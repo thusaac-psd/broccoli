@@ -12,7 +12,7 @@
     "lint": "pnpm eslint .",
     "test": "node -e \"console.log('No JavaScript test suite configured; skipping.');\"",
     "typecheck": "pnpm --filter @broccoli/web typecheck",
-    "build:plugin-frontends": "pnpm --dir plugins/communication-evaluator/frontend build && pnpm --dir plugins/config-ui-test/frontend build && pnpm --dir plugins/cooldown/frontend build && pnpm --dir plugins/icpc/web build && pnpm --dir plugins/ioi/frontend build && pnpm --dir plugins/print/web build && pnpm --dir plugins/standard-languages/frontend build && pnpm --dir plugins/submission-limit/frontend build",
+    "build:plugin-frontends": "pnpm --dir plugins/codelink/web build && pnpm --dir plugins/communication-evaluator/frontend build && pnpm --dir plugins/config-ui-test/frontend build && pnpm --dir plugins/cooldown/frontend build && pnpm --dir plugins/icpc/web build && pnpm --dir plugins/ioi/frontend build && pnpm --dir plugins/print/web build && pnpm --dir plugins/standard-languages/frontend build && pnpm --dir plugins/submission-limit/frontend build",
     "prepare": "husky"
   },
   "keywords": [],

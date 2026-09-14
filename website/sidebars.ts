@@ -8,7 +8,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Using Broccoli',
       collapsed: false,
-      items: ['cli/contestant', 'plugins/printing'],
+      items: ['cli/contestant', 'plugins/printing', 'plugins/codelink'],
     },
     {
       type: 'category',
