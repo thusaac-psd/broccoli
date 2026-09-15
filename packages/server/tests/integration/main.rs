@@ -18,3 +18,4 @@ mod regression_guards;
 mod scaling;
 mod submission;
 mod user;
+mod visibility_matrix;
