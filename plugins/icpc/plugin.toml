@@ -32,6 +32,10 @@ method = "POST"
 path = "/api/plugins/icpc/contests/{contest_id}/reveal"
 handler = "api_reveal"
 
+[[server.queries]]
+topic = "visibility"
+function = "decide_visibility"
+
 [config.contest]
 description = "ICPC contest-level configuration"
 scopes = ["contest"]
