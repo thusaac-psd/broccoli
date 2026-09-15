@@ -84,6 +84,21 @@ use super::{Action, Decision, Resource, Subject};
 /// strategy. Returns one [`Decision`] per entry of `resources`, in the same
 /// order.
 ///
+/// `submission_contest_ids` is an out-param: for every `Resource::
+/// Submission` in `resources`, this inserts `submission_id ->
+/// submission.contest_id` (which is itself `None` for a genuinely
+/// contest-less submission) once that submission has been resolved by Query
+/// 0 below. This surfaces a mapping `host_decide` already builds for its own
+/// rule 6 check, rather than resolving it a second time - see
+/// `VisibilityKernel::decide_batch`'s CRITICAL fix note
+/// (`packages/server/src/visibility/mod.rs`, Task 7) for why the caller
+/// needs it: a `Resource::Submission`'s contest is otherwise unknowable
+/// outside this function, and losing it produces a confidently wrong (not
+/// merely ambiguous) `QueryResource.contest_id` for plugins. Left untouched
+/// (and callers pass an empty map) on the `admin_override` early return
+/// below, since that path never resolves any submission and its decisions
+/// never reach a plugin anyway.
+///
 /// Called from `VisibilityKernel::decide_batch`
 /// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
 /// deduped, not-yet-memoized resource in a batch before any plugin is
@@ -93,6 +108,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     subject: &Subject,
     _action: Action,
     resources: &[Resource],
+    submission_contest_ids: &mut HashMap<i32, Option<i32>>,
 ) -> Result<Vec<Decision>, AppError> {
     if subject.is_admin_override() {
         return Ok(vec![Decision::Allow; resources.len()]);
@@ -121,6 +137,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|s| (s.id, s))
             .collect()
     };
+    submission_contest_ids.extend(submissions.values().map(|s| (s.id, s.contest_id)));
 
     // Query 1: contests referenced by the batch - directly (`Resource::
     // Contest`), via a `Problem`/`Sample`'s `contest_id`, or via a fetched
@@ -135,16 +152,22 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             Resource::Contest(id) => {
                 contest_ids.insert(*id);
             }
-            Resource::Problem { contest_id: Some(cid), .. }
-            | Resource::Sample { contest_id: Some(cid), .. } => {
+            Resource::Problem {
+                contest_id: Some(cid),
+                ..
+            }
+            | Resource::Sample {
+                contest_id: Some(cid),
+                ..
+            } => {
                 contest_ids.insert(*cid);
             }
             _ => {}
         }
     }
     for sub in submissions.values() {
-        let needs_contest_check =
-            !subject.has_permission(perm::SUBMISSION_VIEW_ALL) && subject.user_id != Some(sub.user_id);
+        let needs_contest_check = !subject.has_permission(perm::SUBMISSION_VIEW_ALL)
+            && subject.user_id != Some(sub.user_id);
         if needs_contest_check && let Some(cid) = sub.contest_id {
             contest_ids.insert(cid);
         }
@@ -170,7 +193,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     let member_of: HashSet<i32> = match subject.user_id {
         Some(uid) if !contests.is_empty() => contest_user::Entity::find()
             .filter(contest_user::Column::UserId.eq(uid))
-            .filter(contest_user::Column::ContestId.is_in(contests.keys().copied().collect::<Vec<_>>()))
+            .filter(
+                contest_user::Column::ContestId.is_in(contests.keys().copied().collect::<Vec<_>>()),
+            )
             .all(db)
             .await?
             .into_iter()
@@ -190,8 +215,14 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     let cp_pairs: Vec<(i32, i32)> = resources
         .iter()
         .filter_map(|r| match r {
-            Resource::Problem { contest_id: Some(cid), problem_id }
-            | Resource::Sample { contest_id: Some(cid), problem_id } => Some((*cid, *problem_id)),
+            Resource::Problem {
+                contest_id: Some(cid),
+                problem_id,
+            }
+            | Resource::Sample {
+                contest_id: Some(cid),
+                problem_id,
+            } => Some((*cid, *problem_id)),
             _ => None,
         })
         .collect();
@@ -212,7 +243,17 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
 
     Ok(resources
         .iter()
-        .map(|r| decide_one(subject, now, r, &contests, &member_of, &problem_in_contest, &submissions))
+        .map(|r| {
+            decide_one(
+                subject,
+                now,
+                r,
+                &contests,
+                &member_of,
+                &problem_in_contest,
+                &submissions,
+            )
+        })
         .collect())
 }
 
@@ -227,18 +268,25 @@ fn decide_one(
 ) -> Decision {
     match resource {
         Resource::Contest(id) => decide_contest(subject, now, *id, contests, member_of),
-        Resource::Problem { contest_id, problem_id } | Resource::Sample { contest_id, problem_id } => {
-            decide_problem_or_sample(
-                subject,
-                now,
-                *contest_id,
-                *problem_id,
-                contests,
-                member_of,
-                problem_in_contest,
-            )
+        Resource::Problem {
+            contest_id,
+            problem_id,
         }
-        Resource::Submission(id) => decide_submission(subject, now, *id, contests, member_of, submissions),
+        | Resource::Sample {
+            contest_id,
+            problem_id,
+        } => decide_problem_or_sample(
+            subject,
+            now,
+            *contest_id,
+            *problem_id,
+            contests,
+            member_of,
+            problem_in_contest,
+        ),
+        Resource::Submission(id) => {
+            decide_submission(subject, now, *id, contests, member_of, submissions)
+        }
         // Out of scope for this task - see the module docs. Fail closed.
         Resource::Attachment { .. } | Resource::Clarification(_) => Decision::Deny,
     }
@@ -249,7 +297,8 @@ fn decide_one(
 /// (`utils/contest.rs:77-81`) - the two source functions contain the exact
 /// same predicate applied to the same contest/`now`.
 fn window_is_closed(contest: &contest::Model, now: chrono::DateTime<chrono::Utc>) -> bool {
-    contest.activate_time.is_none_or(|at| at > now) || contest.deactivate_time.is_some_and(|dt| dt <= now)
+    contest.activate_time.is_none_or(|at| at > now)
+        || contest.deactivate_time.is_some_and(|dt| dt <= now)
 }
 
 /// Ported from `check_contest_access` (`utils/contest.rs:21-46`): rules 1-4.
@@ -438,11 +487,20 @@ mod tests {
     }
 
     fn contest_user_row(contest_id: i32, user_id: i32) -> contest_user::Model {
-        contest_user::Model { contest_id, user_id, registered_at: chrono::Utc::now() }
+        contest_user::Model {
+            contest_id,
+            user_id,
+            registered_at: chrono::Utc::now(),
+        }
     }
 
     fn contest_problem_row(contest_id: i32, problem_id: i32) -> contest_problem::Model {
-        contest_problem::Model { contest_id, problem_id, label: "A".into(), position: 0 }
+        contest_problem::Model {
+            contest_id,
+            problem_id,
+            label: "A".into(),
+            position: 0,
+        }
     }
 
     fn submission_row(id: i32, user_id: i32, contest_id: Option<i32>) -> submission::Model {
@@ -482,12 +540,24 @@ mod tests {
         let resources = vec![
             Resource::Contest(1),
             Resource::Submission(2),
-            Resource::Problem { contest_id: Some(1), problem_id: 3 },
+            Resource::Problem {
+                contest_id: Some(1),
+                problem_id: 3,
+            },
         ];
-        let decisions = host_decide(&db, &Subject::admin_override(), Action::Read, &resources)
-            .await
-            .expect("admin override must not touch the database");
-        assert_eq!(decisions, vec![Decision::Allow, Decision::Allow, Decision::Allow]);
+        let decisions = host_decide(
+            &db,
+            &Subject::admin_override(),
+            Action::Read,
+            &resources,
+            &mut HashMap::new(),
+        )
+        .await
+        .expect("admin override must not touch the database");
+        assert_eq!(
+            decisions,
+            vec![Decision::Allow, Decision::Allow, Decision::Allow]
+        );
     }
 
     // -- rule 1: contest:manage short-circuits to Allow --
@@ -505,6 +575,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -519,10 +590,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, true, Some(-3), Some(-1), true)]])
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Contest(7)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -532,10 +608,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, true, None, None, true)]])
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Contest(7)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -549,10 +630,15 @@ mod tests {
             // but comes back empty - the decision must not depend on it.
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Contest(7)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Allow]);
     }
 
@@ -564,10 +650,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, false, Some(-1), None, true)]])
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Contest(7)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -577,10 +668,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, false, Some(-1), None, true)]])
             .append_query_results([vec![contest_user_row(7, 1)]])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Contest(7)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Allow]);
     }
 
@@ -597,7 +693,11 @@ mod tests {
             &db,
             &subject(1, &[]),
             Action::Read,
-            &[Resource::Problem { contest_id: Some(7), problem_id: 3 }],
+            &[Resource::Problem {
+                contest_id: Some(7),
+                problem_id: 3,
+            }],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -615,7 +715,11 @@ mod tests {
             &db,
             &subject(1, &[]),
             Action::Read,
-            &[Resource::Sample { contest_id: Some(7), problem_id: 3 }],
+            &[Resource::Sample {
+                contest_id: Some(7),
+                problem_id: 3,
+            }],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -634,10 +738,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, true, Some(-1), None, true)]])
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(5)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(5)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -648,10 +757,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, false, Some(-1), None, false)]])
             .append_query_results([vec![contest_user_row(7, 1)]])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(5)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(5)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -662,10 +776,15 @@ mod tests {
             .append_query_results([vec![contest_row(7, false, Some(-1), None, true)]])
             .append_query_results([vec![contest_user_row(7, 1)]])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(5)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(5)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Allow]);
     }
 
@@ -674,10 +793,15 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![submission_row(5, 99, None)]])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(5)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(5)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -693,6 +817,7 @@ mod tests {
             &subject(1, &[perm::SUBMISSION_VIEW_ALL]),
             Action::Read,
             &[Resource::Submission(5)],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -708,10 +833,15 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![submission_row(5, 1, Some(999))]])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(5)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(5)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Allow]);
     }
 
@@ -720,10 +850,15 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<submission::Model>::new()])
             .into_connection();
-        let decisions =
-            host_decide(&db, &subject(1, &[]), Action::Read, &[Resource::Submission(404)])
-                .await
-                .unwrap();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Submission(404)],
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
@@ -741,6 +876,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -756,7 +892,11 @@ mod tests {
             &db,
             &subject(1, &[]),
             Action::Read,
-            &[Resource::Problem { contest_id: None, problem_id: 3 }],
+            &[Resource::Problem {
+                contest_id: None,
+                problem_id: 3,
+            }],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -770,7 +910,14 @@ mod tests {
             &db,
             &subject(1, &[]),
             Action::Read,
-            &[Resource::Attachment { problem_id: 1, attachment_id: 2 }, Resource::Clarification(3)],
+            &[
+                Resource::Attachment {
+                    problem_id: 1,
+                    attachment_id: 2,
+                },
+                Resource::Clarification(3),
+            ],
+            &mut HashMap::new(),
         )
         .await
         .unwrap();
@@ -795,11 +942,23 @@ mod tests {
             // fetch set).
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
-        let resources =
-            vec![Resource::Contest(1), Resource::Contest(2), Resource::Submission(3)];
-        let decisions = host_decide(&db, &subject(1, &[]), Action::Read, &resources)
-            .await
-            .unwrap();
-        assert_eq!(decisions, vec![Decision::Deny, Decision::Allow, Decision::Allow]);
+        let resources = vec![
+            Resource::Contest(1),
+            Resource::Contest(2),
+            Resource::Submission(3),
+        ];
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &resources,
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            decisions,
+            vec![Decision::Deny, Decision::Allow, Decision::Allow]
+        );
     }
 }

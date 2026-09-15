@@ -118,16 +118,38 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// has registered `topic = "visibility"` (vacuously true: no plugin
 /// restricts anything further), which also means no plugin is called at all
 /// when the batch is empty or no queriers are registered.
+///
+/// `contest_id` becomes `QueryContext.contest_id` — the REQUEST's contest
+/// scope when the caller's endpoint is itself contest-scoped, `None`
+/// otherwise. It is a hint (e.g. useful to a plugin that wants to reject a
+/// query outright for an unrecognized contest), never the authority on any
+/// individual resource's contest — a batch can span several contests at
+/// once, which this single value cannot represent. `resource_contest_ids`
+/// (positional with `resources`, same length - see the `debug_assert_eq!`
+/// below) is the authority: each entry becomes that resource's own
+/// `QueryResource.contest_id` on the wire, resolved by the caller
+/// (`VisibilityKernel::decide_batch`,
+/// `packages/server/src/visibility/mod.rs`, Task 7) from the resource
+/// itself (`Contest`/`Problem`/`Sample`) or from `host_decide`'s submission
+/// -> contest_id map (`Submission`). Do not re-derive a batch-wide
+/// `contest_id` from `resource_contest_ids` here or anywhere downstream -
+/// that is exactly the lossy inference this parameter exists to avoid.
 pub(crate) async fn query_plugins(
     state: &AppState,
     subject: &Subject,
     action: Action,
     contest_id: Option<i32>,
     resources: &[Resource],
+    resource_contest_ids: &[Option<i32>],
 ) -> Vec<Decision> {
     if resources.is_empty() {
         return Vec::new();
     }
+    debug_assert_eq!(
+        resources.len(),
+        resource_contest_ids.len(),
+        "resource_contest_ids must be positional with resources"
+    );
 
     let queriers = match visibility_queriers(state) {
         Ok(queriers) => queriers,
@@ -151,9 +173,11 @@ pub(crate) async fn query_plugins(
         context: QueryContext { contest_id },
         resources: resources
             .iter()
-            .map(|r| QueryResource {
+            .zip(resource_contest_ids.iter())
+            .map(|(r, cid)| QueryResource {
                 kind: r.wire_kind().to_string(),
                 id: r.wire_id(),
+                contest_id: *cid,
             })
             .collect(),
     };
@@ -203,7 +227,9 @@ mod tests {
     use plugin_core::error::PluginError;
     use plugin_core::host::HostFunctionRegistry;
     use plugin_core::i18n::I18nRegistry;
-    use plugin_core::manifest::{PluginManifest, ServerConfig as ManifestServerConfig, ServerQuery};
+    use plugin_core::manifest::{
+        PluginManifest, ServerConfig as ManifestServerConfig, ServerQuery,
+    };
     use plugin_core::registry::{PluginEntry, PluginRegistry};
     use plugin_core::traits::{PluginInvoker, PluginManager};
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -701,7 +727,7 @@ mod tests {
         // A registered visibility querier exists, so if query_plugins reached
         // for the plugin host at all here, PanicPluginManager would panic and
         // fail this test - the assertion below only runs if it did not.
-        let result = query_plugins(&state, &subject, Action::Read, None, &[]).await;
+        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[]).await;
 
         assert_eq!(result, Vec::<Decision>::new());
     }
@@ -726,7 +752,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
@@ -760,7 +795,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(result, vec![Decision::Deny, Decision::Deny]);
     }
@@ -794,7 +838,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(
             result,
@@ -836,7 +889,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(
             result,
@@ -883,7 +945,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(
             result,
@@ -923,7 +994,16 @@ mod tests {
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1)];
 
-        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
 
         assert_eq!(
             result,

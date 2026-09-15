@@ -18,15 +18,33 @@ pub struct QuerySubject {
     pub permissions: Vec<String>,
 }
 
+/// Request-level scope. `contest_id` is a HINT: the contest the calling
+/// endpoint itself is scoped to when it is contest-scoped, `None`
+/// otherwise. It is not authoritative for any individual resource in the
+/// batch — a single batch can span multiple contests (e.g. a submission
+/// list mixing submissions from more than one contest), which this single
+/// value cannot represent. See [`QueryResource::contest_id`] for the
+/// authoritative, per-resource value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryContext {
     pub contest_id: Option<i32>,
 }
 
+/// One resource being asked about. `contest_id` is the AUTHORITATIVE
+/// contest scope for this specific resource (as opposed to
+/// [`QueryContext::contest_id`], which is only a request-level hint) -
+/// `Some(id)` when this resource is known to belong to contest `id`
+/// (including when the resource itself IS a contest), `None` when it is
+/// genuinely contest-less (e.g. a standalone submission) or its contest is
+/// not resolvable by the host. `#[serde(default)]` keeps this field
+/// optional on the wire so any code deserializing an older, pre-existing
+/// payload that never had it still round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResource {
     pub kind: String,
     pub id: i32,
+    #[serde(default)]
+    pub contest_id: Option<i32>,
 }
 
 /// Plugin -> host. `decisions` is positional and MUST be the same length as the
@@ -94,6 +112,33 @@ mod tests {
             WireDecision::Redact { fields } => assert!(fields.is_empty()),
             other => panic!("expected Redact, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn query_resource_serializes_and_round_trips_its_contest_id() {
+        let resource = QueryResource {
+            kind: "submission".to_string(),
+            id: 42,
+            contest_id: Some(7),
+        };
+        let json = serde_json::to_string(&resource).unwrap();
+        assert!(
+            json.contains(r#""contest_id":7"#),
+            "contest_id must be present on the wire: {json}"
+        );
+
+        let back: QueryResource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.contest_id, Some(7));
+    }
+
+    #[test]
+    fn query_resource_contest_id_defaults_to_none_when_omitted() {
+        // Round-trip tolerance for any payload built before this field
+        // existed (`#[serde(default)]`) - a `QueryResource` with no
+        // `contest_id` key at all must still deserialize, as a genuinely
+        // contest-less resource rather than a protocol error.
+        let back: QueryResource = serde_json::from_str(r#"{"kind":"submission","id":42}"#).unwrap();
+        assert_eq!(back.contest_id, None);
     }
 
     #[test]
