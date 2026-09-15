@@ -12,7 +12,7 @@ use sea_orm::*;
 use tracing::instrument;
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
-use crate::entity::{contest, problem, submission, submission_judgement, user};
+use crate::entity::{contest, contest_user, problem, submission, submission_judgement, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
@@ -284,6 +284,34 @@ pub async fn list_submissions(
         }
     }
 
+    // KNOWN RESIDUAL LEAK, accepted: `total` (and therefore `total_pages`)
+    // is computed from `base_select` BEFORE the per-row kernel filter below
+    // runs, i.e. it counts rows this SQL predicate matches, not rows the
+    // viewer will actually be shown. For a non-`submission:view_all` caller
+    // whose page ends up narrower than this count (e.g. a peer's submission
+    // in a contest that denies them - see `decide_submission`), the response
+    // DOES disclose two things: that at least one more matching submission
+    // exists beyond what `data` contains, and the exact count of such
+    // submissions. It discloses NOTHING about their CONTENT - no ids, users,
+    // verdicts, code, or contest identity leak through this number, only a
+    // count.
+    //
+    // This is NOT fixed the way `list_contest_submissions` is fixed below,
+    // because there is no single-contest static predicate to push into SQL
+    // here: this endpoint is GLOBAL and unscoped, one page can span many
+    // contests plus contest-less submissions, and per-row visibility for a
+    // contest submission depends on THAT row's own contest's
+    // `submissions_visible` flag and the viewer's participation in THAT
+    // contest - a per-row join across however many distinct contests appear
+    // in the full matching set, not one fixed boolean known up front. Making
+    // `total` exact would mean running the full kernel decision (a host rule
+    // per row, plus a plugin round trip for every host-`Allow`) over every
+    // row the filters match in the WHOLE TABLE, not just the current page -
+    // unbounded work per list request, scaling with total submissions rather
+    // than `per_page`. That cost is why this leak is left in place rather
+    // than closed; `list_contest_submissions` is scoped to one contest and
+    // can hoist the static part of the same rule into `WHERE`, so it does
+    // not have this excuse.
     let total = base_select.clone().count(&state.db).await?;
 
     let select = base_select.find_also_related(user::Entity);
@@ -676,7 +704,42 @@ pub async fn list_contest_submissions(
         check_contest_access(&state.db, &auth_user, &contest_model).await?;
     }
 
-    let can_see_all = can_view_all || contest_model.submissions_visible;
+    // STATIC (plugin-independent) half of `visibility::host_rules::decide_submission`'s
+    // non-owner branch: a peer's row is only even a candidate for this viewer
+    // when the contest has `submissions_visible` AND the viewer is a
+    // participant. The old `can_see_all` computed here checked only
+    // `submissions_visible`, never participation - so a PUBLIC,
+    // `submissions_visible` contest handed an authenticated NON-participant
+    // the SQL of a full-access viewer: no `UserId` restriction on `total`,
+    // while every row was then denied by the per-row kernel filter below
+    // (`apply_filter_to_list`, which does check participation). The result
+    // was `{"data": [], "pagination": {"total": <every submission in the
+    // contest>}}` - an aggregate leaking exactly the count of rows the
+    // viewer was denied. Folding participation in here closes that.
+    //
+    // This predicate is only NECESSARY for kernel-Allow, not sufficient: the
+    // per-row kernel decision below can still Redact a row's content (e.g. a
+    // plugin hiding fields), but it can never turn a row this predicate
+    // excludes back into something visible, because a host `Deny` is final
+    // (`Decision::meet(Deny, plugin) == Deny` - see
+    // `visibility::VisibilityKernel::decide_batch`) and every row excluded
+    // here is exactly a row `decide_submission` denies host-side for this
+    // subject. So `total`, computed against this predicate below, can never
+    // undercount what the per-row filter would allow - it stays a safe upper
+    // bound, just a far tighter one than counting the whole contest.
+    let can_see_all = if can_view_all {
+        true
+    } else if !contest_model.submissions_visible {
+        // Short-circuits before the participation lookup: participation
+        // alone never grants `can_see_all` (see `decide_submission` - both
+        // conditions are required), so there is nothing to query for here.
+        false
+    } else {
+        contest_user::Entity::find_by_id((contest_id, auth_user.user_id))
+            .one(&state.db)
+            .await?
+            .is_some()
+    };
 
     let page = cmp::max(query.page.unwrap_or(1), 1);
     let per_page = query.per_page.unwrap_or(20).clamp(1, 100);

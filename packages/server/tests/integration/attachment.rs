@@ -325,6 +325,70 @@ mod attachment_list {
             "p1.txt"
         );
     }
+
+    /// Pin: `total` is derived from the POST-kernel-filter `attachments`
+    /// array (`attachments.len()`, see `handlers/attachment.rs`), never from
+    /// a raw pre-filter `COUNT(*)` over `problem_attachment`. This is the
+    /// correct sibling of the bug fixed in `list_contest_submissions` (see
+    /// `submission.rs`'s `contest_submission_visibility` module) - a denied
+    /// row must never be reflected in an aggregate the viewer cannot see.
+    ///
+    /// Caveat this test cannot get around: `Resource::Attachment`'s host
+    /// decision is, by construction, the exact same
+    /// `decide_standalone_problem_access` call keyed on `problem_id` that
+    /// gates the list at all (see `visibility::host_rules`), and no plugin
+    /// in this tree currently denies an individual attachment once its
+    /// parent problem is reachable. So today there is no black-box way to
+    /// force a per-row Deny distinct from the top-level 404 gate, and a
+    /// naive pre-filter `COUNT(*)` would coincidentally still pass this
+    /// exact scenario. This test's value is holding the NON-admin,
+    /// full-kernel code path (a hidden problem reachable only via contest
+    /// membership rules, not the `is_public` shortcut) to the invariant, so
+    /// it fails immediately the day either a host rule or a plugin CAN
+    /// deny one attachment but not another for the same problem and the
+    /// count computation was reverted to pre-filter in the meantime.
+    #[tokio::test]
+    async fn contestant_total_matches_post_filter_attachments_for_hidden_contest_problem() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin_att_pin", "pass1234", "admin")
+            .await;
+        let problem_id = app
+            .create_hidden_problem(&admin_token, "Hidden Contest Problem")
+            .await;
+        let contest_id = app
+            .create_contest(&admin_token, "Public Contest For Attachments", true, true)
+            .await;
+        app.add_problem_to_contest(contest_id, problem_id, &admin_token)
+            .await;
+
+        app.upload_attachment(problem_id, "a.txt", b"aaa".to_vec(), None, &admin_token)
+            .await;
+        app.upload_attachment(problem_id, "b.txt", b"bbb".to_vec(), None, &admin_token)
+            .await;
+
+        // Authenticated, non-admin, never registered for the contest - only
+        // reachable via the public-contest rule, not the `is_public`
+        // problem shortcut nor any permission bypass.
+        let contestant_token = app
+            .create_authenticated_user("contestant_att_pin", "pass1234")
+            .await;
+
+        let res = app
+            .get_with_token(&routes::attachments(problem_id), &contestant_token)
+            .await;
+
+        assert_eq!(res.status, 200);
+        let attachments = res.body["attachments"]
+            .as_array()
+            .expect("attachments should be array");
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            res.body["total"].as_u64().unwrap(),
+            attachments.len() as u64,
+            "total must equal the post-filter attachments length, not a pre-filter count"
+        );
+    }
 }
 
 mod attachment_download {

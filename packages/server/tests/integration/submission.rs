@@ -1875,6 +1875,68 @@ mod contest_submission_visibility {
         let data = res.body["data"].as_array().expect("data should be array");
         assert_eq!(data.len(), 1);
     }
+
+    /// Pagination-count leak fix: a PUBLIC, `submissions_visible=true`
+    /// contest is reachable (via `check_contest_access`'s `is_public`
+    /// branch) by an authenticated user who never registered. Before the
+    /// fix, `can_see_all` was `can_view_all || contest.submissions_visible`
+    /// with no participation check, so the SQL `total` counted every
+    /// submission in the contest while `apply_filter_to_list`'s per-row
+    /// kernel decision (which DOES require participation - see
+    /// `visibility::host_rules::decide_submission`) denied every one of
+    /// them - `{"data": [], "pagination": {"total": <every submission>}}`.
+    /// `total` must now be bounded by what the static
+    /// participation-or-ownership rule admits, i.e. 0 here.
+    #[tokio::test]
+    async fn non_participant_pagination_total_excludes_denied_rows_when_visibility_on() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("admin2", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Contest Problem").await;
+        let contest_id = app
+            .create_contest(&admin_token, "Public Visible Contest", true, true)
+            .await;
+        app.add_problem_to_contest(contest_id, problem_id, &admin_token)
+            .await;
+
+        let participant_token = app
+            .create_authenticated_user("participant1", "pass1234")
+            .await;
+        app.register_for_contest(contest_id, &participant_token)
+            .await;
+
+        let body = valid_submission_body("cpp");
+        app.post_with_token(
+            &routes::contest_problem_submissions(contest_id, problem_id),
+            &body,
+            &participant_token,
+        )
+        .await;
+
+        // Authenticated, but never registered for this contest. The contest
+        // is public, so the top-level `check_contest_access` gate still lets
+        // the request through (no 404) - only the row-level filter and the
+        // aggregate count are at stake here.
+        let outsider_token = app.create_authenticated_user("outsider1", "pass1234").await;
+
+        let res = app
+            .get_with_token(&routes::contest_submissions(contest_id), &outsider_token)
+            .await;
+
+        assert_eq!(res.status, 200);
+        let data = res.body["data"].as_array().expect("data should be array");
+        assert_eq!(
+            data.len(),
+            0,
+            "non-participant must not see peer submissions"
+        );
+        assert_eq!(
+            res.body["pagination"]["total"], 0,
+            "pagination.total must not count rows the viewer cannot see"
+        );
+        assert_eq!(res.body["pagination"]["total_pages"], 0);
+    }
 }
 
 /// UP#38 - claim-fiber coverage.
