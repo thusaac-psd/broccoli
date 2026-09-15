@@ -9,10 +9,9 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::path::AppPath;
 use crate::state::AppState;
-use crate::utils::contest::{
-    check_contest_access, find_contest, find_contest_problem, require_contest_started,
-};
+use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::test_case_body::read_test_case_body_preview;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ProblemSamplesResponse {
@@ -49,12 +48,30 @@ pub async fn get_contest_problem_samples(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
-) -> Result<Json<ProblemSamplesResponse>, AppError> {
-    let contest_model = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest_model).await?;
-    require_contest_started(&auth_user, &contest_model)?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let resource = Resource::Sample {
+        contest_id: Some(contest_id),
+        problem_id,
+    };
 
-    let _cp = find_contest_problem(&state.db, contest_id, problem_id).await?;
+    // Fail fast, before doing any (bounded but non-trivial) blob reads below,
+    // on a resource the kernel already knows is unreachable. This single
+    // Sample decision folds in what the pre-kernel handler checked as three
+    // separate steps: `check_contest_access`, `require_contest_started`'s
+    // window predicate, and `find_contest_problem` (the problem must be
+    // attached to this contest) - see `visibility::host_rules::decide_problem_or_sample`.
+    if kernel.decide(Action::Read, resource.clone()).await?.is_denied() {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
+    // NOT covered by the kernel decision above: `require_contest_started`'s
+    // `now < start_time` check is a 400 business-rule rejection, not a
+    // reachability outcome, so it has no representation in `Decision` and is
+    // re-applied here, on top of the kernel's `Allow`.
+    let contest_model = find_contest(&state.db, contest_id).await?;
+    require_contest_started(&auth_user, &contest_model)?;
 
     let sample_test_cases = test_case::Entity::find()
         .filter(test_case::Column::ProblemId.eq(problem_id))
@@ -91,5 +108,16 @@ pub async fn get_contest_problem_samples(
         });
     }
 
-    Ok(Json(ProblemSamplesResponse { samples }))
+    // The DTO reaches the response body only through `into_masked_json`, so a
+    // `Redact` decision on this Sample resource can never be forgotten at the
+    // serialization step. The kernel memoizes per (Action, Resource), so this
+    // re-decides the same `resource` already `Allow`ed above at no extra DB
+    // cost, and the `None` arm is unreachable in practice (it was already
+    // `Allow`, not `Deny`) but kept honest rather than `.unwrap()`-ed away.
+    let visible = kernel
+        .fetch_visible(Action::Read, resource, ProblemSamplesResponse { samples })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Contest not found".into()))?;
+
+    Ok(Json(visible.into_masked_json()?))
 }

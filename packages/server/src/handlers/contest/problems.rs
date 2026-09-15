@@ -15,10 +15,9 @@ use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::services::plugin_config::{ConfigTarget, delete_config_by_target};
 use crate::state::AppState;
-use crate::utils::contest::{
-    check_contest_access, find_contest, find_contest_problem, require_contest_started,
-};
+use crate::utils::contest::{find_contest, find_contest_problem, require_contest_started};
 use crate::utils::soft_delete::SoftDeletable;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 use super::find_contest_for_update;
 
@@ -123,9 +122,26 @@ pub async fn list_contest_problems(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
-) -> Result<Json<Vec<ContestProblemResponse>>, AppError> {
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject. `decide`
+    // and `decide_batch` therefore take no `subject` argument.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    if kernel
+        .decide(Action::Read, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
+    // The kernel's Contest decision already folds in the activation-window
+    // gate (`check_contest_access` + `require_contest_started`'s window
+    // predicate - see `visibility::host_rules`). It deliberately does NOT
+    // cover `require_contest_started`'s `now < start_time` business-rule
+    // rejection (a 400, not a reachability outcome), so that check is
+    // re-applied here on top of the kernel's `Allow`.
     let contest_model = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest_model).await?;
     require_contest_started(&auth_user, &contest_model)?;
 
     let rows = contest_problem::Entity::find()
@@ -135,12 +151,32 @@ pub async fn list_contest_problems(
         .all(&state.db)
         .await?;
 
-    let items = rows
+    let items: Vec<(Resource, ContestProblemResponse)> = rows
         .into_iter()
-        .map(|(cp, prob)| contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default()))
+        .map(|(cp, prob)| {
+            let resource = Resource::Problem {
+                contest_id: Some(contest_id),
+                problem_id: cp.problem_id,
+            };
+            let dto = contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default());
+            (resource, dto)
+        })
         .collect();
 
-    Ok(Json(items))
+    let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
+
+    // A denied problem is omitted from the list, never rendered as a
+    // placeholder - a placeholder would confirm it exists, the exact fact a
+    // staged-release contest format is hiding. Every surviving DTO passes
+    // through `into_masked_json`, so a `Redact` decision cannot be
+    // forgotten at serialization time.
+    let body: Vec<serde_json::Value> = visible
+        .into_iter()
+        .flatten()
+        .map(|v| v.into_masked_json())
+        .collect::<Result<_, _>>()?;
+
+    Ok(Json(body))
 }
 #[utoipa::path(
     patch,
