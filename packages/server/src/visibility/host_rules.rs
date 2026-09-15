@@ -84,10 +84,10 @@ use super::{Action, Decision, Resource, Subject};
 /// strategy. Returns one [`Decision`] per entry of `resources`, in the same
 /// order.
 ///
-/// Not yet called from any handler - Task 7 wires this in behind the
-/// existing contest/problem/submission call sites. `#[allow(dead_code)]`
-/// is temporary and should come off once that wiring lands.
-#[allow(dead_code)]
+/// Called from `VisibilityKernel::decide_batch`
+/// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
+/// deduped, not-yet-memoized resource in a batch before any plugin is
+/// consulted.
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     db: &C,
     subject: &Subject,

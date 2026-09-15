@@ -24,9 +24,10 @@
 //! registry's `HashMap`-backed (i.e. unordered) iteration order cannot
 //! affect the result.
 //!
-//! Not yet called from any handler - Task 7 (`decide_batch`) wires this in
-//! alongside `host_rules::host_decide`. `#[allow(dead_code)]` is temporary
-//! and should come off once that wiring lands.
+//! Called from `VisibilityKernel::decide_batch`
+//! (`packages/server/src/visibility/mod.rs`, Task 7), alongside
+//! `host_rules::host_decide` - only for the resources the host did not
+//! already `Deny`.
 
 use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
@@ -117,7 +118,6 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// has registered `topic = "visibility"` (vacuously true: no plugin
 /// restricts anything further), which also means no plugin is called at all
 /// when the batch is empty or no queriers are registered.
-#[allow(dead_code)]
 pub(crate) async fn query_plugins(
     state: &AppState,
     subject: &Subject,
@@ -184,6 +184,11 @@ pub(crate) async fn query_plugins(
 
     combined
 }
+
+// Re-exported for `super::tests` (`packages/server/src/visibility/mod.rs`,
+// Task 7) - see the doc comment on `PanicPluginManager` below.
+#[cfg(test)]
+pub(crate) use tests::PanicPluginManager;
 
 #[cfg(test)]
 mod tests {
@@ -331,11 +336,31 @@ mod tests {
     // no work to do.
     // ---------------------------------------------------------------------
 
-    struct PanicPluginManager {
+    // `pub(crate)` (rather than the private default every other test-only
+    // type in this file uses): Task 7's `VisibilityKernel::decide_batch`
+    // tests (`packages/server/src/visibility/mod.rs`) need a plugin-manager
+    // double that panics on any call, to prove `admin_override` and a fully
+    // host-denied batch never reach for the plugin host - exactly the
+    // property this type already exists to prove here. Re-exported above
+    // this module (`pub(crate) use tests::PanicPluginManager;`) so `mod.rs`'s
+    // own test module can name it as `super::plugin_query::PanicPluginManager`.
+    // The fields stay private; construct via `PanicPluginManager::new` instead.
+    pub(crate) struct PanicPluginManager {
         registry: PluginRegistry,
         config: PluginConfig,
         host_functions: HostFunctionRegistry,
         i18n: I18nRegistry,
+    }
+
+    impl PanicPluginManager {
+        pub(crate) fn new(registry: PluginRegistry) -> Self {
+            Self {
+                registry,
+                config: PluginConfig::default(),
+                host_functions: HostFunctionRegistry::new(),
+                i18n: I18nRegistry::new(),
+            }
+        }
     }
 
     #[async_trait::async_trait]
