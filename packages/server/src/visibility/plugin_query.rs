@@ -435,6 +435,105 @@ mod tests {
         entry
     }
 
+    // ---------------------------------------------------------------------
+    // query_plugins - the multi-querier fold loop, with calls that SUCCEED.
+    //
+    // `PanicPluginManager` above proves plugins are never called when they
+    // shouldn't be; it cannot exercise the loop that combines two or more
+    // *successful* responses, because it panics on any call. `CannedPluginManager`
+    // is a second double that answers each `plugin_id` with a canned,
+    // pre-serialized response (or a trap), so these tests drive the real
+    // `for querier in &queriers` loop in `query_plugins` and the real
+    // `HashMap`-backed `PluginRegistry` scan in `visibility_queriers`, not a
+    // hand-rolled call to `meet_positionally`.
+    // ---------------------------------------------------------------------
+
+    enum CannedResponse {
+        Ok(Vec<u8>),
+        Trap,
+    }
+
+    struct CannedPluginManager {
+        registry: PluginRegistry,
+        config: PluginConfig,
+        host_functions: HostFunctionRegistry,
+        i18n: I18nRegistry,
+        /// Keyed by `plugin_id` - every `Loaded` entry in `registry` that
+        /// registers a `visibility` query MUST have an entry here, or the
+        /// call panics (a missing canned response is a test-setup bug, not
+        /// a case to fail closed on).
+        responses: HashMap<String, CannedResponse>,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for CannedPluginManager {
+        fn get_registry(&self) -> &PluginRegistry {
+            &self.registry
+        }
+
+        fn get_config(&self) -> &PluginConfig {
+            &self.config
+        }
+
+        async fn call_raw(
+            &self,
+            plugin_id: &str,
+            func_name: &str,
+            _input: Vec<u8>,
+        ) -> Result<Vec<u8>, PluginError> {
+            match self.responses.get(plugin_id) {
+                Some(CannedResponse::Ok(bytes)) => Ok(bytes.clone()),
+                Some(CannedResponse::Trap) => Err(PluginError::ExecutionFailed {
+                    plugin_id: plugin_id.to_string(),
+                    func_name: func_name.to_string(),
+                    message: "deliberate test trap".to_string(),
+                }),
+                None => panic!(
+                    "CannedPluginManager has no canned response configured for \
+                     plugin_id='{plugin_id}' - fix the test"
+                ),
+            }
+        }
+    }
+
+    impl PluginManager for CannedPluginManager {
+        fn get_host_functions(&self) -> &HostFunctionRegistry {
+            &self.host_functions
+        }
+
+        fn get_i18n_registry(&self) -> &I18nRegistry {
+            &self.i18n
+        }
+
+        fn resolve(&self, _manifest: &PluginManifest) -> Option<(String, Vec<String>)> {
+            None
+        }
+    }
+
+    fn canned_output(decisions: Vec<WireDecision>) -> Vec<u8> {
+        serde_json::to_vec(&VisibilityQueryOutput { decisions })
+            .expect("serialize canned VisibilityQueryOutput")
+    }
+
+    /// Builds a fresh `PluginRegistry` by inserting one `visibility_plugin_entry`
+    /// per id, in the given sequence. `PluginRegistry` is a `HashMap`, so this
+    /// does NOT guarantee the resulting iteration order matches insertion
+    /// order (`std`'s `HashMap` never promises that) - which is exactly why
+    /// `query_plugins`'s fold must not depend on it. What this DOES guarantee
+    /// is that the test drives a registry built independently of any other
+    /// test's registry, with the ids inserted in the stated sequence, so a
+    /// regression that made the registry/fold insertion-order-sensitive (e.g.
+    /// swapping `HashMap` for an order-preserving map plus a `break` after
+    /// the first querier) would have a registry here to be sensitive to.
+    fn registry_with_order(plugin_ids: &[&str]) -> PluginRegistry {
+        let mut map = HashMap::new();
+        for id in plugin_ids {
+            let entry = visibility_plugin_entry(id);
+            map.insert(entry.id.clone(), entry);
+        }
+        Arc::new(RwLock::new(map))
+    }
+
     /// Mirrors `dispatcher::steal::tests`'s AppState literal (the sole
     /// existing precedent for this in the crate) so field drift between the
     /// two is easy to spot in review.
@@ -639,5 +738,173 @@ mod tests {
         let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
 
         assert_eq!(result, vec![Decision::Deny, Decision::Deny]);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn two_queriers_allow_and_deny_combine_to_deny() {
+        let _guard = crate::metrics_test_lock();
+
+        let registry = registry_with_order(&["plugin-allow", "plugin-deny"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-allow".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+        responses.insert(
+            "plugin-deny".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Deny {}])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+
+        assert_eq!(
+            result,
+            vec![Decision::Deny],
+            "one plugin allowing must not rescue a resource the other denies"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn two_queriers_redact_different_fields_union_the_mask() {
+        let _guard = crate::metrics_test_lock();
+
+        let registry = registry_with_order(&["plugin-redact-a", "plugin-redact-b"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-redact-a".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: vec!["result.verdict".to_string()],
+            }])),
+        );
+        responses.insert(
+            "plugin-redact-b".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: vec!["result.score".to_string()],
+            }])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+
+        assert_eq!(
+            result,
+            vec![Decision::Redact(mask(&["result.verdict", "result.score"]))],
+            "two plugins redacting different fields must combine into the UNION \
+             of both masks, not either plugin's mask alone"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn two_queriers_registered_in_opposite_order_produce_the_same_result() {
+        let _guard = crate::metrics_test_lock();
+
+        // Same plugin ids and canned responses as
+        // `two_queriers_allow_and_deny_combine_to_deny`, but inserted into
+        // the registry in the OPPOSITE sequence. `PluginRegistry` is a
+        // `HashMap`, so this does not force a particular physical traversal
+        // order - the point is that `query_plugins` must produce the same
+        // answer regardless of that order, i.e. a `break`/early-return after
+        // the first querier (which would silently drop whichever plugin the
+        // registry happens to visit second) is the exact bug this pins.
+        let registry = registry_with_order(&["plugin-deny", "plugin-allow"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-allow".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+        responses.insert(
+            "plugin-deny".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Deny {}])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+
+        assert_eq!(
+            result,
+            vec![Decision::Deny],
+            "registering the same two plugins in the opposite order must give a \
+             byte-identical result"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn middle_querier_trap_denies_whole_batch_despite_other_two_allowing() {
+        let _guard = crate::metrics_test_lock();
+
+        let registry = registry_with_order(&["plugin-a", "plugin-b-trap", "plugin-c"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-a".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+        responses.insert("plugin-b-trap".to_string(), CannedResponse::Trap);
+        responses.insert(
+            "plugin-c".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let result = query_plugins(&state, &subject, Action::Read, Some(1), &resources).await;
+
+        assert_eq!(
+            result,
+            vec![Decision::Deny],
+            "one plugin trapping must deny the whole batch even though the \
+             other two allowed - the third querier's response cannot rescue it"
+        );
     }
 }
