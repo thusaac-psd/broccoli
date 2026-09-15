@@ -27,13 +27,31 @@ impl<T: serde::Serialize> Visible<T> {
         Self { inner, decision }
     }
 
-    /// Borrow the entity for internal use that never reaches a response
-    /// body (e.g. re-deriving another `Resource` from it to ask the kernel
-    /// a follow-up question). This intentionally bypasses masking, so
-    /// nothing returned from here may be serialized straight into a
+    /// Borrow the entity for non-serializing internal use within the
+    /// `visibility` module (e.g. re-deriving another `Resource` from it to
+    /// ask the kernel a follow-up question). This bypasses masking
+    /// entirely, so nothing returned from here may be serialized into a
     /// response — [`Self::into_masked_json`] is the only sanctioned path to
     /// a wire body.
-    pub fn as_inner(&self) -> &T {
+    ///
+    /// Deliberately `pub(super)`, not `pub`: a plain `pub` getter on a
+    /// `pub`-exported type would let any handler call
+    /// `serde_json::to_value(visible.as_inner())` and ship the entity
+    /// straight past the kernel's `FieldMask`, silently discarding a
+    /// `Redact` decision. `pub(super)` makes `handlers::*` unable to reach
+    /// this at all, which is what actually closes that hole (a `pub(crate)`
+    /// getter would not — `handlers` lives in the same crate). If a later
+    /// task needs a field off a `Visible<T>` from outside `visibility`, add
+    /// a narrow, purpose-specific accessor for that field instead of
+    /// widening this one back to `pub`/`pub(crate)`.
+    ///
+    /// `#[allow(dead_code)]`: Tasks 9-12 (not yet written) are the intended
+    /// production callers; today the only call site is this module's own
+    /// `#[cfg(test)]` tests, which the lib build (unlike the test build)
+    /// does not compile, so `dead_code` fires without the allow. Remove the
+    /// allow once a non-test caller inside `visibility` exists.
+    #[allow(dead_code)]
+    pub(super) fn as_inner(&self) -> &T {
         &self.inner
     }
 
