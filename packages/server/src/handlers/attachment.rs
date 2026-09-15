@@ -21,8 +21,8 @@ use crate::utils::blob::{
     BlobMetadata, build_blob_response, resolve_virtual_path, stream_field_to_store,
     take_required_file,
 };
-use crate::utils::contest::require_problem_read_access;
 use crate::utils::soft_delete::SoftDeletable;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 pub fn attachment_upload_body_limit() -> DefaultBodyLimit {
     DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
@@ -172,10 +172,63 @@ pub async fn list_attachments(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
-) -> Result<Json<AttachmentListResponse>, AppError> {
-    require_problem_read_access(&state.db, &auth_user, problem_id).await?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let problem_resource = Resource::Problem {
+        contest_id: None,
+        problem_id,
+    };
 
-    Ok(Json(list_problem_attachments(&state.db, problem_id).await?))
+    // Fail fast, before reading the attachment rows below, on a problem the
+    // kernel already knows is unreachable. This single Problem decision
+    // folds in what the pre-kernel handler checked as
+    // `require_problem_read_access` (permission bypass, `is_public`, and -
+    // for a hidden draft - reachability via any contest it is attached to) -
+    // see `visibility::host_rules::decide_standalone_problem_access`.
+    if kernel
+        .decide(Action::Read, problem_resource)
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Problem not found".into()));
+    }
+
+    let refs = problem_attachment::Entity::find()
+        .filter(problem_attachment::Column::ProblemId.eq(problem_id))
+        .order_by_asc(problem_attachment::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
+
+    // Per-attachment decision, distinct from the problem-level gate above: a
+    // plugin can still Deny/Redact one specific attachment even when its
+    // parent problem is otherwise readable - `Resource::Attachment` exists
+    // precisely for that (see the design doc's consumer-validation table).
+    // A denied attachment is omitted from the list, never rendered as a
+    // placeholder - a placeholder would confirm it exists.
+    let items: Vec<(Resource, AttachmentResponse)> = refs
+        .into_iter()
+        .map(|m| {
+            let resource = Resource::Attachment {
+                problem_id,
+                attachment_id: attachment_wire_id(m.id),
+            };
+            (resource, AttachmentResponse::from(m))
+        })
+        .collect();
+
+    let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
+    let attachments: Vec<serde_json::Value> = visible
+        .into_iter()
+        .flatten()
+        .map(|v| v.into_masked_json())
+        .collect::<Result<_, _>>()?;
+    let total = attachments.len() as u64;
+
+    Ok(Json(serde_json::json!({
+        "attachments": attachments,
+        "total": total,
+    })))
 }
 
 #[utoipa::path(
@@ -206,7 +259,27 @@ pub async fn download_attachment(
     AppPath((problem_id, ref_id)): AppPath<(i32, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    require_problem_read_access(&state.db, &auth_user, problem_id).await?;
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before parsing/looking up the specific attachment, on a
+    // problem the kernel already knows is unreachable - preserves the
+    // pre-kernel handler's exact order (`require_problem_read_access` ran
+    // before `Uuid::parse_str`). `Action::Download` throughout this handler:
+    // the whole operation is a file-bytes read, not a metadata read.
+    if kernel
+        .decide(
+            Action::Download,
+            Resource::Problem {
+                contest_id: None,
+                problem_id,
+            },
+        )
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Problem not found".into()));
+    }
 
     let ref_uuid = Uuid::parse_str(&ref_id)
         .map_err(|_| AppError::Validation("Invalid attachment ID".into()))?;
@@ -220,7 +293,54 @@ pub async fn download_attachment(
         return Err(AppError::NotFound("Attachment not found".into()));
     }
 
+    // Per-attachment Download decision, distinct from the problem-level
+    // gate above: a plugin can still Deny/Redact ONE specific attachment
+    // even when its parent problem is otherwise readable - `Resource::
+    // Attachment` exists precisely for that (see the design doc's
+    // consumer-validation table entry for Download + Attachment). The
+    // kernel memoizes per (Action, Resource); `Action::Download` on
+    // `Resource::Attachment` was never asked above (only on `Resource::
+    // Problem`), so this is a genuinely new host decision, not a free
+    // re-check - it resolves from `problem_id` alone though, via the same
+    // `decide_standalone_problem_access` rule as the gate above.
+    let attachment_resource = Resource::Attachment {
+        problem_id,
+        attachment_id: attachment_wire_id(model.id),
+    };
+    if kernel
+        .decide(Action::Download, attachment_resource)
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Attachment not found".into()));
+    }
+
     build_blob_response(&BlobMetadata::from(&model), &headers, &*state.blob_store).await
+}
+
+/// `Resource::Attachment.attachment_id` is `i32` (the kernel's wire ID type,
+/// see `visibility/subject.rs`, frozen for this task), but
+/// `problem_attachment.id` (`entity/problem_attachment.rs`) is a `Uuid`, a
+/// pre-existing type mismatch inherited from `Resource::Attachment`'s shape,
+/// which this task cannot change.
+///
+/// `host_rules::decide_standalone_problem_access` (the only host rule that
+/// reaches a `Resource::Attachment` today) depends ONLY on `problem_id`,
+/// never on `attachment_id`, so this truncation cannot change what the HOST
+/// allows or denies. It only affects (a) the kernel's per-request memo key,
+/// a cache-efficiency concern, not correctness, and (b) the `id` a FUTURE
+/// plugin would see on the wire for a per-attachment `Redact`/`Deny` rule,
+/// where a truncation collision could misattribute one attachment's plugin
+/// decision to another sharing the same problem.
+///
+/// Deterministic and stable across requests (the same UUID always truncates
+/// to the same i32), and `Uuid::now_v7`'s low bits are its random component
+/// (see `upload_attachment` above), so collisions are exactly as likely as
+/// two random i32s colliding, negligible for a problem's typical attachment
+/// count. See the task report for why this could not be resolved by
+/// changing `Resource::Attachment` itself.
+fn attachment_wire_id(id: Uuid) -> i32 {
+    id.as_u128() as i32
 }
 
 #[utoipa::path(
@@ -267,20 +387,4 @@ pub async fn delete_attachment(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn list_problem_attachments<C: sea_orm::ConnectionTrait>(
-    db: &C,
-    problem_id: i32,
-) -> Result<AttachmentListResponse, AppError> {
-    let refs = problem_attachment::Entity::find()
-        .filter(problem_attachment::Column::ProblemId.eq(problem_id))
-        .order_by_asc(problem_attachment::Column::CreatedAt)
-        .all(db)
-        .await?;
-
-    let total = refs.len() as u64;
-    let attachments = refs.into_iter().map(AttachmentResponse::from).collect();
-
-    Ok(AttachmentListResponse { attachments, total })
 }

@@ -81,14 +81,33 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// every `Resource::Submission` passed in is guaranteed to be a key in it.
 ///
 /// `Resource::Clarification`'s contest is not resolved by any source today,
-/// because `host_decide` fails it closed unconditionally (explicitly out of
-/// scope, see `host_rules`'s module docs), so a `Resource::Clarification`
+/// because `host_decide` fails it closed unconditionally (out of scope -
+/// Task 12, see `host_rules`'s module docs), so a `Resource::Clarification`
 /// can never actually reach this function: a host `Deny` never crosses to
-/// the plugin layer (pinned decision #2). `Resource::Attachment` is the
-/// same. Both return `None` here rather than panicking, so this stays
-/// total if that invariant ever changes without a matching update here,
-/// which would be a correctness gap in whichever task ports
-/// Clarification/Attachment support, not a panic waiting to happen.
+/// the plugin layer (pinned decision #2). Returns `None` here rather than
+/// panicking, so this stays total if that invariant ever changes without a
+/// matching update here, which would be a correctness gap in whichever task
+/// ports Clarification support, not a panic waiting to happen.
+///
+/// `Resource::Attachment` DOES reach this function now: `host_decide` can
+/// `Allow` it (see `host_rules::decide_standalone_problem_access`, Task 10),
+/// so its `None` here is a deliberate, principled answer, not the same kind
+/// of "unresolved" gap `Clarification` documents above, and NOT a repeat of
+/// the Task 7 `Submission` bug this function's history warns about. The
+/// `Submission` bug was losing a real, single-valued `contest_id` that
+/// existed but was not inline in the `Resource` (it had to come from
+/// `submission_contest_ids`) - dropping it to `None` was silently wrong.
+/// `Resource::Attachment` is different in kind, not just in whether a
+/// lookup was wired up: it carries a `problem_id`, not a `contest_id`, and
+/// the rule that admits it (`decide_standalone_problem_access`) is the same
+/// contest-agnostic rule used for standalone `Resource::Problem`/
+/// `Resource::Sample` (`contest_id: None`, handled by the arm below) - a
+/// problem can be attached to zero, one, or many contests via
+/// `contest_problem`, so even a DB lookup would produce a SET, not a single
+/// authoritative value. There is no real single answer to lose here, so
+/// `None` is not fail-open; it is the same "not scoped to one contest"
+/// answer this function already gives for a standalone `Resource::Problem`/
+/// `Resource::Sample`.
 fn resource_contest_id(
     resource: &Resource,
     submission_contest_ids: &HashMap<i32, Option<i32>>,
@@ -97,6 +116,9 @@ fn resource_contest_id(
         Resource::Contest(id) => Some(*id),
         Resource::Problem { contest_id, .. } | Resource::Sample { contest_id, .. } => *contest_id,
         Resource::Submission(id) => submission_contest_ids.get(id).copied().flatten(),
+        // See the doc comment above: `Attachment` has no single contest
+        // scope even in principle (problem -> contest is many-to-many);
+        // `Clarification` is still unreachable (Task 12, out of scope).
         Resource::Attachment { .. } | Resource::Clarification(_) => None,
     }
 }
