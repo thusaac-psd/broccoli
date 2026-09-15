@@ -10,6 +10,7 @@ mod persistence;
 mod query;
 mod submission;
 mod verdict;
+mod visibility;
 
 pub use checker::{
     CheckerRunOutcome, CheckerStage, CheckerVerdict, InterpretCheckerInput, OutputMode,
@@ -50,3 +51,7 @@ pub use submission::{
     SourceFile,
 };
 pub use verdict::Verdict;
+pub use visibility::{
+    QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
+    WireDecision,
+};
