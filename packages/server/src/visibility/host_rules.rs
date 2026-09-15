@@ -1370,7 +1370,7 @@ mod tests {
             Action::Read,
             &[Resource::Attachment {
                 problem_id: 1,
-                attachment_id: 999,
+                attachment_id: uuid::Uuid::from_u128(999),
             }],
             &mut HashMap::new(),
         )
@@ -1391,7 +1391,7 @@ mod tests {
             Action::Read,
             &[Resource::Attachment {
                 problem_id: 1,
-                attachment_id: 2,
+                attachment_id: uuid::Uuid::from_u128(2),
             }],
             &mut HashMap::new(),
         )
@@ -1414,7 +1414,7 @@ mod tests {
             Action::Read,
             &[Resource::Attachment {
                 problem_id: 1,
-                attachment_id: 2,
+                attachment_id: uuid::Uuid::from_u128(2),
             }],
             &mut HashMap::new(),
         )

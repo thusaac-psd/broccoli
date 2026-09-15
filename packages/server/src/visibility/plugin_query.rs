@@ -178,6 +178,7 @@ pub(crate) async fn query_plugins(
                 kind: r.wire_kind().to_string(),
                 id: r.wire_id(),
                 contest_id: *cid,
+                problem_id: r.wire_problem_id(),
             })
             .collect(),
     };

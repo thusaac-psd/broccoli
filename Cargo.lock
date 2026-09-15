@@ -879,6 +879,7 @@ dependencies = [
  "extism-pdk",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

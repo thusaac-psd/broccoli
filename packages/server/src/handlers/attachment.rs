@@ -211,7 +211,7 @@ pub async fn list_attachments(
         .map(|m| {
             let resource = Resource::Attachment {
                 problem_id,
-                attachment_id: attachment_wire_id(m.id),
+                attachment_id: m.id,
             };
             (resource, AttachmentResponse::from(m))
         })
@@ -305,7 +305,7 @@ pub async fn download_attachment(
     // `decide_standalone_problem_access` rule as the gate above.
     let attachment_resource = Resource::Attachment {
         problem_id,
-        attachment_id: attachment_wire_id(model.id),
+        attachment_id: model.id,
     };
     if kernel
         .decide(Action::Download, attachment_resource)
@@ -316,31 +316,6 @@ pub async fn download_attachment(
     }
 
     build_blob_response(&BlobMetadata::from(&model), &headers, &*state.blob_store).await
-}
-
-/// `Resource::Attachment.attachment_id` is `i32` (the kernel's wire ID type,
-/// see `visibility/subject.rs`, frozen for this task), but
-/// `problem_attachment.id` (`entity/problem_attachment.rs`) is a `Uuid`, a
-/// pre-existing type mismatch inherited from `Resource::Attachment`'s shape,
-/// which this task cannot change.
-///
-/// `host_rules::decide_standalone_problem_access` (the only host rule that
-/// reaches a `Resource::Attachment` today) depends ONLY on `problem_id`,
-/// never on `attachment_id`, so this truncation cannot change what the HOST
-/// allows or denies. It only affects (a) the kernel's per-request memo key,
-/// a cache-efficiency concern, not correctness, and (b) the `id` a FUTURE
-/// plugin would see on the wire for a per-attachment `Redact`/`Deny` rule,
-/// where a truncation collision could misattribute one attachment's plugin
-/// decision to another sharing the same problem.
-///
-/// Deterministic and stable across requests (the same UUID always truncates
-/// to the same i32), and `Uuid::now_v7`'s low bits are its random component
-/// (see `upload_attachment` above), so collisions are exactly as likely as
-/// two random i32s colliding, negligible for a problem's typical attachment
-/// count. See the task report for why this could not be resolved by
-/// changing `Resource::Attachment` itself.
-fn attachment_wire_id(id: Uuid) -> i32 {
-    id.as_u128() as i32
 }
 
 #[utoipa::path(

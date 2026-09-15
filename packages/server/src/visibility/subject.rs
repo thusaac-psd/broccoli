@@ -62,7 +62,13 @@ pub enum Resource {
     Contest(i32),
     Problem { contest_id: Option<i32>, problem_id: i32 },
     Sample { contest_id: Option<i32>, problem_id: i32 },
-    Attachment { problem_id: i32, attachment_id: i32 },
+    // `attachment_id` is the REAL primary key (`problem_attachment.id`),
+    // not a truncated wire id - there is no lossy identity anywhere inside
+    // the host. `Uuid` is `Hash + Eq`, so `Resource` (and therefore the
+    // kernel's `(Action, Resource)` per-request memo key) still works
+    // unchanged. See `wire_id`'s doc comment for why the wire
+    // representation must stay lossless too.
+    Attachment { problem_id: i32, attachment_id: uuid::Uuid },
     Submission(i32),
     Clarification(i32),
 }
@@ -79,13 +85,39 @@ impl Resource {
         }
     }
 
-    pub fn wire_id(&self) -> i32 {
+    /// The resource's one authoritative wire identifier, always a lossless
+    /// string (decimal for the i32-native kinds, hyphenated UUID for
+    /// `Attachment`). Deliberately `String`, not `i32`: an earlier version
+    /// of this method truncated `Attachment`'s `Uuid` into an `i32`
+    /// (`id.as_u128() as i32`), which collided across the whole
+    /// installation's attachment table at the 32-bit birthday bound. See
+    /// `QueryResource::id`'s doc comment (`broccoli-types`) for the full
+    /// account; that truncation helper has been deleted, not corrected.
+    pub fn wire_id(&self) -> String {
         match self {
-            Resource::Contest(id)
-            | Resource::Submission(id)
-            | Resource::Clarification(id) => *id,
-            Resource::Problem { problem_id, .. } | Resource::Sample { problem_id, .. } => *problem_id,
-            Resource::Attachment { attachment_id, .. } => *attachment_id,
+            Resource::Contest(id) | Resource::Submission(id) | Resource::Clarification(id) => {
+                id.to_string()
+            }
+            Resource::Problem { problem_id, .. } | Resource::Sample { problem_id, .. } => {
+                problem_id.to_string()
+            }
+            Resource::Attachment { attachment_id, .. } => attachment_id.to_string(),
+        }
+    }
+
+    /// The parent problem for a `Problem`/`Sample`/`Attachment` resource,
+    /// `None` for the three kinds that have no problem (`Contest`,
+    /// `Submission`, `Clarification`). Exists so `QueryResource.problem_id`
+    /// can be populated on the wire - without it, an attachment-visibility
+    /// plugin would receive `contest_id: null` (an attachment's contest
+    /// scope is never resolvable, see `resource_contest_id`'s doc comment
+    /// in `visibility/mod.rs`) and nothing else to reason about at all.
+    pub fn wire_problem_id(&self) -> Option<i32> {
+        match self {
+            Resource::Problem { problem_id, .. }
+            | Resource::Sample { problem_id, .. }
+            | Resource::Attachment { problem_id, .. } => Some(*problem_id),
+            Resource::Contest(_) | Resource::Submission(_) | Resource::Clarification(_) => None,
         }
     }
 }
