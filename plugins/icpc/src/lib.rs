@@ -477,6 +477,40 @@ mod filter_tests {
             "must be a single IN(...) batch query: {}",
             queries[0].sql
         );
+
+        // The batching property alone (one query) is not evidence of
+        // correctness: a bug that issues exactly one query and then maps
+        // every resource to Allow regardless of what `must_hide_other_submission`
+        // says would still pass the assertions above. Pin what the three
+        // decisions actually are: submission 7 is in the freeze window for a
+        // non-owner viewer (99) and must be Redact with the full hidden-result
+        // mask; submissions 8 and 9 predate the freeze window and must be
+        // Allow.
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = hidden_result_mask_fields();
+                want.sort();
+                assert_eq!(
+                    got, want,
+                    "submission 7 (in-freeze, non-owner) must be Redact with the exact hidden-result mask"
+                );
+            }
+            other => {
+                panic!("expected submission 7 (in-freeze, non-owner) to be Redact, got {other:?}")
+            }
+        }
+        assert!(
+            matches!(decisions[1], WireDecision::Allow {}),
+            "submission 8 predates the freeze window: expected Allow, got {:?}",
+            decisions[1]
+        );
+        assert!(
+            matches!(decisions[2], WireDecision::Allow {}),
+            "submission 9 predates the freeze window: expected Allow, got {:?}",
+            decisions[2]
+        );
     }
 
     #[test]
@@ -496,6 +530,43 @@ mod filter_tests {
         };
         let decisions = decide_visibility_decisions(&host, &req).unwrap();
         assert!(matches!(decisions[0], WireDecision::Redact { .. }));
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_even_for_a_viewer_who_would_be_the_owner_when_the_row_is_missing()
+     {
+        // Deliberate, safe-direction ordering deviation from the old code:
+        // `filter_submission_for_viewer` was handed the submission's own JSON
+        // (already carrying its `user_id`) and checked ownership FIRST, so an
+        // owner could never reach the "hide it" branch. `decide_visibility`
+        // is handed only a resource id and has no `user_id` to compare until
+        // AFTER the batched query returns a row for that id. When the query
+        // returns no row at all (contest/submission id mismatch, or any other
+        // data-integrity gap), there is nothing to compare the viewer against,
+        // so the missing-row fail-hidden branch runs unconditionally - even
+        // for a viewer who would in fact be the submission's owner if a row
+        // existed. This can only over-hide (Redact), never leak (Allow), so
+        // it is intentionally left as-is. If you reorder these checks to
+        // "restore" the old owner-first semantics, you are removing this
+        // fail-hidden guarantee for the missing-row case - make sure that is
+        // actually what you want.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // would be the owner, if a row existed.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Redact { .. }),
+            "a missing row must fail hidden even for a viewer who would otherwise be the owner, got {:?}",
+            decisions[0]
+        );
     }
 }
 
