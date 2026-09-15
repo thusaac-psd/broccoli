@@ -79,11 +79,72 @@ fn visibility_queriers(state: &AppState) -> Result<Vec<VisibilityQuerier>, ()> {
     Ok(queriers)
 }
 
+/// Maximum number of dot-separated segments in one mask path.
+///
+/// `apply_mask`'s `blank_segments` (`mask.rs`) recurses once per segment that
+/// matches real structure (once per non-`*` segment, once per array element
+/// for a `*` segment) — an unbounded, plugin-controlled path would let a
+/// plugin drive unbounded recursion depth, and a Rust stack overflow is
+/// SIGSEGV/abort, not a catchable panic, so the kernel's fail-closed design
+/// cannot contain it once it crosses this boundary. The deepest legitimate
+/// path in this system today is 4 segments
+/// (`result.test_case_results.*.verdict`); 32 leaves generous headroom for
+/// deeper DTO shapes a future task might introduce while still bounding
+/// worst-case recursion depth to a small, fixed constant.
+const MAX_MASK_PATH_SEGMENTS: usize = 32;
+
+/// Maximum byte length of one mask path string.
+///
+/// Independent of the segment-count check above: a single pathologically
+/// long segment containing no `.` would pass the segment check but not this
+/// one. 256 bytes comfortably fits every real field/segment name in this
+/// codebase (the longest is a few dozen bytes) with generous headroom, while
+/// still bounding the string-processing and allocation work spent per path.
+const MAX_MASK_PATH_BYTES: usize = 256;
+
+/// Maximum number of field strings a single `Redact` decision may carry.
+///
+/// Bounds total per-decision validation/allocation work independently of any
+/// one path's shape. The largest legitimate `Redact` today (an IOI feedback
+/// level) masks a handful of fields; 64 leaves generous headroom without
+/// letting a plugin attach an unbounded `Vec<String>` to one decision.
+const MAX_MASK_FIELDS: usize = 64;
+
+/// Validate a plugin-supplied `Redact` field list at the trust boundary —
+/// the exact point plugin-authored strings are about to become host data via
+/// `FieldMask::new`/`apply_mask`. See `MAX_MASK_PATH_SEGMENTS` for why this
+/// exists: it must run here, before `FieldMask` is built, not inside
+/// `mask.rs`, which stays a pure, total function over already-validated
+/// input and must not itself decide access-control failure modes.
+///
+/// Returns the reason for the first violation found, for logging; the caller
+/// treats any violation identically (deny the whole batch), so the reason is
+/// diagnostic only, not part of the control flow.
+fn validate_redact_fields(fields: &[String]) -> Result<(), &'static str> {
+    if fields.len() > MAX_MASK_FIELDS {
+        return Err("too many fields in one Redact decision");
+    }
+    for field in fields {
+        if field.len() > MAX_MASK_PATH_BYTES {
+            return Err("mask path exceeds max byte length");
+        }
+        if field.split('.').count() > MAX_MASK_PATH_SEGMENTS {
+            return Err("mask path exceeds max segment count");
+        }
+    }
+    Ok(())
+}
+
 /// Map a plugin response to decisions. Every failure mode collapses to
 /// all-`Deny` — matching the host's established fail-closed hook stance
 /// (`plugin_core::hook` tests `non_json_output_fails_closed_reject` and
-/// `empty_output_fails_closed_reject`).
+/// `empty_output_fails_closed_reject`). This includes a `Redact` decision
+/// whose `fields` violate `validate_redact_fields` (oversized path, too many
+/// segments, or too many fields) — a malformed field mask is a protocol
+/// violation exactly like a wrong-length decision vector, not a partial
+/// answer to salvage.
 fn decisions_from_output(
+    plugin_id: &str,
     output: Result<VisibilityQueryOutput, String>,
     expected_len: usize,
 ) -> Vec<Decision> {
@@ -93,6 +154,20 @@ fn decisions_from_output(
     if out.decisions.len() != expected_len {
         return deny_all();
     }
+
+    for decision in &out.decisions {
+        if let WireDecision::Redact { fields } = decision
+            && let Err(reason) = validate_redact_fields(fields)
+        {
+            tracing::error!(
+                plugin_id = %plugin_id,
+                reason,
+                "visibility plugin returned a malformed Redact field mask; denying batch"
+            );
+            return deny_all();
+        }
+    }
+
     out.decisions
         .into_iter()
         .map(|d| match d {
@@ -203,7 +278,7 @@ pub(crate) async fn query_plugins(
             }
         };
 
-        let decisions = decisions_from_output(output, resources.len());
+        let decisions = decisions_from_output(&querier.plugin_id, output, resources.len());
         combined = meet_positionally(combined, decisions);
     }
 
@@ -260,7 +335,7 @@ mod tests {
             decisions: vec![WireDecision::Allow {}],
         };
         assert_eq!(
-            decisions_from_output(Ok(out), 3),
+            decisions_from_output("test-plugin", Ok(out), 3),
             vec![Decision::Deny, Decision::Deny, Decision::Deny],
             "a short decision vector is a protocol violation, not a partial answer"
         );
@@ -280,7 +355,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            decisions_from_output(Ok(out), 2),
+            decisions_from_output("test-plugin", Ok(out), 2),
             vec![Decision::Deny, Decision::Deny],
             "a long decision vector is also a protocol violation, not a partial answer"
         );
@@ -289,7 +364,7 @@ mod tests {
     #[test]
     fn plugin_error_denies_whole_batch() {
         assert_eq!(
-            decisions_from_output(Err("trap".into()), 2),
+            decisions_from_output("test-plugin", Err("trap".into()), 2),
             vec![Decision::Deny, Decision::Deny]
         );
     }
@@ -306,12 +381,69 @@ mod tests {
             ],
         };
         assert_eq!(
-            decisions_from_output(Ok(out), 3),
+            decisions_from_output("test-plugin", Ok(out), 3),
             vec![
                 Decision::Allow,
                 Decision::Redact(FieldMask::new(["result.verdict".to_string()])),
                 Decision::Deny,
             ]
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // decisions_from_output - Redact field-mask validation at the trust
+    // boundary. A plugin-controlled path drives `apply_mask`'s recursion
+    // depth (`mask.rs`), so an oversized/over-segmented path or an
+    // oversized field list must fail the whole batch closed here, before
+    // `FieldMask::new` ever sees it - never applied partially, never a
+    // panic, never a plain error.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn oversized_redact_path_denies_whole_batch() {
+        // One byte over MAX_MASK_PATH_BYTES, well within MAX_MASK_PATH_SEGMENTS.
+        let long_path = "a".repeat(MAX_MASK_PATH_BYTES + 1);
+        let out = VisibilityQueryOutput {
+            decisions: vec![WireDecision::Redact {
+                fields: vec![long_path],
+            }],
+        };
+        assert_eq!(
+            decisions_from_output("test-plugin", Ok(out), 1),
+            vec![Decision::Deny],
+            "a mask path over the byte limit must deny the batch, not truncate or apply it"
+        );
+    }
+
+    #[test]
+    fn over_segmented_redact_path_denies_whole_batch() {
+        // Every segment is one byte, well within MAX_MASK_PATH_BYTES, but
+        // there are more of them than MAX_MASK_PATH_SEGMENTS allows.
+        let deep_path = vec!["a"; MAX_MASK_PATH_SEGMENTS + 1].join(".");
+        let out = VisibilityQueryOutput {
+            decisions: vec![WireDecision::Redact {
+                fields: vec![deep_path],
+            }],
+        };
+        assert_eq!(
+            decisions_from_output("test-plugin", Ok(out), 1),
+            vec![Decision::Deny],
+            "a mask path over the segment limit must deny the batch, not truncate or apply it"
+        );
+    }
+
+    #[test]
+    fn oversized_redact_field_list_denies_whole_batch() {
+        let too_many_fields: Vec<String> = (0..=MAX_MASK_FIELDS).map(|i| format!("f{i}")).collect();
+        let out = VisibilityQueryOutput {
+            decisions: vec![WireDecision::Redact {
+                fields: too_many_fields,
+            }],
+        };
+        assert_eq!(
+            decisions_from_output("test-plugin", Ok(out), 1),
+            vec![Decision::Deny],
+            "a Redact decision with too many fields must deny the batch, not apply a subset"
         );
     }
 

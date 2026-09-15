@@ -4,10 +4,22 @@ use super::FieldMask;
 
 /// Blank every path in `mask` inside `value`.
 ///
+/// A path is a `.`-separated sequence of segments. Any segment other than
+/// `*` is looked up by key in the current object. A `*` segment instead
+/// requires the current node to be an array and fans out into EVERY element,
+/// applying the remaining segments to each independently (so a path may
+/// contain more than one `*`, addressing arrays nested inside arrays).
+///
 /// Blanking is destructive-only: a scalar becomes `null`, an array becomes
-/// empty, and a path that does not exist is left alone. The function can never
-/// insert or overwrite a value with plugin-supplied content — that is what makes
-/// redaction safe to drive from a plugin response.
+/// empty, and a path that does not exist — including a `*` segment landing on
+/// a non-array, an empty array, or an element missing the remaining
+/// path — is left alone. The function can never insert or overwrite a value
+/// with plugin-supplied content — that is what makes redaction safe to drive
+/// from a plugin response. Callers on the untrusted-input path (plugin
+/// responses) MUST bound path length/segment count/field count before
+/// calling this function — see `MAX_MASK_PATH_SEGMENTS` et al. in
+/// `plugin_query.rs` — since this function recurses once per matched `*`
+/// segment and imposes no depth limit of its own.
 pub fn apply_mask(value: &mut Value, mask: &FieldMask) {
     for path in mask.paths() {
         blank_path(value, path);
