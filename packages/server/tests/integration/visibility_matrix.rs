@@ -21,6 +21,47 @@
 //! - a handful of additional cells added because reading the source
 //!   surfaced rules the above selection does not exercise (each is called
 //!   out with a `// NOTE:` and reported separately).
+//!
+//! A code-review pass on this file flagged that a PRIVATE contest cannot
+//! isolate the activation-window check from the participant check: both
+//! produce an identical `404 NOT_FOUND` for a non-participant, so a
+//! non-participant cell on a private contest cannot tell the difference
+//! between "denied by the window" and "denied because not enrolled" - and
+//! would stay green even if the window-gate block in `check_contest_access`
+//! were deleted outright. `contest_problem_list_matrix` therefore also has a
+//! `window_gate_public_contest_*` group that repeats the 4 window states on
+//! a PUBLIC contest with a non-participant viewer, mirroring the existing
+//! precedent in `packages/server/src/utils/contest.rs`'s
+//! `contest_access_tests` (`public_but_deactivated_contest_is_not_found_for_unprivileged_user`,
+//! `public_not_yet_activated_contest_is_not_found_for_unprivileged_user`,
+//! `public_in_window_contest_is_accessible_to_any_user`) where `is_public`
+//! removes the participant check entirely and the outcome flips purely on
+//! the window. The private-contest `non_participant_*` cells are kept
+//! because they legitimately pin a different rule (a private contest denies
+//! non-members no matter the window) but are named accordingly, not as
+//! window coverage.
+//!
+//! Verifying that fix (per the reviewer's ask: temporarily delete
+//! `check_contest_access`'s window-gate block and confirm new cells fail)
+//! surfaced a SECOND, deeper masking: `require_contest_started`
+//! (`packages/server/src/utils/contest.rs`, right below `check_contest_access`)
+//! contains a byte-identical copy of the same window predicate
+//! (`activate_time.is_none_or(|at| at > now) || deactivate_time.is_some_and(|dt| dt <= now)`),
+//! and `list_contest_problems` calls BOTH `check_contest_access` and
+//! `require_contest_started` on the same contest/now. Because the two
+//! predicates are identical, they can never diverge for the same request -
+//! so no black-box cell on `list_contest_problems`, public contest or not,
+//! can isolate `check_contest_access`'s copy specifically; disabling ONLY
+//! `check_contest_access`'s block leaves `require_contest_started`'s copy
+//! fully enforcing the window and every `list_contest_problems` cell (public
+//! or private) keeps passing. The `window_gate_public_contest_*` group in
+//! `contest_problem_list_matrix` therefore pins the AGGREGATE window
+//! enforcement of that endpoint's full gate chain, not `check_contest_access`
+//! in isolation. The cells that genuinely isolate `check_contest_access`
+//! live in `contest_detail`'s `window_gate_isolated_public_contest_*` group,
+//! because `get_contest` calls `check_contest_access` alone (no
+//! `require_contest_started`) - those are the ones verified (see the task
+//! report) to flip from 404 to 200 when the block under test is deleted.
 
 use serde_json::json;
 
@@ -165,8 +206,11 @@ async fn submit_to_contest_problem(
 // ---------------------------------------------------------------------
 // Densest gate: list_contest_problems x {4 windows} x {4 viewer kinds}
 // Gate = check_contest_access + require_contest_started.
-// Contest is always private (is_public=false) so non-participant and
-// participant are meaningfully different.
+// The primary fixture contest is private (is_public=false) so non-participant
+// and participant are meaningfully different for the participant/admin cells.
+// A SEPARATE public-contest fixture (`setup_public`, below) isolates the
+// window check itself from the participant check - see the
+// `window_gate_public_contest_*` group.
 // ---------------------------------------------------------------------
 mod contest_problem_list_matrix {
     use super::*;
@@ -181,11 +225,32 @@ mod contest_problem_list_matrix {
         (app, admin, non_participant, participant, contest_id)
     }
 
-    // --- anonymous: TOKEN_MISSING regardless of window (AuthUser is a
-    // mandatory extractor; there is no anonymous read path at all) ---
+    /// Public-contest fixture used ONLY to isolate the window check
+    /// (`check_contest_access`'s window-gate block) from the participant
+    /// check. For a public contest, once the window-gate block is passed,
+    /// `check_contest_access` returns `Ok` unconditionally on `is_public`
+    /// without ever looking up `contest_user` - so a non-participant's
+    /// outcome flips purely on the window state, matching the precedent unit
+    /// tests in `packages/server/src/utils/contest.rs::contest_access_tests`.
+    async fn setup_public(window: Window) -> (TestApp, String, i32) {
+        let app = TestApp::spawn().await;
+        let admin = app.create_user_with_role("admin", "pass1234", "admin").await;
+        let non_participant = app.create_authenticated_user("outsider", "pass1234").await;
+        let contest_id =
+            create_contest_window(&app, &admin, "Public Window Gate Contest", true, window).await;
+        (app, non_participant, contest_id)
+    }
+
+    // --- anonymous: these pin that authentication is mandatory, NOT the
+    // window. `AuthUser` is a required axum extractor that rejects with
+    // TOKEN_MISSING before the handler body - and therefore before
+    // check_contest_access - ever runs, so the outcome is identical in every
+    // window state. Four near-identical cells are kept (one per window) only
+    // to document that the mandatory-auth extractor really does run first in
+    // every window, not to claim window coverage. ---
 
     #[tokio::test]
-    async fn anonymous_before_activation_is_401() {
+    async fn anonymous_rejected_by_mandatory_auth_before_activation() {
         let (app, _, _, _, contest_id) = setup(BEFORE_ACTIVATION).await;
         let res = app.get_without_token(&routes::contest_problems(contest_id)).await;
         assert_eq!(res.status, 401);
@@ -193,7 +258,7 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn anonymous_inside_window_is_401() {
+    async fn anonymous_rejected_by_mandatory_auth_inside_window() {
         let (app, _, _, _, contest_id) = setup(INSIDE_WINDOW).await;
         let res = app.get_without_token(&routes::contest_problems(contest_id)).await;
         assert_eq!(res.status, 401);
@@ -201,7 +266,7 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn anonymous_after_deactivation_is_401() {
+    async fn anonymous_rejected_by_mandatory_auth_after_deactivation() {
         let (app, _, _, _, contest_id) = setup(AFTER_DEACTIVATION).await;
         let res = app.get_without_token(&routes::contest_problems(contest_id)).await;
         assert_eq!(res.status, 401);
@@ -209,19 +274,27 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn anonymous_null_activate_time_is_401() {
+    async fn anonymous_rejected_by_mandatory_auth_null_activate_time() {
         let (app, _, _, _, contest_id) = setup(NULL_ACTIVATE_TIME).await;
         let res = app.get_without_token(&routes::contest_problems(contest_id)).await;
         assert_eq!(res.status, 401);
         assert_eq!(res.body["code"], "TOKEN_MISSING");
     }
 
-    // --- non-participant: NOT_FOUND in every window (before/after/null
-    // because the window gate rejects everyone; inside because the contest
-    // is private and this viewer never enrolled) ---
+    // --- non-participant on a PRIVATE contest: NOT_FOUND in every window.
+    // IMPORTANT: this does NOT pin the window gate. `check_contest_access`
+    // has two independent paths that both produce this exact 404 for a
+    // private contest - the window-gate block, and (once inside the window)
+    // the participant-check fallback - and a black-box HTTP test cannot tell
+    // which path fired. These cells legitimately pin "a private contest
+    // denies a non-member no matter the window state," a real and
+    // independent rule, but they would ALL stay green even if the
+    // window-gate block were deleted outright (the participant-check
+    // fallback masks it). The cells that actually isolate and pin the window
+    // arithmetic are the `window_gate_public_contest_*` group below. ---
 
     #[tokio::test]
-    async fn non_participant_before_activation_is_404() {
+    async fn private_contest_denies_non_participant_before_activation() {
         let (app, _, non_participant, _, contest_id) = setup(BEFORE_ACTIVATION).await;
         let res = app
             .get_with_token(&routes::contest_problems(contest_id), &non_participant)
@@ -231,7 +304,7 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn non_participant_inside_window_is_404() {
+    async fn private_contest_denies_non_participant_inside_window() {
         let (app, _, non_participant, _, contest_id) = setup(INSIDE_WINDOW).await;
         let res = app
             .get_with_token(&routes::contest_problems(contest_id), &non_participant)
@@ -241,7 +314,7 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn non_participant_after_deactivation_is_404() {
+    async fn private_contest_denies_non_participant_after_deactivation() {
         let (app, _, non_participant, _, contest_id) = setup(AFTER_DEACTIVATION).await;
         let res = app
             .get_with_token(&routes::contest_problems(contest_id), &non_participant)
@@ -251,8 +324,70 @@ mod contest_problem_list_matrix {
     }
 
     #[tokio::test]
-    async fn non_participant_null_activate_time_is_404() {
+    async fn private_contest_denies_non_participant_null_activate_time() {
         let (app, _, non_participant, _, contest_id) = setup(NULL_ACTIVATE_TIME).await;
+        let res = app
+            .get_with_token(&routes::contest_problems(contest_id), &non_participant)
+            .await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    // --- window_gate_public_contest_*: a public contest removes the
+    // participant-check fallback (`is_public` short-circuits before the
+    // `contest_user` lookup), so these pin the AGGREGATE window enforcement
+    // of this endpoint's full gate chain (`check_contest_access` +
+    // `require_contest_started`) purely on window state, with no
+    // participant-membership confound.
+    //
+    // CAVEAT (found while verifying this fix bites, see task-1-report.md):
+    // these do NOT isolate `check_contest_access`'s window-gate block from
+    // `require_contest_started`'s block. Both functions contain the exact
+    // same window predicate applied to the exact same contest/now, and
+    // `list_contest_problems` calls both, so the two can never diverge for
+    // one request - deleting ONLY `check_contest_access`'s copy leaves
+    // `require_contest_started`'s copy still enforcing the window and these
+    // 4 cells keep passing unchanged. For a genuine isolation of
+    // `check_contest_access` alone, see `contest_detail`'s
+    // `window_gate_isolated_public_contest_*` group, which hits `get_contest`
+    // - an endpoint that calls `check_contest_access` only. ---
+
+    #[tokio::test]
+    async fn window_gate_public_contest_before_activation_is_404() {
+        let (app, non_participant, contest_id) = setup_public(BEFORE_ACTIVATION).await;
+        let res = app
+            .get_with_token(&routes::contest_problems(contest_id), &non_participant)
+            .await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn window_gate_public_contest_inside_window_is_200() {
+        let (app, non_participant, contest_id) = setup_public(INSIDE_WINDOW).await;
+        let res = app
+            .get_with_token(&routes::contest_problems(contest_id), &non_participant)
+            .await;
+        assert_eq!(
+            res.status, 200,
+            "positive control: a non-participant IS let in on a public in-window contest"
+        );
+        assert!(res.body.is_array());
+    }
+
+    #[tokio::test]
+    async fn window_gate_public_contest_after_deactivation_is_404() {
+        let (app, non_participant, contest_id) = setup_public(AFTER_DEACTIVATION).await;
+        let res = app
+            .get_with_token(&routes::contest_problems(contest_id), &non_participant)
+            .await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn window_gate_public_contest_null_activate_time_is_404() {
+        let (app, non_participant, contest_id) = setup_public(NULL_ACTIVATE_TIME).await;
         let res = app
             .get_with_token(&routes::contest_problems(contest_id), &non_participant)
             .await;
@@ -449,6 +584,72 @@ mod contest_detail {
             .await;
         assert_eq!(res.status, 200);
         assert_eq!(res.body["id"], f.contest_id);
+    }
+
+    /// Public-contest fixture used ONLY to isolate `check_contest_access`'s
+    /// window-gate block from everything else. `get_contest` calls
+    /// `find_contest` + `check_contest_access` and NOTHING else - no
+    /// `require_contest_started`, so (unlike `list_contest_problems`, see
+    /// `contest_problem_list_matrix`'s `window_gate_public_contest_*`
+    /// comment) there is no second, duplicate window check downstream to
+    /// mask a broken `check_contest_access`. Combined with `is_public`
+    /// removing the participant-check fallback, a non-participant's outcome
+    /// here depends on NOTHING but the window-gate block under test.
+    async fn setup_public(window: Window) -> (TestApp, String, i32) {
+        let app = TestApp::spawn().await;
+        let admin = app.create_user_with_role("admin", "pass1234", "admin").await;
+        let non_participant = app.create_authenticated_user("outsider", "pass1234").await;
+        let contest_id =
+            create_contest_window(&app, &admin, "Isolated Window Gate Contest", true, window).await;
+        (app, non_participant, contest_id)
+    }
+
+    // --- window_gate_isolated_public_contest_*: THIS is the group that
+    // genuinely isolates and pins `check_contest_access`'s window-gate block
+    // in isolation, verified as follows (see task-1-report.md for the actual
+    // numbers): with `packages/server/src/utils/contest.rs`'s window-gate
+    // block (the one inside `check_contest_access`) temporarily deleted, the
+    // 3 out-of-window cells below flip from 404 to 200 and FAIL, while
+    // restoring the block byte-identical makes the whole suite pass again.
+    // Mirrors the precedent in
+    // `packages/server/src/utils/contest.rs::contest_access_tests`
+    // (`public_but_deactivated_contest_is_not_found_for_unprivileged_user`,
+    // `public_not_yet_activated_contest_is_not_found_for_unprivileged_user`,
+    // `public_in_window_contest_is_accessible_to_any_user`). ---
+
+    #[tokio::test]
+    async fn window_gate_isolated_public_contest_before_activation_is_404() {
+        let (app, non_participant, contest_id) = setup_public(BEFORE_ACTIVATION).await;
+        let res = app.get_with_token(&routes::contest(contest_id), &non_participant).await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn window_gate_isolated_public_contest_inside_window_is_200() {
+        let (app, non_participant, contest_id) = setup_public(INSIDE_WINDOW).await;
+        let res = app.get_with_token(&routes::contest(contest_id), &non_participant).await;
+        assert_eq!(
+            res.status, 200,
+            "positive control: a non-participant IS let in on a public in-window contest"
+        );
+        assert_eq!(res.body["id"], contest_id);
+    }
+
+    #[tokio::test]
+    async fn window_gate_isolated_public_contest_after_deactivation_is_404() {
+        let (app, non_participant, contest_id) = setup_public(AFTER_DEACTIVATION).await;
+        let res = app.get_with_token(&routes::contest(contest_id), &non_participant).await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn window_gate_isolated_public_contest_null_activate_time_is_404() {
+        let (app, non_participant, contest_id) = setup_public(NULL_ACTIVATE_TIME).await;
+        let res = app.get_with_token(&routes::contest(contest_id), &non_participant).await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
     }
 }
 
