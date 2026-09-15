@@ -433,7 +433,7 @@ pub async fn list_submission_judgements(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-) -> Result<Json<Vec<SubmissionJudgementResponse>>, AppError> {
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let resource = Resource::Submission(id);

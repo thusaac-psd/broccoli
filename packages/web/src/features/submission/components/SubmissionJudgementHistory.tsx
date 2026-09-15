@@ -402,7 +402,11 @@ function JudgementRow({
                     )}
                     testCase={testCase}
                   />
-                  <TestCaseRow testCase={testCase} index={index + 1} />
+                  <TestCaseRow
+                    testCase={testCase}
+                    index={index + 1}
+                    status={judgement.status}
+                  />
                 </div>
               ))}
             </div>

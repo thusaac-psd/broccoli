@@ -285,8 +285,8 @@ pub(super) async fn build_submission_response(
 
                 TestCaseResultResponse {
                     id: result.id,
-                    verdict: result.verdict,
-                    score: result.score,
+                    verdict: Some(result.verdict),
+                    score: Some(result.score),
                     time_used: result.time_used,
                     memory_used: result.memory_used,
                     test_case_id: result.test_case_id,
@@ -432,8 +432,8 @@ pub(super) async fn build_judgement_response(
 
             TestCaseResultResponse {
                 id: result.id,
-                verdict: result.verdict,
-                score: result.score,
+                verdict: Some(result.verdict),
+                score: Some(result.score),
                 time_used: result.time_used,
                 memory_used: result.memory_used,
                 test_case_id: result.test_case_id,

@@ -63,13 +63,13 @@ pub(super) async fn apply_filter_to_judgement_response(
     sub: &submission::Model,
     user_model: &user::Model,
     problem_model: &problem::Model,
-    mut response: SubmissionJudgementResponse,
+    response: SubmissionJudgementResponse,
     visibility: &VisibilityContext,
-) -> Result<SubmissionJudgementResponse, AppError> {
+) -> Result<serde_json::Value, AppError> {
     let result_response =
         if response.status.is_terminal() || response.status == SubmissionStatus::Running {
             Some(JudgeResultResponse {
-                verdict: response.verdict,
+                verdict: response.verdict.clone(),
                 score: submission_score_for_status(&response.status, response.score),
                 time_used: response.time_used,
                 memory_used: response.memory_used,
@@ -104,44 +104,79 @@ pub(super) async fn apply_filter_to_judgement_response(
     };
 
     let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;
-    // Unlike `get_submission` (which ships `apply_filter_to_response`'s Value
-    // straight out as the body), this needs the masked result fields back as
-    // typed data to copy onto `response` below - same round trip
-    // `filter_submission_via_plugin`'s caller did before this task, same
-    // pre-existing caveat that a mask naming a non-`Option` field here (there
-    // are none among `result.*`) would fail this deserialize.
-    let filtered_submission: SubmissionResponse =
-        serde_json::from_value(filtered_value).map_err(|e| {
-            AppError::Internal(format!("Failed to deserialize masked submission: {e}"))
-        })?;
 
-    match filtered_submission.result {
-        Some(result) => {
-            response.verdict = result.verdict;
-            response.score = submission_score_for_status(&response.status, result.score);
-            response.time_used = result.time_used;
-            response.memory_used = result.memory_used;
-            response.compile_output = result.compile_output;
-            response.error_message = result.error_message;
-            response.finalized_at = result.judged_at;
-            response.test_case_results = result.test_case_results;
-            if response.compile_output.is_none() && response.error_message.is_none() {
-                response.error_code = None;
-            }
-        }
-        None => {
-            response.verdict = None;
-            response.score = None;
-            response.time_used = None;
-            response.memory_used = None;
-            response.compile_output = None;
-            response.error_code = None;
-            response.error_message = None;
-            response.test_case_results.clear();
+    // DO NOT re-deserialize `filtered_value` into a typed `SubmissionResponse`
+    // here, even though that used to be exactly what this function did (and
+    // is still what `filter_submission_via_plugin`'s pre-task caller did). A
+    // `FieldMask` can only ever blank a value to JSON `null`, never author a
+    // replacement - so `per_test_case_mask_fields()` (used by
+    // `subtask_scores`/`total_only`) nulls individual
+    // `result.test_case_results[i].verdict`/`.score` leaves while leaving
+    // their surrounding array elements in place. `TestCaseResultResponse`
+    // declares `verdict: Verdict` and `score: f64` as non-`Option`, so a
+    // masked `null` inside a populated array fails `serde_json::from_value`
+    // outright, turning a legitimate redaction into a 500
+    // (`AppError::Internal`) instead of the null the client is supposed to
+    // see. The `none` level's own e2e coverage never caught this because it
+    // masks the whole array key to `[]`, not individual leaves within it -
+    // see `ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict`.
+    //
+    // The fix mirrors what `apply_filter_to_response` / `get_submission` and
+    // `Visible::into_masked_json` already do: serialize-then-mask, and once
+    // masked, stay in `serde_json::Value` land all the way to the wire -
+    // never re-type masked JSON. Concretely: serialize the still-UNMASKED
+    // `response` (safe - masking hasn't touched it) to a `Value`, then splice
+    // the already-masked `result.*` leaves from `filtered_value` onto it
+    // directly as JSON, reading them with `Value` indexing rather than
+    // through a struct. If you're tempted to "simplify" this back into a
+    // typed round trip, don't - that reintroduces this exact crash.
+    let masked_result = filtered_value
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let mut value = serde_json::to_value(&response)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize judgement response: {e}")))?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        AppError::Internal("Judgement response did not serialize to a JSON object".into())
+    })?;
+
+    if masked_result.is_null() {
+        obj.insert("verdict".into(), serde_json::Value::Null);
+        obj.insert("score".into(), serde_json::Value::Null);
+        obj.insert("time_used".into(), serde_json::Value::Null);
+        obj.insert("memory_used".into(), serde_json::Value::Null);
+        obj.insert("compile_output".into(), serde_json::Value::Null);
+        obj.insert("error_code".into(), serde_json::Value::Null);
+        obj.insert("error_message".into(), serde_json::Value::Null);
+        obj.insert(
+            "test_case_results".into(),
+            serde_json::Value::Array(Vec::new()),
+        );
+    } else {
+        obj.insert("verdict".into(), masked_result["verdict"].clone());
+        obj.insert("score".into(), masked_result["score"].clone());
+        obj.insert("time_used".into(), masked_result["time_used"].clone());
+        obj.insert("memory_used".into(), masked_result["memory_used"].clone());
+        obj.insert(
+            "compile_output".into(),
+            masked_result["compile_output"].clone(),
+        );
+        obj.insert(
+            "error_message".into(),
+            masked_result["error_message"].clone(),
+        );
+        obj.insert("finalized_at".into(), masked_result["judged_at"].clone());
+        obj.insert(
+            "test_case_results".into(),
+            masked_result["test_case_results"].clone(),
+        );
+        if masked_result["compile_output"].is_null() && masked_result["error_message"].is_null() {
+            obj.insert("error_code".into(), serde_json::Value::Null);
         }
     }
 
-    Ok(response)
+    Ok(value)
 }
 
 /// List masking: one `decide_batch` (via `fetch_visible_batch`) over every

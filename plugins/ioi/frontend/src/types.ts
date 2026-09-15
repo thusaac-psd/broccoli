@@ -1,5 +1,3 @@
-import type { TestCaseResult } from '@broccoli/web-sdk/submission';
-
 export interface ContestInfoResponse {
   scoring_mode: ScoringMode;
   feedback_level: FeedbackLevel;
@@ -92,40 +90,3 @@ export type ScoreboardTiebreaker =
   | 'max_score_time';
 export type TokenMode = 'none' | 'fixed_budget' | 'regenerating';
 export type SubtaskScoringMethod = 'group_min' | 'sum' | 'group_mul';
-
-/**
- * Wire shape of a single test-case result once the visibility kernel's field
- * mask has been applied. The `subtask_scores`/`total_only` feedback levels
- * NULL a masked test case's `verdict`/`score` (see plugins/ioi/src/
- * feedback.rs's `per_test_case_mask_fields`) rather than authoring a
- * `"Skipped"`/`0` value the way the old host-fn-based redaction did -- a
- * field mask can only blank a value, never author one.
- *
- * `TestCaseResult` (generated from the OpenAPI schema) still declares both
- * fields non-nullable: the schema does not model this post-mask wire shape.
- * This is an approved, intentional wire/schema divergence -- see
- * `normalizeMaskedTestCase` below, which is how this plugin's own frontend
- * compensates at render time so what the contestant sees is unchanged.
- */
-export type MaskedTestCaseResult = Omit<TestCaseResult, 'verdict' | 'score'> & {
-  verdict: TestCaseResult['verdict'] | null;
-  score: TestCaseResult['score'] | null;
-};
-
-/**
- * Restore the pre-refactor RENDERED equivalence for a single test case:
- * a masked (null) verdict renders exactly like the old redaction's
- * authored `"Skipped"` value; a masked (null) score renders as `0`.
- * Equivalence is defined at the rendered level, not the wire level -- do
- * not "fix" a null here by asking the backend to author `"Skipped"`/`0`
- * again, which would reintroduce a write-capable decision variant.
- */
-export function normalizeMaskedTestCase(
-  tc: MaskedTestCaseResult,
-): TestCaseResult {
-  return {
-    ...tc,
-    verdict: tc.verdict ?? 'Skipped',
-    score: tc.score ?? 0,
-  } as TestCaseResult;
-}

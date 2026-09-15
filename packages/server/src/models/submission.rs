@@ -193,10 +193,17 @@ pub struct SubmissionJudgementResponse {
 pub struct TestCaseResultResponse {
     #[schema(example = 1)]
     pub id: i32,
-    #[schema(value_type = String, example = "Accepted")]
-    pub verdict: Verdict,
+    /// `Option`, not `Verdict`: a `FieldMask` (e.g. `subtask_scores`'s
+    /// `result.test_case_results.*.verdict`) can blank this to JSON `null`
+    /// for a viewer who isn't entitled to the per-test-case breakdown, and a
+    /// mask can only ever blank a value, never author a replacement - so the
+    /// wire type has to admit `null` even though every row that reaches here
+    /// unmasked always carries a real verdict. See
+    /// `apply_filter_to_judgement_response` for where that null is produced.
+    #[schema(value_type = Option<String>, example = "Accepted")]
+    pub verdict: Option<Verdict>,
     #[schema(example = 10.0)]
-    pub score: f64,
+    pub score: Option<f64>,
     #[schema(example = 5)]
     pub time_used: Option<i32>,
     #[schema(example = 256)]
@@ -356,8 +363,8 @@ impl From<crate::entity::test_case_result::Model> for TestCaseResultResponse {
     fn from(m: crate::entity::test_case_result::Model) -> Self {
         Self {
             id: m.id,
-            verdict: m.verdict,
-            score: m.score,
+            verdict: Some(m.verdict),
+            score: Some(m.score),
             time_used: m.time_used,
             memory_used: m.memory_used,
             test_case_id: m.test_case_id,
