@@ -9,12 +9,14 @@ mod host_rules;
 mod mask;
 mod plugin_query;
 mod subject;
+mod visible;
 
 pub use decision::{Decision, FieldMask};
 pub(crate) use host_rules::host_decide;
 pub use mask::apply_mask;
 pub(crate) use plugin_query::query_plugins;
 pub use subject::{Action, Resource, Subject};
+pub use visible::Visible;
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -317,6 +319,43 @@ impl<'a> VisibilityKernel<'a> {
                 memo.get(&(action, r.clone()))
                     .cloned()
                     .expect("every resource was decided and memoized above before re-expansion")
+            })
+            .collect())
+    }
+
+    /// Decide, then wrap. The only public way to obtain a `Visible<T>`.
+    /// Returns `Ok(None)` when the decision is `Deny`, so callers filter a
+    /// list by dropping `None` and render a detail 404 on `None` - a denied
+    /// resource is never rendered as a placeholder, because a placeholder
+    /// confirms it exists.
+    pub async fn fetch_visible<T: serde::Serialize>(
+        &self,
+        action: Action,
+        resource: Resource,
+        entity: T,
+    ) -> Result<Option<Visible<T>>, AppError> {
+        let decision = self.decide(action, resource).await?;
+        Ok(match decision {
+            Decision::Deny => None,
+            d => Some(Visible::new(entity, d)),
+        })
+    }
+
+    /// Batched form. Input and output are positionally aligned; denied
+    /// entries come back as `None`.
+    pub async fn fetch_visible_batch<T: serde::Serialize>(
+        &self,
+        action: Action,
+        items: Vec<(Resource, T)>,
+    ) -> Result<Vec<Option<Visible<T>>>, AppError> {
+        let resources: Vec<Resource> = items.iter().map(|(r, _)| r.clone()).collect();
+        let decisions = self.decide_batch(action, &resources).await?;
+        Ok(items
+            .into_iter()
+            .zip(decisions)
+            .map(|((_, entity), d)| match d {
+                Decision::Deny => None,
+                d => Some(Visible::new(entity, d)),
             })
             .collect())
     }
@@ -1103,6 +1142,142 @@ mod tests {
             captured[0].resources[0].contest_id, None,
             "a genuinely contest-less submission must stay None, not silently inherit \
              some other resource's contest"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `fetch_visible` / `fetch_visible_batch`
+    // -----------------------------------------------------------------
+
+    #[derive(Debug, Clone, serde::Serialize)]
+    struct ScoredEntity {
+        id: i32,
+        score: Option<i32>,
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn fetch_visible_batch_aligns_positions_across_allow_redact_and_deny() {
+        let _guard = crate::metrics_test_lock();
+
+        // Contest 1: private, non-member -> host Deny.
+        // Contest 2: public, in-window -> host Allow; plugin redacts "score".
+        // Contest 3: public, in-window -> host Allow; plugin allows too.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                contest_row(1, false, Some(-1), None, true),
+                contest_row(2, true, Some(-1), None, true),
+                contest_row(3, true, Some(-1), None, true),
+            ]])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .into_connection();
+
+        let mut answers = HashMap::new();
+        answers.insert(
+            ("contest".to_string(), 2),
+            WireDecision::Redact {
+                fields: vec!["score".to_string()],
+            },
+        );
+        let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
+            registry: registry_with_visibility_plugin("vis-plugin"),
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            captured: Arc::new(StdMutex::new(Vec::new())),
+            answers,
+        });
+        let state = test_app_state(plugins, db).await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+
+        let items = vec![
+            (
+                Resource::Contest(1),
+                ScoredEntity {
+                    id: 1,
+                    score: Some(10),
+                },
+            ),
+            (
+                Resource::Contest(2),
+                ScoredEntity {
+                    id: 2,
+                    score: Some(20),
+                },
+            ),
+            (
+                Resource::Contest(3),
+                ScoredEntity {
+                    id: 3,
+                    score: Some(30),
+                },
+            ),
+        ];
+        let mut results = kernel
+            .fetch_visible_batch(Action::Read, items)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 3, "output must be the same length as input");
+
+        // Index 0: host-denied -> None, never a wrapped placeholder - a
+        // placeholder would confirm the resource exists.
+        assert!(
+            results[0].is_none(),
+            "a denied resource must come back as None, not Some(Visible) around a placeholder"
+        );
+
+        // Index 1: plugin-redacted -> Some, and the mask actually blanks the
+        // field once serialized, while leaving the other field untouched.
+        let redacted = results[1]
+            .take()
+            .expect("contest 2 was redacted, not denied");
+        assert_eq!(redacted.as_inner().id, 2);
+        let json = redacted.into_masked_json().unwrap();
+        assert!(
+            json["score"].is_null(),
+            "redacted field must be blanked in the final JSON"
+        );
+        assert_eq!(json["id"], 2, "non-masked fields must survive untouched");
+
+        // Index 2: fully allowed -> Some, unmasked.
+        let allowed = results[2].take().expect("contest 3 was allowed");
+        let json = allowed.into_masked_json().unwrap();
+        assert_eq!(json["score"], 30, "an allowed resource must not be masked");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn fetch_visible_single_deny_returns_none_not_placeholder() {
+        let _guard = crate::metrics_test_lock();
+
+        // Out-of-window contest -> host Deny (rule 2).
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![contest_row(7, true, Some(-3), Some(-1), true)]])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .into_connection();
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(PanicPluginManager::new(
+            registry_with_visibility_plugin("vis-plugin"),
+        ));
+        let state = test_app_state(plugins, db).await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+
+        let result = kernel
+            .fetch_visible(
+                Action::Read,
+                Resource::Contest(7),
+                ScoredEntity {
+                    id: 7,
+                    score: Some(1),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_none(),
+            "a denied resource must be None so callers 404 instead of rendering a placeholder"
         );
     }
 }
