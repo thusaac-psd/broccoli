@@ -21,11 +21,13 @@ import { useIsIoiContest } from './hooks/useIsIoiContest';
 import { canViewPrivilegedSubmissionFeedback } from './permissions';
 import type {
   ContestInfoResponse,
+  MaskedTestCaseResult,
   SubtaskInfo,
   SubtaskScoreEntry,
   SubtaskScoresResponse,
   TaskConfigResponse,
 } from './types';
+import { normalizeMaskedTestCase } from './types';
 
 interface IoiSubmissionResultProps {
   submission?: Submission | null;
@@ -950,7 +952,14 @@ export function IoiSubmissionResult({
 
   if (!submission.result || !taskConfig || !visibility) return null;
 
-  const allTestCases = testCases ?? submission.result.test_case_results ?? [];
+  // A masked test case's `verdict`/`score` arrive as `null` (the visibility
+  // kernel can only blank, never author, a field); normalize back to the
+  // pre-refactor rendered equivalent ("Skipped" / 0) right at ingestion so
+  // every downstream consumer below keeps working with the never-null shape
+  // it already expects.
+  const allTestCases = (
+    testCases ?? submission.result.test_case_results ?? []
+  ).map((tc) => normalizeMaskedTestCase(tc as MaskedTestCaseResult));
   const { effectiveFeedback } = visibility;
   const taskSubtasks = taskConfig.subtasks ?? [];
   const subtaskScores = subtaskScoresData?.subtasks;

@@ -49,6 +49,10 @@ method = "GET"
 path = "/api/plugins/ioi/contests/{contest_id}/submissions/{submission_id}/subtask-scores"
 handler = "api_submission_subtask_scores"
 
+[[server.queries]]
+topic = "visibility"
+function = "decide_visibility"
+
 [translations]
 en = "i18n/en.toml"
 zh-CN = "i18n/zh-CN.toml"

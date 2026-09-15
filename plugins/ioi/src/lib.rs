@@ -66,12 +66,8 @@ pub(crate) fn load_token_state(
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    host.registry.register_contest_type_with_filter(
-        "ioi",
-        "handle_ioi_submission",
-        "handle_ioi_code_run",
-        Some("filter_submission_for_viewer"),
-    )?;
+    host.registry
+        .register_contest_type("ioi", "handle_ioi_submission", "handle_ioi_code_run")?;
     host.log.info("IOI contest plugin registered")?;
     Ok("ok".into())
 }
@@ -151,20 +147,13 @@ pub fn on_ioi_eval_result(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&output)?)
 }
 
-// `FilterSubmissionInput`/`FilterSubmissionOutput` are the shared wire types
-// from `broccoli_server_sdk::types` (via the prelude).
-
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
-pub fn filter_submission_for_viewer(input: String) -> FnResult<String> {
+pub fn decide_visibility(input: String) -> FnResult<String> {
     let host = Host::new();
-    let req: FilterSubmissionInput = serde_json::from_str(&input)?;
-
-    let submission = feedback::apply_feedback_filter(&host, &req)?;
-
-    Ok(serde_json::to_string(&FilterSubmissionOutput {
-        submission,
-    })?)
+    let req: VisibilityQueryInput = serde_json::from_str(&input)?;
+    let decisions = feedback::decide_visibility_decisions(&host, &req)?;
+    Ok(serde_json::to_string(&VisibilityQueryOutput { decisions })?)
 }
 
 #[cfg(target_arch = "wasm32")]
