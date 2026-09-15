@@ -32,3 +32,7 @@ method = "GET"
 handler = "reflect"
 permission = "submission:view_all"
 
+[[server.queries]]
+topic = "visibility"
+function = "decide_visibility"
+

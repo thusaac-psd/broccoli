@@ -1,142 +1,65 @@
-use broccoli_server_sdk::permissions as perm;
-use broccoli_server_sdk::types::{FilterSubmissionInput, FilterSubmissionOutput};
 use common::SubmissionStatus;
-use sea_orm::DatabaseConnection;
-
-use plugin_core::traits::PluginInvokerExt;
 
 use crate::entity::{problem, submission, user};
 use crate::error::AppError;
-use crate::extractors::auth::AuthUser;
 use crate::models::submission::*;
-use crate::state::AppState;
-use crate::utils::contest::{check_contest_access, find_contest, is_contest_participant};
 use crate::utils::judging::files_from_json;
+use crate::visibility::{Action, Resource, VisibilityKernel};
 
 use super::response::{VisibilityContext, submission_score_for_status};
 
-pub(super) async fn require_submission_visible(
-    db: &DatabaseConnection,
-    auth_user: &AuthUser,
-    sub: &submission::Model,
-) -> Result<VisibilityContext, AppError> {
-    let can_view_all = auth_user.has_permission(perm::SUBMISSION_VIEW_ALL);
-    if !can_view_all && sub.user_id != auth_user.user_id {
-        if let Some(contest_id) = sub.contest_id {
-            let contest_model = find_contest(db, contest_id).await?;
-
-            // Enforce the contest activation window here too, exactly as the list
-            // path and every other contest read path do via check_contest_access:
-            // a deactivated/archived (or not-yet-activated) contest is 404 for
-            // non-managers. This only TIGHTENS - the is_participant &&
-            // submissions_visible requirement below still stands on top, so the
-            // public branch of check_contest_access can't widen peer visibility;
-            // it just closes the hole where an enrolled participant kept reading
-            // peers' submissions after the contest left its window.
-            check_contest_access(db, auth_user, &contest_model).await?;
-            let is_participant = is_contest_participant(db, contest_id, auth_user.user_id).await?;
-
-            if !is_participant || !contest_model.submissions_visible {
-                return Err(AppError::NotFound("Submission not found".into()));
-            }
-        } else {
-            return Err(AppError::NotFound("Submission not found".into()));
-        }
-    }
-
-    Ok(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: can_view_all,
-    })
-}
-
-/// Generic per-contest-type submission filter dispatch. Looks up the registered
-/// `filter_submission_fn` for the submission's contest_type and invokes it with
-/// the shared `FilterSubmissionInput`/`FilterSubmissionOutput` wire types from
-/// `broccoli_server_sdk::types`. Returns the input unchanged if no contest_id,
-/// no plugin handler, or no `filter_submission_fn` is registered.
-async fn filter_submission_via_plugin(
-    state: &AppState,
-    contest_type: &str,
-    contest_id: Option<i32>,
-    submission_value: serde_json::Value,
-    is_list_item: bool,
-    visibility: Option<&VisibilityContext>,
-) -> Result<serde_json::Value, AppError> {
-    if contest_id.is_none() {
-        return Ok(submission_value);
-    }
-
-    let handler = {
-        let registry = state.registries.contest_type_registry.read().await;
-        registry.get(contest_type).cloned()
-    };
-    let Some(handler) = handler else {
-        return Ok(submission_value);
-    };
-    let Some(filter_fn) = handler.filter_submission_fn.clone() else {
-        return Ok(submission_value);
-    };
-
-    let viewer_permissions: Vec<String> = visibility
-        .map(|ctx| {
-            let mut perms = Vec::new();
-            if ctx.has_view_all {
-                perms.push(perm::SUBMISSION_VIEW_ALL.to_string());
-            }
-            perms
-        })
-        .unwrap_or_default();
-
-    let input = FilterSubmissionInput {
-        submission: submission_value,
-        is_list_item,
-        contest_id,
-        viewer_user_id: visibility.map(|ctx| ctx.viewer_id),
-        viewer_permissions,
-    };
-
-    let output: Result<FilterSubmissionOutput, _> = state
-        .plugins
-        .call(&handler.plugin_id, &filter_fn, &input)
-        .await;
-
-    match output {
-        Ok(out) => Ok(out.submission),
-        Err(e) => {
-            tracing::error!(
-                contest_type = %contest_type,
-                plugin_id = %handler.plugin_id,
-                func = %filter_fn,
-                error = %e,
-                "filter_submission plugin call failed"
-            );
-            Err(AppError::Internal(
-                "Failed to apply submission visibility filter".into(),
-            ))
-        }
-    }
-}
-
+/// Applies the kernel's `Resource::Submission` decision - host reachability
+/// `meet`-ed with any registered visibility plugin's answer, host always
+/// wins on `Deny` - to an already-built `SubmissionResponse`, returning the
+/// masked wire JSON.
+///
+/// Before this task, this file's `filter_submission_via_plugin` adopted a
+/// plugin-authored submission JSON wholesale after only a shape check -
+/// `Ok(out) => Ok(out.submission)`. A plugin registered against the
+/// submission's contest type could therefore alter a verdict, a score, or a
+/// displayed user id outright. Routing through `VisibilityKernel::fetch_visible`
+/// closes that structurally rather than by convention: `Visible::new` is
+/// `pub(super)` to `crate::visibility`, so the only way anything under
+/// `handlers` can turn a DTO into a response body is `Visible::into_masked_json`,
+/// which can only ever blank fields named in a `FieldMask` - never substitute a
+/// value. `None` (the kernel's `Deny`) maps to the same 404 this submission
+/// surface has always returned for an unreachable submission; the caller (not
+/// this function) also fails fast on that same decision before doing the
+/// (multi-table) work of building `response` in the first place - see
+/// `get_submission`.
+///
+/// Returns raw JSON, not a re-parsed `SubmissionResponse`: a plugin (or the
+/// host) can name any field path, including ones like `username` that aren't
+/// `Option` on the DTO, so a masked value must be allowed to ship as JSON
+/// `null` without first surviving a round trip back through `serde`.
 pub(super) async fn apply_filter_to_response(
-    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
     response: SubmissionResponse,
-    visibility: Option<&VisibilityContext>,
-) -> Result<SubmissionResponse, AppError> {
-    let contest_type = response.contest_type.clone();
-    let contest_id = response.contest_id;
-    let value = serde_json::to_value(&response).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize submission for filter: {}", e))
-    })?;
-    let filtered =
-        filter_submission_via_plugin(state, &contest_type, contest_id, value, false, visibility)
-            .await?;
-    serde_json::from_value::<SubmissionResponse>(filtered)
-        .map_err(|e| AppError::Internal(format!("Plugin returned invalid submission JSON: {}", e)))
+) -> Result<serde_json::Value, AppError> {
+    let resource = Resource::Submission(response.id);
+    kernel
+        .fetch_visible(Action::Read, resource, response)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Submission not found".into()))?
+        .into_masked_json()
 }
 
+/// Judgement-history masking.
+///
+/// `SubmissionJudgementResponse` is a flat shape (`verdict`, `score`, ...
+/// directly on the object), not the nested `result.verdict` shape a
+/// `FieldMask` targets (see `Decision`'s own doc examples and
+/// `apply_mask`'s tests). Exactly as before this task, a synthetic
+/// `SubmissionResponse` wrapper stands in for the judgement so the masking
+/// (now kernel-driven instead of plugin-driven) lands on the paths a caller
+/// actually names, and the masked fields are copied back onto the real
+/// judgement response afterwards. The kernel memoizes per `(Action,
+/// Resource)`, so this doesn't re-decide anything already decided for this
+/// submission earlier in the request (e.g. by `list_submission_judgements`'s
+/// own upfront reachability check) - it's a second lookup into the same
+/// memo, not a second host/plugin round trip.
 pub(super) async fn apply_filter_to_judgement_response(
-    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
     sub: &submission::Model,
     user_model: &user::Model,
     problem_model: &problem::Model,
@@ -180,8 +103,17 @@ pub(super) async fn apply_filter_to_judgement_response(
         result: result_response,
     };
 
-    let filtered_submission =
-        apply_filter_to_response(state, synthetic_submission, Some(visibility)).await?;
+    let filtered_value = apply_filter_to_response(kernel, synthetic_submission).await?;
+    // Unlike `get_submission` (which ships `apply_filter_to_response`'s Value
+    // straight out as the body), this needs the masked result fields back as
+    // typed data to copy onto `response` below - same round trip
+    // `filter_submission_via_plugin`'s caller did before this task, same
+    // pre-existing caveat that a mask naming a non-`Option` field here (there
+    // are none among `result.*`) would fail this deserialize.
+    let filtered_submission: SubmissionResponse =
+        serde_json::from_value(filtered_value).map_err(|e| {
+            AppError::Internal(format!("Failed to deserialize masked submission: {e}"))
+        })?;
 
     match filtered_submission.result {
         Some(result) => {
@@ -212,25 +144,36 @@ pub(super) async fn apply_filter_to_judgement_response(
     Ok(response)
 }
 
+/// List masking: one `decide_batch` (via `fetch_visible_batch`) over every
+/// listed submission's own `Resource::Submission(id)`. `decide_batch` dedupes
+/// and resolves each submission's own `contest_id` internally via
+/// `host_decide`'s `submission_contest_ids` out-param, so a single global
+/// page spanning several contests (and contest-less submissions) still gets a
+/// per-submission-correct decision with no extra plumbing here - see
+/// `visibility::resource_contest_id`.
+///
+/// A denied row is omitted outright: `fetch_visible_batch` returns `None` for
+/// it, and `.flatten()` below drops it - never rendered as a placeholder,
+/// which would itself leak that the row exists. This is a real (and
+/// intended) behavioural change from the plugin-based mechanism it replaces:
+/// `FilterSubmissionOutput` had no way to say "omit this item", only to
+/// rewrite one - a list page can now legitimately come back shorter than
+/// `per_page` even though `total`/`total_pages` are computed from the
+/// pre-decision SQL count, exactly like every other kernel-backed list
+/// endpoint (e.g. `handlers::attachment::list_attachments`).
 pub(super) async fn apply_filter_to_list(
-    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
     items: Vec<SubmissionListItem>,
-    visibility: Option<&VisibilityContext>,
-) -> Result<Vec<SubmissionListItem>, AppError> {
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let contest_type = item.contest_type.clone();
-        let contest_id = item.contest_id;
-        let value = serde_json::to_value(&item).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize submission for filter: {}", e))
-        })?;
-        let filtered =
-            filter_submission_via_plugin(state, &contest_type, contest_id, value, true, visibility)
-                .await?;
-        let item: SubmissionListItem = serde_json::from_value(filtered).map_err(|e| {
-            AppError::Internal(format!("Plugin returned invalid list item JSON: {}", e))
-        })?;
-        out.push(item);
-    }
-    Ok(out)
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let pairs: Vec<(Resource, SubmissionListItem)> = items
+        .into_iter()
+        .map(|item| (Resource::Submission(item.id), item))
+        .collect();
+
+    let visible = kernel.fetch_visible_batch(Action::Read, pairs).await?;
+    visible
+        .into_iter()
+        .flatten()
+        .map(|v| v.into_masked_json())
+        .collect()
 }

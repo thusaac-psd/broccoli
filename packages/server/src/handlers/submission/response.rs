@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
 use common::SubmissionStatus;
 use common::storage::BlobStore;
@@ -9,6 +10,7 @@ use crate::entity::{
     contest, problem, submission, submission_judgement, test_case, test_case_result, user,
 };
 use crate::error::AppError;
+use crate::extractors::auth::AuthUser;
 use crate::models::submission::*;
 use crate::utils::judging::files_from_json;
 use crate::utils::test_case_body::read_test_case_body_preview;
@@ -68,6 +70,26 @@ pub(super) async fn build_submission_list_items(
 pub(super) struct VisibilityContext {
     pub(super) viewer_id: i32,
     pub(super) has_view_all: bool,
+}
+
+impl VisibilityContext {
+    /// Derives the field-suppression context (source/compile-output/test-IO
+    /// gating in [`build_submission_response`] / [`build_judgement_response`])
+    /// straight from the caller's auth, with no DB round trip.
+    ///
+    /// Before this task this only ever came out of `require_submission_visible`
+    /// as a side effect of it *also* deciding reachability by hand. That
+    /// reachability decision now belongs solely to
+    /// `VisibilityKernel::decide`/`fetch_visible` (`Resource::Submission`) -
+    /// this constructor exists so callers can still get a `VisibilityContext`
+    /// for the orthogonal field-suppression rules without resurrecting that
+    /// hand-rolled check.
+    pub(super) fn from_auth_user(auth_user: &AuthUser) -> Self {
+        Self {
+            viewer_id: auth_user.user_id,
+            has_view_all: auth_user.has_permission(perm::SUBMISSION_VIEW_ALL),
+        }
+    }
 }
 
 #[derive(FromQueryResult)]

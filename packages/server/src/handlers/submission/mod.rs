@@ -29,6 +29,7 @@ use crate::utils::judging::{files_to_json, validate_code_payload, validate_submi
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
 use crate::utils::rate_limit::check_rate_limit;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 mod dispatch;
 mod filter;
@@ -43,10 +44,7 @@ pub use rejudge::*;
 pub(crate) use dispatch::open_rejudge_judgement;
 
 use dispatch::{dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks};
-use filter::{
-    apply_filter_to_judgement_response, apply_filter_to_list, apply_filter_to_response,
-    require_submission_visible,
-};
+use filter::{apply_filter_to_judgement_response, apply_filter_to_list, apply_filter_to_response};
 use response::{
     VisibilityContext, build_judgement_response, build_submission_list_items,
     build_submission_response,
@@ -186,10 +184,7 @@ pub async fn create_submission(
         Some(enabled_plugins),
     );
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: auth_user.has_permission(perm::SUBMISSION_VIEW_ALL),
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
 
@@ -216,7 +211,7 @@ pub async fn list_submissions(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<SubmissionListQuery>,
-) -> Result<Json<SubmissionListResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     validate_sorting_params(
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
@@ -312,22 +307,27 @@ pub async fn list_submissions(
         .await?;
 
     let data = build_submission_list_items(&state.db, submissions).await?;
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: can_view_all,
-    });
-    let data = apply_filter_to_list(&state, data, visibility.as_ref()).await?;
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    // This list is GLOBAL - it can span several contests plus contest-less
+    // submissions in one page. One `decide_batch` (via `fetch_visible_batch`)
+    // over every listed submission's own `Resource::Submission(id)` resolves
+    // each row's own contest scope internally (`host_decide`'s
+    // `submission_contest_ids` out-param), so no extra plumbing is needed
+    // here to keep rows from different contests from bleeding into each
+    // other's decision.
+    let data = apply_filter_to_list(&kernel, data).await?;
     let total_pages = total.div_ceil(per_page);
 
-    Ok(Json(SubmissionListResponse {
-        data,
-        pagination: Pagination {
+    Ok(Json(serde_json::json!({
+        "data": data,
+        "pagination": Pagination {
             page,
             per_page,
             total,
             total_pages,
         },
-    }))
+    })))
 }
 
 #[utoipa::path(
@@ -353,13 +353,33 @@ pub async fn get_submission(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-) -> Result<Json<SubmissionResponse>, AppError> {
-    let sub = find_submission(&state.db, id).await?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let resource = Resource::Submission(id);
 
-    let visibility = Some(require_submission_visible(&state.db, &auth_user, &sub).await?);
+    // Fail fast, before building the full detail response (user/problem/
+    // contest/judgement/test-case-result reads below), on a submission the
+    // kernel already knows is unreachable. This single decision folds in
+    // what `require_submission_visible` used to check by hand - owner
+    // bypass, the contest activation window, participation, and
+    // `submissions_visible` - see `visibility::host_rules::decide_submission`,
+    // a byte-for-byte port of that old logic.
+    if kernel.decide(Action::Read, resource).await?.is_denied() {
+        return Err(AppError::NotFound("Submission not found".into()));
+    }
+
+    let sub = find_submission(&state.db, id).await?;
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, sub, visibility).await?;
-    let response = apply_filter_to_response(&state, response, visibility.as_ref()).await?;
+
+    // The DTO reaches the response body only through `into_masked_json`
+    // (inside `apply_filter_to_response`), so a `Redact` decision - host or
+    // plugin - can never be forgotten at the serialization step. The kernel
+    // memoizes per `(Action, Resource)`, so this re-decides the same
+    // `resource` already checked above at no extra DB/plugin cost.
+    let response = apply_filter_to_response(&kernel, response).await?;
     Ok(Json(response))
 }
 
@@ -386,8 +406,18 @@ pub async fn list_submission_judgements(
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<Vec<SubmissionJudgementResponse>>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let resource = Resource::Submission(id);
+
+    // Fail fast, exactly as `get_submission`: a submission the kernel
+    // already knows is unreachable never gets its judgement history built.
+    if kernel.decide(Action::Read, resource).await?.is_denied() {
+        return Err(AppError::NotFound("Submission not found".into()));
+    }
+
     let sub = find_submission(&state.db, id).await?;
-    let visibility = require_submission_visible(&state.db, &auth_user, &sub).await?;
+    let visibility = VisibilityContext::from_auth_user(&auth_user);
 
     let problem_model = problem::Entity::find_by_id(sub.problem_id)
         .one(&state.db)
@@ -450,7 +480,7 @@ pub async fn list_submission_judgements(
         )
         .await?;
         let response = apply_filter_to_judgement_response(
-            &state,
+            &kernel,
             &sub,
             &user_model,
             &problem_model,
@@ -591,10 +621,7 @@ pub async fn create_contest_submission(
         Some(enabled_plugins),
     );
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: auth_user.has_permission(perm::SUBMISSION_VIEW_ALL),
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
 
@@ -626,7 +653,7 @@ pub async fn list_contest_submissions(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     Query(query): Query<SubmissionListQuery>,
-) -> Result<Json<SubmissionListResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     validate_sorting_params(
         query.sort_by.as_deref(),
         query.sort_order.as_deref(),
@@ -699,22 +726,33 @@ pub async fn list_contest_submissions(
         .await?;
 
     let data = build_submission_list_items(&state.db, submissions).await?;
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: can_view_all,
-    });
-    let data = apply_filter_to_list(&state, data, visibility.as_ref()).await?;
+    // The kernel OWNS the subject: one kernel per request per subject. The
+    // top-level `check_contest_access` gate above is untouched - it stays the
+    // sole reachability check for the contest itself, `submission:view_all`
+    // (not `contest:manage`) is still what bypasses it. This per-row decision
+    // is an ADDITIONAL, independent narrowing on top: it also requires
+    // contest participation for any row not already covered by
+    // `submission:view_all` or self-ownership, matching `get_submission`'s
+    // row-level behaviour exactly (see `visibility::host_rules::decide_submission`).
+    // Previously the plugin-based filter had no way to omit a row at all, so
+    // every viewer who passed the top-level gate saw every row the SQL
+    // query returned; a genuinely non-participant viewer of a public,
+    // `submissions_visible` contest could see peers' submissions in the list
+    // that `get_submission` would already 404 on individually - this closes
+    // that inconsistency.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let data = apply_filter_to_list(&kernel, data).await?;
     let total_pages = total.div_ceil(per_page);
 
-    Ok(Json(SubmissionListResponse {
-        data,
-        pagination: Pagination {
+    Ok(Json(serde_json::json!({
+        "data": data,
+        "pagination": Pagination {
             page,
             per_page,
             total,
             total_pages,
         },
-    }))
+    })))
 }
 
 pub fn submission_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
