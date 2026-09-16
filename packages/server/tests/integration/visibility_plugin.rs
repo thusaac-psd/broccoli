@@ -138,8 +138,12 @@ async fn plugin_cannot_widen_host_decision() {
 
     let app = TestApp::spawn_with_plugins().await;
 
-    let owner_token = app.create_authenticated_user("widen_owner", "pass1234").await;
-    let peer_token = app.create_authenticated_user("widen_peer", "pass1234").await;
+    let owner_token = app
+        .create_authenticated_user("widen_owner", "pass1234")
+        .await;
+    let peer_token = app
+        .create_authenticated_user("widen_peer", "pass1234")
+        .await;
 
     let problem_id = insert_public_problem(&app, "Widen Test Problem").await;
     let owner = user::Entity::find()
@@ -164,7 +168,11 @@ async fn plugin_cannot_widen_host_decision() {
     let owner_res = app
         .get_with_token(&routes::submission(submission_id), &owner_token)
         .await;
-    assert_eq!(owner_res.status, 200, "owner read failed: {}", owner_res.text);
+    assert_eq!(
+        owner_res.status, 200,
+        "owner read failed: {}",
+        owner_res.text
+    );
 
     let res = app
         .get_with_token(&routes::submission(submission_id), &peer_token)
@@ -237,7 +245,11 @@ async fn plugin_cannot_author_a_verdict() {
     let baseline = app
         .get_with_token(&routes::submission(submission_id), &owner_token)
         .await;
-    assert_eq!(baseline.status, 200, "baseline read failed: {}", baseline.text);
+    assert_eq!(
+        baseline.status, 200,
+        "baseline read failed: {}",
+        baseline.text
+    );
     assert_eq!(baseline.body["result"]["verdict"], "Accepted");
     assert_eq!(baseline.body["result"]["score"], 100.0);
 
@@ -251,7 +263,11 @@ async fn plugin_cannot_author_a_verdict() {
         .get_with_token(&routes::submission(submission_id), &owner_token)
         .await;
 
-    assert_eq!(res.status, 200, "owner read should still be reachable: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "owner read should still be reachable: {}",
+        res.text
+    );
     assert!(
         res.body["result"]["verdict"].is_null(),
         "plugin-nominated Redact must blank the verdict, got: {}",
@@ -387,10 +403,12 @@ async fn short_decision_vector_denies_whole_batch() {
         insert_queued_submission(&app, problem_id, owner.id).await,
     ];
 
-    let baseline = app
-        .get_with_token(routes::SUBMISSIONS, &owner_token)
-        .await;
-    assert_eq!(baseline.status, 200, "baseline list failed: {}", baseline.text);
+    let baseline = app.get_with_token(routes::SUBMISSIONS, &owner_token).await;
+    assert_eq!(
+        baseline.status, 200,
+        "baseline list failed: {}",
+        baseline.text
+    );
     assert_eq!(
         baseline.body["data"].as_array().map(Vec::len),
         Some(3),
@@ -402,11 +420,13 @@ async fn short_decision_vector_denies_whole_batch() {
     // element off - one short of the 3-resource batch this list produces.
     seed_kv(&app, "visibility_mode", "short_vector").await;
 
-    let res = app
-        .get_with_token(routes::SUBMISSIONS, &owner_token)
-        .await;
+    let res = app.get_with_token(routes::SUBMISSIONS, &owner_token).await;
 
-    assert_eq!(res.status, 200, "list endpoint itself must not 500: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "list endpoint itself must not 500: {}",
+        res.text
+    );
     assert_eq!(
         res.body["data"].as_array().map(Vec::len),
         Some(0),
@@ -421,7 +441,11 @@ async fn short_decision_vector_denies_whole_batch() {
         .flatten()
         .filter(|item| submission_ids.contains(&(item["id"].as_i64().unwrap_or(-1) as i32)))
         .collect();
-    assert!(leaked.is_empty(), "a denied submission leaked into the list: {}", res.text);
+    assert!(
+        leaked.is_empty(),
+        "a denied submission leaked into the list: {}",
+        res.text
+    );
 }
 
 /// Over-limit `Redact` field masks. The host caps a single decision's field
@@ -514,9 +538,16 @@ async fn decide_visibility_list_partial_omission() {
     let res = app
         .get_with_token(&routes::contest_problems(contest_id), &viewer_token)
         .await;
-    assert_eq!(res.status, 200, "list_contest_problems failed: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "list_contest_problems failed: {}",
+        res.text
+    );
 
-    let data = res.body.as_array().expect("response should be a JSON array");
+    let data = res
+        .body
+        .as_array()
+        .expect("response should be a JSON array");
     assert_eq!(
         data.len(),
         2,
@@ -565,9 +596,16 @@ async fn decide_visibility_list_masking() {
     let res = app
         .get_with_token(&routes::contest_problems(contest_id), &viewer_token)
         .await;
-    assert_eq!(res.status, 200, "list_contest_problems failed: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "list_contest_problems failed: {}",
+        res.text
+    );
 
-    let data = res.body.as_array().expect("response should be a JSON array");
+    let data = res
+        .body
+        .as_array()
+        .expect("response should be a JSON array");
     assert_eq!(
         data.len(),
         3,
@@ -650,9 +688,16 @@ async fn decide_visibility_mixed_batch_lands_on_correct_resources() {
     let res = app
         .get_with_token(&routes::contest_problems(contest_id), &viewer_token)
         .await;
-    assert_eq!(res.status, 200, "list_contest_problems failed: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "list_contest_problems failed: {}",
+        res.text
+    );
 
-    let data = res.body.as_array().expect("response should be a JSON array");
+    let data = res
+        .body
+        .as_array()
+        .expect("response should be a JSON array");
     assert_eq!(
         data.len(),
         2,

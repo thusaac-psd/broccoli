@@ -3,7 +3,9 @@ use chrono::{Duration, TimeZone, Utc};
 use common::{SubmissionStatus, Verdict};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::json;
-use server::entity::{contest, plugin_storage, submission, submission_judgement, test_case_result, user};
+use server::entity::{
+    contest, plugin_storage, submission, submission_judgement, test_case_result, user,
+};
 
 use crate::common::E2eTestApp;
 
@@ -637,7 +639,11 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     // Owner (contestant B) reading their own submission during the same
     // freeze: a team always sees its own results, even while frozen.
     let owner_res = app.get_with_token(&sub_path, &contestant_b).await;
-    assert_eq!(owner_res.status, 200, "Owner read failed: {}", owner_res.text);
+    assert_eq!(
+        owner_res.status, 200,
+        "Owner read failed: {}",
+        owner_res.text
+    );
     assert_eq!(
         owner_res.body["result"]["verdict"].as_str(),
         Some("Accepted"),

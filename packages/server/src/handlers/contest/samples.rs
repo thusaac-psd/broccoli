@@ -67,7 +67,11 @@ pub async fn get_contest_problem_samples(
     // separate steps: `check_contest_access`, `require_contest_started`'s
     // window predicate, and `find_contest_problem` (the problem must be
     // attached to this contest) - see `visibility::host_rules::decide_problem_or_sample`.
-    if kernel.decide(Action::Read, resource.clone()).await?.is_denied() {
+    if kernel
+        .decide(Action::Read, resource.clone())
+        .await?
+        .is_denied()
+    {
         return Err(AppError::NotFound("Contest not found".into()));
     }
 

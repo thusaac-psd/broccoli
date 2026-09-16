@@ -889,7 +889,10 @@ mod tests {
             .into_connection();
 
         let mut answers = HashMap::new();
-        answers.insert(("contest".to_string(), "2".to_string()), WireDecision::Deny {});
+        answers.insert(
+            ("contest".to_string(), "2".to_string()),
+            WireDecision::Deny {},
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(StdMutex::new(Vec::new()));
         let plugins: Arc<dyn PluginManager> = Arc::new(RecordingPluginManager {
@@ -1123,8 +1126,12 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         let sent = &captured[0].resources;
-        let contest_id_of =
-            |id: i32| sent.iter().find(|r| r.id == id.to_string()).unwrap().contest_id;
+        let contest_id_of = |id: i32| {
+            sent.iter()
+                .find(|r| r.id == id.to_string())
+                .unwrap()
+                .contest_id
+        };
         assert_eq!(
             contest_id_of(10),
             Some(7),

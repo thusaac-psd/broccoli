@@ -96,7 +96,10 @@ mod tests {
     #[test]
     fn blanks_an_array_to_empty_not_null() {
         let mut v = json!({"result": {"test_case_results": [{"verdict": "AC"}]}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results".to_string()]));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results".to_string()]),
+        );
         assert_eq!(v, json!({"result": {"test_case_results": []}}));
     }
 
@@ -127,31 +130,49 @@ mod tests {
             {"verdict": "AC", "score": 10},
             {"verdict": "WA", "score": 0}
         ]}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results.*.verdict".to_string()]));
-        assert_eq!(v, json!({"result": {"test_case_results": [
-            {"verdict": null, "score": 10},
-            {"verdict": null, "score": 0}
-        ]}}));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results.*.verdict".to_string()]),
+        );
+        assert_eq!(
+            v,
+            json!({"result": {"test_case_results": [
+                {"verdict": null, "score": 10},
+                {"verdict": null, "score": 0}
+            ]}})
+        );
     }
 
     #[test]
     fn wildcard_on_an_empty_array_is_a_no_op() {
         let mut v = json!({"result": {"test_case_results": []}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results.*.verdict".to_string()]));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results.*.verdict".to_string()]),
+        );
         assert_eq!(v, json!({"result": {"test_case_results": []}}));
     }
 
     #[test]
     fn wildcard_on_a_non_array_is_a_no_op() {
         let mut v = json!({"result": {"test_case_results": {"not": "an array"}}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results.*.verdict".to_string()]));
-        assert_eq!(v, json!({"result": {"test_case_results": {"not": "an array"}}}));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results.*.verdict".to_string()]),
+        );
+        assert_eq!(
+            v,
+            json!({"result": {"test_case_results": {"not": "an array"}}})
+        );
     }
 
     #[test]
     fn wildcard_never_creates_a_field_in_an_element() {
         let mut v = json!({"result": {"test_case_results": [{"score": 10}]}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results.*.verdict".to_string()]));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results.*.verdict".to_string()]),
+        );
         assert_eq!(
             v,
             json!({"result": {"test_case_results": [{"score": 10}]}}),
@@ -179,7 +200,10 @@ mod tests {
             {"verdict": "AC", "score": 10},
             {"score": 0}
         ]}});
-        apply_mask(&mut v, &FieldMask::new(["result.test_case_results.*.verdict".to_string()]));
+        apply_mask(
+            &mut v,
+            &FieldMask::new(["result.test_case_results.*.verdict".to_string()]),
+        );
         assert_eq!(
             v,
             json!({"result": {"test_case_results": [

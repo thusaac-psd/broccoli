@@ -19,14 +19,24 @@ impl Subject {
     }
 
     pub fn anonymous() -> Self {
-        Self { user_id: None, authenticated: false, permissions: Vec::new(), admin_override: false }
+        Self {
+            user_id: None,
+            authenticated: false,
+            permissions: Vec::new(),
+            admin_override: false,
+        }
     }
 
     /// Explicit, greppable bypass for system and admin paths that must read
     /// entities without a viewer decision (rejudge, dispatcher, migrations).
     /// Every call site needs its own test justifying it.
     pub fn admin_override() -> Self {
-        Self { user_id: None, authenticated: true, permissions: Vec::new(), admin_override: true }
+        Self {
+            user_id: None,
+            authenticated: true,
+            permissions: Vec::new(),
+            admin_override: true,
+        }
     }
 
     pub fn is_admin_override(&self) -> bool {
@@ -60,15 +70,24 @@ impl Action {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resource {
     Contest(i32),
-    Problem { contest_id: Option<i32>, problem_id: i32 },
-    Sample { contest_id: Option<i32>, problem_id: i32 },
+    Problem {
+        contest_id: Option<i32>,
+        problem_id: i32,
+    },
+    Sample {
+        contest_id: Option<i32>,
+        problem_id: i32,
+    },
     // `attachment_id` is the REAL primary key (`problem_attachment.id`),
     // not a truncated wire id - there is no lossy identity anywhere inside
     // the host. `Uuid` is `Hash + Eq`, so `Resource` (and therefore the
     // kernel's `(Action, Resource)` per-request memo key) still works
     // unchanged. See `wire_id`'s doc comment for why the wire
     // representation must stay lossless too.
-    Attachment { problem_id: i32, attachment_id: uuid::Uuid },
+    Attachment {
+        problem_id: i32,
+        attachment_id: uuid::Uuid,
+    },
     Submission(i32),
     Clarification(i32),
 }

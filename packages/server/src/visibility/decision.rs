@@ -93,10 +93,7 @@ mod tests {
         let a = Decision::Allow;
         let b = Decision::Redact(mask(&["x"]));
         let c = Decision::Redact(mask(&["y"]));
-        assert_eq!(
-            a.clone().meet(b.clone()).meet(c.clone()),
-            a.meet(b.meet(c))
-        );
+        assert_eq!(a.clone().meet(b.clone()).meet(c.clone()), a.meet(b.meet(c)));
     }
 
     #[test]
