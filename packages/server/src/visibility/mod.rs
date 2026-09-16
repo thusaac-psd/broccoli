@@ -206,12 +206,12 @@ impl<'a> VisibilityKernel<'a> {
     ///    mapping every `Resource::Submission` miss to its own
     ///    `contest_id` - needed by step 4 so each resource can be stamped
     ///    with its OWN authoritative contest scope (see
-    ///    [`resource_contest_id`]) instead of a lossy batch-level guess.
+    ///    `resource_contest_id`) instead of a lossy batch-level guess.
     /// 4. Unless `self.subject.is_admin_override()` - in which case plugins
     ///    are never consulted at all, full stop - send only the misses the
     ///    host did NOT already `Deny` to `query_plugins`, in their original
     ///    relative order, each carrying its own `contest_id` via
-    ///    [`resource_contest_id`]. A host `Deny` is final (`meet(Deny, _)
+    ///    `resource_contest_id`. A host `Deny` is final (`meet(Deny, _)
     ///    == Deny`), so a resource the host denied never crosses into
     ///    plugin code.
     /// 5. `meet` each host decision with its corresponding plugin decision,
