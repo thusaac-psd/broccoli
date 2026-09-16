@@ -29,7 +29,7 @@ use server::config::{
     MqAppConfig, ServerConfig, SubmissionConfig,
 };
 use server::consumers::consume_operation_results;
-use server::entity::{user, user_role};
+use server::entity::{role, role_permission, user, user_role};
 use server::manager::ServerManager;
 use server::registry::{
     CheckerStageRegistry, ContestTypeRegistry, EvaluateBatches, EvaluatorRegistry,
@@ -997,6 +997,41 @@ impl E2eTestApp {
             .as_str()
             .expect("Login response should contain a token")
             .to_string()
+    }
+
+    /// Creates a user and a brand-new role carrying EXACTLY the given
+    /// permissions - not one of the seeded `DEFAULT_MAPPINGS` roles ("admin",
+    /// "problem_setter", "contestant"), which each bundle several permissions
+    /// together. Use this when a test needs to isolate ONE permission's
+    /// effect from another that a stock role would always grant alongside it
+    /// (e.g. `admin` holds both `contest:manage` and `submission:view_all`,
+    /// so it cannot tell apart which one a given bypass actually checks).
+    pub async fn create_user_with_permissions(
+        &self,
+        username: &str,
+        password: &str,
+        permissions: &[&str],
+    ) -> String {
+        let role_name = format!("{username}_role");
+        role::ActiveModel {
+            name: Set(role_name.clone()),
+        }
+        .insert(&self.db)
+        .await
+        .expect("Failed to insert custom role");
+
+        for permission in permissions {
+            role_permission::ActiveModel {
+                role: Set(role_name.clone()),
+                permission: Set(permission.to_string()),
+            }
+            .insert(&self.db)
+            .await
+            .expect("Failed to insert custom role permission");
+        }
+
+        self.create_user_with_role(username, password, &role_name)
+            .await
     }
 
     /// Creates a hidden-draft problem (`is_public = false`, the server

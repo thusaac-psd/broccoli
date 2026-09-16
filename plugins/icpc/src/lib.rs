@@ -418,6 +418,36 @@ mod filter_tests {
     }
 
     #[test]
+    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
+        // Task 17: a viewer holding `contest:manage` WITHOUT
+        // `submission:view_all` must ALSO bypass to Allow for the whole
+        // batch, without querying - mirroring the `SUBMISSION_VIEW_ALL`
+        // bypass above exactly, so a future change cannot special-case one
+        // permission's short-circuit without the other. This is the unit-level
+        // pin for the fix `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+        // pins end to end.
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    #[test]
     fn decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch() {
         // The critical N+1 guard: a batch of MANY submissions must cost ONE
         // query, not one query per submission.
@@ -682,13 +712,28 @@ fn decide_visibility_decisions(
     host: &Host,
     req: &VisibilityQueryInput,
 ) -> Result<Vec<WireDecision>, SdkError> {
-    // Admin / view-all bypass, for the whole batch at once - it does not
-    // depend on any individual resource.
+    // Admin / view-all / organiser bypass, for the whole batch at once - it
+    // does not depend on any individual resource.
+    //
+    // `CONTEST_MANAGE` is checked here (Task 17) alongside the pre-existing
+    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE, not
+    // a regression fix: `git show d9860bc8^` confirms the pre-kernel
+    // `apply_scoreboard_filter` also checked only `SUBMISSION_VIEW_ALL`, so
+    // the kernel migration ported this inconsistency verbatim rather than
+    // introducing it. It contradicted `handle_standings` (below), which DOES
+    // check `CONTEST_MANAGE` so organisers see the unfrozen board, and the
+    // documented invariant in `config.rs`: "Organizers (`contest:manage`)
+    // always see the real board." A viewer holding `contest:manage` without
+    // `submission:view_all` - a plausible problem-setter or judge role - was
+    // wrongly redacted during the freeze window; see
+    // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+    // in `packages/server/tests/e2e/plugins/icpc.rs` for the viewer that
+    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
     if req
         .subject
         .permissions
         .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL)
+        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
     {
         return Ok(req
             .resources

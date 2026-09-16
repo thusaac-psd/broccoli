@@ -1,3 +1,4 @@
+use broccoli_server_sdk::permissions as perm;
 use chrono::{Duration, TimeZone, Utc};
 use common::{SubmissionStatus, Verdict};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -447,6 +448,16 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
     let contestant_b = app
         .create_authenticated_user("icpc_freeze_b", "password")
         .await;
+    // Task 17: holds `contest:manage` WITHOUT `submission:view_all` - unlike
+    // `admin` above, which holds BOTH and so cannot isolate which permission
+    // a bypass actually checks. A plausible problem-setter/judge role.
+    let manage_only = app
+        .create_user_with_permissions(
+            "icpc_freeze_manage_only",
+            "password",
+            &[perm::CONTEST_MANAGE],
+        )
+        .await;
 
     let problem_id = app.create_problem(&admin, "ICPC Freeze Problem").await;
     app.create_test_case(problem_id, &admin).await;
@@ -458,6 +469,13 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
         .await;
     app.register_for_contest(contest_id, &contestant_a).await;
     app.register_for_contest(contest_id, &contestant_b).await;
+    // Host-level reachability for a non-owner, non-`submission:view_all`
+    // viewer requires contest participation when `submissions_visible` is
+    // true (see `visibility::host_rules::decide_submission`) - `contest:manage`
+    // alone does not grant it. Without this, the request 404s before the
+    // plugin's decision is ever consulted, and the assertions below would
+    // not actually exercise the fix.
+    app.register_for_contest(contest_id, &manage_only).await;
 
     // Non-zero freeze window, and public standings so the redaction under
     // test is purely the freeze mechanism, not the separate
@@ -685,6 +703,45 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
         Some(4096),
         "{}",
         organizer_res.text
+    );
+
+    // Task 17: a viewer holding `contest:manage` WITHOUT `submission:view_all`
+    // reading contestant B's submission during the freeze. Before this task,
+    // `decide_visibility_decisions` checked only `SUBMISSION_VIEW_ALL`, so
+    // this viewer would have been wrongly redacted here - the `organizer_res`
+    // assertions above pass via `admin`'s `SUBMISSION_VIEW_ALL` alone and
+    // never actually exercise the `CONTEST_MANAGE` branch, since the default
+    // `admin` role holds both permissions. This is the assertion that pins
+    // the fix and would fail against pre-fix code.
+    let manage_only_res = app.get_with_token(&sub_path, &manage_only).await;
+    assert_eq!(
+        manage_only_res.status, 200,
+        "contest:manage-only read failed: {}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["verdict"].as_str(),
+        Some("Accepted"),
+        "a viewer with contest:manage but not submission:view_all must see the true board: {}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["score"].as_f64(),
+        Some(1.0),
+        "{}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["time_used"].as_i64(),
+        Some(123),
+        "{}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["memory_used"].as_i64(),
+        Some(4096),
+        "{}",
+        manage_only_res.text
     );
 }
 
