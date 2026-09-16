@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use broccoli_server_sdk::error::SdkError;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,8 @@ pub struct Standing {
     pub credited: usize,
     pub accepted: usize,
     pub qualified: bool,
+    /// Eligibility survives every resolution of the visible pending submissions.
+    /// The exact credited problems and qualification time may still change.
     pub qualification_confirmed: bool,
     pub qualified_at_seconds: Option<i64>,
     pub problems: BTreeMap<i32, ProblemCell>,
@@ -85,6 +87,60 @@ pub struct Standings {
     pub pending_submissions: usize,
     pub problems: Vec<ProblemSlots>,
     pub rows: Vec<Standing>,
+}
+
+/// Conservative bounds over all possible AC/failure outcomes of pending work.
+/// Possible owners reserve capacity until their results are known. A known AC
+/// with room even under those reservations proves "owns this slot OR already
+/// qualified". Proofs on enough distinct problems therefore guarantee eligibility,
+/// even when its exact credited problems or qualification time can still change.
+struct Confirmation {
+    possible_owners: Vec<HashSet<usize>>,
+    certain_owners: Vec<HashSet<usize>>,
+    possible_problems: Vec<HashSet<usize>>,
+    proofs: Vec<HashSet<usize>>,
+}
+
+impl Confirmation {
+    fn new(users: usize, problems: usize) -> Self {
+        Self {
+            possible_owners: vec![HashSet::new(); problems],
+            certain_owners: vec![HashSet::new(); problems],
+            possible_problems: vec![HashSet::new(); users],
+            proofs: vec![HashSet::new(); users],
+        }
+    }
+
+    fn qualified(&self, user: usize, config: &ContestConfig) -> bool {
+        self.proofs[user].len() >= config.solves_to_qualify
+    }
+
+    fn observe(&mut self, user: usize, problem: usize, accepted: bool, config: &ContestConfig) {
+        if self.qualified(user, config)
+            || self.certain_owners[problem].len() >= config.slots_per_problem
+        {
+            return;
+        }
+
+        let other_owners = self.possible_owners[problem].len()
+            - usize::from(self.possible_owners[problem].contains(&user));
+        if accepted && other_owners < config.slots_per_problem {
+            self.proofs[user].insert(problem);
+            let other_problems = self.possible_problems[user].len()
+                - usize::from(self.possible_problems[user].contains(&problem));
+            if other_problems < config.solves_to_qualify {
+                // Without this problem the contestant cannot already have
+                // qualified, so its place really is occupied in every outcome.
+                self.certain_owners[problem].insert(user);
+            }
+        }
+
+        // Even a displayed qualifier may still need this place if an earlier
+        // pending rival displaces one of their current credits. Keep that
+        // possibility so uncertainty can propagate through other problems.
+        self.possible_owners[problem].insert(user);
+        self.possible_problems[user].insert(problem);
+    }
 }
 
 /// Replay one snapshot of official results in submission order. All users and
@@ -146,7 +202,7 @@ pub fn calculate(
     // Preserve microsecond precision. Submission id breaks exact timestamp ties
     // deterministically, independent of SQL row order or worker delivery order.
     submissions.sort_by_key(|s| (s.submitted_at_us, s.submission_id));
-    let mut earliest_pending = None;
+    let mut confirmation = Confirmation::new(rows.len(), problems.len());
     let mut pending_submissions = 0;
     for submission in submissions {
         let (Some(&user_index), Some(&problem_index)) = (
@@ -157,14 +213,22 @@ pub fn calculate(
         };
         if submission.pending {
             pending_submissions += 1;
-            earliest_pending.get_or_insert((submission.submitted_at_us, submission.submission_id));
         }
-        if !submission.accepted || submission.pending {
+        if !submission.accepted && !submission.pending {
             continue;
         }
         let row = &mut rows[user_index];
         // Only the first AC on each distinct problem matters for a contestant.
         if row.problems.contains_key(&submission.problem_id) {
+            continue;
+        }
+        confirmation.observe(
+            user_index,
+            problem_index,
+            submission.accepted && !submission.pending,
+            config,
+        );
+        if submission.pending {
             continue;
         }
         let problem = &mut problems[problem_index];
@@ -189,9 +253,6 @@ pub fn calculate(
             if row.credited == config.solves_to_qualify {
                 row.qualified = true;
                 row.qualified_at_seconds = Some(time_seconds);
-                // Only earlier unfinished submissions can displace these slots.
-                // Later submissions cannot revoke a confirmed qualification.
-                row.qualification_confirmed = earliest_pending.is_none();
             }
             Some(problem.awards.len())
         } else {
@@ -207,6 +268,10 @@ pub fn calculate(
                 slot,
             },
         );
+    }
+
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.qualification_confirmed = row.qualified && confirmation.qualified(index, config);
     }
 
     // Display qualifiers first, then progress. Additional ACs never change this

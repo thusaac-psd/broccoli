@@ -99,16 +99,25 @@ ends while queued evaluations finish. Use **Auto refresh** to pause it or
 
 | Status | Meaning |
 | --- | --- |
-| Qualified | Reached the configured threshold, with every earlier submission resolved |
-| Provisional | Reached the threshold in the current results, with earlier evaluations still pending |
+| Qualified | Reached the configured threshold and will remain qualified however pending results finish |
+| Provisional | Reached the threshold in the current results, but eligibility is not yet guaranteed |
 | Competing | Fewer credited problems than the configured threshold |
 
-An earlier pending submission can displace a provisional slot if it eventually
-passes. Once those earlier results are resolved, later submissions cannot revoke
-an existing qualification. Applied rejudges can change the official results and
-recalculate the slots. A rejudge that has not been applied does not replace the
-official result. Finish pending evaluations and review any rejudges before using
-the list for the afternoon round.
+Pending submissions include work still in the queue before a judgement has been
+created. A pending result can displace a provisional slot if it eventually
+passes. Attempts on a problem whose slots are definitely full, duplicate attempts
+on an already accepted problem, and attempts by confirmed qualifiers do not
+delay other contestants' qualification.
+
+The board confirms eligibility when it can guarantee qualification regardless
+of the pending results. It also accounts for those results changing when other
+contestants qualify and stop taking further slots. The displayed slots and times
+reflect the current results and can still change while pending work finishes,
+even when eligibility is already confirmed.
+
+Applied rejudges and rule changes can recalculate qualification. A rejudge that
+has not been applied does not replace the official result. Finish pending
+evaluations and review any rejudges before using the list for the afternoon round.
 
 The score shown on an individual submission describes whether its solution
 passed. Use **Credited** on the Codelink board to determine qualification. The

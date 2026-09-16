@@ -12,6 +12,14 @@ fn ac(id: i32, user: i32, problem: i32) -> Submission {
     }
 }
 
+fn pending(id: i32, user: i32, problem: i32) -> Submission {
+    Submission {
+        accepted: false,
+        pending: true,
+        ..ac(id, user, problem)
+    }
+}
+
 fn board(submissions: Vec<Submission>) -> Standings {
     board_with_config(submissions, &ContestConfig::default())
 }
@@ -285,4 +293,163 @@ fn one_slot_and_one_credit_qualifies_immediately_without_taking_later_slots() {
     assert_eq!(row(&result, 1).qualified_at_seconds, Some(1));
     assert_eq!(row(&result, 2).qualified_at_seconds, Some(4));
     assert_eq!(result.problems[1].awards[0].user_id, 2);
+}
+
+#[test]
+fn pending_on_a_full_problem_does_not_delay_unrelated_qualification() {
+    let result = board(vec![
+        ac(1, 1, 1),
+        ac(2, 2, 1),
+        pending(3, 3, 1),
+        ac(4, 1, 2),
+    ]);
+    assert_eq!(result.pending_submissions, 1);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn pending_on_an_unrelated_problem_does_not_delay_qualification() {
+    let result = board(vec![pending(1, 3, 3), ac(2, 1, 1), ac(3, 1, 2)]);
+    assert_eq!(result.pending_submissions, 1);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn duplicate_pending_submission_cannot_take_another_slot() {
+    let result = board(vec![ac(1, 1, 1), pending(2, 1, 1), ac(3, 1, 2)]);
+    assert_eq!(result.pending_submissions, 1);
+    assert_eq!(result.problems[0].remaining, 1);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn pending_from_a_confirmed_qualifier_does_not_block_other_contestants() {
+    let result = board(vec![
+        ac(1, 1, 1),
+        ac(2, 1, 2),
+        pending(3, 1, 3),
+        ac(4, 2, 3),
+        ac(5, 2, 4),
+    ]);
+    assert_eq!(result.confirmed_qualified_count, 2);
+    assert_eq!(result.pending_submissions, 1);
+}
+
+#[test]
+fn pending_rival_does_not_block_a_slot_that_is_available_in_every_outcome() {
+    let result = board(vec![pending(1, 2, 1), ac(2, 1, 1), ac(3, 1, 2)]);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn own_pending_solve_does_not_block_guaranteed_qualification() {
+    let result = board(vec![pending(1, 1, 3), ac(2, 1, 1), ac(3, 1, 2)]);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn repeated_pending_attempts_reserve_only_one_possible_place_per_contestant() {
+    let result = board(vec![
+        pending(1, 2, 1),
+        pending(2, 2, 1),
+        ac(3, 1, 1),
+        ac(4, 1, 2),
+    ]);
+    assert_eq!(result.pending_submissions, 2);
+    assert!(row(&result, 1).qualification_confirmed);
+}
+
+#[test]
+fn additional_known_solves_can_guarantee_eligibility_despite_a_disputed_slot() {
+    let mut submissions = vec![pending(1, 2, 1), pending(2, 3, 1), ac(3, 1, 1), ac(4, 1, 2)];
+    assert!(!row(&board(submissions.clone()), 1).qualification_confirmed);
+    submissions.push(ac(5, 1, 3));
+    assert!(row(&board(submissions), 1).qualification_confirmed);
+}
+
+#[test]
+fn uncertainty_propagates_through_another_contestants_qualification() {
+    let submissions = vec![
+        pending(1, 1, 1),
+        ac(2, 2, 1),
+        ac(3, 3, 1),
+        ac(4, 3, 2),
+        ac(5, 3, 3),
+        ac(6, 4, 3),
+        ac(7, 5, 3),
+        ac(8, 5, 4),
+    ];
+    let provisional = board(submissions.clone());
+    assert!(row(&provisional, 5).qualified);
+    assert!(!row(&provisional, 5).qualification_confirmed);
+
+    let mut resolved = submissions;
+    resolved[0].pending = false;
+    resolved[0].accepted = true;
+    let final_board = board(resolved);
+    assert_eq!(
+        row(&final_board, 3).problems[&3].status,
+        CreditStatus::Credited
+    );
+    assert!(!row(&final_board, 5).qualified);
+}
+
+#[test]
+fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories() {
+    // Enumerate every AC/failure resolution of each generated pending set. This
+    // checks the guarantee against completed scoreboards, including interactions
+    // across problems and qualification thresholds, without duplicating replay.
+    let mut seed = 0x5eed_u64;
+    for history in 0..512 {
+        let config = ContestConfig {
+            slots_per_problem: 1 + history % 3,
+            solves_to_qualify: 1 + (history / 3) % 3,
+            ..Default::default()
+        };
+        let mut submissions = Vec::new();
+        let mut pending_indices = Vec::new();
+        for id in 1..=12 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let user = 1 + ((seed >> 32) % 4) as i32;
+            let problem = 1 + ((seed >> 40) % 4) as i32;
+            let outcome = (seed >> 48) % 4;
+            let mut submission = ac(id, user, problem);
+            if outcome == 0 && pending_indices.len() < 4 {
+                submission.accepted = false;
+                submission.pending = true;
+                pending_indices.push(submissions.len());
+            } else if outcome == 1 {
+                submission.accepted = false;
+            }
+            submissions.push(submission);
+        }
+        let initial = board_with_config(submissions.clone(), &config);
+        for mask in 0..(1 << pending_indices.len()) {
+            let mut resolved = submissions.clone();
+            for (bit, &index) in pending_indices.iter().enumerate() {
+                resolved[index].pending = false;
+                resolved[index].accepted = mask & (1 << bit) != 0;
+            }
+            let final_board = board_with_config(resolved, &config);
+            for contestant in initial.rows.iter().filter(|r| r.qualification_confirmed) {
+                assert!(
+                    row(&final_board, contestant.user_id).qualified,
+                    "history {history}, mask {mask}, user {} was incorrectly confirmed",
+                    contestant.user_id
+                );
+            }
+            assert!(
+                final_board
+                    .problems
+                    .iter()
+                    .all(|p| p.awards.len() <= config.slots_per_problem)
+            );
+            assert!(
+                final_board
+                    .rows
+                    .iter()
+                    .all(|r| r.credited <= config.solves_to_qualify)
+            );
+        }
+    }
 }

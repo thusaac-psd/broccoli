@@ -1,4 +1,3 @@
-[translations]
 'codelink.rules.title' = 'Morning qualification round'
 'codelink.rules.description' = 'Choose freely among {problem_count} problems. Scoring slots per problem: {slots_per_problem}. Earn credit on {solves_to_qualify} different problems to qualify for the afternoon. Further ACs remain visible but take no additional slots. Your original slots remain occupied.'
 'codelink.rules.order' = 'Slots follow the submission time of accepted solutions. Submission ID breaks exact time ties. An AC without a scoring slot does not count toward qualification.'
@@ -13,7 +12,7 @@
 'codelink.phase.after' = 'Finished'
 'codelink.qualifiedCount' = '{count} qualified'
 'codelink.problemCount' = 'This contest has {actual} problems. The Codelink morning round requires {expected}.'
-'codelink.pending' = 'Pending submissions: {count}. Earlier pending submissions may change scoring slots. Qualification is marked provisional until those results are known.'
+'codelink.pending' = 'Pending submissions: {count}. Scoring slots and displayed times may still change. Qualifications that are not yet guaranteed are marked provisional.'
 'codelink.slots.title' = 'Problem scoring slots'
 'codelink.slots.remaining' = '{count} available'
 'codelink.slots.available' = 'Available'

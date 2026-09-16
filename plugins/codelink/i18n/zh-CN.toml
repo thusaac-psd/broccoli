@@ -1,4 +1,3 @@
-[translations]
 'codelink.rules.title' = '上午场晋级赛'
 'codelink.rules.description' = '{problem_count} 道题自由选做，每题前 {slots_per_problem} 名符合条件的选手获得计分名额。在 {solves_to_qualify} 道不同题目上获得名额即可晋级下午场。晋级后仍可继续提交，后续 AC 会显示，但不再占用新名额；原先获得的名额继续保留。'
 'codelink.rules.order' = '按最终 AC 提交的提交时间分配名额，时间完全相同时按提交 ID 排序。未获得计分名额的 AC 不计入晋级条件。'
@@ -13,7 +12,7 @@
 'codelink.phase.after' = '已结束'
 'codelink.qualifiedCount' = '已晋级 {count} 人'
 'codelink.problemCount' = '当前比赛有 {actual} 道题，Codelink 上午场应配置 {expected} 道题。'
-'codelink.pending' = '还有 {count} 次提交尚未完成评测。更早的待评测提交可能改变名额归属，其结果确定前，相关选手的晋级状态显示为待确认。'
+'codelink.pending' = '还有 {count} 次提交尚未完成评测，可能调整名额归属和显示时间。尚不能确定晋级资格的选手显示为待确认。'
 'codelink.slots.title' = '各题计分名额'
 'codelink.slots.remaining' = '剩余 {count} 个'
 'codelink.slots.available' = '空余'
