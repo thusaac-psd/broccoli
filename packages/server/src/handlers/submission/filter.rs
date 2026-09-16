@@ -1,5 +1,11 @@
 use common::SubmissionStatus;
 
+// visibility-bypass-audited: this module fetches nothing - `problem`,
+// `submission`, and `user` are only used as parameter/field types for rows
+// its callers already fetched. Every function here is the per-row masking
+// step applied *after* `VisibilityKernel::decide`/`fetch_visible_batch`
+// (see the module doc comment below and `handlers/submission/mod.rs`'s
+// `list_contest_submissions`), never a substitute for it.
 use crate::entity::{problem, submission, user};
 use crate::error::AppError;
 use crate::models::submission::*;

@@ -12,6 +12,13 @@ use serde::Deserialize;
 use tracing::{info, instrument};
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
+// visibility-bypass-audited: every handler in this module requires
+// perm::SUBMISSION_REJUDGE at entry (the `target_worker_id` override further
+// requires perm::SYSTEM_ADMIN), pinned by `contestant_cannot_rejudge` and
+// `contestant_cannot_bulk_rejudge` (tests/integration/submission.rs). This is
+// system/judge-operator tooling that mutates submissions, not a viewer read
+// path - any `SubmissionResponse` returned here reflects the actor's own
+// privileged write back to them, the same as any other write handler.
 use crate::entity::judgement_reset::ClearJudgementActiveModel;
 use crate::entity::{submission, submission_judgement, test_case_result};
 use crate::error::{AppError, ErrorBody};

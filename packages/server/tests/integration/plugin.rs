@@ -36,6 +36,45 @@ mod plugin_management {
         assert_eq!(res.body["code"], "TOKEN_MISSING");
     }
 
+    /// `plugin:manage` is the sole gate on every `handlers/admin.rs` endpoint -
+    /// this pins that gate (previously untested against a non-admin
+    /// authenticated user) for the guard test's `visibility-bypass-audited`
+    /// comment above that file's entity import.
+    #[tokio::test]
+    async fn contestant_cannot_manage_plugins() {
+        let app = TestApp::spawn().await;
+        let contestant = app
+            .create_user_with_role("contestant_plugin_mgmt", "securepass", "contestant")
+            .await;
+
+        let res = app.get_with_token(routes::ADMIN_PLUGINS, &contestant).await;
+        assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+
+        let res = app
+            .get_with_token(&routes::admin_plugin_details("server-plugin"), &contestant)
+            .await;
+        assert_eq!(res.status, 403);
+
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_enable("server-plugin"),
+                &json!({}),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 403);
+
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_disable("server-plugin"),
+                &json!({}),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 403);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn admin_can_enable_a_valid_plugin() {
         let app = TestApp::spawn_with_plugins().await;

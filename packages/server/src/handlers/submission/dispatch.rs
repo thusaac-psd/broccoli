@@ -3,6 +3,12 @@ use chrono::Utc;
 use common::SubmissionStatus;
 use sea_orm::*;
 
+// visibility-bypass-audited: this module has no HTTP handlers - it is
+// `pub(super)`/`pub(crate)` plumbing for hook dispatch and rejudge-judgement
+// bookkeeping, called only from callers that are themselves permission-gated
+// (`rejudge.rs`'s perm::SUBMISSION_REJUDGE handlers, and the create-submission
+// paths in `mod.rs`). None of these functions return a `submission`/
+// `submission_judgement` row to an HTTP response body.
 use crate::entity::{submission, submission_judgement};
 use crate::error::AppError;
 use crate::hooks::{self, HookOutcome};

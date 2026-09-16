@@ -8,6 +8,15 @@ use sea_orm::sea_query::{Func, LikeExpr};
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `create_problem`/`update_problem`/`delete_problem`
+// require perm::PROBLEM_CREATE/PROBLEM_EDIT/PROBLEM_DELETE, and `list_problems`
+// (the admin problem-bank browser, not the contestant-facing problem list)
+// requires PROBLEM_CREATE or PROBLEM_EDIT - all asserted at handler entry and
+// pinned by tests/integration/problem.rs's permission-denial tests for each
+// verb. The one viewer-facing read, `get_problem`, routes through
+// `VisibilityKernel` below (`Resource::Problem`); `contest`/`contest_problem`
+// here are only used for the pre-kernel row fetch and for the admin write
+// paths' own bookkeeping.
 use crate::entity::{contest, contest_problem, problem, test_case};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

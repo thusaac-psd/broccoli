@@ -7,6 +7,14 @@ use sea_orm::prelude::Expr;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: every write here (create/update/delete/reorder/
+// bulk_delete) requires perm::PROBLEM_EDIT, asserted at its handler's entry
+// and pinned by tests/integration/problem.rs's `contestant_cannot_reorder_test_cases`
+// and `contestant_cannot_bulk_delete_test_cases`. The one viewer-facing read,
+// `get_test_case`, gates reachability through `VisibilityKernel`'s
+// `Resource::Problem` decision before touching these types (see the kernel
+// call above), pinned by `contestant_can_access_sample_test_case_via_active_contest`
+// and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
 use crate::entity::{test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -15,12 +23,12 @@ use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
-use crate::utils::contest::require_problem_read_access;
 use crate::utils::problem::find_problem;
 use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
 };
 use crate::utils::text::{sanitize_db_text, sanitize_db_text_opt};
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 use super::find_problem_for_update;
 
@@ -199,7 +207,22 @@ pub async fn get_test_case(
     if !auth_user.has_permission(perm::PROBLEM_CREATE)
         && !auth_user.has_permission(perm::PROBLEM_EDIT)
     {
-        require_problem_read_access(&state.db, &auth_user, problem_id).await?;
+        // Reachability to the *problem* is a kernel decision - the same
+        // `Resource::Problem` decision `get_problem` (handlers/problem/mod.rs)
+        // makes - rather than a second, hand-written copy of
+        // `require_problem_read_access`'s permission/is_public/via-contest
+        // logic that could drift from `decide_standalone_problem_access`.
+        let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+        let resource = Resource::Problem {
+            contest_id: None,
+            problem_id,
+        };
+        if kernel.decide(Action::Read, resource).await?.is_denied() {
+            return Err(AppError::NotFound("Test case not found".into()));
+        }
+        // The kernel only knows the *problem* is reachable; whether this
+        // particular test case is a public sample is local to test cases and
+        // has no kernel resource of its own.
         if !tc.is_sample {
             return Err(AppError::NotFound("Test case not found".into()));
         }

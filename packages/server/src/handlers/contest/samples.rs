@@ -4,6 +4,11 @@ use sea_orm::*;
 use serde::Serialize;
 use tracing::instrument;
 
+// visibility-bypass-audited: this handler routes through `VisibilityKernel`
+// below (`Resource::Sample`) before any sample data is returned - `test_case`
+// is only used for the pre-kernel row fetch, mirroring
+// `handlers/contest/problems.rs`. Pinned by the frozen
+// `tests/integration/visibility_matrix.rs::contest_problem_sample` suite.
 use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

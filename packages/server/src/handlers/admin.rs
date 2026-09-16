@@ -13,6 +13,12 @@ use plugin_core::registry::PluginEntry;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: every handler in this module (list_all_plugins,
+// get_plugin_details, enable_plugin, disable_plugin, reload_plugin,
+// reload_all_plugins, upload_plugin) requires perm::PLUGIN_MANAGE, pinned by
+// tests/integration/plugin.rs's `contestant_cannot_manage_plugins`. This is
+// operator tooling over the plugin registry, never a per-row
+// Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::plugin as plugin_entity;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

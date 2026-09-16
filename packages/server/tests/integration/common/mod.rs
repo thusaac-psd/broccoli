@@ -253,6 +253,8 @@ pub mod routes {
         format!("/api/v1/roles/{role_name}/permissions/{permission_name}")
     }
 
+    pub const ADMIN_PLUGINS: &str = "/api/v1/admin/plugins";
+
     pub fn admin_plugin_details(id: &str) -> String {
         format!("/api/v1/admin/plugins/{id}")
     }
@@ -427,12 +429,24 @@ pub mod routes {
     pub const DLQ_BULK: &str = "/api/v1/dlq/bulk";
     pub const SUBMISSIONS_BULK_REJUDGE: &str = "/api/v1/submissions/bulk-rejudge";
 
+    pub const SYSTEM_WORKERS: &str = "/api/v1/admin/system/workers";
+    pub const SYSTEM_QUEUES: &str = "/api/v1/admin/system/queues";
+    pub const SYSTEM_OVERVIEW: &str = "/api/v1/admin/system/overview";
+
     pub fn attachments(problem_id: i32) -> String {
         format!("/api/v1/problems/{problem_id}/attachments")
     }
 
     pub fn attachment(problem_id: i32, ref_id: &str) -> String {
         format!("/api/v1/problems/{problem_id}/attachments/{ref_id}")
+    }
+
+    pub fn additional_files(problem_id: i32) -> String {
+        format!("/api/v1/problems/{problem_id}/additional-files")
+    }
+
+    pub fn additional_file(problem_id: i32, ref_id: &str) -> String {
+        format!("/api/v1/problems/{problem_id}/additional-files/{ref_id}")
     }
 
     pub fn problem_config(problem_id: i32) -> String {
@@ -1182,6 +1196,34 @@ impl TestApp {
             .send()
             .await
             .expect("Failed to send attachment upload request");
+
+        TestResponse::from_response(res).await
+    }
+
+    pub async fn upload_additional_file(
+        &self,
+        problem_id: i32,
+        file_name: &str,
+        file_bytes: Vec<u8>,
+        language: &str,
+        token: &str,
+    ) -> TestResponse {
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")
+            .expect("Failed to set MIME type");
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("language", language.to_string());
+
+        let res = self
+            .client
+            .post(self.url(&routes::additional_files(problem_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .multipart(form)
+            .send()
+            .await
+            .expect("Failed to send additional file upload request");
 
         TestResponse::from_response(res).await
     }

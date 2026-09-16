@@ -12,6 +12,17 @@ use sea_orm::*;
 use tracing::instrument;
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
+// visibility-bypass-audited: every read handler in this module already
+// routes through `VisibilityKernel` (`get_submission`/`list_submission_judgements`
+// via `Resource::Submission`, `list_submissions`/`list_contest_submissions`
+// via `fetch_visible_batch`, `create_submission`/`create_contest_submission`
+// via `Resource::Problem` before accepting a submit) - these entity types are
+// only used for the pre-kernel row fetch and for `list_contest_submissions`'s
+// deliberately-retained `check_contest_access` contest-reachability gate (see
+// the comment at that call site, and `handlers/contest/mod.rs` for the same
+// audited pattern), pinned by the frozen
+// `tests/integration/visibility_matrix.rs::contest_submission_list` and
+// `submission_detail` suites.
 use crate::entity::{contest, contest_user, problem, submission, submission_judgement, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

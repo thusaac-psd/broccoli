@@ -1,3 +1,4 @@
+mod additional_file;
 mod attachment;
 mod auth;
 mod clarification;
@@ -17,6 +18,7 @@ mod problem;
 mod regression_guards;
 mod scaling;
 mod submission;
+mod system;
 mod user;
 mod visibility_matrix;
 mod visibility_plugin;

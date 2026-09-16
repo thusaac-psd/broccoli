@@ -9,6 +9,15 @@ use sea_orm::*;
 use tracing::instrument;
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
+// visibility-bypass-audited: `run_code`/`run_contest_code` require
+// perm::SUBMISSION_SUBMIT and only ever create a run owned by the caller.
+// `get_code_run`, the one read, gates on `cr.user_id == auth_user.user_id ||
+// auth_user.has_permission(perm::SUBMISSION_VIEW_ALL)` - pinned by
+// `owner_can_get_their_code_run`, `other_user_cannot_see_code_run`, and
+// `admin_can_see_any_code_run` (tests/integration/code_run.rs). There is no
+// `Resource::CodeRun` in the kernel (code runs are a scratch/practice
+// feature, not a contest-scoped resource), so this ownership check cannot be
+// expressed as a kernel decision.
 use crate::entity::{code_run, code_run_result, problem, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

@@ -7,6 +7,21 @@ use sea_orm::*;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
+// visibility-bypass-audited: `list_clarifications`/`create_clarification`
+// already route contest reachability through `VisibilityKernel`
+// (`Resource::Contest` below), and `list_clarifications`'s per-row
+// visibility is the kernel's `fetch_visible_batch`
+// (`visibility::host_rules::decide_clarification`) - see the comments at
+// those call sites. `reply_clarification`/`toggle_reply_public`/
+// `resolve_clarification` are write paths on a single clarification the
+// caller must already be the admin, author, or recipient of (asserted
+// inline, since "is a party to this thread" has no `Resource::Clarification`
+// read-decision equivalent), and every response they return reflects only
+// that one clarification the caller was just authorized to act on - the
+// same write-reflects-own-result pattern as `handlers/submission/rejudge.rs`.
+// `user` here is only used by `resolve_usernames`, a post-authorization
+// display helper. Pinned by the frozen
+// `tests/integration/visibility_matrix.rs::contest_clarification_list` suite.
 use crate::entity::{clarification, clarification_reply, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

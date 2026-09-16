@@ -10,6 +10,13 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, Transactio
 use tracing::instrument;
 use uuid::Uuid;
 
+// visibility-bypass-audited: `upload_attachment`/`delete_attachment` require
+// perm::PROBLEM_EDIT and are write-only. The two viewer-facing reads,
+// `list_attachments`/`download_attachment`, already route through
+// `VisibilityKernel` below (`Resource::Problem`); `problem`/`problem_attachment`
+// here are only used for the pre-kernel row fetch and for the admin write
+// paths. Pinned by the frozen
+// `tests/integration/visibility_matrix.rs::problem_attachment_list` suite.
 use crate::entity::{problem, problem_attachment};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

@@ -13,6 +13,15 @@ use tracing::{info, instrument, warn};
 
 use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
 
+// visibility-bypass-audited: `user` is used only by `is_token_fresh` below,
+// which selects a single `credentials_changed_at` column
+// (`select_only().into_tuple()`) and returns a bool - it structurally cannot
+// return a `user::Model` to a response body. It mirrors the same
+// iat-vs-credentials_changed_at freshness check `FreshAuthUser` performs on
+// core routes (pinned by
+// tests/integration/auth.rs::stale_access_token_rejected_on_mutation_but_accepted_on_reads),
+// duplicated here because the plugin proxy path authenticates via
+// `resolve_optional_auth_user` rather than an extractor.
 use crate::entity::user;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

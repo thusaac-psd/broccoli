@@ -6,6 +6,11 @@ use common::SubmissionStatus;
 use common::storage::BlobStore;
 use sea_orm::*;
 
+// visibility-bypass-audited: these DTO-building helpers are the pre-kernel
+// row fetch for `handlers/submission/mod.rs`'s read handlers - every caller
+// pairs the DTOs built here with `VisibilityKernel::decide`/`fetch_visible`/
+// `fetch_visible_batch` (see this file's own `VisibilityContext` doc comment
+// below) before anything reaches a response body. Never called standalone.
 use crate::entity::{
     contest, problem, submission, submission_judgement, test_case, test_case_result, user,
 };

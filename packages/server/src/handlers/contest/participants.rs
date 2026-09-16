@@ -6,6 +6,20 @@ use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `add_participant`/`remove_participant`/
+// `bulk_add_participants` require perm::CONTEST_MANAGE, pinned by
+// `contestant_cannot_add_participant`, `contestant_cannot_remove_participant`,
+// and `contestant_cannot_bulk_add_participants`. `register_for_contest`/
+// `unregister_from_contest` are self-service writes on the caller's own
+// membership row (window/is_public checked inline), not a third-party read.
+// `list_participants` gates contest reachability through
+// `check_contest_access` (the same audited pattern as `handlers/contest/mod.rs`,
+// pinned by `utils::contest::contest_access_tests`), then requires
+// `show_participants_list` or perm::CONTEST_MANAGE - there is no
+// `Resource::Participant` in the kernel, so this cannot be routed - pinned by
+// `hidden_participant_list_denies_non_manager_participant` and
+// `hidden_participant_list_still_readable_by_contest_manager`
+// (tests/integration/contest.rs).
 use crate::entity::{contest_user, role, user, user_role};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

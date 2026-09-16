@@ -8,6 +8,26 @@ use sea_orm::sea_query::{Func, LikeExpr, Query as SeaQuery};
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `create_contest`/`update_contest`/`delete_contest`
+// require perm::CONTEST_CREATE/CONTEST_MANAGE/CONTEST_DELETE respectively,
+// asserted at handler entry and pinned by tests/integration/contest.rs's
+// `contestant_cannot_create_a_contest`, `contestant_cannot_update_contest`,
+// and `contestant_cannot_delete_a_contest`. The two single-contest reads,
+// `get_contest`/`get_contest_my_info`, gate through `check_contest_access`
+// (window + is_public + participant), the same host rule the kernel's
+// `decide_contest` is a direct port of (see
+// `visibility::host_rules::decide_contest`) - `check_contest_access` is kept
+// as the sole reachability check here, mirroring the deliberate,
+// already-reviewed precedent in `list_contest_submissions`
+// (handlers/submission/mod.rs) - and is independently unit-tested in
+// `utils::contest::contest_access_tests`, plus pinned end-to-end by
+// `non_participant_cannot_see_private_contest`. `list_contests` filters the
+// same window/is_public/participant conditions at the SQL layer with a
+// perm::CONTEST_MANAGE bypass for the admin view, pinned by
+// `contestant_sees_only_public_and_enrolled_contests`,
+// `contestant_does_not_see_never_activating_contests`,
+// `contestant_does_not_see_not_yet_activated_contests`, and
+// `contestant_does_not_see_deactivated_contests`.
 use crate::entity::{contest, contest_user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

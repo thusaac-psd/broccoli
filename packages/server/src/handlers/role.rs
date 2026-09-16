@@ -5,6 +5,11 @@ use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 
+// visibility-bypass-audited: every handler in this module requires
+// perm::ROLE_MANAGE, pinned by
+// tests/integration/user.rs::regular_user_cannot_access_role_permissions
+// (mod role_management). This is RBAC administration, never a per-row
+// Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::{role, role_permission, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

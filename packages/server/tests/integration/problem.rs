@@ -1684,6 +1684,36 @@ mod test_case_zip_upload {
     }
 
     #[tokio::test]
+    async fn contestant_cannot_upload_test_cases() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_upload_perm", "password123", "admin")
+            .await;
+        let contestant = app
+            .create_user_with_role("contestant_upload_perm", "password123", "contestant")
+            .await;
+
+        let pid = app.create_problem(&admin, "Test Problem").await;
+
+        let zip_data = build_zip(&[("01.in", "1 2\n"), ("01.ans", "3\n")]);
+
+        let res = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "tests.zip",
+                zip_data,
+                Some("*.in"),
+                Some("*.ans"),
+                Some("replace"),
+                &contestant,
+            )
+            .await;
+
+        assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
     async fn can_upload_with_sample_and_main_directories() {
         let app = TestApp::spawn().await;
         let token = app

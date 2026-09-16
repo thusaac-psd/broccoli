@@ -374,6 +374,49 @@ fn process_thread_count() -> Option<usize> {
     None
 }
 
+/// Returns the path to `packages/server/src/handlers/` from the crate
+/// manifest dir of the `server` package.
+fn handlers_root() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir).join("src").join("handlers")
+}
+
+/// Handlers must reach entities only through the visibility kernel. A direct
+/// `crate::entity::` import in a handler module is a bypass: it can read a row
+/// the kernel would have denied. Kept as a static guard because the failure
+/// this prevents — a new read path that skips the kernel — is invisible at
+/// runtime until someone reads a problem they should not have.
+#[test]
+fn handlers_do_not_import_entities_directly() {
+    let root = handlers_root();
+    assert!(
+        root.is_dir(),
+        "expected handlers directory at {}",
+        root.display()
+    );
+
+    let mut files = Vec::new();
+    collect_rs_files(&root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "no .rs files found under {}; the regression guard would silently pass",
+        root.display()
+    );
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let src = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        if src.contains("use crate::entity::") && !src.contains("visibility-bypass-audited:") {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "handlers importing entities directly: {offenders:#?}"
+    );
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;

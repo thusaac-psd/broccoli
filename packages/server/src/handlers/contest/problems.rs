@@ -7,6 +7,17 @@ use sea_orm::prelude::Expr;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: the admin writes (`add_contest_problem`,
+// `update_contest_problem`, `remove_contest_problem`, `reorder_contest_problems`,
+// `bulk_delete_contest_problems`) all require perm::CONTEST_MANAGE, pinned by
+// `contestant_cannot_add_problem_to_contest`, `contestant_cannot_update_contest_problem`,
+// `contestant_cannot_remove_contest_problem`, and
+// `contestant_cannot_reorder_contest_problems` (tests/integration/contest.rs).
+// The one viewer-facing read, `list_contest_problems`, already routes through
+// `VisibilityKernel` below (`Resource::Contest` then `Resource::Problem` per
+// row via `fetch_visible_batch`); these entity types are only used for the
+// pre-kernel row fetch that builds the (Resource, DTO) pairs the kernel then
+// decides on - the same pattern as `handlers/submission/mod.rs`.
 use crate::entity::{contest_problem, problem};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
