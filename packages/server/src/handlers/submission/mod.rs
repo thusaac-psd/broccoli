@@ -22,8 +22,7 @@ use crate::models::shared::{Pagination, escape_like};
 use crate::models::submission::*;
 use crate::state::AppState;
 use crate::utils::contest::{
-    check_contest_access, find_contest, is_problem_in_contest, require_contest_participant,
-    require_contest_running, require_problem_read_access,
+    check_contest_access, find_contest, require_contest_participant, require_contest_running,
 };
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
@@ -105,11 +104,32 @@ pub async fn create_submission(
     // check out a second connection that never freed. Run each step on the pool
     // directly so a request never holds two connections at once.
     let problem = find_problem(&state.db, problem_id).await?;
-    // Gate on problem read access (contest membership or problem-edit
-    // permission), same as viewing the problem. Without this a contestant can
-    // probe and submit against hidden/unreleased problems by guessing IDs, which
-    // is a stronger information oracle than viewing since it runs secret tests.
-    require_problem_read_access(&state.db, &auth_user, problem_id).await?;
+    // The kernel OWNS the subject: one kernel per request per subject.
+    // REACHABILITY FIRST: gate on problem read access (contest membership or
+    // problem-edit permission), same as viewing the problem, and do it before
+    // the `before_submission` hook dispatch below. Without this a contestant
+    // can probe and submit against hidden/unreleased problems by guessing
+    // IDs, which is a stronger information oracle than viewing since it runs
+    // secret tests. A denied decision fails closed and silent (404) - this is
+    // reachability, not a business rule, so it must never grow a reason
+    // string; the cooldown/submission-limit plugins' own loud, reasoned
+    // rejections are a separate, later check untouched by this gate. See
+    // `visibility::host_rules::decide_standalone_problem_access`, ported
+    // verbatim from the `require_problem_read_access` this replaces.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(
+            Action::Submit,
+            Resource::Problem {
+                contest_id: None,
+                problem_id,
+            },
+        )
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Problem not found".into()));
+    }
     let known_languages: std::collections::HashSet<String> = state
         .registries
         .language_resolver_registry
@@ -579,7 +599,30 @@ pub async fn create_contest_submission(
     let contest_model = find_contest(&state.db, contest_id).await?;
 
     let problem = find_problem(&state.db, problem_id).await?;
-    if !is_problem_in_contest(&state.db, contest_id, problem_id).await? {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    // REACHABILITY FIRST, BUSINESS RULES SECOND: this decision - contest
+    // window/access plus contest-problem membership, ported verbatim from
+    // `is_problem_in_contest` (see `visibility::host_rules::decide_problem_or_sample`)
+    // - must run, and does, before `require_contest_running`/
+    // `require_contest_participant` below and before the `before_submission`
+    // hook dispatch further down. A denied decision fails closed and silent
+    // (404); it must never grow a reason string. `require_contest_running`'s
+    // "not started yet" / "already ended" and `require_contest_participant`'s
+    // "forbidden" rejections are separate, later, loud business-rule checks -
+    // this gate does not merge into them, and the cooldown/submission-limit
+    // plugins' own rejections are untouched by it either.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(
+            Action::Submit,
+            Resource::Problem {
+                contest_id: Some(contest_id),
+                problem_id,
+            },
+        )
+        .await?
+        .is_denied()
+    {
         return Err(AppError::NotFound(
             "Problem not found in this contest".into(),
         ));
