@@ -17,6 +17,7 @@ mod plugin;
 mod plugin_config;
 mod problem;
 mod regression_guards;
+mod rejudge_visibility;
 mod scaling;
 mod submission;
 mod system;

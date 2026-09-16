@@ -17,8 +17,17 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // requires perm::SYSTEM_ADMIN), pinned by `contestant_cannot_rejudge` and
 // `contestant_cannot_bulk_rejudge` (tests/integration/submission.rs). This is
 // system/judge-operator tooling that mutates submissions, not a viewer read
-// path - any `SubmissionResponse` returned here reflects the actor's own
-// privileged write back to them, the same as any other write handler.
+// path - but the `SubmissionResponse` it builds is still routed through
+// `VisibilityKernel::decide`/`fetch_visible` before it ships (see
+// `apply_filter_to_response_after_mutation`), because `submission:rejudge`/
+// `system:admin` are independent of `Resource::Submission`'s own Read
+// reachability: an operator can trigger a rejudge on a submission they could
+// not themselves `GET` (not the owner, no `submission:view_all`, not a
+// contest participant), and a frozen ICPC contest / restricted IOI feedback
+// level must redact this response exactly as it would that `GET`. Only the
+// *mutation* is authorised by `submission:rejudge` alone; what comes back
+// reflects the actor's own Read visibility, not a blanket admin view. Pinned
+// by `tests/integration/rejudge_visibility.rs`.
 use crate::entity::{
     judgement_reset::ClearJudgementActiveModel, submission, submission_judgement, test_case_result,
 };
@@ -32,8 +41,10 @@ use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
+use crate::visibility::{Subject, VisibilityKernel};
 
 use super::dispatch::open_rejudge_judgement;
+use super::filter::apply_filter_to_response_after_mutation;
 use super::response::{VisibilityContext, build_submission_response};
 
 #[utoipa::path(
@@ -61,7 +72,7 @@ pub async fn apply_submission_judgement(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
-) -> Result<Json<SubmissionResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
@@ -121,12 +132,11 @@ pub async fn apply_submission_judgement(
     )
     .await;
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
 }
 
@@ -230,7 +240,7 @@ pub async fn rejudge_submission(
     AppPath(id): AppPath<i32>,
     Query(query): Query<RejudgeQuery>,
     body: Bytes,
-) -> Result<Json<SubmissionResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let payload = if body.is_empty() {
@@ -333,12 +343,11 @@ pub async fn rejudge_submission(
     // crash between txn.commit() and the response no longer loses the
     // rejudge.
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
 }
 
@@ -626,22 +635,19 @@ pub async fn admin_fan_out_submission(
         "Admin fan-out submission created"
     );
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     let mut responses = Vec::with_capacity(models.len());
     for model in models {
         let response =
             build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
+        let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
         responses.push(response);
     }
 
     Ok((
         StatusCode::CREATED,
-        Json(AdminFanOutSubmissionResponse {
-            submissions: responses,
-        }),
+        Json(serde_json::json!({ "submissions": responses })),
     ))
 }

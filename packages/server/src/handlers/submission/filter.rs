@@ -50,6 +50,43 @@ pub(super) async fn apply_filter_to_response(
         .into_masked_json()
 }
 
+/// Like [`apply_filter_to_response`], but for a handler whose write has
+/// already been authorised and committed by the time this runs - `rejudge.rs`'s
+/// `apply_submission_judgement`/`rejudge_submission`/`admin_fan_out_submission`.
+/// Those mutations are gated on `submission:rejudge` / `system:admin`, a
+/// permission independent of `Resource::Submission`'s own Read reachability
+/// (owner, `submission:view_all`, or contest participation with
+/// `submissions_visible`) - so an operator can legitimately trigger a rejudge
+/// on a submission they could not themselves `GET`. A `Deny` on that Read
+/// decision must not undo the mutation: turning it into `AppError::NotFound`
+/// here (as `apply_filter_to_response` does for an actual read) would read as
+/// "the rejudge failed", when in fact it succeeded and only the response body
+/// is being shaped.
+///
+/// On `Allow`/`Redact`, this is byte-for-byte what `apply_filter_to_response`
+/// would have returned - i.e. exactly what that same viewer's own
+/// `GET /submissions/{id}` shows. On `Deny`, it degrades to a minimal
+/// acknowledgement carrying only the id the caller already supplied in the
+/// request path: nothing here is derived from the submission's row, so
+/// nothing is disclosed that the caller didn't already have (they named this
+/// id themselves to trigger the mutation). This mirrors what a `GET` would
+/// tell that same viewer - nothing - while still confirming the write went
+/// through, which a bare 404 would falsely deny.
+pub(super) async fn apply_filter_to_response_after_mutation(
+    kernel: &VisibilityKernel<'_>,
+    response: SubmissionResponse,
+) -> Result<serde_json::Value, AppError> {
+    let id = response.id;
+    let resource = Resource::Submission(id);
+    match kernel
+        .fetch_visible(Action::Read, resource, response)
+        .await?
+    {
+        Some(visible) => visible.into_masked_json(),
+        None => Ok(serde_json::json!({ "id": id })),
+    }
+}
+
 /// Judgement-history masking.
 ///
 /// `SubmissionJudgementResponse` is a flat shape (`verdict`, `score`, ...
