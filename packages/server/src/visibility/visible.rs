@@ -12,6 +12,8 @@
 //! which applies the `FieldMask` when the decision is `Redact` — a handler
 //! that filters a decision vector by hand can apply `Deny` but silently
 //! forget `Redact`; going through this type instead makes that impossible.
+use broccoli_server_sdk::visibility::cap_submission_detail_texts;
+
 use super::Decision;
 use crate::error::AppError;
 
@@ -58,12 +60,27 @@ impl<T: serde::Serialize> Visible<T> {
     /// Serialize the entity, then apply the `FieldMask` if the decision was
     /// `Redact`. This is the only way to turn a `Visible<T>` into JSON, so a
     /// `Redact` decision can never be skipped at the serialization step.
+    ///
+    /// Also applies [`cap_submission_detail_texts`] here, unconditionally,
+    /// after masking - moved from the two per-contest-type plugins that used
+    /// to call it (ICPC, then IOI) once `decide_visibility` stopped handing
+    /// plugins the response body to cap in the first place (Task 15/16). The
+    /// byte cap on oversized free-text fields (`compile_output`, checker
+    /// output, test-case blobs) is a payload-size invariant, not an access
+    /// decision, so it belongs here structurally: every DTO that reaches a
+    /// response body passes through this one function, including contest
+    /// types with NO registered visibility plugin at all, which could never
+    /// have called it under the old per-plugin convention. It is a plain
+    /// no-op (returns immediately) for any `Value` that isn't shaped like a
+    /// submission detail response (no top-level `result` object), so calling
+    /// it unconditionally for every `Visible<T>` is safe regardless of `T`.
     pub fn into_masked_json(self) -> Result<serde_json::Value, AppError> {
         let mut value = serde_json::to_value(&self.inner)
             .map_err(|e| AppError::Internal(format!("visibility serialize: {e}")))?;
         if let Decision::Redact(mask) = &self.decision {
             super::apply_mask(&mut value, mask);
         }
+        cap_submission_detail_texts(&mut value);
         Ok(value)
     }
 }
@@ -80,6 +97,71 @@ mod tests {
     struct SampleDto {
         verdict: Option<String>,
         score: Option<i32>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct FakeJudgeResult {
+        compile_output: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct FakeSubmissionDto {
+        result: FakeJudgeResult,
+    }
+
+    /// Task 17 / Step 2a: `cap_submission_detail_texts` moved into
+    /// `into_masked_json` because, after Task 16, nothing else calls it at
+    /// all (both plugins that used to were migrated off the old
+    /// `filter_submission_fn` mechanism, which was the only place a plugin
+    /// could see - and cap - a response body). `Decision::Allow` with no
+    /// `FieldMask` in play is exactly what a contest type with NO registered
+    /// visibility plugin gets: `host_decide`'s reachability answer alone,
+    /// `meet`-ed with zero queriers (`query_plugins`'s zero-queriers case
+    /// returns Allow, the identity element). This test proves the cap holds
+    /// even here, i.e. it no longer depends on any plugin cooperating.
+    #[test]
+    fn into_masked_json_caps_oversized_detail_text_with_no_mask_and_no_plugin() {
+        let big =
+            "x".repeat(broccoli_server_sdk::visibility::DETAIL_TEXT_RESPONSE_LIMIT_BYTES + 10);
+        let dto = FakeSubmissionDto {
+            result: FakeJudgeResult {
+                compile_output: Some(big),
+            },
+        };
+        let value = Visible::new(dto, Decision::Allow)
+            .into_masked_json()
+            .unwrap();
+        let capped = value["result"]["compile_output"].as_str().unwrap();
+        assert_eq!(
+            capped.len(),
+            broccoli_server_sdk::visibility::DETAIL_TEXT_RESPONSE_LIMIT_BYTES
+        );
+    }
+
+    /// The cap must still apply when a `Redact` mask ALSO fires, and must not
+    /// resurrect a field the mask just blanked to `null` (capping a string
+    /// is a no-op on anything that isn't a string - see
+    /// `cap_json_string_field` - so a masked-to-null `compile_output` stays
+    /// `null`, not `""`).
+    #[test]
+    fn into_masked_json_caps_oversized_detail_text_alongside_a_redact_mask() {
+        let big =
+            "x".repeat(broccoli_server_sdk::visibility::DETAIL_TEXT_RESPONSE_LIMIT_BYTES + 10);
+        let dto = FakeSubmissionDto {
+            result: FakeJudgeResult {
+                compile_output: Some(big),
+            },
+        };
+        let value = Visible::new(
+            dto,
+            Decision::Redact(FieldMask::new(["result.compile_output".to_string()])),
+        )
+        .into_masked_json()
+        .unwrap();
+        assert!(
+            value["result"]["compile_output"].is_null(),
+            "masking must win over capping for a field the mask blanks: {value:?}"
+        );
     }
 
     #[test]
