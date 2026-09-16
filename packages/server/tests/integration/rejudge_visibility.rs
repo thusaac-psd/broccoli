@@ -25,11 +25,15 @@
 
 use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
+use common::worker::{HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX};
 use common::{SubmissionStatus, Verdict};
+use redis::AsyncCommands;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use server::entity::{problem, submission, submission_judgement, user};
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::redis::Redis;
 
-use crate::common::{TestApp, routes};
+use crate::common::{SpawnOptions, TestApp, routes};
 
 /// Insert a public, standalone-submittable problem directly via the DB -
 /// mirrors the identical helper (and its doc comment explaining why this
@@ -389,4 +393,149 @@ async fn rejudge_response_is_redacted_like_a_read_would_be() {
     // status) stay visible, unlike the full-Deny case above.
     assert_eq!(res.body["id"], submission_id);
     assert_eq!(res.body["status"], "Judged");
+}
+
+// == admin_fan_out_submission: the third handler this fix touches, and the
+// == one that previously had zero coverage of its own - a partial revert of
+// == just this handler would have left the four tests above green
+// == =========================================================================
+
+/// `admin_fan_out_submission` requires a `target_worker_ids` entry to have a
+/// LIVE heartbeat (`handlers::system::live_worker_ids`), which reads
+/// `AppState.redis_client` - `None` under the plain `TestApp::spawn*`
+/// fixture, which makes `live_worker_ids` always return the empty set and
+/// the handler's success path permanently unreachable. Spin up a real Redis
+/// (mirroring `scaling.rs`) and write one worker's heartbeat key directly,
+/// in the exact wire shape `handlers::system::read_workers` deserializes.
+async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
+    let client = redis::Client::open(redis_url).expect("valid redis url");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("connect to redis");
+    let now = Utc::now();
+    let heartbeat = HeartbeatPayload {
+        id: worker_id.to_string(),
+        started_at: now,
+        last_seen: now,
+        in_flight: 0,
+        max_concurrency: Some(1),
+        fairness_mode: "unknown".to_string(),
+        sandbox_backend: "test".to_string(),
+        version: "test".to_string(),
+        hostname: None,
+        ip_addresses: Vec::new(),
+        os: None,
+        arch: None,
+        cpu_count: None,
+        pid: None,
+    };
+    let key = format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}");
+    let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");
+    let _: () = conn.set(&key, &value).await.expect("write heartbeat key");
+}
+
+#[tokio::test]
+async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
+    let redis = Redis::default()
+        .start()
+        .await
+        .expect("failed to start Redis container");
+    let port = redis
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("failed to get Redis port");
+    let redis_url = format!("redis://127.0.0.1:{port}");
+
+    let worker_id = "rjv-fanout-worker";
+    seed_live_worker_heartbeat(&redis_url, worker_id).await;
+
+    let app = TestApp::spawn_with_plugins_and_options(SpawnOptions {
+        redis_url: Some(redis_url),
+        ..Default::default()
+    })
+    .await;
+
+    // The new submission is always owned by the fan-out caller
+    // (`user_id: Set(auth_user.user_id)` in the handler), so the HOST
+    // decision is an owner-bypass `Allow` - there is no ownership mismatch
+    // to deny this via, unlike the other tests in this file. And the new
+    // row's id doesn't exist until the handler inserts it, so it can't be
+    // nominated by id after the fact either. Nominate a generous low-id
+    // range up front instead: this test's database is freshly created by
+    // `TestApp::spawn*` (see `spawn_internal`), so the very first
+    // `submission` row ever inserted in it lands at id 1. A plugin `Deny`
+    // on that id `meet`s the host's owner-bypass `Allow` and wins
+    // (`Decision::meet`), giving exactly the scenario this test exists to
+    // pin: a plugin denying an admin's own freshly-created submission.
+    let deny_keys = (1..=20)
+        .map(|id| format!("submission:{id}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let res = app
+        .post_without_token(
+            &routes::plugin_proxy("server-plugin", "kv/deny_resource_keys"),
+            &serde_json::json!({ "value": deny_keys }),
+        )
+        .await;
+    assert_eq!(res.status, 200, "seeding deny KV failed: {}", res.text);
+
+    let problem_id = insert_public_problem(&app, "Fan-out Visibility Problem").await;
+    let admin_token = app
+        .create_user_with_permissions("rjv_fanout_admin", "pass1234", &[perm::SYSTEM_ADMIN])
+        .await;
+
+    let res = app
+        .post_with_token(
+            routes::ADMIN_FAN_OUT_SUBMISSION,
+            &serde_json::json!({
+                "problem_id": problem_id,
+                "language": "cpp",
+                "files": [{ "filename": "main.cpp", "content": "int main() { return 0; }" }],
+                "target_worker_ids": [worker_id],
+            }),
+            &admin_token,
+        )
+        .await;
+
+    // The mutation must still succeed - `system:admin` alone authorises the
+    // fan-out, independent of the caller's own Read visibility into what it
+    // just created.
+    assert_eq!(res.status, 201, "fan-out must succeed: {}", res.text);
+
+    let submissions = res.body["submissions"]
+        .as_array()
+        .expect("submissions should be an array");
+    assert_eq!(submissions.len(), 1, "expected one submission: {}", res.body);
+
+    // But the response entry must carry nothing beyond the id - no files,
+    // no language, no target_worker_id. This is the exact shape a denied
+    // Read degrades to, same as the single-submission handlers above.
+    let obj = submissions[0]
+        .as_object()
+        .expect("entry should be an object");
+    assert_eq!(
+        obj.len(),
+        1,
+        "a denied-read fan-out entry must contain nothing but the id, got: {}",
+        submissions[0]
+    );
+    let submission_id = submissions[0]["id"]
+        .as_i64()
+        .expect("id should be present") as i32;
+
+    // Prove the mutation genuinely happened despite the suppressed response
+    // - verified against the DB, not trusted from the response body.
+    let created = submission::Entity::find_by_id(submission_id)
+        .one(&app.db)
+        .await
+        .expect("query submission")
+        .expect("submission should have been created");
+    assert_eq!(
+        created.status,
+        SubmissionStatus::Queued,
+        "fan-out should have created a queued submission even though the response was suppressed"
+    );
+    assert_eq!(created.target_worker_id.as_deref(), Some(worker_id));
+    assert_eq!(created.problem_id, problem_id);
 }

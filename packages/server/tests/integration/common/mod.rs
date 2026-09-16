@@ -360,6 +360,8 @@ pub mod routes {
         format!("/api/v1/submissions/{id}/judgements/{judgement_id}/discard")
     }
 
+    pub const ADMIN_FAN_OUT_SUBMISSION: &str = "/api/v1/admin/submissions/fan-out";
+
     pub fn problem_submissions(problem_id: i32) -> String {
         format!("/api/v1/problems/{problem_id}/submissions")
     }
@@ -538,7 +540,7 @@ pub struct TestResponse {
 /// `Self::spawn_internal`. Add a field here when a test needs to
 /// observe a non-default `ServerConfig` value rather than copy-pasting
 /// the entire fixture in the test.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct SpawnOptions {
     /// UP#39: cap on durable `Queued` rows accepted at POST time.
     /// `Some(0)` (the fixture default) disables the cap; `Some(n)`
@@ -554,6 +556,17 @@ pub struct SpawnOptions {
     /// opt in so the shared test database is not hammered by hundreds
     /// of background pollers during parallel integration runs.
     pub start_dispatcher: bool,
+    /// Wire a real Redis connection into `AppState.redis_client`. The
+    /// fixture defaults to `None` (no Redis), which makes
+    /// `handlers::system::live_worker_ids` always return an empty set -
+    /// fine for the overwhelming majority of tests, but it means any
+    /// endpoint that requires a live worker heartbeat (`system:admin`
+    /// `target_worker_id` overrides, `admin_fan_out_submission`) can never
+    /// reach its success path under the plain fixture. A test that needs
+    /// that path starts its own `testcontainers_modules::redis::Redis`
+    /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
+    /// container's URL here.
+    pub redis_url: Option<String>,
 }
 
 impl TestApp {
@@ -567,6 +580,10 @@ impl TestApp {
 
     pub async fn spawn_with_options(options: SpawnOptions) -> Self {
         Self::spawn_internal(false, options).await
+    }
+
+    pub async fn spawn_with_plugins_and_options(options: SpawnOptions) -> Self {
+        Self::spawn_internal(true, options).await
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
@@ -777,12 +794,17 @@ impl TestApp {
             }
         }
 
+        let redis_client = options
+            .redis_url
+            .as_ref()
+            .map(|url| Arc::new(redis::Client::open(url.clone()).expect("valid redis url")));
+
         let state = AppState {
             plugins,
             db: db.clone(),
             config: app_config,
             mq: None,
-            redis_client: None,
+            redis_client,
             blob_store,
             registries: server::state::RegistryState {
                 contest_type_registry,
