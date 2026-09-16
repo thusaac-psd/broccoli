@@ -46,10 +46,7 @@ pub use persistence::{
     TestCaseResultRow, push_judge_sets, sanitize_result_text_field, sanitize_text_field,
 };
 pub use query::{ProblemCheckerInfo, TestCaseData, TestCaseRow};
-pub use submission::{
-    FilterSubmissionInput, FilterSubmissionOutput, OnSubmissionInput, OnSubmissionOutput,
-    SourceFile,
-};
+pub use submission::{OnSubmissionInput, OnSubmissionOutput, SourceFile};
 pub use verdict::Verdict;
 pub use visibility::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,

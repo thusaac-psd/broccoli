@@ -733,7 +733,6 @@ impl E2eTestApp {
                     plugin_id: "__test__".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
-                    filter_submission_fn: None,
                 },
             );
         }

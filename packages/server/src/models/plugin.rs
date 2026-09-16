@@ -67,10 +67,6 @@ pub struct ContestTypeEntry {
     /// Function name invoked for code-run / sample-run dispatch.
     #[schema(example = "on_code_run")]
     pub code_run_fn: String,
-    /// Optional function invoked to filter outgoing submission DTOs for a viewer.
-    #[schema(example = "filter_submission_for_viewer")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter_submission_fn: Option<String>,
 }
 
 /// A single hook registration entry.

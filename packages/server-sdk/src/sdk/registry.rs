@@ -13,26 +13,10 @@ impl Registry {
         submission_handler: &str,
         code_run_handler: &str,
     ) -> Result<(), SdkError> {
-        self.register_contest_type_with_filter(
-            contest_type,
-            submission_handler,
-            code_run_handler,
-            None,
-        )
-    }
-
-    pub fn register_contest_type_with_filter(
-        &self,
-        contest_type: &str,
-        submission_handler: &str,
-        code_run_handler: &str,
-        filter_submission_handler: Option<&str>,
-    ) -> Result<(), SdkError> {
         let input = serde_json::json!({
             "type": contest_type,
             "submission_handler": submission_handler,
             "code_run_handler": code_run_handler,
-            "filter_submission_handler": filter_submission_handler,
         });
         unsafe { crate::host::raw::register_contest_type(serde_json::to_string(&input)?)? };
         Ok(())
@@ -104,16 +88,6 @@ impl Registry {
         _contest_type: &str,
         _submission_handler: &str,
         _code_run_handler: &str,
-    ) -> Result<(), SdkError> {
-        Ok(())
-    }
-
-    pub fn register_contest_type_with_filter(
-        &self,
-        _contest_type: &str,
-        _submission_handler: &str,
-        _code_run_handler: &str,
-        _filter_submission_handler: Option<&str>,
     ) -> Result<(), SdkError> {
         Ok(())
     }

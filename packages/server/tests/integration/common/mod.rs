@@ -749,7 +749,6 @@ impl TestApp {
                     plugin_id: "__test__".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
-                    filter_submission_fn: None,
                 },
             );
             let mut languages = language_resolver_registry.write().await;

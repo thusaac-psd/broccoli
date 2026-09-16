@@ -56,7 +56,6 @@ pub async fn list_registries(
                 plugin_id: h.plugin_id.clone(),
                 submission_fn: h.submission_fn.clone(),
                 code_run_fn: h.code_run_fn.clone(),
-                filter_submission_fn: h.filter_submission_fn.clone(),
             })
             .collect()
     };
