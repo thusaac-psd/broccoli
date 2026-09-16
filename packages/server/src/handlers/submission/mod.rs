@@ -318,31 +318,43 @@ pub async fn list_submissions(
     // KNOWN RESIDUAL LEAK, accepted: `total` (and therefore `total_pages`)
     // is computed from `base_select` BEFORE the per-row kernel filter below
     // runs, i.e. it counts rows this SQL predicate matches, not rows the
-    // viewer will actually be shown. For a non-`submission:view_all` caller
-    // whose page ends up narrower than this count (e.g. a peer's submission
-    // in a contest that denies them - see `decide_submission`), the response
-    // DOES disclose two things: that at least one more matching submission
-    // exists beyond what `data` contains, and the exact count of such
-    // submissions. It discloses NOTHING about their CONTENT - no ids, users,
-    // verdicts, code, or contest identity leak through this number, only a
-    // count.
+    // viewer will actually be shown. For a caller whose page ends up
+    // narrower than this count, the response DOES disclose two things: that
+    // at least one more matching submission exists beyond what `data`
+    // contains, and the exact count of such submissions. It discloses
+    // NOTHING about their CONTENT - no ids, users, verdicts, code, or
+    // contest identity leak through this number, only a count.
+    //
+    // Task 17 / Step 2b (I2): the mechanism that can cause this divergence
+    // is plugin-level narrowing via `Decision::meet` below, NOT
+    // `decide_submission`'s participation / `submissions_visible` branch -
+    // that branch is unreachable from this endpoint. Every row `base_select`
+    // can return is already host-`Allow` before the kernel is even asked:
+    // a non-`submission:view_all` caller's query is filtered to
+    // `UserId.eq(auth_user.user_id)` above, which hits `decide_submission`'s
+    // unconditional owner bypass, and a `submission:view_all` caller hits its
+    // permission bypass - both `Allow` unconditionally, never reaching the
+    // participation/`submissions_visible` check at all. A registered
+    // visibility plugin can still `Deny` a host-`Allow`ed row via
+    // `Decision::meet` (`meet(Allow, Deny) == Deny`), and `apply_filter_to_list`
+    // drops denied rows outright rather than rendering a placeholder - that
+    // plugin-level narrowing is the only source of `total` vs `data.len()`
+    // divergence here.
     //
     // This is NOT fixed the way `list_contest_submissions` is fixed below,
     // because there is no single-contest static predicate to push into SQL
     // here: this endpoint is GLOBAL and unscoped, one page can span many
-    // contests plus contest-less submissions, and per-row visibility for a
-    // contest submission depends on THAT row's own contest's
-    // `submissions_visible` flag and the viewer's participation in THAT
-    // contest - a per-row join across however many distinct contests appear
-    // in the full matching set, not one fixed boolean known up front. Making
-    // `total` exact would mean running the full kernel decision (a host rule
-    // per row, plus a plugin round trip for every host-`Allow`) over every
-    // row the filters match in the WHOLE TABLE, not just the current page -
-    // unbounded work per list request, scaling with total submissions rather
-    // than `per_page`. That cost is why this leak is left in place rather
-    // than closed; `list_contest_submissions` is scoped to one contest and
-    // can hoist the static part of the same rule into `WHERE`, so it does
-    // not have this excuse.
+    // contests plus contest-less submissions, and which plugin (if any) would
+    // narrow a given row depends on THAT row's own contest's registered
+    // contest type - not one fixed predicate known up front. Making `total`
+    // exact would mean running the full kernel decision (a plugin round trip
+    // for every row) over every row the filters match in the WHOLE TABLE, not
+    // just the current page - unbounded work per list request, scaling with
+    // total submissions rather than `per_page`. That cost is why this leak is
+    // left in place rather than closed; `list_contest_submissions` is scoped
+    // to one contest and can hoist the static part of its own
+    // (`decide_submission`-derived) rule into `WHERE`, so it does not have
+    // this excuse.
     let total = base_select.clone().count(&state.db).await?;
 
     let select = base_select.find_also_related(user::Entity);
