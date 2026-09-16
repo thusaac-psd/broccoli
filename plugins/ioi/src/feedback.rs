@@ -150,21 +150,47 @@ struct SubmissionVisibilityRow {
 }
 
 /// Core decision logic. Exercised directly by tests via `Host::mock()` (no
-/// wasm32 target required) -- there is no e2e test pinning every branch of
-/// this function's behavior, so these unit tests are the evidence it still
-/// works.
+/// wasm32 target required); the organiser-bypass branch is additionally
+/// pinned end-to-end by
+/// `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
+/// in `packages/server/tests/e2e/plugins/ioi.rs` (see below). No e2e test
+/// pins every other branch of this function's behavior, so those unit tests
+/// remain the evidence they still work.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn decide_visibility_decisions(
     host: &Host,
     req: &VisibilityQueryInput,
 ) -> Result<Vec<WireDecision>, SdkError> {
-    // Admin / view-all bypass, for the whole batch at once -- it does not
-    // depend on any individual resource.
+    // Admin / view-all / organiser bypass, for the whole batch at once -- it
+    // does not depend on any individual resource.
+    //
+    // `CONTEST_MANAGE` is checked here alongside the pre-existing
+    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE,
+    // not a regression fix: `git show 3dde5d42:plugins/ioi/src/feedback.rs`
+    // confirms the pre-kernel `apply_feedback_filter`'s "Admin / view-all
+    // bypass" also checked only `SUBMISSION_VIEW_ALL`, so the kernel
+    // migration ported this inconsistency verbatim rather than introducing
+    // it. It contradicted `can_view_privileged_submission_feedback` (top of
+    // this file) and `api.rs`'s scoreboard ranking, which DO check
+    // `CONTEST_MANAGE` so organisers see full data, and mirrors the same
+    // Task 17 fix already applied to ICPC's scoreboard-freeze decision. A
+    // viewer holding `contest:manage` without `submission:view_all` -- a
+    // plausible problem-setter or judge role -- was wrongly redacted here;
+    // see
+    // `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
+    // in `packages/server/tests/e2e/plugins/ioi.rs` for the viewer that
+    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
+    //
+    // Note: this bypass does not change host-level reachability.
+    // `decide_submission` (host rule) does not bypass on `CONTEST_MANAGE`,
+    // so a non-enrolled `contest:manage` organiser still gets a 404 before
+    // this plugin ever runs -- "organisers always see the real data" holds
+    // only for organisers who are also enrolled participants.
     if req
         .subject
         .permissions
         .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL)
+        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
     {
         return Ok(req
             .resources
@@ -447,6 +473,35 @@ mod visibility_tests {
         let host = Host::mock();
         let mut sub = subject(Some(99));
         sub.permissions.push(perm::SUBMISSION_VIEW_ALL.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    /// Deliberate BEHAVIOUR CHANGE (see the comment on
+    /// `decide_visibility_decisions`): a viewer holding `contest:manage`
+    /// without `submission:view_all` -- a plausible problem-setter or judge
+    /// role -- must also bypass the whole batch, matching
+    /// `can_view_privileged_submission_feedback` and mirroring ICPC's Task
+    /// 17 fix.
+    #[test]
+    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
         let req = VisibilityQueryInput {
             subject: sub,
             action: "view".to_string(),
