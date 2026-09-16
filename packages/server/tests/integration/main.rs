@@ -20,5 +20,6 @@ mod scaling;
 mod submission;
 mod system;
 mod user;
+mod visibility_clarification_contents;
 mod visibility_matrix;
 mod visibility_plugin;

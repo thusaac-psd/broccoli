@@ -144,7 +144,6 @@ struct VisibilityQueryInputIn {
 #[serde(rename_all = "snake_case")]
 enum WireDecisionOut {
     Allow {},
-    #[allow(dead_code)]
     Deny {},
     Redact { fields: Vec<String> },
 }
@@ -154,32 +153,124 @@ struct VisibilityQueryOutputOut {
     decisions: Vec<WireDecisionOut>,
 }
 
-/// Test-only visibility querier. Deliberately tries two things a plugin must
-/// never be able to pull off, so the integration suite
-/// (`tests/integration/visibility_plugin.rs`) can prove the host refuses
-/// both:
+/// Test-only visibility querier, switched between behaviors by the
+/// `visibility_mode` KV key (seeded through the existing `kv_write`
+/// route/host functions above). Deliberately tries several things a plugin
+/// must never be able to pull off, so the integration suite
+/// (`tests/integration/visibility_plugin.rs`) can prove the host refuses all
+/// of them without ever surfacing a 500:
 ///
-/// - It answers `Allow` for EVERY resource by default, including ones the
-///   host has already denied. `Decision::meet` must keep the host's `Deny`
-///   no matter what a plugin answers - `plugin_cannot_widen_host_decision`.
-/// - For submission ids nominated via the `redact_submission_ids` KV key
-///   (seeded through the existing `kv_write` route/host functions above),
-///   it answers `Redact` on `result.verdict` / `result.score`.
-///   `WireDecision::Redact` only ever carries field PATHS, never a
-///   replacement value, so blanking those two fields is the closest a
-///   plugin can get to "authoring" a verdict - the masked fields must come
-///   back `null`, never plugin-supplied content -
-///   `plugin_cannot_author_a_verdict`.
+/// - unset/`"normal"` (the default): a WORKING decision function. It answers
+///   `Allow` for EVERY resource by default, including ones the host has
+///   already denied - `Decision::meet` must keep the host's `Deny` no matter
+///   what a plugin answers (`plugin_cannot_widen_host_decision`). Resources
+///   nominated (by `"kind:id"`) via `deny_resource_keys` get `Deny`;
+///   resources nominated via `redact_resource_keys` get `Redact` with the
+///   fields from `redact_resource_fields` (defaulting to `label` /
+///   `problem_title`, the contest-problem list DTO's own fields); submission
+///   ids nominated via the older, submission-only `redact_submission_ids`
+///   key get `Redact` on `result.verdict` / `result.score` - kept unchanged
+///   so `plugin_cannot_author_a_verdict` still exercises exactly the
+///   mechanism it always has. `WireDecision::Redact` only ever carries field
+///   PATHS, never a replacement value, so blanking fields is the closest a
+///   plugin can get to "authoring" content - the masked fields must come
+///   back `null`/`[]`, never plugin-supplied content.
+/// - `"trap"`: panics before even parsing `input`, forcing a genuine WASM
+///   trap (this target has no unwind support, so a panic lowers to
+///   `unreachable`).
+/// - `"non_json"`: returns a successful `FnResult` whose payload is not JSON
+///   at all.
+/// - `"short_vector"`: returns one fewer decision than there are resources.
+/// - `"unknown_variant"`: hand-crafts raw JSON using a decision tag the host
+///   has never heard of, bypassing `WireDecisionOut` entirely.
+/// - `"over_limit_segments"` / `"over_limit_bytes"` / `"over_limit_fields"`:
+///   answers `Redact` with a field mask that exceeds one of the host's
+///   `MAX_MASK_PATH_SEGMENTS` / `MAX_MASK_PATH_BYTES` / `MAX_MASK_FIELDS`
+///   caps (`packages/server/src/visibility/plugin_query.rs`) respectively.
+///
+/// Every failure mode above must deny the WHOLE batch - never a partial
+/// result, never a 500.
 #[plugin_fn]
 pub fn decide_visibility(input: String) -> FnResult<String> {
+    let mode = read_kv_single("visibility_mode").unwrap_or_default();
+
+    if mode == "trap" {
+        panic!("decide_visibility: forced trap for failure-injection test");
+    }
+
     let req: VisibilityQueryInputIn = serde_json::from_str(&input)?;
-    let redact_ids = read_kv_csv("redact_submission_ids");
+
+    if mode == "non_json" {
+        return Ok("this is deliberately not JSON".to_string());
+    }
+
+    if mode == "unknown_variant" {
+        // Bypass `WireDecisionOut` entirely: a tag the host has never heard
+        // of, once per resource in the batch.
+        let decisions: Vec<serde_json::Value> = req
+            .resources
+            .iter()
+            .map(|_| serde_json::json!({ "mystery": {} }))
+            .collect();
+        return Ok(serde_json::json!({ "decisions": decisions }).to_string());
+    }
+
+    if mode == "short_vector" {
+        let mut decisions: Vec<WireDecisionOut> = req
+            .resources
+            .iter()
+            .map(|_| WireDecisionOut::Allow {})
+            .collect();
+        decisions.pop();
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+    }
+
+    if mode == "over_limit_segments" || mode == "over_limit_bytes" || mode == "over_limit_fields" {
+        let fields = match mode.as_str() {
+            // 40 dot-separated segments: over the host's 32-segment cap.
+            "over_limit_segments" => vec![vec!["a"; 40].join(".")],
+            // A single 300-byte segment: over the host's 256-byte cap.
+            "over_limit_bytes" => vec!["x".repeat(300)],
+            // 70 distinct field paths: over the host's 64-field cap.
+            "over_limit_fields" => (0..70).map(|i| format!("field_{i}")).collect(),
+            _ => unreachable!(),
+        };
+        let decisions = req
+            .resources
+            .iter()
+            .map(|_| WireDecisionOut::Redact {
+                fields: fields.clone(),
+            })
+            .collect();
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+    }
+
+    // -- Normal path -------------------------------------------------------
+    let redact_submission_ids = read_kv_csv("redact_submission_ids");
+    let deny_keys = read_kv_csv("deny_resource_keys");
+    let redact_keys = read_kv_csv("redact_resource_keys");
+    let redact_fields = {
+        let fields = read_kv_csv("redact_resource_fields");
+        if fields.is_empty() {
+            vec!["label".to_string(), "problem_title".to_string()]
+        } else {
+            fields
+        }
+    };
 
     let decisions = req
         .resources
         .iter()
         .map(|r| {
-            if r.kind == "submission" && redact_ids.iter().any(|id| id == &r.id) {
+            let key = format!("{}:{}", r.kind, r.id);
+            if deny_keys.iter().any(|k| k == &key) {
+                WireDecisionOut::Deny {}
+            } else if redact_keys.iter().any(|k| k == &key) {
+                WireDecisionOut::Redact {
+                    fields: redact_fields.clone(),
+                }
+            } else if r.kind == "submission" && redact_submission_ids.iter().any(|id| id == &r.id)
+            {
                 WireDecisionOut::Redact {
                     fields: vec!["result.verdict".to_string(), "result.score".to_string()],
                 }
@@ -192,32 +283,34 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?)
 }
 
+/// Read a single KV value written via the `kv_write` route. `None` if never
+/// written, on any host error, or on a non-JSON/unexpected shape - this
+/// query function must never trap or fail the batch just because a test
+/// hasn't seeded the key yet.
+fn read_kv_single(key: &str) -> Option<String> {
+    let store_input = serde_json::to_string(&serde_json::json!({ "keys": [key] })).ok()?;
+    let raw = (unsafe { store_get(store_input) }).ok()?;
+    let result: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    result
+        .get("values")
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Read a comma-separated KV value written via the `kv_write` route. Empty
 /// (never written, host error, or non-JSON) reads back as no ids - this
 /// query function must never trap or fail the batch just because a test
 /// hasn't seeded the key yet.
 fn read_kv_csv(key: &str) -> Vec<String> {
-    let Ok(store_input) = serde_json::to_string(&serde_json::json!({ "keys": [key] })) else {
+    let Some(raw) = read_kv_single(key) else {
         return Vec::new();
     };
-    let Ok(raw) = (unsafe { store_get(store_input) }) else {
-        return Vec::new();
-    };
-    let Ok(result) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
-    };
-    result
-        .get("values")
-        .and_then(|v| v.get(key))
-        .and_then(|v| v.as_str())
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    raw.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[plugin_fn]
