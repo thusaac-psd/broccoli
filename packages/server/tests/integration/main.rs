@@ -12,6 +12,7 @@ mod downloads;
 mod downloads_slim;
 mod health;
 mod meta;
+mod permission_fixture;
 mod plugin;
 mod plugin_config;
 mod problem;
