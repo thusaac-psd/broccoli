@@ -212,6 +212,14 @@ pub async fn get_test_case(
         // makes - rather than a second, hand-written copy of
         // `require_problem_read_access`'s permission/is_public/via-contest
         // logic that could drift from `decide_standalone_problem_access`.
+        // NOTE: `is_denied()` treats `Decision::Redact` the same as `Allow`
+        // (only `Deny` is denied) - this gate is a pure yes/no reachability
+        // check, not a `fetch_visible`/`into_masked_json` call, so a
+        // hypothetical `Redact` here would never actually apply its
+        // `FieldMask`: the response below is built straight from `tc` with
+        // no masking step. Today no plugin returns `Redact` for
+        // `Resource::Problem`, so this is a documented no-op, not a live
+        // bug - see Task 20 Item 6.
         let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
         let resource = Resource::Problem {
             contest_id: None,

@@ -310,6 +310,13 @@ pub async fn download_attachment(
     // Problem`), so this is a genuinely new host decision, not a free
     // re-check - it resolves from `problem_id` alone though, via the same
     // `decide_standalone_problem_access` rule as the gate above.
+    // NOTE: `is_denied()` only checks for `Decision::Deny` - a `Redact`
+    // decision here would be indistinguishable from `Allow` and this
+    // handler would stream the raw blob unmasked below regardless, since
+    // `build_blob_response` bypasses `Visible<T>`/`into_masked_json`
+    // entirely (there is no `FieldMask` concept for a binary blob body). No
+    // plugin currently returns `Redact` for `Resource::Attachment`, so this
+    // is a documented no-op today, not a live bug - see Task 20 Item 6.
     let attachment_resource = Resource::Attachment {
         problem_id,
         attachment_id: model.id,

@@ -86,6 +86,14 @@ pub async fn list_clarifications(
     // `visibility::host_rules::decide_contest`. Both of that pair's `Err`
     // branches already returned exactly this same `AppError::NotFound`
     // message, so this is not a behavioural change.
+    //
+    // NOTE: this is a pure reachability gate - `is_denied()` treats a
+    // hypothetical `Redact` on this `Resource::Contest` decision the same
+    // as `Allow`, and the contest itself is never rendered from this
+    // decision (only used to decide whether to proceed), so `Redact`
+    // degenerates to `Allow` here. No plugin currently returns `Redact` for
+    // `Resource::Contest`, so this is a documented no-op today, not a live
+    // bug - see Task 20 Item 6.
     if kernel
         .decide(Action::Read, Resource::Contest(contest_id))
         .await?
@@ -283,6 +291,13 @@ pub async fn create_clarification(
     // returned exactly this same `AppError::NotFound` message, so this is
     // not a behavioural change. See `visibility::host_rules`'s module docs
     // for why this needs no new host-rule code.
+    //
+    // NOTE: as in `list_clarifications` above, this is a pure reachability
+    // gate - `is_denied()` treats a hypothetical `Redact` here the same as
+    // `Allow`, and this decision's `Resource::Contest` is never rendered
+    // from here, so `Redact` degenerates to `Allow`. No plugin currently
+    // returns `Redact` for `Resource::Contest`, so this is a documented
+    // no-op today, not a live bug - see Task 20 Item 6.
     if kernel
         .decide(Action::Clarify, Resource::Contest(contest_id))
         .await?

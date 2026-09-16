@@ -138,6 +138,15 @@ pub async fn list_contest_problems(
     // and `decide_batch` therefore take no `subject` argument.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
+    // NOTE: this is a pure reachability gate on the contest itself, distinct
+    // from the `Resource::Problem` decisions made below (which DO go
+    // through `fetch_visible_batch`/`into_masked_json` and so honor
+    // `Redact` correctly). `is_denied()` treats a hypothetical `Redact` on
+    // this `Resource::Contest` decision the same as `Allow`, and this
+    // decision's contest is never rendered from here, so `Redact`
+    // degenerates to `Allow`. No plugin currently returns `Redact` for
+    // `Resource::Contest`, so this is a documented no-op today, not a live
+    // bug - see Task 20 Item 6.
     if kernel
         .decide(Action::Read, Resource::Contest(contest_id))
         .await?
