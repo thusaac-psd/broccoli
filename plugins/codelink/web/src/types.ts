@@ -1,5 +1,7 @@
 export type CreditStatus = 'credited' | 'slots_full' | 'after_qualification';
 
+export type QualificationVerdict = 'pending' | 'qualified';
+
 export interface ProblemCell {
   status: CreditStatus;
   submission_id: number;
@@ -12,8 +14,7 @@ export interface Standing {
   username: string;
   credited: number;
   accepted: number;
-  qualified: boolean;
-  qualification_confirmed: boolean;
+  qualification_verdict: QualificationVerdict | null;
   qualified_at_seconds: number | null;
   problems: Record<string, ProblemCell>;
 }
@@ -41,7 +42,6 @@ export interface ContestInfoResponse {
 
 export interface StandingsResponse extends ContestInfoResponse {
   qualified_count: number;
-  confirmed_qualified_count: number;
   pending_submissions: number;
   problems: ProblemSlots[];
   rows: Standing[];

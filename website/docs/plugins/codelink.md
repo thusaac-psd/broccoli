@@ -99,13 +99,16 @@ ends while queued evaluations finish. Use **Auto refresh** to pause it or
 
 | Status | Meaning |
 | --- | --- |
-| Qualified | Reached the configured threshold and will remain qualified however pending results finish |
-| Provisional | Reached the threshold in the current results, but eligibility is not yet guaranteed |
-| Competing | Fewer credited problems than the configured threshold |
+| Qualified | Qualification is guaranteed however the remaining evaluations finish |
+| Awaiting judging | Unfinished evaluations prevent confirming whether the contestant qualifies |
+
+The board shows these two verdicts only. Contestants without enough possible
+credited problems have no verdict and can follow their progress in **Credited**.
+The qualifier count and qualification times include contestants marked **Qualified** only.
 
 Pending submissions include work still in the queue before a judgement has been
-created. A pending result can displace a provisional slot if it eventually
-passes. Attempts on a problem whose slots are definitely full, duplicate attempts
+created. A contestant can await a verdict while their own submission finishes or
+while an earlier submission could change their slots. Attempts on a problem whose slots are definitely full, duplicate attempts
 on an already accepted problem, and attempts by confirmed qualifiers do not
 delay other contestants' qualification.
 
@@ -120,6 +123,6 @@ has not been applied does not replace the official result. Finish pending
 evaluations and review any rejudges before using the list for the afternoon round.
 
 The score shown on an individual submission describes whether its solution
-passed. Use **Credited** on the Codelink board to determine qualification. The
+passed. Use **Qualified** on the Codelink board to determine qualification. The
 plugin records qualification on this board and does not enroll contestants in a
 separate afternoon contest.

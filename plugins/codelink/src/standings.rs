@@ -36,6 +36,15 @@ pub enum CreditStatus {
     AfterQualification,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationVerdict {
+    /// Unfinished evaluations prevent confirming whether the contestant qualifies.
+    Pending,
+    /// Eligibility survives every resolution of the visible pending submissions.
+    Qualified,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProblemCell {
     pub status: CreditStatus,
@@ -50,10 +59,9 @@ pub struct Standing {
     pub username: String,
     pub credited: usize,
     pub accepted: usize,
-    pub qualified: bool,
-    /// Eligibility survives every resolution of the visible pending submissions.
-    /// The exact credited problems and qualification time may still change.
-    pub qualification_confirmed: bool,
+    /// None means there are not enough possible credited problems to qualify.
+    pub qualification_verdict: Option<QualificationVerdict>,
+    /// Only exposed for confirmed qualifiers; the exact time may still change.
     pub qualified_at_seconds: Option<i64>,
     pub problems: BTreeMap<i32, ProblemCell>,
     #[serde(skip)]
@@ -82,8 +90,8 @@ pub struct Standings {
     #[serde(flatten)]
     pub config: ContestConfig,
     pub problem_count: usize,
+    /// Counts confirmed qualifiers only.
     pub qualified_count: usize,
-    pub confirmed_qualified_count: usize,
     pub pending_submissions: usize,
     pub problems: Vec<ProblemSlots>,
     pub rows: Vec<Standing>,
@@ -111,12 +119,22 @@ impl Confirmation {
         }
     }
 
-    fn qualified(&self, user: usize, config: &ContestConfig) -> bool {
+    fn is_confirmed(&self, user: usize, config: &ContestConfig) -> bool {
         self.proofs[user].len() >= config.solves_to_qualify
     }
 
+    fn verdict(&self, user: usize, config: &ContestConfig) -> Option<QualificationVerdict> {
+        if self.is_confirmed(user, config) {
+            Some(QualificationVerdict::Qualified)
+        } else if self.possible_problems[user].len() >= config.solves_to_qualify {
+            Some(QualificationVerdict::Pending)
+        } else {
+            None
+        }
+    }
+
     fn observe(&mut self, user: usize, problem: usize, accepted: bool, config: &ContestConfig) {
-        if self.qualified(user, config)
+        if self.is_confirmed(user, config)
             || self.certain_owners[problem].len() >= config.slots_per_problem
         {
             return;
@@ -135,9 +153,9 @@ impl Confirmation {
             }
         }
 
-        // Even a displayed qualifier may still need this place if an earlier
-        // pending rival displaces one of their current credits. Keep that
-        // possibility so uncertainty can propagate through other problems.
+        // Even a contestant at the displayed credit limit may need this place
+        // if an earlier pending rival displaces one of their current credits.
+        // Keep that possibility so uncertainty can propagate through other problems.
         self.possible_owners[problem].insert(user);
         self.possible_problems[user].insert(problem);
     }
@@ -161,8 +179,7 @@ pub fn calculate(
             username: p.username,
             credited: 0,
             accepted: 0,
-            qualified: false,
-            qualification_confirmed: false,
+            qualification_verdict: None,
             qualified_at_seconds: None,
             problems: BTreeMap::new(),
             last_credit: None,
@@ -233,7 +250,7 @@ pub fn calculate(
         }
         let problem = &mut problems[problem_index];
         let time_seconds = submission.submitted_at_us.div_euclid(1_000_000);
-        let status = if row.qualified {
+        let status = if row.credited >= config.solves_to_qualify {
             CreditStatus::AfterQualification
         } else if problem.remaining == 0 {
             CreditStatus::SlotsFull
@@ -251,7 +268,6 @@ pub fn calculate(
             row.credited += 1;
             row.last_credit = Some((submission.submitted_at_us, submission.submission_id));
             if row.credited == config.solves_to_qualify {
-                row.qualified = true;
                 row.qualified_at_seconds = Some(time_seconds);
             }
             Some(problem.awards.len())
@@ -271,17 +287,22 @@ pub fn calculate(
     }
 
     for (index, row) in rows.iter_mut().enumerate() {
-        row.qualification_confirmed = row.qualified && confirmation.qualified(index, config);
+        row.qualification_verdict = confirmation.verdict(index, config);
+        if row.qualification_verdict != Some(QualificationVerdict::Qualified) {
+            row.qualified_at_seconds = None;
+        }
     }
 
-    // Display qualifiers first, then progress. Additional ACs never change this
-    // ordering or the time at which the contestant reached the threshold.
+    // Order by displayed credit progress. Extra ACs after the credit limit do
+    // not change this ordering or the time at which the threshold was reached.
     rows.sort_by_key(|r| (std::cmp::Reverse(r.credited), r.last_credit, r.user_id));
     Ok(Standings {
         config: config.clone(),
         problem_count: problems.len(),
-        qualified_count: rows.iter().filter(|r| r.qualified).count(),
-        confirmed_qualified_count: rows.iter().filter(|r| r.qualification_confirmed).count(),
+        qualified_count: rows
+            .iter()
+            .filter(|r| r.qualification_verdict == Some(QualificationVerdict::Qualified))
+            .count(),
         pending_submissions,
         problems,
         rows,

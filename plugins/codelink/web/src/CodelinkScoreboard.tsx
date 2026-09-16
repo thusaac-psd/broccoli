@@ -82,7 +82,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
           <Badge variant="outline">{t(`codelink.phase.${data.phase}`)}</Badge>
           <span className="text-sm font-semibold">
             {t('codelink.qualifiedCount', {
-              count: data.confirmed_qualified_count,
+              count: data.qualified_count,
             })}
           </span>
         </div>
@@ -217,19 +217,24 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                     {row.username}
                   </th>
                   <td className="whitespace-nowrap border-b border-border px-3 py-3 text-center">
-                    <Badge
-                      variant={
-                        row.qualification_confirmed ? 'default' : 'outline'
-                      }
-                    >
-                      {t(
-                        row.qualification_confirmed
-                          ? 'codelink.status.qualified'
-                          : row.qualified
-                            ? 'codelink.status.provisional'
-                            : 'codelink.status.competing',
-                      )}
-                    </Badge>
+                    {row.qualification_verdict ? (
+                      <Badge
+                        variant={
+                          row.qualification_verdict === 'qualified'
+                            ? 'default'
+                            : 'outline'
+                        }
+                      >
+                        {t(`codelink.status.${row.qualification_verdict}`)}
+                      </Badge>
+                    ) : (
+                      <span
+                        aria-label={t('codelink.status.noVerdict')}
+                        className="text-muted-foreground"
+                      >
+                        —
+                      </span>
+                    )}
                   </td>
                   <td className="border-b border-border px-3 py-3 text-center font-mono">
                     {row.credited}/{data.solves_to_qualify}
