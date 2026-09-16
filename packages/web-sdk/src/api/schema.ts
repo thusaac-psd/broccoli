@@ -2638,11 +2638,6 @@ export interface components {
        */
       contest_type: string;
       /**
-       * @description Optional function invoked to filter outgoing submission DTOs for a viewer.
-       * @example filter_submission_for_viewer
-       */
-      filter_submission_fn?: string | null;
-      /**
        * @description Plugin that registered this contest type.
        * @example icpc
        */
@@ -3809,7 +3804,7 @@ export interface components {
        * Format: double
        * @example 10
        */
-      score: number;
+      score?: number | null;
       stderr?: string | null;
       stdout?: string | null;
       /** Format: int32 */
@@ -3819,8 +3814,17 @@ export interface components {
        * @example 5
        */
       time_used?: number | null;
-      /** @example Accepted */
-      verdict: string;
+      /**
+       * @description `Option`, not `Verdict`: a `FieldMask` (e.g. `subtask_scores`'s
+       *     `result.test_case_results.*.verdict`) can blank this to JSON `null`
+       *     for a viewer who isn't entitled to the per-test-case breakdown, and a
+       *     mask can only ever blank a value, never author a replacement - so the
+       *     wire type has to admit `null` even though every row that reaches here
+       *     unmasked always carries a real verdict. See
+       *     `apply_filter_to_judgement_response` for where that null is produced.
+       * @example Accepted
+       */
+      verdict?: string | null;
     };
     /**
      * @example {

@@ -136,6 +136,19 @@ pub(super) async fn apply_filter_to_judgement_response(
     // directly as JSON, reading them with `Value` indexing rather than
     // through a struct. If you're tempted to "simplify" this back into a
     // typed round trip, don't - that reintroduces this exact crash.
+    // Task 17 / Step 2z: the `obj.insert(...)` calls below assume the eight
+    // leaves named here are the WHOLE of `JudgeResultResponse` - i.e. that
+    // splicing them one by one out of `masked_result` is equivalent to
+    // splicing the whole `result` object. That is true today, but it is a
+    // whitelist, not a projection: if `JudgeResultResponse` ever grows a
+    // ninth field, this splice silently keeps shipping the field from the
+    // UNMASKED `response` serialization below (`obj` already has it, and
+    // nothing here overwrites it) even if a future plugin's `FieldMask`
+    // targets it. That is a leak, not a crash, so nothing here would fail
+    // loudly - see `_assert_judge_result_response_fields_are_exhaustively_spliced`
+    // just below, which turns that silent leak into a compile error by
+    // naming every field of `JudgeResultResponse` with no `..` catch-all:
+    // adding a field there without touching this function no longer compiles.
     let masked_result = filtered_value
         .get("result")
         .cloned()
@@ -183,6 +196,32 @@ pub(super) async fn apply_filter_to_judgement_response(
     }
 
     Ok(value)
+}
+
+/// Compile-time exhaustiveness guard for the splice in
+/// [`apply_filter_to_judgement_response`]. This function is never called -
+/// its only purpose is the destructuring pattern below, which names every
+/// field of [`JudgeResultResponse`] explicitly with no `..` catch-all. If a
+/// field is ever added to (or removed from) `JudgeResultResponse` without
+/// this pattern being updated to match, `rustc` rejects the mismatch with
+/// "pattern does not mention field `<name>`" (E0027) rather than letting the
+/// splice above silently keep whitelisting only the original eight leaves.
+/// Keep this pattern in exact 1:1 correspondence with the `obj.insert(...)`
+/// calls in both branches of `apply_filter_to_judgement_response` - when you
+/// add a field here, add the matching `obj.insert` (both the `is_null()` and
+/// the populated branch) at the same time.
+#[allow(dead_code)]
+fn _assert_judge_result_response_fields_are_exhaustively_spliced(r: JudgeResultResponse) {
+    let JudgeResultResponse {
+        verdict: _,
+        score: _,
+        time_used: _,
+        memory_used: _,
+        compile_output: _,
+        error_message: _,
+        judged_at: _,
+        test_case_results: _,
+    } = r;
 }
 
 /// List masking: one `decide_batch` (via `fetch_visible_batch`) over every

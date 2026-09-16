@@ -27,11 +27,7 @@ const TERMINAL_STATUSES: SubmissionStatus[] = [
   'SystemError',
 ];
 
-const NON_TERMINAL_STATUSES: SubmissionStatus[] = [
-  'Pending',
-  'Compiling',
-  'Running',
-];
+const NON_TERMINAL_STATUSES: SubmissionStatus[] = ['Pending', 'Compiling'];
 
 for (const status of TERMINAL_STATUSES) {
   test(`a null verdict under terminal status "${status}" is a redaction, not a pending case`, () => {
@@ -39,6 +35,24 @@ for (const status of TERMINAL_STATUSES) {
   });
 
   test(`an undefined verdict under terminal status "${status}" is a redaction, not a pending case`, () => {
+    assert.equal(getVerdictKey(undefined, status), 'skipped');
+  });
+}
+
+// `Running` is deliberately NOT in `TERMINAL_STATUSES` (see
+// `@broccoli/web-sdk/submission`'s `isTerminalStatus` -- pollers must keep
+// polling while `Running`) but a null verdict on an existing test-case row
+// must still be treated as a redaction here, not "not run yet": a case can
+// finish and be masked while the judgement as a whole is still `Running`.
+// Task 17 / Step 2z: this pins the CRITICAL finding from the Task 16
+// re-review -- the previous version of this test asserted 'pending' for
+// this exact case, which was pinning the bug rather than the fix.
+for (const status of ['Running'] as const satisfies SubmissionStatus[]) {
+  test(`a null verdict under status "${status}" is a redaction, not a pending case`, () => {
+    assert.equal(getVerdictKey(null, status), 'skipped');
+  });
+
+  test(`an undefined verdict under status "${status}" is a redaction, not a pending case`, () => {
     assert.equal(getVerdictKey(undefined, status), 'skipped');
   });
 }
