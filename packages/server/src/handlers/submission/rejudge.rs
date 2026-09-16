@@ -19,8 +19,9 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // system/judge-operator tooling that mutates submissions, not a viewer read
 // path - any `SubmissionResponse` returned here reflects the actor's own
 // privileged write back to them, the same as any other write handler.
-use crate::entity::judgement_reset::ClearJudgementActiveModel;
-use crate::entity::{submission, submission_judgement, test_case_result};
+use crate::entity::{
+    judgement_reset::ClearJudgementActiveModel, submission, submission_judgement, test_case_result,
+};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::FreshAuthUser;
 use crate::extractors::json::AppJson;

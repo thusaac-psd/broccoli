@@ -381,11 +381,127 @@ fn handlers_root() -> PathBuf {
     PathBuf::from(manifest_dir).join("src").join("handlers")
 }
 
+/// True iff `line` references the `entity` module as a path segment (`entity::`)
+/// at a genuine word boundary — the character immediately before the match
+/// (if any) is not an identifier character. This is what rejects `plugin_entity::`
+/// (an unrelated locally-aliased import) while still accepting `crate::entity::`,
+/// `super::super::entity::` (any depth of relative chain, since the substring
+/// `super::entity::` is present regardless of how many `super::` precede it),
+/// `self::entity::`, and a grouped path fragment like `entity::user` sitting on
+/// its own line inside a `use crate::{ ... }` block. Comment-only lines are
+/// never treated as access sites (a line whose trimmed content starts with
+/// `//` cannot itself be a bypass).
+///
+/// Also matches a bare module alias site, `entity as `, so `use crate::entity
+/// as e;` requires its own audit even though it contains no `entity::` token.
+fn line_has_entity_access(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    for pat in ["entity::", "entity as "] {
+        let mut start = 0;
+        while let Some(rel) = line[start..].find(pat) {
+            let idx = start + rel;
+            let boundary_ok = match idx.checked_sub(1) {
+                None => true,
+                Some(prev_idx) => {
+                    let prev = line[..idx].chars().next_back().unwrap();
+                    let _ = prev_idx;
+                    !(prev.is_alphanumeric() || prev == '_')
+                }
+            };
+            if boundary_ok {
+                return true;
+            }
+            start = idx + 1;
+        }
+    }
+    false
+}
+
+/// A multi-line `use crate::{ ... }` group can put the `entity::` token on a
+/// continuation line, separate from the `use` keyword an audit comment sits
+/// above. Walk backward (bounded, no full statement parser) to find the `use`
+/// line that opens the enclosing group, so the audit comment above *that*
+/// line covers the whole group. If a prior statement's end (`;`) is crossed
+/// before a `use` line is found, `hit_line` is standalone (e.g. a
+/// fully-qualified inline call in a function body) and is its own anchor.
+fn find_use_group_anchor(lines: &[&str], hit_line: usize) -> usize {
+    if lines[hit_line].trim_start().starts_with("use ") {
+        return hit_line;
+    }
+    let mut j = hit_line;
+    let mut steps = 0;
+    while j > 0 && steps < 8 {
+        j -= 1;
+        steps += 1;
+        let trimmed = lines[j].trim_start();
+        if trimmed.starts_with("use ") {
+            return j;
+        }
+        if trimmed.ends_with(';') {
+            return hit_line;
+        }
+    }
+    hit_line
+}
+
+/// Whether a contiguous block of `//` comment lines directly above
+/// `anchor_line` (no blank line or code line breaks the chain) contains the
+/// `visibility-bypass-audited:` marker.
+fn is_audited_at(lines: &[&str], anchor_line: usize) -> bool {
+    let mut j = anchor_line;
+    while j > 0 {
+        j -= 1;
+        let trimmed = lines[j].trim_start();
+        if !trimmed.starts_with("//") {
+            return false;
+        }
+        if trimmed.contains("visibility-bypass-audited:") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns the 1-indexed line numbers in `content` where the `entity` module
+/// is referenced without an adjacent `visibility-bypass-audited:` comment.
+/// Scoped per line (and per `use` group), not per file: one audited import
+/// earlier in a file no longer exempts every later import in that same file.
+///
+/// Known residual gaps (not detected by this line-oriented scan — see
+/// task-13-report.md addendum for why):
+///   - alias-then-use-alias: `use crate::entity as e;` requires its own audit
+///     (caught, see `entity as ` above), but a later `e::user::Entity::find()`
+///     elsewhere in the file is not tracked back to that alias.
+///   - a facade re-export: another (non-handler) module doing
+///     `pub use crate::entity::submission;`, imported by a handler from that
+///     facade instead of from `crate::entity` directly.
+fn find_unaudited_entity_accesses(content: &str) -> Vec<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut offenders = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line_has_entity_access(line) {
+            continue;
+        }
+        let anchor = find_use_group_anchor(&lines, i);
+        if !is_audited_at(&lines, anchor) {
+            offenders.push(i + 1);
+        }
+    }
+    offenders
+}
+
 /// Handlers must reach entities only through the visibility kernel. A direct
 /// `crate::entity::` import in a handler module is a bypass: it can read a row
 /// the kernel would have denied. Kept as a static guard because the failure
 /// this prevents — a new read path that skips the kernel — is invisible at
 /// runtime until someone reads a problem they should not have.
+///
+/// This is a per-line/per-`use`-group check, not a per-file one: a file that
+/// already has one audited entity import does not get a blanket exemption for
+/// every entity import added to it afterward.
 #[test]
 fn handlers_do_not_import_entities_directly() {
     let root = handlers_root();
@@ -405,16 +521,133 @@ fn handlers_do_not_import_entities_directly() {
 
     let mut offenders = Vec::new();
     for file in &files {
-        let src = fs::read_to_string(file)
-            .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
-        if src.contains("use crate::entity::") && !src.contains("visibility-bypass-audited:") {
-            offenders.push(file.display().to_string());
+        let src =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        let lines = find_unaudited_entity_accesses(&src);
+        if !lines.is_empty() {
+            offenders.push(format!("{}: lines {lines:?}", file.display()));
         }
     }
     assert!(
         offenders.is_empty(),
-        "handlers importing entities directly: {offenders:#?}"
+        "handlers importing entities directly without an adjacent audit: {offenders:#?}"
     );
+}
+
+#[cfg(test)]
+mod entity_import_guard_tests {
+    use super::find_unaudited_entity_accesses;
+
+    /// The CRITICAL fix this module exists to pin: an audited import earlier
+    /// in a file must NOT exempt an unrelated, unaudited import later in the
+    /// same file. Before this fix the guard checked `file.contains(marker)`
+    /// once for the whole file, so this exact shape passed silently.
+    #[test]
+    fn earlier_audited_import_does_not_exempt_a_later_unaudited_one() {
+        let src = "\
+// visibility-bypass-audited: existing justified import
+use crate::entity::{additional_file, problem};
+
+use crate::entity::submission; // brand new, zero justification
+";
+        assert_eq!(
+            find_unaudited_entity_accesses(src),
+            vec![4],
+            "the unaudited `submission` import on line 4 must be flagged even \
+             though line 1's comment audits line 2"
+        );
+    }
+
+    #[test]
+    fn audited_flat_import_is_not_flagged() {
+        let src = "\
+// visibility-bypass-audited: some reason
+use crate::entity::user;
+";
+        assert!(find_unaudited_entity_accesses(src).is_empty());
+    }
+
+    #[test]
+    fn unaudited_flat_import_is_flagged() {
+        let src = "use crate::entity::user;\n";
+        assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
+    }
+
+    /// Evasion form 1: a grouped path has no literal `use crate::entity::`
+    /// substring at all.
+    #[test]
+    fn grouped_use_path_is_detected() {
+        let src = "use crate::{entity::user, other_mod};\n";
+        assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
+    }
+
+    /// Evasion form 2: a relative chain has no `crate::entity::` substring;
+    /// this must be caught at any depth of `super::`.
+    #[test]
+    fn relative_super_chain_is_detected_at_any_depth() {
+        assert_eq!(
+            find_unaudited_entity_accesses("use super::entity::user;\n"),
+            vec![1]
+        );
+        assert_eq!(
+            find_unaudited_entity_accesses("use super::super::entity::user;\n"),
+            vec![1]
+        );
+    }
+
+    /// Evasion form 4: a fully-qualified inline call with no `use` at all.
+    #[test]
+    fn fully_qualified_inline_call_is_detected() {
+        let src = "\
+fn f() {
+    let x = crate::entity::submission::Entity::find_by_id(1);
+}
+";
+        assert_eq!(find_unaudited_entity_accesses(src), vec![2]);
+    }
+
+    /// A multi-line grouped `use` puts `entity::` on a continuation line; the
+    /// audit comment lives above the `use` line that opens the group, not
+    /// directly above the `entity::user,` line itself.
+    #[test]
+    fn multiline_grouped_use_is_covered_by_comment_above_the_use_line() {
+        let src = "\
+// visibility-bypass-audited: reason
+use crate::{
+    entity::user,
+    other_mod,
+};
+";
+        assert!(find_unaudited_entity_accesses(src).is_empty());
+    }
+
+    /// A locally-aliased, unrelated import (`plugin_entity::`) must not
+    /// false-positive: `entity` here is a suffix of a longer identifier, not
+    /// the `entity` module path segment.
+    #[test]
+    fn aliased_unrelated_identifier_is_not_a_false_positive() {
+        let src = "let x = plugin_entity::ActiveModel { ..Default::default() };\n";
+        assert!(find_unaudited_entity_accesses(src).is_empty());
+    }
+
+    /// `use crate::entity::user as u;` — the alias is on the imported item,
+    /// not the module — still contains a literal `entity::` token and must
+    /// still be caught.
+    #[test]
+    fn item_level_alias_does_not_evade() {
+        let src = "use crate::entity::user as u;\n";
+        assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
+    }
+
+    /// `use crate::entity as e;` has no `entity::` substring but must still
+    /// require an audit at the aliasing site itself (see the module doc
+    /// comment on `find_unaudited_entity_accesses` for the residual gap this
+    /// does not close: tracking `e::` uses after this point).
+    #[test]
+    fn module_level_alias_site_is_detected() {
+        let src = "use crate::entity as e;\n";
+        assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
+    }
 }
 
 #[cfg(test)]

@@ -23,8 +23,7 @@ use crate::dlq::{DlqService, ResolveResult, dlq_service};
 // `contestant_cannot_bulk_delete`. This is judge-operator tooling over the
 // dead letter queue, never a per-row Contest/Problem/Submission view the
 // kernel governs.
-use crate::entity::judgement_reset::ClearJudgementColumns;
-use crate::entity::{dead_letter_message, submission};
+use crate::entity::{dead_letter_message, judgement_reset::ClearJudgementColumns, submission};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
