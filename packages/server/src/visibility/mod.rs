@@ -80,46 +80,54 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// `Decision`s for this same `decide_batch` call - by the time this runs,
 /// every `Resource::Submission` passed in is guaranteed to be a key in it.
 ///
-/// `Resource::Clarification`'s contest is not resolved by any source today,
-/// because `host_decide` fails it closed unconditionally (out of scope -
-/// Task 12, see `host_rules`'s module docs), so a `Resource::Clarification`
-/// can never actually reach this function: a host `Deny` never crosses to
-/// the plugin layer (pinned decision #2). Returns `None` here rather than
-/// panicking, so this stays total if that invariant ever changes without a
-/// matching update here, which would be a correctness gap in whichever task
-/// ports Clarification support, not a panic waiting to happen.
+/// `clarification_contest_ids` is the analogous out-param for `Resource::
+/// Clarification` (`clarification_id -> clarification.contest_id`), added
+/// in Task 12 alongside `host_rules::decide_clarification`. Unlike a
+/// submission, a clarification's `contest_id` column is never null - it
+/// belongs to exactly one contest, always - so returning `None` for a
+/// `Resource::Clarification` that WAS resolved by `host_decide` would be
+/// the exact Task 7 `Submission` bug this function's own history warns
+/// about: a real, single-valued `contest_id` exists and is knowable, so
+/// reporting `None` would be silently dishonest to a plugin, not merely
+/// imprecise. It differs from `Resource::Attachment`'s principled `None`
+/// below in exactly this way - a clarification has ONE contest, a problem
+/// backing an attachment can have zero, one, or many. A miss in this map
+/// (the id absent as a key) can only mean this resource was never a host
+/// `Deny` target that reached here in the first place, mirroring
+/// `submission_contest_ids`'s own miss handling.
 ///
 /// `Resource::Attachment` DOES reach this function now: `host_decide` can
 /// `Allow` it (see `host_rules::decide_standalone_problem_access`, Task 10),
 /// so its `None` here is a deliberate, principled answer, not the same kind
-/// of "unresolved" gap `Clarification` documents above, and NOT a repeat of
-/// the Task 7 `Submission` bug this function's history warns about. The
-/// `Submission` bug was losing a real, single-valued `contest_id` that
-/// existed but was not inline in the `Resource` (it had to come from
-/// `submission_contest_ids`) - dropping it to `None` was silently wrong.
-/// `Resource::Attachment` is different in kind, not just in whether a
-/// lookup was wired up: it carries a `problem_id`, not a `contest_id`, and
-/// the rule that admits it (`decide_standalone_problem_access`) is the same
-/// contest-agnostic rule used for standalone `Resource::Problem`/
-/// `Resource::Sample` (`contest_id: None`, handled by the arm below) - a
-/// problem can be attached to zero, one, or many contests via
-/// `contest_problem`, so even a DB lookup would produce a SET, not a single
-/// authoritative value. There is no real single answer to lose here, so
-/// `None` is not fail-open; it is the same "not scoped to one contest"
-/// answer this function already gives for a standalone `Resource::Problem`/
-/// `Resource::Sample`.
+/// of "unresolved" gap `Clarification` used to document before Task 12, and
+/// NOT a repeat of the Task 7 `Submission` bug this function's history
+/// warns about. The `Submission` bug was losing a real, single-valued
+/// `contest_id` that existed but was not inline in the `Resource` (it had
+/// to come from `submission_contest_ids`) - dropping it to `None` was
+/// silently wrong. `Resource::Attachment` is different in kind, not just in
+/// whether a lookup was wired up: it carries a `problem_id`, not a
+/// `contest_id`, and the rule that admits it
+/// (`decide_standalone_problem_access`) is the same contest-agnostic rule
+/// used for standalone `Resource::Problem`/`Resource::Sample`
+/// (`contest_id: None`, handled by the arm below) - a problem can be
+/// attached to zero, one, or many contests via `contest_problem`, so even a
+/// DB lookup would produce a SET, not a single authoritative value. There
+/// is no real single answer to lose here, so `None` is not fail-open; it is
+/// the same "not scoped to one contest" answer this function already gives
+/// for a standalone `Resource::Problem`/`Resource::Sample`.
 fn resource_contest_id(
     resource: &Resource,
     submission_contest_ids: &HashMap<i32, Option<i32>>,
+    clarification_contest_ids: &HashMap<i32, i32>,
 ) -> Option<i32> {
     match resource {
         Resource::Contest(id) => Some(*id),
         Resource::Problem { contest_id, .. } | Resource::Sample { contest_id, .. } => *contest_id,
         Resource::Submission(id) => submission_contest_ids.get(id).copied().flatten(),
+        Resource::Clarification(id) => clarification_contest_ids.get(id).copied(),
         // See the doc comment above: `Attachment` has no single contest
-        // scope even in principle (problem -> contest is many-to-many);
-        // `Clarification` is still unreachable (Task 12, out of scope).
-        Resource::Attachment { .. } | Resource::Clarification(_) => None,
+        // scope even in principle (problem -> contest is many-to-many).
+        Resource::Attachment { .. } => None,
     }
 }
 
@@ -249,12 +257,14 @@ impl<'a> VisibilityKernel<'a> {
 
         if !misses.is_empty() {
             let mut submission_contest_ids: HashMap<i32, Option<i32>> = HashMap::new();
+            let mut clarification_contest_ids: HashMap<i32, i32> = HashMap::new();
             let host_decisions = host_decide(
                 &self.state.db,
                 &self.subject,
                 action,
                 &misses,
                 &mut submission_contest_ids,
+                &mut clarification_contest_ids,
             )
             .await?;
             debug_assert_eq!(
@@ -295,7 +305,13 @@ impl<'a> VisibilityKernel<'a> {
                     // this.
                     let target_contest_ids: Vec<Option<i32>> = plugin_targets
                         .iter()
-                        .map(|r| resource_contest_id(r, &submission_contest_ids))
+                        .map(|r| {
+                            resource_contest_id(
+                                r,
+                                &submission_contest_ids,
+                                &clarification_contest_ids,
+                            )
+                        })
                         .collect();
                     let contest_id = contest_scope(&plugin_targets);
                     let plugin_decisions = query_plugins(
