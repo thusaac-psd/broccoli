@@ -705,8 +705,10 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
 }
 
 /// Core decision logic. Exercised directly by tests via `Host::mock()` (no
-/// wasm32 target required) - there is no e2e test pinning ICPC's freeze
-/// behaviour, so these unit tests are the evidence it still works.
+/// wasm32 target required); the freeze-redaction branch is additionally
+/// pinned end-to-end by
+/// `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+/// in `packages/server/tests/e2e/plugins/icpc.rs` (see below).
 #[cfg(any(target_arch = "wasm32", test))]
 fn decide_visibility_decisions(
     host: &Host,

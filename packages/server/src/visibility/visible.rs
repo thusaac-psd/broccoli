@@ -2,11 +2,21 @@
 //!
 //! An entity the kernel has cleared for one subject and action. The
 //! constructor is `pub(super)` — private to the `visibility` module — so a
-//! handler cannot mint one directly; the only public way to obtain a
-//! `Visible<T>` is through `VisibilityKernel::fetch_visible` /
-//! `fetch_visible_batch`. Combined with `crate::entity` being closed to
-//! handler modules (Task 13), this makes "a read path that skips the
-//! kernel" a compile error rather than a production finding.
+//! handler cannot mint one directly; the only way to obtain a `Visible<T>`
+//! is through `VisibilityKernel::fetch_visible` / `fetch_visible_batch`,
+//! both of which route through a kernel decision first. That alone makes
+//! "obtain an entity without a kernel decision" a compile error, enforced
+//! exhaustively by the compiler — no pattern list to maintain.
+//!
+//! Separately, direct `crate::entity` imports in handler modules are
+//! flagged by a CI-enforced static source scan
+//! (`handlers_do_not_import_entities_directly`), **not** by the compiler:
+//! `pub(crate)` grants visibility to the whole defining crate, and handlers
+//! live in that crate, so there is no visibility modifier that walls
+//! handlers off from `entity` while leaving `entity`'s ~19 other, legitimate
+//! non-handler consumers untouched. That scan raises the cost of a bypass;
+//! it does not make one impossible. See the design spec's "Layer ④ —
+//! enforcement by construction" (amended 2026-09-16) for the full argument.
 //!
 //! A DTO must reach a response body ONLY through [`Visible::into_masked_json`],
 //! which applies the `FieldMask` when the decision is `Redact` — a handler
@@ -47,11 +57,14 @@ impl<T: serde::Serialize> Visible<T> {
     /// a narrow, purpose-specific accessor for that field instead of
     /// widening this one back to `pub`/`pub(crate)`.
     ///
-    /// `#[allow(dead_code)]`: Tasks 9-12 (not yet written) are the intended
-    /// production callers; today the only call site is this module's own
-    /// `#[cfg(test)]` tests, which the lib build (unlike the test build)
-    /// does not compile, so `dead_code` fires without the allow. Remove the
-    /// allow once a non-test caller inside `visibility` exists.
+    /// `#[allow(dead_code)]`: no production code inside `visibility` calls
+    /// this yet. Tasks 9-12 were written without needing it, so the only
+    /// call site remains this module's own `#[cfg(test)]` tests, which the
+    /// lib build (unlike the test build) does not compile, so `dead_code`
+    /// fires without the allow. Remove the allow once a genuine non-test
+    /// caller inside `visibility` exists; if none ever materializes,
+    /// consider deleting `as_inner` rather than leaving it allowed
+    /// indefinitely.
     #[allow(dead_code)]
     pub(super) fn as_inner(&self) -> &T {
         &self.inner
