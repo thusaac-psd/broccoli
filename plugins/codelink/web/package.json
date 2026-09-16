@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "build": "tsdown --dts",
+    "build": "pnpm run typecheck && tsdown --dts",
+    "typecheck": "tsc --noEmit",
     "dev": "tsdown --watch --sourcemap"
   },
   "tsdown": {

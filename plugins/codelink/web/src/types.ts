@@ -1,13 +1,14 @@
-export type CreditStatus = 'credited' | 'slots_full' | 'after_qualification';
-
 export type QualificationVerdict = 'pending' | 'qualified';
 
-export interface ProblemCell {
-  status: CreditStatus;
+export type ProblemCell = {
   submission_id: number;
   time_seconds: number;
-  slot: number | null;
-}
+} & (
+  | { status: 'credited'; slot: number }
+  | { status: 'slots_full' | 'after_qualification'; slot: null }
+);
+
+export type CreditStatus = ProblemCell['status'];
 
 export interface Standing {
   user_id: number;
