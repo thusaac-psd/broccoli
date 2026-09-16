@@ -230,7 +230,11 @@ export const en: Record<string, string> = {
   'submissionDetail.timeDelta': 'Time {value} ms',
   'submissionDetail.memoryDelta': 'Memory {value} KB',
   'submissionDetail.caseChanges': '{count} case changes vs current',
+  'submissionDetail.caseChangesUnknown':
+    '{count} case(s) hidden - cannot verify change vs current',
   'submissionDetail.changedFromCase': 'Changed from {verdict}, {score} pts',
+  'submissionDetail.maskedCaseDiff': 'Result hidden - cannot verify change',
+  'submissionDetail.hiddenValue': 'hidden',
   'submissionDetail.newCaseInVersion': 'New in this version',
   'submissionDetail.noVisibleResultDetails': 'No visible result details.',
   'submissionDetail.errorCode': 'Error code',
