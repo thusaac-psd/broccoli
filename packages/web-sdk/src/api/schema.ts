@@ -3891,6 +3891,10 @@ export interface components {
       memory_used?: number | null;
       /**
        * Format: double
+       * @description `Option` for the same reason as `verdict` above (this field is masked
+       *     by the same `result.test_case_results.*.score`-shaped `FieldMask`
+       *     paths) - every row that reaches here unmasked always carries a real
+       *     score.
        * @example 10
        */
       score?: number | null;
