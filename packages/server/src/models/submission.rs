@@ -338,6 +338,9 @@ pub struct AdminFanOutSubmissionResponse {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct BulkRejudgeResponse {
+    /// Count only - never per-id detail, never submission content. See
+    /// `bulk_rejudge_submissions`'s doc comment (`handlers/submission/rejudge.rs`)
+    /// for exactly what this number does and does not disclose.
     #[schema(example = 1234)]
     pub queued: usize,
 }

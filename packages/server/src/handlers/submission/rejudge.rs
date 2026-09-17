@@ -351,6 +351,34 @@ pub async fn rejudge_submission(
     Ok(Json(response))
 }
 
+/// Bulk-rejudges every submission in `payload.submission_ids` that exists,
+/// returning only `{ queued: N }` - never a per-id success/failure list,
+/// never any submission content.
+///
+/// `N` counts every *requested, deduplicated* id found in the `submission`
+/// table, regardless of the caller's own `Resource::Submission` Read
+/// visibility into any of them - this endpoint is gated on
+/// `submission:rejudge`, a mutation permission independent of Read
+/// reachability (see `apply_filter_to_response_after_mutation`'s doc comment
+/// in `filter.rs` for the sibling reasoning on the single-submission path).
+/// A caller who repeatedly narrows `submission_ids` and reads back `queued`
+/// can therefore binary-search which ids exist, even ones they could never
+/// `GET` - an aggregate *existence* oracle over the id space.
+///
+/// That is a real disclosure; do not describe it as "nothing to leak". It is
+/// judged acceptable because it discloses existence only, never content: no
+/// field of a submission the caller can't Read (owner, verdict, code,
+/// timestamps, ...) is ever observable through this count, only whether the
+/// row is present. That is the same disclosure class the single-submission
+/// surface already has and keeps after the submission:rejudge visibility
+/// fix - `GET /submissions/{id}` still answers 200 vs. 404 for exactly this
+/// reason, and `apply_submission_judgement`/`rejudge_submission` still
+/// succeed-or-404 on a nonexistent id - just aggregated across up to 10,000
+/// ids in one round trip instead of one id per request. It is not a
+/// regression introduced by that fix. Don't close it by changing this
+/// endpoint's behaviour alone: the identical oracle stays reachable one id
+/// at a time via the endpoints above, so narrowing only this one would trade
+/// a fast leak for a slow one rather than closing it.
 #[utoipa::path(
     post,
     path = "/bulk-rejudge",
