@@ -50,6 +50,9 @@ pub async fn list_registries(
 
     let mut contest_type_handlers: Vec<ContestTypeEntry> = {
         let reg = state.registries.contest_type_registry.read().await;
+        // No `filter_submission_fn` field here anymore - see
+        // `ContestTypeEntry`'s doc comment for where that capability went
+        // (the VisibilityKernel, not this registry).
         reg.iter()
             .map(|(contest_type, h)| ContestTypeEntry {
                 contest_type: contest_type.clone(),
