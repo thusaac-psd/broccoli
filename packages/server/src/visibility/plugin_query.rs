@@ -526,6 +526,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oversized_redact_field_list_at_non_first_index_denies_whole_batch() {
+        // The batch-size-1 sibling test above cannot tell a full scan of
+        // `out.decisions` apart from a validator that only ever looks at
+        // index 0 - a batch size of 1 has no non-first index. Use a batch
+        // of 3 with the oversized Redact at the LAST position.
+        let too_many_fields: Vec<String> = (0..=MAX_MASK_FIELDS).map(|i| format!("f{i}")).collect();
+        let out = VisibilityQueryOutput {
+            decisions: vec![
+                WireDecision::Allow {},
+                WireDecision::Allow {},
+                WireDecision::Redact {
+                    fields: too_many_fields,
+                },
+            ],
+        };
+        assert_eq!(
+            decisions_from_output("test-plugin", Ok(out), 3),
+            vec![Decision::Deny, Decision::Deny, Decision::Deny],
+            "a Redact decision with too many fields anywhere in the batch - not just at \
+             index 0 - must deny the whole batch"
+        );
+    }
+
     // ---------------------------------------------------------------------
     // meet_positionally - pure, no plugin host needed
     // ---------------------------------------------------------------------
