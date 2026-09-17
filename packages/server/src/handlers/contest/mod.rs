@@ -13,21 +13,44 @@ use tracing::instrument;
 // asserted at handler entry and pinned by tests/integration/contest.rs's
 // `contestant_cannot_create_a_contest`, `contestant_cannot_update_contest`,
 // and `contestant_cannot_delete_a_contest`. The two single-contest reads,
-// `get_contest`/`get_contest_my_info`, gate through `check_contest_access`
-// (window + is_public + participant), the same host rule the kernel's
-// `decide_contest` is a direct port of (see
-// `visibility::host_rules::decide_contest`) - `check_contest_access` is kept
-// as the sole reachability check here, mirroring the deliberate,
-// already-reviewed precedent in `list_contest_submissions`
-// (handlers/submission/mod.rs) - and is independently unit-tested in
-// `utils::contest::contest_access_tests`, plus pinned end-to-end by
-// `non_participant_cannot_see_private_contest`. `list_contests` filters the
-// same window/is_public/participant conditions at the SQL layer with a
+// `get_contest`/`get_contest_my_info`, now gate through
+// `kernel.decide(Action::Read, Resource::Contest(id)).is_denied()` -
+// `visibility::host_rules::decide_contest` is a verified byte-identical
+// port of the window/is_public/participant rule `check_contest_access` used
+// to apply directly here, so this is not a behavioural change; it is a
+// routing change, so a future contest-scoped plugin's `Deny` on
+// `Resource::Contest` now takes effect on these two endpoints exactly as it
+// already does on `list_contest_problems` and the clarification read paths
+// (see I1 in `.superpowers/sdd/2026-09-15-visibility-kernel/consolidated-findings.md`).
+// `find_contest` (via `find_active_by_id`) still runs BEFORE the kernel
+// gate, so a soft-deleted contest is still 404 even for a `contest:manage`
+// admin, unaffected - pinned by
+// `visibility_matrix::soft_delete::contest_soft_deleted_is_not_found_even_for_contest_manage_admin`.
+// `list_contests` filters the same window/is_public/participant conditions
+// at the SQL layer (necessary: pagination's COUNT/OFFSET/LIMIT must operate
+// over the filtered set at the DB layer, which a per-row kernel decision
+// cannot do without first fetching the whole table) with a
 // perm::CONTEST_MANAGE bypass for the admin view, pinned by
 // `contestant_sees_only_public_and_enrolled_contests`,
 // `contestant_does_not_see_never_activating_contests`,
 // `contestant_does_not_see_not_yet_activated_contests`, and
-// `contestant_does_not_see_deactivated_contests`.
+// `contestant_does_not_see_deactivated_contests` - then ALSO runs every
+// fetched page (bounded to `per_page`, max 100) through
+// `kernel.decide_batch(Action::Read, ..)` and drops any row the kernel
+// denies, so the same future contest-scoped plugin narrowing applies here
+// too. The SQL predicate is a byte-identical mirror of the same host rule
+// the kernel applies, so it cannot ALLOW a row the kernel would deny; the
+// kernel pass can only shrink a page the SQL filter already selected, never
+// add a row back - the failure direction if the two predicates ever drift
+// is under-inclusion (an availability bug, visible as `data.len()` <
+// `pagination.total` for that page), never over-inclusion (a disclosure
+// bug). No plugin registers for `Resource::Contest` today, so both new
+// kernel gates are documented no-ops, not live behaviour changes - the same
+// caveat as every other `Resource::Contest` gate in this codebase (see
+// `handlers/clarification.rs`). `list_participants`
+// (handlers/contest/participants.rs) and `list_contest_submissions`'s top
+// gate (handlers/submission/mod.rs) are documented separately at their own
+// call sites.
 use crate::entity::{contest, contest_user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -39,9 +62,10 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
-use crate::utils::contest::{check_contest_access, find_contest};
+use crate::utils::contest::find_contest;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::text::sanitize_db_text;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 mod participants;
 mod problems;
@@ -213,6 +237,26 @@ pub async fn list_contests(
         .all(&state.db)
         .await?;
 
+    // Kernel narrowing pass over this page only (bounded by `per_page`,
+    // clamped above to at most 100) - see the module-level comment for why
+    // the SQL filter above stays and this cannot disagree with it in the
+    // disclosure direction. The kernel OWNS the subject: one kernel per
+    // request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let resources: Vec<Resource> = data.iter().map(|c| Resource::Contest(c.id)).collect();
+    let decisions = kernel.decide_batch(Action::Read, &resources).await?;
+    let data: Vec<ContestListItem> = data
+        .into_iter()
+        .zip(decisions)
+        .filter_map(|(item, decision)| {
+            if decision.is_denied() {
+                None
+            } else {
+                Some(item)
+            }
+        })
+        .collect();
+
     Ok(Json(ContestListResponse {
         data,
         pagination: Pagination {
@@ -245,7 +289,17 @@ pub async fn get_contest(
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<ContestResponse>, AppError> {
     let model = find_contest(&state.db, id).await?;
-    check_contest_access(&state.db, &auth_user, &model).await?;
+
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(Action::Read, Resource::Contest(id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
     Ok(Json(model.into()))
 }
 #[utoipa::path(
@@ -269,8 +323,20 @@ pub async fn get_contest_my_info(
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<ContestUserContextResponse>, AppError> {
-    let model = find_contest(&state.db, id).await?;
-    check_contest_access(&state.db, &auth_user, &model).await?;
+    // `find_contest` resolves via `find_active_by_id`, so a soft-deleted
+    // contest 404s here first, before the kernel gate below - see the
+    // module-level comment.
+    find_contest(&state.db, id).await?;
+
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(Action::Read, Resource::Contest(id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
 
     let registration = contest_user::Entity::find_by_id((id, auth_user.user_id))
         .one(&state.db)

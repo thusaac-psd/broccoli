@@ -17,10 +17,16 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // via `Resource::Submission`, `list_submissions`/`list_contest_submissions`
 // via `fetch_visible_batch`, `create_submission`/`create_contest_submission`
 // via `Resource::Problem` before accepting a submit) - these entity types are
-// only used for the pre-kernel row fetch and for `list_contest_submissions`'s
-// deliberately-retained `check_contest_access` contest-reachability gate (see
-// the comment at that call site, and `handlers/contest/mod.rs` for the same
-// audited pattern), pinned by the frozen
+// only used for the pre-kernel row fetch. `list_contest_submissions`'s top
+// gate now also routes through the kernel: it decides `Action::Read` on
+// `Resource::Contest(contest_id)` (the same gate `get_contest`/
+// `list_contest_problems` use - `decide_contest` is a verified
+// byte-identical port of the window/is_public/participant rule this used to
+// call directly via `check_contest_access`, so this is not a behavioural
+// change), reusing the single per-request kernel instance that also drives
+// the per-row `apply_filter_to_list` pass on `Resource::Submission` further
+// down - distinct resource kinds, so the two decisions cannot collide or
+// double-decide (see the comments at that call site), pinned by the frozen
 // `tests/integration/visibility_matrix.rs::contest_submission_list` and
 // `submission_detail` suites.
 use crate::entity::{contest, contest_user, problem, submission, submission_judgement, user};
@@ -32,9 +38,7 @@ use crate::hooks;
 use crate::models::shared::{Pagination, escape_like};
 use crate::models::submission::*;
 use crate::state::AppState;
-use crate::utils::contest::{
-    check_contest_access, find_contest, require_contest_participant, require_contest_running,
-};
+use crate::utils::contest::{find_contest, require_contest_participant, require_contest_running};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
@@ -758,16 +762,34 @@ pub async fn list_contest_submissions(
 
     let can_view_all = auth_user.has_permission(perm::SUBMISSION_VIEW_ALL);
 
-    // Gate contest visibility through the shared access check so the activation
-    // window (activate_time/deactivate_time) is enforced here exactly as on every
-    // other contest read path. SUBMISSION_VIEW_ALL still short-circuits it, matching
-    // the prior behaviour where that permission bypassed the gate. The hand-rolled
-    // `is_public` check this replaces skipped the window entirely: a *public but
-    // out-of-window* contest (not yet activated, or deactivated/archived) leaked its
-    // full submission list - usernames, verdicts, scores - to any authenticated
-    // non-participant, and acted as an existence oracle (200-with-data vs 404).
-    if !can_view_all {
-        check_contest_access(&state.db, &auth_user, &contest_model).await?;
+    // The kernel OWNS the subject: one kernel per request per subject. This
+    // single instance also drives the per-row `apply_filter_to_list` pass
+    // below.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Gate contest visibility through `Resource::Contest` (the same gate
+    // `get_contest`/`list_contest_problems` use - `decide_contest` is a
+    // verified byte-identical port of the window/is_public/participant rule
+    // this replaces, so this is not a behavioural change) so the activation
+    // window (activate_time/deactivate_time) is enforced here exactly as on
+    // every other contest read path. SUBMISSION_VIEW_ALL still short-circuits
+    // it, matching the prior behaviour where that permission bypassed the
+    // gate. The hand-rolled `is_public` check this originally replaced
+    // skipped the window entirely: a *public but out-of-window* contest (not
+    // yet activated, or deactivated/archived) leaked its full submission list
+    // - usernames, verdicts, scores - to any authenticated non-participant,
+    // and acted as an existence oracle (200-with-data vs 404). This top gate
+    // decides `Resource::Contest`; the per-row pass below decides
+    // `Resource::Submission` for each row - distinct resource kinds, so
+    // there is no double-decision and this gate still runs, and still can
+    // still 404, strictly before any row is fetched.
+    if !can_view_all
+        && kernel
+            .decide(Action::Read, Resource::Contest(contest_id))
+            .await?
+            .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
     }
 
     // STATIC (plugin-independent) half of `visibility::host_rules::decide_submission`'s
@@ -855,21 +877,18 @@ pub async fn list_contest_submissions(
         .await?;
 
     let data = build_submission_list_items(&state.db, submissions).await?;
-    // The kernel OWNS the subject: one kernel per request per subject. The
-    // top-level `check_contest_access` gate above is untouched - it stays the
-    // sole reachability check for the contest itself, `submission:view_all`
-    // (not `contest:manage`) is still what bypasses it. This per-row decision
-    // is an ADDITIONAL, independent narrowing on top: it also requires
-    // contest participation for any row not already covered by
-    // `submission:view_all` or self-ownership, matching `get_submission`'s
-    // row-level behaviour exactly (see `visibility::host_rules::decide_submission`).
-    // Previously the plugin-based filter had no way to omit a row at all, so
-    // every viewer who passed the top-level gate saw every row the SQL
-    // query returned; a genuinely non-participant viewer of a public,
-    // `submissions_visible` contest could see peers' submissions in the list
-    // that `get_submission` would already 404 on individually - this closes
-    // that inconsistency.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    // Reuses the same kernel instance the top-level `Resource::Contest` gate
+    // above used. `submission:view_all` (not `contest:manage`) is still what
+    // bypasses that gate. This per-row decision is an ADDITIONAL, independent
+    // narrowing on top: it also requires contest participation for any row
+    // not already covered by `submission:view_all` or self-ownership,
+    // matching `get_submission`'s row-level behaviour exactly (see
+    // `visibility::host_rules::decide_submission`). Previously the
+    // plugin-based filter had no way to omit a row at all, so every viewer
+    // who passed the top-level gate saw every row the SQL query returned; a
+    // genuinely non-participant viewer of a public, `submissions_visible`
+    // contest could see peers' submissions in the list that `get_submission`
+    // would already 404 on individually - this closes that inconsistency.
     let data = apply_filter_to_list(&kernel, data).await?;
     let total_pages = total.div_ceil(per_page);
 
