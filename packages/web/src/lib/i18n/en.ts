@@ -729,6 +729,8 @@ export const en: Record<string, string> = {
   'toast.submission.submitted': 'Code submitted successfully.',
   'toast.submission.fannedOut':
     'Code pinned to {count} worker(s). Comparing results below.',
+  'toast.submission.fanOutWithheld':
+    "Submission created on {workerId}, but you don't have permission to view it.",
   'submit.pinTo': 'Pin to:',
   'submit.pinToHint': 'Admin only — submit to specific workers.',
   'submit.addWorker': '+ Add worker…',
