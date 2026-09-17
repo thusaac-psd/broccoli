@@ -27,12 +27,12 @@ use crate::models::code_run::*;
 use crate::state::AppState;
 use crate::utils::contest::{
     find_contest, is_problem_in_contest, require_contest_participant, require_contest_running,
-    require_problem_read_access,
 };
 use crate::utils::judging::{files_from_json, files_to_json, validate_run_language};
 use crate::utils::problem::find_problem;
 use crate::utils::rate_limit::check_rate_limit;
 use crate::utils::text::sanitize_db_json;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn build_code_run_response(
     db: &DatabaseConnection,
@@ -168,12 +168,34 @@ pub async fn run_code(
     // same cap.
     enforce_queue_depth_admission(&state).await?;
 
-    let txn = state.db.begin().await?;
-    let problem = find_problem(&txn, problem_id).await?;
+    // No wrapping transaction: independent read validations followed by a
+    // single-row INSERT (atomic on its own). Holding a pooled txn connection
+    // open across the kernel decide's own `&state.db` acquisition below would
+    // reintroduce the same core-pool self-deadlock analyzed in
+    // `submission::create_submission` - each step runs on the pool directly,
+    // matching `run_contest_code` below.
+    let problem = find_problem(&state.db, problem_id).await?;
     // Prevent probing hidden/unreleased problems: a code run must be gated by
     // the same read-access rule as viewing the problem (contest membership or
     // problem-edit permission), not merely the `submission:submit` capability.
-    require_problem_read_access(&txn, &auth_user, problem_id).await?;
+    // The kernel OWNS the subject: one kernel per request per subject. This
+    // shares `visibility::host_rules::decide_standalone_problem_access` with
+    // `get_problem`/`create_submission` instead of duplicating the rule via
+    // the now-removed `require_problem_read_access`.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(
+            Action::Submit,
+            Resource::Problem {
+                contest_id: None,
+                problem_id,
+            },
+        )
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Problem not found".into()));
+    }
 
     let known_languages: std::collections::HashSet<String> = state
         .registries
@@ -209,8 +231,7 @@ pub async fn run_code(
         ..Default::default()
     };
 
-    let model = new_code_run.insert(&txn).await?;
-    txn.commit().await?;
+    let model = new_code_run.insert(&state.db).await?;
 
     let response = build_code_run_response(&state.db, model).await?;
 
