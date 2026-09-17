@@ -415,6 +415,93 @@ mod filter_tests {
         assert!(matches!(decisions[0], WireDecision::Allow {}));
     }
 
+    // Task: C3 -- every existing `decide_visibility_decisions` test (above)
+    // and every e2e test hardcodes `"public_standings": true`, so the config
+    // wiring itself (as opposed to the freeze mechanism, covered above) was
+    // empirically confirmed unreachable: hardcoding the call site's argument
+    // to `true` left every one of them green. This pair of tests pins
+    // `public_standings = false` end-to-end through `decide_visibility_decisions`,
+    // with the freeze mechanism neutralised (`freeze_minutes: 0`, a
+    // pre-freeze-window submission) so ONLY the `public_standings` wiring is
+    // under test.
+    #[test]
+    fn decide_visibility_redacts_a_peer_submission_when_public_standings_is_false() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": false,
+                "freeze_minutes": 0,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            PRE_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer is NOT the submission owner (2).
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            WireDecision::Redact { .. } => {}
+            other => panic!("expected Redact when public_standings is false, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_allows_a_peer_submission_when_public_standings_is_true() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": true,
+                "freeze_minutes": 0,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            PRE_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer is NOT the submission owner (2).
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Allow {}),
+            "expected Allow when public_standings is true and there is no freeze, got {:?}",
+            decisions[0]
+        );
+    }
+
     #[test]
     fn decide_visibility_allows_a_submission_from_a_non_icpc_contest() {
         // Every visibility plugin is queried for every resource regardless of
