@@ -20,10 +20,40 @@ use super::FieldMask;
 /// calling this function — see `MAX_MASK_PATH_SEGMENTS` et al. in
 /// `plugin_query.rs` — since this function recurses once per matched `*`
 /// segment and imposes no depth limit of its own.
+///
+/// A path that simply doesn't match anything in `value` is deliberately left
+/// undiagnosed: ICPC and IOI each ship one *union* `FieldMask` reused across
+/// several different resource shapes (submission detail, standings row,
+/// etc.), so "most of these paths don't exist in this particular shape" is
+/// the normal, intended case, not a mistake — a real typo in a path segment
+/// is indistinguishable from that at this layer and cannot be flagged
+/// without drowning the genuine case in noise. What CAN be flagged
+/// unambiguously is a path that is syntactically malformed — an empty
+/// segment from a leading dot, a trailing dot, or a doubled dot (`.result`,
+/// `result.`, `result..verdict`) — since a struct field name is never the
+/// empty string, so a path like that can never match anything, ever,
+/// regardless of shape. [`has_empty_segment`] catches exactly that narrower
+/// case and logs it at debug level; it does not change blanking behavior
+/// (the path still silently no-ops, same as before) or reject the mask.
 pub fn apply_mask(value: &mut Value, mask: &FieldMask) {
     for path in mask.paths() {
+        if has_empty_segment(path) {
+            tracing::debug!(
+                path,
+                "mask path has an empty segment (leading/trailing/doubled '.'); \
+                 it is syntactically incapable of matching a field and will \
+                 silently blank nothing"
+            );
+        }
         blank_path(value, path);
     }
+}
+
+/// True if `path` is empty, or splitting it on `.` yields an empty segment
+/// (leading dot, trailing dot, or a doubled dot). See [`apply_mask`]'s doc
+/// comment for why this — and only this — is worth diagnosing.
+fn has_empty_segment(path: &str) -> bool {
+    path.is_empty() || path.split('.').any(str::is_empty)
 }
 
 fn blank_path(value: &mut Value, path: &str) {
@@ -247,5 +277,61 @@ mod tests {
         let mut v = json!({"scores": [1, 2, 3]});
         apply_mask(&mut v, &FieldMask::new(["scores.*".to_string()]));
         assert_eq!(v, json!({"scores": [null, null, null]}));
+    }
+
+    // M3: a syntactically malformed path (empty/leading/trailing/doubled dot)
+    // must still be a safe no-op — `has_empty_segment` only adds a debug-level
+    // diagnostic, it never changes blanking behavior or rejects the mask.
+
+    #[test]
+    fn trailing_dot_path_has_empty_segment() {
+        assert!(has_empty_segment("result."));
+    }
+
+    #[test]
+    fn leading_dot_path_has_empty_segment() {
+        assert!(has_empty_segment(".result"));
+    }
+
+    #[test]
+    fn doubled_dot_path_has_empty_segment() {
+        assert!(has_empty_segment("result..verdict"));
+    }
+
+    #[test]
+    fn empty_path_has_empty_segment() {
+        assert!(has_empty_segment(""));
+    }
+
+    #[test]
+    fn well_formed_path_has_no_empty_segment() {
+        assert!(!has_empty_segment("result.verdict"));
+        assert!(!has_empty_segment("result.test_case_results.*.verdict"));
+        assert!(!has_empty_segment("verdict"));
+    }
+
+    #[test]
+    fn trailing_dot_path_still_blanks_nothing() {
+        let mut v = json!({"result": {"verdict": "AC"}});
+        apply_mask(&mut v, &FieldMask::new(["result.".to_string()]));
+        assert_eq!(
+            v,
+            json!({"result": {"verdict": "AC"}}),
+            "malformed path must stay a no-op, not start matching or panicking"
+        );
+    }
+
+    #[test]
+    fn leading_dot_path_still_blanks_nothing() {
+        let mut v = json!({"result": {"verdict": "AC"}});
+        apply_mask(&mut v, &FieldMask::new([".result".to_string()]));
+        assert_eq!(v, json!({"result": {"verdict": "AC"}}));
+    }
+
+    #[test]
+    fn doubled_dot_path_still_blanks_nothing() {
+        let mut v = json!({"result": {"verdict": "AC"}});
+        apply_mask(&mut v, &FieldMask::new(["result..verdict".to_string()]));
+        assert_eq!(v, json!({"result": {"verdict": "AC"}}));
     }
 }
