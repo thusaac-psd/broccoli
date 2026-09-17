@@ -138,20 +138,62 @@ pub async fn list_contest_problems(
     // and `decide_batch` therefore take no `subject` argument.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
+    let rows = contest_problem::Entity::find()
+        .filter(contest_problem::Column::ContestId.eq(contest_id))
+        .find_also_related(problem::Entity)
+        .order_by_asc(contest_problem::Column::Position)
+        .all(&state.db)
+        .await?;
+
+    // `Resource::Contest(contest_id)` goes into the SAME batch as every
+    // `Resource::Problem` row below, as element 0, rather than its own
+    // earlier `kernel.decide(...)` call. `Resource::Contest` and
+    // `Resource::Problem` are different memo keys (see `VisibilityKernel`'s
+    // docs), so deciding the contest gate on its own first and the problem
+    // rows in a second `fetch_visible_batch` call - the previous shape here
+    // - paid for a second `host_decide` query batch and a second plugin
+    // WASM crossing to re-establish reachability for the SAME contest the
+    // first call had just resolved, even though every one of THIS
+    // contest's problems is going to ask the same host/plugin machinery
+    // about that same contest anyway (rule 8/9's "open and started"
+    // window). One `fetch_visible_batch` call over `[Contest, Problem,
+    // Problem, ...]` costs at most one `host_decide` batch and one plugin
+    // crossing total for this whole page. The trade is that the
+    // `contest_problem` row query above no longer gets skipped on a denied
+    // contest (it used to short-circuit before any row fetch); that is a
+    // small, bounded extra query on the deny path in exchange for removing
+    // a full WASM crossing on the (far more common) allow path.
+    //
+    // The contest entry carries `None::<ContestProblemResponse>` as its T -
+    // `Visible::new` is `pub(super)` to `visibility::`, so `fetch_visible_batch`
+    // is the only way to get one, and `Option<T>`'s `Serialize` impl is
+    // transparent (no wrapper), so this costs nothing at the wire even
+    // though the contest entry is never itself rendered - only its `Deny`
+    // vs. not-`Deny` outcome (`is_none()` below) is used.
+    let mut items: Vec<(Resource, Option<ContestProblemResponse>)> =
+        Vec::with_capacity(rows.len() + 1);
+    items.push((Resource::Contest(contest_id), None));
+    items.extend(rows.into_iter().map(|(cp, prob)| {
+        let resource = Resource::Problem {
+            contest_id: Some(contest_id),
+            problem_id: cp.problem_id,
+        };
+        let dto = contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default());
+        (resource, Some(dto))
+    }));
+
+    let mut visible = kernel.fetch_visible_batch(Action::Read, items).await?;
+    let contest_visible = visible.remove(0);
+
     // NOTE: this is a pure reachability gate on the contest itself, distinct
-    // from the `Resource::Problem` decisions made below (which DO go
-    // through `fetch_visible_batch`/`into_masked_json` and so honor
-    // `Redact` correctly). `is_denied()` treats a hypothetical `Redact` on
-    // this `Resource::Contest` decision the same as `Allow`, and this
-    // decision's contest is never rendered from here, so `Redact`
-    // degenerates to `Allow`. No plugin currently returns `Redact` for
-    // `Resource::Contest`, so this is a documented no-op today, not a live
-    // bug - see Task 20 Item 6.
-    if kernel
-        .decide(Action::Read, Resource::Contest(contest_id))
-        .await?
-        .is_denied()
-    {
+    // from the `Resource::Problem` decisions handled below (which DO go
+    // through `into_masked_json` and so honor `Redact` correctly).
+    // `is_none()` treats a hypothetical `Redact` on this `Resource::Contest`
+    // decision the same as `Allow`, and this decision's contest is never
+    // rendered from here, so `Redact` degenerates to `Allow`. No plugin
+    // currently returns `Redact` for `Resource::Contest`, so this is a
+    // documented no-op today, not a live bug - see Task 20 Item 6.
+    if contest_visible.is_none() {
         return Err(AppError::NotFound("Contest not found".into()));
     }
 
@@ -163,27 +205,6 @@ pub async fn list_contest_problems(
     // re-applied here on top of the kernel's `Allow`.
     let contest_model = find_contest(&state.db, contest_id).await?;
     require_contest_started(&auth_user, &contest_model)?;
-
-    let rows = contest_problem::Entity::find()
-        .filter(contest_problem::Column::ContestId.eq(contest_id))
-        .find_also_related(problem::Entity)
-        .order_by_asc(contest_problem::Column::Position)
-        .all(&state.db)
-        .await?;
-
-    let items: Vec<(Resource, ContestProblemResponse)> = rows
-        .into_iter()
-        .map(|(cp, prob)| {
-            let resource = Resource::Problem {
-                contest_id: Some(contest_id),
-                problem_id: cp.problem_id,
-            };
-            let dto = contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default());
-            (resource, dto)
-        })
-        .collect();
-
-    let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
 
     // A denied problem is omitted from the list, never rendered as a
     // placeholder - a placeholder would confirm it exists, the exact fact a
