@@ -32,9 +32,10 @@ use super::FieldMask;
 /// segment from a leading dot, a trailing dot, or a doubled dot (`.result`,
 /// `result.`, `result..verdict`) — since a struct field name is never the
 /// empty string, so a path like that can never match anything, ever,
-/// regardless of shape. [`has_empty_segment`] catches exactly that narrower
-/// case and logs it at debug level; it does not change blanking behavior
-/// (the path still silently no-ops, same as before) or reject the mask.
+/// regardless of shape. `has_empty_segment` (private, below) catches exactly
+/// that narrower case and logs it at debug level; it does not change
+/// blanking behavior (the path still silently no-ops, same as before) or
+/// reject the mask.
 pub fn apply_mask(value: &mut Value, mask: &FieldMask) {
     for path in mask.paths() {
         if has_empty_segment(path) {
