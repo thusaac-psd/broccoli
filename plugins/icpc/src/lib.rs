@@ -29,6 +29,48 @@ fn must_hide_other_submission(
             >= crate::config::freeze_window_start_ms(freeze_minutes, duration_ms)
 }
 
+/// Whether a viewer's `/standings` view must be restricted to their OWN row,
+/// and if so, which row. This is the ONLY enforcement point for
+/// `public_standings = false`: it drives the SQL `WHERE cu.user_id = $N` in
+/// `handle_standings` that removes every other team's row from the query
+/// entirely, a distinct mechanism from `decide_visibility_decisions`'
+/// per-submission field redaction (which blanks fields, not rows). Extracted
+/// out from behind `#[cfg(target_arch = "wasm32")]` so it is reachable by
+/// `cargo test`, mirroring `must_hide_other_submission` above and
+/// `decide_visibility_decisions` below.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandingsRestriction {
+    /// No restriction: every registered contestant's row is visible.
+    Unrestricted,
+    /// Restricted to exactly this viewer's own row.
+    RestrictedTo(i32),
+    /// Restricted, but the viewer is unauthenticated -- there is no "own
+    /// row" to show, so the caller must return an empty board rather than
+    /// query at all.
+    RestrictedAnonymous,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn standings_restriction(
+    phase: &str,
+    can_view_all: bool,
+    public_standings: bool,
+    viewer_id: Option<i32>,
+) -> StandingsRestriction {
+    // Restrict a contestant to their own row during the contest UNLESS the
+    // organizer opted into a public live scoreboard. Organizers always see all.
+    let is_restricted =
+        (phase == "before" || phase == "during") && !can_view_all && !public_standings;
+    if !is_restricted {
+        return StandingsRestriction::Unrestricted;
+    }
+    match viewer_id {
+        Some(uid) => StandingsRestriction::RestrictedTo(uid),
+        None => StandingsRestriction::RestrictedAnonymous,
+    }
+}
+
 /// Field mask covering every field `hide_submission_result` used to blank on
 /// EITHER host shape, unioned into one list. The host applies a mask with
 /// `apply_mask` (`packages/server/src/visibility/mask.rs`), which is a
@@ -165,6 +207,50 @@ mod filter_tests {
             100 * 60_000,
             PRE_FREEZE_SUB
         ));
+    }
+
+    #[test]
+    fn standings_restrict_contestant_to_own_row_when_private_and_during_contest() {
+        assert_eq!(
+            standings_restriction("during", false, false, Some(42)),
+            StandingsRestriction::RestrictedTo(42)
+        );
+        assert_eq!(
+            standings_restriction("before", false, false, Some(42)),
+            StandingsRestriction::RestrictedTo(42)
+        );
+    }
+
+    #[test]
+    fn standings_restrict_anonymous_viewer_gets_no_row_rather_than_an_id() {
+        assert_eq!(
+            standings_restriction("during", false, false, None),
+            StandingsRestriction::RestrictedAnonymous
+        );
+    }
+
+    #[test]
+    fn standings_public_standings_true_lifts_the_restriction_during_the_contest() {
+        assert_eq!(
+            standings_restriction("during", false, true, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
+    }
+
+    #[test]
+    fn standings_organizer_always_sees_everyone_even_when_private() {
+        assert_eq!(
+            standings_restriction("during", true, false, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
+    }
+
+    #[test]
+    fn standings_after_phase_is_unrestricted_regardless_of_public_standings() {
+        assert_eq!(
+            standings_restriction("after", false, false, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
     }
 
     #[test]
@@ -1235,14 +1321,11 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     let phase = &info.phase;
     let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
-    // Restrict a contestant to their own row during the contest UNLESS the
-    // organizer opted into a public live scoreboard. Organizers always see all.
-    let is_restricted =
-        (phase == "before" || phase == "during") && !can_view_all && !config.public_standings;
-    let restricted_user_id = if is_restricted {
-        match req.user_id() {
-            Some(uid) => Some(uid),
-            None => {
+    let restricted_user_id =
+        match standings_restriction(phase, can_view_all, config.public_standings, req.user_id()) {
+            StandingsRestriction::Unrestricted => None,
+            StandingsRestriction::RestrictedTo(uid) => Some(uid),
+            StandingsRestriction::RestrictedAnonymous => {
                 return Ok(PluginHttpResponse {
                     status: 200,
                     headers: None,
@@ -1254,10 +1337,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                     })),
                 });
             }
-        }
-    } else {
-        None
-    };
+        };
 
     // Freeze: in the final `freeze_minutes` a contestant's board stops updating and
     // submissions during the window show as pending "?". Organizers always see the

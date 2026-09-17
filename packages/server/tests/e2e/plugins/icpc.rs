@@ -223,6 +223,175 @@ async fn icpc_standings_reflects_judged_submission() {
     );
 }
 
+// Task: C2b -- `handle_standings`' `is_restricted`/`restricted_user_id` row
+// filter (now `standings_restriction`) is the ONLY enforcement point for
+// `public_standings = false`: it drives the SQL `WHERE cu.user_id = $N` that
+// removes every other team's row from the query entirely. Every prior
+// `/standings` e2e test registered exactly one contestant, so this filter
+// could be deleted with zero test failures. This test registers TWO
+// contestants and never sets `public_standings` (defaults to `false`) to make
+// the row-filter observable: a contestant must see only their own row, while
+// an organizer (`contest:manage`) must see everyone's.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_own_row() {
+    let app = E2eTestApp::spawn().await;
+
+    let admin = app
+        .create_user_with_role("icpc_priv_admin", "password", "admin")
+        .await;
+    let contestant_a = app
+        .create_authenticated_user("icpc_priv_a", "password")
+        .await;
+    let contestant_b = app
+        .create_authenticated_user("icpc_priv_b", "password")
+        .await;
+
+    let problem_id = app
+        .create_problem(&admin, "ICPC Private Standings Problem")
+        .await;
+
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Private Standings Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant_a).await;
+    app.register_for_contest(contest_id, &contestant_b).await;
+
+    // Default config: `public_standings` is never set, so it defaults to
+    // `false` (`#[serde(default)]` on `ContestConfig::public_standings`).
+    seed_accepted_icpc_submission(&app, "icpc_priv_a", problem_id, contest_id).await;
+    seed_accepted_icpc_submission(&app, "icpc_priv_b", problem_id, contest_id).await;
+
+    let standings_path = format!("/api/v1/p/icpc/api/plugins/icpc/contests/{contest_id}/standings");
+
+    // Contestant A, mid-contest, private standings: must see ONLY their own row.
+    let res_a = app.get_with_token(&standings_path, &contestant_a).await;
+    assert_eq!(
+        res_a.status, 200,
+        "Standings request failed: {}",
+        res_a.text
+    );
+    let rows_a = res_a.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_a.len(),
+        1,
+        "private standings should restrict a contestant to exactly their own row, got: {rows_a:?}"
+    );
+    assert_eq!(rows_a[0]["username"], "icpc_priv_a");
+
+    // Contestant B: must likewise see only their own row, not A's.
+    let res_b = app.get_with_token(&standings_path, &contestant_b).await;
+    assert_eq!(
+        res_b.status, 200,
+        "Standings request failed: {}",
+        res_b.text
+    );
+    let rows_b = res_b.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_b.len(),
+        1,
+        "private standings should restrict a contestant to exactly their own row, got: {rows_b:?}"
+    );
+    assert_eq!(rows_b[0]["username"], "icpc_priv_b");
+
+    // The organizer (`contest:manage`) always sees every row regardless of
+    // `public_standings`.
+    let res_admin = app.get_with_token(&standings_path, &admin).await;
+    assert_eq!(
+        res_admin.status, 200,
+        "Standings request failed: {}",
+        res_admin.text
+    );
+    let rows_admin = res_admin.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_admin.len(),
+        2,
+        "an organizer should see every contestant's row, got: {rows_admin:?}"
+    );
+}
+
+// Companion to the test above: with `public_standings: true` explicitly set,
+// the SAME two-contestant setup must show every row to every viewer -- proving
+// the flag (not some other factor) is what differentiates the two outcomes.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_standings_public_standings_true_shows_every_contestant_their_row() {
+    let app = E2eTestApp::spawn().await;
+
+    let admin = app
+        .create_user_with_role("icpc_pub_admin", "password", "admin")
+        .await;
+    let contestant_a = app
+        .create_authenticated_user("icpc_pub_a", "password")
+        .await;
+    let contestant_b = app
+        .create_authenticated_user("icpc_pub_b", "password")
+        .await;
+
+    let problem_id = app
+        .create_problem(&admin, "ICPC Public Standings Problem")
+        .await;
+
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Public Standings Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant_a).await;
+    app.register_for_contest(contest_id, &contestant_b).await;
+
+    let config_path = format!("/api/v1/contests/{contest_id}/config/icpc/contest");
+    let put_res = app
+        .put_with_token(
+            &config_path,
+            &json!({
+                "config": {
+                    "public_standings": true
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(
+        put_res.status, 200,
+        "Failed to set ICPC public_standings config: {}",
+        put_res.text
+    );
+
+    seed_accepted_icpc_submission(&app, "icpc_pub_a", problem_id, contest_id).await;
+    seed_accepted_icpc_submission(&app, "icpc_pub_b", problem_id, contest_id).await;
+
+    let standings_path = format!("/api/v1/p/icpc/api/plugins/icpc/contests/{contest_id}/standings");
+
+    let res_a = app.get_with_token(&standings_path, &contestant_a).await;
+    assert_eq!(
+        res_a.status, 200,
+        "Standings request failed: {}",
+        res_a.text
+    );
+    let rows_a = res_a.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_a.len(),
+        2,
+        "public standings should show every contestant's row, got: {rows_a:?}"
+    );
+    let usernames: Vec<&str> = rows_a
+        .iter()
+        .map(|r| r["username"].as_str().unwrap())
+        .collect();
+    assert!(usernames.contains(&"icpc_pub_a"));
+    assert!(usernames.contains(&"icpc_pub_b"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn icpc_standings_uses_current_judgements_instead_of_stale_storage() {
     let app = E2eTestApp::spawn().await;
