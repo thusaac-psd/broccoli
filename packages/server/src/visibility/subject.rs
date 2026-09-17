@@ -27,9 +27,26 @@ impl Subject {
         }
     }
 
-    /// Explicit, greppable bypass for system and admin paths that must read
-    /// entities without a viewer decision (rejudge, dispatcher, migrations).
-    /// Every call site needs its own test justifying it.
+    /// Skips `host_decide`/`query_plugins` entirely and resolves every
+    /// `decide`/`decide_batch` call to `Allow` with zero DB queries and zero
+    /// plugin calls (see `host_decide`'s `is_admin_override()` branch).
+    /// Currently has NO production call sites - only the two tests that pin
+    /// this short-circuit (`host_rules::admin_override_allows_everything_without_querying`,
+    /// `visibility::admin_override_allows_everything_without_reaching_plugins`)
+    /// construct one. Handlers that read entities outside a viewer's own
+    /// reachability (e.g. `handlers/submission/rejudge.rs`) do NOT use this:
+    /// a bare `Decision::Allow` can't express what they actually need (a
+    /// locked row fetch, `SELECT ... FOR UPDATE`), so calling this here
+    /// would be a no-op dressed up as an access check. Those call sites
+    /// instead pair an ordinary `auth_user.require_permission(...)` guard
+    /// with a `visibility-bypass-audited:` comment on the raw `entity::`
+    /// import itself (grep that token across `handlers/`) - and still route
+    /// their *response* through the kernel under the real
+    /// `Subject::from_auth_user` (see `apply_filter_to_response_after_mutation`
+    /// in `rejudge.rs`). Dispatcher and migration code never construct a
+    /// `Subject` at all; they run outside any HTTP request/viewer context
+    /// and have no kernel to bypass. Before adding a new call site, confirm
+    /// a `Decision` is actually what's needed there.
     pub fn admin_override() -> Self {
         Self {
             user_id: None,
