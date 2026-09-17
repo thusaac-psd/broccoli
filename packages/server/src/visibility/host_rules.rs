@@ -1005,6 +1005,28 @@ mod tests {
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
+    #[tokio::test]
+    async fn rule2_future_deactivate_time_does_not_close_the_window() {
+        // Activated in the past, deactivates in the future: the window is
+        // still open. A deactivate_time merely being `Some` must not close
+        // it - only `deactivate_time <= now` may.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![contest_row(7, true, Some(-1), Some(1), true)]])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .into_connection();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Read,
+            &[Resource::Contest(7)],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decisions, vec![Decision::Allow]);
+    }
+
     // -- rule 3: contest.is_public short-circuits the participant check --
 
     #[tokio::test]
