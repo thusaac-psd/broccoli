@@ -228,6 +228,20 @@ fn decisions_from_output(
 /// [`Decision::meet`]. Split out so order-independence (required because
 /// multiple plugins are folded together, and the registry they come from is
 /// a `HashMap`) is unit-testable on its own, without needing a plugin host.
+///
+/// M4: the `debug_assert_eq!` below compiles out in release, but that is
+/// safe — it is not the mechanism keeping `acc`/`next` the same length. This
+/// function has one call site (`query_plugins`'s fold loop), where `acc`
+/// starts as `vec![Decision::Allow; resources.len()]` and `next` is always
+/// `decisions_from_output(..., resources.len())`'s return value, which
+/// enforces `out.decisions.len() == expected_len` with a plain, unconditional
+/// `if` (see `decisions_from_output` above, `deny_all()` on mismatch) — a
+/// real check that still runs in release. `zip` would otherwise silently
+/// truncate to the shorter length on a mismatch rather than panic, which is
+/// exactly the failure mode worth guarding against; the debug assertion
+/// exists only to fail loudly, in tests, the moment either of those two
+/// real guarantees is ever broken by a future edit — not to provide the
+/// guarantee itself.
 fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
     debug_assert_eq!(acc.len(), next.len());
     acc.into_iter().zip(next).map(|(a, b)| a.meet(b)).collect()
@@ -266,6 +280,15 @@ pub(crate) async fn query_plugins(
     if resources.is_empty() {
         return Vec::new();
     }
+    // M4: compiled out in release, and that is safe for the same reason as
+    // `meet_positionally`'s — this has one call site
+    // (`VisibilityKernel::decide_batch`, `mod.rs`), where `target_contest_ids`
+    // is built as `plugin_targets.iter().map(...).collect()`: a `.map()` over
+    // `plugin_targets` itself is length-preserving by construction,
+    // unconditionally, in any build profile — not something a debug
+    // assertion is needed to enforce. This assertion exists only to fail
+    // loudly, in tests, if a future edit replaces that `.map()` with
+    // something that no longer preserves length.
     debug_assert_eq!(
         resources.len(),
         resource_contest_ids.len(),

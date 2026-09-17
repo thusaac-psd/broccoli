@@ -267,6 +267,14 @@ impl<'a> VisibilityKernel<'a> {
                 &mut clarification_contest_ids,
             )
             .await?;
+            // M4: compiled out in release, and that is safe — `host_decide`
+            // (`host_rules.rs`) builds its return value as
+            // `resources.iter().map(...).collect()`, a `.map()` over its own
+            // `resources` parameter (here, `misses`), which is
+            // length-preserving by construction, unconditionally, in any
+            // build profile. This assertion exists only to fail loudly, in
+            // tests, if a future edit to `host_decide` ever replaces that
+            // `.map()` with something that no longer preserves length.
             debug_assert_eq!(
                 host_decisions.len(),
                 misses.len(),
@@ -323,6 +331,18 @@ impl<'a> VisibilityKernel<'a> {
                         &target_contest_ids,
                     )
                     .await;
+                    // M4: compiled out in release, and that is safe —
+                    // `query_plugins` (`plugin_query.rs`) always returns
+                    // exactly `resources.len()` decisions: the empty-batch,
+                    // poisoned-registry, and zero-queriers early returns are
+                    // each an explicit `vec![_; resources.len()]`, and the
+                    // fold loop's `combined` is seeded at that same length
+                    // and then only ever passed through `meet_positionally`,
+                    // whose own doc comment establishes it preserves length
+                    // given same-length inputs — all real (non-debug)
+                    // guarantees. This assertion exists only to fail loudly,
+                    // in tests, if a future edit to `query_plugins` ever
+                    // breaks that chain.
                     debug_assert_eq!(
                         plugin_decisions.len(),
                         plugin_targets.len(),
