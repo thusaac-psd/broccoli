@@ -501,6 +501,26 @@ mod tests {
     }
 
     #[test]
+    fn phase_after_reveals_full_scoreboard_even_without_view_all_or_all_contest_viewers() {
+        assert!(full_scoreboard_visible_for_phase(
+            "after",
+            false,
+            ScoreboardVisibility::AdminsOnly,
+        ));
+    }
+
+    #[test]
+    fn phase_before_and_during_stay_hidden_without_view_all_or_all_contest_viewers() {
+        for phase in ["before", "during"] {
+            assert!(!full_scoreboard_visible_for_phase(
+                phase,
+                false,
+                ScoreboardVisibility::AdminsOnly,
+            ));
+        }
+    }
+
+    #[test]
     fn equal_rank_tiebreaker_ignores_score_time() {
         assert_eq!(
             compare_scoreboard_entries(
