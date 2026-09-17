@@ -74,15 +74,45 @@ const VERDICT_ICONS = {
   Running: Loader2,
 } as const;
 
+const UNKNOWN_VERDICT_META = { color: '#6b7280', bg: 'rgba(0,0,0,0.04)' };
+
+/**
+ * `TestCaseResultResponse.verdict` is `string | null | undefined` on the
+ * wire: a `FieldMask` (e.g. `subtask_scores`'s
+ * `result.test_case_results.*.verdict`) can blank it to `null` for a viewer
+ * who isn't entitled to the per-test-case breakdown - see that field's doc
+ * comment in the generated schema. This component only ever renders
+ * test-case rows under `effectiveFeedback === 'full'` (see the comment
+ * above `allTestCases` in `IoiSubmissionResult`), and `full` feedback is
+ * never masked, so in practice a `null`/`undefined` verdict should never
+ * reach these call sites - but the wire type doesn't (and shouldn't)
+ * encode that. Render it as an explicit "withheld" state instead of
+ * silently guessing a real verdict or crashing.
+ */
+function verdictMeta(verdict: string | null | undefined) {
+  if (!verdict) return UNKNOWN_VERDICT_META;
+  return VERDICT_META[verdict] ?? UNKNOWN_VERDICT_META;
+}
+
 const DETAIL_PREVIEW_CHARS = 4096;
 
 function VerdictIcon({
   verdict,
   size = 14,
 }: {
-  verdict: string;
+  verdict: string | null | undefined;
   size?: number;
 }) {
+  if (!verdict) {
+    return (
+      <MinusCircle
+        size={size}
+        color={UNKNOWN_VERDICT_META.color}
+        className="shrink-0"
+      />
+    );
+  }
+
   const meta = VERDICT_META[verdict];
   const c = meta?.color ?? '#6b7280';
   const Icon =
@@ -177,7 +207,10 @@ function getNormalizedTestCaseScore(
   testCase: DisplayTestCaseResult,
   maxScore: number | undefined,
 ): number | null {
-  if (testCase.isPlaceholder) {
+  // A withheld (masked-to-null) score is treated the same as a placeholder:
+  // there is nothing to normalize, so it's excluded from the provisional
+  // average below rather than silently counted as 0.
+  if (testCase.isPlaceholder || testCase.score == null) {
     return null;
   }
   if (!maxScore || maxScore <= 0) {
@@ -244,6 +277,11 @@ function buildSubtaskResults({
 }): DisplaySubtaskResult[] {
   const tcById = new Map<number, TestCaseResult>();
   for (const testCase of allTestCases) {
+    // A withheld (masked-to-null) test_case_id can't be looked up by id;
+    // buildStaticTestCaseList's label lookup will fall through to a
+    // "Pending"-style placeholder for that label, same as an id that's
+    // simply missing from this batch.
+    if (testCase.test_case_id == null) continue;
     tcById.set(testCase.test_case_id, testCase);
   }
 
@@ -360,10 +398,7 @@ function TestCaseDetailPanel({
   tc: TestCaseResult;
   index: number;
 }) {
-  const vm = VERDICT_META[tc.verdict] ?? {
-    color: '#6b7280',
-    bg: 'rgba(0,0,0,0.04)',
-  };
+  const vm = verdictMeta(tc.verdict);
   const { t } = useTranslation();
 
   return (
@@ -443,10 +478,7 @@ function TestCaseResultList({ testCases }: { testCases: TestCaseResult[] }) {
     <div className="overflow-hidden rounded-lg border border-border bg-card">
       <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-0.5 px-2.5 py-2">
         {testCases.map((tc, i) => {
-          const vm = VERDICT_META[tc.verdict] ?? {
-            color: '#6b7280',
-            bg: 'rgba(0,0,0,0.04)',
-          };
+          const vm = verdictMeta(tc.verdict);
           const clickable = tcHasDetails(tc);
           const isSelected = selectedTcIndex === i;
           const tcScore = tc.score ?? 0;
@@ -663,10 +695,7 @@ function SubtaskCard({
         <div className="px-2.5 py-2">
           <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-0.5">
             {visibleTCs.map((tc, i) => {
-              const vm = VERDICT_META[tc.verdict] ?? {
-                color: '#6b7280',
-                bg: 'rgba(0,0,0,0.04)',
-              };
+              const vm = verdictMeta(tc.verdict);
               const clickable = tcHasDetails(tc);
               const isSelected = selectedTcIndex === i;
               const tcScore = tc.score ?? 0;
