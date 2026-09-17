@@ -90,6 +90,9 @@ jobs:
       - name: Check formatting
         run: pnpm format:check
 
+      - name: Test
+        run: pnpm test
+
       - name: Build
         run: pnpm build
 
