@@ -369,8 +369,30 @@ mod filter_tests {
             WireDecision::Redact { fields } => {
                 let mut got = fields.clone();
                 got.sort();
-                let mut want = hidden_result_mask_fields();
+                // Hard-coded literal, NOT a second call to
+                // hidden_result_mask_fields(): comparing the SUT's output
+                // against the same helper it is built from is a tautology
+                // that stays green even if the helper's field list drifts
+                // away from what hide_submission_result actually blanks.
+                let mut want = vec![
+                    "verdict".to_string(),
+                    "score".to_string(),
+                    "time_used".to_string(),
+                    "memory_used".to_string(),
+                    "result.verdict".to_string(),
+                    "result.score".to_string(),
+                    "result.time_used".to_string(),
+                    "result.memory_used".to_string(),
+                    "result.compile_output".to_string(),
+                    "result.error_message".to_string(),
+                    "result.test_case_results".to_string(),
+                ];
                 want.sort();
+                assert_eq!(
+                    got.len(),
+                    11,
+                    "no extra fields beyond the documented set: {got:?}"
+                );
                 assert_eq!(
                     got, want,
                     "decide_visibility must redact EXACTLY what hide_submission_result blanked"
@@ -693,8 +715,28 @@ mod filter_tests {
             WireDecision::Redact { fields } => {
                 let mut got = fields.clone();
                 got.sort();
-                let mut want = hidden_result_mask_fields();
+                // Hard-coded literal - see the sibling comment in
+                // decide_visibility_redacts_the_exact_hide_submission_result_field_set_for_a_frozen_peer_submission
+                // for why this must not re-derive from hidden_result_mask_fields().
+                let mut want = vec![
+                    "verdict".to_string(),
+                    "score".to_string(),
+                    "time_used".to_string(),
+                    "memory_used".to_string(),
+                    "result.verdict".to_string(),
+                    "result.score".to_string(),
+                    "result.time_used".to_string(),
+                    "result.memory_used".to_string(),
+                    "result.compile_output".to_string(),
+                    "result.error_message".to_string(),
+                    "result.test_case_results".to_string(),
+                ];
                 want.sort();
+                assert_eq!(
+                    got.len(),
+                    11,
+                    "no extra fields beyond the documented set: {got:?}"
+                );
                 assert_eq!(
                     got, want,
                     "submission 7 (in-freeze, non-owner) must be Redact with the exact hidden-result mask"
