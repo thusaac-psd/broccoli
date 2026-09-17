@@ -7,21 +7,26 @@ use sea_orm::*;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
-// visibility-bypass-audited: `list_clarifications`/`create_clarification`
-// already route contest reachability through `VisibilityKernel`
-// (`Resource::Contest` below), and `list_clarifications`'s per-row
-// visibility is the kernel's `fetch_visible_batch`
+// visibility-bypass-audited: `list_clarifications`/`create_clarification`/
+// `reply_clarification`/`resolve_clarification` all route contest
+// reachability through `VisibilityKernel` (`Resource::Contest` below)
+// BEFORE any row lookup, and `list_clarifications`'s per-row visibility is
+// the kernel's `fetch_visible_batch`
 // (`visibility::host_rules::decide_clarification`) - see the comments at
 // those call sites. `reply_clarification`/`toggle_reply_public`/
 // `resolve_clarification` are write paths on a single clarification the
 // caller must already be the admin, author, or recipient of (asserted
 // inline, since "is a party to this thread" has no `Resource::Clarification`
-// read-decision equivalent), and every response they return reflects only
+// read-decision equivalent) - the contest-reachability gate only prevents
+// an unreachable contest's existing-vs-missing clarification id from being
+// distinguishable via 403-vs-404; it does not replace the inline
+// admin/author/recipient check. Every response they return reflects only
 // that one clarification the caller was just authorized to act on - the
 // same write-reflects-own-result pattern as `handlers/submission/rejudge.rs`.
 // `user` here is only used by `resolve_usernames`, a post-authorization
 // display helper. Pinned by the frozen
-// `tests/integration/visibility_matrix.rs::contest_clarification_list` suite.
+// `tests/integration/visibility_matrix.rs::contest_clarification_list` suite
+// and `tests/integration/clarification.rs::clarification_actions`.
 use crate::entity::{clarification, clarification_reply, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -411,6 +416,26 @@ pub async fn reply_clarification(
 ) -> Result<Json<ClarificationResponse>, AppError> {
     validate_reply_clarification(&payload)?;
 
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before the row lookup below, on a contest the kernel
+    // already knows is unreachable - the same `Resource::Contest`/
+    // `Action::Clarify` gate `create_clarification` uses. Without this, a
+    // stranger to a private or inactive contest could distinguish an
+    // existing clarification id (403 PermissionDenied, since the row exists
+    // but they're neither admin, author, nor recipient) from a non-existing
+    // one (404 NotFound) - confirming the row exists without ever being
+    // authorized to see it. Gating reachability first collapses both cases
+    // to the same 404, matching `list_clarifications`/`create_clarification`.
+    if kernel
+        .decide(Action::Clarify, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
     let existing = clarification::Entity::find_by_id(clarification_id)
         .filter(clarification::Column::ContestId.eq(contest_id))
         .one(&state.db)
@@ -653,6 +678,22 @@ pub async fn resolve_clarification(
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ResolveClarificationRequest>,
 ) -> Result<Json<ClarificationResponse>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before the row lookup below, on a contest the kernel
+    // already knows is unreachable - same rationale and gate as
+    // `reply_clarification` above: without this, a stranger to a private
+    // or inactive contest could distinguish an existing clarification id
+    // (403 PermissionDenied) from a non-existing one (404 NotFound).
+    if kernel
+        .decide(Action::Clarify, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
     let existing = clarification::Entity::find_by_id(clarification_id)
         .filter(clarification::Column::ContestId.eq(contest_id))
         .one(&state.db)
