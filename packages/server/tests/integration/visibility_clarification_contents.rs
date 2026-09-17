@@ -298,4 +298,126 @@ mod contest_clarification_list_contents {
         // meaningless.
         assert_ne!(qa, qb);
     }
+
+    /// I6: `decide_clarification`'s `latest_reply_public` (host_rules.rs)
+    /// is built by `.order_by_asc(clarification_reply::Column::CreatedAt)`
+    /// then folding replies into a `HashMap<clarification_id, is_public>`
+    /// where each later row overwrites the previous one - so the map ends
+    /// up holding the LATEST reply's visibility, not any reply's, and
+    /// definitely not whether ANY reply was ever public. The two
+    /// MockDatabase-backed unit tests pinning this
+    /// (`clarification_gates_on_latest_reply_not_the_aggregate_any_public`,
+    /// `clarification_allows_when_latest_reply_is_public_even_if_an_older_one_is_not`)
+    /// cannot tell ASC from DESC apart: `MockDatabase` returns rows in
+    /// exactly the Vec order given to `append_query_results`, regardless of
+    /// the `.order_by_asc`/`.order_by_desc` the code under test actually
+    /// asked for. This test drives the SAME scenario through two REAL
+    /// `reply_clarification` calls against a real Postgres ORDER BY, which
+    /// only the SQL query itself can get right or wrong.
+    #[tokio::test]
+    async fn latest_reply_wins_over_an_earlier_reply_with_the_opposite_visibility() {
+        let f = setup().await;
+
+        let q_res = f
+            .app
+            .post_with_token(
+                &routes::contest_clarifications(f.contest_id),
+                &json!({
+                    "content": "Q with two replies",
+                    "clarification_type": "question",
+                    "is_public": true,
+                }),
+                &f.admin,
+            )
+            .await;
+        assert_eq!(q_res.status, 201, "question create failed: {}", q_res.text);
+        let q_id = q_res.id();
+
+        // First reply: public.
+        let first = f
+            .app
+            .post_with_token(
+                &routes::contest_clarification_reply(f.contest_id, q_id),
+                &json!({"content": "first reply", "is_public": true}),
+                &f.admin,
+            )
+            .await;
+        assert_eq!(first.status, 200, "first reply failed: {}", first.text);
+
+        // Premise check before the second reply lands: participant_a (not
+        // the author, not an admin) must see the first, public reply.
+        let after_first = f
+            .app
+            .get_with_token(
+                &routes::contest_clarifications(f.contest_id),
+                &f.participant_a,
+            )
+            .await;
+        assert_eq!(after_first.status, 200);
+        let row_after_first = after_first.body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["content"] == "Q with two replies")
+            .expect("question must be visible to participant_a");
+        assert_eq!(
+            row_after_first["reply_content"], "first reply",
+            "premise check: the first (public) reply must be visible before \
+             the second one lands"
+        );
+
+        // Second reply: private. Every `reply_clarification` call inserts a
+        // NEW `clarification_reply` row - it never overwrites the first.
+        let second = f
+            .app
+            .post_with_token(
+                &routes::contest_clarification_reply(f.contest_id, q_id),
+                &json!({"content": "second reply", "is_public": false}),
+                &f.admin,
+            )
+            .await;
+        assert_eq!(second.status, 200, "second reply failed: {}", second.text);
+
+        let after_second = f
+            .app
+            .get_with_token(
+                &routes::contest_clarifications(f.contest_id),
+                &f.participant_a,
+            )
+            .await;
+        assert_eq!(after_second.status, 200);
+        let row_after_second = after_second.body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["content"] == "Q with two replies")
+            .expect("question must still be visible to participant_a");
+        assert_eq!(
+            row_after_second["reply_content"],
+            serde_json::Value::Null,
+            "the LATEST reply is private, so a non-participant must NOT see \
+             reply_content - even though an EARLIER reply on the same \
+             clarification was public"
+        );
+        assert_eq!(row_after_second["reply_author_id"], serde_json::Value::Null);
+        assert_eq!(
+            row_after_second["reply_author_name"],
+            serde_json::Value::Null
+        );
+        assert_eq!(row_after_second["replied_at"], serde_json::Value::Null);
+
+        // Admin sanity check: the row still holds the real latest content
+        // server-side - only the non-participant's VIEW is masked.
+        let admin_view = f
+            .app
+            .get_with_token(&routes::contest_clarifications(f.contest_id), &f.admin)
+            .await;
+        let admin_row = admin_view.body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["content"] == "Q with two replies")
+            .expect("admin must see the row");
+        assert_eq!(admin_row["reply_content"], "second reply");
+    }
 }
