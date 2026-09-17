@@ -59,7 +59,7 @@ use super::response::{VisibilityContext, build_submission_response};
         ("judgement_id" = i32, Path, description = "Judgement ID")
     ),
     responses(
-        (status = 200, description = "Applied judgement", body = SubmissionResponse),
+        (status = 200, description = "Applied judgement", body = SubmissionResponseAfterMutation),
         (status = 400, description = "Judgement is not finalized (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
@@ -224,7 +224,7 @@ pub struct RejudgeQuery {
     ),
     request_body = RejudgeRequest,
     responses(
-        (status = 200, description = "Submission re-queued", body = SubmissionResponse),
+        (status = 200, description = "Submission re-queued", body = SubmissionResponseAfterMutation),
         (status = 400, description = "Invalid worker (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),

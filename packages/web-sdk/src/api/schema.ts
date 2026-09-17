@@ -2117,7 +2117,7 @@ export interface components {
       target_worker_ids: string[];
     };
     AdminFanOutSubmissionResponse: {
-      submissions: components['schemas']['SubmissionResponse'][];
+      submissions: components['schemas']['SubmissionResponseAfterMutation'][];
     };
     AttachmentListResponse: {
       attachments: components['schemas']['AttachmentResponse'][];
@@ -2233,7 +2233,12 @@ export interface components {
       target_worker_id?: string | null;
     };
     BulkRejudgeResponse: {
-      /** @example 1234 */
+      /**
+       * @description Count only - never per-id detail, never submission content. See
+       *     `bulk_rejudge_submissions`'s doc comment (`handlers/submission/rejudge.rs`)
+       *     for exactly what this number does and does not disclose.
+       * @example 1234
+       */
       queued: number;
     };
     BulkRetryDlqRequest: {
@@ -3666,6 +3671,77 @@ export interface components {
       user_id: number;
       /** @example alice */
       username: string;
+    };
+    /**
+     * @description The wire shape `apply_submission_judgement`, `rejudge_submission`, and
+     *     `admin_fan_out_submission` actually return. All three authorise their
+     *     *mutation* independently of the caller's own Read visibility into the
+     *     submission (`submission:rejudge`/`system:admin`, never
+     *     `submission:view_all`), then route the response through
+     *     `apply_filter_to_response_after_mutation` (`handlers/submission/filter.rs`),
+     *     which runs the same `Resource::Submission` Read decision `GET
+     *     /submissions/{id}` would make for that caller:
+     *
+     *     - `Allow`: every field below is present, identical to `SubmissionResponse`.
+     *     - `Redact`: only the fields the decision nominates come back `null`/`[]`.
+     *     - `Deny`: the mutation still went through, but the response collapses to
+     *       just `id` - every other field below is entirely ABSENT from the JSON
+     *       object (not `null` - omitted), because failing the request outright
+     *       would misrepresent a mutation that did happen. See the `rjv_*` tests in
+     *       `tests/integration/rejudge_visibility.rs`.
+     *
+     *     Every field but `id` is therefore optional here, unlike
+     *     `SubmissionResponse` (used by `GET /submissions/{id}`, where a `Deny`
+     *     degrades to a 404 instead of a sparse body, so its fields stay required).
+     */
+    SubmissionResponseAfterMutation: {
+      /**
+       * Format: int32
+       * @example 1
+       */
+      contest_id?: number | null;
+      /** @example ioi */
+      contest_type?: string | null;
+      /**
+       * Format: date-time
+       * @example 2025-10-01T14:30:00Z
+       */
+      created_at?: string | null;
+      files?: components['schemas']['SubmissionFileDto'][] | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      id: number;
+      /**
+       * Format: int32
+       * @example 0
+       */
+      judge_epoch?: number | null;
+      /** @example cpp */
+      language?: string | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      problem_id?: number | null;
+      /** @example Two Sum */
+      problem_title?: string | null;
+      result?: null | components['schemas']['JudgeResultResponse'];
+      status?: null | components['schemas']['SubmissionStatus'];
+      /**
+       * @description When set, the submission has been pinned to this worker by an admin
+       *     and every operation it produces will run there.
+       * @example worker-1
+       */
+      target_worker_id?: string | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      user_id?: number | null;
+      /** @example alice */
+      username?: string | null;
     };
     /** @enum {string} */
     SubmissionStatus:
@@ -10630,7 +10706,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubmissionResponse'];
+          'application/json': components['schemas']['SubmissionResponseAfterMutation'];
         };
       };
       /** @description Judgement is not finalized (VALIDATION_ERROR) */
@@ -10755,7 +10831,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubmissionResponse'];
+          'application/json': components['schemas']['SubmissionResponseAfterMutation'];
         };
       };
       /** @description Invalid worker (VALIDATION_ERROR) */
