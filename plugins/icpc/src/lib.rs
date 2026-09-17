@@ -759,6 +759,79 @@ mod filter_tests {
     }
 
     #[test]
+    fn decide_visibility_issues_exactly_one_batched_storage_read_for_reveal_flags_across_many_contests()
+     {
+        // M20: the reveal flag load used to be one `host.storage.get_one()`
+        // call per DISTINCT contest id in the batch (one extism host-fn
+        // crossing per contest). It must now be ONE `host.storage.get()`
+        // call for the whole batch, mirroring the DB query batching pinned by
+        // `decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch`
+        // just above. Two DISTINCT contests are required here - a
+        // single-contest batch would pass even with the old per-contest loop.
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({ "public_standings": true, "freeze_minutes": 60 }),
+        );
+        host.config.seed(
+            "contest",
+            "20",
+            "contest",
+            serde_json::json!({ "public_standings": true, "freeze_minutes": 60 }),
+        );
+        // Contest 20 has been revealed; contest 10 has not (no key at all -
+        // the fail-frozen default).
+        host.storage.set(&[("reveal:20", "1")]).unwrap();
+
+        host.db.queue_query_result(serde_json::json!([
+            {
+                "submission_id": 7, "user_id": 2, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": IN_FREEZE_SUB as f64,
+            },
+            {
+                "submission_id": 8, "user_id": 3, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": IN_FREEZE_SUB as f64,
+            },
+        ]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer owns neither submission.
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 20)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+
+        assert_eq!(
+            host.storage.get_call_count(),
+            1,
+            "must issue exactly one storage.get() for both contests' reveal flags"
+        );
+
+        // Batching alone is not evidence of correctness - pin that the two
+        // contests' reveal states were resolved independently and correctly:
+        // contest 10 (not revealed) still hides submission 7 from the
+        // non-owner viewer; contest 20 (revealed) lets submission 8 through.
+        assert!(
+            matches!(decisions[0], WireDecision::Redact { .. }),
+            "contest 10 is not revealed: submission 7 must stay Redact, got {:?}",
+            decisions[0]
+        );
+        assert!(
+            matches!(decisions[1], WireDecision::Allow {}),
+            "contest 20 is revealed: submission 8 must be Allow, got {:?}",
+            decisions[1]
+        );
+    }
+
+    #[test]
     fn decide_visibility_fails_hidden_on_contest_submission_mismatch() {
         // No row at all for the submission id: the old code's "fail hidden
         // rather than leak" branch.
@@ -1033,20 +1106,30 @@ fn decide_visibility_decisions(
     icpc_contest_ids.dedup();
 
     let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
+    for contest_id in &icpc_contest_ids {
+        configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
+    }
+
+    // Reveal flags: ONE batched storage read across every distinct contest
+    // id in the batch, mirroring IOI's `tokens:{contest_id}:{viewer}` load
+    // in `feedback::decide_visibility_decisions` - never one `get_one` call
+    // per contest, which is one extism host-fn crossing per contest instead
+    // of one for the whole batch. Same fail-frozen handling as before (and
+    // as `handle_standings`): a storage read error is swallowed to an empty
+    // map, so every contest in this batch defaults to `revealed = false` -
+    // never accidentally unfreeze.
     let mut revealed: HashMap<i32, bool> = HashMap::new();
-    for contest_id in icpc_contest_ids {
-        configs.insert(contest_id, contest::load_config(host, contest_id)?);
-        // Same fail-frozen reveal handling as handle_standings: a storage
-        // read error is swallowed to `revealed = false` - never accidentally
-        // unfreeze.
-        let is_revealed = host
-            .storage
-            .get_one(&format!("reveal:{contest_id}"))
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("1");
-        revealed.insert(contest_id, is_revealed);
+    if !icpc_contest_ids.is_empty() {
+        let keys: Vec<String> = icpc_contest_ids
+            .iter()
+            .map(|cid| format!("reveal:{cid}"))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let raw = host.storage.get(&key_refs).ok().unwrap_or_default();
+        for (contest_id, key) in icpc_contest_ids.iter().zip(keys.iter()) {
+            let is_revealed = raw.get(key).map(String::as_str) == Some("1");
+            revealed.insert(*contest_id, is_revealed);
+        }
     }
 
     let viewer_id = req.subject.user_id;

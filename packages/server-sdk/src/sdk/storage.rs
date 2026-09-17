@@ -98,6 +98,15 @@ impl Storage {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct StorageMock {
     data: std::cell::RefCell<HashMap<String, String>>,
+    /// Number of `Storage::get()` calls made so far. Note this mock's
+    /// `get_one` reads `data` directly rather than calling `get` (unlike the
+    /// real wasm32 impl, where `get_one` is `get(&[key])`), so it does NOT
+    /// bump this counter - only `get()` itself does. That asymmetry is
+    /// exactly the point: it lets a plugin-side test assert that a batch of
+    /// lookups issued exactly one real `get()` (one extism host-fn crossing
+    /// on the wasm32 side) rather than one `get_one()` per key, mirroring
+    /// `host.db.queries()`'s role in the SQL-batching regression tests.
+    get_calls: std::cell::RefCell<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -105,6 +114,7 @@ impl StorageMock {
     pub fn new() -> Self {
         Self {
             data: std::cell::RefCell::new(HashMap::new()),
+            get_calls: std::cell::RefCell::new(0),
         }
     }
 }
@@ -112,11 +122,18 @@ impl StorageMock {
 #[cfg(not(target_arch = "wasm32"))]
 impl Storage {
     pub fn get(&self, keys: &[&str]) -> Result<HashMap<String, String>, SdkError> {
+        *self.inner.get_calls.borrow_mut() += 1;
         let data = self.inner.data.borrow();
         Ok(keys
             .iter()
             .filter_map(|k| data.get(*k).map(|v| (k.to_string(), v.clone())))
             .collect())
+    }
+
+    /// Number of `get()` calls made so far (test-only instrumentation - see
+    /// `StorageMock::get_calls`'s doc comment).
+    pub fn get_call_count(&self) -> usize {
+        *self.inner.get_calls.borrow()
     }
 
     pub fn get_one(&self, key: &str) -> Result<Option<String>, SdkError> {
