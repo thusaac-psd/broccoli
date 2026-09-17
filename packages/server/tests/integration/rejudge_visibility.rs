@@ -506,7 +506,12 @@ async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
     let submissions = res.body["submissions"]
         .as_array()
         .expect("submissions should be an array");
-    assert_eq!(submissions.len(), 1, "expected one submission: {}", res.body);
+    assert_eq!(
+        submissions.len(),
+        1,
+        "expected one submission: {}",
+        res.body
+    );
 
     // But the response entry must carry nothing beyond the id - no files,
     // no language, no target_worker_id. This is the exact shape a denied
@@ -520,9 +525,7 @@ async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
         "a denied-read fan-out entry must contain nothing but the id, got: {}",
         submissions[0]
     );
-    let submission_id = submissions[0]["id"]
-        .as_i64()
-        .expect("id should be present") as i32;
+    let submission_id = submissions[0]["id"].as_i64().expect("id should be present") as i32;
 
     // Prove the mutation genuinely happened despite the suppressed response
     // - verified against the DB, not trusted from the response body.
