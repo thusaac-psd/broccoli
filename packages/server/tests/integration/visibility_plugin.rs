@@ -917,3 +917,122 @@ async fn contest_level_gates_all_route_through_the_kernel() {
         res.text
     );
 }
+
+// ---------------------------------------------------------------------
+// Task 20 Item 6 (I5): `Decision::is_denied()` treats `Redact` as NOT
+// denied by design (see decision.rs's `is_denied_true_only_for_deny`).
+// `get_test_case` and `download_attachment` both gate reachability with a
+// bare `.is_denied()` check on `Resource::Problem` (and, for the
+// attachment, a second check on `Resource::Attachment`) rather than going
+// through `Visible<T>`/`into_masked_json` - each site's own doc comment
+// says a `Redact` there degenerates to Allow, since there is no masking
+// step afterwards. These tests pin that documented behavior against a
+// REAL plugin `Redact` answer, not just a doc comment: a plugin nominating
+// the problem (or the attachment) via `redact_resource_keys` must not
+// cause a 404, and the content that comes back must be the real,
+// unmasked content - never null, and never blocked.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_test_case_redact_on_problem_resource_still_returns_full_content() {
+    let app = TestApp::spawn_with_plugins().await;
+    // create_test_case requires `problem:edit`, which plain
+    // create_authenticated_user does not grant.
+    let admin_token = app
+        .create_user_with_role("tc_redact_admin", "pass1234", "admin")
+        .await;
+    let viewer_token = app
+        .create_authenticated_user("tc_redact_viewer", "pass1234")
+        .await;
+
+    let problem_id = insert_public_problem(&app, "TC Redact Problem").await;
+    let tc_id = app.create_test_case(problem_id, &admin_token).await;
+
+    seed_kv(
+        &app,
+        "redact_resource_keys",
+        &format!("problem:{problem_id}"),
+    )
+    .await;
+
+    let res = app
+        .get_with_token(&routes::test_case(problem_id, tc_id), &viewer_token)
+        .await;
+
+    assert_eq!(
+        res.status, 200,
+        "a plugin Redact on Resource::Problem must not deny get_test_case \
+         (is_denied() only matches Deny): {}",
+        res.text
+    );
+    assert_eq!(
+        res.body["input"], "5\n1 2 3 4 5",
+        "the response is built straight from the row with no masking step - \
+         content must be the real, unmasked value: {}",
+        res.text
+    );
+    assert_eq!(res.body["expected_output"], "15");
+    assert_eq!(res.body["score"], 10);
+}
+
+#[tokio::test]
+async fn download_attachment_redact_on_attachment_resource_still_returns_full_content() {
+    let app = TestApp::spawn_with_plugins().await;
+    // upload_attachment requires `problem:edit`, which plain
+    // create_authenticated_user does not grant.
+    let admin_token = app
+        .create_user_with_role("attach_redact_admin", "pass1234", "admin")
+        .await;
+    let viewer_token = app
+        .create_authenticated_user("attach_redact_viewer", "pass1234")
+        .await;
+
+    let problem_id = insert_public_problem(&app, "Attachment Redact Problem").await;
+    let file_bytes = b"the real attachment content".to_vec();
+    let upload_res = app
+        .upload_attachment(
+            problem_id,
+            "notes.txt",
+            file_bytes.clone(),
+            None,
+            &admin_token,
+        )
+        .await;
+    assert_eq!(
+        upload_res.status, 201,
+        "attachment upload failed: {}",
+        upload_res.text
+    );
+    let ref_id = upload_res.body["id"]
+        .as_str()
+        .expect("upload response must carry id")
+        .to_string();
+
+    // Nominate the ATTACHMENT resource specifically (not the problem), to
+    // pin the second, attachment-level gate in `download_attachment` - the
+    // problem-level gate above it is left at the fixture's default Allow.
+    seed_kv(
+        &app,
+        "redact_resource_keys",
+        &format!("attachment:{ref_id}"),
+    )
+    .await;
+
+    let res = app
+        .download_raw(&routes::attachment(problem_id, &ref_id), &viewer_token)
+        .await;
+
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "a plugin Redact on Resource::Attachment must not deny download_attachment \
+         (is_denied() only matches Deny)"
+    );
+    let bytes = res.bytes().await.unwrap();
+    assert_eq!(
+        bytes.as_ref(),
+        file_bytes.as_slice(),
+        "build_blob_response bypasses Visible<T>/into_masked_json entirely - \
+         the streamed bytes must be the real, unmasked content"
+    );
+}

@@ -69,6 +69,20 @@ mod tests {
     }
 
     #[test]
+    fn is_denied_true_only_for_deny() {
+        // Redact is deliberately NOT denied - see the handler-site doc
+        // comments this test's sibling HTTP-level tests pin (get_test_case,
+        // download_attachment): a hypothetical Redact decision at those
+        // sites degenerates to Allow because the response is built without
+        // going through `Visible<T>`/`into_masked_json`. If `is_denied`
+        // ever started treating `Redact` as denied, those sites would start
+        // 404ing viewers who should merely be un-redactable there.
+        assert!(Decision::Deny.is_denied());
+        assert!(!Decision::Allow.is_denied());
+        assert!(!Decision::Redact(mask(&["x"])).is_denied());
+    }
+
+    #[test]
     fn plugin_cannot_widen_a_host_deny() {
         assert_eq!(Decision::Deny.meet(Decision::Allow), Decision::Deny);
     }
