@@ -21,6 +21,14 @@ impl FieldMask {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Number of distinct field paths. Used by
+    /// `plugin_query::query_plugins` to reapply `MAX_MASK_FIELDS` after
+    /// [`Decision::meet`] has unioned masks from more than one plugin
+    /// together - see that constant's doc comment.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 /// Reachability decision for one (subject, action, resource) triple.

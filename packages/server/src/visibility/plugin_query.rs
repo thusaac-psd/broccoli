@@ -130,7 +130,25 @@ const MAX_MASK_PATH_SEGMENTS: usize = 32;
 /// still bounding the string-processing and allocation work spent per path.
 const MAX_MASK_PATH_BYTES: usize = 256;
 
-/// Maximum number of field strings a single `Redact` decision may carry.
+/// Maximum number of field strings any one `Redact` decision may carry for a
+/// single resource, enforced TWICE:
+///
+/// 1. Here, per plugin response, by [`validate_redact_fields`] inside
+///    [`decisions_from_output`] - bounds one plugin's own
+///    `Vec<String>` before it becomes a `FieldMask`.
+/// 2. Again, per resource, on the FINAL decision `query_plugins` returns for
+///    that resource, after folding every registered plugin's response
+///    together with [`Decision::meet`]. `meet` unions two `Redact` masks
+///    (`FieldMask::union`) without revalidating the result, so N plugins each
+///    answering right at this cap can fold into one `Redact` carrying up to
+///    `N * MAX_MASK_FIELDS` paths - silently past this constant's bound if
+///    nothing rechecked the union. `query_plugins` does that recheck (see the
+///    loop at the end of that function): the growth there is bounded by the
+///    number of plugins that declare `topic = "visibility"`, a trusted,
+///    deploy-time-fixed count, not a per-request or attacker-controlled
+///    quantity, so this is a precision fix (keeping the constant's meaning
+///    accurate for the value that actually ships in a response), not a DoS
+///    mitigation.
 ///
 /// Bounds total per-decision validation/allocation work independently of any
 /// one path's shape. The largest legitimate `Redact` today (an IOI feedback
@@ -310,7 +328,40 @@ pub(crate) async fn query_plugins(
         combined = meet_positionally(combined, decisions);
     }
 
-    combined
+    enforce_mask_cap_post_union(combined)
+}
+
+/// Reapply `MAX_MASK_FIELDS` to every `Redact` decision AFTER folding all
+/// plugins' responses together, since `Decision::meet` unions two `Redact`
+/// masks without revalidating the result - see `MAX_MASK_FIELDS`'s doc
+/// comment. Any decision whose unioned mask is still within the cap is
+/// returned unchanged (the common case: zero or one visibility plugin
+/// registered, or several agreeing on overlapping/small masks).
+///
+/// A decision that ends up over the cap is escalated to `Decision::Deny`,
+/// never silently truncated: dropping paths to fit the cap would make the
+/// response show MORE than the union of every plugin's `Redact` said should
+/// be hidden - an under-redaction, exactly backwards for a fail-closed
+/// system. `Deny` is strictly more restrictive than any `Redact`, so this
+/// can only narrow what the caller sees, never widen it - consistent with
+/// `decisions_from_output`'s existing "any malformed mask denies the whole
+/// resource" stance, just applied post-union instead of pre-union.
+fn enforce_mask_cap_post_union(decisions: Vec<Decision>) -> Vec<Decision> {
+    decisions
+        .into_iter()
+        .map(|decision| match decision {
+            Decision::Redact(mask) if mask.len() > MAX_MASK_FIELDS => {
+                tracing::error!(
+                    field_count = mask.len(),
+                    max = MAX_MASK_FIELDS,
+                    "visibility decision's Redact mask exceeds MAX_MASK_FIELDS after \
+                     combining multiple plugins' responses; denying this resource"
+                );
+                Decision::Deny
+            }
+            other => other,
+        })
+        .collect()
 }
 
 // Re-exported for `super::tests` (`packages/server/src/visibility/mod.rs`,
@@ -1111,6 +1162,138 @@ mod tests {
             "two plugins redacting different fields must combine into the UNION \
              of both masks, not either plugin's mask alone"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // query_plugins - MAX_MASK_FIELDS enforcement AFTER the fold (I10).
+    //
+    // `oversized_redact_field_list_denies_whole_batch` above already pins
+    // the pre-existing per-response check inside `decisions_from_output`.
+    // These two pin the second, separate check: `enforce_mask_cap_post_union`
+    // revalidates the cap on the FINAL decision, after `Decision::meet` has
+    // unioned every querier's mask together. Each plugin's own answer below
+    // is well within the cap individually, so the pre-existing per-response
+    // check lets both through - the only thing that can catch an over-cap
+    // union is the post-union recheck.
+    // ---------------------------------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn two_queriers_redact_union_over_cap_denies_instead_of_over_redacting() {
+        let _guard = crate::metrics_test_lock();
+
+        // Disjoint field sets, 40 fields each (well under MAX_MASK_FIELDS =
+        // 64 individually), whose union is 80 fields - over the cap.
+        let fields_a: Vec<String> = (0..40).map(|i| format!("a{i}")).collect();
+        let fields_b: Vec<String> = (0..40).map(|i| format!("b{i}")).collect();
+
+        let registry = registry_with_order(&["plugin-redact-a", "plugin-redact-b"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-redact-a".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: fields_a,
+            }])),
+        );
+        responses.insert(
+            "plugin-redact-b".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: fields_b,
+            }])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            vec![Decision::Deny],
+            "a unioned Redact mask over MAX_MASK_FIELDS must deny the resource - \
+             shipping it as Redact would show MORE fields than either plugin's \
+             own answer said should be hidden, an under-redaction"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn two_queriers_redact_union_exactly_at_cap_stays_redact() {
+        let _guard = crate::metrics_test_lock();
+
+        // Boundary check for the same fold: a union that lands EXACTLY on
+        // MAX_MASK_FIELDS must still ship as `Redact`, not be over-denied by
+        // an off-by-one in `enforce_mask_cap_post_union`.
+        let fields_a: Vec<String> = (0..32).map(|i| format!("a{i}")).collect();
+        let fields_b: Vec<String> = (0..32).map(|i| format!("b{i}")).collect();
+        assert_eq!(fields_a.len() + fields_b.len(), MAX_MASK_FIELDS);
+
+        let registry = registry_with_order(&["plugin-redact-a", "plugin-redact-b"]);
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-redact-a".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: fields_a,
+            }])),
+        );
+        responses.insert(
+            "plugin-redact-b".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Redact {
+                fields: fields_b,
+            }])),
+        );
+
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+
+        let resource_contest_ids = vec![Some(1); resources.len()];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &resource_contest_ids,
+        )
+        .await;
+
+        match &result[0] {
+            Decision::Redact(mask) => assert_eq!(
+                mask.len(),
+                MAX_MASK_FIELDS,
+                "a union landing exactly on the cap must not be truncated or denied"
+            ),
+            other => panic!("expected Redact exactly at the cap, got {other:?}"),
+        }
     }
 
     #[allow(clippy::await_holding_lock)]
