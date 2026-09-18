@@ -27,7 +27,15 @@ const TERMINAL_STATUSES: SubmissionStatus[] = [
   'SystemError',
 ];
 
-const NON_TERMINAL_STATUSES: SubmissionStatus[] = ['Pending', 'Compiling'];
+// M16: `Queued` is a valid `SubmissionStatus` (see the `SubmissionStatus`
+// schema literal in `@broccoli/web-sdk/api/schema`) but was missing here -
+// this suite exercised every non-terminal status except the very first one
+// a submission can be in.
+const NON_TERMINAL_STATUSES: SubmissionStatus[] = [
+  'Queued',
+  'Pending',
+  'Compiling',
+];
 
 for (const status of TERMINAL_STATUSES) {
   test(`a null verdict under terminal status "${status}" is a redaction, not a pending case`, () => {
