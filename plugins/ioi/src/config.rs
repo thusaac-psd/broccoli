@@ -1,90 +1,58 @@
-#[cfg(test)]
-use broccoli_server_sdk::types::TestCaseBodyRef;
 use broccoli_server_sdk::types::TestCaseRow;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoringMode {
+    #[default]
     MaxSubmission,
     SumBestSubtask,
     BestTokenedOrLast,
 }
 
-impl Default for ScoringMode {
-    fn default() -> Self {
-        Self::MaxSubmission
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackLevel {
+    #[default]
     Full,
     SubtaskScores,
     TotalOnly,
     None,
 }
 
-impl Default for FeedbackLevel {
-    fn default() -> Self {
-        Self::Full
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreboardVisibility {
+    #[default]
     AdminsOnly,
     AllContestViewers,
 }
 
-impl Default for ScoreboardVisibility {
-    fn default() -> Self {
-        Self::AdminsOnly
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScoreboardTiebreaker {
     EqualRank,
     SumScoreTime,
+    #[default]
     MaxScoreTime,
 }
 
-impl Default for ScoreboardTiebreaker {
-    fn default() -> Self {
-        Self::MaxScoreTime
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenMode {
+    #[default]
     None,
     FixedBudget,
     Regenerating,
 }
 
-impl Default for TokenMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubtaskScoringMethod {
+    #[default]
     GroupMin,
     Sum,
     GroupMul,
-}
-
-impl Default for SubtaskScoringMethod {
-    fn default() -> Self {
-        Self::GroupMin
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

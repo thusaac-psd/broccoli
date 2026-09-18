@@ -319,7 +319,6 @@ mod tests {
         JudgeContext {
             task_config: TaskConfig {
                 subtasks: subtask_defs.clone(),
-                ..TaskConfig::default()
             },
             subtask_defs,
             ..default_ctx(test_cases)

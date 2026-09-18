@@ -1,33 +1,50 @@
+#[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::permissions as perm;
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ContestConfig, FeedbackLevel, TaskConfig, resolve_tc_label, round_score};
+#[cfg(target_arch = "wasm32")]
+use crate::config::{ContestConfig, TaskConfig, resolve_tc_label, round_score};
+// Used by both the wasm32 handlers below and subtask_scores_access_decision,
+// which is deliberately reachable under `#[cfg(test)]` too (see its doc
+// comment) so `cargo test` can exercise the feedback-level access matrix.
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
 use crate::feedback::{
     can_view_privileged_submission_feedback, viewer_has_token_feedback_for_submission,
 };
+#[cfg(target_arch = "wasm32")]
 use crate::score::{TcMaxScore, score_submission_subtask_details};
 #[cfg(target_arch = "wasm32")]
 use crate::score::{compute_official_task_score, load_current_submission_test_case_results};
 #[cfg(target_arch = "wasm32")]
 use crate::scoreboard::load_scoreboard_cells;
+#[cfg(target_arch = "wasm32")]
 use crate::scoreboard::{
     combined_score_time_seconds, compare_scoreboard_entries, full_scoreboard_visible_for_phase,
     scoreboard_entries_tied,
 };
+#[cfg(target_arch = "wasm32")]
 use crate::tokens::{TokenState, available_tokens, next_regen_elapsed_min};
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config, load_token_state};
 
+// Only ever queried by the wasm32-gated token handlers below; gated the same
+// way so a native (test/clippy) build -- which never calls those handlers --
+// doesn't see these as dead code.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct ElapsedMinutes {
     elapsed_minutes: Option<f64>,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct NextRegenAtRow {
     next_regen_at: Option<String>,

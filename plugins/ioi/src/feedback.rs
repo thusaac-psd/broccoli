@@ -3,8 +3,19 @@ use std::collections::HashMap;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::permissions as perm;
+// Host/PluginHttpRequest/SdkError/WireDecision/VisibilityQueryInput/Params are
+// used by both the wasm32-gated handlers below and the #[cfg(test)] unit
+// tests in `visibility_tests`, which exercise `decide_visibility_decisions`
+// directly via `Host::mock()`; gate the same way so a native (test/clippy)
+// build doesn't see this as unused.
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 
+// ContestConfig/FeedbackLevel are used by `decide_visibility_decisions` and
+// `mask_for_level` (both wasm32-gated production code) and directly by the
+// #[cfg(test)] unit tests below; gate the same way so a native (test/clippy)
+// build doesn't see this as unused.
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{ContestConfig, FeedbackLevel};
 #[cfg(target_arch = "wasm32")]
 use crate::load_token_state;

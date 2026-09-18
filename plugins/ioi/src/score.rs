@@ -1,22 +1,53 @@
+// Every item below is reachable only from wasm32-gated production code
+// and/or the #[cfg(test)] unit tests at the bottom of this file; this file
+// has no top-level (unconditional) use of the SDK prelude, HashMap, or serde
+// derive macros, so gate these imports the same way a native (test/clippy)
+// build doesn't see them as unused.
+#[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
+#[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
-use crate::config::{
-    ContestConfig, ScoringMode, SubtaskDef, TaskConfig, resolve_tc_label, round_score,
-};
+// Only reachable from the wasm32-gated `run_judge`/`compute_official_task_score`
+// below; this file has no #[cfg(test)] use of these three.
+#[cfg(target_arch = "wasm32")]
+use crate::config::{ContestConfig, ScoringMode, TaskConfig};
+// Reachable from wasm32-gated production code AND directly from the
+// #[cfg(test)] unit tests below (`score_submission_subtask_details`, which
+// they call directly, and `SubtaskDef` literals they construct); gate the
+// same way so a native (test/clippy) build doesn't see these as unused.
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::config::{SubtaskDef, resolve_tc_label, round_score};
+#[cfg(target_arch = "wasm32")]
 use crate::judge::{JudgeContext, judge_with_context_detached};
+// Only used by the wasm32-gated `sum_best_subtask_score`/
+// `compute_official_task_score` below; this file has no #[cfg(test)] use of
+// either.
+#[cfg(target_arch = "wasm32")]
 use crate::scoring::{score_best_tokened_or_last, score_sum_best_subtask};
+// `build_default_subtasks` is reachable from the wasm32-gated `run_judge`
+// below AND directly from the #[cfg(test)] unit tests; `score_all_subtasks`
+// is reachable from both `score_submission_subtask_details` (wasm32+test)
+// and the wasm32-only `sum_best_subtask_score`. Gate both the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::subtasks::{build_default_subtasks, score_all_subtasks};
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config, load_token_state};
 
+// Only constructed by the wasm32-gated `compute_official_task_score` below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct MaxScore {
     max_score: Option<f64>,
 }
 
+// Constructed by the wasm32-gated `load_current_submission_test_case_results`/
+// `recompute_sum_best_subtask` below AND directly by the #[cfg(test)] unit
+// tests, which build rows by hand instead of querying a mock DB.
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 pub(crate) struct TcResultRow {
     #[allow(dead_code)]
@@ -34,6 +65,9 @@ pub(crate) struct TcResultRow {
 /// actually passed (those methods gate on `raw >= 1.0`), diverging from the live
 /// judging path (which scores from the true `outcome.score`). Use the persisted
 /// verdict for the full-pass signal so recompute matches live scoring.
+// Called from the wasm32-gated `recompute_sum_best_subtask` below AND from
+// `score_submission_subtask_details` (wasm32+test); gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn normalized_raw_score(verdict: &Verdict, score: f64, tc_max: f64) -> f64 {
     if verdict.is_accepted() {
         1.0
@@ -44,6 +78,9 @@ pub(crate) fn normalized_raw_score(verdict: &Verdict, score: f64, tc_max: f64) -
     }
 }
 
+// Only constructed inside `score_submission_subtask_details` below
+// (wasm32+test); gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct SubtaskScoreDetail {
     name: String,
@@ -52,6 +89,9 @@ pub(crate) struct SubtaskScoreDetail {
     max_score: f64,
 }
 
+// Only constructed by the wasm32-gated `recompute_sum_best_subtask` below,
+// and used as a type from `api.rs`'s wasm32-gated handlers.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 pub(crate) struct TcMaxScore {
     #[allow(dead_code)]
@@ -59,6 +99,8 @@ pub(crate) struct TcMaxScore {
     pub(crate) max_score: f64,
 }
 
+// Only constructed by the wasm32-gated `compute_official_task_score` below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct SubmissionScore {
     #[allow(dead_code)]
@@ -66,6 +108,9 @@ struct SubmissionScore {
     score: f64,
 }
 
+// Called by the wasm32-gated `api.rs` subtask-scores handler AND directly by
+// the #[cfg(test)] unit tests below; gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn score_submission_subtask_details(
     test_cases: &[TestCaseRow],
     subtask_defs: &[SubtaskDef],
@@ -228,6 +273,10 @@ fn recompute_sum_best_subtask(
 /// official task score ([`recompute_sum_best_subtask`]) and the scoreboard cell
 /// (`crate::scoreboard`), which differ only in how they fetch + normalize the
 /// rows - so the two cannot diverge on the value.
+// Called from the wasm32-gated `recompute_sum_best_subtask` above and from
+// `scoreboard.rs`'s wasm32-gated sum-best-subtask cell loader; this file has
+// no #[cfg(test)] use of it directly.
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn sum_best_subtask_score<'a>(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
