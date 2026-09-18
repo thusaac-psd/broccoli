@@ -67,7 +67,6 @@ impl SandboxConfig {
             process_limit: Some(self.compile_process_limit),
             open_files_limit: Some(self.compile_open_files_limit),
             file_size_limit: Some(self.compile_file_size_limit_kb),
-            ..Default::default()
         }
     }
 
@@ -86,7 +85,6 @@ impl SandboxConfig {
             process_limit: Some(self.exec_process_limit),
             open_files_limit: Some(self.exec_open_files_limit),
             file_size_limit: Some(self.exec_file_size_limit_kb),
-            ..Default::default()
         }
     }
 
