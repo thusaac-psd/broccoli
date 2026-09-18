@@ -118,6 +118,9 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub queries: Vec<ServerQuery>,
+
+    #[serde(default)]
+    pub timers: Vec<ServerTimer>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -138,6 +141,15 @@ pub struct HookDeclaration {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerQuery {
     pub topic: String,
+    pub function: String,
+}
+
+/// A `[[server.timers]]` declaration: the function invoked when one of this
+/// plugin's scheduled timers comes due. A plugin has at most one, and
+/// declaring it is the opt-in for receiving callbacks -- scheduling them
+/// additionally requires the `timer` permission.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerTimer {
     pub function: String,
 }
 
@@ -924,5 +936,36 @@ permissions = ["logger"]
 "#;
         let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
         assert!(manifest.server.as_ref().unwrap().queries.is_empty());
+    }
+
+    #[test]
+    fn parses_server_timers_section() {
+        let toml = r#"
+name = "p"
+version = "0.1.0"
+
+[server]
+entry = "p.wasm"
+
+[[server.timers]]
+function = "on_timer"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        let timers = &manifest.server.as_ref().unwrap().timers;
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0].function, "on_timer");
+    }
+
+    #[test]
+    fn manifest_without_timers_defaults_to_empty() {
+        let toml = r#"
+name = "p"
+version = "0.1.0"
+
+[server]
+entry = "p.wasm"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        assert!(manifest.server.as_ref().unwrap().timers.is_empty());
     }
 }
