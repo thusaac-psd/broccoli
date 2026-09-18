@@ -78,4 +78,6 @@ export interface AdminJobsQuery {
   sort_by?: string;
   sort_order?: 'asc' | 'desc';
   status?: string;
+  station?: string;
+  printer?: string;
 }
