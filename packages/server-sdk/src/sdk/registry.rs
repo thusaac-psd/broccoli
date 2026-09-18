@@ -1,9 +1,11 @@
 use crate::error::SdkError;
 
-pub struct Registry {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) inner: RegistryMock,
-}
+// No mock-state field: the host-target mock impl below always returns
+// `Ok(())`, so there is nothing to record/replay and no consumer to
+// cfg-gate a state field to. See checker.rs for the same reasoning -- a
+// previous `#[cfg(not(target_arch = "wasm32"))] inner: RegistryMock` field
+// was a zero-sized, never-read placeholder that warned on host builds.
+pub struct Registry {}
 
 #[cfg(target_arch = "wasm32")]
 impl Registry {
@@ -68,16 +70,6 @@ impl Registry {
         });
         unsafe { crate::host::raw::register_language_resolver(serde_json::to_string(&input)?)? };
         Ok(())
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) struct RegistryMock;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl RegistryMock {
-    pub fn new() -> Self {
-        Self
     }
 }
 
