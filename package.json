@@ -10,7 +10,7 @@
     "format": "pnpm prettier --write \"{.,packages/**}/*.{ts,tsx,css,scss,html,json,md}\"",
     "format:check": "pnpm prettier --check \"{.,packages/**}/*.{ts,tsx,css,scss,html,json,md}\"",
     "lint": "pnpm eslint .",
-    "test": "node --experimental-strip-types --test $(find packages/web/src -name '*.test.ts')",
+    "test": "node --experimental-strip-types --test $(find packages/web/src plugins -name '*.test.ts' -not -path '*/node_modules/*')",
     "typecheck": "pnpm --filter @broccoli/web typecheck",
     "build:plugin-frontends": "pnpm --dir plugins/communication-evaluator/frontend build && pnpm --dir plugins/config-ui-test/frontend build && pnpm --dir plugins/cooldown/frontend build && pnpm --dir plugins/icpc/web build && pnpm --dir plugins/ioi/frontend build && pnpm --dir plugins/print/web build && pnpm --dir plugins/standard-languages/frontend build && pnpm --dir plugins/submission-limit/frontend build",
     "prepare": "husky"
