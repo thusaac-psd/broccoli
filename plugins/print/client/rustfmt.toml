@@ -1,0 +1,12 @@
+# This crate is the repo's only `edition = "2021"` crate; everything else is
+# edition 2024. `cargo fmt` derives its style edition from the manifest, so it
+# would check these files under 2021 import-ordering rules -- while
+# package.json's lint-staged hook runs `rustfmt --edition 2024` over every
+# staged *.rs file in the repo, this crate's included. The two disagree
+# permanently: the hook reorders imports to 2024 style on commit, and a 2021
+# `cargo fmt --check` then reports them as unformatted.
+#
+# Pinning the style edition to 2024 settles that in favour of the rest of the
+# repo, and changes formatting only -- the crate still compiles as edition
+# 2021, so no language semantics shift.
+style_edition = "2024"
