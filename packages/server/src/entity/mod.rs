@@ -12,6 +12,7 @@ pub mod judgement_reset;
 pub mod plugin;
 pub mod plugin_config;
 pub mod plugin_storage;
+pub mod plugin_timer;
 pub mod problem;
 pub mod problem_attachment;
 pub mod refresh_token;

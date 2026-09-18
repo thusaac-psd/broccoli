@@ -21,6 +21,7 @@ mod m0002_user_credentials_changed_at;
 mod m0003_remove_plugin_read_denylist;
 mod m0004_grant_plugin_writes;
 mod m0005_leased_at;
+mod m0006_plugin_timer_index;
 
 pub struct Migrator;
 
@@ -33,6 +34,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0003_remove_plugin_read_denylist::Migration),
             Box::new(m0004_grant_plugin_writes::Migration),
             Box::new(m0005_leased_at::Migration),
+            Box::new(m0006_plugin_timer_index::Migration),
         ]
     }
 }
