@@ -123,4 +123,63 @@ mod tests {
         let a = Decision::Redact(mask(&["x"]));
         assert_eq!(a.clone().meet(a.clone()), a);
     }
+
+    // M2: the six tests above look like a complete lattice-law suite, but a
+    // mutant that replaces `meet`'s whole body with `self` (a first-argument
+    // projection) survives FOUR of them. Not by sloppiness - a
+    // first-argument projection genuinely IS associative
+    // (`f(f(a,b),c) == f(a,f(b,c)) == a`, trivially, for ANY `f` that always
+    // returns its first argument) and idempotent (`f(a,a) == a`, same
+    // reason), so `meet_is_associative`/`meet_is_idempotent` are
+    // mathematically incapable of ever detecting this mutant - no
+    // assertion strengthening fixes that, only a different property can.
+    // `plugin_cannot_widen_a_host_deny` and `plugin_cannot_widen_a_host_redact`
+    // also survive it, but only because BOTH happen to write the "expected
+    // winner" (`Deny`, `host`) as the FIRST `.meet()` operand - the
+    // projection returns the right answer by construction of the test, not
+    // because it implements `meet`. The two tests below pick the operand
+    // order that a first-argument projection gets wrong: Allow written
+    // FIRST (where a projection would wrongly answer `Allow` itself), and
+    // an explicit swap-and-compare for commutativity. Confirmed by hand:
+    // temporarily changing `meet`'s body to `self` fails both of these
+    // (and `redact_meets_redact_by_union_of_masks`, and `meet_is_commutative`
+    // above) while leaving `meet_is_associative`/`meet_is_idempotent`/
+    // `plugin_cannot_widen_a_host_deny`/`plugin_cannot_widen_a_host_redact`
+    // green - restoring the real implementation makes the whole module
+    // green again.
+
+    #[test]
+    fn allow_is_the_meet_identity_from_either_operand_position() {
+        // `plugin_cannot_widen_a_host_redact` above already pins
+        // `x.meet(Allow) == x` (Allow as the SECOND operand) - a
+        // first-argument-projection stub answers that correctly by
+        // accident, since it returns `x` regardless of what `Allow` even
+        // is. Allow as the FIRST operand is the direction that actually
+        // distinguishes real `meet` from that stub: a projection would
+        // wrongly answer `Allow` itself instead of `x`.
+        let redact = Decision::Redact(mask(&["x"]));
+        assert_eq!(Decision::Allow.meet(redact.clone()), redact);
+        assert_eq!(Decision::Allow.meet(Decision::Deny), Decision::Deny);
+    }
+
+    #[test]
+    fn meet_is_commutative_across_every_variant_pair() {
+        // `meet_is_commutative` above already swaps Redact/Deny and
+        // correctly fails the first-argument-projection stub. This test
+        // adds the pairs that stub's OTHER two survivors
+        // (`plugin_cannot_widen_a_host_deny`, `plugin_cannot_widen_a_host_redact`)
+        // never swap - both always write the expected winner first. Swap
+        // order here on purpose: a first-argument projection cannot be
+        // commutative for any pair of genuinely different values, since it
+        // always returns whichever side happens to be written first.
+        let redact = Decision::Redact(mask(&["x"]));
+        assert_eq!(
+            Decision::Allow.meet(redact.clone()),
+            redact.meet(Decision::Allow)
+        );
+        assert_eq!(
+            Decision::Allow.meet(Decision::Deny),
+            Decision::Deny.meet(Decision::Allow)
+        );
+    }
 }
