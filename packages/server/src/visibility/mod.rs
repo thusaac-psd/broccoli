@@ -896,9 +896,23 @@ mod tests {
     async fn mixed_batch_denied_and_allowed_resources_resolve_independently() {
         let _guard = crate::metrics_test_lock();
 
+        // M15: this test used to have the plugin DENY contest 2, so
+        // `decisions[0]` (host-denied) and `decisions[1]` (host-allowed but
+        // plugin-denied) were both `Decision::Deny` - a positional bug that
+        // swapped those two entries would have gone completely unnoticed,
+        // despite the comment right above claiming "all three final
+        // outcomes differ" (they did not: two of the three were the same
+        // `Decision::Deny` value, just reached by different mechanisms).
+        // The plugin now REDACTS contest 2 instead, which still exercises
+        // the exact same mechanism this test is for (a host-denied resource
+        // is excluded from the plugin call entirely, while a host-allowed
+        // one still reaches it and can be narrowed) but makes all three
+        // final outcomes pairwise distinct, so a positional swap between
+        // any two of them changes the asserted result.
+        //
         // Contest 1: private, non-member -> host Deny. Contest 2 and 3:
-        // public, in-window -> host Allow; the plugin then denies 2 and
-        // allows 3, so all three final outcomes differ.
+        // public, in-window -> host Allow; the plugin then redacts 2 and
+        // allows 3.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![
                 contest_row(1, false, Some(-1), None, true),
@@ -911,7 +925,9 @@ mod tests {
         let mut answers = HashMap::new();
         answers.insert(
             ("contest".to_string(), "2".to_string()),
-            WireDecision::Deny {},
+            WireDecision::Redact {
+                fields: vec!["score".to_string()],
+            },
         );
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = Arc::new(StdMutex::new(Vec::new()));
@@ -938,8 +954,8 @@ mod tests {
         assert_eq!(decisions[0], Decision::Deny, "contest 1 is host-denied");
         assert_eq!(
             decisions[1],
-            Decision::Deny,
-            "contest 2 is host-allowed but plugin-denied"
+            Decision::Redact(FieldMask::new(["score".to_string()])),
+            "contest 2 is host-allowed but plugin-redacted"
         );
         assert_eq!(
             decisions[2],

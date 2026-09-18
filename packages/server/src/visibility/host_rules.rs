@@ -1897,23 +1897,45 @@ mod tests {
 
     #[tokio::test]
     async fn decisions_are_positional_matching_resources() {
+        // M15: the original version of this test asserted
+        // `[Decision::Deny, Decision::Allow, Decision::Allow]` for
+        // `[Contest(1), Contest(2), Submission(3)]` - a swap between the
+        // Contest(2) and Submission(3) POSITIONS (i.e. a bug that handed
+        // Submission(3)'s decision to slot 1 and Contest(2)'s to slot 2)
+        // would have produced that exact same vector, so this test could
+        // not actually have caught a positional-mapping bug between those
+        // two resources despite exercising three genuinely different rule
+        // paths. Every expected value below is now pairwise distinct (Deny
+        // / Redact / Allow), so ANY positional swap among the three
+        // resources changes the asserted vector, while still exercising
+        // rule 4 (private contest denies a non-member), rule 10 (a
+        // non-participant sees a public clarification's question but not
+        // its reply fields when there is no reply to confirm public), and
+        // rule 6 (an owner always sees their own submission).
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             // Query 0: submissions.
-            .append_query_results([vec![submission_row(3, 1, Some(1))]])
-            // Query 1: contests 1 (private, denies) and 2 (public, allows).
-            .append_query_results([vec![
-                contest_row(1, false, Some(-1), None, true),
-                contest_row(2, true, Some(-1), None, true),
-            ]])
-            // Query 2: membership - empty (not a member of contest 1;
-            // contest 2 is public so it doesn't matter; submission 3 is
+            .append_query_results([vec![submission_row(3, 1, None)]])
+            // Query C: clarifications. `contest_id` (5) is deliberately NOT
+            // shared with `Resource::Contest(1)` below - `decide_clarification`
+            // never consults `contests`, so this also proves that
+            // independently.
+            .append_query_results([vec![clarification_row(9, 5, 99, None, true)]])
+            // Query D: no replies -> `latest_reply_public` defaults to
+            // `false`, same setup as
+            // `clarification_non_participant_public_with_no_replies_redacts_reply_fields`
+            // above.
+            .append_query_results([Vec::<clarification_reply::Model>::new()])
+            // Query 1: contest 1 only (private, denies) - submission 3 is
             // owned by the subject so its contest was never added to the
-            // fetch set).
+            // fetch set, and a clarification's `contest_id` is never added
+            // to it either (see the Query C comment above).
+            .append_query_results([vec![contest_row(1, false, Some(-1), None, true)]])
+            // Query 2: membership - empty (not a member of contest 1).
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
         let resources = vec![
             Resource::Contest(1),
-            Resource::Contest(2),
+            Resource::Clarification(9),
             Resource::Submission(3),
         ];
         let decisions = host_decide(
@@ -1928,7 +1950,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             decisions,
-            vec![Decision::Deny, Decision::Allow, Decision::Allow]
+            vec![
+                Decision::Deny,
+                Decision::Redact(FieldMask::new([
+                    "reply_content".to_string(),
+                    "reply_author_id".to_string(),
+                    "reply_author_name".to_string(),
+                    "replied_at".to_string(),
+                ])),
+                Decision::Allow,
+            ]
         );
     }
 }
