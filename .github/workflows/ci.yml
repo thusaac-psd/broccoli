@@ -107,6 +107,14 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
+      # `pnpm typecheck` above only runs `pnpm --filter @broccoli/web
+      # typecheck`; no plugin frontend is type-checked by anything else
+      # (`pnpm build` in those packages transpiles via tsdown/vite without a
+      # full type-check). See the script for why a script beats a hardcoded
+      # package list here.
+      - name: Type check plugin frontends
+        run: ./scripts/typecheck-plugin-frontends.sh
+
       - name: Check formatting
         run: pnpm format:check
 
