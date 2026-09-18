@@ -3,6 +3,7 @@ pub mod fanout;
 pub mod lease;
 pub mod operation_reaper;
 pub mod permits;
+pub mod plugin_timer;
 pub mod queue_depth;
 pub mod steal;
 pub mod sweeper;
@@ -39,20 +40,38 @@ impl Dispatcher {
         let lease_steal_enabled = deps.config.dispatcher_lease_steal_enabled;
         let claim_enabled = deps.config.claim_fiber_enabled;
 
-        if !lease_steal_enabled && !claim_enabled {
-            info!(
-                "Dispatcher fully disabled by config (lease/steal off, claim fiber off). \
-                 Submissions written with status='Queued' will accumulate until the claim \
-                 fiber is re-enabled."
-            );
-            return Self {
-                cancel: None,
-                handles: Vec::new(),
-            };
-        }
-
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let mut handles = Vec::new();
+
+        // The plugin-timer delivery loop is **independent** of both the claim
+        // fiber and the lease/steal toggle: those govern submission judging,
+        // this delivers plugin-scheduled `[[server.timers]]` callbacks. It is
+        // therefore spawned unconditionally and BEFORE the early-return below
+        // — a deployment that disables lease/steal and the claim fiber still
+        // wants its plugins' timers to fire.
+        handles.push(tokio::spawn(plugin_timer::run(
+            deps.state.clone(),
+            plugin_timer::TimerConfig {
+                tick_interval_secs: deps.config.plugin_timer_tick_interval_secs,
+                lease_secs: deps.config.plugin_timer_lease_secs,
+                batch: deps.config.plugin_timer_batch,
+                max_attempts: deps.config.plugin_timer_max_attempts,
+            },
+            cancel_rx.clone(),
+        )));
+
+        if !lease_steal_enabled && !claim_enabled {
+            info!(
+                "Dispatcher submission-judging fibers fully disabled by config (lease/steal \
+                 off, claim fiber off). Submissions written with status='Queued' will \
+                 accumulate until the claim fiber is re-enabled. The plugin-timer delivery \
+                 loop still runs regardless of this switch."
+            );
+            return Self {
+                cancel: Some(cancel_tx),
+                handles,
+            };
+        }
 
         // Capture the operation-reaper inputs before the lease/steal block below
         // conditionally moves `deps.state` / `deps.redis_client`. The reaper is

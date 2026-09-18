@@ -709,6 +709,10 @@ mod tests {
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
+                    plugin_timer_tick_interval_secs: 1,
+                    plugin_timer_lease_secs: 30,
+                    plugin_timer_batch: 64,
+                    plugin_timer_max_attempts: 5,
                 },
                 database: DatabaseConfig {
                     url: "mock://visibility-kernel-test".to_string(),
