@@ -93,17 +93,12 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommunicationMode {
+    #[default]
     Redirect,
     FifoArgs,
-}
-
-impl Default for CommunicationMode {
-    fn default() -> Self {
-        Self::Redirect
-    }
 }
 
 /// Sandbox resource limits (from `[config.sandbox]`).
