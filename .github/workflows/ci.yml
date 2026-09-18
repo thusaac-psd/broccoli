@@ -59,6 +59,18 @@ jobs:
       - name: Clippy plugins
         run: ./scripts/clippy-plugins.sh
 
+      # `broccoli-server-sdk`'s `guest` feature (the WASM guest-side surface
+      # every plugin crate depends on, gating e.g. the `extism-pdk` calls and
+      # `#[cfg(target_arch = "wasm32")]` code in `sdk/eval.rs`) is off by
+      # default, so neither the workspace Clippy step above (packages/server
+      # depends on this crate with default features only) nor Clippy plugins
+      # above (that script only lints each plugin's own crate, not its path
+      # dependencies) ever lints server-sdk with it enabled. See the script
+      # for why this is a single fixed invocation rather than a discovery
+      # loop like the plugin scripts above.
+      - name: Clippy server-sdk (guest feature)
+        run: ./scripts/clippy-server-sdk-guest.sh
+
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh
 

@@ -328,10 +328,8 @@ impl WindowedEvalSession<'_> {
         if !self.remove_active_test_case(result.test_case_id) {
             return Ok(None);
         }
-        if refill_after_result {
-            if let Err(err) = self.refill_window() {
-                self.deferred_refill_error.get_or_insert(err);
-            }
+        if refill_after_result && let Err(err) = self.refill_window() {
+            self.deferred_refill_error.get_or_insert(err);
         }
         Ok(Some(result))
     }
