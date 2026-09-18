@@ -42,6 +42,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # `plugins` is excluded from the root workspace (wasm32 targets, own
+      # `[workspace]` pins), so `cargo fmt --all --check` above never looks at
+      # plugin crates. This iterates over them separately; see the script for
+      # why a script beats a hardcoded crate list here.
+      - name: Check plugin formatting
+        run: ./scripts/fmt-plugins.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -53,6 +60,12 @@ jobs:
         env:
           E2E_SANDBOX_BACKEND: mock
         run: cargo test --workspace --locked -- --test-threads=4
+
+      # Same exclusion problem as formatting: `cargo test --workspace` never
+      # touches plugin crates, so their tests (including the ICPC
+      # submission-freeze mask and IOI feedback mask tests) never ran in CI.
+      - name: Test plugins
+        run: ./scripts/test-plugins.sh
 
       - name: Documentation
         run: cargo doc --workspace --no-deps --locked
