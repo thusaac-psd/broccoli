@@ -549,6 +549,7 @@ mod tests {
                     topic: "visibility".to_string(),
                     function: "decide_visibility".to_string(),
                 }],
+                timers: vec![],
             }),
             worker: None,
             web: None,
