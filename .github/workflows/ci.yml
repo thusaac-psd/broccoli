@@ -52,6 +52,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # Same exclusion problem as formatting: `cargo clippy --workspace`
+      # above never looks at plugin crates, so their lint findings never ran
+      # in CI. See the script for why a script beats a hardcoded crate list
+      # here.
+      - name: Clippy plugins
+        run: ./scripts/clippy-plugins.sh
+
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh
 
