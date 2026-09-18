@@ -26,7 +26,10 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use plugin_core::registry::PluginStatus;
-use sea_orm::{DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, Statement};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    Statement,
+};
 use serde::Serialize;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -146,6 +149,28 @@ async fn claim_due(
     ))
     .all(db)
     .await
+}
+
+/// Deletes every pending timer belonging to `plugin_id`. Called when a
+/// plugin is unloaded -- on a failed `init()` during activation
+/// (`utils::plugin::activate_plugin`) and on an admin-initiated disable
+/// (`handlers::admin::disable_plugin`). A plugin's timers are meaningless
+/// once it can no longer be invoked: without this, `deliver`'s
+/// `timer_function` lookup would keep returning `Ok(None)` for them forever,
+/// which already drops rows one at a time on the next tick that claims them
+/// -- this just does it immediately, at the moment of unload, rather than
+/// leaving them to expire on a best-effort basis. NOT called from
+/// `reload_plugin`: a reload swaps the WASM runtime under the same plugin
+/// id, and its pending timers remain valid callbacks for the reloaded code.
+pub async fn delete_timers_for_plugin(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+) -> Result<(), DbErr> {
+    plugin_timer::Entity::delete_many()
+        .filter(plugin_timer::Column::PluginId.eq(plugin_id))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// Deletes a `plugin_timer` row after successful delivery, a permanent drop
@@ -382,5 +407,21 @@ mod tests {
         let claimed = claim_due(&db, Duration::seconds(30), 2).await.unwrap();
 
         assert_eq!(claimed.len(), 2, "batch limit must bound one claim tick");
+    }
+
+    #[tokio::test]
+    async fn unloading_a_plugin_deletes_its_pending_timers() {
+        let db = test_db().await;
+        seed_timer(&db, "doomed", "k", now() + Duration::hours(1), None).await;
+        seed_timer(&db, "survivor", "k", now() + Duration::hours(1), None).await;
+
+        delete_timers_for_plugin(&db, "doomed").await.unwrap();
+
+        let left = plugin_timer::Entity::find().all(&*db).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(
+            left[0].plugin_id, "survivor",
+            "only the unloaded plugin's timers go"
+        );
     }
 }
