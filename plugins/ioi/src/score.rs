@@ -23,15 +23,19 @@ use crate::config::{ContestConfig, ScoringMode, TaskConfig};
 use crate::config::{SubtaskDef, resolve_tc_label, round_score};
 #[cfg(target_arch = "wasm32")]
 use crate::judge::{JudgeContext, judge_with_context_detached};
-// Only used by the wasm32-gated `sum_best_subtask_score`/
-// `compute_official_task_score` below; this file has no #[cfg(test)] use of
-// either.
+// Only used by the wasm32-gated `compute_official_task_score` below.
 #[cfg(target_arch = "wasm32")]
-use crate::scoring::{score_best_tokened_or_last, score_sum_best_subtask};
+use crate::scoring::score_best_tokened_or_last;
+// Used by `sum_best_subtask_score` below, which is reachable from the
+// #[cfg(test)] unit tests as well as from wasm32 - so this import has to be
+// visible under `test` too, hence the split from the wasm32-only import above.
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::scoring::score_sum_best_subtask;
 // `build_default_subtasks` is reachable from the wasm32-gated `run_judge`
 // below AND directly from the #[cfg(test)] unit tests; `score_all_subtasks`
-// is reachable from both `score_submission_subtask_details` (wasm32+test)
-// and the wasm32-only `sum_best_subtask_score`. Gate both the same way.
+// is reachable from both `score_submission_subtask_details` and
+// `sum_best_subtask_score`, which are themselves wasm32+test. Gate both the
+// same way.
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::subtasks::{build_default_subtasks, score_all_subtasks};
 #[cfg(target_arch = "wasm32")]
@@ -273,10 +277,13 @@ fn recompute_sum_best_subtask(
 /// official task score ([`recompute_sum_best_subtask`]) and the scoreboard cell
 /// (`crate::scoreboard`), which differ only in how they fetch + normalize the
 /// rows - so the two cannot diverge on the value.
-// Called from the wasm32-gated `recompute_sum_best_subtask` above and from
-// `scoreboard.rs`'s wasm32-gated sum-best-subtask cell loader; this file has
-// no #[cfg(test)] use of it directly.
-#[cfg(target_arch = "wasm32")]
+// Called from the wasm32-gated `recompute_sum_best_subtask` above, from
+// `scoreboard.rs`'s wasm32-gated sum-best-subtask cell loader, AND directly by
+// the #[cfg(test)] unit tests below; gate the same way. The doc comment above
+// calls this the single source of truth that keeps the official task score and
+// the scoreboard cell from diverging - an invariant worth a host test, which a
+// wasm32-only gate would make impossible to write.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn sum_best_subtask_score<'a>(
     subtask_defs: &[SubtaskDef],
     test_cases: &[TestCaseRow],
@@ -412,6 +419,77 @@ pub(crate) fn compute_official_task_score(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sum_best_subtask_takes_the_best_per_subtask_across_submissions_not_the_best_submission() {
+        // Two subtasks, two submissions, each submission winning a different
+        // subtask. The whole point of sum-best-subtask scoring is that a
+        // contestant banks their best result on EACH subtask independently:
+        // 100 + 100 = 200. Taking the best single submission's total would
+        // give 100, and summing everything would give 200 only by accident,
+        // so the asymmetric split below distinguishes all three.
+        let test_cases = vec![
+            TestCaseRow {
+                id: 11,
+                score: 100.0,
+                is_sample: false,
+                position: 1,
+                description: None,
+                label: Some("a".into()),
+                input: TestCaseBodyRef::inline(""),
+                expected_output: TestCaseBodyRef::inline(""),
+                is_custom: false,
+            },
+            TestCaseRow {
+                id: 12,
+                score: 100.0,
+                is_sample: false,
+                position: 2,
+                description: None,
+                label: Some("b".into()),
+                input: TestCaseBodyRef::inline(""),
+                expected_output: TestCaseBodyRef::inline(""),
+                is_custom: false,
+            },
+        ];
+        let subtasks = vec![
+            SubtaskDef {
+                name: "X".into(),
+                scoring_method: crate::config::SubtaskScoringMethod::Sum,
+                max_score: 100.0,
+                test_cases: vec!["a".into()],
+            },
+            SubtaskDef {
+                name: "Y".into(),
+                scoring_method: crate::config::SubtaskScoringMethod::Sum,
+                max_score: 100.0,
+                test_cases: vec!["b".into()],
+            },
+        ];
+
+        // Submission 1 aces subtask X and fails Y; submission 2 is the mirror.
+        // Values here are per-test-case ratios in [0.0, 1.0], scaled by each
+        // test case's own weight - not absolute points.
+        let first: HashMap<String, f64> = [("a".to_string(), 1.0), ("b".to_string(), 0.0)]
+            .into_iter()
+            .collect();
+        let second: HashMap<String, f64> = [("a".to_string(), 0.0), ("b".to_string(), 1.0)]
+            .into_iter()
+            .collect();
+
+        let total = sum_best_subtask_score(&subtasks, &test_cases, [&first, &second]);
+
+        assert_eq!(
+            total, 200.0,
+            "each subtask's best result across submissions is banked independently"
+        );
+
+        // A single submission alone can only earn its own subtask.
+        assert_eq!(
+            sum_best_subtask_score(&subtasks, &test_cases, [&first]),
+            100.0
+        );
+    }
 
     #[test]
     fn subtask_detail_scores_are_derived_from_current_test_case_results() {
