@@ -310,6 +310,11 @@ mod filter_tests {
         }
     }
 
+    // Test-only fixture: each parameter mirrors one column of the mocked
+    // freeze-status DB row 1:1, which keeps every call site self-documenting.
+    // Bundling them into a params struct would only relocate the same list
+    // one level of indirection without reducing the real complexity here.
+    #[allow(clippy::too_many_arguments)]
     fn seed_freeze_row(
         host: &Host,
         submission_id: i32,
