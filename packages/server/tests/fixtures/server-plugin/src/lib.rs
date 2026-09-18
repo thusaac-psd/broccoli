@@ -189,10 +189,16 @@ struct VisibilityQueryOutputOut {
 ///   caps (`packages/server/src/visibility/plugin_query.rs`) respectively.
 ///
 /// Every failure mode above must deny the WHOLE batch - never a partial
-/// result, never a 500.
+/// result, never a 500. This includes a failure mode with no dedicated
+/// `visibility_mode` value: if ANY `store_get` call this function makes
+/// (reading `visibility_mode` itself, or any of the normal path's KV lists)
+/// hits a genuine host error - not "key never seeded", see `read_kv_single`'s
+/// doc comment - this function returns `Err` and the whole batch denies the
+/// same way it would for a trap. A plugin that cannot read its own decision
+/// inputs must never silently fall back to allowing everything (N1).
 #[plugin_fn]
 pub fn decide_visibility(input: String) -> FnResult<String> {
-    let mode = read_kv_single("visibility_mode").unwrap_or_default();
+    let mode = read_kv_single("visibility_mode")?.unwrap_or_default();
 
     if mode == "trap" {
         panic!("decide_visibility: forced trap for failure-injection test");
@@ -246,11 +252,11 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
     }
 
     // -- Normal path -------------------------------------------------------
-    let redact_submission_ids = read_kv_csv("redact_submission_ids");
-    let deny_keys = read_kv_csv("deny_resource_keys");
-    let redact_keys = read_kv_csv("redact_resource_keys");
+    let redact_submission_ids = read_kv_csv("redact_submission_ids")?;
+    let deny_keys = read_kv_csv("deny_resource_keys")?;
+    let redact_keys = read_kv_csv("redact_resource_keys")?;
     let redact_fields = {
-        let fields = read_kv_csv("redact_resource_fields");
+        let fields = read_kv_csv("redact_resource_fields")?;
         if fields.is_empty() {
             vec!["label".to_string(), "problem_title".to_string()]
         } else {
@@ -283,34 +289,54 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?)
 }
 
-/// Read a single KV value written via the `kv_write` route. `None` if never
-/// written, on any host error, or on a non-JSON/unexpected shape - this
-/// query function must never trap or fail the batch just because a test
-/// hasn't seeded the key yet.
-fn read_kv_single(key: &str) -> Option<String> {
-    let store_input = serde_json::to_string(&serde_json::json!({ "keys": [key] })).ok()?;
-    let raw = (unsafe { store_get(store_input) }).ok()?;
-    let result: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    result
+/// Read a single KV value written via the `kv_write` route.
+///
+/// `Ok(None)` means the key is legitimately absent: it was never written, so
+/// `store_get` succeeds and simply returns no entry for it. `Err` means the
+/// host call itself failed (e.g. `store_get` hitting DB-pool contention) or
+/// its response could not be parsed as the expected shape - a GENUINE fault,
+/// not "not seeded yet".
+///
+/// This distinction is load-bearing (N1): an earlier version of this
+/// function collapsed BOTH cases to `None`, which made `decide_visibility`'s
+/// normal path read a host error the same way it reads "no deny/redact list
+/// configured" - i.e. `Allow`. That is fail-OPEN, the opposite of this
+/// kernel's contract (`packages/server/src/visibility/plugin_query.rs`'s
+/// module doc: every plugin failure mode must collapse to `Deny`). A test
+/// fixture that fails open can hide a real fail-open regression in the
+/// kernel itself, since the test would stay green for the wrong reason.
+///
+/// Callers propagate `Err` with `?` up through `decide_visibility`, so a
+/// host error here becomes a plugin call failure exactly like a trap or
+/// non-JSON output - `decisions_from_output` in `plugin_query.rs` denies the
+/// whole batch for that, which is what we want: a plugin that cannot read
+/// its own inputs must deny, not silently agree with the host.
+fn read_kv_single(key: &str) -> FnResult<Option<String>> {
+    let store_input = serde_json::to_string(&serde_json::json!({ "keys": [key] }))?;
+    let raw = unsafe { store_get(store_input) }?;
+    let result: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(result
         .get("values")
         .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// Read a comma-separated KV value written via the `kv_write` route. Empty
-/// (never written, host error, or non-JSON) reads back as no ids - this
-/// query function must never trap or fail the batch just because a test
-/// hasn't seeded the key yet.
-fn read_kv_csv(key: &str) -> Vec<String> {
-    let Some(raw) = read_kv_single(key) else {
-        return Vec::new();
+/// when the key is legitimately absent (never written). Propagates `Err` on
+/// a genuine host error exactly like `read_kv_single` - see its doc comment
+/// for why this must NOT collapse to "no ids", which is indistinguishable
+/// from `Allow` in every one of this function's call sites.
+fn read_kv_csv(key: &str) -> FnResult<Vec<String>> {
+    let Some(raw) = read_kv_single(key)? else {
+        return Ok(Vec::new());
     };
-    raw.split(',')
+    Ok(raw
+        .split(',')
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(str::to_string)
-        .collect()
+        .collect())
 }
 
 #[plugin_fn]

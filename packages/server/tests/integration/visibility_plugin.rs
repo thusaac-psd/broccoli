@@ -848,13 +848,18 @@ async fn contest_level_gates_all_route_through_the_kernel() {
     // Control: `list_contest_problems` already gated on
     // `Resource::Contest` BEFORE I1, so it is not what this test is
     // proving - it is here to prove the plugin Deny is actually LIVE at
-    // this moment. The fixture's `read_kv_csv` swallows host errors and
-    // returns an empty list (-> Allow), so under heavy DB-pool contention
-    // a seeded key can silently fail to read back. If THIS assertion is
-    // the one that fails, the fixture was not live and the run is
-    // inconclusive - it is not evidence of a handler bypass. If this
-    // passes and any assertion below fails, that endpoint is genuinely
-    // not consulting the kernel.
+    // this moment. (N1: the fixture's `read_kv_csv`/`read_kv_single` used
+    // to swallow host errors and return an empty list [-> Allow], so under
+    // heavy DB-pool contention a seeded key could silently fail to read
+    // back and this control would pass for the wrong reason. That fixture
+    // bug is fixed - a host error now propagates as `Err` and denies the
+    // whole batch, same as a trap - but this control assertion is kept: it
+    // is still cheap insurance against ANY reason the seed might not have
+    // taken effect yet, fixture bug or not.) If THIS assertion is the one
+    // that fails, the fixture was not live and the run is inconclusive -
+    // it is not evidence of a handler bypass. If this passes and any
+    // assertion below fails, that endpoint is genuinely not consulting the
+    // kernel.
     let res = app
         .get_with_token(&routes::contest_problems(contest_id), &viewer_token)
         .await;
