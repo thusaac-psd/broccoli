@@ -233,6 +233,14 @@ mod contest_problem_list_matrix {
             .await;
         let contest_id = create_contest_window(&app, &admin, "Matrix Contest", false, window).await;
         enroll_participant(&app, &admin, contest_id, &participant).await;
+        // M1: without a real row, every 200 cell's body is `[]` regardless
+        // of authorization, so `is_array()` cannot distinguish "the real
+        // list" from "everything redacted away" - both are `[]`. Adding a
+        // problem here (an admin write, not gated by the window under test)
+        // gives the 200 cells below something a redaction would break.
+        let problem_id = app.create_problem(&admin, "Matrix Problem").await;
+        app.add_problem_to_contest(contest_id, problem_id, &admin)
+            .await;
         (app, admin, non_participant, participant, contest_id)
     }
 
@@ -251,6 +259,14 @@ mod contest_problem_list_matrix {
         let non_participant = app.create_authenticated_user("outsider", "pass1234").await;
         let contest_id =
             create_contest_window(&app, &admin, "Public Window Gate Contest", true, window).await;
+        // M1: see the matching comment in `setup` above - gives
+        // `window_gate_public_contest_inside_window_is_200` a real row to
+        // pin instead of only `[]`.
+        let problem_id = app
+            .create_problem(&admin, "Public Window Gate Problem")
+            .await;
+        app.add_problem_to_contest(contest_id, problem_id, &admin)
+            .await;
         (app, non_participant, contest_id)
     }
 
@@ -393,7 +409,9 @@ mod contest_problem_list_matrix {
             res.status, 200,
             "positive control: a non-participant IS let in on a public in-window contest"
         );
-        assert!(res.body.is_array());
+        // M1: `is_array()` alone also passes for `[]` (fully redacted) -
+        // pin the one problem `setup_public` seeds.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -440,7 +458,8 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &participant)
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body.is_array(), "body shape: array of contest problems");
+        // M1: pin the one problem `setup` seeds, not just array shape.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -474,7 +493,8 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body.is_array());
+        // M1: pin the one problem `setup` seeds, not just array shape.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -484,7 +504,8 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body.is_array());
+        // M1: pin the one problem `setup` seeds, not just array shape.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -494,7 +515,8 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body.is_array());
+        // M1: pin the one problem `setup` seeds, not just array shape.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -504,7 +526,8 @@ mod contest_problem_list_matrix {
             .get_with_token(&routes::contest_problems(contest_id), &admin)
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body.is_array());
+        // M1: pin the one problem `setup` seeds, not just array shape.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 
     // --- extra rule not covered by the 4 canonical windows:
@@ -536,6 +559,8 @@ mod contest_problem_list_matrix {
             res.status, 200,
             "contest:manage bypasses require_contest_started too"
         );
+        // M1: pin the one problem `setup` seeds, not just status.
+        assert_eq!(res.body.as_array().unwrap().len(), 1);
     }
 }
 
@@ -873,6 +898,10 @@ mod contest_problem_sample {
             )
             .await;
         assert_eq!(res.status, 200);
+        // M1: a fully-redacted or empty body would still be 200 - pin the
+        // same content shape `participant_is_200` pins above.
+        assert!(res.body["samples"].is_array());
+        assert_eq!(res.body["samples"].as_array().unwrap().len(), 1);
     }
 
     /// NOTE (docstring/behaviour mismatch): `getContestProblemSamples`'s
@@ -987,6 +1016,10 @@ mod problem_attachment_list {
             .get_with_token(&routes::attachments(f.problem_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
+        // M1: pin the same content shape `participant_is_200` pins above -
+        // status alone would also pass a fully-redacted/empty body.
+        assert_eq!(res.body["total"], 1);
+        assert_eq!(res.body["attachments"].as_array().unwrap().len(), 1);
     }
 }
 
@@ -1076,6 +1109,9 @@ mod contest_submission_list {
             .get_with_token(&routes::contest_submissions(f.contest_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
+        // M1: pin the same content shape `participant_is_200` pins above -
+        // status alone would also pass a fully-redacted/empty body.
+        assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
     }
 
     /// NOTE (permission-key asymmetry): every other contest read path in
@@ -1233,6 +1269,9 @@ mod submission_detail {
             .get_with_token(&routes::submission(f.submission_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
+        // M1: pin the same content shape `owner_participant_is_200` pins
+        // above - status alone would also pass a fully-redacted body.
+        assert_eq!(res.body["id"], f.submission_id);
     }
 }
 
@@ -1260,6 +1299,24 @@ mod contest_clarification_list {
             create_contest_window(&app, &admin, "Clarification Fixture", false, INSIDE_WINDOW)
                 .await;
         enroll_participant(&app, &admin, contest_id, &participant).await;
+        // M1: without a real row, `data.is_array()` passes on BOTH a
+        // populated and an empty ("fully redacted") list - it caught the
+        // exact "list_clarifications returns data: [] for every viewer"
+        // regression documented in visibility_clarification_contents.rs's
+        // module doc only by accident, never by design. Seed one
+        // announcement so `participant_is_200`/`admin_is_200` below can pin
+        // count and content, not just shape.
+        let seed = app
+            .post_with_token(
+                &routes::contest_clarifications(contest_id),
+                &json!({
+                    "content": "Matrix fixture announcement",
+                    "clarification_type": "announcement",
+                }),
+                &admin,
+            )
+            .await;
+        assert_eq!(seed.status, 201, "seed announcement failed: {}", seed.text);
         Fixture {
             app,
             admin,
@@ -1305,7 +1362,15 @@ mod contest_clarification_list {
             )
             .await;
         assert_eq!(res.status, 200);
-        assert!(res.body["data"].is_array());
+        // M1: `is_array()` alone passes for an empty list too - pin the
+        // seeded announcement's count and content, which a full-body
+        // redaction (or the historical `data: []`-for-everyone regression)
+        // would break.
+        assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            res.body["data"][0]["content"],
+            "Matrix fixture announcement"
+        );
     }
 
     #[tokio::test]
@@ -1316,6 +1381,11 @@ mod contest_clarification_list {
             .get_with_token(&routes::contest_clarifications(f.contest_id), &f.admin)
             .await;
         assert_eq!(res.status, 200);
+        assert_eq!(res.body["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            res.body["data"][0]["content"],
+            "Matrix fixture announcement"
+        );
     }
 }
 
