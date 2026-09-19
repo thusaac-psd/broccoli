@@ -6,7 +6,7 @@
 //! plugin timers. A deployment that disables lease/steal and the claim fiber
 //! still wants a plugin's `[[server.timers]]` callback to fire.
 //!
-//! Each tick claims due rows in ONE statement ([`claim_due`]) and then
+//! Each tick claims due rows in ONE statement (`claim_due`, private) and then
 //! invokes each claimed row's plugin OUTSIDE any transaction. Holding a
 //! transaction across a plugin invocation and then acquiring a second pooled
 //! connection inside it is the self-deadlock pattern this codebase has
