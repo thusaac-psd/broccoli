@@ -111,7 +111,10 @@ async fn rescheduling_the_same_key_replaces_rather_than_duplicates() {
     let deliveries = await_deliveries(&app, 1, Duration::from_secs(10)).await;
 
     assert_eq!(deliveries.len(), 1, "replace, not duplicate");
-    assert_eq!(deliveries[0]["payload"], "second", "the later schedule wins");
+    assert_eq!(
+        deliveries[0]["payload"], "second",
+        "the later schedule wins"
+    );
 }
 
 #[tokio::test]
@@ -153,4 +156,37 @@ async fn a_plugin_without_the_timer_permission_cannot_schedule() {
         "scheduling without the permission must fail: {}",
         res.text
     );
+}
+
+/// Two concurrent ticks racing for one due timer must deliver it once.
+///
+/// This is the integration-level counterpart to the unit tests on `claim_due`
+/// in `dispatcher::plugin_timer`. It goes through `tick_once`, so it covers
+/// the whole claim-and-deliver path -- including `deliver`, which the unit
+/// tests do not reach -- and therefore proves the plugin's handler is invoked
+/// once rather than merely that one row was claimed.
+///
+/// The dispatcher is deliberately NOT started here: its own loop would race
+/// these explicit ticks and make the counts meaningless.
+#[tokio::test]
+async fn two_concurrent_ticks_deliver_a_timer_exactly_once() {
+    let app = TestApp::spawn_with_plugins().await;
+    schedule_timer(&app, "raced", 0, r#"{"once":true}"#).await;
+
+    let config = server::dispatcher::plugin_timer::TimerConfig::default();
+    let (a, b) = tokio::join!(
+        server::dispatcher::plugin_timer::tick_once(&app.state, &config),
+        server::dispatcher::plugin_timer::tick_once(&app.state, &config),
+    );
+    let claimed = a.unwrap().claimed + b.unwrap().claimed;
+
+    assert_eq!(claimed, 1, "exactly one tick claims the row");
+
+    let deliveries = read_deliveries(&app).await;
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the plugin handler runs once, not once per tick: {deliveries:?}"
+    );
+    assert_eq!(deliveries[0]["key"], "raced");
 }

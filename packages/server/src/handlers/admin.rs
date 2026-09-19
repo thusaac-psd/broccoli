@@ -178,8 +178,7 @@ pub async fn disable_plugin(
     purge_plugin_registrations(&state.registries, &id).await;
     state.plugins.unload_plugin(&id)?;
     state.plugins.update_translations()?;
-    if let Err(e) =
-        crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, &id).await
+    if let Err(e) = crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, &id).await
     {
         tracing::error!(
             plugin_id = %id,

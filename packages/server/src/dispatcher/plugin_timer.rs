@@ -59,10 +59,10 @@ impl Default for TimerConfig {
     }
 }
 
-/// Outcome of one [`tick_once`] call, exposed so integration tests can prove
-/// `FOR UPDATE SKIP LOCKED` disjointness by racing two concurrent ticks and
-/// asserting their claimed counts sum to exactly one row (see
-/// `tests/integration/plugin_timer.rs`, `two_concurrent_claimers_deliver_a_timer_once`).
+/// Outcome of one [`tick_once`] call, exposed so integration tests can race
+/// two concurrent ticks and assert their claimed counts sum to exactly one
+/// row (see `tests/integration/plugin_timer.rs`,
+/// `two_concurrent_claimers_deliver_a_timer_once`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TickStats {
     pub claimed: usize,
@@ -106,7 +106,12 @@ pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiv
 /// the same way `tests/integration/scaling.rs` calls
 /// `server::dispatcher::sweeper::sweep_once` directly.
 pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickStats, DbErr> {
-    let claimed = claim_due(&state.db, Duration::seconds(config.lease_secs), config.batch).await?;
+    let claimed = claim_due(
+        &state.db,
+        Duration::seconds(config.lease_secs),
+        config.batch,
+    )
+    .await?;
     let stats = TickStats {
         claimed: claimed.len(),
     };
@@ -116,14 +121,28 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
     Ok(stats)
 }
 
-/// Claims due timers in ONE statement. Two properties are load-bearing:
+/// Claims due timers in ONE statement.
 ///
-/// - `FOR UPDATE SKIP LOCKED` means two replicas (or two concurrent ticks)
-///   take disjoint batches instead of racing for the same rows.
-/// - No transaction is held across the plugin invocation that follows this
-///   call -- `claim_due` returns before `deliver` ever touches the plugin
-///   host, so the connection this statement runs on is released back to the
-///   pool immediately.
+/// Two independent mechanisms stop two replicas (or two concurrent ticks)
+/// from both claiming the same row, and they are deliberately redundant:
+///
+/// - the `claimed_at` predicate excludes a row another claimer already took,
+///   within the lease window;
+/// - `FOR UPDATE SKIP LOCKED` makes a claimer skip a row another claimer
+///   currently holds, rather than blocking on its lock.
+///
+/// Either alone is sufficient for correctness — verified by mutation, not by
+/// argument: removing just one keeps
+/// `two_concurrent_claimers_take_a_timer_exactly_once` green, and removing
+/// both makes it fail with a genuine duplicate claim. `SKIP LOCKED`'s
+/// distinct contribution is liveness (no claimer waits on another's lock),
+/// which the suite does not measure.
+///
+/// Separately load-bearing: no transaction is held across the plugin
+/// invocation that follows. `claim_due` returns before `deliver` ever touches
+/// the plugin host, so this statement's connection is back in the pool first.
+/// Holding one and then acquiring a second pooled connection inside it is the
+/// self-deadlock shape this codebase has already been bitten by twice.
 async fn claim_due(
     db: &DatabaseConnection,
     lease: Duration,
@@ -371,7 +390,14 @@ mod tests {
         let db = test_db().await;
         seed_timer(&db, "p", "due", now() - Duration::seconds(5), None).await;
         seed_timer(&db, "p", "future", now() + Duration::hours(1), None).await;
-        seed_timer(&db, "p", "claimed", now() - Duration::seconds(5), Some(now())).await;
+        seed_timer(
+            &db,
+            "p",
+            "claimed",
+            now() - Duration::seconds(5),
+            Some(now()),
+        )
+        .await;
 
         let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
 
@@ -395,14 +421,24 @@ mod tests {
         let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
 
         assert_eq!(claimed.len(), 1, "an expired lease must be reclaimable");
-        assert_eq!(claimed[0].attempts, 2, "reclaim increments the attempt count");
+        assert_eq!(
+            claimed[0].attempts, 2,
+            "reclaim increments the attempt count"
+        );
     }
 
     #[tokio::test]
     async fn claim_respects_the_batch_limit() {
         let db = test_db().await;
         for i in 0..5 {
-            seed_timer(&db, "p", &format!("k{i}"), now() - Duration::seconds(5), None).await;
+            seed_timer(
+                &db,
+                "p",
+                &format!("k{i}"),
+                now() - Duration::seconds(5),
+                None,
+            )
+            .await;
         }
 
         let claimed = claim_due(&db, Duration::seconds(30), 2).await.unwrap();
@@ -423,6 +459,82 @@ mod tests {
         assert_eq!(
             left[0].plugin_id, "survivor",
             "only the unloaded plugin's timers go"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_claimers_take_a_timer_exactly_once() {
+        // Two ticks racing for one due row must not both deliver it: a
+        // duplicate claim means a duplicate callback, and while delivery is
+        // documented as at-least-once, that is a crash-recovery allowance,
+        // not licence to double-fire on the happy path.
+        //
+        // What this does and does NOT isolate, established by mutation rather
+        // than argument:
+        //
+        // - Remove ONLY `SKIP LOCKED`: this test still passes. Under READ
+        //   COMMITTED a blocked `FOR UPDATE` re-evaluates its WHERE clause
+        //   against the committed row version, sees `claimed_at` set, and
+        //   claims nothing.
+        // - Remove ONLY the `claimed_at` predicate: this test still passes.
+        //   `SKIP LOCKED` makes the second claimer skip the locked row.
+        // - Remove BOTH: this test fails with `left: 2, right: 1` -- a real
+        //   duplicate delivery.
+        //
+        // So the two mechanisms are redundant by design, and this test pins
+        // their conjunction, not either one alone. Nothing here isolates
+        // `SKIP LOCKED`; its value is that a claimer never waits on another
+        // claimer's row lock, which is a liveness property this suite does not
+        // measure. Said plainly so a future reader does not mistake a passing
+        // suite for proof that the clause is load-bearing on its own.
+        let db = test_db().await;
+        seed_timer(&db, "p", "contended", now() - Duration::seconds(5), None).await;
+
+        let (a, b) = tokio::join!(
+            claim_due(&db, Duration::seconds(30), 64),
+            claim_due(&db, Duration::seconds(30), 64),
+        );
+        let total = a.unwrap().len() + b.unwrap().len();
+
+        assert_eq!(total, 1, "exactly one claimer takes the row");
+    }
+
+    #[tokio::test]
+    async fn a_contended_batch_is_partitioned_between_claimers_not_duplicated() {
+        // The batch-sized version of the sibling above. A single row can pass
+        // by a lucky interleaving; 64 cannot. With both mechanisms removed
+        // this fails `left: 128, right: 64` -- each claimer took the whole
+        // batch.
+        //
+        // An earlier draft of this test also asserted an elapsed-time ceiling,
+        // intending to isolate `SKIP LOCKED` via its liveness effect. Measured
+        // against the real mutation, that assertion never fired: on a local
+        // container the blocked claimer waits milliseconds, so the timing
+        // bound passed with the clause removed. It was decoration implying
+        // coverage it did not provide, and is gone. A test that cannot fail is
+        // worse than no test, because it converts an open question into
+        // documented confidence.
+        let db = test_db().await;
+        for i in 0..64 {
+            seed_timer(
+                &db,
+                "p",
+                &format!("c{i}"),
+                now() - Duration::seconds(5),
+                None,
+            )
+            .await;
+        }
+
+        let (a, b) = tokio::join!(
+            claim_due(&db, Duration::seconds(30), 64),
+            claim_due(&db, Duration::seconds(30), 64),
+        );
+        let total = a.unwrap().len() + b.unwrap().len();
+
+        assert_eq!(
+            total, 64,
+            "every due row is claimed exactly once across both claimers"
         );
     }
 }
