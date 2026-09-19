@@ -15,6 +15,7 @@ mod meta;
 mod permission_fixture;
 mod plugin;
 mod plugin_config;
+mod plugin_timer;
 mod problem;
 mod regression_guards;
 mod rejudge_visibility;

@@ -495,6 +495,11 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub client: Client,
     pub db: DatabaseConnection,
+    /// A clone of the `AppState` the router was built from. Lets a test call
+    /// a dispatcher-internal `pub` function directly (e.g.
+    /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP -
+    /// the same pattern `scaling.rs` uses for `dispatcher::sweeper::sweep_once`.
+    pub state: AppState,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -567,6 +572,19 @@ pub struct SpawnOptions {
     /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
     /// container's URL here.
     pub redis_url: Option<String>,
+    /// Overrides `PluginConfig.plugins_dir` (default: the shared
+    /// `tests/fixtures`). Used to isolate a plugin whose activation is
+    /// EXPECTED to fail (e.g. an unresolved host-function import from a
+    /// missing permission) from the shared fixtures directory, so it does
+    /// not fail every other test that loads `tests/fixtures`.
+    pub plugins_dir: Option<PathBuf>,
+    /// When `false` (the default), `spawn_internal` hard-asserts that every
+    /// discovered plugin activated successfully - the right default, since
+    /// an unexpected activation failure almost always means a fixture is
+    /// broken. A test that deliberately loads a plugin whose activation
+    /// cannot succeed (see `plugins_dir` above) sets this to `true` instead
+    /// of weakening that assertion for everyone else.
+    pub allow_plugin_activation_failures: bool,
 }
 
 impl TestApp {
@@ -658,6 +676,10 @@ impl TestApp {
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
+                plugin_timer_tick_interval_secs: 1,
+                plugin_timer_lease_secs: 30,
+                plugin_timer_batch: 64,
+                plugin_timer_max_attempts: 5,
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
@@ -673,7 +695,7 @@ impl TestApp {
                 login_failure_window_secs: 60,
             },
             plugin: PluginConfig {
-                plugins_dir: fixtures_dir(),
+                plugins_dir: options.plugins_dir.clone().unwrap_or_else(fixtures_dir),
                 ..Default::default()
             },
             submission: SubmissionConfig::default(),
@@ -836,17 +858,20 @@ impl TestApp {
         });
         if load_plugins {
             let failures = sync_plugins(&state).await.expect("Failed to sync plugins");
-            assert!(
-                failures.is_empty(),
-                "Plugin activations failed: {}",
-                failures
-                    .iter()
-                    .map(|f| format!("{}: {}", f.plugin_id, f.error))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
+            if !options.allow_plugin_activation_failures {
+                assert!(
+                    failures.is_empty(),
+                    "Plugin activations failed: {}",
+                    failures
+                        .iter()
+                        .map(|f| format!("{}: {}", f.plugin_id, f.error))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
         }
 
+        let state_for_app = state.clone();
         let app = server::build_router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -872,6 +897,7 @@ impl TestApp {
                 .build()
                 .expect("Failed to build reqwest client"),
             db,
+            state: state_for_app,
             server_handle: Some(server_handle),
             dispatcher,
         }

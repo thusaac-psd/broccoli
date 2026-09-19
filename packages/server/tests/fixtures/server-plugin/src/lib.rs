@@ -36,6 +36,8 @@ extern "ExtismHost" {
     fn store_get(input: String) -> String;
     fn db_execute(sql: String, args: String) -> String;
     fn db_query(sql: String, args: String) -> String;
+    fn timer_schedule(input: String) -> String;
+    fn timer_cancel(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -91,6 +93,124 @@ pub fn kv_read(input: String) -> FnResult<String> {
         status,
         body: Some(body),
     })?)
+}
+
+// -- Timer routes (`[[server.routes]]` / `[[server.timers]]`) -------------
+//
+// `timer_schedule_route`/`timer_cancel_route` are ordinary HTTP-routed
+// handlers: the proxy wraps the request in `PluginHttpRequest` the same way
+// it does for `kv_write`/`kv_read` above. `on_timer`, by contrast, is called
+// directly by the dispatcher's `deliver()` via `PluginInvoker::call_raw` -
+// NOT through the HTTP proxy - so its `input` is the bare
+// `{"key","payload","fire_at_ms","attempt"}` JSON the dispatcher serializes,
+// with no `PluginHttpRequest` envelope.
+
+#[derive(Deserialize)]
+struct TimerScheduleBody {
+    key: String,
+    fire_at_ms: i64,
+    payload: String,
+}
+
+#[derive(Deserialize)]
+struct TimerCancelBody {
+    key: String,
+}
+
+#[derive(Serialize)]
+struct TimerScheduleHostInput<'a> {
+    key: &'a str,
+    fire_at_ms: i64,
+    payload: &'a str,
+}
+
+#[derive(Serialize)]
+struct TimerCancelHostInput<'a> {
+    key: &'a str,
+}
+
+#[plugin_fn]
+pub fn timer_schedule_route(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let body: TimerScheduleBody = serde_json::from_value(req.body.unwrap_or_default())?;
+    let host_input = TimerScheduleHostInput {
+        key: &body.key,
+        fire_at_ms: body.fire_at_ms,
+        payload: &body.payload,
+    };
+    unsafe {
+        timer_schedule(serde_json::to_string(&host_input)?)?;
+    }
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: None,
+    })?)
+}
+
+#[plugin_fn]
+pub fn timer_cancel_route(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let body: TimerCancelBody = serde_json::from_value(req.body.unwrap_or_default())?;
+    let host_input = TimerCancelHostInput { key: &body.key };
+    unsafe {
+        timer_cancel(serde_json::to_string(&host_input)?)?;
+    }
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: None,
+    })?)
+}
+
+#[plugin_fn]
+pub fn timer_deliveries_route(_input: String) -> FnResult<String> {
+    let deliveries = read_deliveries_list()?;
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: Some(serde_json::Value::Array(deliveries)),
+    })?)
+}
+
+#[derive(Deserialize)]
+struct TimerCallbackInputIn {
+    key: String,
+    payload: String,
+    #[allow(dead_code)]
+    fire_at_ms: i64,
+    #[allow(dead_code)]
+    attempt: i32,
+}
+
+/// Invoked directly by the dispatcher (`deliver()`), not via the HTTP proxy.
+/// `"trap_on_timer"` (seeded through `kv_write`, exactly like
+/// `decide_visibility`'s `"trap"` mode) forces a real WASM trap so the
+/// integration suite can prove retry-then-drop without wedging the loop.
+#[plugin_fn]
+pub fn on_timer(input: String) -> FnResult<String> {
+    if read_kv_single("trap_on_timer")?.as_deref() == Some("1") {
+        panic!("on_timer: forced trap for failure-injection test");
+    }
+
+    let cb: TimerCallbackInputIn = serde_json::from_str(&input)?;
+    let mut deliveries = read_deliveries_list()?;
+    deliveries.push(serde_json::json!({ "key": cb.key, "payload": cb.payload }));
+
+    let store_input = serde_json::json!({
+        "entries": [{ "key": "timer_deliveries", "value": serde_json::to_string(&deliveries)? }],
+    });
+    unsafe {
+        store_set(serde_json::to_string(&store_input)?)?;
+    }
+    Ok("{}".to_string())
+}
+
+/// Reads the JSON array previously accumulated under the fixed
+/// `"timer_deliveries"` KV key, defaulting to empty when nothing has been
+/// delivered yet.
+fn read_deliveries_list() -> FnResult<Vec<serde_json::Value>> {
+    match read_kv_single("timer_deliveries")? {
+        Some(raw) => Ok(serde_json::from_str(&raw)?),
+        None => Ok(Vec::new()),
+    }
 }
 
 // -- Visibility querier (`[[server.queries]] topic = "visibility"`) -------

@@ -24,7 +24,7 @@
 
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::Duration;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
@@ -295,6 +295,7 @@ async fn deliver(state: &AppState, config: &TimerConfig, row: plugin_timer::Mode
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use sea_orm::{ActiveModelTrait, Set};
     use testcontainers::ContainerAsync;
     use testcontainers::ImageExt;

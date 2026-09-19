@@ -4,7 +4,10 @@ description = "Minimal test fixture server plugin"
 
 [server]
 entry = "server_plugin.wasm"
-permissions = ["storage", "sql"]
+permissions = ["storage", "sql", "timer"]
+
+[[server.timers]]
+function = "on_timer"
 
 [[server.routes]]
 path = "/reflect/{id}"
@@ -31,6 +34,21 @@ path = "/protected/{id}"
 method = "GET"
 handler = "reflect"
 permission = "submission:view_all"
+
+[[server.routes]]
+path = "/timer/schedule"
+method = "POST"
+handler = "timer_schedule_route"
+
+[[server.routes]]
+path = "/timer/cancel"
+method = "POST"
+handler = "timer_cancel_route"
+
+[[server.routes]]
+path = "/timer/deliveries"
+method = "GET"
+handler = "timer_deliveries_route"
 
 [[server.queries]]
 topic = "visibility"
