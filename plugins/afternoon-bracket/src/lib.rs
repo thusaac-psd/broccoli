@@ -5,6 +5,9 @@
 //! bracket state, ordering, visibility and judging logic lives in this
 //! plugin; the host knows nothing about brackets, rounds, matches or 小局.
 
+pub mod model;
+pub mod storage;
+
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};
 
