@@ -59,11 +59,11 @@ use crate::model::{MatchState, RoundDef};
 use crate::storage;
 
 /// Everything [`decide_problem`] needs about ONE match to answer a
-/// visibility question, deliberately smaller than [`MatchState`]: it holds
-/// only what the rules above read, already resolved to the shape the rules
-/// are stated against (e.g. "current 小局 index", not the raw `xiaoju` log).
-/// Built from a real match by [`ctx_from_match`] in the host wiring below;
-/// tests construct it directly.
+/// visibility question, deliberately smaller than [`crate::model::MatchState`]:
+/// it holds only what the rules above read, already resolved to the shape
+/// the rules are stated against (e.g. "current 小局 index", not the raw
+/// `xiaoju` log). Built from a real match by `ctx_from_match` in the host
+/// wiring below; tests construct it directly.
 #[derive(Debug, Clone)]
 pub struct VisibilityCtx {
     pub player_a: i32,
