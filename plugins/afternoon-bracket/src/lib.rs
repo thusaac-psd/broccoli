@@ -5,6 +5,7 @@
 //! bracket state, ordering, visibility and judging logic lives in this
 //! plugin; the host knows nothing about brackets, rounds, matches or 小局.
 
+pub mod decide;
 pub mod gate;
 pub mod model;
 pub mod ordering;
