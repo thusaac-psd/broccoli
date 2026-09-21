@@ -7,10 +7,11 @@
 //! validates against `match_state.group_a` when `submitter == player_b`, and
 //! the result is written into `order_a` -- the order imposed ON player A.
 //! See the doc comment on [`crate::model::MatchState`] for the full
-//! reasoning, and [`player_b_submitting_sets_the_order_imposed_on_player_a`]
-//! below for the test that asserts the direction explicitly (a test that
-//! only exercises the symmetric case, both players ranking at once, cannot
-//! catch the fields being swapped).
+//! reasoning, and this module's own
+//! `player_b_submitting_sets_the_order_imposed_on_player_a` test below for
+//! the test that asserts the direction explicitly (a test that only
+//! exercises the symmetric case, both players ranking at once, cannot catch
+//! the fields being swapped).
 
 use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
