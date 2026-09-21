@@ -1,0 +1,31 @@
+name = "afternoon-bracket"
+version = "0.1.0"
+description = "16-player single-elimination bracket with per-小局 asymmetric problem sets"
+
+[translations]
+en = "i18n/en.toml"
+
+[server]
+entry = "afternoon_bracket.wasm"
+permissions = [
+    "logger",
+    "plugin:register",
+    "storage",
+    "sql",
+    "submission",
+    "evaluator:evaluate",
+    "config:read",
+    "timer",
+]
+
+[[server.queries]]
+topic = "visibility"
+function = "decide_visibility"
+
+[[server.hooks]]
+topic = "before_submission"
+function = "check_submission"
+scope = "resource"
+
+[[server.timers]]
+function = "on_timer"
