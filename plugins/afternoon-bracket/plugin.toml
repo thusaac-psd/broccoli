@@ -29,3 +29,8 @@ scope = "resource"
 
 [[server.timers]]
 function = "on_timer"
+
+[[server.routes]]
+method = "POST"
+path = "/api/plugins/afternoon-bracket/contests/{contest_id}/setup"
+handler = "api_setup"

@@ -6,6 +6,7 @@
 //! plugin; the host knows nothing about brackets, rounds, matches or 小局.
 
 pub mod model;
+pub mod setup;
 pub mod storage;
 
 #[cfg(target_arch = "wasm32")]
@@ -28,4 +29,12 @@ pub fn init() -> FnResult<String> {
     host.log
         .info("afternoon-bracket contest plugin registered")?;
     Ok("ok".into())
+}
+
+// -- API: POST /contests/{contest_id}/setup ------------------------------
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_setup(input: String) -> FnResult<String> {
+    run_api_handler(&input, setup::handle_setup)
 }
