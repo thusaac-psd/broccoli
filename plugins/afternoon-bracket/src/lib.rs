@@ -9,6 +9,7 @@ pub mod model;
 pub mod ordering;
 pub mod setup;
 pub mod storage;
+pub mod visibility;
 
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};

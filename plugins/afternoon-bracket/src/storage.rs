@@ -7,7 +7,13 @@
 
 use broccoli_server_sdk::prelude::*;
 
-use crate::model::MatchState;
+use crate::model::{MatchState, Setup};
+
+/// A single-elimination bracket of 16 players has exactly 15 matches
+/// (8 + 4 + 2 + 1), independent of whatever match-id numbering scheme
+/// round-advancement assigns. Used to bound the scan in
+/// [`load_all_matches`] instead of guessing a range.
+pub const MATCH_COUNT: u8 = 15;
 
 /// Storage key for a contest's `/setup` round definitions.
 pub fn setup_key(contest: i32) -> String {
@@ -46,6 +52,35 @@ pub fn load_match(host: &Host, contest: i32, id: u8) -> Result<Option<MatchState
         Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
         None => Ok(None),
     }
+}
+
+/// Load a contest's `/setup` round definitions, if `/setup` has run.
+pub fn load_setup(host: &Host, contest: i32) -> Result<Option<Setup>, SdkError> {
+    let key = setup_key(contest);
+    match host.storage.get_one(&key)? {
+        Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+        None => Ok(None),
+    }
+}
+
+/// Load every match that has been created for `contest`, in ONE batched
+/// `host.storage.get` call across all [`MATCH_COUNT`] possible match ids
+/// -- never one `get_one` per id, which would be one host-fn crossing per
+/// match instead of one for the whole bracket. Matches that have not been
+/// created yet (no round-advancement has written them) are simply absent
+/// from the result, not an error.
+pub fn load_all_matches(host: &Host, contest: i32) -> Result<Vec<(u8, MatchState)>, SdkError> {
+    let keys: Vec<String> = (0..MATCH_COUNT).map(|id| match_key(contest, id)).collect();
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let raw = host.storage.get(&key_refs)?;
+
+    let mut matches = Vec::new();
+    for (id, key) in (0..MATCH_COUNT).zip(keys.iter()) {
+        if let Some(value) = raw.get(key) {
+            matches.push((id, serde_json::from_str(value)?));
+        }
+    }
+    Ok(matches)
 }
 
 /// Apply `f` to a match's state via a compare-and-set retry loop, so a
@@ -110,5 +145,83 @@ mod tests {
 
         let reloaded = load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(reloaded.score_a, 1, "the mutation must be durable");
+    }
+
+    #[test]
+    fn load_setup_returns_none_before_setup_has_run() {
+        let host = Host::mock();
+        assert!(load_setup(&host, 7).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_setup_returns_the_persisted_document() {
+        let host = Host::mock();
+        let setup = Setup {
+            xiaoju_seconds: 1_800,
+            ..Default::default()
+        };
+        host.storage
+            .set(&[(
+                setup_key(7).as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            )])
+            .unwrap();
+        assert_eq!(load_setup(&host, 7).unwrap(), Some(setup));
+    }
+
+    #[test]
+    fn load_all_matches_skips_uncreated_ids_and_reads_the_bracket_in_one_call() {
+        let host = Host::mock();
+        host.storage
+            .set(&[
+                (
+                    match_key(7, 0).as_str(),
+                    serde_json::to_string(&MatchState {
+                        round: 1,
+                        pos: 0,
+                        player_a: 10,
+                        player_b: 20,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .as_str(),
+                ),
+                (
+                    match_key(7, 5).as_str(),
+                    serde_json::to_string(&MatchState {
+                        round: 2,
+                        pos: 0,
+                        player_a: 30,
+                        player_b: 40,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .as_str(),
+                ),
+            ])
+            .unwrap();
+
+        // A second contest's match must not leak into contest 7's scan.
+        host.storage
+            .set(&[(
+                match_key(8, 0).as_str(),
+                serde_json::to_string(&MatchState::default())
+                    .unwrap()
+                    .as_str(),
+            )])
+            .unwrap();
+
+        let before = host.storage.get_call_count();
+        let matches = load_all_matches(&host, 7).unwrap();
+        assert_eq!(
+            host.storage.get_call_count(),
+            before + 1,
+            "the whole bracket must be one batched read"
+        );
+
+        let ids: Vec<u8> = matches.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![0, 5]);
+        assert_eq!(matches[0].1.player_a, 10);
+        assert_eq!(matches[1].1.player_a, 30);
     }
 }
