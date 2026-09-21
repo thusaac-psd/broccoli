@@ -91,6 +91,14 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      # `plugins` is excluded from the root workspace, so the step above never
+      # documents a plugin crate -- the same gap already closed for fmt,
+      # clippy and tests. A broken intra-doc link in a plugin went undetected
+      # by every other gate until this one existed. See the script for why it
+      # discovers crates rather than listing them.
+      - name: Documentation (plugins)
+        run: ./scripts/doc-plugins.sh
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
