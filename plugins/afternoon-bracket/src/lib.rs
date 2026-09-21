@@ -6,6 +6,7 @@
 //! plugin; the host knows nothing about brackets, rounds, matches or 小局.
 
 pub mod model;
+pub mod ordering;
 pub mod setup;
 pub mod storage;
 
@@ -37,4 +38,12 @@ pub fn init() -> FnResult<String> {
 #[plugin_fn]
 pub fn api_setup(input: String) -> FnResult<String> {
     run_api_handler(&input, setup::handle_setup)
+}
+
+// -- API: POST /contests/{contest_id}/matches/{match_id}/order -----------
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_order(input: String) -> FnResult<String> {
+    run_api_handler(&input, ordering::handle_order)
 }

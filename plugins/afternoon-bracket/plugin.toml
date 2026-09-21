@@ -34,3 +34,8 @@ function = "on_timer"
 method = "POST"
 path = "/api/plugins/afternoon-bracket/contests/{contest_id}/setup"
 handler = "api_setup"
+
+[[server.routes]]
+method = "POST"
+path = "/api/plugins/afternoon-bracket/contests/{contest_id}/matches/{match_id}/order"
+handler = "api_order"

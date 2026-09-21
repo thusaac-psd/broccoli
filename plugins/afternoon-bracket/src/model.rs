@@ -46,6 +46,12 @@ pub struct MatchState {
     pub pos: u8,
     pub player_a: i32,
     pub player_b: i32,
+    /// Player A's own 3 problems for this round (from `RoundDef::group_a`).
+    /// Player B ranks THESE to produce `order_a`.
+    pub group_a: [i32; 3],
+    /// Player B's own 3 problems for this round (from `RoundDef::group_b`).
+    /// Player A ranks THESE to produce `order_b`.
+    pub group_b: [i32; 3],
     /// The order player A must solve THEIR OWN group's problems in, as
     /// ranked by player B (A's opponent). `None` until B submits a ranking.
     pub order_a: Option<[i32; 3]>,
