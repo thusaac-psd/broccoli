@@ -83,6 +83,25 @@ pub fn load_all_matches(host: &Host, contest: i32) -> Result<Vec<(u8, MatchState
     Ok(matches)
 }
 
+/// Find the one match, among every match already loaded for a contest, where
+/// `player` participates AND whose round is `round` (1-based, matching
+/// [`MatchState::round`]). A player is in at most one match per round, so
+/// this uniquely resolves "the match this (problem, viewer) pair is about"
+/// without needing a match-id numbering scheme. Shared by `visibility.rs`
+/// (per-viewer problem visibility) and `gate.rs` (submission gating) -- both
+/// resolve a problem to a round via `Setup.rounds`, then need this same
+/// lookup to find the viewer's match in that round.
+pub fn find_players_match(
+    matches: &[(u8, MatchState)],
+    round: u8,
+    player: i32,
+) -> Option<&MatchState> {
+    matches
+        .iter()
+        .find(|(_, m)| m.round == round && (m.player_a == player || m.player_b == player))
+        .map(|(_, m)| m)
+}
+
 /// Apply `f` to a match's state via a compare-and-set retry loop, so a
 /// judging callback and a timer firing on the same match cannot clobber
 /// each other's write.

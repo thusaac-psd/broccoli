@@ -184,20 +184,10 @@ struct SubmissionOwnerRow {
     contest_type: Option<String>,
 }
 
-/// Find the one match, among every match created so far in `contest`, where
-/// `player` participates AND whose round is `round` (1-based, matching
-/// [`MatchState::round`]). A player is in at most one match per round, so
-/// this uniquely resolves "the match this problem-visibility question is
-/// about" without needing a match-id numbering scheme -- see
-/// `load_all_matches`'s doc comment for why the scan is bounded and batched
-/// rather than open-ended.
-#[cfg(any(target_arch = "wasm32", test))]
-fn find_players_match(matches: &[(u8, MatchState)], round: u8, player: i32) -> Option<&MatchState> {
-    matches
-        .iter()
-        .find(|(_, m)| m.round == round && (m.player_a == player || m.player_b == player))
-        .map(|(_, m)| m)
-}
+// `find_players_match` moved to `storage.rs`: it operates purely on
+// `storage::load_all_matches`'s return shape and is shared with `gate.rs`'s
+// submission gating, which needs the identical "resolve a problem to a
+// round, then find the viewer's match in that round" lookup.
 
 /// Core decision logic for the `visibility` query topic. Exercised directly
 /// by tests via `Host::mock()` (no wasm32 target required); the thin
@@ -326,7 +316,7 @@ fn decide_visibility_decisions(
                 let Some(contest_matches) = matches.get(&contest_id) else {
                     return WireDecision::Deny {};
                 };
-                let Some(m) = find_players_match(contest_matches, round, v) else {
+                let Some(m) = storage::find_players_match(contest_matches, round, v) else {
                     return WireDecision::Deny {};
                 };
                 let ctx = ctx_from_match(m, round_def);
