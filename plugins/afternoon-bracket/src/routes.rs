@@ -203,6 +203,23 @@ struct MatchView {
     /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
     /// to diff two responses over time.
     awaiting_submission_id: Option<i32>,
+    /// The currently open 小局's index, deadline and open time, taken from
+    /// `MatchState::xiaoju.last()`. All three are `None` before the first
+    /// 小局 opens and after the match is decided.
+    ///
+    /// Structural, like `state` -- not a problem id, so not masked. Both
+    /// players already know when their own 小局 ends, and a spectator is
+    /// entitled to the same clock, so there is nothing here to withhold.
+    ///
+    /// Present because a countdown MUST be driven by the server's deadline.
+    /// Without these the frontend can only guess, and a guessed clock that
+    /// reaches zero before the server has decided would announce a result
+    /// the server has not made -- in front of an audience. The frontend
+    /// deliberately renders "live timing unavailable" rather than
+    /// fabricating one, so these fields are what turn the countdown on.
+    current_xiaoju_index: Option<u8>,
+    current_xiaoju_deadline_ms: Option<i64>,
+    current_xiaoju_opened_at_ms: Option<i64>,
 }
 
 /// Whether `viewer` may see `problem_id` in `ctx`, per
@@ -255,6 +272,10 @@ fn match_view(
     viewer: Option<i32>,
     can_view_all: bool,
 ) -> MatchView {
+    // The open 小局, if any: `None` before the first opens and after the
+    // match is decided. Read once here so the three timing fields below
+    // cannot disagree with each other.
+    let current = m.xiaoju.last();
     let ctx = VisibilityCtx {
         player_a: m.player_a,
         player_b: m.player_b,
@@ -286,6 +307,9 @@ fn match_view(
         winner: m.winner,
         decided_at_ms: m.decided_at_ms,
         awaiting_submission_id: m.awaiting_submission_id,
+        current_xiaoju_index: current.map(|x| x.index),
+        current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
+        current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
     }
 }
 
@@ -644,6 +668,50 @@ mod tests {
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert!(reloaded.xiaoju[0].decided);
         assert_eq!(reloaded.xiaoju[0].winner, None);
+    }
+
+    // -- MatchView 小局 timing: what drives the client countdown --
+
+    #[test]
+    fn match_view_exposes_the_open_xiaoju_timing_for_the_countdown() {
+        // The frontend must never invent a deadline. If these are absent it
+        // renders "live timing unavailable" rather than running a guessed
+        // clock that could hit zero and announce a result the server has not
+        // made. So a missing field here is not cosmetic - it silently
+        // disables the countdown for a live, spectated match.
+        let mut m = match_in_ordering();
+        m.state = MatchPhase::InProgress;
+        m.order_a = Some([103, 101, 102]);
+        m.order_b = Some([203, 201, 202]);
+        m.xiaoju = vec![XiaojuState {
+            index: 1,
+            opened_at_ms: 5_000,
+            deadline_ms: 65_000,
+            winner: None,
+            decided: false,
+        }];
+        let setup = setup_two_rounds();
+
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+
+        assert_eq!(view.current_xiaoju_index, Some(1));
+        assert_eq!(view.current_xiaoju_opened_at_ms, Some(5_000));
+        assert_eq!(view.current_xiaoju_deadline_ms, Some(65_000));
+    }
+
+    #[test]
+    fn match_view_reports_no_xiaoju_timing_before_the_first_one_opens() {
+        // Boundary the naive `unwrap_or(0)` gets wrong: 0 is a legitimate
+        // epoch value, so "no 小局 open" must be absent, not zero. A client
+        // told `deadline_ms: 0` would show a countdown that expired in 1970.
+        let m = match_in_ordering();
+        let setup = setup_two_rounds();
+
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+
+        assert_eq!(view.current_xiaoju_index, None);
+        assert_eq!(view.current_xiaoju_opened_at_ms, None);
+        assert_eq!(view.current_xiaoju_deadline_ms, None);
     }
 
     // -- GET /bracket, GET /matches/{id}: the visibility-masking gap --
