@@ -51,7 +51,7 @@ use broccoli_server_sdk::types::*;
 use extism_pdk::{FnResult, plugin_fn};
 use serde::{Deserialize, Serialize};
 
-use crate::decide::{self, MatchOutcome, SubmissionRecord, XiaojuOutcome};
+use crate::decide::{self, MatchOutcome, SubmissionLifecycle, SubmissionRecord, XiaojuOutcome};
 use crate::model::{MatchPhase, MatchState, RoundDef, Setup, XiaojuState};
 use crate::storage;
 
@@ -125,10 +125,12 @@ pub(crate) fn now_ms(host: &Host) -> Result<i64, SdkError> {
 
 #[derive(Debug, Deserialize)]
 struct SubRow {
+    id: i32,
     user_id: i32,
     problem_id: i32,
     submitted_at_ms: f64,
     verdict: Option<Verdict>,
+    status: SubmissionLifecycle,
 }
 
 /// Fetch every submission relevant to deciding `m`'s currently open 小局:
@@ -136,6 +138,18 @@ struct SubRow {
 /// [`current_problem`]), scoped to this contest. A player with no current
 /// problem (e.g. between phases) contributes no clause and yields no rows
 /// for that side.
+///
+/// Reads `status` alongside `verdict`: a submission whose judging failed
+/// with a platform fault (`SystemError`) writes NO verdict (see
+/// `mark_submission_system_error_with_epoch` and the stuck-job handler in
+/// `packages/server`), so `verdict.is_none()` alone cannot tell "still being
+/// judged" apart from "terminally failed, no verdict ever coming" -- see
+/// `decide::is_in_flight`'s doc comment. `status::text AS status` follows
+/// the codebase-wide convention for reading a Postgres enum column as plain
+/// text (see `plugins/icpc/src/lib.rs`); it deserializes into
+/// [`decide::SubmissionLifecycle`], not the host's own `SubmissionStatus`
+/// (this WASM guest cannot depend on `packages/common` -- see that type's
+/// doc comment).
 fn fetch_subs(
     host: &Host,
     contest: i32,
@@ -166,8 +180,9 @@ fn fetch_subs(
     }
 
     let sql = format!(
-        "SELECT user_id, problem_id, \
-         EXTRACT(EPOCH FROM created_at) * 1000 AS submitted_at_ms, verdict \
+        "SELECT id, user_id, problem_id, \
+         EXTRACT(EPOCH FROM created_at) * 1000 AS submitted_at_ms, verdict, \
+         status::text AS status \
          FROM submission WHERE contest_id = {} AND ({})",
         p.bind(contest),
         clauses.join(" OR ")
@@ -176,10 +191,12 @@ fn fetch_subs(
     Ok(rows
         .into_iter()
         .map(|r| SubmissionRecord {
+            submission_id: r.id,
             user_id: r.user_id,
             problem_id: r.problem_id,
             submitted_at_ms: r.submitted_at_ms as i64,
             verdict: r.verdict,
+            status: r.status,
         })
         .collect())
 }
@@ -715,10 +732,12 @@ mod tests {
 
     fn ac_row(user_id: i32, submitted_at_ms: i64) -> serde_json::Value {
         serde_json::json!({
+            "id": user_id,
             "user_id": user_id,
             "problem_id": 0,
             "submitted_at_ms": submitted_at_ms as f64,
             "verdict": "Accepted",
+            "status": "Judged",
         })
     }
 

@@ -13,19 +13,87 @@
 //! each other, they are re-driven.
 
 use broccoli_server_sdk::prelude::Verdict;
+use serde::{Deserialize, Serialize};
 
 use crate::model::{MatchPhase, MatchState, Setup};
 
+/// The 3 regular 小局 (index 0..3); 附加赛 (tiebreak) attempts are appended
+/// only once `m.state` becomes `Tiebreak`. Shared with `judge.rs`, which
+/// needs the same boundary both to classify `current_problem` during
+/// `MatchPhase::AwaitingJudge` (see that variant's doc comment for why
+/// `m.state` alone no longer distinguishes regular from tiebreak there) and
+/// to restore `m.state` once a blocked 小局 resolves.
+pub(crate) const REGULAR_XIAOJU_COUNT: usize = 3;
+
+/// Whether xiaoju `index` belongs to the 3 regular 小局 (vs. an 附加赛
+/// attempt). See [`REGULAR_XIAOJU_COUNT`].
+pub(crate) fn is_regular_xiaoju_index(index: u8) -> bool {
+    (index as usize) < REGULAR_XIAOJU_COUNT
+}
+
+/// A submission's host-wide lifecycle status, as read back from the raw
+/// `submission.status` column (see `judge.rs::fetch_subs`).
+///
+/// This is a PLUGIN-LOCAL mirror of `packages/common::SubmissionStatus`, not
+/// a re-export of it: this WASM guest crate depends only on
+/// `broccoli-server-sdk`, which exposes a DIFFERENT, narrower type under the
+/// same name (`broccoli_types::persistence::SubmissionStatus`, with only
+/// `Compiling`/`Running`/`Judged`/`CompilationError` -- the subset a plugin
+/// may WRITE via `host.submission.update`), not the full 7-variant
+/// host-lifecycle enum a submission can be READ back as. Variant spellings
+/// must stay in exact sync with `packages/common::SubmissionStatus`
+/// (`#[serde(rename_all = "PascalCase")]` there too) since both sides
+/// serialize the same underlying Postgres enum column as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum SubmissionLifecycle {
+    Queued,
+    Pending,
+    Compiling,
+    Running,
+    Judged,
+    CompilationError,
+    SystemError,
+}
+
+/// Whether a submission in this status is still IN FLIGHT (could yet
+/// receive a different verdict) as far as the bracket's scoring policy is
+/// concerned.
+///
+/// This is deliberately NOT the same as `packages/common::SubmissionStatus
+/// ::is_terminal()`: that method's idea of "terminal" is a host-wide,
+/// storage-lifecycle concept, where `SystemError` counts as terminal
+/// (judging finished, the submission's row is in a resting state). The
+/// bracket's scoring policy needs the OPPOSITE answer for `SystemError`: the
+/// platform aggressively re-judges these (`max_system_error_retries`,
+/// "never abandon a system fault" --
+/// `packages/server/src/dispatcher/system_error_retry.rs`), so a
+/// `SystemError` submission can still turn into a real verdict later and
+/// must keep blocking a later AC, exactly like `Queued`/`Pending`/
+/// `Compiling`/`Running`. Only `Judged` and `CompilationError` are actually
+/// done as far as this decision is concerned.
+fn is_in_flight(status: &SubmissionLifecycle) -> bool {
+    !matches!(
+        status,
+        SubmissionLifecycle::Judged | SubmissionLifecycle::CompilationError
+    )
+}
+
 /// One submission, as `decide_xiaoju` needs to see it: which player made it,
 /// to which problem, when it was SUBMITTED (not judged -- see
-/// [`decide_xiaoju`]'s doc comment for why that distinction matters), and
-/// its verdict if judging has completed (`None` while still pending).
+/// [`decide_xiaoju`]'s doc comment for why that distinction matters), its
+/// verdict if judging has completed (`None` while still pending or while a
+/// system fault is being retried -- see [`is_in_flight`]), and its host
+/// submission id (surfaced to staff via [`XiaojuOutcome::AwaitingJudge`] so
+/// they know which submission to rejudge).
 #[derive(Debug, Clone)]
 pub struct SubmissionRecord {
+    pub submission_id: i32,
     pub user_id: i32,
     pub problem_id: i32,
     pub submitted_at_ms: i64,
     pub verdict: Option<Verdict>,
+    pub status: SubmissionLifecycle,
 }
 
 /// Outcome of deciding one 小局.
@@ -42,11 +110,23 @@ pub struct SubmissionRecord {
 pub enum XiaojuOutcome {
     /// Neither player has won yet, and the deadline has not passed -- there
     /// is nothing to record. Also returned while an older submission is
-    /// still pending judgment and could still beat the current best AC (see
-    /// [`decide_xiaoju`]'s doc comment).
+    /// still in flight and could still beat the current best AC (see
+    /// [`decide_xiaoju`]'s doc comment), as long as the deadline has not
+    /// passed yet either.
     NotYet,
     Decided {
         winner: Option<i32>,
+    },
+    /// The deadline has passed, but an older submission is STILL in flight
+    /// (see [`is_in_flight`]) and could still beat the current best AC --
+    /// awarding the AC now could hand the 小局 to the wrong player once that
+    /// verdict lands, but staying `NotYet` forever would let a platform
+    /// fault cost a player the 小局 outright (it would never resolve without
+    /// staff intervention). The contest owner's chosen policy: escalate
+    /// visibly instead of either. `blocking_submission_id` names the
+    /// in-flight submission staff should rejudge to unblock this.
+    AwaitingJudge {
+        blocking_submission_id: i32,
     },
 }
 
@@ -67,12 +147,17 @@ pub enum XiaojuOutcome {
 /// > the players, not their judges.
 ///
 /// A consequence: if the best AC found so far was submitted at `t`, and some
-/// OTHER submission older than `t` is still pending (`verdict: None`), the
-/// 小局 is not yet decidable -- that pending submission could still turn out
-/// accepted and, having been submitted earlier, would have to win instead.
-/// `decide_xiaoju` returns [`XiaojuOutcome::NotYet`] in that case rather than
-/// awarding a winner it might have to revoke once the pending verdict
-/// arrives.
+/// OTHER submission older than `t` is still IN FLIGHT (see [`is_in_flight`]
+/// -- not simply `verdict.is_none()`: a terminally-failed submission can
+/// also have no verdict written, see that function's doc comment), the 小局
+/// is not yet decidable -- that submission could still turn out accepted
+/// and, having been submitted earlier, would have to win instead.
+/// `decide_xiaoju` returns [`XiaojuOutcome::NotYet`] in that case BEFORE the
+/// deadline, rather than awarding a winner it might have to revoke once the
+/// verdict arrives. Once the deadline has passed while still blocked, it
+/// returns [`XiaojuOutcome::AwaitingJudge`] instead -- see that variant's
+/// doc comment for why neither awarding the AC nor staying `NotYet` forever
+/// is acceptable at that point.
 ///
 /// Does not validate that `problem_id` is the player's actual current
 /// problem -- that is `gate.rs`'s job (submissions to the wrong problem are
@@ -103,11 +188,20 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
 
     let winner = match best_ac {
         Some(ac) => {
-            let blocked_by_an_older_pending_submission = subs
+            // The OLDEST in-flight submission older than the best AC: if it
+            // is still blocking once the deadline passes, that is the one
+            // staff should rejudge first -- it has been stuck the longest.
+            let blocker = subs
                 .iter()
-                .any(|s| s.verdict.is_none() && s.submitted_at_ms < ac.submitted_at_ms);
-            if blocked_by_an_older_pending_submission {
-                return XiaojuOutcome::NotYet;
+                .filter(|s| is_in_flight(&s.status) && s.submitted_at_ms < ac.submitted_at_ms)
+                .min_by_key(|s| s.submitted_at_ms);
+            if let Some(blocker) = blocker {
+                if now_ms < deadline_ms {
+                    return XiaojuOutcome::NotYet;
+                }
+                return XiaojuOutcome::AwaitingJudge {
+                    blocking_submission_id: blocker.submission_id,
+                };
             }
             Some(ac.user_id)
         }
@@ -223,7 +317,6 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
     // Regular phase: waiting on the 3 regular 小局 (index 0..3; 附加赛
     // attempts are appended only once `m.state` becomes `Tiebreak`, so
     // nothing here needs to filter them out).
-    const REGULAR_XIAOJU_COUNT: usize = 3;
     let all_regular_decided =
         m.xiaoju.len() == REGULAR_XIAOJU_COUNT && m.xiaoju.iter().all(|x| x.decided);
     if !all_regular_decided {
@@ -294,11 +387,35 @@ mod tests {
         submitted_at_ms: i64,
         verdict: Option<Verdict>,
     ) -> SubmissionRecord {
+        // `status` mirrors the verdict for these older tests, which predate
+        // the in-flight/terminal distinction: `Some(verdict)` implies
+        // judging finished (`Judged`), `None` implies still pending
+        // (`Pending`) -- both in-flight-vs-terminal classifications that
+        // agree with the old buggy `verdict.is_none()` check, so none of
+        // these call sites need editing.
+        let status = if verdict.is_some() {
+            SubmissionLifecycle::Judged
+        } else {
+            SubmissionLifecycle::Pending
+        };
+        sub_with_status(0, user_id, problem_id, submitted_at_ms, verdict, status)
+    }
+
+    fn sub_with_status(
+        submission_id: i32,
+        user_id: i32,
+        problem_id: i32,
+        submitted_at_ms: i64,
+        verdict: Option<Verdict>,
+        status: SubmissionLifecycle,
+    ) -> SubmissionRecord {
         SubmissionRecord {
+            submission_id,
             user_id,
             problem_id,
             submitted_at_ms,
             verdict,
+            status,
         }
     }
 
@@ -389,6 +506,122 @@ mod tests {
             (m.score_a, m.score_b),
             score_after_first,
             "score must not double-count"
+        );
+    }
+
+    #[test]
+    fn a_system_error_submission_older_than_a_later_ac_still_blocks() {
+        // A `SystemError` submission has NO verdict written to it (see
+        // `mark_submission_system_error_with_epoch` and the stuck-job
+        // handler -- neither ever sets `submission.verdict`), but the
+        // platform aggressively re-judges these
+        // (`max_system_error_retries`): it is still IN FLIGHT, not a
+        // terminal "not accepted" outcome, so an older one must still be
+        // able to beat a later AC once it finally judges.
+        let mut m = match_in_progress_at_xiaoju(0);
+        let subs = [
+            sub_with_status(1, 10, 103, 1_000, None, SubmissionLifecycle::SystemError),
+            sub_with_status(
+                2,
+                20,
+                203,
+                1_500,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(decide_xiaoju(&mut m, &subs, 9_999), XiaojuOutcome::NotYet);
+    }
+
+    #[test]
+    fn a_compilation_error_submission_older_than_a_later_ac_does_not_block() {
+        // `CompilationError` also has NO verdict written to it, but it IS
+        // terminal -- it can never turn into an accepted submission, so it
+        // must not be able to hold a later AC hostage. A naive
+        // `verdict.is_none()` in-flight check (the bug this pins) cannot
+        // tell this case apart from the SystemError one above; this is the
+        // designated break/restore-proof test.
+        let mut m = match_in_progress_at_xiaoju(0);
+        let subs = [
+            sub_with_status(
+                1,
+                10,
+                103,
+                1_000,
+                None,
+                SubmissionLifecycle::CompilationError,
+            ),
+            sub_with_status(
+                2,
+                20,
+                203,
+                1_500,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 9_999),
+            XiaojuOutcome::Decided { winner: Some(20) }
+        );
+    }
+
+    #[test]
+    fn a_blocked_deadline_passing_yields_awaiting_judge_and_records_the_blocker() {
+        // Same shape as `an_earlier_pending_submission_blocks_the_decision`,
+        // but the deadline has now passed. Awarding the later AC would
+        // break "a platform fault must never cost a player the 小局"; the
+        // contest owner chose escalation instead of a silent win, so this
+        // must surface as a new, visible state -- not `Decided`, and not a
+        // forever-`NotYet` hang either.
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 5_000);
+        let subs = [
+            sub_with_status(77, 10, 103, 1_000, None, SubmissionLifecycle::SystemError),
+            sub_with_status(
+                2,
+                20,
+                203,
+                2_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 5_001),
+            XiaojuOutcome::AwaitingJudge {
+                blocking_submission_id: 77
+            }
+        );
+    }
+
+    #[test]
+    fn a_verdict_landing_while_awaiting_judge_decides_normally_and_the_earlier_submitter_wins() {
+        // The blocking submission's verdict finally lands, and it is
+        // accepted: the earliest-submitted rule must still hold -- the
+        // EARLIER submitter (the one that had been blocking) wins the 小局,
+        // not the later AC that was provisionally ahead while blocked.
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 5_000);
+        let subs = [
+            sub_with_status(
+                77,
+                10,
+                103,
+                1_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+            sub_with_status(
+                2,
+                20,
+                203,
+                2_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 5_001),
+            XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
 
