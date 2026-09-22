@@ -634,6 +634,7 @@ mod tests {
             }],
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 300,
+            escalation_grace_seconds: 120,
         }
     }
 
@@ -678,6 +679,7 @@ mod tests {
             winner: None,
             tiebreak_index: 0,
             decided_at_ms: 0,
+            awaiting_submission_id: None,
         }
     }
 
@@ -730,6 +732,7 @@ mod tests {
             winner: None,
             tiebreak_index,
             decided_at_ms: 0,
+            awaiting_submission_id: None,
         }
     }
 

@@ -320,6 +320,7 @@ mod tests {
             ],
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
+            escalation_grace_seconds: 120,
         }
     }
 

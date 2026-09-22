@@ -91,6 +91,11 @@ struct SetupRequest {
     rounds: Vec<RoundDef>,
     xiaoju_seconds: i64,
     round_intermission_seconds: i64,
+    /// Optional: a request that omits this falls back to
+    /// [`crate::model::default_escalation_grace_seconds`], same as a
+    /// persisted `Setup` document written before this field existed.
+    #[serde(default = "crate::model::default_escalation_grace_seconds")]
+    escalation_grace_seconds: i64,
     seeds: [i32; 16],
 }
 
@@ -125,6 +130,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         rounds: body.rounds,
         xiaoju_seconds: body.xiaoju_seconds,
         round_intermission_seconds: body.round_intermission_seconds,
+        escalation_grace_seconds: body.escalation_grace_seconds,
     };
     validate_setup(&setup, &body.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
@@ -201,6 +207,7 @@ mod tests {
             ],
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
+            escalation_grace_seconds: 120,
         }
     }
 

@@ -196,6 +196,13 @@ struct MatchView {
     state: MatchPhase,
     winner: Option<i32>,
     decided_at_ms: i64,
+    /// Present (and matches `MatchState::awaiting_submission_id`) only while
+    /// `state == MatchPhase::AwaitingJudge`. Never masked -- like `state`
+    /// itself, this is structural, not a problem id. Lets staff reading
+    /// `GET /matches/{id}` distinguish "still solving" (`InProgress`) from
+    /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
+    /// to diff two responses over time.
+    awaiting_submission_id: Option<i32>,
 }
 
 /// Whether `viewer` may see `problem_id` in `ctx`, per
@@ -278,6 +285,7 @@ fn match_view(
         state: m.state,
         winner: m.winner,
         decided_at_ms: m.decided_at_ms,
+        awaiting_submission_id: m.awaiting_submission_id,
     }
 }
 
@@ -379,6 +387,7 @@ mod tests {
             ],
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
+            escalation_grace_seconds: 120,
         }
     }
 

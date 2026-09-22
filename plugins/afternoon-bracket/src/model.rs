@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Default grace period (seconds) between a match entering
+/// `MatchPhase::AwaitingJudge` and its escalation timer firing. See
+/// [`Setup::escalation_grace_seconds`].
+pub fn default_escalation_grace_seconds() -> i64 {
+    120
+}
+
 /// Round-level problem assignment and timing, submitted once via `/setup`
 /// before the bracket begins. Stored under [`crate::storage::setup_key`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -9,6 +16,15 @@ pub struct Setup {
     pub rounds: Vec<RoundDef>,
     pub xiaoju_seconds: i64,
     pub round_intermission_seconds: i64,
+    /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on
+    /// an in-flight submission past its 小局 deadline) before escalating to
+    /// `MatchPhase::NeedsAdjudication` for staff. `#[serde(default)]` so
+    /// both a persisted `Setup` document written before this field existed,
+    /// and a `/setup` request body that omits it, fall back to
+    /// [`default_escalation_grace_seconds`] rather than failing to
+    /// deserialize or silently becoming `0`.
+    #[serde(default = "default_escalation_grace_seconds")]
+    pub escalation_grace_seconds: i64,
 }
 
 /// One round's problem split: two groups of 3 (one per player of a match),
@@ -74,6 +90,12 @@ pub struct MatchState {
     /// requires knowing when each match finished, not just that it did.
     /// See `bracket::round_ended_at_ms`.
     pub decided_at_ms: i64,
+    /// While `state == MatchPhase::AwaitingJudge`: the id of the in-flight
+    /// submission this match is blocked on, so staff reading
+    /// `GET /matches/{id}` know which submission to rejudge. `None`
+    /// otherwise. See `MatchPhase::AwaitingJudge`'s doc comment for the
+    /// policy this exists to support.
+    pub awaiting_submission_id: Option<i32>,
 }
 
 /// State of one 小局 (the best-of-one sub-match on a single problem).
@@ -107,6 +129,22 @@ pub enum MatchPhase {
     InProgress,
     /// Scores were level after 3 小局; an 附加赛 is running.
     Tiebreak,
+    /// A 小局's deadline passed while an older submission was still IN
+    /// FLIGHT (queued, pending, compiling, running, or a `SystemError`
+    /// being retried -- see `decide::is_in_flight`) and could still beat
+    /// the current best AC once judged. Awarding the AC now could hand the
+    /// 小局 to the wrong player; staying in `InProgress`/`Tiebreak` forever
+    /// would let a platform fault cost a player the 小局 outright with no
+    /// automatic recovery. The contest owner's chosen policy: never let a
+    /// platform fault decide it silently -- surface it as a distinct,
+    /// staff-visible state (`awaiting_submission_id` names the blocking
+    /// submission) with an escalation timer
+    /// (`Setup::escalation_grace_seconds`) to `NeedsAdjudication` if the
+    /// block outlives its grace period. If the blocking submission's
+    /// verdict lands first, the match resumes normally -- and if it turns
+    /// out accepted, the EARLIER submitter wins, per the earliest-submitted
+    /// rule this whole plugin is built around.
+    AwaitingJudge,
     /// The match has a winner.
     Decided,
     /// The tiebreak problem list was exhausted without a decision; staff
