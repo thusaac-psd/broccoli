@@ -59,3 +59,24 @@ handler = "api_get_bracket"
 method = "GET"
 path = "/api/plugins/afternoon-bracket/contests/{contest_id}/matches/{match_id}"
 handler = "api_get_match"
+
+[web]
+root = "frontend/dist"
+entry = "index.js"
+css = ["styles.css"]
+
+[web.components]
+BracketView = "BracketView"
+LiveXiaojuView = "LiveXiaojuView"
+
+[[web.slots]]
+name = "ranking.content"
+position = "wrap"
+component = "BracketView"
+contest_type = "afternoon-bracket"
+
+[[web.slots]]
+name = "problem-detail.sidebar"
+position = "prepend"
+component = "LiveXiaojuView"
+contest_type = "afternoon-bracket"
