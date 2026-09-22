@@ -82,7 +82,7 @@ pub fn parse_xiaoju_timer_key(key: &str) -> Option<(i32, u8)> {
 
 /// The storage/timer key for the escalation grace timer scheduled when a
 /// match enters `MatchPhase::AwaitingJudge` (see [`decide::XiaojuOutcome::AwaitingJudge`]
-/// and [`step`]). Deliberately a DIFFERENT namespace from
+/// and `step`). Deliberately a DIFFERENT namespace from
 /// [`xiaoju_timer_key`] -- the two must never be mistaken for each other
 /// (see the module doc comment's "Timer key discipline" section), since a
 /// match can have both a live 小局 timer and a live escalation timer
@@ -452,7 +452,7 @@ pub fn advance(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> 
 /// `Storage::modify`-defaulting reason documented there.
 ///
 /// `pub` (not `pub(crate)`), matching [`advance`]/[`force_decide`]: its
-/// only production caller is [`on_timer`], which is `wasm32`-gated, so a
+/// only production caller is `on_timer`, which is `wasm32`-gated, so a
 /// native (non-`wasm32`) build has no non-test caller to make a
 /// `pub(crate)` item "used" -- see this crate's `["cdylib", "rlib"]`
 /// crate-type, under which a fully `pub` item is exempt from the

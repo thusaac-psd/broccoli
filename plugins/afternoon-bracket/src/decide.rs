@@ -83,7 +83,7 @@ fn is_in_flight(status: &SubmissionLifecycle) -> bool {
 /// to which problem, when it was SUBMITTED (not judged -- see
 /// [`decide_xiaoju`]'s doc comment for why that distinction matters), its
 /// verdict if judging has completed (`None` while still pending or while a
-/// system fault is being retried -- see [`is_in_flight`]), and its host
+/// system fault is being retried -- see `is_in_flight`), and its host
 /// submission id (surfaced to staff via [`XiaojuOutcome::AwaitingJudge`] so
 /// they know which submission to rejudge).
 #[derive(Debug, Clone)]
@@ -118,7 +118,7 @@ pub enum XiaojuOutcome {
         winner: Option<i32>,
     },
     /// The deadline has passed, but an older submission is STILL in flight
-    /// (see [`is_in_flight`]) and could still beat the current best AC --
+    /// (see `is_in_flight`) and could still beat the current best AC --
     /// awarding the AC now could hand the 小局 to the wrong player once that
     /// verdict lands, but staying `NotYet` forever would let a platform
     /// fault cost a player the 小局 outright (it would never resolve without
@@ -147,7 +147,7 @@ pub enum XiaojuOutcome {
 /// > the players, not their judges.
 ///
 /// A consequence: if the best AC found so far was submitted at `t`, and some
-/// OTHER submission older than `t` is still IN FLIGHT (see [`is_in_flight`]
+/// OTHER submission older than `t` is still IN FLIGHT (see `is_in_flight`
 /// -- not simply `verdict.is_none()`: a terminally-failed submission can
 /// also have no verdict written, see that function's doc comment), the 小局
 /// is not yet decidable -- that submission could still turn out accepted
