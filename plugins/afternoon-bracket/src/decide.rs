@@ -444,6 +444,7 @@ mod tests {
             state: MatchPhase::InProgress,
             winner: None,
             tiebreak_index: 0,
+            decided_at_ms: 0,
         }
     }
 
@@ -495,6 +496,7 @@ mod tests {
             state: MatchPhase::Tiebreak,
             winner: None,
             tiebreak_index,
+            decided_at_ms: 0,
         }
     }
 

@@ -7,6 +7,7 @@
 
 pub mod decide;
 pub mod gate;
+pub mod judge;
 pub mod model;
 pub mod ordering;
 pub mod setup;

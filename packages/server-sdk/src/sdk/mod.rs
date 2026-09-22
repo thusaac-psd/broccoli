@@ -94,7 +94,9 @@ impl Host {
             checker: Checker {},
             language: Language {},
             registry: Registry {},
-            timer: Timer {},
+            timer: Timer {
+                inner: timer::TimerMock::new(),
+            },
         }
     }
 }

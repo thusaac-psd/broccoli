@@ -7,13 +7,38 @@
 
 use broccoli_server_sdk::prelude::*;
 
-use crate::model::{MatchState, Setup};
+use crate::model::{MatchPhase, MatchState, Setup};
 
 /// A single-elimination bracket of 16 players has exactly 15 matches
 /// (8 + 4 + 2 + 1), independent of whatever match-id numbering scheme
 /// round-advancement assigns. Used to bound the scan in
 /// [`load_all_matches`] instead of guessing a range.
 pub const MATCH_COUNT: u8 = 15;
+
+/// How many matches round `round` (1-based) contains, for a 16-player
+/// single-elimination bracket: round 1 has 8, halving each round after.
+pub fn matches_in_round(round: u8) -> u8 {
+    16u8 >> round
+}
+
+/// How many match ids are used up by every round strictly before `round`.
+/// `round` may be `0` (meaning "before round 1", i.e. no earlier round at
+/// all) -- callers computing an intermission boundary need to ask for the
+/// offset of "the round before this one" without first checking whether
+/// that round exists, and `round: u8` cannot represent `-1`. A naive
+/// `round - 1` subtraction here would underflow for round 1 (and panic in
+/// debug builds); summing the OPEN range `1..round` instead is naturally 0
+/// when `round <= 1`.
+pub fn round_offset(round: u8) -> u8 {
+    (1..round).map(matches_in_round).sum()
+}
+
+/// The unique match id for `(round, pos)`, in `0..MATCH_COUNT`. Ids are
+/// assigned round-major (all of round 1, then all of round 2, ...) so a
+/// match's id never changes shape as later rounds are created.
+pub fn match_id_for(round: u8, pos: u8) -> u8 {
+    round_offset(round) + pos
+}
 
 /// Storage key for a contest's `/setup` round definitions.
 pub fn setup_key(contest: i32) -> String {
@@ -113,6 +138,63 @@ where
     host.storage.modify(&key, f)
 }
 
+/// Create the match at `(round, pos)`, but ONLY once both of its feeder
+/// slots (`slot_key(contest, round, pos*2)` and `..pos*2+1`) have been
+/// filled. A no-op, not an error, while either slot is still empty -- the
+/// caller (round 1: `setup::handle_setup`; later rounds: `judge::step` via
+/// `write_next_round_slot`) is expected to call this once per slot write,
+/// and only the write that completes the PAIR actually creates anything.
+///
+/// Uses `compare_and_set(key, None, ..)` (create-only) rather than
+/// `update_match`'s read-modify-write, so calling this again once the match
+/// already exists is a harmless no-op instead of clobbering whatever
+/// progress (ordering, xiaoju) it has made since. That matters because a
+/// slot write and this call are not transactional together: a retried or
+/// redelivered write to the second slot must not re-create (and reset) a
+/// match the first successful call already started.
+pub fn create_match_if_both_slots_filled(
+    host: &Host,
+    contest: i32,
+    setup: &Setup,
+    round: u8,
+    pos: u8,
+) -> Result<(), SdkError> {
+    let key_a = slot_key(contest, round, pos * 2);
+    let key_b = slot_key(contest, round, pos * 2 + 1);
+    let raw = host.storage.get(&[key_a.as_str(), key_b.as_str()])?;
+    let (Some(a), Some(b)) = (raw.get(&key_a), raw.get(&key_b)) else {
+        return Ok(());
+    };
+    let player_a: i32 = a
+        .parse()
+        .map_err(|_| SdkError::Other(format!("slot {key_a} holds a non-integer player id")))?;
+    let player_b: i32 = b
+        .parse()
+        .map_err(|_| SdkError::Other(format!("slot {key_b} holds a non-integer player id")))?;
+
+    let Some(round_def) = setup.rounds.get(round.saturating_sub(1) as usize) else {
+        return Err(SdkError::Other(format!(
+            "setup has no RoundDef for round {round}"
+        )));
+    };
+
+    let m = MatchState {
+        round,
+        pos,
+        player_a,
+        player_b,
+        group_a: round_def.group_a,
+        group_b: round_def.group_b,
+        state: MatchPhase::Ordering,
+        ..Default::default()
+    };
+    let id = match_id_for(round, pos);
+    let _ =
+        host.storage
+            .compare_and_set(&match_key(contest, id), None, &serde_json::to_string(&m)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +268,116 @@ mod tests {
             )])
             .unwrap();
         assert_eq!(load_setup(&host, 7).unwrap(), Some(setup));
+    }
+
+    #[test]
+    fn matches_in_round_halves_each_round() {
+        assert_eq!(matches_in_round(1), 8);
+        assert_eq!(matches_in_round(2), 4);
+        assert_eq!(matches_in_round(3), 2);
+        assert_eq!(matches_in_round(4), 1);
+    }
+
+    #[test]
+    fn round_offset_sums_every_earlier_rounds_match_count() {
+        assert_eq!(round_offset(1), 0);
+        assert_eq!(round_offset(2), 8);
+        assert_eq!(round_offset(3), 12);
+        assert_eq!(round_offset(4), 14);
+    }
+
+    #[test]
+    fn round_offset_does_not_underflow_at_round_one() {
+        // Round 1 has no earlier round to sum; a naive `round - 1` on a `u8`
+        // would underflow instead of returning 0.
+        assert_eq!(round_offset(0), 0);
+    }
+
+    #[test]
+    fn match_id_for_covers_every_id_exactly_once() {
+        let mut ids = Vec::new();
+        for round in 1..=4u8 {
+            for pos in 0..matches_in_round(round) {
+                ids.push(match_id_for(round, pos));
+            }
+        }
+        ids.sort_unstable();
+        let expected: Vec<u8> = (0..MATCH_COUNT).collect();
+        assert_eq!(ids, expected);
+    }
+
+    fn setup_with_round_1() -> Setup {
+        Setup {
+            rounds: vec![
+                crate::model::RoundDef {
+                    group_a: [1, 2, 3],
+                    group_b: [4, 5, 6],
+                    tiebreak: vec![7],
+                },
+                crate::model::RoundDef::default(),
+                crate::model::RoundDef::default(),
+                crate::model::RoundDef::default(),
+            ],
+            xiaoju_seconds: 1_800,
+            round_intermission_seconds: 600,
+        }
+    }
+
+    #[test]
+    fn create_match_if_both_slots_filled_does_nothing_until_both_slots_are_set() {
+        let host = Host::mock();
+        let setup = setup_with_round_1();
+        host.storage
+            .set(&[(slot_key(7, 1, 0).as_str(), "10")])
+            .unwrap();
+        create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
+        assert!(load_match(&host, 7, match_id_for(1, 0)).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_match_if_both_slots_filled_creates_the_match_once_both_slots_are_set() {
+        let host = Host::mock();
+        let setup = setup_with_round_1();
+        host.storage
+            .set(&[
+                (slot_key(7, 1, 0).as_str(), "10"),
+                (slot_key(7, 1, 1).as_str(), "20"),
+            ])
+            .unwrap();
+        create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
+        let m = load_match(&host, 7, match_id_for(1, 0)).unwrap().unwrap();
+        assert_eq!(m.player_a, 10);
+        assert_eq!(m.player_b, 20);
+        assert_eq!(m.round, 1);
+        assert_eq!(m.pos, 0);
+        assert_eq!(m.state, MatchPhase::Ordering);
+        assert_eq!(m.group_a, [1, 2, 3]);
+        assert_eq!(m.group_b, [4, 5, 6]);
+    }
+
+    #[test]
+    fn create_match_if_both_slots_filled_does_not_clobber_an_already_created_match() {
+        let host = Host::mock();
+        let setup = setup_with_round_1();
+        host.storage
+            .set(&[
+                (slot_key(7, 1, 0).as_str(), "10"),
+                (slot_key(7, 1, 1).as_str(), "20"),
+            ])
+            .unwrap();
+        create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
+        update_match(&host, 7, match_id_for(1, 0), |m| {
+            m.state = MatchPhase::InProgress;
+            Ok(())
+        })
+        .unwrap();
+
+        // A redelivered/retried slot write re-runs this; it must not reset
+        // a match that has already progressed past `Ordering`.
+        create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
+
+        let m = load_match(&host, 7, match_id_for(1, 0)).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::InProgress);
     }
 
     #[test]

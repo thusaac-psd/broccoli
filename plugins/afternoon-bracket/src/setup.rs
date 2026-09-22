@@ -151,6 +151,15 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         .collect();
     host.storage.set(&seed_entries_ref)?;
 
+    // Every round-1 match's BOTH slots are filled at once by the seeding
+    // above (unlike later rounds, whose slots trickle in one winner at a
+    // time from `judge::write_next_round_slot`) -- so unlike that path,
+    // round 1's matches must be created explicitly here rather than
+    // relying on a slot write to trigger it.
+    for pos in 0..storage::matches_in_round(1) {
+        storage::create_match_if_both_slots_filled(host, contest_id, &setup, 1, pos)?;
+    }
+
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
@@ -250,5 +259,61 @@ mod tests {
         setup.xiaoju_seconds = 0;
         let err = validate_setup(&setup, &valid_seeds()).unwrap_err();
         assert!(err.contains("xiaoju_seconds"), "got: {err}");
+    }
+
+    fn manage_request(contest_id: i32) -> PluginHttpRequest {
+        let mut params = HashMap::new();
+        params.insert("contest_id".to_string(), contest_id.to_string());
+        let setup = valid_setup();
+        PluginHttpRequest {
+            method: "POST".into(),
+            path: String::new(),
+            params,
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: Some(serde_json::json!({
+                "rounds": setup.rounds,
+                "xiaoju_seconds": setup.xiaoju_seconds,
+                "round_intermission_seconds": setup.round_intermission_seconds,
+                "seeds": valid_seeds(),
+            })),
+            auth: Some(PluginHttpAuth {
+                user_id: 1,
+                username: "staff".into(),
+                roles: vec![],
+                permissions: vec![perm::CONTEST_MANAGE.to_string()],
+            }),
+        }
+    }
+
+    fn queue_bracket_contest_info(host: &Host) {
+        host.db.queue_query_result(serde_json::json!([{
+            "contest_type": "afternoon-bracket",
+            "is_public": true,
+            "is_active": true,
+            "phase": "during",
+        }]));
+    }
+
+    #[test]
+    fn handle_setup_creates_all_eight_round_one_matches() {
+        // Round 1's slots are seeded directly from `/setup`'s player order
+        // (see `handle_setup`'s doc comment), but a MATCH document only
+        // exists once `create_match_if_both_slots_filled` has run for it --
+        // without this, round 1 would have 16 filled slots and zero actual
+        // matches for `judge::advance`/`ordering::handle_order` to act on.
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+
+        let resp = handle_setup(&host, &manage_request(7)).unwrap();
+        assert_eq!(resp.status, 200);
+
+        for pos in 0..storage::matches_in_round(1) {
+            let match_id = storage::match_id_for(1, pos);
+            assert!(
+                storage::load_match(&host, 7, match_id).unwrap().is_some(),
+                "round 1 match at pos {pos} (id {match_id}) should have been created"
+            );
+        }
     }
 }

@@ -66,6 +66,14 @@ pub struct MatchState {
     /// Index into this round's `RoundDef::tiebreak` list of the 附加赛
     /// problem currently (or most recently) in play.
     pub tiebreak_index: usize,
+    /// When this match reached `MatchPhase::Decided` (Unix epoch
+    /// milliseconds), `0` until then. Needed to compute a ROUND-WIDE
+    /// intermission boundary ("Intermission | Fixed, between rounds only"):
+    /// the next round may not open before the fixed intermission has
+    /// elapsed after the LAST match of the previous round finished, which
+    /// requires knowing when each match finished, not just that it did.
+    /// See `bracket::round_ended_at_ms`.
+    pub decided_at_ms: i64,
 }
 
 /// State of one 小局 (the best-of-one sub-match on a single problem).
