@@ -51,22 +51,22 @@ use std::time::Duration;
 /// ONLY way it resolves is the real background dispatcher's `on_timer` ->
 /// `advance` firing after `deadline_ms`) does not make the test slow, large
 /// enough to comfortably outlast the dispatcher's own ~1s tick.
-const XIAOJU_SECONDS: i64 = 3;
+pub(crate) const XIAOJU_SECONDS: i64 = 3;
 
 /// One round's 7 real problem ids (3 group_a, 3 group_b, 1 tiebreak),
 /// copied identically into every match of that round by the plugin's own
 /// `storage::create_match_if_both_slots_filled` - see that function's doc
 /// comment in `plugins/afternoon-bracket/src/storage.rs`.
 #[derive(Debug, Clone, Copy)]
-struct RoundProblems {
-    group_a: [i32; 3],
-    group_b: [i32; 3],
-    tiebreak: i32,
+pub(crate) struct RoundProblems {
+    pub(crate) group_a: [i32; 3],
+    pub(crate) group_b: [i32; 3],
+    pub(crate) tiebreak: i32,
 }
 
-struct Player {
-    id: i32,
-    token: String,
+pub(crate) struct Player {
+    pub(crate) id: i32,
+    pub(crate) token: String,
 }
 
 /// Build a merged `plugins_dir` for `TestApp::spawn_with_plugins_and_options`
@@ -124,7 +124,7 @@ fn merged_plugins_dir() -> tempfile::TempDir {
     tmp
 }
 
-async fn spawn_bracket_app() -> (TestApp, tempfile::TempDir) {
+pub(crate) async fn spawn_bracket_app() -> (TestApp, tempfile::TempDir) {
     let tmp = merged_plugins_dir();
     let app = TestApp::spawn_with_plugins_and_options(SpawnOptions {
         plugins_dir: Some(tmp.path().to_path_buf()),
@@ -137,7 +137,7 @@ async fn spawn_bracket_app() -> (TestApp, tempfile::TempDir) {
 
 /// Register `username`, log in, and resolve the real DB-assigned `user_id`
 /// (`create_authenticated_user` only ever returns a token).
-async fn player(app: &TestApp, username: &str) -> Player {
+pub(crate) async fn player(app: &TestApp, username: &str) -> Player {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     use server::entity::user;
 
@@ -207,7 +207,7 @@ async fn create_and_attach_problem(
 /// Create all 28 real problems (4 rounds x 7: 3 group_a + 3 group_b + 1
 /// tiebreak) and attach them to the contest, returning one [`RoundProblems`]
 /// per round in order.
-async fn create_all_round_problems(
+pub(crate) async fn create_all_round_problems(
     app: &TestApp,
     contest_id: i32,
     staff_token: &str,
@@ -235,7 +235,7 @@ async fn create_all_round_problems(
     rounds
 }
 
-fn setup_body(rounds: &[RoundProblems], seeds: &[i32]) -> Value {
+pub(crate) fn setup_body(rounds: &[RoundProblems], seeds: &[i32]) -> Value {
     json!({
         "rounds": rounds.iter().map(|r| json!({
             "group_a": r.group_a,
@@ -248,14 +248,14 @@ fn setup_body(rounds: &[RoundProblems], seeds: &[i32]) -> Value {
     })
 }
 
-fn bracket_route(contest_id: i32, sub_path: &str) -> String {
+pub(crate) fn bracket_route(contest_id: i32, sub_path: &str) -> String {
     routes::plugin_proxy(
         "afternoon-bracket",
         &format!("/api/plugins/afternoon-bracket/contests/{contest_id}{sub_path}"),
     )
 }
 
-async fn get_match(app: &TestApp, contest_id: i32, match_id: u8, token: &str) -> Value {
+pub(crate) async fn get_match(app: &TestApp, contest_id: i32, match_id: u8, token: &str) -> Value {
     let res = app
         .get_with_token(
             &bracket_route(contest_id, &format!("/matches/{match_id}")),
@@ -302,7 +302,7 @@ async fn poll_match(
 /// host asked the plugin's `decide_visibility` and honoured the answer. A
 /// denied problem is OMITTED from the response array entirely (no
 /// placeholder), so absence from this list IS the denial signal.
-async fn visible_problem_ids(app: &TestApp, contest_id: i32, token: &str) -> Vec<i64> {
+pub(crate) async fn visible_problem_ids(app: &TestApp, contest_id: i32, token: &str) -> Vec<i64> {
     let res = app
         .get_with_token(&routes::contest_problems(contest_id), token)
         .await;
@@ -323,7 +323,7 @@ async fn visible_problem_ids(app: &TestApp, contest_id: i32, token: &str) -> Vec
         .collect()
 }
 
-async fn submit(
+pub(crate) async fn submit(
     app: &TestApp,
     contest_id: i32,
     problem_id: i32,
