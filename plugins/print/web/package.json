@@ -9,14 +9,19 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "build": "tsdown --dts",
     "dev": "tsdown --watch --sourcemap"
   },
   "tsdown": {
-    "entry": ["src/index.tsx", "src/styles.css"],
+    "entry": [
+      "src/index.tsx",
+      "src/styles.css"
+    ],
     "platform": "neutral",
     "css": {
       "transformer": "postcss",

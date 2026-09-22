@@ -15,9 +15,7 @@ import type { AdminJobsQuery } from '../types';
  * already supported them. Adding a field to `AdminJobsQuery` now flows
  * through automatically -- there is no second place to remember.
  */
-export function buildAdminJobsQueryParams(
-  q: AdminJobsQuery,
-): URLSearchParams {
+export function buildAdminJobsQueryParams(q: AdminJobsQuery): URLSearchParams {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(q)) {
     if (value === undefined || value === '') continue;
