@@ -9,12 +9,23 @@
 //! > next-round slot on a decision.
 //!
 //! [`advance`] is that single function. A judging callback finishing
-//! ([`AfternoonBracketJudge::finalize`]), a 小局 deadline firing
-//! ([`on_timer`]), and staff calling `/force-decide` (Task 10's
-//! `routes::handle_force_decide`) all call it, so a duplicate delivery of
-//! any one of the three is harmless -- `decide_xiaoju` and `decide_match`
-//! are both idempotent (see `decide.rs`'s module doc comment), and
-//! `advance` adds no state of its own beyond replaying them.
+//! ([`AfternoonBracketJudge::finalize`]) and a 小局 deadline firing
+//! ([`on_timer`]) call NOTHING else -- every automatic, evidence-driven
+//! advancement funnels through `advance`, so a duplicate delivery of either
+//! is harmless: `decide_xiaoju` and `decide_match` are both idempotent (see
+//! `decide.rs`'s module doc comment), and `advance` adds no state of its own
+//! beyond replaying them.
+//!
+//! Staff's `/force-decide` (Task 10's `routes::handle_force_decide`) has two
+//! distinct behaviours, matching the spec's "force expiry / resolve
+//! adjudication": with no explicit winner in the request, it simply calls
+//! `advance` too (a manual nudge at the CURRENT real time -- useful if a
+//! timer failed to fire). With an explicit winner, it calls [`force_decide`]
+//! instead, a genuinely different, non-idempotent-with-`advance` path:
+//! neither `decide_xiaoju` nor `decide_match` can ever invent a winner
+//! without either an accepted submission or an elapsed deadline, so a
+//! mid-match withdrawal or a `NeedsAdjudication` resolution -- which by
+//! definition have neither -- cannot be expressed by replaying them.
 //!
 //! # Timer key discipline
 //!
@@ -102,7 +113,9 @@ struct NowRow {
 /// -- following the codebase-wide `EXTRACT(EPOCH FROM ...) * 1000` raw-SQL
 /// convention for epoch-ms columns (see `plugins/icpc/src/lib.rs`,
 /// `plugins/cooldown/src/lib.rs`), which deserializes as `f64`, not `i64`.
-fn now_ms(host: &Host) -> Result<i64, SdkError> {
+/// `pub(crate)`: `routes::handle_start` (Task 10) needs the same "current
+/// server time" reading to evaluate the round-intermission gate.
+pub(crate) fn now_ms(host: &Host) -> Result<i64, SdkError> {
     let row: Option<NowRow> = host
         .db
         .query_one("SELECT EXTRACT(EPOCH FROM NOW()) * 1000 AS now_ms")?;
@@ -324,6 +337,62 @@ fn resolve_and_advance(
         return Ok(());
     };
     advance(host, contest_id, storage::match_id_for(m.round, m.pos))
+}
+
+/// Pure precondition + mutation for a staff-forced match decision. `winner`
+/// must be one of the two players, and the match must not already be
+/// `Decided` -- a forced decision does not retroactively overturn a real
+/// one, since that would corrupt whatever next-round slot the first
+/// decision already wrote. Mirrors `ordering::record_order`'s pure-fallible
+/// shape so `routes::handle_force_decide` can probe-validate a clone before
+/// entering the CAS retry loop, exactly as `ordering::handle_order` does --
+/// see that function's comment for why.
+pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> Result<(), String> {
+    if winner != m.player_a && winner != m.player_b {
+        return Err(format!(
+            "player {winner} is not a participant in this match"
+        ));
+    }
+    if m.state == MatchPhase::Decided {
+        return Err("this match has already been decided".to_string());
+    }
+    m.state = MatchPhase::Decided;
+    m.winner = Some(winner);
+    m.decided_at_ms = now;
+    Ok(())
+}
+
+/// Staff override: award `match_id` to `winner` directly. See the module
+/// doc comment for why this is a genuinely separate path from [`advance`],
+/// not an alternate way of calling it. Cancels whichever 小局 is currently
+/// open (if any) so its stale deadline cannot fire after the forced
+/// decision, matching [`step`]'s same discipline.
+///
+/// A no-op-with-error (not a silently-created bogus match) if `/setup` has
+/// not run or `match_id` was never created -- see [`advance`]'s doc comment
+/// on why `Storage::modify`'s missing-key-defaulting makes that guard
+/// necessary. `routes::handle_force_decide` also checks existence itself
+/// first (to report a proper 404 instead of this function's 500-mapped
+/// `SdkError`), so this is defense in depth, not the only guard.
+pub fn force_decide(host: &Host, contest: i32, match_id: u8, winner: i32) -> Result<(), SdkError> {
+    let Some(setup) = storage::load_setup(host, contest)? else {
+        return Err(SdkError::Other(
+            "the bracket has not been set up yet".into(),
+        ));
+    };
+    if storage::load_match(host, contest, match_id)?.is_none() {
+        return Err(SdkError::Other("match not found".into()));
+    }
+
+    let updated = storage::update_match(host, contest, match_id, |m| {
+        if let Some(current) = m.xiaoju.last() {
+            host.timer
+                .cancel(&xiaoju_timer_key(contest, match_id, current.index))?;
+        }
+        let now = now_ms(host)?;
+        apply_force_decide(m, winner, now).map_err(SdkError::Other)
+    })?;
+    write_next_round_slot(host, contest, &setup, &updated, winner)
 }
 
 /// Bracket judging policy for the shared detached-evaluate driver: binary
@@ -1062,5 +1131,91 @@ mod tests {
 
         let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(m.score_a, 1);
+    }
+
+    // -- apply_force_decide / force_decide --
+
+    #[test]
+    fn apply_force_decide_rejects_a_winner_who_is_not_a_participant() {
+        let mut m = match_in_progress();
+        let err = apply_force_decide(&mut m, 999, 1_000).unwrap_err();
+        assert!(err.contains("not a participant"), "got: {err}");
+        assert_eq!(
+            m.state,
+            MatchPhase::InProgress,
+            "a rejection must not mutate state"
+        );
+    }
+
+    #[test]
+    fn apply_force_decide_rejects_a_match_that_is_already_decided() {
+        let mut m = match_in_progress();
+        m.state = MatchPhase::Decided;
+        m.winner = Some(10);
+        let err = apply_force_decide(&mut m, 20, 1_000).unwrap_err();
+        assert!(err.contains("already been decided"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_force_decide_awards_the_match_and_stamps_decided_at_ms() {
+        let mut m = match_in_progress();
+        apply_force_decide(&mut m, 20, 42_000).unwrap();
+        assert_eq!(m.state, MatchPhase::Decided);
+        assert_eq!(m.winner, Some(20));
+        assert_eq!(m.decided_at_ms, 42_000);
+    }
+
+    #[test]
+    fn force_decide_resolves_needs_adjudication_and_writes_the_next_round_slot() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::NeedsAdjudication;
+        m.xiaoju.clear(); // no 小局 open -- nothing for force_decide to cancel
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 5_000_000);
+        force_decide(&host, 7, 0, 10).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::Decided);
+        assert_eq!(reloaded.winner, Some(10));
+        assert_eq!(reloaded.decided_at_ms, 5_000_000);
+
+        let slot = host
+            .storage
+            .get(&[storage::slot_key(7, 2, 0).as_str()])
+            .unwrap();
+        assert_eq!(
+            slot.get(&storage::slot_key(7, 2, 0)),
+            Some(&"10".to_string())
+        );
+    }
+
+    #[test]
+    fn force_decide_cancels_the_currently_open_xiaojus_timer() {
+        // A withdrawal mid-match still has a live 小局 deadline scheduled;
+        // forcing the decision must not leave that stale timer armed.
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress());
+
+        queue_now(&host, 5_000_000);
+        force_decide(&host, 7, 0, 10).unwrap();
+
+        assert!(host.timer.was_cancelled(&xiaoju_timer_key(7, 0, 0)));
+    }
+
+    #[test]
+    fn force_decide_is_a_noop_error_for_a_match_id_that_was_never_created() {
+        let host = Host::mock();
+        host.storage
+            .set(&[(
+                storage::setup_key(7).as_str(),
+                serde_json::to_string(&setup_two_rounds()).unwrap().as_str(),
+            )])
+            .unwrap();
+        assert!(force_decide(&host, 7, 5, 10).is_err());
+        assert!(storage::load_match(&host, 7, 5).unwrap().is_none());
     }
 }

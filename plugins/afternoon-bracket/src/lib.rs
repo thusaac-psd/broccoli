@@ -11,6 +11,7 @@ pub mod gate;
 pub mod judge;
 pub mod model;
 pub mod ordering;
+pub mod routes;
 pub mod setup;
 pub mod storage;
 pub mod visibility;
@@ -51,4 +52,36 @@ pub fn api_setup(input: String) -> FnResult<String> {
 #[plugin_fn]
 pub fn api_order(input: String) -> FnResult<String> {
     run_api_handler(&input, ordering::handle_order)
+}
+
+// -- API: POST /contests/{contest_id}/matches/{match_id}/start -----------
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_start(input: String) -> FnResult<String> {
+    run_api_handler(&input, routes::handle_start)
+}
+
+// -- API: POST /contests/{contest_id}/matches/{match_id}/force-decide ----
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_force_decide(input: String) -> FnResult<String> {
+    run_api_handler(&input, routes::handle_force_decide)
+}
+
+// -- API: GET /contests/{contest_id}/bracket ------------------------------
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_get_bracket(input: String) -> FnResult<String> {
+    run_api_handler(&input, routes::handle_get_bracket)
+}
+
+// -- API: GET /contests/{contest_id}/matches/{match_id} -------------------
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_get_match(input: String) -> FnResult<String> {
+    run_api_handler(&input, routes::handle_get_match)
 }
