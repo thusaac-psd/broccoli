@@ -1,0 +1,7 @@
+name = "afternoon-judge-fixture"
+version = "0.1.0"
+description = "Test-only evaluator + language resolver fixture for the afternoon-bracket integration test"
+
+[server]
+entry = "afternoon_judge_fixture.wasm"
+permissions = ["logger", "plugin:register"]
