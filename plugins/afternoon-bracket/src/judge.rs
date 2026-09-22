@@ -10,7 +10,7 @@
 //!
 //! [`advance`] is that single function. A judging callback finishing
 //! ([`AfternoonBracketJudge::finalize`]) and a 小局 deadline firing
-//! ([`on_timer`]) call NOTHING else -- every automatic, evidence-driven
+//! (`on_timer`) call NOTHING else -- every automatic, evidence-driven
 //! advancement funnels through `advance`, so a duplicate delivery of either
 //! is harmless: `decide_xiaoju` and `decide_match` are both idempotent (see
 //! `decide.rs`'s module doc comment), and `advance` adds no state of its own
@@ -31,7 +31,7 @@
 //!
 //! One timer per 小局: `xiaoju:{contest}:{match_id}:{index}`
 //! ([`xiaoju_timer_key`]). When a 小局 ends EARLY (an AC before its
-//! deadline), [`step`] cancels that 小局's timer before opening the next
+//! deadline), `step` cancels that 小局's timer before opening the next
 //! one or deciding the match. Without this, a stale timer for the OLD 小局
 //! would still be scheduled to fire at the old deadline, land on the NEW
 //! (or no longer existent) 小局, and -- because `advance` re-reads whatever
@@ -55,8 +55,8 @@ use crate::decide::{self, MatchOutcome, SubmissionRecord, XiaojuOutcome};
 use crate::model::{MatchPhase, MatchState, RoundDef, Setup, XiaojuState};
 use crate::storage;
 
-/// The storage/timer key for one 小局's deadline. Shared by [`step`] (which
-/// schedules and cancels it) and [`on_timer`] (which parses it back out of
+/// The storage/timer key for one 小局's deadline. Shared by `step` (which
+/// schedules and cancels it) and `on_timer` (which parses it back out of
 /// the fired timer's key).
 pub fn xiaoju_timer_key(contest: i32, match_id: u8, index: u8) -> String {
     format!("xiaoju:{contest}:{match_id}:{index}")
@@ -64,7 +64,7 @@ pub fn xiaoju_timer_key(contest: i32, match_id: u8, index: u8) -> String {
 
 /// Parse a `xiaoju:{contest}:{match_id}:{index}` key back into
 /// `(contest, match_id)`. The 小局 index itself is not needed by
-/// [`on_timer`] -- `advance` always re-reads whichever 小局 is CURRENTLY
+/// `on_timer` -- `advance` always re-reads whichever 小局 is CURRENTLY
 /// open, not the one named in the fired timer (see the module doc comment
 /// on why a stale timer must be cancelled rather than trusted).
 pub fn parse_xiaoju_timer_key(key: &str) -> Option<(i32, u8)> {
@@ -366,7 +366,7 @@ pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> R
 /// doc comment for why this is a genuinely separate path from [`advance`],
 /// not an alternate way of calling it. Cancels whichever 小局 is currently
 /// open (if any) so its stale deadline cannot fire after the forced
-/// decision, matching [`step`]'s same discipline.
+/// decision, matching `step`'s same discipline.
 ///
 /// A no-op-with-error (not a silently-created bogus match) if `/setup` has
 /// not run or `match_id` was never created -- see [`advance`]'s doc comment
