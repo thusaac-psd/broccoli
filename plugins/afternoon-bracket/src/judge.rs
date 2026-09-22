@@ -738,6 +738,39 @@ mod tests {
         assert_eq!(parse_xiaoju_timer_key("xiaoju:not-a-number:3:0"), None);
     }
 
+    #[test]
+    fn a_timer_key_carries_no_authority_over_which_xiaoju_is_decided() {
+        // Load-bearing invariant, pinned here because the code that relies on
+        // it is not obviously connected to it.
+        //
+        // `Storage::modify` re-runs its whole closure on a CAS retry, side
+        // effects included. So two concurrent triggers on one match can leave
+        // an ORPHANED timer: attempt 1 schedules `xiaoju:7:3:1`, its CAS
+        // loses, and the retry (seeing fresher state) schedules
+        // `xiaoju:7:3:2` instead - with nothing having cancelled key `:1`.
+        // That stale timer fires later, while the match is on a different
+        // 小局.
+        //
+        // It is harmless ONLY because the index segment is inert: `on_timer`
+        // extracts `(contest, match_id)` and discards the index, then calls
+        // `advance`, which re-derives the current 小局 and its deadline from
+        // stored state. A stale timer therefore degenerates into an extra
+        // no-op `advance`.
+        //
+        // If anyone ever "improves" the parser to return the index and acts
+        // on it, orphaned timers stop being harmless and start deciding the
+        // wrong 小局. This test is what should fail first.
+        let for_xiaoju_0 = parse_xiaoju_timer_key("xiaoju:7:3:0");
+        let for_xiaoju_2 = parse_xiaoju_timer_key("xiaoju:7:3:2");
+
+        assert_eq!(
+            for_xiaoju_0, for_xiaoju_2,
+            "two keys differing only in 小局 index must be indistinguishable \
+             to the callback - the index must not reach any decision"
+        );
+        assert_eq!(for_xiaoju_0, Some((7, 3)));
+    }
+
     // -- current_problem --
 
     #[test]
