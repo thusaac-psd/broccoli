@@ -80,6 +80,35 @@ pub fn parse_xiaoju_timer_key(key: &str) -> Option<(i32, u8)> {
     Some((contest, match_id))
 }
 
+/// The storage/timer key for the escalation grace timer scheduled when a
+/// match enters `MatchPhase::AwaitingJudge` (see [`decide::XiaojuOutcome::AwaitingJudge`]
+/// and [`step`]). Deliberately a DIFFERENT namespace from
+/// [`xiaoju_timer_key`] -- the two must never be mistaken for each other
+/// (see the module doc comment's "Timer key discipline" section), since a
+/// match can have both a live 小局 timer and a live escalation timer
+/// pending at once (whichever fires first wins the race, and both must be
+/// individually cancellable without touching the other).
+pub fn judgewait_timer_key(contest: i32, match_id: u8, index: u8) -> String {
+    format!("judgewait:{contest}:{match_id}:{index}")
+}
+
+/// Parse a `judgewait:{contest}:{match_id}:{index}` key back into
+/// `(contest, match_id)`. Mirrors [`parse_xiaoju_timer_key`] exactly,
+/// including discarding the index -- the same
+/// `a_timer_key_carries_no_authority_over_which_xiaoju_is_decided`
+/// invariant applies here: [`escalate`] re-reads the match's CURRENT state
+/// rather than trusting anything encoded in the fired timer's key.
+pub fn parse_judgewait_timer_key(key: &str) -> Option<(i32, u8)> {
+    let mut parts = key.split(':');
+    if parts.next() != Some("judgewait") {
+        return None;
+    }
+    let contest: i32 = parts.next()?.parse().ok()?;
+    let match_id: u8 = parts.next()?.parse().ok()?;
+    parts.next()?;
+    Some((contest, match_id))
+}
+
 /// The problem `player` should currently be submitting to in match `m`,
 /// mirroring `gate.rs::check`'s `expected` derivation exactly (see that
 /// module's doc comment for why the two must never drift apart: this
@@ -89,19 +118,41 @@ pub fn parse_xiaoju_timer_key(key: &str) -> Option<(i32, u8)> {
 fn current_problem(m: &MatchState, round_def: &RoundDef, player: i32) -> Option<i32> {
     match m.state {
         MatchPhase::Tiebreak => round_def.tiebreak.get(m.tiebreak_index).copied(),
-        MatchPhase::InProgress => {
-            let order = if player == m.player_a {
-                m.order_a
-            } else if player == m.player_b {
-                m.order_b
-            } else {
-                None
-            };
+        MatchPhase::InProgress => current_regular_problem(m, player),
+        // A blocked 小局 freezes `m.xiaoju`/`m.tiebreak_index` exactly as
+        // they were when the block began -- only `m.state` moved to
+        // `AwaitingJudge`, which erases whether the blocked 小局 was
+        // regular or an 附加赛 attempt. Recover that from the blocked
+        // 小局's own INDEX instead (`decide::is_regular_xiaoju_index`), not
+        // from `m.state`, since both `step` (re-deciding it) and
+        // `fetch_subs` (re-querying its submissions) must keep resolving
+        // to the SAME problem the block is actually about.
+        MatchPhase::AwaitingJudge => {
             let index = m.xiaoju.last()?.index;
-            order.and_then(|o| o.get(index as usize).copied())
+            if decide::is_regular_xiaoju_index(index) {
+                current_regular_problem(m, player)
+            } else {
+                round_def.tiebreak.get(m.tiebreak_index).copied()
+            }
         }
         _ => None,
     }
+}
+
+/// The problem `player` must solve at the currently open REGULAR 小局 (the
+/// order imposed on them by their opponent, indexed by `m.xiaoju.last()`'s
+/// index). Shared by [`current_problem`]'s `InProgress` arm and its
+/// `AwaitingJudge` arm when the blocked 小局 turns out to be a regular one.
+fn current_regular_problem(m: &MatchState, player: i32) -> Option<i32> {
+    let order = if player == m.player_a {
+        m.order_a
+    } else if player == m.player_b {
+        m.order_b
+    } else {
+        return None;
+    };
+    let index = m.xiaoju.last()?.index;
+    order.and_then(|o| o.get(index as usize).copied())
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,7 +310,10 @@ fn step(
     setup: &Setup,
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
-    if m.state != MatchPhase::InProgress && m.state != MatchPhase::Tiebreak {
+    if m.state != MatchPhase::InProgress
+        && m.state != MatchPhase::Tiebreak
+        && m.state != MatchPhase::AwaitingJudge
+    {
         return Ok(());
     }
     let Some(current) = m.xiaoju.last() else {
@@ -278,26 +332,77 @@ fn step(
     let now = now_ms(host)?;
     let subs = fetch_subs(host, contest, m, round_def)?;
     let outcome = decide::decide_xiaoju(m, &subs, now);
-    let XiaojuOutcome::Decided { .. } = outcome else {
-        return Ok(());
-    };
 
-    // The 小局 that just concluded (or was already concluded by an earlier,
-    // successful `step` -- see the module doc comment) must have its
-    // deadline cancelled BEFORE anything opens next, so a stale
-    // redelivery of THIS timer cannot land on the next 小局.
-    host.timer
-        .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
+    match outcome {
+        XiaojuOutcome::NotYet => Ok(()),
+        XiaojuOutcome::AwaitingJudge {
+            blocking_submission_id,
+        } => {
+            // The 小局's own deadline has already passed (that is the only
+            // way `decide_xiaoju` returns this) -- that timer has either
+            // already fired (this call IS its callback) or is about to;
+            // either way it has done its job and must not linger.
+            host.timer
+                .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
 
-    match decide::decide_match(m, setup) {
-        MatchOutcome::NotYet | MatchOutcome::OpenTiebreak { .. } => {
-            open_xiaoju(host, contest, match_id, setup, now, m)
+            let entering_now = m.state != MatchPhase::AwaitingJudge;
+            m.state = MatchPhase::AwaitingJudge;
+            m.awaiting_submission_id = Some(blocking_submission_id);
+
+            // Schedule the escalation timer only on FIRST entry. A later
+            // re-delivery (a judging retry still in flight, a duplicate
+            // trigger) must not keep pushing the grace period further out
+            // -- see `tests::advance_is_idempotent_while_awaiting_judge_and_does_not_reschedule_escalation`.
+            if entering_now {
+                let escalate_at_ms = now + setup.escalation_grace_seconds * 1_000;
+                host.timer.schedule(
+                    escalate_at_ms,
+                    &judgewait_timer_key(contest, match_id, current_index),
+                    "",
+                )?;
+            }
+            Ok(())
         }
-        MatchOutcome::Decided { winner } => {
-            m.decided_at_ms = now;
-            write_next_round_slot(host, contest, setup, m, winner)
+        XiaojuOutcome::Decided { .. } => {
+            // The 小局 that just concluded (or was already concluded by an
+            // earlier, successful `step` -- see the module doc comment)
+            // must have its deadline cancelled BEFORE anything opens next,
+            // so a stale redelivery of THIS timer cannot land on the next
+            // 小局.
+            host.timer
+                .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
+
+            if m.state == MatchPhase::AwaitingJudge {
+                // The block just resolved (the blocking submission's
+                // verdict landed) -- the escalation timer must not fire
+                // later and clobber whatever `decide_match` below produces.
+                host.timer
+                    .cancel(&judgewait_timer_key(contest, match_id, current_index))?;
+                m.awaiting_submission_id = None;
+                // `AwaitingJudge` erased whether this 小局 was regular or
+                // an 附加赛 attempt (see `current_problem`'s doc comment on
+                // the same problem) -- `decide_match` needs that restored
+                // BEFORE it runs, since it branches on `m.state ==
+                // Tiebreak` vs. everything else, and `AwaitingJudge` is
+                // neither.
+                m.state = if decide::is_regular_xiaoju_index(current_index) {
+                    MatchPhase::InProgress
+                } else {
+                    MatchPhase::Tiebreak
+                };
+            }
+
+            match decide::decide_match(m, setup) {
+                MatchOutcome::NotYet | MatchOutcome::OpenTiebreak { .. } => {
+                    open_xiaoju(host, contest, match_id, setup, now, m)
+                }
+                MatchOutcome::Decided { winner } => {
+                    m.decided_at_ms = now;
+                    write_next_round_slot(host, contest, setup, m, winner)
+                }
+                MatchOutcome::NeedsAdjudication => Ok(()),
+            }
         }
-        MatchOutcome::NeedsAdjudication => Ok(()),
     }
 }
 
@@ -321,6 +426,50 @@ pub fn advance(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> 
     }
     storage::update_match(host, contest, match_id, |m| {
         step(host, contest, match_id, &setup, m)
+    })?;
+    Ok(())
+}
+
+/// The escalation grace timer fired: `match_id` has been
+/// `MatchPhase::AwaitingJudge` for longer than `Setup::escalation_grace_seconds`
+/// without the blocking submission resolving. Moves it to
+/// `MatchPhase::NeedsAdjudication` for staff to resolve (via the existing
+/// `/force-decide` route, or by rejudging the submission named in
+/// `awaiting_submission_id` through the platform's own rejudge endpoint --
+/// this plugin deliberately does not grow a new capability to requeue a
+/// submission itself, see the module's design notes).
+///
+/// A no-op if the match has since left `AwaitingJudge` by any other path
+/// (the blocking submission's verdict landed and `step` already resolved
+/// it, or staff force-decided it) -- a stale timer degenerating into a
+/// harmless no-op, same discipline as a stale [`xiaoju_timer_key`] firing
+/// (see the module doc comment). `pub(crate)`: only `on_timer` calls this
+/// in production; tests call it directly since `on_timer` itself is
+/// wasm32-gated.
+///
+/// Mirrors [`advance`]'s guard shape: a no-op (not an error) if `/setup`
+/// has not run or `match_id` was never created, for the same
+/// `Storage::modify`-defaulting reason documented there.
+///
+/// `pub` (not `pub(crate)`), matching [`advance`]/[`force_decide`]: its
+/// only production caller is [`on_timer`], which is `wasm32`-gated, so a
+/// native (non-`wasm32`) build has no non-test caller to make a
+/// `pub(crate)` item "used" -- see this crate's `["cdylib", "rlib"]`
+/// crate-type, under which a fully `pub` item is exempt from the
+/// `dead_code` lint as library API surface.
+pub fn escalate(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> {
+    if storage::load_setup(host, contest)?.is_none() {
+        return Ok(());
+    }
+    if storage::load_match(host, contest, match_id)?.is_none() {
+        return Ok(());
+    }
+    storage::update_match(host, contest, match_id, |m| {
+        if m.state != MatchPhase::AwaitingJudge {
+            return Ok(());
+        }
+        m.state = MatchPhase::NeedsAdjudication;
+        Ok(())
     })?;
     Ok(())
 }
@@ -376,6 +525,10 @@ pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> R
     m.state = MatchPhase::Decided;
     m.winner = Some(winner);
     m.decided_at_ms = now;
+    // A decided match is not "awaiting" anything -- clear it even if the
+    // match was forced out of `AwaitingJudge`, so `GET /matches/{id}`
+    // never shows a stale blocking-submission id next to a final result.
+    m.awaiting_submission_id = None;
     Ok(())
 }
 
@@ -403,8 +556,13 @@ pub fn force_decide(host: &Host, contest: i32, match_id: u8, winner: i32) -> Res
 
     let updated = storage::update_match(host, contest, match_id, |m| {
         if let Some(current) = m.xiaoju.last() {
+            let index = current.index;
             host.timer
-                .cancel(&xiaoju_timer_key(contest, match_id, current.index))?;
+                .cancel(&xiaoju_timer_key(contest, match_id, index))?;
+            if m.state == MatchPhase::AwaitingJudge {
+                host.timer
+                    .cancel(&judgewait_timer_key(contest, match_id, index))?;
+            }
         }
         let now = now_ms(host)?;
         apply_force_decide(m, winner, now).map_err(SdkError::Other)
@@ -656,21 +814,25 @@ pub fn on_timer(input: String) -> extism_pdk::FnResult<String> {
     }
     let host = Host::new();
     let input: TimerCallbackInput = serde_json::from_str(&input)?;
-    match parse_xiaoju_timer_key(&input.key) {
-        Some((contest, match_id)) => {
-            if let Err(e) = advance(&host, contest, match_id) {
-                let _ = host.log.info(&format!(
-                    "afternoon-bracket: on_timer advance failed for key {}: {e:?}",
-                    input.key
-                ));
-            }
-        }
-        None => {
+    if let Some((contest, match_id)) = parse_xiaoju_timer_key(&input.key) {
+        if let Err(e) = advance(&host, contest, match_id) {
             let _ = host.log.info(&format!(
-                "afternoon-bracket: on_timer got an unparseable key: {}",
+                "afternoon-bracket: on_timer advance failed for key {}: {e:?}",
                 input.key
             ));
         }
+    } else if let Some((contest, match_id)) = parse_judgewait_timer_key(&input.key) {
+        if let Err(e) = escalate(&host, contest, match_id) {
+            let _ = host.log.info(&format!(
+                "afternoon-bracket: on_timer escalate failed for key {}: {e:?}",
+                input.key
+            ));
+        }
+    } else {
+        let _ = host.log.info(&format!(
+            "afternoon-bracket: on_timer got an unparseable key: {}",
+            input.key
+        ));
     }
     Ok("ok".into())
 }
@@ -742,6 +904,27 @@ mod tests {
         })
     }
 
+    /// Like `ac_row`, but with an explicit submission id, verdict, and
+    /// status -- needed to construct `SystemError`/still-in-flight rows,
+    /// and rows whose blocked-then-resolved id must be pinned to a value
+    /// distinct from `user_id` (`ac_row` conflates the two).
+    fn row_with_status(
+        id: i32,
+        user_id: i32,
+        submitted_at_ms: i64,
+        verdict: Option<&str>,
+        status: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "user_id": user_id,
+            "problem_id": 0,
+            "submitted_at_ms": submitted_at_ms as f64,
+            "verdict": verdict,
+            "status": status,
+        })
+    }
+
     // -- xiaoju_timer_key / parse_xiaoju_timer_key --
 
     #[test]
@@ -791,6 +974,32 @@ mod tests {
         assert_eq!(for_xiaoju_0, Some((7, 3)));
     }
 
+    // -- judgewait_timer_key / parse_judgewait_timer_key --
+
+    #[test]
+    fn judgewait_timer_key_round_trips_through_parse() {
+        let key = judgewait_timer_key(7, 3, 1);
+        assert_eq!(key, "judgewait:7:3:1");
+        assert_eq!(parse_judgewait_timer_key(&key), Some((7, 3)));
+    }
+
+    #[test]
+    fn parse_judgewait_timer_key_rejects_a_foreign_key() {
+        // In particular, a `xiaoju:` key must not parse as a `judgewait:`
+        // one -- the two namespaces must never collide (see the module doc
+        // comment's "Timer key discipline" section).
+        assert_eq!(parse_judgewait_timer_key("xiaoju:7:3:0"), None);
+        assert_eq!(
+            parse_judgewait_timer_key("judgewait:7:3"),
+            None,
+            "missing index"
+        );
+        assert_eq!(
+            parse_judgewait_timer_key("judgewait:not-a-number:3:0"),
+            None
+        );
+    }
+
     // -- current_problem --
 
     #[test]
@@ -814,6 +1023,39 @@ mod tests {
         let mut m = match_in_progress();
         m.state = MatchPhase::Tiebreak;
         m.tiebreak_index = 1;
+        assert_eq!(current_problem(&m, round_def, 10), Some(302));
+        assert_eq!(current_problem(&m, round_def, 20), Some(302));
+    }
+
+    #[test]
+    fn current_problem_while_awaiting_judge_on_a_regular_xiaoju_uses_the_imposed_order() {
+        // A match blocked mid-regular-小局 must still resolve to the SAME
+        // problem it was blocked on -- `fetch_subs` needs this to re-check
+        // whether the blocking submission's verdict has landed yet.
+        let round_def = &setup_two_rounds().rounds[0];
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        assert_eq!(current_problem(&m, round_def, 10), Some(103));
+        assert_eq!(current_problem(&m, round_def, 20), Some(203));
+    }
+
+    #[test]
+    fn current_problem_while_awaiting_judge_on_a_tiebreak_uses_the_shared_tiebreak_problem() {
+        // `m.state` alone can no longer distinguish "blocked mid-regular"
+        // from "blocked mid-tiebreak" once both collapse to
+        // `AwaitingJudge` -- this must fall back to the blocked 小局's own
+        // INDEX (`decide::is_regular_xiaoju_index`), not `m.state`.
+        let round_def = &setup_two_rounds().rounds[0];
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        m.tiebreak_index = 1;
+        m.xiaoju = vec![XiaojuState {
+            index: 3,
+            opened_at_ms: 0,
+            deadline_ms: 1_000_000,
+            winner: None,
+            decided: false,
+        }];
         assert_eq!(current_problem(&m, round_def, 10), Some(302));
         assert_eq!(current_problem(&m, round_def, 20), Some(302));
     }
@@ -1158,6 +1400,213 @@ mod tests {
         assert_eq!(after_second.state, MatchPhase::NeedsAdjudication);
     }
 
+    // -- step, via advance: AwaitingJudge (platform-fault escalation policy) --
+
+    #[test]
+    fn advance_enters_awaiting_judge_when_the_deadline_passes_while_blocked_and_schedules_escalation()
+     {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress()); // deadline_ms = 1_000_000
+
+        queue_now(&host, 1_000_000); // deadline reached
+        queue_subs(
+            &host,
+            vec![
+                // Blocker: older than the AC below, still in flight.
+                row_with_status(1, 10, 100, None, "SystemError"),
+                ac_row(20, 500),
+            ],
+        );
+
+        advance(&host, 7, 0).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::AwaitingJudge);
+        assert_eq!(reloaded.awaiting_submission_id, Some(1));
+
+        assert!(
+            host.timer.was_cancelled(&xiaoju_timer_key(7, 0, 0)),
+            "the deadline timer that just fired has done its job"
+        );
+        let escalation_key = judgewait_timer_key(7, 0, 0);
+        assert!(host.timer.is_scheduled(&escalation_key));
+        assert_eq!(
+            host.timer.scheduled_at(&escalation_key),
+            Some(1_000_000 + 120_000),
+            "escalation fires escalation_grace_seconds (120) after now, not after the original deadline"
+        );
+    }
+
+    #[test]
+    fn advance_is_idempotent_while_awaiting_judge_and_does_not_reschedule_escalation() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        m.awaiting_submission_id = Some(1);
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 1_000_100);
+        queue_subs(
+            &host,
+            vec![
+                row_with_status(1, 10, 100, None, "SystemError"),
+                ac_row(20, 500),
+            ],
+        );
+        advance(&host, 7, 0).unwrap();
+
+        // A second, later re-delivery must not push the escalation timer
+        // further out -- otherwise a platform fault that keeps getting
+        // re-observed (e.g. every judging retry) could delay escalation
+        // indefinitely, defeating the grace period entirely.
+        let escalation_key = judgewait_timer_key(7, 0, 0);
+        let scheduled_after_first = host.timer.scheduled_at(&escalation_key);
+
+        queue_now(&host, 1_000_200);
+        queue_subs(
+            &host,
+            vec![
+                row_with_status(1, 10, 100, None, "SystemError"),
+                ac_row(20, 500),
+            ],
+        );
+        advance(&host, 7, 0).unwrap();
+
+        assert_eq!(
+            host.timer.scheduled_at(&escalation_key),
+            scheduled_after_first
+        );
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::AwaitingJudge);
+    }
+
+    #[test]
+    fn advance_resolves_out_of_awaiting_judge_once_the_blocking_verdict_lands_and_the_earlier_submitter_wins()
+     {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        m.awaiting_submission_id = Some(1);
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 1_000_500);
+        // The blocker's verdict has landed: accepted, and still earlier
+        // than the other player's submission -- per the earliest-submitted
+        // rule, player 10 must win even though player 20's AC was
+        // provisionally ahead while blocked.
+        queue_subs(
+            &host,
+            vec![
+                row_with_status(1, 10, 100, Some("Accepted"), "Judged"),
+                row_with_status(2, 20, 500, Some("Accepted"), "Judged"),
+            ],
+        );
+
+        advance(&host, 7, 0).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.score_a, 1);
+        assert_eq!(reloaded.score_b, 0);
+        assert_eq!(reloaded.xiaoju[0].winner, Some(10));
+        assert!(
+            host.timer.was_cancelled(&judgewait_timer_key(7, 0, 0)),
+            "the escalation timer must not fire after the block resolved"
+        );
+        // Only the first of 3 regular 小局 is decided -- the match opens the
+        // next one and stays InProgress, exactly like the non-blocked path.
+        assert_eq!(reloaded.state, MatchPhase::InProgress);
+        assert!(host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 1)));
+    }
+
+    #[test]
+    fn advance_resolves_out_of_awaiting_judge_during_a_tiebreak_back_into_tiebreak() {
+        // Same as the regular-小局 case above, but the blocked 小局 was an
+        // 附加赛 attempt: `m.state` must be restored to `Tiebreak`, not
+        // `InProgress`, before `decide_match` runs -- otherwise `decide_match`
+        // would (wrongly) evaluate this as if only 1 of 3 regular 小局 were
+        // ever recorded.
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.score_a = 1;
+        m.score_b = 1;
+        m.state = MatchPhase::AwaitingJudge;
+        m.awaiting_submission_id = Some(1);
+        m.tiebreak_index = 0;
+        m.xiaoju = vec![XiaojuState {
+            index: 3,
+            opened_at_ms: 0,
+            deadline_ms: 1_000_000,
+            winner: None,
+            decided: false,
+        }];
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 1_000_500);
+        queue_subs(
+            &host,
+            vec![
+                row_with_status(1, 10, 100, Some("Accepted"), "Judged"),
+                row_with_status(2, 20, 500, Some("Accepted"), "Judged"),
+            ],
+        );
+
+        advance(&host, 7, 0).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::Decided);
+        assert_eq!(reloaded.winner, Some(10));
+    }
+
+    // -- escalate --
+
+    #[test]
+    fn escalate_moves_a_still_blocked_match_to_needs_adjudication() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        m.awaiting_submission_id = Some(1);
+        seed(&host, 7, &setup, 0, &m);
+
+        escalate(&host, 7, 0).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::NeedsAdjudication);
+    }
+
+    #[test]
+    fn escalate_is_a_noop_when_the_block_has_already_cleared() {
+        // Stale timer: the match resolved out of `AwaitingJudge` (a verdict
+        // landing, or a staff force-decide) before the escalation grace
+        // period elapsed. Same inertness discipline as a stale
+        // `xiaoju_timer_key` firing -- see the module doc comment.
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress()); // state: InProgress
+
+        escalate(&host, 7, 0).unwrap();
+
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::InProgress);
+    }
+
+    #[test]
+    fn escalate_is_a_noop_for_a_match_id_that_was_never_created() {
+        let host = Host::mock();
+        host.storage
+            .set(&[(
+                storage::setup_key(7).as_str(),
+                serde_json::to_string(&setup_two_rounds()).unwrap().as_str(),
+            )])
+            .unwrap();
+        escalate(&host, 7, 5).unwrap();
+        assert!(storage::load_match(&host, 7, 5).unwrap().is_none());
+    }
+
     // -- resolve_and_advance --
 
     #[test]
@@ -1257,6 +1706,31 @@ mod tests {
         force_decide(&host, 7, 0, 10).unwrap();
 
         assert!(host.timer.was_cancelled(&xiaoju_timer_key(7, 0, 0)));
+    }
+
+    #[test]
+    fn force_decide_cancels_the_escalation_timer_when_forcing_an_awaiting_judge_match() {
+        // Mirrors `force_decide_cancels_the_currently_open_xiaojus_timer`:
+        // a staff override on an `AwaitingJudge` match must not leave the
+        // escalation timer armed to fire later and clobber the state the
+        // staff member just set.
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::AwaitingJudge;
+        m.awaiting_submission_id = Some(1);
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 5_000_000);
+        force_decide(&host, 7, 0, 10).unwrap();
+
+        assert!(host.timer.was_cancelled(&judgewait_timer_key(7, 0, 0)));
+        let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::Decided);
+        assert_eq!(
+            reloaded.awaiting_submission_id, None,
+            "a decided match must not still claim to be awaiting a submission"
+        );
     }
 
     #[test]
