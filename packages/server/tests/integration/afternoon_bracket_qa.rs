@@ -417,6 +417,66 @@ async fn defect_standalone_submission_route_bypasses_bracket_gate_entirely() {
     );
 }
 
+/// THE test that decides whether the format is defeatable.
+///
+/// The residual host-side gate bypass above lets a player submit to their
+/// OPPONENT'S current problem via the standalone route. That is low harm:
+/// they are already entitled to read it (they ranked it), and solving it
+/// advances nothing -- `decide_xiaoju` scores each player against their OWN
+/// problem, and a `contest_id: NULL` submission is not counted by its
+/// `WHERE contest_id = ?` query at all.
+///
+/// Submitting to one's OWN not-yet-open problem is the case that would
+/// destroy the format: read 小局-3's problem during 小局 1, develop against
+/// the real judge, then submit instantly the moment it opens. That is
+/// precisely what the rules' 「无法提前看到自己组后面的题目」 exists to prevent.
+///
+/// It is closed by the reachability fix rather than by the hook: the same
+/// `Resource::Problem { contest_id: None }` decision that now hides the
+/// problem from `GET /problems/{id}` is what `create_submission` gates
+/// `Action::Submit` on, so the request dies at 404 before hook dispatch is
+/// reached. Pinned here so a future change to either layer cannot silently
+/// reopen it.
+#[tokio::test]
+async fn own_not_yet_open_problem_cannot_be_submitted_to_via_the_standalone_route() {
+    let fx = setup_fixture().await;
+    order_match_0(&fx).await;
+    start_match_0(&fx).await;
+
+    let a = &fx.players[0];
+    // A's own 小局-2 problem: theirs, but not yet open while 小局 0 runs.
+    let own_future_problem = fx.rounds[0].group_a[2];
+
+    // Premise: the contest-scoped list hides it, so the denial asserted
+    // below is the bracket's rule and not a broken fixture.
+    let ids_for_a = visible_problem_ids(&fx.app, fx.contest_id, &a.token).await;
+    assert!(
+        !ids_for_a.contains(&(own_future_problem as i64)),
+        "premise failed: A's own not-yet-open problem should be hidden from the \
+         contest-scoped list"
+    );
+
+    let res = fx
+        .app
+        .post_with_token(
+            &routes::problem_submissions(own_future_problem),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": "ACCEPT"}],
+                "language": "cpp",
+            }),
+            &a.token,
+        )
+        .await;
+
+    assert_eq!(
+        res.status, 404,
+        "FORMAT DEFEATED: A submitted to their own not-yet-open problem via the standalone \
+         route (status {}, body {}) -- a player could develop and judge-test a later \
+         小局's solution ahead of time",
+        res.status, res.text
+    );
+}
+
 // =====================================================================
 // Area 2 -- passing probes: confirm real enforcement, and its distinct
 // codes, through the CORRECT (contest-scoped) route.
