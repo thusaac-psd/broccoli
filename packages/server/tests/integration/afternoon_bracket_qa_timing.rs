@@ -859,25 +859,6 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
 /// DEFECT: a ranking can be resubmitted after the match has left the
 /// Ordering phase.
 #[tokio::test]
-#[ignore = "DEFECT: neither `ordering::record_order` nor its HTTP handler `ordering::\
-handle_order` (plugins/afternoon-bracket/src/ordering.rs) check `match_state.state` before \
-accepting a ranking. `record_order` validates only that the submitter is a match participant \
-and that `order` is a permutation of the opponent's FIXED group of 3; `handle_order` validates \
-the SAME pure function against a pre-CAS snapshot and then writes through \
-`storage::update_match` with no additional state check either -- contrast with \
-`ordering::handle_order`'s own comment claiming the fields it depends on 'never change' after \
-creation, which is true of player_a/player_b/group_a/group_b but not of order_a/order_b \
-themselves. Reproduction: order + start match 0 (state -> in_progress, 小局 0 opens using the \
-already-established order_a/order_b), then have B (who ranks A's problems) call `POST \
-/matches/0/order` again with a different permutation of the SAME 3 problem ids. This is \
-accepted (200) and mutates order_a in place, even though the match has left the Ordering \
-phase. Since order_a/order_b are read LIVE (not snapshotted) by every gate check and judging \
-decision, and `fetch_subs` (judge.rs) queries submissions by (user_id, problem_id) with no \
-lower bound on created_at, a player who rotates an already-scored problem back into the \
-CURRENTLY-open position could cause a later 小局 to be decided against a submission that \
-predates that 小局 ever opening. This test only pins the base defect (a ranking is silently \
-accepted and applied after start); the stale-submission-replay consequence is not separately \
-reproduced here for time."]
 async fn defect_ranking_can_be_resubmitted_after_the_match_has_started() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
