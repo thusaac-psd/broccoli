@@ -9,6 +9,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 
 import { useBracketApi } from './hooks/useBracketApi';
+import {
+  deriveCountdownStatus,
+  formatCountdownLabel,
+  xiaojuTimingFromMatch,
+} from './lib/countdown';
 import { describeMatchPhase, isActivelyPlaying } from './lib/phase';
 import { OrderingPanel } from './OrderingPanel';
 import { SpectatorFeed } from './SpectatorFeed';
@@ -126,6 +131,12 @@ export function MatchDetailPanel({
   };
 
   const bothOrdersIn = match.order_a !== null && match.order_b !== null;
+  const countdown = deriveCountdownStatus(
+    xiaojuTimingFromMatch(match),
+    Date.now(),
+  );
+  const showCountdown =
+    isActivelyPlaying(match.state) || match.state === 'awaiting_judge';
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
@@ -140,6 +151,19 @@ export function MatchDetailPanel({
       <div className="text-sm text-muted-foreground">
         Score: {match.score_a} - {match.score_b}
       </div>
+
+      {showCountdown && (
+        <div
+          className={cn(
+            'text-sm',
+            countdown.kind === 'waiting-for-server'
+              ? 'text-amber-700'
+              : 'text-muted-foreground',
+          )}
+        >
+          {formatCountdownLabel(countdown)}
+        </div>
+      )}
 
       {match.state === 'awaiting_judge' && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700">

@@ -1,10 +1,15 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import type { Submission } from '@broccoli/web-sdk/submission';
+import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 
 import { useBracketApi } from './hooks/useBracketApi';
-import { deriveCountdownStatus } from './lib/countdown';
-import { describeMatchPhase } from './lib/phase';
+import {
+  deriveCountdownStatus,
+  formatCountdownLabel,
+  xiaojuTimingFromMatch,
+} from './lib/countdown';
+import { describeMatchPhase, isActivelyPlaying } from './lib/phase';
 import type { MatchView } from './types';
 
 /**
@@ -83,12 +88,10 @@ export function LiveXiaojuView({
   }
 
   const status = describeMatchPhase(match.state);
-  // No 小局 deadline is available from `GET /matches/{id}`/`GET /bracket`
-  // today (see `lib/countdown.ts`'s doc comment) -- `deriveCountdownStatus`
-  // is still called so the "no-data" branch is exercised consistently with
-  // its tested behaviour, rather than hand-writing a second ad hoc message
-  // here.
-  const countdown = deriveCountdownStatus(null, Date.now());
+  const countdown = deriveCountdownStatus(
+    xiaojuTimingFromMatch(match),
+    Date.now(),
+  );
   const ownScore = viewerId === match.player_a ? match.score_a : match.score_b;
   const opponentScore =
     viewerId === match.player_a ? match.score_b : match.score_a;
@@ -112,12 +115,18 @@ export function LiveXiaojuView({
         </p>
       )}
 
-      {countdown.kind === 'no-data' &&
-        (match.state === 'in_progress' || match.state === 'tiebreak') && (
-          <p className="text-xs text-muted-foreground">
-            Live timing is not available from the server for this match yet.
-          </p>
-        )}
+      {(isActivelyPlaying(match.state) || match.state === 'awaiting_judge') && (
+        <p
+          className={cn(
+            'text-xs',
+            countdown.kind === 'waiting-for-server'
+              ? 'text-amber-700'
+              : 'text-muted-foreground',
+          )}
+        >
+          {formatCountdownLabel(countdown)}
+        </p>
+      )}
 
       {submissions && submissions.length > 0 && (
         <ul className="mt-2 flex flex-col gap-1">

@@ -4,14 +4,14 @@
 //   - `MatchView` (GET routes)  -- plugins/afternoon-bracket/src/routes.rs
 //   - order/start/force-decide  -- plugins/afternoon-bracket/src/{ordering,routes}.rs
 //
-// IMPORTANT: `MatchView` (what `GET /bracket` and `GET /matches/{id}`
-// return) does NOT include any 小局 timing (no `deadline_ms`,
-// `opened_at_ms`, or `current_xiaoju_index`) -- only `state`, `score_a`,
-// `score_b`, `winner`, `decided_at_ms`, and (while `state ==
-// "awaiting_judge"`) `awaiting_submission_id`. `XiaojuTiming` in
-// `./lib/countdown.ts` is therefore never populated from a real response
-// today; see that module's doc comment and this task's report for the
-// backend gap this leaves.
+// `current_xiaoju_index`/`current_xiaoju_deadline_ms`/
+// `current_xiaoju_opened_at_ms` (added by commit 2378a986) are read from a
+// single `xiaoju.last()` on the server, so they are all-`None` or all-`Some`
+// together -- never a mix. `None` before the first 小局 opens; see
+// `./lib/countdown.ts`'s `xiaojuTimingFromMatch` for how the UI turns these
+// into a countdown without trusting them as more authoritative than
+// `state` (a stale-but-`Some` deadline can outlive the 小局 it describes --
+// see that function's doc comment).
 
 export type MatchPhase =
   | 'pending'
@@ -53,6 +53,20 @@ export interface MatchView {
    * `state` itself).
    */
   awaiting_submission_id: number | null;
+  /**
+   * The currently open (or most recently open) 小局's index/deadline/open
+   * time, from `MatchState::xiaoju.last()`. `None` before the first 小局
+   * opens. Never masked -- structural, like `state`.
+   *
+   * NOT guaranteed `None` once the match is `decided`/`needs_adjudication`:
+   * the server does not clear `xiaoju` on decision, so these can keep
+   * reporting the last-played 小局's (now-stale) deadline. Do not use
+   * field-presence alone to decide whether a match is still live -- use
+   * `state` for that (see `xiaojuTimingFromMatch`).
+   */
+  current_xiaoju_index: number | null;
+  current_xiaoju_deadline_ms: number | null;
+  current_xiaoju_opened_at_ms: number | null;
 }
 
 export interface BracketResponse {

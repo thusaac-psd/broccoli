@@ -7,22 +7,55 @@
 // server", never a fabricated result -- announcing an outcome the server
 // has not made would contradict the eventual official one.
 //
-// NOTE ON THE CURRENT WIRE CONTRACT: `GET /matches/{id}` and `GET /bracket`
-// (`MatchView` in plugins/afternoon-bracket/src/routes.rs) do not currently
-// return any 小局 timing at all -- no `deadline_ms`, no `opened_at_ms`, no
-// `current_xiaoju_index`. `XiaojuTiming` below mirrors the shape of
-// `MatchState::xiaoju`'s entries (`plugins/afternoon-bracket/src/model.rs`)
-// that WOULD be needed to drive a real countdown; today no caller in this
-// package can construct one from a real response, so `LiveXiaojuView`
-// always calls `deriveCountdownStatus(null, ...)`. This is flagged as a
-// backend/frontend contract gap in this task's report rather than papered
-// over with a client-invented deadline, which would be worse than showing
-// nothing: a fabricated countdown is exactly the kind of "display treated
-// as authority" this module exists to avoid.
+// WIRE CONTRACT (commit 2378a986): `MatchView.current_xiaoju_deadline_ms`
+// (plus `_index`/`_opened_at_ms`) carries the currently-open 小局's real
+// server deadline, all three `None`-together before the first 小局 opens.
+// See `xiaojuTimingFromMatch` below for how a real `MatchView` is turned
+// into the `XiaojuTiming` this module's pure derivation expects -- in
+// particular why "decided" comes from `MatchView.state`, not from these
+// fields becoming absent (they are not guaranteed to, once the match ends;
+// see that function's doc comment).
+
+import type { MatchPhase } from '../types.ts';
 
 export interface XiaojuTiming {
   deadlineMs: number;
   decided: boolean;
+}
+
+/**
+ * Build the `XiaojuTiming` `deriveCountdownStatus` expects from a real
+ * `MatchView`. Returns `null` ("no clock") when
+ * `current_xiaoju_deadline_ms` is absent -- before the first 小局 opens.
+ *
+ * `decided` is derived from `state`, deliberately NOT from whether these
+ * timing fields are present: the server does not clear
+ * `MatchState::xiaoju` once a match concludes (`apply_force_decide` and the
+ * natural win path both only flip `state`), so a decided match's deadline
+ * fields can keep reporting the last-played 小局's now-stale deadline
+ * rather than going back to `None`. Gating "decided" on `state` instead
+ * means `deriveCountdownStatus` reports `{ kind: 'decided' }` correctly
+ * either way, rather than treating a stale-but-present deadline as if the
+ * match were still counting down.
+ *
+ * This also makes `MatchPhase.AwaitingJudge` fall out of the existing pure
+ * derivation for free: its deadline is frozen in the past (the block began
+ * because the deadline already passed) and `decided` is `false` (the
+ * server has not resolved it yet), so `deriveCountdownStatus` naturally
+ * returns `waiting-for-server` -- exactly what `AwaitingJudge` means --
+ * without this function needing a special case for it.
+ */
+export function xiaojuTimingFromMatch(match: {
+  current_xiaoju_deadline_ms: number | null;
+  state: MatchPhase;
+}): XiaojuTiming | null {
+  if (match.current_xiaoju_deadline_ms === null) {
+    return null;
+  }
+  return {
+    deadlineMs: match.current_xiaoju_deadline_ms,
+    decided: match.state === 'decided' || match.state === 'needs_adjudication',
+  };
 }
 
 export type CountdownStatus =
@@ -59,4 +92,33 @@ export function deriveCountdownStatus(
   // `-remainingMs` is `-0`, which is not `Object.is`-equal to `0` --
   // `Math.abs(-0) === 0` (positive zero) avoids that trap.
   return { kind: 'waiting-for-server', overdueMs: Math.abs(remainingMs) };
+}
+
+/** Format a non-negative millisecond duration as `M:SS` (e.g. `1:05`). */
+export function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Human-readable label for a `CountdownStatus`, shared by every component
+ * that renders one so the exhaustiveness check lives in exactly one place
+ * (see this task's requirement that no phase/status ever fall through to a
+ * default branch). The `switch` below has no `default` arm on purpose: if a
+ * future `CountdownStatus` variant is added without a case here, this stops
+ * compiling instead of silently rendering nothing for it.
+ */
+export function formatCountdownLabel(status: CountdownStatus): string {
+  switch (status.kind) {
+    case 'no-data':
+      return 'Live timing is not available for this match yet.';
+    case 'counting':
+      return `Time remaining: ${formatDurationMs(status.remainingMs)}`;
+    case 'waiting-for-server':
+      return `Deadline passed ${formatDurationMs(status.overdueMs)} ago -- waiting for the server to decide.`;
+    case 'decided':
+      return 'This 小局 has been decided.';
+  }
 }
