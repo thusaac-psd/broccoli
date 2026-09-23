@@ -9,6 +9,65 @@ pub const INLINE_TEST_CASE_BODY_THRESHOLD_BYTES: usize = 1_048_576;
 const PREVIEW_CHARS: usize = 100;
 const STORED_PREVIEW_CHARS: usize = PREVIEW_CHARS + 1;
 
+/// Upper bound, in bytes, on the TOTAL inline test-case body bytes (input and
+/// expected_output combined, across every test case) assembled into a single
+/// submission's plugin dispatch payload.
+///
+/// [`INLINE_TEST_CASE_BODY_THRESHOLD_BYTES`] only bounds ONE body at a time.
+/// It does nothing to bound the sum across a whole test-case set, and that
+/// sum is what the judging plugin's WASM guest actually has to hold. This was
+/// measured end-to-end (real judging, not simulated) against a 50-test-case
+/// problem with a trivial `cat`-style solution:
+///
+/// | per-case size | aggregate inline | result                              |
+/// |---------------|-------------------|--------------------------------------|
+/// | 100,000 B     | 4.8 MiB           | judged, 3.3s                         |
+/// | 1,000,000 B   | 47.7 MiB          | guest OOM (`oom` trap)                |
+/// | 1,100,000 B   | 52.5 MiB (blob)   | judged, 2.0s -- faster, and BIGGER    |
+/// | 1,000,000 B x 25 | 25 MiB         | judged, 10.6s                        |
+///
+/// The failure tracks aggregate inline bytes, not case count or total
+/// problem size: 50 cases at 100 KB is fine, 50 at 1 MB is not, and the
+/// all-blob 52.5 MiB run is both correct and 4x faster than the 4.8 MiB
+/// inline run. The measured safe/unsafe cliff sits between 25 MiB and
+/// 48 MiB; this budget is set well below that margin. Note that the guest's
+/// own configured cap is 1.5 GiB (`max_instance_memory_pages` in
+/// `plugin-core`), so ~48 MiB tripping it implies roughly 30x amplification
+/// somewhere that this budget does NOT explain or fix -- it only removes the
+/// trigger.
+pub const AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// Decide, in a fixed and deterministic order, which candidate inline bodies
+/// (given as `sizes`, in that order) fit within `budget` cumulative bytes.
+///
+/// Greedy left-to-right: a candidate is kept inline as long as adding its
+/// size to the running total of already-kept candidates does not exceed
+/// `budget`; otherwise it is marked to spill (and does not contribute to the
+/// running total, so a later, smaller candidate can still fit). The result
+/// is `true`/`false` per input position, same length and order as `sizes`.
+///
+/// This is a pure function of `(sizes, order, budget)`: the same input
+/// always produces the same split. That determinism is what makes the
+/// dispatch-time re-derivation of the inline/blob split for a given
+/// submission's test cases stable across rejudges, and what lets it repair
+/// pre-existing over-budget problems without a data migration -- every
+/// dispatch just recomputes the split from current storage state.
+pub fn select_inline_within_budget(sizes: &[usize], budget: usize) -> Vec<bool> {
+    let mut running: usize = 0;
+    sizes
+        .iter()
+        .map(|&size| {
+            let next = running.saturating_add(size);
+            if next <= budget {
+                running = next;
+                true
+            } else {
+                false
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedTestCaseBody {
     pub inline_text: String,
@@ -214,5 +273,91 @@ mod tests {
         let read_back = read_test_case_body("", Some(&hash), &*store).await.unwrap();
         assert!(!read_back.contains('\0'), "blob body must not retain NUL");
         assert!(read_back.ends_with('\u{FFFD}'), "NUL sanitized to U+FFFD");
+    }
+
+    // -- aggregate inline budget (`select_inline_within_budget`) --
+    //
+    // These are pure, non-async tests of the selection function itself. The
+    // async, blob-store-touching wiring lives in
+    // `services::submission_dispatch`, which is why the "which body spills"
+    // decision is tested here as a pure function while the "how a spill
+    // actually happens" is tested there.
+
+    #[test]
+    fn aggregate_budget_triggers_spill_even_though_every_case_is_under_the_per_case_threshold() {
+        // 50 bodies at 1,000,000 B each (< INLINE_TEST_CASE_BODY_THRESHOLD_BYTES,
+        // so every single one would pass the per-case check) sum to ~47.7 MiB,
+        // which is the exact measured OOM shape. None of them individually
+        // trips the per-case threshold, so only an aggregate check can catch
+        // this.
+        let sizes = vec![1_000_000usize; 50];
+        assert!(
+            sizes
+                .iter()
+                .all(|&s| s < INLINE_TEST_CASE_BODY_THRESHOLD_BYTES)
+        );
+
+        let keep = select_inline_within_budget(&sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+
+        assert!(
+            keep.iter().any(|&k| !k),
+            "50 x 1,000,000 B must not all stay inline under the aggregate budget"
+        );
+        let kept_bytes: usize = sizes
+            .iter()
+            .zip(&keep)
+            .filter(|&(_, &k)| k)
+            .map(|(&s, _)| s)
+            .sum();
+        assert!(kept_bytes <= AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+    }
+
+    #[test]
+    fn boundary_exactly_at_budget_stays_inline_one_byte_over_spills() {
+        let at_budget = vec![AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES];
+        assert_eq!(
+            select_inline_within_budget(&at_budget, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES),
+            vec![true]
+        );
+
+        let one_over = vec![AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES + 1];
+        assert_eq!(
+            select_inline_within_budget(&one_over, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES),
+            vec![false]
+        );
+    }
+
+    #[test]
+    fn small_problem_is_entirely_unaffected() {
+        // Negative control: a small problem (well under budget) must have
+        // every body stay inline -- no spilling.
+        let sizes = vec![100_000usize; 50]; // 4.8 MiB aggregate, the measured-fine shape.
+        let keep = select_inline_within_budget(&sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+        assert!(
+            keep.iter().all(|&k| k),
+            "small problem must not spill anything"
+        );
+    }
+
+    #[test]
+    fn selection_is_deterministic_across_repeated_calls() {
+        let sizes = vec![
+            2 * 1024 * 1024,
+            3 * 1024 * 1024,
+            1024,
+            5 * 1024 * 1024,
+            4 * 1024 * 1024,
+        ];
+        let first = select_inline_within_budget(&sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+        let second = select_inline_within_budget(&sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+        let third = select_inline_within_budget(&sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES);
+        assert_eq!(
+            first, second,
+            "same input (same order) must produce the same split"
+        );
+        assert_eq!(
+            second, third,
+            "same input (same order) must produce the same split"
+        );
     }
 }
