@@ -685,27 +685,6 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
 /// DEFECT: `decide_xiaoju`'s `best_ac == None` branch never checks for an
 /// in-flight submission before declaring the 小局 scoreless.
 #[tokio::test]
-#[ignore = "DEFECT: decide_xiaoju's `best_ac == None` branch (plugins/afternoon-bracket/src/\
-decide.rs, the `None =>` arm around line 208-213) checks ONLY `now_ms < deadline_ms` before \
-declaring a 小局 scoreless -- it never checks whether any submission is still in flight \
-(Queued/Pending/Compiling/Running/SystemError), unlike the `Some(ac) =>` branch immediately \
-above it, which explicitly looks for an older in-flight blocker and enters AwaitingJudge \
-instead of deciding. Reproduction: A submits well before the 小局 deadline; the submission is \
-still in flight (unjudged, no verdict) when the deadline passes; B never submits anything at \
-all, so `best_ac` is `None` on both sides. Per the design's own stated policy (judge.rs module \
-doc comment: a platform fault 'must never cost a player the 小局') and the AwaitingJudge \
-mechanism that exists specifically to implement that policy, this should escalate to \
-awaiting_judge pending A's real verdict, exactly like the case where B DOES have a competing \
-AC (see `awaiting_judge_end_to_end_then_escalates_to_needs_adjudication`, a PASSING probe for \
-that other branch). Instead the match SILENTLY and PERMANENTLY decides the 小局 scoreless \
-(winner: None) the instant the deadline passes, discarding A's in-flight submission's eventual \
-verdict entirely: `decide_xiaoju`'s `current.decided` idempotency guard means this can never \
-be revisited even if A's submission resolves Accepted a moment later. No AwaitingJudge state, \
-no escalation timer, no staff visibility -- a player who submitted correctly before the \
-deadline can lose the 小局 purely because the judge queue was briefly backed up, and nothing \
-in the product surfaces that this happened. This is the same class of harm as the 'hangs \
-forever' liveness bug AwaitingJudge was built to close, just on the other branch of the same \
-function."]
 async fn defect_a_lone_in_flight_submission_with_no_competing_ac_is_silently_scored_scoreless_at_the_deadline()
  {
     let fx = setup_fixture().await;

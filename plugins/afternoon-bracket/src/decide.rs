@@ -209,6 +209,33 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             if now_ms < deadline_ms {
                 return XiaojuOutcome::NotYet;
             }
+            // The deadline has passed with no accepted submission ANYWHERE.
+            // Before scoring this 小局 scoreless, check the same thing the
+            // `Some(ac)` arm above checks: is a submission still in flight?
+            //
+            // This arm used to decide scoreless immediately, which made the
+            // platform-fault policy only half-implemented. A player whose
+            // opponent had an AC was protected; a player whose submission was
+            // the ONLY one -- and was stuck -- was not, even though that
+            // submission might yet come back Accepted and win outright. And
+            // because deciding sets `decided = true`, the idempotency guard
+            // meant a later Accepted verdict could never revisit it: the 小局
+            // was lost permanently to a fault that was not the player's.
+            //
+            // A stuck submission is a platform fault and must never cost a
+            // player the 小局 (see the spec's platform-fault section). Escalate
+            // exactly as the sibling arm does, so staff can force a rejudge,
+            // and let the escalation timer fall through to NeedsAdjudication
+            // if it stays stuck.
+            let blocker = subs
+                .iter()
+                .filter(|s| is_in_flight(&s.status))
+                .min_by_key(|s| s.submitted_at_ms);
+            if let Some(blocker) = blocker {
+                return XiaojuOutcome::AwaitingJudge {
+                    blocking_submission_id: blocker.submission_id,
+                };
+            }
             // 如果在规定时间内双方均未能通过当前题目，则该小局双方均不得分
             None
         }
