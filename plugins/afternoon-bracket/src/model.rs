@@ -96,6 +96,23 @@ pub struct MatchState {
     /// otherwise. See `MatchPhase::AwaitingJudge`'s doc comment for the
     /// policy this exists to support.
     pub awaiting_submission_id: Option<i32>,
+    /// The 小局 duration (seconds) this match's FIRST 小局 opened under,
+    /// pinned once by `judge::open_xiaoju` the moment it actually opens (see
+    /// that function's doc comment) so a LATER `/setup` call rewriting the
+    /// shared `Setup` document's `xiaoju_seconds` cannot silently
+    /// reconfigure an already-running match's remaining 小局.
+    ///
+    /// `0` means "not yet pinned": both a match still in `MatchPhase::
+    /// Ordering`/`Pending` (which has never called `open_xiaoju`) and any
+    /// older persisted document / test fixture built without this field set
+    /// fall back to reading `Setup::xiaoju_seconds` live, exactly the
+    /// pre-fix behaviour -- see `setup::handle_setup`'s doc comment for why
+    /// a second `/setup` call is accepted rather than rejected outright.
+    /// `#[serde(default)]` so an older persisted `MatchState` document
+    /// (written before this field existed) deserializes with `0`, i.e. the
+    /// same "not yet pinned" fallback, rather than failing to deserialize.
+    #[serde(default)]
+    pub xiaoju_seconds: i64,
 }
 
 /// State of one 小局 (the best-of-one sub-match on a single problem).

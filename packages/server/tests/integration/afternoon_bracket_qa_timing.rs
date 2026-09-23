@@ -793,24 +793,6 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 /// DEFECT: `/setup` called a second time, mid-contest, silently
 /// reconfigures an already-in-progress match's pacing.
 #[tokio::test]
-#[ignore = "DEFECT: `handle_setup` (plugins/afternoon-bracket/src/setup.rs) has no guard \
-against being called again once matches are already in progress -- it unconditionally \
-overwrites the single global `setup_key(contest_id)` document (xiaoju_seconds, \
-round_intermission_seconds, escalation_grace_seconds, every round's tiebreak list) and every \
-round-1 slot. Round-1 MATCH documents themselves are protected \
-(`storage::create_match_if_both_slots_filled` uses a create-only compare_and_set), but \
-`judge::step`/`judge::advance`/`judge::open_xiaoju` all re-read the `Setup` document FRESH on \
-every call rather than the match snapshotting it at creation (a `MatchState` snapshots its \
-OWN `group_a`/`group_b` at creation, but explicitly NOT `xiaoju_seconds`/tiebreak/intermission/\
-escalation, which live only in the shared `Setup` document). Reproduction: run `/setup` once \
-with `xiaoju_seconds: 3`, order + start match 0 (小局 0 opens under a 3s deadline), run \
-`/setup` again with the SAME rounds/seeds but `xiaoju_seconds: 300` (accepted unconditionally, \
-200), then let 小局 0 resolve via a real AC so 小局 1 opens WITHIN the same still-InProgress \
-match, AFTER the second /setup call. 小局 1's deadline is computed from the NEW 300s value, \
-not the 3s the match actually started under. A staff member (or anyone with contest:manage) \
-can silently reconfigure a LIVE match's pacing, tiebreak problem list, or escalation grace \
-period mid-play, with no warning, no version check, and no rejection -- nothing in the \
-existing test suite covered this before this file."]
 async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
     let fx = setup_fixture_with_timing(3, 0, 120).await;
     order_match_0(&fx).await;

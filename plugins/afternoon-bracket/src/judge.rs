@@ -256,6 +256,16 @@ fn fetch_subs(
 /// that field's doc comment) and schedule its deadline timer. `pub(crate)`
 /// because Task 10's `routes::handle_start` also calls this directly, to
 /// open the FIRST regular 小局 the moment a match leaves `Ordering`.
+///
+/// On this match's very FIRST call (`m.xiaoju_seconds == 0`, the "not yet
+/// pinned" sentinel -- see that field's doc comment), the live
+/// `setup.xiaoju_seconds` is snapshotted into `m.xiaoju_seconds` and used
+/// for every 小局 this match opens from then on, including ones opened by
+/// LATER calls after a `/setup` call has rewritten the shared `Setup`
+/// document's `xiaoju_seconds`. This is what makes a second `/setup` call
+/// safe to accept unconditionally instead of rejecting it (see
+/// `setup::handle_setup`'s doc comment): the pacing a match actually
+/// started under cannot be rewritten out from under it mid-play.
 pub(crate) fn open_xiaoju(
     host: &Host,
     contest: i32,
@@ -264,8 +274,11 @@ pub(crate) fn open_xiaoju(
     now: i64,
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
+    if m.xiaoju_seconds == 0 {
+        m.xiaoju_seconds = setup.xiaoju_seconds;
+    }
     let index = m.xiaoju.len() as u8;
-    let deadline_ms = now + setup.xiaoju_seconds * 1_000;
+    let deadline_ms = now + m.xiaoju_seconds * 1_000;
     m.xiaoju.push(XiaojuState {
         index,
         opened_at_ms: now,
@@ -1088,6 +1101,65 @@ mod tests {
         let key = xiaoju_timer_key(7, 0, 0);
         assert!(host.timer.is_scheduled(&key));
         assert_eq!(host.timer.scheduled_at(&key), Some(1_000 + 1_800_000));
+    }
+
+    #[test]
+    fn open_xiaoju_pins_xiaoju_seconds_on_first_open_and_ignores_a_later_setup_change() {
+        // Defect 3 fix: the FIRST open_xiaoju call for a match snapshots the
+        // live setup.xiaoju_seconds into m.xiaoju_seconds, and every LATER
+        // call for the SAME match keeps using that pinned value even if the
+        // caller passes in a `Setup` whose xiaoju_seconds has since changed
+        // -- exactly what a second `/setup` call mid-contest would do.
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.xiaoju_seconds = 3;
+        let mut m = match_in_progress();
+        m.xiaoju.clear();
+        m.xiaoju_seconds = 0; // sentinel: not yet pinned
+
+        open_xiaoju(&host, 7, 0, &setup, 1_000, &mut m).unwrap();
+        assert_eq!(
+            m.xiaoju_seconds, 3,
+            "the first open should pin the then-live setup value"
+        );
+        assert_eq!(m.xiaoju[0].deadline_ms, 1_000 + 3_000);
+
+        // A second /setup call rewrites the shared Setup document...
+        let mut reconfigured = setup.clone();
+        reconfigured.xiaoju_seconds = 300;
+
+        // ...but opening this match's NEXT 小局 must still use the 3s it
+        // actually started under, not the new 300s.
+        open_xiaoju(&host, 7, 0, &reconfigured, 2_000, &mut m).unwrap();
+        assert_eq!(
+            m.xiaoju_seconds, 3,
+            "a pinned value must not change on later opens"
+        );
+        assert_eq!(m.xiaoju[1].deadline_ms, 2_000 + 3_000);
+    }
+
+    #[test]
+    fn open_xiaoju_negative_control_an_unstarted_match_still_picks_up_a_setup_correction() {
+        // Negative control for the pin above: a match with xiaoju_seconds
+        // still 0 (never opened a 小局) must pick up whatever the CURRENT
+        // `Setup` says, including a value corrected by a second `/setup`
+        // call that ran before this match started -- the "still allowed to
+        // correct a bracket nobody has started playing yet" half of the
+        // rule documented on `setup::handle_setup`.
+        let host = Host::mock();
+        let mut corrected_setup = setup_two_rounds();
+        corrected_setup.xiaoju_seconds = 120; // staff's corrected value
+
+        let mut m = match_in_progress();
+        m.xiaoju.clear();
+        m.xiaoju_seconds = 0; // sentinel: never opened a 小局 yet
+
+        open_xiaoju(&host, 7, 0, &corrected_setup, 1_000, &mut m).unwrap();
+        assert_eq!(
+            m.xiaoju_seconds, 120,
+            "an unstarted match must pick up the corrected setup value"
+        );
+        assert_eq!(m.xiaoju[0].deadline_ms, 1_000 + 120_000);
     }
 
     // -- advance / step: guards --

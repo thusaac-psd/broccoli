@@ -707,6 +707,7 @@ mod tests {
             tiebreak_index: 0,
             decided_at_ms: 0,
             awaiting_submission_id: None,
+            xiaoju_seconds: 0,
         }
     }
 
@@ -760,6 +761,7 @@ mod tests {
             tiebreak_index,
             decided_at_ms: 0,
             awaiting_submission_id: None,
+            xiaoju_seconds: 0,
         }
     }
 

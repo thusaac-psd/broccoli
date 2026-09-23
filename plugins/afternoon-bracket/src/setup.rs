@@ -107,6 +107,45 @@ struct SetupRequest {
 ///
 /// Nothing is written unless `validate_setup` accepts the whole document --
 /// see the module doc comment for why a half-applied setup is unrecoverable.
+///
+/// # A second `/setup` call is accepted, not rejected
+///
+/// This handler has no guard against being called again after matches
+/// already exist or are in progress: it always unconditionally overwrites
+/// the shared `Setup` document (`xiaoju_seconds`, `round_intermission_seconds`,
+/// `escalation_grace_seconds`, every round's tiebreak list) and re-seeds
+/// round 1's slots. This is a deliberate choice, not an oversight, for two
+/// reasons:
+///
+/// 1. Staff need a way to correct a fat-fingered bracket (wrong problem id,
+///    wrong seed order, wrong timing) before or even after play has begun,
+///    without restarting the whole contest. Rejecting outright would leave
+///    no recovery path.
+/// 2. A pacing value (`xiaoju_seconds`) rewritten here can no longer
+///    silently reconfigure an ALREADY-RUNNING match: `judge::open_xiaoju`
+///    snapshots the live `setup.xiaoju_seconds` into that match's own
+///    `MatchState::xiaoju_seconds` the moment its first 小局 actually opens,
+///    and uses that pinned per-match value for every subsequent 小局,
+///    ignoring later changes to the shared `Setup` document. A match that
+///    has NOT opened its first 小局 yet (still `Pending`/`Ordering`) has
+///    nothing pinned yet, so it correctly picks up a corrected value. See
+///    `MatchState::xiaoju_seconds`'s doc comment and the QA regression test
+///    `defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing`.
+///
+/// This pinning is deliberately scoped to `xiaoju_seconds` only, the one
+/// field the QA suite concretely exercises. `escalation_grace_seconds` and
+/// each round's `tiebreak` list are still read LIVE from the shared `Setup`
+/// document by `judge.rs` on every call and share the same theoretical
+/// exposure to a corrective second `/setup` call reaching a match already
+/// past the point that value started mattering (e.g. a re-ordered tiebreak
+/// list reshuffling which problem an in-progress 附加赛 advances to next).
+/// That is a known, out-of-scope residual, not a defect fixed here -- see
+/// the QA sweep report.
+///
+/// Round 1's MATCH documents themselves are unaffected by a second call in
+/// a different way: `storage::create_match_if_both_slots_filled` uses a
+/// create-only compare-and-set, so re-seeding slots for a round that
+/// already has matches created is a no-op for those matches.
 pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
     let contest_id: i32 = req.param("contest_id")?;
     let info = contest::check_access(host, req, contest_id)?;
@@ -300,6 +339,27 @@ mod tests {
             "is_active": true,
             "phase": "during",
         }]));
+    }
+
+    #[test]
+    fn handle_setup_still_accepts_a_second_call_correcting_an_unstarted_bracket() {
+        // Documents the "accept, don't reject" rule from `handle_setup`'s doc
+        // comment: staff must be able to fix a fat-fingered bracket that
+        // nobody has started playing yet. Round 1's matches exist after the
+        // first call (create-only CAS), but none has left `Ordering`, so a
+        // second call correcting e.g. the timing must still succeed.
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        queue_bracket_contest_info(&host);
+
+        let first = handle_setup(&host, &manage_request(7)).unwrap();
+        assert_eq!(first.status, 200);
+
+        let second = handle_setup(&host, &manage_request(7)).unwrap();
+        assert_eq!(
+            second.status, 200,
+            "a second /setup call on a bracket nobody has started playing must succeed"
+        );
     }
 
     #[test]
