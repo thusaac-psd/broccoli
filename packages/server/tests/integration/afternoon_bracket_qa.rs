@@ -221,12 +221,6 @@ async fn start_match_0(fx: &Fixture) {
 // =====================================================================
 
 #[tokio::test]
-#[ignore = "DEFECT (leak): GET /problems/{id} bypasses the bracket's phase/ownership rule \
-            entirely -- see this file's Area-1 module comment for the root cause. Repro: A's \
-            own 小局-2 problem (rounds[0].group_a[2]), correctly hidden from A by \
-            GET /contests/{id}/problems while 小局 0 is open, is still readable in full via \
-            GET /problems/{problem_id} with A's own token. Expected: 403 or 404, matching the \
-            contest-scoped list. Observed: 200 with the full problem body."]
 async fn defect_standalone_problem_detail_leaks_own_not_yet_open_bracket_problem() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
@@ -259,15 +253,6 @@ async fn defect_standalone_problem_detail_leaks_own_not_yet_open_bracket_problem
 }
 
 #[tokio::test]
-#[ignore = "DEFECT (leak): attachment download bypasses the bracket's phase/ownership rule \
-            entirely, same root cause as the sibling problem-detail leak in this file -- see \
-            this file's Area-1 module comment. download_attachment's per-attachment decision \
-            also resolves via decide_standalone_problem_access (its own code comment says so: \
-            \"it resolves from problem_id alone though, via the same \
-            decide_standalone_problem_access rule as the gate above\"). Repro: staff uploads an \
-            attachment to A's own 小局-2 problem; A downloads it directly by ref id while 小局 0 \
-            is open. Expected: 404 (matching get_problem's denial for the same problem). \
-            Observed: 200 with the raw attachment bytes."]
 async fn defect_standalone_attachment_download_leaks_own_not_yet_open_bracket_problem() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
@@ -312,13 +297,6 @@ async fn defect_standalone_attachment_download_leaks_own_not_yet_open_bracket_pr
 }
 
 #[tokio::test]
-#[ignore = "DEFECT (leak): a sample test case's input/output bypasses the bracket's \
-            phase/ownership rule entirely, same root cause -- see this file's Area-1 module \
-            comment. get_test_case (packages/server/src/handlers/problem/test_cases.rs) also \
-            gates via Resource::Problem{contest_id: None, ..} for a non-staff viewer, and only \
-            additionally checks `is_sample` (true here, as every test case this fixture creates \
-            is a sample). Repro: A reads A's own 小局-2 problem's sample test case by id while \
-            小局 0 is open. Expected: 404. Observed: 200 with the sample input/output."]
 async fn defect_standalone_sample_test_case_leaks_own_not_yet_open_bracket_problem() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
@@ -351,40 +329,44 @@ async fn defect_standalone_sample_test_case_leaks_own_not_yet_open_bracket_probl
 // =====================================================================
 
 #[tokio::test]
-#[ignore = "DEFECT (submission-gate bypass, the most severe finding in this sweep): \
-            POST /problems/{id}/submissions (create_submission) builds \
-            BeforeSubmissionEvent{contest_id: None, ..} and fetches enabled_plugins via \
-            hooks::fetch_resource_enablements(problem_id, None, db). That function \
-            (packages/server/src/hooks.rs) only queries \"problem\"-scoped plugin_config rows \
-            when contest_id is None -- its `if let Some(cid) = contest_id` branch, which adds \
-            the \"contest\" and \"contest_problem\" scoped conditions, is skipped entirely. The \
-            bracket's before_submission hook is enabled via a CONTEST-scoped row (this fixture's \
-            PUT /contests/{id}/config/afternoon-bracket/before_submission, matching the real \
-            product's only documented way to enable a HookScope::Resource hook), so the lookup \
-            never finds it. dispatch_hooks_inner then finds no entry for the bracket's plugin_id \
-            in enabled_plugins and silently skips the hook (packages/server/src/hooks.rs, the \
-            `if let Some(enabled) = enabled_plugins && let Some(&pos) = enabled.get(&entry.\
-            plugin_id)` guard on HookScope::Resource) -- gate.rs::check_submission_response, and \
-            therefore gate.rs::check, is NEVER CALLED on this path. Combined with the standalone \
-            reachability leak this file's other #[ignore]d tests document (Resource::Problem{\
-            contest_id: None} decided purely by host_rules::decide_standalone_problem_access, \
-            blind to match phase), a player can submit a REAL, JUDGED solution to any bracket \
-            problem that is public (every one in this fixture, and per create_and_attach_problem's \
-            own comment every one the real product creates), at ANY time, regardless of whose \
-            turn it is, which 小局 is open, or elimination. Contrast: the SAME opponent-problem \
-            submission via the contest-scoped route (POST /contests/{id}/problems/{problem_id}/\
-            submissions, used throughout afternoon_bracket.rs) is correctly rejected 400 \
-            NOT_YOUR_PROBLEM, because create_contest_submission passes contest_id: Some(..) end \
-            to end and DOES look up the contest-scoped enablement row. Note also: the plugin's \
-            own gate.rs unit test `check_submission_response_rejects_a_contest_less_event_as_not_\
-            in_match` shows the authors anticipated a contest_id: None event reaching the gate \
-            and defended its PURE logic against it (returns NOT_IN_MATCH) -- but that defense is \
-            unreachable dead code on this path in the current host wiring, since the hook is \
-            never dispatched at all when contest_id is None; the real observed behavior is 201 \
-            Created, not 400 NOT_IN_MATCH. Fix belongs in the host: fetch_resource_enablements \
-            must not silently drop contest-scoped enablement just because the caller passed \
-            contest_id: None, or create_submission must resolve a problem's bracket contest \
-            (via contest_problem) and pass it through."]
+#[ignore = "DEFECT (host-side residual, confirmed separate from the reachability leak this \
+            file's sibling tests document -- see the plugin-side visibility fix's report at \
+            .superpowers/sdd/2026-09-19-afternoon-bracket/standalone-visibility-fix-report.md): \
+            this test's scenario is A submitting to B's CURRENT (opponent's) problem, which is \
+            READABLE by A per the rule table's own 'opponent allowed once ordering reached' rule \
+            (see this file's `submitting_during_ordering_phase_is_rejected_as_match_not_started` \
+            comment, and `visibility.rs`'s `the_same_problem_is_allowed_to_the_opponent_and_\
+            denied_to_its_owner` unit test) -- so `kernel.decide(Action::Submit, Resource::\
+            Problem{contest_id: None, problem_id})` correctly resolves Allow, matching the \
+            IDENTICAL contest-scoped call in `create_contest_submission` (also Allow, confirmed \
+            by this test's own sanity check below expecting 400 NOT_YOUR_PROBLEM, not 404). The \
+            standalone visibility fix (this plugin's `decide_problem_for_contest`, shared \
+            verbatim by both the contest-scoped and context-free arms of `decide_visibility_\
+            decisions`) is therefore proven correct and CANNOT distinguish this case -- it is \
+            reachability, not a business rule, by explicit design (`create_submission`'s own \
+            code comment: 'REACHABILITY FIRST... same as viewing the problem'). The 400 \
+            NOT_YOUR_PROBLEM the contest-scoped route correctly returns comes ENTIRELY from the \
+            `before_submission` hook (gate.rs::check_submission_response), a separate, later \
+            check. `VisibilityQueryInput.action` IS on the wire (`packages/broccoli-types/src/\
+            types/visibility.rs`), so an action-aware plugin rule (stricter for \"submit\" than \
+            \"view\") was considered and REJECTED: since `create_contest_submission` gates \
+            Action::Submit through the exact same `Resource::Problem{contest_id: Some(cid)}` \
+            arm, tightening it there too would flip the SAME currently-passing 400 \
+            NOT_YOUR_PROBLEM sanity check below (and likely afternoon_bracket.rs's own gate-probe \
+            tests) to 404 -- collapsing the design's deliberate reachability/business-rule \
+            separation and regressing already-passing coverage, not fixing this one. The actual \
+            root cause remains exactly as originally diagnosed: `hooks::fetch_resource_\
+            enablements` (packages/server/src/hooks.rs) only adds its \"contest\"/\"contest_\
+            problem\"-scoped SQL conditions inside `if let Some(cid) = contest_id` -- skipped \
+            entirely when `create_submission` passes `contest_id: None` -- so the bracket's \
+            CONTEST-scoped before_submission enablement row is never found and the hook never \
+            dispatches on this path. This is HOST code (packages/server/src/hooks.rs or \
+            create_submission's contest resolution), out of scope for a plugin-only fix and \
+            explicitly excluded by this task's constraints; fixing it requires either \
+            `fetch_resource_enablements` not dropping contest-scoped rows when `contest_id: \
+            None`, or `create_submission` resolving the problem's bracket contest (the SAME \
+            batched `contest_problem` join this plugin's visibility fix already performs) and \
+            passing it through to the hook dispatch, not just the kernel check."]
 async fn defect_standalone_submission_route_bypasses_bracket_gate_entirely() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;

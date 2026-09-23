@@ -184,10 +184,64 @@ struct SubmissionOwnerRow {
     contest_type: Option<String>,
 }
 
+/// One `(problem_id, contest_id)` pair for a CONTEXT-FREE problem resource
+/// (`Resource::Problem{contest_id: None, ..}`) that turns out to belong to
+/// one of THIS plugin's own bracket contests. A problem may belong to more
+/// than one bracket contest, so this is a row per membership, not per
+/// problem -- see [`decide_visibility_decisions`]'s standalone-problem
+/// branch for why the full set matters (Deny composes; attribution does
+/// not).
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Deserialize)]
+struct ContextFreeProblemContestRow {
+    problem_id: i32,
+    contest_id: i32,
+}
+
 // `find_players_match` moved to `storage.rs`: it operates purely on
 // `storage::load_all_matches`'s return shape and is shared with `gate.rs`'s
 // submission gating, which needs the identical "resolve a problem to a
 // round, then find the viewer's match in that round" lookup.
+
+/// Resolve `viewer`'s decision for `problem_id` within one specific bracket
+/// `contest_id`, given already-batched `setups`/`matches` maps (keyed by
+/// contest id). Shared by both a resource's own declared `contest_id` (the
+/// contest-scoped read paths, e.g. `GET /contests/{id}/problems`) and the
+/// context-free branch below (`GET /problems/{id}` and friends) -- there is
+/// exactly ONE place this decision is computed, so the two paths cannot
+/// disagree for the same (contest, problem, viewer) triple.
+#[cfg(any(target_arch = "wasm32", test))]
+fn decide_problem_for_contest(
+    contest_id: i32,
+    problem_id: i32,
+    viewer: i32,
+    setups: &HashMap<i32, crate::model::Setup>,
+    matches: &HashMap<i32, Vec<(u8, MatchState)>>,
+) -> WireDecision {
+    // A missing setup, an unresolvable round, or no match for this viewer
+    // all fail hidden (Deny) rather than leak -- see the module doc
+    // comment's "eliminated player" reasoning.
+    let Some(setup) = setups.get(&contest_id) else {
+        return WireDecision::Deny {};
+    };
+    let Some(round_index) = setup.rounds.iter().position(|r| {
+        r.group_a.contains(&problem_id)
+            || r.group_b.contains(&problem_id)
+            || r.tiebreak.contains(&problem_id)
+    }) else {
+        return WireDecision::Deny {};
+    };
+    let round_def = &setup.rounds[round_index];
+    let round = (round_index + 1) as u8;
+    let Some(contest_matches) = matches.get(&contest_id) else {
+        return WireDecision::Deny {};
+    };
+    let Some(m) = storage::find_players_match(contest_matches, round, viewer) else {
+        return WireDecision::Deny {};
+    };
+    let ctx = ctx_from_match(m, round_def);
+    decide_problem(&ctx, problem_id, viewer, false)
+}
 
 /// Core decision logic for the `visibility` query topic. Exercised directly
 /// by tests via `Host::mock()` (no wasm32 target required); the thin
@@ -244,6 +298,55 @@ fn decide_visibility_decisions(
         }
     }
 
+    // -- Context-free problem resources (`contest_id: None`): resolve which
+    // of THIS plugin's own bracket contests each problem_id belongs to, in
+    // ONE batched query for the WHOLE request -- this is on the hot path for
+    // every standalone problem read on the platform (`GET /problems/{id}`,
+    // attachment download, sample test cases, the standalone submit route's
+    // gate check), so a per-resource query here would be the same N+1 defect
+    // the ICPC plugin's M20 fixed. This is deliberately NOT "resolve a
+    // contest for the problem": a problem can belong to several contests
+    // (including non-bracket ones, filtered out by the `contest_type` join
+    // below), and a contest-free problem is a first-class platform feature.
+    // It resolves the FULL set of this plugin's own bracket contests per
+    // problem_id, because Deny composes (any one of them hiding it is
+    // enough) while attribution does not.
+    let mut context_free_problem_ids: Vec<i32> = req
+        .resources
+        .iter()
+        .filter(|r| r.kind == "problem" && r.contest_id.is_none())
+        .filter_map(|r| r.problem_id)
+        .collect();
+    context_free_problem_ids.sort_unstable();
+    context_free_problem_ids.dedup();
+
+    let mut context_free_bracket_contests: HashMap<i32, Vec<i32>> = HashMap::new();
+    if !context_free_problem_ids.is_empty() {
+        let mut p = Params::new();
+        let placeholders: Vec<String> = context_free_problem_ids
+            .iter()
+            .map(|id| p.bind(*id))
+            .collect();
+        let sql = format!(
+            "SELECT cp.problem_id AS problem_id, cp.contest_id AS contest_id \
+             FROM contest_problem cp JOIN contest c ON c.id = cp.contest_id \
+             WHERE c.contest_type = 'afternoon-bracket' AND cp.problem_id IN ({})",
+            placeholders.join(",")
+        );
+        let rows: Vec<ContextFreeProblemContestRow> =
+            host.db.query_with_args(&sql, &p.into_args())?;
+        for row in rows {
+            // Fold into `bracket_contests` too so the setup+matches batch
+            // load just below covers contests discovered here, not just
+            // ones an explicit `contest_id` resource already named.
+            bracket_contests.insert(row.contest_id, ());
+            context_free_bracket_contests
+                .entry(row.problem_id)
+                .or_default()
+                .push(row.contest_id);
+        }
+    }
+
     let mut setups: HashMap<i32, crate::model::Setup> = HashMap::new();
     let mut matches: HashMap<i32, Vec<(u8, MatchState)>> = HashMap::new();
     for &contest_id in bracket_contests.keys() {
@@ -286,41 +389,64 @@ fn decide_visibility_decisions(
         .iter()
         .map(|resource| match resource.kind.as_str() {
             "problem" => {
-                let (Some(contest_id), Some(problem_id)) =
-                    (resource.contest_id, resource.problem_id)
-                else {
+                let Some(problem_id) = resource.problem_id else {
                     return WireDecision::Allow {};
                 };
-                if !bracket_contests.contains_key(&contest_id) {
-                    return WireDecision::Allow {};
+                match resource.contest_id {
+                    Some(contest_id) => {
+                        if !bracket_contests.contains_key(&contest_id) {
+                            return WireDecision::Allow {};
+                        }
+                        // From here on this plugin DOES have an opinion: a
+                        // missing setup, an unresolvable round, or no match
+                        // for this viewer all fail hidden (Deny) rather than
+                        // leak -- see the module doc comment's "eliminated
+                        // player" reasoning.
+                        let Some(v) = viewer else {
+                            return WireDecision::Deny {};
+                        };
+                        decide_problem_for_contest(contest_id, problem_id, v, &setups, &matches)
+                    }
+                    None => {
+                        // Standalone read paths (`GET /problems/{id}`,
+                        // attachment download, sample test cases, and --
+                        // decisively -- the standalone submit route's
+                        // pre-hook kernel gate) reach here with no contest
+                        // context at all. This is NOT "resolve a contest for
+                        // the problem" -- see the batching block above for
+                        // why. It answers one question about OURSELVES
+                        // instead: is this problem attached to one of THIS
+                        // plugin's own bracket contests, and if so, does
+                        // that contest currently hide it from this viewer?
+                        // A problem with no such attachment is untouched:
+                        // `Allow {}`, the identity of the host's `meet`,
+                        // exactly as before this fix. A problem attached to
+                        // one or more is decided through the SAME
+                        // `decide_problem_for_contest` the contest-scoped
+                        // arm above uses, so the standalone answer cannot
+                        // drift from the contest-scoped one for the same
+                        // viewer and problem. If it belongs to more than one
+                        // and ANY of them hides it, the answer is Deny --
+                        // Deny composes; attribution does not, and there is
+                        // no guess to make.
+                        let Some(contest_ids) = context_free_bracket_contests.get(&problem_id)
+                        else {
+                            return WireDecision::Allow {};
+                        };
+                        let Some(v) = viewer else {
+                            return WireDecision::Deny {};
+                        };
+                        for &contest_id in contest_ids {
+                            let decision = decide_problem_for_contest(
+                                contest_id, problem_id, v, &setups, &matches,
+                            );
+                            if matches!(decision, WireDecision::Deny {}) {
+                                return WireDecision::Deny {};
+                            }
+                        }
+                        WireDecision::Allow {}
+                    }
                 }
-                // From here on this plugin DOES have an opinion: a missing
-                // setup, an unresolvable round, or no match for this viewer
-                // all fail hidden (Deny) rather than leak -- see the module
-                // doc comment's "eliminated player" reasoning.
-                let Some(v) = viewer else {
-                    return WireDecision::Deny {};
-                };
-                let Some(setup) = setups.get(&contest_id) else {
-                    return WireDecision::Deny {};
-                };
-                let Some(round_index) = setup.rounds.iter().position(|r| {
-                    r.group_a.contains(&problem_id)
-                        || r.group_b.contains(&problem_id)
-                        || r.tiebreak.contains(&problem_id)
-                }) else {
-                    return WireDecision::Deny {};
-                };
-                let round_def = &setup.rounds[round_index];
-                let round = (round_index + 1) as u8;
-                let Some(contest_matches) = matches.get(&contest_id) else {
-                    return WireDecision::Deny {};
-                };
-                let Some(m) = storage::find_players_match(contest_matches, round, v) else {
-                    return WireDecision::Deny {};
-                };
-                let ctx = ctx_from_match(m, round_def);
-                decide_problem(&ctx, problem_id, v, false)
             }
             "submission" => {
                 let Ok(sub_id) = resource.id.parse::<i32>() else {
@@ -588,6 +714,47 @@ mod tests {
         }
     }
 
+    /// A CONTEXT-FREE problem resource -- `contest_id: None` -- exactly the
+    /// shape `GET /problems/{id}`, attachment download, `get_test_case`, and
+    /// the standalone submit route's pre-hook kernel gate all build. See
+    /// this file's `None =>` arm in `decide_visibility_decisions`.
+    fn context_free_problem_resource(problem_id: i32) -> QueryResource {
+        QueryResource {
+            kind: "problem".to_string(),
+            id: problem_id.to_string(),
+            contest_id: None,
+            problem_id: Some(problem_id),
+        }
+    }
+
+    /// Persist a `RoundDef`-shaped `Setup` plus one match document, WITHOUT
+    /// touching the mock DB's query queue -- callers queue whichever
+    /// query row shape their path needs (the explicit-`contest_id`
+    /// `ContestTypeRow` shape, or the context-free `ContextFreeProblemContestRow`
+    /// shape) themselves, since the two paths issue differently-shaped
+    /// queries. Mirrors `gate.rs::seed_match`, generalized to take a caller-
+    /// built `MatchState` instead of hardcoding one.
+    fn seed_setup_and_match(host: &Host, contest_id: i32, m: &MatchState) {
+        let setup = crate::model::Setup {
+            rounds: vec![round_def()],
+            xiaoju_seconds: 1_800,
+            round_intermission_seconds: 600,
+            escalation_grace_seconds: 120,
+        };
+        host.storage
+            .set(&[(
+                storage::setup_key(contest_id).as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            )])
+            .unwrap();
+        host.storage
+            .set(&[(
+                storage::match_key(contest_id, 0).as_str(),
+                serde_json::to_string(m).unwrap().as_str(),
+            )])
+            .unwrap();
+    }
+
     #[test]
     fn decide_visibility_resolves_the_asymmetric_case_end_to_end() {
         // The same wire-level check as the pure-function test above, but
@@ -686,5 +853,338 @@ mod tests {
         let decisions = decide_visibility_decisions(&host, &req).unwrap();
         assert!(matches!(decisions[0], WireDecision::Allow {}));
         assert!(host.db.queries().is_empty());
+    }
+
+    // =====================================================================
+    // Standalone (context-free, `contest_id: None`) problem resources --
+    // the fix for the QA sweep's Area-1 leaks and, for free, the Area-2
+    // submission-gate bypass (`create_submission` gates on this same
+    // `Resource::Problem{contest_id: None, ..}` decision before any hook
+    // runs). See this file's `None =>` arm in `decide_visibility_decisions`.
+    // =====================================================================
+
+    #[test]
+    fn decide_visibility_standalone_problem_denies_owner_their_own_not_yet_open_problem_matching_contest_scoped_answer()
+     {
+        // THE fix. Before it, `contest_id: None` unconditionally returned
+        // `Allow {}` (no opinion), so the host's contest-blind standalone
+        // rule took over and leaked A's own not-yet-open problem -- see
+        // `packages/server/tests/integration/afternoon_bracket_qa.rs`'s
+        // `defect_standalone_problem_detail_leaks_own_not_yet_open_bracket_problem`
+        // and its Area-1 module comment for the full root cause.
+        let future_problem = 102; // A's own group, position 2, current xiaoju index 0 -- not yet open.
+        let m = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([103, 101, 102]),
+            order_b: Some([203, 201, 202]),
+            state: MatchPhase::InProgress,
+            xiaoju: vec![crate::model::XiaojuState {
+                index: 0,
+                decided: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Sanity: the CONTEST-SCOPED answer for the same viewer/problem
+        // denies it -- if this fails the fixture is wrong, not the fix.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "contest_id": 7, "contest_type": "afternoon-bracket" }
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+        let contest_scoped_req = VisibilityQueryInput {
+            subject: subject(Some(10), false),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(7),
+            },
+            resources: vec![problem_resource(7, future_problem)],
+        };
+        let contest_scoped = decide_visibility_decisions(&host, &contest_scoped_req).unwrap();
+        assert!(
+            matches!(contest_scoped[0], WireDecision::Deny {}),
+            "sanity check failed: the contest-scoped answer should deny A's own not-yet-open \
+             problem -- if this fails the fixture itself is broken, not the fix"
+        );
+
+        // The standalone (context-free) answer for the SAME viewer/problem
+        // must match.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "problem_id": future_problem, "contest_id": 7 }
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+        let standalone_req = VisibilityQueryInput {
+            subject: subject(Some(10), false),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![context_free_problem_resource(future_problem)],
+        };
+        let standalone = decide_visibility_decisions(&host, &standalone_req).unwrap();
+        assert!(
+            matches!(standalone[0], WireDecision::Deny {}),
+            "LEAK: the standalone (contest_id: None) answer allowed A's own not-yet-open \
+             problem {future_problem} ({:?}), but the contest-scoped answer for the same \
+             viewer denies it",
+            standalone[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_standalone_opponent_during_ordering_matches_contest_scoped_allow() {
+        // Negative control against over-reaching in the OTHER direction: B
+        // (the opponent) reading A's own group during ordering is `Allow`
+        // through the contest-scoped path
+        // (`the_same_problem_is_allowed_to_the_opponent_and_denied_to_its_owner`);
+        // the standalone path must agree, not newly deny it.
+        let m = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([101, 102, 103]),
+            state: MatchPhase::Ordering,
+            ..Default::default()
+        };
+
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "contest_id": 7, "contest_type": "afternoon-bracket" }
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+        let contest_scoped_req = VisibilityQueryInput {
+            subject: subject(Some(20), false),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(7),
+            },
+            resources: vec![problem_resource(7, 101)],
+        };
+        let contest_scoped = decide_visibility_decisions(&host, &contest_scoped_req).unwrap();
+        assert!(matches!(contest_scoped[0], WireDecision::Allow {}));
+
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "problem_id": 101, "contest_id": 7 }
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+        let standalone_req = VisibilityQueryInput {
+            subject: subject(Some(20), false),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![context_free_problem_resource(101)],
+        };
+        let standalone = decide_visibility_decisions(&host, &standalone_req).unwrap();
+        assert!(
+            matches!(standalone[0], WireDecision::Allow {}),
+            "standalone must match the contest-scoped Allow, got {:?}",
+            standalone[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_standalone_problem_with_no_bracket_attachment_is_allowed() {
+        // Negative control: contest-free problems, and problems attached
+        // only to OTHER contest types, are a first-class platform feature
+        // this fix must not touch -- a problem the query resolves to NO
+        // bracket contest membership at all stays `Allow {}`, exactly as
+        // before this fix.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([])); // no bracket-contest membership found
+        let req = VisibilityQueryInput {
+            subject: subject(Some(10), false),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![context_free_problem_resource(555)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_standalone_problem_in_a_decided_match_is_allowed_practice_restored() {
+        // Negative control: once a match reaches `MatchPhase::Decided`, this
+        // plugin's OWN rules already stop hiding the owner's group (their
+        // `current_xiaoju_index` now covers every position they reached) --
+        // so "the contest has ended" needs no special case in the new
+        // branch; `decide_problem_for_contest` already answers `Allow`
+        // through the existing rule table. This pins that "practice
+        // restored" falls out naturally rather than requiring new logic
+        // that could itself over-reach.
+        let m = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([101, 102, 103]),
+            order_b: Some([201, 202, 203]),
+            state: MatchPhase::Decided,
+            winner: Some(10),
+            xiaoju: vec![crate::model::XiaojuState {
+                index: 2,
+                decided: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "problem_id": 103, "contest_id": 7 }
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(10), false), // the OWNER -- the strictest viewer while live.
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![context_free_problem_resource(103)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Allow {}),
+            "a decided match's own problems must be readable again (practice), got {:?}",
+            decisions[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_standalone_problem_denied_if_any_of_multiple_bracket_contests_hides_it() {
+        // Composition, not attribution -- the design's explicit rule: a
+        // problem attached to TWO bracket contests must `Deny` if EITHER
+        // one hides it from this viewer, even though the other currently
+        // allows it. There is no "which contest does this belong to" guess
+        // to make; denial composes.
+        let hidden_in_contest_7 = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([101, 102, 103]),
+            state: MatchPhase::Ordering, // owner 10 denied their own group
+            ..Default::default()
+        };
+        let visible_in_contest_8 = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 30,
+            group_a: [101, 102, 103],
+            group_b: [401, 402, 403],
+            order_a: Some([101, 102, 103]),
+            order_b: Some([401, 402, 403]),
+            state: MatchPhase::Decided, // owner 10 allowed: match is over
+            winner: Some(10),
+            xiaoju: vec![crate::model::XiaojuState {
+                index: 2,
+                decided: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "problem_id": 101, "contest_id": 7 },
+            { "problem_id": 101, "contest_id": 8 },
+        ]));
+        seed_setup_and_match(&host, 7, &hidden_in_contest_7);
+        seed_setup_and_match(&host, 8, &visible_in_contest_8);
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(10), false),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![context_free_problem_resource(101)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Deny {}),
+            "problem 101 is hidden by contest 7 even though contest 8 allows it -- Deny must \
+             win, got {:?}",
+            decisions[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_standalone_problem_batch_issues_exactly_one_query() {
+        // The N+1 guard, mirroring ICPC's M20 fix: a batch of MANY
+        // context-free problem resources must cost ONE query, not one per
+        // problem_id -- this is on the hot path for every standalone
+        // problem read on the platform.
+        let m = MatchState {
+            round: 1,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([101, 102, 103]),
+            order_b: Some([201, 202, 203]),
+            state: MatchPhase::Ordering,
+            ..Default::default()
+        };
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([
+            { "problem_id": 101, "contest_id": 7 },
+            { "problem_id": 201, "contest_id": 7 },
+        ]));
+        seed_setup_and_match(&host, 7, &m);
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(20), false), // player B
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![
+                context_free_problem_resource(101), // A's group (B is opponent)
+                context_free_problem_resource(201), // B's OWN group
+                context_free_problem_resource(999), // no bracket attachment at all
+            ],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 3);
+
+        let queries = host.db.queries();
+        assert_eq!(
+            queries.len(),
+            1,
+            "must issue exactly one query for the whole batch of context-free problem ids, \
+             got: {queries:?}"
+        );
+        assert!(
+            queries[0].sql.contains("IN ("),
+            "must be a single IN(...) batch query: {}",
+            queries[0].sql
+        );
+
+        // The batching property alone is not evidence of correctness --
+        // pin what the three decisions actually are, mirroring the ICPC
+        // batching test's own caution.
+        assert!(
+            matches!(decisions[0], WireDecision::Allow {}),
+            "B is the opponent of A's group during ordering: expected Allow, got {:?}",
+            decisions[0]
+        );
+        assert!(
+            matches!(decisions[1], WireDecision::Deny {}),
+            "B's own group during ordering (not yet opened): expected Deny, got {:?}",
+            decisions[1]
+        );
+        assert!(
+            matches!(decisions[2], WireDecision::Allow {}),
+            "no bracket-contest attachment at all: expected Allow, got {:?}",
+            decisions[2]
+        );
     }
 }
