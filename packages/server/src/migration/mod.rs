@@ -22,6 +22,7 @@ mod m0003_remove_plugin_read_denylist;
 mod m0004_grant_plugin_writes;
 mod m0005_leased_at;
 mod m0006_plugin_timer_index;
+mod m0007_contest_problem_problem_id_index;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0004_grant_plugin_writes::Migration),
             Box::new(m0005_leased_at::Migration),
             Box::new(m0006_plugin_timer_index::Migration),
+            Box::new(m0007_contest_problem_problem_id_index::Migration),
         ]
     }
 }
