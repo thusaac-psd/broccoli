@@ -239,9 +239,22 @@ struct MatchView {
     /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
     /// to diff two responses over time.
     awaiting_submission_id: Option<i32>,
-    /// The currently open 小局's index, deadline and open time, taken from
-    /// `MatchState::xiaoju.last()`. All three are `None` before the first
-    /// 小局 opens and after the match is decided.
+    /// The last 小局's index, deadline and open time, taken from
+    /// `MatchState::xiaoju.last()`.
+    ///
+    /// All three are `None` only BEFORE the first 小局 opens, while
+    /// `xiaoju` is still empty. They are NOT cleared when the match is
+    /// decided: nothing in production ever removes an entry from `xiaoju`
+    /// (every `xiaoju.clear()` in this crate is `#[cfg(test)]`-only), so a
+    /// `Decided` or `NeedsAdjudication` match keeps reporting its final
+    /// 小局's now-past deadline.
+    ///
+    /// **A consumer must therefore derive "is this match still running"
+    /// from `state`, never from the presence of these fields.** An earlier
+    /// version of this comment claimed they go `None` once decided; that
+    /// was simply false, and a client that trusted it would show a live
+    /// countdown ticking against a stale deadline on a finished match. The
+    /// frontend derives from `state` for exactly this reason.
     ///
     /// Structural, like `state` -- not a problem id, so not masked. Both
     /// players already know when their own 小局 ends, and a spectator is
@@ -775,6 +788,44 @@ mod tests {
         assert_eq!(view.current_xiaoju_index, None);
         assert_eq!(view.current_xiaoju_opened_at_ms, None);
         assert_eq!(view.current_xiaoju_deadline_ms, None);
+    }
+
+    #[test]
+    fn match_view_still_reports_the_final_xiaoju_timing_after_the_match_is_decided() {
+        // Pins the ACTUAL contract, which is not the intuitive one. Nothing
+        // in production removes an entry from `xiaoju` -- every
+        // `xiaoju.clear()` in this crate is `#[cfg(test)]`-only -- so a
+        // decided match keeps reporting its last 小局's now-past deadline
+        // rather than going `None`.
+        //
+        // This test exists because an earlier version of the field's doc
+        // comment asserted the opposite. A client trusting that would run a
+        // live countdown against a stale deadline on a finished match. The
+        // rule for consumers is: derive "still running" from `state`, never
+        // from the presence of these fields.
+        let mut m = match_in_ordering();
+        m.state = MatchPhase::Decided;
+        m.winner = Some(m.player_a);
+        m.order_a = Some([103, 101, 102]);
+        m.order_b = Some([203, 201, 202]);
+        m.xiaoju = vec![XiaojuState {
+            index: 2,
+            opened_at_ms: 10_000,
+            deadline_ms: 70_000,
+            winner: Some(10),
+            decided: true,
+        }];
+        let setup = setup_two_rounds();
+
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+
+        assert_eq!(view.state, MatchPhase::Decided);
+        assert_eq!(
+            view.current_xiaoju_index,
+            Some(2),
+            "a decided match still reports its final 小局 -- consumers must key off `state`"
+        );
+        assert_eq!(view.current_xiaoju_deadline_ms, Some(70_000));
     }
 
     // -- GET /bracket, GET /matches/{id}: the visibility-masking gap --
