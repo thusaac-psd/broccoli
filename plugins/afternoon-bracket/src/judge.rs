@@ -518,6 +518,15 @@ fn resolve_and_advance(
     advance(host, contest_id, storage::match_id_for(m.round, m.pos))
 }
 
+/// The rejection message [`apply_force_decide`] returns once a match is
+/// already `Decided`. A shared constant (rather than an inline literal) so
+/// `routes::handle_force_decide` can pattern-match on it to distinguish "you
+/// lost a race with another force-decide" from a genuine internal error when
+/// this surfaces from inside [`force_decide`]'s CAS retry closure -- the
+/// same technique `ordering::LEFT_ORDERING_PHASE_MSG` uses for
+/// `ordering::handle_order`.
+pub(crate) const ALREADY_DECIDED_MSG: &str = "this match has already been decided";
+
 /// Pure precondition + mutation for a staff-forced match decision. `winner`
 /// must be one of the two players, and the match must not already be
 /// `Decided` -- a forced decision does not retroactively overturn a real
@@ -533,7 +542,7 @@ pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> R
         ));
     }
     if m.state == MatchPhase::Decided {
-        return Err("this match has already been decided".to_string());
+        return Err(ALREADY_DECIDED_MSG.to_string());
     }
     m.state = MatchPhase::Decided;
     m.winner = Some(winner);
@@ -1764,6 +1773,33 @@ mod tests {
             slot.get(&storage::slot_key(7, 2, 0)),
             Some(&"10".to_string())
         );
+    }
+
+    #[test]
+    fn force_decide_surfaces_the_already_decided_message_when_it_loses_a_race() {
+        // Simulates the losing side of a concurrent force-decide (two staff
+        // clicking "force decide" on the same match near-simultaneously, or
+        // a retried request): by the time `force_decide`'s CAS closure
+        // reloads the LATEST state, another writer has already decided the
+        // match. `force_decide` must surface EXACTLY
+        // `SdkError::Other(ALREADY_DECIDED_MSG)` (not some other message
+        // shape) for `routes::map_force_decide_error` to be able to map it
+        // to a 409 instead of letting it leak through as a bare 500 via the
+        // generic `SdkError` -> `ApiError` conversion.
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::Decided;
+        m.winner = Some(10);
+        m.decided_at_ms = 1_000;
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 2_000);
+        let err = force_decide(&host, 7, 0, 20).unwrap_err();
+        match err {
+            SdkError::Other(msg) => assert_eq!(msg, ALREADY_DECIDED_MSG),
+            other => panic!("expected SdkError::Other(ALREADY_DECIDED_MSG), got {other:?}"),
+        }
     }
 
     #[test]

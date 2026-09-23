@@ -158,7 +158,14 @@ pub fn handle_force_decide(
             let mut probe = current.clone();
             judge::apply_force_decide(&mut probe, winner, 0)
                 .map_err(|msg| PluginHttpResponse::error(400, msg))?;
-            judge::force_decide(host, contest_id, match_id, winner)?;
+
+            // The probe above passed (the match was not yet `Decided` at
+            // that snapshot), but a concurrent force-decide can still win
+            // the race before `force_decide`'s CAS retry closure re-runs
+            // `apply_force_decide` against the freshly-reloaded state -- see
+            // `map_force_decide_error`'s doc comment.
+            judge::force_decide(host, contest_id, match_id, winner)
+                .map_err(map_force_decide_error)?;
         }
     }
 
@@ -172,6 +179,35 @@ pub fn handle_force_decide(
             "winner": updated.winner,
         })),
     })
+}
+
+/// Map a [`judge::force_decide`] failure to the right HTTP response. That
+/// function's CAS retry closure can lose a genuine race against another
+/// concurrent force-decide (two staff clicking the same button, or a
+/// retried request): it re-validates `apply_force_decide` against the
+/// freshly-reloaded state on every retry, and returns exactly
+/// `SdkError::Other(judge::ALREADY_DECIDED_MSG)` when it discovers the match
+/// was decided out from under it. That is a benign lost race, not an
+/// internal error, so it becomes a 409 Conflict here instead of falling
+/// through to `ApiError`'s generic `SdkError` -> 500 conversion. Any OTHER
+/// `SdkError` (the bracket was never set up, a genuine storage/host
+/// failure, ...) still falls through to that generic conversion unchanged
+/// -- see this function's negative-control test below.
+///
+/// Pulled into its own function, rather than inlined as a `map_err`
+/// closure, so it can be unit tested directly against a synthetic error:
+/// the real race it exists for cannot be reproduced deterministically
+/// against `Host::mock()`'s single-threaded (`RefCell`-backed) storage, so
+/// `judge::force_decide_surfaces_the_already_decided_message_when_it_loses_a_race`
+/// (`judge.rs`) tests that `force_decide` produces this exact error, and
+/// the two tests below test that THIS function maps it correctly.
+fn map_force_decide_error(e: SdkError) -> ApiError {
+    match e {
+        SdkError::Other(ref msg) if msg == judge::ALREADY_DECIDED_MSG => {
+            ApiError::from(PluginHttpResponse::error(409, judge::ALREADY_DECIDED_MSG))
+        }
+        other => ApiError::from(other),
+    }
 }
 
 /// One match, as returned by `GET /bracket` and `GET /matches/{id}` --
@@ -636,6 +672,33 @@ mod tests {
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(reloaded.state, MatchPhase::Decided);
         assert_eq!(reloaded.winner, Some(10));
+    }
+
+    // -- map_force_decide_error (DEFECT 4 fix) --
+
+    #[test]
+    fn map_force_decide_error_turns_a_lost_race_into_409() {
+        let err = map_force_decide_error(SdkError::Other(judge::ALREADY_DECIDED_MSG.to_string()));
+        let resp = err.into_response();
+        assert_eq!(
+            resp.status, 409,
+            "the losing side of a concurrent force-decide must be a 409, not a bare 500"
+        );
+    }
+
+    #[test]
+    fn map_force_decide_error_negative_control_other_sdk_errors_still_surface_as_500() {
+        // Negative control: an SdkError with any OTHER message (a genuine
+        // internal error, e.g. the bracket was never set up) must NOT be
+        // caught by the 409 branch -- only the exact lost-race message is.
+        let err = map_force_decide_error(SdkError::Other(
+            "the bracket has not been set up yet".to_string(),
+        ));
+        let resp = err.into_response();
+        assert_eq!(
+            resp.status, 500,
+            "a genuine internal error must not be masked as a 409 conflict"
+        );
     }
 
     #[test]

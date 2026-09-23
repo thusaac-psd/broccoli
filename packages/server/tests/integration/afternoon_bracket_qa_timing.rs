@@ -521,21 +521,6 @@ async fn two_concurrent_force_decides_never_corrupt_match_state() {
 /// NUISANCE finding, not a correctness bug: the losing side of a concurrent
 /// force-decide gets a bare 500, not a 4xx conflict response.
 #[tokio::test]
-#[ignore = "NUISANCE: the losing side of a concurrent force-decide race gets a bare 500 \
-Internal Server Error instead of a 4xx conflict response. Root cause: `handle_force_decide` \
-(routes.rs) only maps `apply_force_decide`'s rejection to a clean 400 for the OUTER \
-pre-flight probe, validated against a `storage::load_match` snapshot taken BEFORE the CAS \
-loop starts. The actual write goes through `judge::force_decide` (judge.rs), whose CAS \
-retry closure re-validates via `apply_force_decide` on every retry and returns \
-`Err(SdkError::Other(\"...already been decided...\"))` on the losing side -- that error is \
-never given the same 400 treatment. It propagates through `storage::update_match`'s `?` and \
-`judge::force_decide`'s `?`, so `handle_force_decide`'s trailing \
-`judge::force_decide(...)?` hits `ApiError`'s generic blanket `From<SdkError>` conversion, \
-which is a 500. A staff client racing a force-decide (two admins clicking the same button, \
-or a retried request) cannot distinguish \"you lost a normal race\" from \"the server broke\" \
-from the status code alone. The concurrency SAFETY itself is fine -- see \
-`two_concurrent_force_decides_never_corrupt_match_state`: exactly one winner is ever \
-recorded, never both, never neither. This is purely a wrong-status-class nuisance."]
 async fn defect_the_losing_side_of_a_concurrent_force_decide_gets_a_bare_500_not_a_4xx() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
