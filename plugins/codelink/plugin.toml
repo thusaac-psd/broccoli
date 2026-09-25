@@ -1,0 +1,78 @@
+name = "codelink"
+version = "0.1.0"
+description = "Codelink qualifier with configurable scoring slots and qualification thresholds"
+
+[translations]
+en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
+
+[server]
+entry = "codelink.wasm"
+permissions = ["logger", "plugin:register", "sql", "submission", "evaluator:evaluate", "config:read"]
+
+[[server.routes]]
+method = "GET"
+path = "/api/plugins/codelink/contests/{contest_id}/info"
+handler = "api_contest_info"
+
+[[server.routes]]
+method = "GET"
+path = "/api/plugins/codelink/contests/{contest_id}/standings"
+handler = "api_standings"
+
+[config.contest]
+description = "Codelink qualification rules and scoreboard settings"
+scopes = ["contest"]
+
+[config.contest.properties.expected_problem_count]
+type = "integer"
+title = "Expected Problem Count"
+description = "Show a setup notice when the actual problem count differs. Set to 0 to disable this check."
+default = 16
+min = 0
+max = 1000
+
+[config.contest.properties.slots_per_problem]
+type = "integer"
+title = "Scoring Slots per Problem"
+description = "Maximum number of different eligible contestants who can earn credit on each problem"
+default = 2
+min = 1
+max = 1000
+
+[config.contest.properties.solves_to_qualify]
+type = "integer"
+title = "Credited Problems to Qualify"
+description = "Number of different problems on which a contestant must earn a slot to qualify"
+default = 2
+min = 1
+max = 1000
+
+[config.contest.properties.scoreboard_refresh_seconds]
+type = "integer"
+title = "Scoreboard Refresh Interval"
+description = "Automatic refresh interval in seconds. Set to 0 for manual refresh only."
+default = 5
+min = 0
+max = 3600
+
+[web]
+root = "web/dist"
+entry = "index.js"
+css = ["styles.css"]
+
+[web.components]
+CodelinkScoreboard = "CodelinkScoreboard"
+CodelinkContestInfo = "CodelinkContestInfo"
+
+[[web.slots]]
+name = "ranking.content"
+position = "wrap"
+component = "CodelinkScoreboard"
+contest_type = "codelink"
+
+[[web.slots]]
+name = "contest-overview.content"
+position = "prepend"
+component = "CodelinkContestInfo"
+contest_type = "codelink"

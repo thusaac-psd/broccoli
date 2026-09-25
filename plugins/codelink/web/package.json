@@ -1,0 +1,64 @@
+{
+  "name": "@broccoli/plugin-codelink",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "build": "pnpm run typecheck && tsdown --dts",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsdown --watch --sourcemap"
+  },
+  "tsdown": {
+    "entry": [
+      "src/index.tsx",
+      "src/styles.css"
+    ],
+    "platform": "neutral",
+    "css": {
+      "transformer": "postcss",
+      "fileName": "styles.css"
+    },
+    "deps": {
+      "neverBundle": [
+        "react",
+        "react-dom",
+        "react-router",
+        "@tanstack/react-query",
+        "@broccoli/web-sdk/api",
+        "@broccoli/web-sdk/i18n",
+        "@broccoli/web-sdk/slot",
+        "@broccoli/web-sdk/submission",
+        "@broccoli/web-sdk/ui",
+        "@broccoli/web-sdk/utils"
+      ]
+    }
+  },
+  "dependencies": {
+    "@broccoli/web-sdk": "file:../../../packages/web-sdk"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "@tanstack/react-query": "^5.0.0",
+    "@tsdown/css": "^0.21.4",
+    "@types/react": "^19.1.16",
+    "postcss": "^8.4.0",
+    "postcss-import": "^16.1.1",
+    "react-router": "^7.0.0",
+    "tailwindcss": "^4.2.1",
+    "tsdown": "^0.21.4",
+    "typescript": "~5.9.3"
+  }
+}

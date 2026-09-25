@@ -36,6 +36,7 @@ test-plugin path:
 # Test all root plugin crates explicitly; root plugins stay out of Cargo workspace
 test-plugins:
     cargo test --manifest-path plugins/batch-evaluator/Cargo.toml
+    cargo test --manifest-path plugins/codelink/Cargo.toml
     cargo test --manifest-path plugins/communication-evaluator/Cargo.toml
     cargo test --manifest-path plugins/cooldown/Cargo.toml
     cargo test --manifest-path plugins/icpc/Cargo.toml
@@ -108,6 +109,7 @@ format-check:
 # Build all WASM plugins (debug)
 build-plugins *args:
     cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator {{args}}
+    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink {{args}}
     cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator {{args}}
     cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown {{args}}
     cargo run -p broccoli-dev-cli -- plugin build plugins/icpc {{args}}
@@ -120,6 +122,7 @@ build-plugins *args:
 # Build all WASM plugins (release)
 build-plugins-release:
     cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator --install --release
+    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink --install --release
     cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator --install --release
     cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown --install --release
     cargo run -p broccoli-dev-cli -- plugin build plugins/icpc --install --release
