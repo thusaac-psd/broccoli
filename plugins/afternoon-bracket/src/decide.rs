@@ -79,6 +79,22 @@ fn is_in_flight(status: &SubmissionLifecycle) -> bool {
     )
 }
 
+/// Whether `s` could still turn into a different outcome, so the 小局 must
+/// wait for it: either its lifecycle `status` is still in flight (see
+/// [`is_in_flight`]), or judging finished with a `SystemError` VERDICT.
+///
+/// The second arm is the shape the platform actually produces for a sandbox
+/// fault: plugin-finalized as `status == Judged` with `verdict ==
+/// SystemError`, which the SystemError-retry reaper selects and re-judges
+/// exactly like `status == SystemError`. Classifying by `status` alone called
+/// it terminal. Measured on a real 4-worker stack under a concurrent burst:
+/// correct solutions came back `Judged/SystemError` and lost their 小局 - to
+/// the opponent's later AC, or 0-0 at the deadline - purely to a platform
+/// fault. A SystemError verdict is never the contestant's outcome.
+fn submission_in_flight(s: &SubmissionRecord) -> bool {
+    is_in_flight(&s.status) || matches!(s.verdict, Some(Verdict::SystemError))
+}
+
 /// One submission, as `decide_xiaoju` needs to see it: which player made it,
 /// to which problem, when it was SUBMITTED (not judged -- see
 /// [`decide_xiaoju`]'s doc comment for why that distinction matters), its
@@ -193,7 +209,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             // staff should rejudge first -- it has been stuck the longest.
             let blocker = subs
                 .iter()
-                .filter(|s| is_in_flight(&s.status) && s.submitted_at_ms < ac.submitted_at_ms)
+                .filter(|s| submission_in_flight(s) && s.submitted_at_ms < ac.submitted_at_ms)
                 .min_by_key(|s| s.submitted_at_ms);
             if let Some(blocker) = blocker {
                 if now_ms < deadline_ms {
@@ -229,7 +245,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             // if it stays stuck.
             let blocker = subs
                 .iter()
-                .filter(|s| is_in_flight(&s.status))
+                .filter(|s| submission_in_flight(s))
                 .min_by_key(|s| s.submitted_at_ms);
             if let Some(blocker) = blocker {
                 return XiaojuOutcome::AwaitingJudge {
@@ -558,6 +574,61 @@ mod tests {
             ),
         ];
         assert_eq!(decide_xiaoju(&mut m, &subs, 9_999), XiaojuOutcome::NotYet);
+    }
+
+    #[test]
+    fn a_judged_submission_with_a_system_error_verdict_still_blocks_a_later_ac() {
+        // The shape measured on a real 4-worker stack under concurrent load:
+        // the platform finalizes an infra fault as `status == Judged` with
+        // `verdict == SystemError` (plugin-finalized), NOT as
+        // `status == SystemError`. Classifying by status alone called that
+        // terminal, so a correct solution that hit a sandbox fault simply
+        // lost the 小局 to the opponent's later AC. The SystemError-retry
+        // reaper re-judges exactly this shape, so it is still in flight.
+        let mut m = match_in_progress_at_xiaoju(0);
+        let subs = [
+            sub_with_status(
+                1,
+                10,
+                103,
+                1_000,
+                Some(Verdict::SystemError),
+                SubmissionLifecycle::Judged,
+            ),
+            sub_with_status(
+                2,
+                20,
+                203,
+                1_500,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(decide_xiaoju(&mut m, &subs, 9_999), XiaojuOutcome::NotYet);
+    }
+
+    #[test]
+    fn a_lone_system_error_verdict_escalates_at_the_deadline_rather_than_scoring_nobody() {
+        // Measured: both players' correct submissions came back
+        // `Judged/SystemError` and the 小局 would have been scored 0-0 at the
+        // deadline - both players robbed by a platform fault, silently. It
+        // must escalate to AwaitingJudge so staff (or the reaper) can
+        // re-judge, exactly like any other in-flight submission.
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 5_000);
+        let subs = [sub_with_status(
+            7,
+            10,
+            103,
+            1_000,
+            Some(Verdict::SystemError),
+            SubmissionLifecycle::Judged,
+        )];
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 5_001),
+            XiaojuOutcome::AwaitingJudge {
+                blocking_submission_id: 7
+            }
+        );
     }
 
     #[test]
