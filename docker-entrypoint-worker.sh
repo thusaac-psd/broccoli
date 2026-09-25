@@ -120,6 +120,16 @@ if [ "$1" = "/usr/local/bin/broccoli-worker" ] &&
     fi
 fi
 
+# The box-id slot lock dir must be shared by every worker container on a host
+# (see `box_slot_lock_dir` in packages/worker/src/config.rs) and is typically a
+# freshly mounted, root-owned volume. Hand it to the unprivileged worker user
+# while still root: if the worker cannot create its lock files it falls back to
+# slot 0, which is exactly the cross-container collision the dir exists to stop.
+if [ -n "${BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR:-}" ] && [ "$(id -u)" = "0" ]; then
+    mkdir -p "$BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR"
+    chown worker:worker "$BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR"
+fi
+
 if [ "$(id -u)" = "0" ] && [ "${BROCCOLI_WORKER_DROP_PRIVILEGES:-true}" = "true" ]; then
     exec gosu worker:worker "$@"
 fi

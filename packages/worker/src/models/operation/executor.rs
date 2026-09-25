@@ -34,6 +34,7 @@ impl OperationTaskExecutor {
         config: &WorkerAppConfig,
         metrics: common::metrics::Metrics,
     ) -> Result<Self> {
+        Self::configure_box_slot_lock_dir(config);
         let fingerprint =
             toolchain_fingerprint::compute(toolchain_fingerprint::default_probes()).await;
         info!(
@@ -102,6 +103,34 @@ impl OperationTaskExecutor {
             .with_tools_dir(tools_dir.clone()),
             tools_dir,
         })
+    }
+
+    /// Apply `[worker] box_slot_lock_dir` before any sandbox is created (the
+    /// box-id slot is claimed lazily on first use, so it must be set first).
+    ///
+    /// A worker in a container with no shared lock dir configured is the exact
+    /// setup that collapses every worker on a host into box-id slot 0, so warn
+    /// loudly: nothing else surfaces it until correct solutions start coming
+    /// back SystemError / TimeLimitExceeded under load.
+    fn configure_box_slot_lock_dir(config: &WorkerAppConfig) {
+        match &config.worker.box_slot_lock_dir {
+            Some(dir) => {
+                super::handler::configure_slot_lock_dir(std::path::PathBuf::from(dir));
+                info!(box_slot_lock_dir = %dir, "Isolate box-id slot lock dir configured");
+            }
+            None if running_in_container() => {
+                warn!(
+                    "worker is running in a container with no [worker] box_slot_lock_dir set: \
+                     it will claim its isolate box-id slot from its PRIVATE temp dir. If more \
+                     than one worker container runs on this host they will all claim slot 0, \
+                     run contestant code as the same UID, and exhaust each other's process \
+                     limit (execve EAGAIN -> SystemError / TimeLimitExceeded). Point every \
+                     worker on the host at one shared directory via \
+                     BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR."
+                );
+            }
+            None => {}
+        }
     }
 
     /// Reject an operation up front when it requests a platform tool this
@@ -376,6 +405,13 @@ impl Executor for OperationTaskExecutor {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Best-effort container detection (Docker's `/.dockerenv`, Podman's
+/// `/run/.containerenv`). Only used to decide whether to warn.
+fn running_in_container() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
 }
 
 #[cfg(test)]
