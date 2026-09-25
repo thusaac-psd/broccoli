@@ -35,7 +35,7 @@ impl MigrationTrait for Migration {
         // it is why this index is justified by the measurement above and not
         // by a general "index the filtered column" instinct.
         //
-        // The lookup is on a hot path: the afternoon-bracket plugin's
+        // The lookup is on a hot path: the codelink-bracket plugin's
         // `decide_visibility` resolves context-free problem ids (the
         // `Resource::Problem { contest_id: None }` raised by
         // `GET /problems/{id}`, attachment download, test-case reads and

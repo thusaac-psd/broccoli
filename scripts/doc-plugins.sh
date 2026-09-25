@@ -14,7 +14,7 @@
 # links a private or `#[cfg(test)]`-only item passes silently. That exact
 # defect has now occurred three times on this codebase -- twice in workspace
 # crates (caught by CI, which does set the flag) and once in
-# plugins/afternoon-bracket, which no gate covered at all until this script
+# plugins/codelink-bracket, which no gate covered at all until this script
 # existed.
 #
 # Deliberately invoked from the repo root and never `cd`s into a plugin

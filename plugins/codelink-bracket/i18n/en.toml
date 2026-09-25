@@ -1,0 +1,58 @@
+# codelink-bracket
+'codelink-bracket.title' = 'Afternoon bracket'
+
+'codelink-bracket.rules.title' = 'Afternoon knockout round'
+'codelink-bracket.rules.description' = "Single elimination. Before each match, both players rank the other player's three problems. The match is three games. In each game, each player works on the next problem in the order their opponent chose, and the first accepted submission wins the game. If neither player solves their problem before the deadline, nobody scores. After three games, the player with more wins advances. A level score goes to tiebreak problems."
+'codelink-bracket.rules.order' = 'Game winners follow the submission time of accepted solutions. Submission ID breaks exact time ties. If a submission is still being judged at the deadline, the game waits for its result. Staff decide the match if judging does not finish in time.'
+
+'codelink-bracket.bracket.loading' = 'Loading bracket…'
+'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
+'codelink-bracket.bracket.empty' = 'The bracket has not been set up yet.'
+'codelink-bracket.bracket.round' = 'Round {round}'
+
+'codelink-bracket.phase.pending' = 'Not started'
+'codelink-bracket.phase.ordering' = 'Waiting for both players to rank problems'
+'codelink-bracket.phase.inProgress' = 'In progress'
+'codelink-bracket.phase.tiebreak' = 'Tiebreak in progress'
+'codelink-bracket.phase.awaitingJudge' = 'Waiting on a pending submission'
+'codelink-bracket.phase.decided' = 'Decided'
+'codelink-bracket.phase.needsAdjudication' = 'Needs staff decision'
+
+'codelink-bracket.countdown.noData' = 'Live timing is not available for this match yet.'
+'codelink-bracket.countdown.counting' = 'Time remaining: {time}'
+'codelink-bracket.countdown.waitingForServer' = 'Deadline passed {time} ago. Waiting for the server to decide.'
+'codelink-bracket.countdown.decided' = 'This game has been decided.'
+
+'codelink-bracket.match.loading' = 'Loading match…'
+'codelink-bracket.match.heading' = 'Round {round}: {a} vs {b}'
+'codelink-bracket.match.score' = 'Score: {a} - {b}'
+'codelink-bracket.match.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. The result is not known yet.'
+'codelink-bracket.match.blockingSubmission' = 'Blocking submission: #{id}.'
+'codelink-bracket.match.stuckJudge' = 'Submission #{id} was still being judged when the grace period ran out. Check its result (rejudge it if it is stuck), then decide the match.'
+'codelink-bracket.match.tiebreakExhausted' = 'The tiebreak problems ran out without a winner. Staff must decide this match manually.'
+
+'codelink-bracket.staff.title' = 'Staff controls'
+'codelink-bracket.staff.start' = 'Start match'
+'codelink-bracket.staff.starting' = 'Starting…'
+'codelink-bracket.staff.forceExpiry' = 'Force expiry'
+'codelink-bracket.staff.awardTo' = 'Award to {name}'
+'codelink-bracket.error.submitOrder' = 'Failed to submit the ranking.'
+'codelink-bracket.error.start' = 'Failed to start the match.'
+'codelink-bracket.error.forceDecide' = 'Failed to decide the match.'
+
+'codelink-bracket.ordering.hidden' = "Waiting to see the opponent's problems before you can rank them."
+'codelink-bracket.ordering.resubmit' = 'You already submitted a ranking. Submitting again replaces it until the match starts.'
+'codelink-bracket.ordering.instructions' = "Click the opponent's 3 problems in the order they must solve them (first click = 1st)."
+'codelink-bracket.ordering.problem' = 'Problem {id}'
+'codelink-bracket.ordering.remove' = 'Remove'
+'codelink-bracket.ordering.empty' = 'No problems ranked yet.'
+'codelink-bracket.ordering.submit' = 'Submit ranking'
+'codelink-bracket.ordering.submitting' = 'Submitting…'
+'codelink-bracket.ordering.reset' = 'Reset'
+
+'codelink-bracket.feed.loading' = 'Loading…'
+'codelink-bracket.feed.loadError' = 'Failed to load submissions.'
+'codelink-bracket.feed.empty' = 'No submissions yet.'
+
+'codelink-bracket.live.title' = 'Afternoon bracket: {status}'
+'codelink-bracket.live.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. Waiting on the judge.'

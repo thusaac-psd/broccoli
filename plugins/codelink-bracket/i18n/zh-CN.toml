@@ -1,0 +1,58 @@
+# codelink-bracket
+'codelink-bracket.title' = '下午场对阵'
+
+'codelink-bracket.rules.title' = '下午场淘汰赛'
+'codelink-bracket.rules.description' = '单败淘汰。每场比赛开始前，双方各自为对手的 3 道题排定顺序。每场比赛共 3 个小局，每个小局中双方各做对手为自己排定的下一道题，先提交通过者赢得该小局；截止时双方都未通过则该小局无人得分。3 个小局后胜局多者晋级，比分相同则进入附加赛。'
+'codelink-bracket.rules.order' = '小局胜负按通过提交的提交时间判定，时间完全相同时按提交 ID 排序。截止时如有提交仍在评测，该小局会等待评测结果；评测未能及时完成时，由工作人员裁定本场比赛。'
+
+'codelink-bracket.bracket.loading' = '正在加载对阵表…'
+'codelink-bracket.bracket.loadError' = '无法加载对阵表。'
+'codelink-bracket.bracket.empty' = '对阵表尚未生成。'
+'codelink-bracket.bracket.round' = '第 {round} 轮'
+
+'codelink-bracket.phase.pending' = '未开始'
+'codelink-bracket.phase.ordering' = '等待双方排定题目顺序'
+'codelink-bracket.phase.inProgress' = '进行中'
+'codelink-bracket.phase.tiebreak' = '附加赛进行中'
+'codelink-bracket.phase.awaitingJudge' = '等待提交评测完成'
+'codelink-bracket.phase.decided' = '已决出胜负'
+'codelink-bracket.phase.needsAdjudication' = '需工作人员裁定'
+
+'codelink-bracket.countdown.noData' = '本场比赛暂无实时计时。'
+'codelink-bracket.countdown.counting' = '剩余时间：{time}'
+'codelink-bracket.countdown.waitingForServer' = '已超过截止时间 {time}，等待服务器判定。'
+'codelink-bracket.countdown.decided' = '本小局已决出胜负。'
+
+'codelink-bracket.match.loading' = '正在加载比赛…'
+'codelink-bracket.match.heading' = '第 {round} 轮：{a} 对 {b}'
+'codelink-bracket.match.score' = '比分：{a} - {b}'
+'codelink-bracket.match.awaitingJudge' = '截止时间已到，但更早的一次提交仍在评测，结果暂未确定。'
+'codelink-bracket.match.blockingSubmission' = '等待中的提交：#{id}。'
+'codelink-bracket.match.stuckJudge' = '宽限期结束时提交 #{id} 仍在评测中。请先确认其评测结果（如卡住请重新评测），再裁定本场比赛。'
+'codelink-bracket.match.tiebreakExhausted' = '附加赛题目已用完仍未分出胜负，需工作人员手动裁定。'
+
+'codelink-bracket.staff.title' = '工作人员操作'
+'codelink-bracket.staff.start' = '开始比赛'
+'codelink-bracket.staff.starting' = '正在开始…'
+'codelink-bracket.staff.forceExpiry' = '强制截止'
+'codelink-bracket.staff.awardTo' = '判 {name} 获胜'
+'codelink-bracket.error.submitOrder' = '提交排序失败。'
+'codelink-bracket.error.start' = '开始比赛失败。'
+'codelink-bracket.error.forceDecide' = '裁定失败。'
+
+'codelink-bracket.ordering.hidden' = '对手的题目尚未公开，暂时无法排序。'
+'codelink-bracket.ordering.resubmit' = '你已提交排序。比赛开始前再次提交会覆盖之前的排序。'
+'codelink-bracket.ordering.instructions' = '按对手需要做题的顺序依次点击对手的 3 道题（第一次点击为第 1 题）。'
+'codelink-bracket.ordering.problem' = '题目 {id}'
+'codelink-bracket.ordering.remove' = '移除'
+'codelink-bracket.ordering.empty' = '尚未选择题目。'
+'codelink-bracket.ordering.submit' = '提交排序'
+'codelink-bracket.ordering.submitting' = '正在提交…'
+'codelink-bracket.ordering.reset' = '重置'
+
+'codelink-bracket.feed.loading' = '正在加载…'
+'codelink-bracket.feed.loadError' = '无法加载提交记录。'
+'codelink-bracket.feed.empty' = '暂无提交。'
+
+'codelink-bracket.live.title' = '下午场对阵：{status}'
+'codelink-bracket.live.awaitingJudge' = '截止时间已到，但更早的一次提交仍在评测，正在等待评测结果。'

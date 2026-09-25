@@ -1,11 +1,11 @@
 mod additional_file;
-mod afternoon_bracket;
-mod afternoon_bracket_qa;
-mod afternoon_bracket_qa_timing;
 mod attachment;
 mod auth;
 mod clarification;
 mod code_run;
+mod codelink_bracket;
+mod codelink_bracket_qa;
+mod codelink_bracket_qa_timing;
 mod common;
 mod contest;
 mod dlq;

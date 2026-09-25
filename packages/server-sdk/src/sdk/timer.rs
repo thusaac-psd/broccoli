@@ -45,7 +45,7 @@ impl Timer {
     }
 }
 
-/// Host-target mock for [`Timer`]. Plugin logic (e.g. the afternoon-bracket
+/// Host-target mock for [`Timer`]. Plugin logic (e.g. the codelink-bracket
 /// judging/advancement tests) is unit-tested off wasm and needs to assert
 /// "this key was scheduled for this deadline" / "this key was cancelled"
 /// without a real timer host to record it.
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn the_host_target_mock_records_a_scheduled_key_and_its_deadline() {
-        // Plugin-side tests (e.g. the afternoon-bracket 小局 advancement
+        // Plugin-side tests (e.g. the codelink-bracket 小局 advancement
         // tests) need to assert "the next deadline was scheduled" without a
         // real timer host - a stateless no-op mock cannot support that.
         let timer = Timer::new();

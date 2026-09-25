@@ -217,7 +217,7 @@ mod tests {
     /// (which runs once) survived the first boot and vanished on the second:
     /// every subsequent `timer_schedule` failed with "there is no unique or
     /// exclusion constraint matching the ON CONFLICT specification", and every
-    /// afternoon-bracket `/start` returned 500. Found on a real stack under
+    /// codelink-bracket `/start` returned 500. Found on a real stack under
     /// load, after its server had been restarted - no fresh-database test
     /// could ever see it. The second `init_db` below is the restart.
     #[tokio::test]

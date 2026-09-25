@@ -214,7 +214,7 @@ mod plugin_routing {
     /// `permission`) used to see an expired token as "no caller", so the plugin
     /// answered 403 "requires contest:manage". Clients refresh their access
     /// token on 401, never on 403, so a staff member whose 5-minute token
-    /// lapsed hit a misleading permissions error on every afternoon-bracket
+    /// lapsed hit a misleading permissions error on every codelink-bracket
     /// staff action until they reloaded - found running a real 128-candidate
     /// tournament. Core routes already answer 401 here; plugin routes now match.
     /// A genuinely ABSENT token is still anonymous, because some plugin routes
