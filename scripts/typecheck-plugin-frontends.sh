@@ -21,6 +21,14 @@
 # `exports` map, which points at `dist`, not `src`) -- e.g. via
 # `pnpm --filter @broccoli/web-sdk build`, as the CI `frontend` job's
 # "Build web SDK" step already does before this script's step.
+#
+# Installs each plugin frontend's own dependencies first. They are not pnpm
+# workspace members, so the root `pnpm install` never installs them, and no
+# earlier step in CI's `frontend` job does either. Without this the gate only
+# ever passed on machines where `build-plugins.sh` had already installed them,
+# and failed in CI with `tsc: not found`. Mirrors the dev CLI's frontend
+# install (`pnpm install --ignore-workspace`), plus `--frozen-lockfile` so a
+# stale per-plugin lockfile fails here rather than drifting silently.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,6 +46,7 @@ while IFS= read -r -d '' manifest; do
   plugin_dir="$(dirname "${manifest}")"
   plugin_name="${plugin_dir#"${ROOT_DIR}/"}"
   echo "==> Type checking plugin frontend: ${plugin_name}"
+  pnpm --dir "${plugin_dir}" install --ignore-workspace --frozen-lockfile --reporter=silent
   pnpm --dir "${plugin_dir}" exec tsc --noEmit -p tsconfig.json
   checked_any=1
 done < <(
