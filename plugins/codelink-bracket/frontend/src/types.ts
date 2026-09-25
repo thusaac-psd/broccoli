@@ -72,6 +72,23 @@ export interface MatchView {
   current_xiaoju_index: number | null;
   current_xiaoju_deadline_ms: number | null;
   current_xiaoju_opened_at_ms: number | null;
+  /**
+   * Every game opened so far, in order. Problem ids are masked exactly like
+   * `order_a`/`order_b`; games not yet opened are absent.
+   */
+  games: GameView[];
+}
+
+/** One opened game (小局). Index 0-2 are regular games, 3+ are tiebreaks. */
+export interface GameView {
+  index: number;
+  tiebreak: boolean;
+  problem_a: number | null;
+  problem_b: number | null;
+  opened_at_ms: number;
+  deadline_ms: number;
+  winner: number | null;
+  decided: boolean;
 }
 
 export interface BracketResponse {
@@ -108,4 +125,20 @@ export interface ForceDecideRequest {
 export interface ForceDecideResponse {
   state: MatchPhase;
   winner: number | null;
+}
+
+/** One round's problems for `POST /setup` (see `RoundDef` in src/model.rs). */
+export interface RoundSetup {
+  group_a: [number, number, number];
+  group_b: [number, number, number];
+  tiebreak: number[];
+}
+
+/** `POST /setup` body. Seeds pair up adjacently in round 1. */
+export interface SetupRequest {
+  seeds: number[];
+  rounds: RoundSetup[];
+  xiaoju_seconds: number;
+  round_intermission_seconds: number;
+  escalation_grace_seconds: number;
 }

@@ -1,118 +1,106 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { ExternalLink, Lock } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router';
 
+import type { ProblemInfo } from './hooks/useContestData';
+import { problemPath } from './lib/links';
 import { canSubmitOrder } from './lib/ordering';
+import { SortableList } from './SortableList';
 import type { MaskedTriple } from './types';
 
 interface OrderingPanelProps {
+  contestId: number;
   /** The OPPONENT's group of 3 problems, as this viewer sees it (masked). */
   opponentGroup: MaskedTriple;
+  /** This viewer's earlier ranking, if they already sent one. */
+  submittedOrder: MaskedTriple | null;
+  problems: ReadonlyMap<number, ProblemInfo>;
   onSubmit: (order: [number, number, number]) => void;
   submitting: boolean;
-  /** Set once this viewer has already submitted a ranking for this match. */
-  alreadySubmitted: boolean;
-  /** Contest label per problem id (e.g. `R1B2`); ids missing here fall back to the id. */
-  problemLabels: ReadonlyMap<number, string>;
 }
 
 /**
- * Drag-and-drop is not used here on purpose: a "click each problem once, in
- * the order you want your opponent to face them" build produces a ranking
- * that is a permutation OF THE VISIBLE PROBLEMS by construction -- there is
- * no reordering gesture that can leave a duplicate or omission in the
- * `picks` array. `canSubmitOrder` (shared with the tested pure-logic
- * module) is still consulted before enabling Submit, both as defense in
- * depth and because it is also the function that gates the case a
- * click-based UI cannot self-prevent: the opponent's group not being fully
- * visible yet (a masked entry), where there is nothing valid to rank at
- * all.
+ * The player ranks the opponent's three problems by dragging them into the
+ * order the opponent must solve them. The list always holds exactly the
+ * visible group, so any arrangement is a valid permutation; `canSubmitOrder`
+ * is still checked, and also covers the one case dragging cannot: part of the
+ * group not being visible yet.
  */
 export function OrderingPanel({
+  contestId,
   opponentGroup,
+  submittedOrder,
+  problems,
   onSubmit,
   submitting,
-  alreadySubmitted,
-  problemLabels,
 }: OrderingPanelProps) {
   const { t } = useTranslation();
-  const [picks, setPicks] = useState<number[]>([]);
-  const problemName = (id: number) =>
-    problemLabels.get(id) ?? t('codelink-bracket.ordering.problem', { id });
+  const visible = opponentGroup.filter((id): id is number => id !== null);
+  const initial =
+    submittedOrder && submittedOrder.every((id) => id !== null)
+      ? (submittedOrder as number[])
+      : visible;
+  const [order, setOrder] = useState<number[]>(initial);
 
-  const hiddenEntryCount = opponentGroup.filter((id) => id === null).length;
-  if (hiddenEntryCount > 0) {
+  if (visible.length < opponentGroup.length) {
     return (
-      <div className="rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+      <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">
         {t('codelink-bracket.ordering.hidden')}
-      </div>
+      </p>
     );
   }
 
-  const visibleProblems = opponentGroup.filter(
-    (id): id is number => id !== null,
-  );
-  const remaining = visibleProblems.filter((id) => !picks.includes(id));
-  const canSubmit = canSubmitOrder(picks, opponentGroup) && !submitting;
+  const alreadySubmitted = submittedOrder !== null;
+  const canSubmit = canSubmitOrder(order, opponentGroup) && !submitting;
 
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        {alreadySubmitted
-          ? t('codelink-bracket.ordering.resubmit')
-          : t('codelink-bracket.ordering.instructions')}
+        {t('codelink-bracket.ordering.instructions')}
       </p>
-
-      <div className="flex flex-wrap gap-2">
-        {remaining.map((problemId) => (
-          <button
-            key={problemId}
-            type="button"
-            onClick={() => setPicks((prev) => [...prev, problemId])}
-            className="rounded-md border border-input bg-background px-3 py-1.5 text-sm hover:bg-accent"
-          >
-            {problemName(problemId)}
-          </button>
-        ))}
-      </div>
-
-      <ol className="flex flex-col gap-1">
-        {picks.map((problemId, index) => (
-          <li
-            key={problemId}
-            className={cn(
-              'flex items-center justify-between rounded-md border border-border px-3 py-1.5 text-sm',
-            )}
-          >
-            <span>
-              {index + 1}. {problemName(problemId)}
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                setPicks((prev) => prev.filter((id) => id !== problemId))
-              }
-              className="text-xs text-muted-foreground hover:text-foreground"
-            >
-              {t('codelink-bracket.ordering.remove')}
-            </button>
-          </li>
-        ))}
-        {picks.length === 0 && (
-          <li className="text-sm text-muted-foreground">
-            {t('codelink-bracket.ordering.empty')}
-          </li>
-        )}
-      </ol>
-
-      <div className="flex items-center gap-2">
+      <SortableList
+        items={order}
+        getKey={(id) => id}
+        onChange={setOrder}
+        disabled={submitting}
+        renderItem={(id) => {
+          const p = problems.get(id);
+          return (
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate">
+                <span className="font-mono font-semibold">
+                  {p?.label ?? `#${id}`}
+                </span>
+                {p && (
+                  <span className="ml-2 text-muted-foreground">{p.title}</span>
+                )}
+              </span>
+              <Link
+                to={problemPath(contestId, id)}
+                target="_blank"
+                onClick={(e) => e.stopPropagation()}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label={t('codelink-bracket.ordering.openProblem')}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+            </div>
+          );
+        }}
+      />
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          {alreadySubmitted
+            ? t('codelink-bracket.ordering.resubmit')
+            : t('codelink-bracket.ordering.hint')}
+        </p>
         <Button
           type="button"
           disabled={!canSubmit}
           onClick={() => {
-            if (picks.length !== 3) return;
-            const [first, second, third] = picks;
+            const [first, second, third] = order;
             if (
               first === undefined ||
               second === undefined ||
@@ -123,20 +111,13 @@ export function OrderingPanel({
             onSubmit([first, second, third]);
           }}
         >
+          <Lock className="mr-1.5 h-3.5 w-3.5" />
           {submitting
             ? t('codelink-bracket.ordering.submitting')
-            : t('codelink-bracket.ordering.submit')}
+            : alreadySubmitted
+              ? t('codelink-bracket.ordering.update')
+              : t('codelink-bracket.ordering.submit')}
         </Button>
-        {picks.length > 0 && (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setPicks([])}
-            disabled={submitting}
-          >
-            {t('codelink-bracket.ordering.reset')}
-          </Button>
-        )}
       </div>
     </div>
   );

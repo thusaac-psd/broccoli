@@ -8,6 +8,7 @@ import type {
   MatchView,
   OrderRequest,
   OrderResponse,
+  SetupRequest,
   StartResponse,
 } from '../types.ts';
 
@@ -89,6 +90,13 @@ export function useBracketApi() {
             body: JSON.stringify({ winner } satisfies ForceDecideRequest),
           },
         ),
+
+      setup: (contestId: number, body: SetupRequest) =>
+        fetchJson<unknown>(`${PLUGIN_BASE}/contests/${contestId}/setup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
     }),
     [fetchJson],
   );

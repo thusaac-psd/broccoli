@@ -1,149 +1,398 @@
+import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
+import { Skeleton } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
+import { AlertTriangle, Crown, Trophy } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 
 import { useBracketApi } from './hooks/useBracketApi';
-import { describeMatchPhase } from './lib/phase';
 import { playerLabel } from './lib/player';
-import { MatchDetailPanel } from './MatchDetailPanel';
+import {
+  matchesInRound,
+  ROUND_COUNT,
+  roundNameKey,
+  roundShortKey,
+} from './lib/rounds';
+import { sideOf } from './lib/stage';
+import { MatchSheet } from './MatchSheet';
+import { MyMatchPanel } from './MyMatchPanel';
+import { StatusPill, useGameClock } from './parts';
+import { SetupPanel } from './SetupPanel';
 import type { MatchView } from './types';
 
-interface BracketViewProps {
+interface BracketScoreboardProps {
   contestId?: number;
   contestType?: string;
   children?: ReactNode;
 }
 
+const needsAttention = (m: MatchView) =>
+  m.state === 'awaiting_judge' || m.state === 'needs_adjudication';
+const readyToStart = (m: MatchView) =>
+  m.state === 'ordering' && m.order_a !== null && m.order_b !== null;
+const isLive = (m: MatchView) =>
+  m.state === 'in_progress' || m.state === 'tiebreak';
+
 /**
- * The bracket view: 16 slots across 4 rounds, grouped by round. Registered
- * at the `ranking.content` slot (contest_type = "codelink-bracket",
- * position = "wrap", mirroring IcpcScoreboard/IoiScoreboard). Every match
- * shown here is already visibility-filtered by `GET /bracket` for this
- * viewer -- this component does not re-derive or second-guess that, it
- * only renders what came back.
+ * The ranking page for the afternoon round: the viewer's own match first (for
+ * players), then the whole bracket as a tree. Registered at `ranking.content`.
+ * Every match here is already visibility-filtered by `GET /bracket`.
  */
-export function BracketScoreboard({ contestId, children }: BracketViewProps) {
+export function BracketScoreboard({
+  contestId,
+  children,
+}: BracketScoreboardProps) {
   const { t } = useTranslation();
   const api = useBracketApi();
-  const [selectedMatchId, setSelectedMatchId] = useState<number | null>(null);
+  const auth = useAuth();
+  const [openMatch, setOpenMatch] = useState<number | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['codelink-bracket-bracket', contestId],
     enabled: !!contestId,
     queryFn: () => api.getBracket(contestId as number),
-    refetchInterval: 8_000,
+    refetchInterval: 5_000,
   });
 
-  if (!contestId) {
-    return <>{children}</>;
-  }
+  if (!contestId) return <>{children}</>;
 
   if (isError) {
     return (
-      <div className="rounded-md bg-red-500/[0.06] p-6 text-center text-[13px] text-red-600">
+      <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-6 text-center text-sm text-red-700">
         {t('codelink-bracket.bracket.loadError')}
       </div>
     );
   }
-
   if (isLoading || !data) {
     return (
-      <div className="p-6 text-center text-muted-foreground">
-        {t('codelink-bracket.bracket.loading')}
+      <div className="grid grid-cols-4 gap-8">
+        {Array.from({ length: 4 }, (_, i) => (
+          <Skeleton key={i} className="h-72 w-full" />
+        ))}
       </div>
     );
   }
 
+  const viewerId = auth.user?.id ?? null;
+  const isStaff = (auth.user?.permissions ?? []).includes(CONTEST_MANAGE);
+
   if (data.matches.length === 0) {
-    return (
-      <div className="py-12 text-center text-muted-foreground">
+    return isStaff ? (
+      <SetupPanel contestId={contestId} />
+    ) : (
+      <div className="rounded-xl border border-dashed border-border py-16 text-center text-muted-foreground">
         {t('codelink-bracket.bracket.empty')}
       </div>
     );
   }
 
-  const byRound = new Map<number, MatchView[]>();
-  for (const match of data.matches) {
-    const bucket = byRound.get(match.round) ?? [];
-    bucket.push(match);
-    byRound.set(match.round, bucket);
-  }
-  const rounds = [...byRound.keys()].sort((a, b) => a - b);
+  const matches = data.matches;
+  const mine = matches
+    .filter((m) => sideOf(m, viewerId) !== null)
+    .sort((a, b) => b.round - a.round)[0];
+  const mySide = mine ? sideOf(mine, viewerId) : null;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-4 overflow-x-auto sm:flex-row">
-        {rounds.map((round) => (
-          <div key={round} className="flex min-w-[220px] flex-col gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {t('codelink-bracket.bracket.round', { round })}
-            </h3>
-            {(byRound.get(round) ?? [])
-              .sort((a, b) => a.pos - b.pos)
-              .map((match) => (
-                <MatchCard
-                  key={match.id}
-                  match={match}
-                  selected={selectedMatchId === match.id}
-                  onSelect={() => setSelectedMatchId(match.id)}
-                />
-              ))}
-          </div>
-        ))}
-      </div>
-
-      {selectedMatchId !== null && (
-        <MatchDetailPanel contestId={contestId} matchId={selectedMatchId} />
+    <div className="space-y-6">
+      {mine && mySide && (
+        <MyMatchPanel
+          contestId={contestId}
+          match={mine}
+          side={mySide}
+          onOpenDetails={() => setOpenMatch(mine.id)}
+        />
       )}
+      <SummaryBar matches={matches} isStaff={isStaff} />
+      <BracketTree
+        matches={matches}
+        viewerId={viewerId}
+        onOpen={setOpenMatch}
+      />
+      <MatchSheet
+        contestId={contestId}
+        matchId={openMatch}
+        onClose={() => setOpenMatch(null)}
+      />
+    </div>
+  );
+}
+
+function SummaryBar({
+  matches,
+  isStaff,
+}: {
+  matches: MatchView[];
+  isStaff: boolean;
+}) {
+  const { t } = useTranslation();
+  const decided = matches.filter((m) => m.state === 'decided').length;
+  const currentRound =
+    Math.min(
+      ...matches.filter((m) => m.state !== 'decided').map((m) => m.round),
+    ) || ROUND_COUNT;
+  const stat = (value: number, label: string, tone?: string) => (
+    <div className="flex items-baseline gap-1.5">
+      <span
+        className={cn('font-mono text-lg font-semibold tabular-nums', tone)}
+      >
+        {value}
+      </span>
+      <span className="text-xs text-muted-foreground">{label}</span>
+    </div>
+  );
+  const attention = matches.filter(needsAttention).length;
+  const ready = matches.filter(readyToStart).length;
+  return (
+    <div className="flex flex-wrap items-center gap-x-8 gap-y-3 rounded-xl border border-border bg-card px-5 py-3">
+      <div>
+        <div className="text-xs text-muted-foreground">
+          {t('codelink-bracket.summary.stage')}
+        </div>
+        <div className="font-semibold">
+          {decided === 15
+            ? t('codelink-bracket.summary.finished')
+            : t(
+                roundNameKey(
+                  Number.isFinite(currentRound) ? currentRound : ROUND_COUNT,
+                ),
+              )}
+        </div>
+      </div>
+      {stat(
+        matches.filter(isLive).length,
+        t('codelink-bracket.summary.live'),
+        'text-emerald-600',
+      )}
+      {stat(decided, t('codelink-bracket.summary.decided', { total: 15 }))}
+      {isStaff &&
+        ready > 0 &&
+        stat(ready, t('codelink-bracket.summary.ready'), 'text-sky-600')}
+      {isStaff && attention > 0 && (
+        <div className="ml-auto flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-300">
+          <AlertTriangle className="h-4 w-4" />
+          {t('codelink-bracket.summary.attention', { count: attention })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BracketTree({
+  matches,
+  viewerId,
+  onOpen,
+}: {
+  matches: MatchView[];
+  viewerId: number | null;
+  onOpen: (id: number) => void;
+}) {
+  const { t } = useTranslation();
+  const at = new Map(matches.map((m) => [`${m.round}:${m.pos}`, m]));
+  const final = at.get(`${ROUND_COUNT}:0`);
+  const champion =
+    final?.state === 'decided' && final.winner !== null
+      ? final.winner === final.player_a
+        ? playerLabel(final.player_a_name, final.player_a)
+        : playerLabel(final.player_b_name, final.player_b)
+      : null;
+
+  return (
+    <div className="overflow-x-auto pb-2">
+      <div className="min-w-[980px]">
+        <div className="mb-2 grid grid-cols-[repeat(4,minmax(0,1fr))_9rem] gap-x-8">
+          {Array.from({ length: ROUND_COUNT }, (_, i) => (
+            <div
+              key={i}
+              className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+            >
+              {t(roundNameKey(i + 1))}
+            </div>
+          ))}
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {t('codelink-bracket.round.champion')}
+          </div>
+        </div>
+        <div
+          className="grid grid-cols-[repeat(4,minmax(0,1fr))_9rem] gap-x-8"
+          style={{ gridTemplateRows: 'repeat(8, minmax(4.75rem, auto))' }}
+        >
+          {Array.from({ length: ROUND_COUNT }, (_, r) => r + 1).flatMap(
+            (round) =>
+              Array.from({ length: matchesInRound(round) }, (_, pos) => {
+                const span = 1 << (round - 1);
+                const match = at.get(`${round}:${pos}`);
+                return (
+                  <div
+                    key={`${round}:${pos}`}
+                    className="relative flex items-center py-1.5"
+                    style={{
+                      gridColumn: round,
+                      gridRow: `${pos * span + 1} / span ${span}`,
+                    }}
+                  >
+                    {round > 1 && (
+                      <span className="absolute -left-4 top-1/2 h-px w-4 bg-border" />
+                    )}
+                    <span className="absolute -right-4 top-1/2 h-px w-4 bg-border" />
+                    {round < ROUND_COUNT && pos % 2 === 0 && (
+                      <span className="absolute -right-4 top-1/2 h-full w-px bg-border" />
+                    )}
+                    {match ? (
+                      <MatchCard
+                        match={match}
+                        isMine={sideOf(match, viewerId) !== null}
+                        onOpen={() => onOpen(match.id)}
+                      />
+                    ) : (
+                      <PendingSlot round={round} pos={pos} />
+                    )}
+                  </div>
+                );
+              }),
+          )}
+          <div
+            className="relative flex items-center py-1.5"
+            style={{ gridColumn: 5, gridRow: '1 / span 8' }}
+          >
+            <span className="absolute -left-4 top-1/2 h-px w-4 bg-border" />
+            <div
+              className={cn(
+                'flex w-full flex-col items-center gap-2 rounded-xl border p-4 text-center',
+                champion
+                  ? 'border-amber-400/60 bg-amber-400/10'
+                  : 'border-dashed border-border text-muted-foreground',
+              )}
+            >
+              <Crown
+                className={cn(
+                  'h-6 w-6',
+                  champion ? 'text-amber-500' : 'opacity-40',
+                )}
+              />
+              <span className="text-sm font-semibold">
+                {champion ?? t('codelink-bracket.round.tbd')}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PendingSlot({ round, pos }: { round: number; pos: number }) {
+  const { t } = useTranslation();
+  // Feeders are the two matches of the previous round at 2*pos and 2*pos+1.
+  const feeder = (i: number) =>
+    t('codelink-bracket.slot.winnerOf', {
+      match: `${t(roundShortKey(round - 1))} ${2 * pos + i + 1}`,
+    });
+  return (
+    <div className="w-full rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+      <div className="py-0.5">
+        {round > 1 ? feeder(0) : t('codelink-bracket.round.tbd')}
+      </div>
+      <div className="py-0.5">
+        {round > 1 ? feeder(1) : t('codelink-bracket.round.tbd')}
+      </div>
     </div>
   );
 }
 
 function MatchCard({
   match,
-  selected,
-  onSelect,
+  isMine,
+  onOpen,
 }: {
   match: MatchView;
-  selected: boolean;
-  onSelect: () => void;
+  isMine: boolean;
+  onOpen: () => void;
 }) {
   const { t } = useTranslation();
-  const status = describeMatchPhase(match.state);
+  const clock = useGameClock(match);
+  const row = (name: string, id: number, score: number) => {
+    const won = match.winner === id;
+    const lost = match.winner !== null && !won;
+    return (
+      <div
+        className={cn(
+          'flex items-center gap-2 px-3 py-1',
+          won && 'bg-emerald-500/5',
+        )}
+      >
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate text-sm',
+            won
+              ? 'font-semibold'
+              : lost
+                ? 'text-muted-foreground'
+                : 'font-medium',
+          )}
+        >
+          {name}
+        </span>
+        {won && <Trophy className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
+        <span
+          className={cn(
+            'w-5 text-right font-mono text-sm tabular-nums',
+            won ? 'font-bold' : 'text-muted-foreground',
+          )}
+        >
+          {match.state === 'pending' ? '' : score}
+        </span>
+      </div>
+    );
+  };
   return (
     <button
       type="button"
-      onClick={onSelect}
+      onClick={onOpen}
       className={cn(
-        'rounded-md border border-border p-2 text-left text-sm transition-colors hover:bg-accent',
-        selected && 'border-primary bg-accent',
+        'w-full overflow-hidden rounded-lg border bg-card text-left shadow-xs transition hover:-translate-y-px hover:border-primary/50 hover:shadow-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
+        match.state === 'needs_adjudication'
+          ? 'border-red-500/50 ring-1 ring-red-500/30'
+          : match.state === 'awaiting_judge'
+            ? 'border-amber-500/50 ring-1 ring-amber-500/30'
+            : isMine
+              ? 'border-primary/60 ring-1 ring-primary/30'
+              : 'border-border',
       )}
     >
-      <div className="flex items-center justify-between">
-        <span
-          className={cn(
-            'font-medium',
-            match.winner === match.player_a && 'text-emerald-600',
-          )}
-        >
-          {playerLabel(match.player_a_name, match.player_a)}
-        </span>
-        <span className="font-mono tabular-nums">{match.score_a}</span>
+      <div className="divide-y divide-border">
+        {row(
+          playerLabel(match.player_a_name, match.player_a),
+          match.player_a,
+          match.score_a,
+        )}
+        {row(
+          playerLabel(match.player_b_name, match.player_b),
+          match.player_b,
+          match.score_b,
+        )}
       </div>
-      <div className="flex items-center justify-between">
-        <span
-          className={cn(
-            'font-medium',
-            match.winner === match.player_b && 'text-emerald-600',
-          )}
-        >
-          {playerLabel(match.player_b_name, match.player_b)}
+      <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-1">
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {t(roundShortKey(match.round))} {match.pos + 1}
         </span>
-        <span className="font-mono tabular-nums">{match.score_b}</span>
-      </div>
-      <div className="mt-1 text-[11px] text-muted-foreground">
-        {t(status.labelKey)}
+        <StatusPill short state={match.state} className="px-1.5 text-[10px]" />
+        {isMine && (
+          <span className="rounded bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+            {t('codelink-bracket.card.you')}
+          </span>
+        )}
+        {clock && (
+          <span
+            className={cn(
+              'ml-auto font-mono text-[11px] tabular-nums',
+              clock.overdue ? 'text-amber-700' : 'text-muted-foreground',
+            )}
+          >
+            {clock.text}
+          </span>
+        )}
       </div>
     </button>
   );

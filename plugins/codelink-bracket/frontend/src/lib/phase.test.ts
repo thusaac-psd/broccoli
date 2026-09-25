@@ -82,3 +82,12 @@ test('isActivelyPlaying is false for awaiting_judge', () => {
   // widening this check, defeating the whole point of the phase.
   assert.equal(isActivelyPlaying('awaiting_judge'), false);
 });
+
+test('every phase has a short card label, and awaiting_judge keeps its own', () => {
+  const shorts = ALL_PHASES.map((p) => describeMatchPhase(p).shortKey);
+  for (const key of shorts) assert.ok(key.length > 0);
+  assert.notEqual(
+    describeMatchPhase('awaiting_judge').shortKey,
+    describeMatchPhase('in_progress').shortKey,
+  );
+});

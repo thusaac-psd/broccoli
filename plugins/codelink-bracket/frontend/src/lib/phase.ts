@@ -27,6 +27,8 @@ export interface MatchStatusDescription {
   kind: MatchStatusKind;
   /** Translation key for a short summary (`i18n/*.toml` in this plugin). */
   labelKey: string;
+  /** Translation key for a one- or two-word form, for bracket cards. */
+  shortKey: string;
 }
 
 export function describeMatchPhase(phase: MatchPhase): MatchStatusDescription {
@@ -35,27 +37,43 @@ export function describeMatchPhase(phase: MatchPhase): MatchStatusDescription {
       return {
         kind: 'not_started',
         labelKey: 'codelink-bracket.phase.pending',
+        shortKey: 'codelink-bracket.phase.short.pending',
       };
     case 'ordering':
-      return { kind: 'ordering', labelKey: 'codelink-bracket.phase.ordering' };
+      return {
+        kind: 'ordering',
+        labelKey: 'codelink-bracket.phase.ordering',
+        shortKey: 'codelink-bracket.phase.short.ordering',
+      };
     case 'in_progress':
       return {
         kind: 'playing',
         labelKey: 'codelink-bracket.phase.inProgress',
+        shortKey: 'codelink-bracket.phase.short.live',
       };
     case 'tiebreak':
-      return { kind: 'playing', labelKey: 'codelink-bracket.phase.tiebreak' };
+      return {
+        kind: 'playing',
+        labelKey: 'codelink-bracket.phase.tiebreak',
+        shortKey: 'codelink-bracket.phase.short.tiebreak',
+      };
     case 'awaiting_judge':
       return {
         kind: 'awaiting_judge',
         labelKey: 'codelink-bracket.phase.awaitingJudge',
+        shortKey: 'codelink-bracket.phase.short.judging',
       };
     case 'decided':
-      return { kind: 'decided', labelKey: 'codelink-bracket.phase.decided' };
+      return {
+        kind: 'decided',
+        labelKey: 'codelink-bracket.phase.decided',
+        shortKey: 'codelink-bracket.phase.short.decided',
+      };
     case 'needs_adjudication':
       return {
         kind: 'needs_adjudication',
         labelKey: 'codelink-bracket.phase.needsAdjudication',
+        shortKey: 'codelink-bracket.phase.short.staff',
       };
   }
 }
