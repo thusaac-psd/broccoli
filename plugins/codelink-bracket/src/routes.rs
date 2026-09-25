@@ -16,6 +16,7 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::bracket;
+use crate::decide;
 use crate::judge;
 use crate::model::{MatchPhase, MatchState, RoundDef};
 use crate::storage;
@@ -277,6 +278,28 @@ struct MatchView {
     current_xiaoju_index: Option<u8>,
     current_xiaoju_deadline_ms: Option<i64>,
     current_xiaoju_opened_at_ms: Option<i64>,
+    /// Every 小局 opened so far, in order - the per-game history staff and
+    /// spectators need (who won which game, on which problems, and when). A
+    /// game that has not opened is simply absent, and each problem id is
+    /// masked by the same [`mask_problem`] rule as the rest of this view, so
+    /// this adds no visibility that `order_a`/`order_b`/`tiebreak_problem`
+    /// do not already grant.
+    games: Vec<GameView>,
+}
+
+/// One opened 小局 as seen by the requesting viewer. Regular games (index
+/// 0-2) give each player their own problem from the opponent-chosen order;
+/// a tiebreak (index 3+) gives both players the same problem.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct GameView {
+    index: u8,
+    tiebreak: bool,
+    problem_a: Option<i32>,
+    problem_b: Option<i32>,
+    opened_at_ms: i64,
+    deadline_ms: i64,
+    winner: Option<i32>,
+    decided: bool,
 }
 
 /// Whether `viewer` may see `problem_id` in `ctx`, per
@@ -369,6 +392,42 @@ fn match_view(
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
+        games: m
+            .xiaoju
+            .iter()
+            .map(|x| {
+                let (a, b) = game_problems(m, round_def, x.index);
+                let mask = |pid: Option<i32>| {
+                    pid.and_then(|pid| mask_problem(&ctx, pid, viewer, can_view_all))
+                };
+                GameView {
+                    index: x.index,
+                    tiebreak: !decide::is_regular_xiaoju_index(x.index),
+                    problem_a: mask(a),
+                    problem_b: mask(b),
+                    opened_at_ms: x.opened_at_ms,
+                    deadline_ms: x.deadline_ms,
+                    winner: x.winner,
+                    decided: x.decided,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The problems each player faces in 小局 `index`: position `index` of the
+/// order imposed on them for a regular game, the round's `index - 3`th
+/// tiebreak problem (the same for both) for a tiebreak.
+fn game_problems(m: &MatchState, round_def: &RoundDef, index: u8) -> (Option<i32>, Option<i32>) {
+    let i = index as usize;
+    if decide::is_regular_xiaoju_index(index) {
+        (m.order_a.map(|o| o[i]), m.order_b.map(|o| o[i]))
+    } else {
+        let t = round_def
+            .tiebreak
+            .get(i - decide::REGULAR_XIAOJU_COUNT)
+            .copied();
+        (t, t)
     }
 }
 
@@ -804,6 +863,65 @@ mod tests {
     }
 
     // -- MatchView 小局 timing: what drives the client countdown --
+
+    #[test]
+    fn games_list_each_opened_game_and_mask_it_like_the_rest_of_the_view() {
+        let mut m = match_in_ordering();
+        m.state = MatchPhase::InProgress;
+        m.order_a = Some([103, 101, 102]);
+        m.order_b = Some([203, 201, 202]);
+        m.xiaoju = vec![
+            XiaojuState {
+                index: 0,
+                opened_at_ms: 0,
+                deadline_ms: 60_000,
+                winner: Some(10),
+                decided: true,
+            },
+            XiaojuState {
+                index: 1,
+                opened_at_ms: 60_000,
+                deadline_ms: 120_000,
+                winner: None,
+                decided: false,
+            },
+        ];
+        let setup = setup_two_rounds();
+        let round_def = &setup.rounds[0];
+
+        // Staff see both players' problems for every opened game, and no
+        // entry at all for the game that has not opened.
+        let staff = match_view(0, &m, round_def, None, true);
+        assert_eq!(staff.games.len(), 2);
+        assert_eq!(
+            (staff.games[0].problem_a, staff.games[0].problem_b),
+            (Some(103), Some(203))
+        );
+        assert_eq!(
+            (staff.games[1].problem_a, staff.games[1].problem_b),
+            (Some(101), Some(201))
+        );
+        assert_eq!(staff.games[0].winner, Some(10));
+        assert!(!staff.games[1].tiebreak);
+
+        // Each game's problems obey exactly the same masking as the orders.
+        for viewer in [Some(10), Some(20), Some(99), None] {
+            let v = match_view(0, &m, round_def, viewer, false);
+            for g in &v.games {
+                let i = g.index as usize;
+                assert_eq!(
+                    g.problem_a,
+                    v.order_a.unwrap()[i],
+                    "viewer {viewer:?} game {i} a"
+                );
+                assert_eq!(
+                    g.problem_b,
+                    v.order_b.unwrap()[i],
+                    "viewer {viewer:?} game {i} b"
+                );
+            }
+        }
+    }
 
     #[test]
     fn match_view_exposes_the_open_xiaoju_timing_for_the_countdown() {
