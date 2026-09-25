@@ -4,6 +4,7 @@ description = "16-player single-elimination bracket with per-小局 asymmetric p
 
 [translations]
 en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
 
 [server]
 entry = "afternoon_bracket.wasm"

@@ -26,12 +26,12 @@ const ALL_PHASES: MatchPhase[] = [
   'needs_adjudication',
 ];
 
-test('every MatchPhase maps to a description with a non-empty label', () => {
+test('every MatchPhase maps to a description with a non-empty label key', () => {
   for (const phase of ALL_PHASES) {
     const description = describeMatchPhase(phase);
     assert.ok(
-      description.label.length > 0,
-      `phase "${phase}" got an empty label`,
+      description.labelKey.length > 0,
+      `phase "${phase}" got an empty label key`,
     );
   }
 });
@@ -65,7 +65,7 @@ test('in_progress and tiebreak are both "playing" but each keeps a distinguishin
   const tiebreak = describeMatchPhase('tiebreak');
   assert.equal(inProgress.kind, 'playing');
   assert.equal(tiebreak.kind, 'playing');
-  assert.notEqual(inProgress.label, tiebreak.label);
+  assert.notEqual(inProgress.labelKey, tiebreak.labelKey);
 });
 
 test('isActivelyPlaying is true only for in_progress and tiebreak', () => {

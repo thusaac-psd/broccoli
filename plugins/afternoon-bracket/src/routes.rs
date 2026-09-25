@@ -222,6 +222,12 @@ struct MatchView {
     pos: u8,
     player_a: i32,
     player_b: i32,
+    /// Display names for `player_a` / `player_b`, resolved in one batched
+    /// lookup per request (see [`attach_player_names`]). Who plays whom is
+    /// structural and public, like the ids themselves, so never masked.
+    /// `None` only if the lookup failed; the frontend falls back to the id.
+    player_a_name: Option<String>,
+    player_b_name: Option<String>,
     group_a: [Option<i32>; 3],
     group_b: [Option<i32>; 3],
     order_a: Option<[Option<i32>; 3]>,
@@ -232,9 +238,11 @@ struct MatchView {
     state: MatchPhase,
     winner: Option<i32>,
     decided_at_ms: i64,
-    /// Present (and matches `MatchState::awaiting_submission_id`) only while
-    /// `state == MatchPhase::AwaitingJudge`. Never masked -- like `state`
-    /// itself, this is structural, not a problem id. Lets staff reading
+    /// Mirrors `MatchState::awaiting_submission_id`: set while
+    /// `state == MatchPhase::AwaitingJudge`, and KEPT when that block times out
+    /// into `NeedsAdjudication` (so staff know which submission to rejudge;
+    /// its absence there means the tiebreak list ran out instead). Never
+    /// masked -- like `state` itself, this is structural, not a problem id. Lets staff reading
     /// `GET /matches/{id}` distinguish "still solving" (`InProgress`) from
     /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
     /// to diff two responses over time.
@@ -343,6 +351,8 @@ fn match_view(
         pos: m.pos,
         player_a: m.player_a,
         player_b: m.player_b,
+        player_a_name: None,
+        player_b_name: None,
         group_a: mask_group(&ctx, m.group_a, viewer, can_view_all),
         group_b: mask_group(&ctx, m.group_b, viewer, can_view_all),
         order_a: m.order_a.map(|o| mask_group(&ctx, o, viewer, can_view_all)),
@@ -359,6 +369,50 @@ fn match_view(
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
+    }
+}
+
+#[derive(Deserialize)]
+struct PlayerNameRow {
+    id: i32,
+    username: String,
+}
+
+/// Fill in `player_{a,b}_name` for every view with ONE query - the same
+/// `"user"` lookup the morning round (codelink) uses for its standings, so
+/// both halves of the event show contestants the same way. Best-effort: names
+/// are cosmetic, so a failed lookup logs and leaves them `None` rather than
+/// failing the whole bracket view mid-contest.
+fn attach_player_names(host: &Host, views: &mut [MatchView]) {
+    let mut ids: Vec<i32> = views
+        .iter()
+        .flat_map(|v| [v.player_a, v.player_b])
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return;
+    }
+    let mut p = Params::new();
+    let placeholders: Vec<String> = ids.iter().map(|id| p.bind(*id)).collect();
+    let sql = format!(
+        "SELECT id, username FROM \"user\" WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let rows: Vec<PlayerNameRow> = match host.db.query_with_args(&sql, &p.into_args()) {
+        Ok(rows) => rows,
+        Err(e) => {
+            let _ = host.log.info(&format!(
+                "afternoon-bracket: player name lookup failed: {e:?}"
+            ));
+            return;
+        }
+    };
+    let names: std::collections::HashMap<i32, String> =
+        rows.into_iter().map(|r| (r.id, r.username)).collect();
+    for v in views.iter_mut() {
+        v.player_a_name = names.get(&v.player_a).cloned();
+        v.player_b_name = names.get(&v.player_b).cloned();
     }
 }
 
@@ -390,13 +444,14 @@ pub fn handle_get_bracket(
 
     let viewer = req.user_id();
     let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    let views: Vec<MatchView> = matches
+    let mut views: Vec<MatchView> = matches
         .iter()
         .filter_map(|(id, m)| {
             let round_def = setup.rounds.get(m.round.saturating_sub(1) as usize)?;
             Some(match_view(*id, m, round_def, viewer, can_view_all))
         })
         .collect();
+    attach_player_names(host, &mut views);
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -428,7 +483,9 @@ pub fn handle_get_match(
 
     let viewer = req.user_id();
     let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    let view = match_view(match_id, &m, round_def, viewer, can_view_all);
+    let mut view = [match_view(match_id, &m, round_def, viewer, can_view_all)];
+    attach_player_names(host, &mut view);
+    let [view] = view;
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -983,5 +1040,34 @@ mod tests {
         // for why the visible entry lands at `group_a`'s own index (2), not
         // at the front.
         assert_eq!(matches[0]["group_a"], serde_json::json!([null, null, 103]));
+    }
+    #[test]
+    fn get_bracket_shows_player_usernames() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        seed_match_in_progress(&host, 7);
+        host.db.queue_query_result(serde_json::json!([
+            { "id": 10, "username": "alice" },
+            { "id": 20, "username": "bob" },
+        ]));
+
+        let resp = handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
+        let m = resp.body.unwrap()["matches"][0].clone();
+        assert_eq!(m["player_a_name"], "alice");
+        assert_eq!(m["player_b_name"], "bob");
+    }
+
+    #[test]
+    fn get_bracket_still_renders_when_the_name_lookup_returns_nothing() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        seed_match_in_progress(&host, 7);
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let resp = handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
+        assert_eq!(resp.status, 200);
+        let m = resp.body.unwrap()["matches"][0].clone();
+        assert_eq!(m["player_a"], 10);
+        assert!(m["player_a_name"].is_null());
     }
 }

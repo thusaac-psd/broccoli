@@ -37,6 +37,9 @@ export interface MatchView {
   pos: number;
   player_a: number;
   player_b: number;
+  /** Usernames for `player_a`/`player_b`; null only if the server's lookup failed. */
+  player_a_name: string | null;
+  player_b_name: string | null;
   group_a: MaskedTriple;
   group_b: MaskedTriple;
   order_a: MaskedTriple | null;
@@ -48,9 +51,11 @@ export interface MatchView {
   winner: number | null;
   decided_at_ms: number;
   /**
-   * The id of the in-flight submission this match is blocked on. Present
-   * only while `state === 'awaiting_judge'`; never masked (structural, like
-   * `state` itself).
+   * The id of the in-flight submission this match is blocked on. Set while
+   * `state === 'awaiting_judge'` and kept if that block escalates to
+   * `needs_adjudication` -- so in that state, non-null means "a judge never
+   * finished" and null means "the tiebreak list ran out". Never masked
+   * (structural, like `state` itself).
    */
   awaiting_submission_id: number | null;
   /**

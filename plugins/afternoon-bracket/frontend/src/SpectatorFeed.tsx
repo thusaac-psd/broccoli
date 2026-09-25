@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
 
@@ -6,6 +7,8 @@ interface SpectatorFeedProps {
   contestId: number;
   playerA: number;
   playerB: number;
+  nameA: string;
+  nameB: string;
 }
 
 /**
@@ -18,11 +21,13 @@ export function SpectatorFeed({
   contestId,
   playerA,
   playerB,
+  nameA,
+  nameB,
 }: SpectatorFeedProps) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-      <PlayerFeed contestId={contestId} userId={playerA} label="Player A" />
-      <PlayerFeed contestId={contestId} userId={playerB} label="Player B" />
+      <PlayerFeed contestId={contestId} userId={playerA} label={nameA} />
+      <PlayerFeed contestId={contestId} userId={playerB} label={nameB} />
     </div>
   );
 }
@@ -36,6 +41,7 @@ function PlayerFeed({
   userId: number;
   label: string;
 }) {
+  const { t } = useTranslation();
   const apiClient = useApiClient();
 
   const { data, isLoading, isError } = useQuery({
@@ -66,14 +72,22 @@ function PlayerFeed({
   return (
     <div className="rounded-md border border-border p-3">
       <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {label} (user {userId})
+        {label}
       </h4>
-      {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+      {isLoading && (
+        <p className="text-sm text-muted-foreground">
+          {t('afternoon-bracket.feed.loading')}
+        </p>
+      )}
       {isError && (
-        <p className="text-sm text-destructive">Failed to load submissions.</p>
+        <p className="text-sm text-destructive">
+          {t('afternoon-bracket.feed.loadError')}
+        </p>
       )}
       {data && data.data.length === 0 && (
-        <p className="text-sm text-muted-foreground">No submissions yet.</p>
+        <p className="text-sm text-muted-foreground">
+          {t('afternoon-bracket.feed.empty')}
+        </p>
       )}
       {data && data.data.length > 0 && (
         <ul className="flex flex-col gap-1.5">

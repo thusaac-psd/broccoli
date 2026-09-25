@@ -25,32 +25,38 @@ export type MatchStatusKind =
 
 export interface MatchStatusDescription {
   kind: MatchStatusKind;
-  /** Short, human-readable summary. English regardless of UI locale. */
-  label: string;
+  /** Translation key for a short summary (`i18n/*.toml` in this plugin). */
+  labelKey: string;
 }
 
 export function describeMatchPhase(phase: MatchPhase): MatchStatusDescription {
   switch (phase) {
     case 'pending':
-      return { kind: 'not_started', label: 'Not started' };
-    case 'ordering':
       return {
-        kind: 'ordering',
-        label: 'Waiting for both players to rank problems',
+        kind: 'not_started',
+        labelKey: 'afternoon-bracket.phase.pending',
       };
+    case 'ordering':
+      return { kind: 'ordering', labelKey: 'afternoon-bracket.phase.ordering' };
     case 'in_progress':
-      return { kind: 'playing', label: 'In progress' };
+      return {
+        kind: 'playing',
+        labelKey: 'afternoon-bracket.phase.inProgress',
+      };
     case 'tiebreak':
-      return { kind: 'playing', label: 'Tiebreak (附加赛) in progress' };
+      return { kind: 'playing', labelKey: 'afternoon-bracket.phase.tiebreak' };
     case 'awaiting_judge':
       return {
         kind: 'awaiting_judge',
-        label: 'Waiting on a pending submission -- not simply in progress',
+        labelKey: 'afternoon-bracket.phase.awaitingJudge',
       };
     case 'decided':
-      return { kind: 'decided', label: 'Decided' };
+      return { kind: 'decided', labelKey: 'afternoon-bracket.phase.decided' };
     case 'needs_adjudication':
-      return { kind: 'needs_adjudication', label: 'Needs staff adjudication' };
+      return {
+        kind: 'needs_adjudication',
+        labelKey: 'afternoon-bracket.phase.needsAdjudication',
+      };
   }
 }
 

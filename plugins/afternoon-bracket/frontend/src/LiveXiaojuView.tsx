@@ -1,4 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { Submission } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -63,6 +64,7 @@ export function LiveXiaojuView({
   problemId,
   submissions,
 }: LiveXiaojuViewProps) {
+  const { t } = useTranslation();
   const api = useBracketApi();
   const auth = useAuth();
   const viewerId = auth.user?.id ?? null;
@@ -100,7 +102,7 @@ export function LiveXiaojuView({
     <div className="mb-4 rounded-md border border-border p-3">
       <div className="mb-1 flex items-center justify-between">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          下午场 Bracket -- {status.label}
+          {t('afternoon-bracket.live.title', { status: t(status.labelKey) })}
         </h4>
         <span className="font-mono text-xs tabular-nums text-muted-foreground">
           {ownScore} - {opponentScore}
@@ -109,9 +111,7 @@ export function LiveXiaojuView({
 
       {match.state === 'awaiting_judge' && (
         <p className="text-xs text-amber-700">
-          This 小局's deadline passed while an earlier submission was still
-          being judged -- you are not simply still playing. Waiting on the
-          judge.
+          {t('afternoon-bracket.live.awaitingJudge')}
         </p>
       )}
 
@@ -124,7 +124,7 @@ export function LiveXiaojuView({
               : 'text-muted-foreground',
           )}
         >
-          {formatCountdownLabel(countdown)}
+          {formatCountdownLabel(countdown, t)}
         </p>
       )}
 

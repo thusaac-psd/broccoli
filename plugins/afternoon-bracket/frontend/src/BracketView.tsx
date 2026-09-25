@@ -1,9 +1,11 @@
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useState } from 'react';
 
 import { useBracketApi } from './hooks/useBracketApi';
 import { describeMatchPhase } from './lib/phase';
+import { playerLabel } from './lib/player';
 import { MatchDetailPanel } from './MatchDetailPanel';
 import type { MatchView } from './types';
 
@@ -22,6 +24,7 @@ interface BracketViewProps {
  * only renders what came back.
  */
 export function BracketView({ contestId, children }: BracketViewProps) {
+  const { t } = useTranslation();
   const api = useBracketApi();
   const [selectedMatchId, setSelectedMatchId] = useState<number | null>(null);
 
@@ -39,7 +42,7 @@ export function BracketView({ contestId, children }: BracketViewProps) {
   if (isError) {
     return (
       <div className="rounded-md bg-red-500/[0.06] p-6 text-center text-[13px] text-red-600">
-        Failed to load the bracket.
+        {t('afternoon-bracket.bracket.loadError')}
       </div>
     );
   }
@@ -47,7 +50,7 @@ export function BracketView({ contestId, children }: BracketViewProps) {
   if (isLoading || !data) {
     return (
       <div className="p-6 text-center text-muted-foreground">
-        Loading bracket...
+        {t('afternoon-bracket.bracket.loading')}
       </div>
     );
   }
@@ -55,7 +58,7 @@ export function BracketView({ contestId, children }: BracketViewProps) {
   if (data.matches.length === 0) {
     return (
       <div className="py-12 text-center text-muted-foreground">
-        The bracket has not been set up yet.
+        {t('afternoon-bracket.bracket.empty')}
       </div>
     );
   }
@@ -74,7 +77,7 @@ export function BracketView({ contestId, children }: BracketViewProps) {
         {rounds.map((round) => (
           <div key={round} className="flex min-w-[220px] flex-col gap-2">
             <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Round {round}
+              {t('afternoon-bracket.bracket.round', { round })}
             </h3>
             {(byRound.get(round) ?? [])
               .sort((a, b) => a.pos - b.pos)
@@ -106,6 +109,7 @@ function MatchCard({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const { t } = useTranslation();
   const status = describeMatchPhase(match.state);
   return (
     <button
@@ -123,7 +127,7 @@ function MatchCard({
             match.winner === match.player_a && 'text-emerald-600',
           )}
         >
-          Player {match.player_a}
+          {playerLabel(match.player_a_name, match.player_a)}
         </span>
         <span className="font-mono tabular-nums">{match.score_a}</span>
       </div>
@@ -134,12 +138,12 @@ function MatchCard({
             match.winner === match.player_b && 'text-emerald-600',
           )}
         >
-          Player {match.player_b}
+          {playerLabel(match.player_b_name, match.player_b)}
         </span>
         <span className="font-mono tabular-nums">{match.score_b}</span>
       </div>
       <div className="mt-1 text-[11px] text-muted-foreground">
-        {status.label}
+        {t(status.labelKey)}
       </div>
     </button>
   );

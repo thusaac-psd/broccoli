@@ -1,4 +1,5 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
   SUBMISSION_VIEW_ALL,
@@ -15,6 +16,7 @@ import {
   xiaojuTimingFromMatch,
 } from './lib/countdown';
 import { describeMatchPhase, isActivelyPlaying } from './lib/phase';
+import { playerLabel } from './lib/player';
 import { OrderingPanel } from './OrderingPanel';
 import { SpectatorFeed } from './SpectatorFeed';
 import type { MatchView } from './types';
@@ -28,6 +30,7 @@ export function MatchDetailPanel({
   contestId,
   matchId,
 }: MatchDetailPanelProps) {
+  const { t } = useTranslation();
   const api = useBracketApi();
   const auth = useAuth();
   const queryClient = useQueryClient();
@@ -57,7 +60,9 @@ export function MatchDetailPanel({
 
   if (isLoading || !match) {
     return (
-      <p className="p-3 text-sm text-muted-foreground">Loading match...</p>
+      <p className="p-3 text-sm text-muted-foreground">
+        {t('afternoon-bracket.match.loading')}
+      </p>
     );
   }
 
@@ -67,6 +72,8 @@ export function MatchDetailPanel({
   const canViewAll = permissions.includes(SUBMISSION_VIEW_ALL);
 
   const status = describeMatchPhase(match.state);
+  const nameA = playerLabel(match.player_a_name, match.player_a);
+  const nameB = playerLabel(match.player_b_name, match.player_b);
 
   // See `MatchState`'s doc comment (plugins/afternoon-bracket/src/model.rs):
   // a player ranks the OPPONENT's problems, so player A's opponent group is
@@ -93,7 +100,9 @@ export function MatchDetailPanel({
       invalidate();
     } catch (err) {
       setActionError(
-        err instanceof Error ? err.message : 'Failed to submit order',
+        err instanceof Error
+          ? err.message
+          : t('afternoon-bracket.error.submitOrder'),
       );
     } finally {
       setSubmittingOrder(false);
@@ -108,7 +117,7 @@ export function MatchDetailPanel({
       invalidate();
     } catch (err) {
       setActionError(
-        err instanceof Error ? err.message : 'Failed to start match',
+        err instanceof Error ? err.message : t('afternoon-bracket.error.start'),
       );
     } finally {
       setStartingMatch(false);
@@ -123,7 +132,9 @@ export function MatchDetailPanel({
       invalidate();
     } catch (err) {
       setActionError(
-        err instanceof Error ? err.message : 'Failed to force-decide',
+        err instanceof Error
+          ? err.message
+          : t('afternoon-bracket.error.forceDecide'),
       );
     } finally {
       setForceDeciding(false);
@@ -142,14 +153,20 @@ export function MatchDetailPanel({
     <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">
-          Round {match.round} -- Player {match.player_a} vs Player{' '}
-          {match.player_b}
+          {t('afternoon-bracket.match.heading', {
+            round: match.round,
+            a: nameA,
+            b: nameB,
+          })}
         </h3>
-        <StatusBadge kind={status.kind} label={status.label} />
+        <StatusBadge kind={status.kind} label={t(status.labelKey)} />
       </div>
 
       <div className="text-sm text-muted-foreground">
-        Score: {match.score_a} - {match.score_b}
+        {t('afternoon-bracket.match.score', {
+          a: match.score_a,
+          b: match.score_b,
+        })}
       </div>
 
       {showCountdown && (
@@ -161,25 +178,33 @@ export function MatchDetailPanel({
               : 'text-muted-foreground',
           )}
         >
-          {formatCountdownLabel(countdown)}
+          {formatCountdownLabel(countdown, t)}
         </div>
       )}
 
       {match.state === 'awaiting_judge' && (
         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700">
-          This 小局's deadline passed while an earlier submission was still
-          being judged. The outcome is not yet known -- this is NOT the same as
-          still being in progress.
+          {t('afternoon-bracket.match.awaitingJudge')}
           {match.awaiting_submission_id !== null && (
-            <> Blocking submission: #{match.awaiting_submission_id}.</>
+            <>
+              {' '}
+              {t('afternoon-bracket.match.blockingSubmission', {
+                id: match.awaiting_submission_id,
+              })}
+            </>
           )}
         </div>
       )}
 
       {match.state === 'needs_adjudication' && (
         <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700">
-          The tiebreak problem list was exhausted without a decision. Staff must
-          resolve this match manually.
+          {/* Escalation from `awaiting_judge` keeps the blocking id; the
+              tiebreak list running out never sets one. */}
+          {match.awaiting_submission_id !== null
+            ? t('afternoon-bracket.match.stuckJudge', {
+                id: match.awaiting_submission_id,
+              })
+            : t('afternoon-bracket.match.tiebreakExhausted')}
         </div>
       )}
 
@@ -197,13 +222,15 @@ export function MatchDetailPanel({
           contestId={contestId}
           playerA={match.player_a}
           playerB={match.player_b}
+          nameA={nameA}
+          nameB={nameB}
         />
       )}
 
       {isStaff && (
         <div className="flex flex-col gap-2 border-t border-border pt-3">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Staff controls
+            {t('afternoon-bracket.staff.title')}
           </h4>
           <div className="flex flex-wrap gap-2">
             {match.state === 'ordering' && (
@@ -213,7 +240,9 @@ export function MatchDetailPanel({
                 disabled={!bothOrdersIn || startingMatch}
                 onClick={handleStart}
               >
-                {startingMatch ? 'Starting...' : 'Start match'}
+                {startingMatch
+                  ? t('afternoon-bracket.staff.starting')
+                  : t('afternoon-bracket.staff.start')}
               </Button>
             )}
             {(isActivelyPlaying(match.state) ||
@@ -227,7 +256,7 @@ export function MatchDetailPanel({
                   disabled={forceDeciding}
                   onClick={() => handleForceDecide(null)}
                 >
-                  Force expiry
+                  {t('afternoon-bracket.staff.forceExpiry')}
                 </Button>
                 <Button
                   type="button"
@@ -236,7 +265,7 @@ export function MatchDetailPanel({
                   disabled={forceDeciding}
                   onClick={() => handleForceDecide(match.player_a)}
                 >
-                  Award to Player {match.player_a}
+                  {t('afternoon-bracket.staff.awardTo', { name: nameA })}
                 </Button>
                 <Button
                   type="button"
@@ -245,7 +274,7 @@ export function MatchDetailPanel({
                   disabled={forceDeciding}
                   onClick={() => handleForceDecide(match.player_b)}
                 >
-                  Award to Player {match.player_b}
+                  {t('afternoon-bracket.staff.awardTo', { name: nameB })}
                 </Button>
               </>
             )}

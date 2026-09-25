@@ -1,3 +1,4 @@
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useState } from 'react';
@@ -32,13 +33,14 @@ export function OrderingPanel({
   submitting,
   alreadySubmitted,
 }: OrderingPanelProps) {
+  const { t } = useTranslation();
   const [picks, setPicks] = useState<number[]>([]);
 
   const hiddenEntryCount = opponentGroup.filter((id) => id === null).length;
   if (hiddenEntryCount > 0) {
     return (
       <div className="rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
-        Waiting to see the opponent&apos;s problems before you can rank them.
+        {t('afternoon-bracket.ordering.hidden')}
       </div>
     );
   }
@@ -53,8 +55,8 @@ export function OrderingPanel({
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
         {alreadySubmitted
-          ? 'You already submitted a ranking. Submitting again replaces it until the match starts.'
-          : "Click the opponent's 3 problems below, in the order you want them to face them (first click = 1st)."}
+          ? t('afternoon-bracket.ordering.resubmit')
+          : t('afternoon-bracket.ordering.instructions')}
       </p>
 
       <div className="flex flex-wrap gap-2">
@@ -65,7 +67,7 @@ export function OrderingPanel({
             onClick={() => setPicks((prev) => [...prev, problemId])}
             className="rounded-md border border-input bg-background px-3 py-1.5 text-sm hover:bg-accent"
           >
-            Problem {problemId}
+            {t('afternoon-bracket.ordering.problem', { id: problemId })}
           </button>
         ))}
       </div>
@@ -79,7 +81,8 @@ export function OrderingPanel({
             )}
           >
             <span>
-              {index + 1}. Problem {problemId}
+              {index + 1}.{' '}
+              {t('afternoon-bracket.ordering.problem', { id: problemId })}
             </span>
             <button
               type="button"
@@ -88,13 +91,13 @@ export function OrderingPanel({
               }
               className="text-xs text-muted-foreground hover:text-foreground"
             >
-              Remove
+              {t('afternoon-bracket.ordering.remove')}
             </button>
           </li>
         ))}
         {picks.length === 0 && (
           <li className="text-sm text-muted-foreground">
-            No problems ranked yet.
+            {t('afternoon-bracket.ordering.empty')}
           </li>
         )}
       </ol>
@@ -116,7 +119,9 @@ export function OrderingPanel({
             onSubmit([first, second, third]);
           }}
         >
-          {submitting ? 'Submitting...' : 'Submit ranking'}
+          {submitting
+            ? t('afternoon-bracket.ordering.submitting')
+            : t('afternoon-bracket.ordering.submit')}
         </Button>
         {picks.length > 0 && (
           <Button
@@ -125,7 +130,7 @@ export function OrderingPanel({
             onClick={() => setPicks([])}
             disabled={submitting}
           >
-            Reset
+            {t('afternoon-bracket.ordering.reset')}
           </Button>
         )}
       </div>

@@ -110,15 +110,22 @@ export function formatDurationMs(ms: number): string {
  * future `CountdownStatus` variant is added without a case here, this stops
  * compiling instead of silently rendering nothing for it.
  */
-export function formatCountdownLabel(status: CountdownStatus): string {
+export function formatCountdownLabel(
+  status: CountdownStatus,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
   switch (status.kind) {
     case 'no-data':
-      return 'Live timing is not available for this match yet.';
+      return t('afternoon-bracket.countdown.noData');
     case 'counting':
-      return `Time remaining: ${formatDurationMs(status.remainingMs)}`;
+      return t('afternoon-bracket.countdown.counting', {
+        time: formatDurationMs(status.remainingMs),
+      });
     case 'waiting-for-server':
-      return `Deadline passed ${formatDurationMs(status.overdueMs)} ago -- waiting for the server to decide.`;
+      return t('afternoon-bracket.countdown.waitingForServer', {
+        time: formatDurationMs(status.overdueMs),
+      });
     case 'decided':
-      return 'This 小局 has been decided.';
+      return t('afternoon-bracket.countdown.decided');
   }
 }

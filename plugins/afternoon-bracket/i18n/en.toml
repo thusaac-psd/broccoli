@@ -1,2 +1,54 @@
 # afternoon-bracket
-'afternoon-bracket.title' = '下午场 Bracket'
+'afternoon-bracket.title' = 'Afternoon bracket'
+
+'afternoon-bracket.bracket.loading' = 'Loading bracket…'
+'afternoon-bracket.bracket.loadError' = 'Failed to load the bracket.'
+'afternoon-bracket.bracket.empty' = 'The bracket has not been set up yet.'
+'afternoon-bracket.bracket.round' = 'Round {round}'
+
+'afternoon-bracket.phase.pending' = 'Not started'
+'afternoon-bracket.phase.ordering' = 'Waiting for both players to rank problems'
+'afternoon-bracket.phase.inProgress' = 'In progress'
+'afternoon-bracket.phase.tiebreak' = 'Tiebreak in progress'
+'afternoon-bracket.phase.awaitingJudge' = 'Waiting on a pending submission'
+'afternoon-bracket.phase.decided' = 'Decided'
+'afternoon-bracket.phase.needsAdjudication' = 'Needs staff decision'
+
+'afternoon-bracket.countdown.noData' = 'Live timing is not available for this match yet.'
+'afternoon-bracket.countdown.counting' = 'Time remaining: {time}'
+'afternoon-bracket.countdown.waitingForServer' = 'Deadline passed {time} ago. Waiting for the server to decide.'
+'afternoon-bracket.countdown.decided' = 'This game has been decided.'
+
+'afternoon-bracket.match.loading' = 'Loading match…'
+'afternoon-bracket.match.heading' = 'Round {round}: {a} vs {b}'
+'afternoon-bracket.match.score' = 'Score: {a} - {b}'
+'afternoon-bracket.match.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. The result is not known yet.'
+'afternoon-bracket.match.blockingSubmission' = 'Blocking submission: #{id}.'
+'afternoon-bracket.match.stuckJudge' = 'Submission #{id} never finished judging. Rejudge it, or decide the match manually.'
+'afternoon-bracket.match.tiebreakExhausted' = 'The tiebreak problems ran out without a winner. Staff must decide this match manually.'
+
+'afternoon-bracket.staff.title' = 'Staff controls'
+'afternoon-bracket.staff.start' = 'Start match'
+'afternoon-bracket.staff.starting' = 'Starting…'
+'afternoon-bracket.staff.forceExpiry' = 'Force expiry'
+'afternoon-bracket.staff.awardTo' = 'Award to {name}'
+'afternoon-bracket.error.submitOrder' = 'Failed to submit the ranking.'
+'afternoon-bracket.error.start' = 'Failed to start the match.'
+'afternoon-bracket.error.forceDecide' = 'Failed to decide the match.'
+
+'afternoon-bracket.ordering.hidden' = "Waiting to see the opponent's problems before you can rank them."
+'afternoon-bracket.ordering.resubmit' = 'You already submitted a ranking. Submitting again replaces it until the match starts.'
+'afternoon-bracket.ordering.instructions' = "Click the opponent's 3 problems in the order they must solve them (first click = 1st)."
+'afternoon-bracket.ordering.problem' = 'Problem {id}'
+'afternoon-bracket.ordering.remove' = 'Remove'
+'afternoon-bracket.ordering.empty' = 'No problems ranked yet.'
+'afternoon-bracket.ordering.submit' = 'Submit ranking'
+'afternoon-bracket.ordering.submitting' = 'Submitting…'
+'afternoon-bracket.ordering.reset' = 'Reset'
+
+'afternoon-bracket.feed.loading' = 'Loading…'
+'afternoon-bracket.feed.loadError' = 'Failed to load submissions.'
+'afternoon-bracket.feed.empty' = 'No submissions yet.'
+
+'afternoon-bracket.live.title' = 'Afternoon bracket: {status}'
+'afternoon-bracket.live.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. Waiting on the judge.'

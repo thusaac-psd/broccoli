@@ -168,6 +168,11 @@ test('formatDurationMs clamps a negative input to 0:00 rather than producing a n
 
 // -- formatCountdownLabel: exhaustive over every CountdownStatus kind --
 
+// Stand-in translator: echoes the key and its params, so these tests pin
+// which message is chosen and what gets interpolated, independent of locale.
+const echoT = (key: string, params?: Record<string, string | number>) =>
+  params ? `${key} ${JSON.stringify(params)}` : key;
+
 test('formatCountdownLabel produces a non-empty, distinct label for every CountdownStatus kind', () => {
   const statuses: Parameters<typeof formatCountdownLabel>[0][] = [
     { kind: 'no-data' },
@@ -175,7 +180,7 @@ test('formatCountdownLabel produces a non-empty, distinct label for every Countd
     { kind: 'waiting-for-server', overdueMs: 2_500 },
     { kind: 'decided' },
   ];
-  const labels = statuses.map(formatCountdownLabel);
+  const labels = statuses.map((s) => formatCountdownLabel(s, echoT));
   for (const label of labels) {
     assert.ok(label.length > 0);
   }
@@ -184,14 +189,17 @@ test('formatCountdownLabel produces a non-empty, distinct label for every Countd
 
 test('formatCountdownLabel embeds the formatted remaining time for "counting"', () => {
   assert.match(
-    formatCountdownLabel({ kind: 'counting', remainingMs: 65_000 }),
+    formatCountdownLabel({ kind: 'counting', remainingMs: 65_000 }, echoT),
     /1:05/,
   );
 });
 
 test('formatCountdownLabel embeds the formatted overdue time for "waiting-for-server"', () => {
   assert.match(
-    formatCountdownLabel({ kind: 'waiting-for-server', overdueMs: 2_500 }),
+    formatCountdownLabel(
+      { kind: 'waiting-for-server', overdueMs: 2_500 },
+      echoT,
+    ),
     /0:03/,
   );
 });
