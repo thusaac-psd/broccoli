@@ -24,7 +24,7 @@
 'afternoon-bracket.match.score' = 'Score: {a} - {b}'
 'afternoon-bracket.match.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. The result is not known yet.'
 'afternoon-bracket.match.blockingSubmission' = 'Blocking submission: #{id}.'
-'afternoon-bracket.match.stuckJudge' = 'Submission #{id} never finished judging. Rejudge it, or decide the match manually.'
+'afternoon-bracket.match.stuckJudge' = 'Submission #{id} was still being judged when the grace period ran out. Check its result (rejudge it if it is stuck), then decide the match.'
 'afternoon-bracket.match.tiebreakExhausted' = 'The tiebreak problems ran out without a winner. Staff must decide this match manually.'
 
 'afternoon-bracket.staff.title' = 'Staff controls'

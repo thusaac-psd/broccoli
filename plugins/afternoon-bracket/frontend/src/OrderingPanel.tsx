@@ -13,6 +13,8 @@ interface OrderingPanelProps {
   submitting: boolean;
   /** Set once this viewer has already submitted a ranking for this match. */
   alreadySubmitted: boolean;
+  /** Contest label per problem id (e.g. `R1B2`); ids missing here fall back to the id. */
+  problemLabels: ReadonlyMap<number, string>;
 }
 
 /**
@@ -32,9 +34,12 @@ export function OrderingPanel({
   onSubmit,
   submitting,
   alreadySubmitted,
+  problemLabels,
 }: OrderingPanelProps) {
   const { t } = useTranslation();
   const [picks, setPicks] = useState<number[]>([]);
+  const problemName = (id: number) =>
+    problemLabels.get(id) ?? t('afternoon-bracket.ordering.problem', { id });
 
   const hiddenEntryCount = opponentGroup.filter((id) => id === null).length;
   if (hiddenEntryCount > 0) {
@@ -67,7 +72,7 @@ export function OrderingPanel({
             onClick={() => setPicks((prev) => [...prev, problemId])}
             className="rounded-md border border-input bg-background px-3 py-1.5 text-sm hover:bg-accent"
           >
-            {t('afternoon-bracket.ordering.problem', { id: problemId })}
+            {problemName(problemId)}
           </button>
         ))}
       </div>
@@ -81,8 +86,7 @@ export function OrderingPanel({
             )}
           >
             <span>
-              {index + 1}.{' '}
-              {t('afternoon-bracket.ordering.problem', { id: problemId })}
+              {index + 1}. {problemName(problemId)}
             </span>
             <button
               type="button"

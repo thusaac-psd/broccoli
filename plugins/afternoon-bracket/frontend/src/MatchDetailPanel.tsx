@@ -1,3 +1,4 @@
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -33,6 +34,7 @@ export function MatchDetailPanel({
   const { t } = useTranslation();
   const api = useBracketApi();
   const auth = useAuth();
+  const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
   const [submittingOrder, setSubmittingOrder] = useState(false);
@@ -46,6 +48,19 @@ export function MatchDetailPanel({
       const current = query.state.data as MatchView | undefined;
       if (!current) return 4_000;
       return current.state === 'decided' ? false : 4_000;
+    },
+  });
+
+  // Contest labels for the ordering buttons. The host's list is already
+  // visibility-filtered for this viewer, so it never names a hidden problem.
+  const { data: problemLabels = new Map<number, string>() } = useQuery({
+    queryKey: ['afternoon-bracket-problem-labels', contestId],
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
+        params: { path: { id: contestId } },
+      });
+      if (error || !data) return new Map<number, string>();
+      return new Map(data.map((p) => [p.problem_id, p.label]));
     },
   });
 
@@ -214,6 +229,7 @@ export function MatchDetailPanel({
           onSubmit={handleSubmitOrder}
           submitting={submittingOrder}
           alreadySubmitted={ownSubmittedOrder !== null}
+          problemLabels={problemLabels}
         />
       )}
 
@@ -249,15 +265,19 @@ export function MatchDetailPanel({
               match.state === 'awaiting_judge' ||
               match.state === 'needs_adjudication') && (
               <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={forceDeciding}
-                  onClick={() => handleForceDecide(null)}
-                >
-                  {t('afternoon-bracket.staff.forceExpiry')}
-                </Button>
+                {/* Expiry re-runs the normal decision, which never reopens
+                    an escalated match -- only an explicit award does. */}
+                {match.state !== 'needs_adjudication' && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={forceDeciding}
+                    onClick={() => handleForceDecide(null)}
+                  >
+                    {t('afternoon-bracket.staff.forceExpiry')}
+                  </Button>
+                )}
                 <Button
                   type="button"
                   size="sm"
