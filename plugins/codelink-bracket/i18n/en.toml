@@ -157,3 +157,15 @@
 'codelink-bracket.confirm.rejudgeDescription' = 'The submission is judged again and the new result replaces the old one. If this game is waiting on it, the game resolves when the new result arrives.'
 'codelink-bracket.confirm.autofillTitle' = 'Replace your problem choices?'
 'codelink-bracket.confirm.autofillDescription' = "Every round is refilled from the contest's problem order. The problems you picked by hand are lost."
+'codelink-bracket.strip.waiting_opponent' = 'Waiting for your opponent'
+'codelink-bracket.strip.rank' = "Rank your opponent's problems"
+'codelink-bracket.strip.waiting_start' = 'Ranked · waiting to start'
+'codelink-bracket.strip.judging' = 'Waiting on the judge'
+'codelink-bracket.strip.staff' = 'Staff are deciding'
+'codelink-bracket.strip.advanced' = 'You advanced'
+'codelink-bracket.strip.eliminated' = 'Eliminated'
+'codelink-bracket.strip.go' = 'Go to your match'
+'codelink-bracket.summary.present' = 'Present'
+'codelink-bracket.summary.exitPresent' = 'Exit'
+'codelink-bracket.game.short' = 'G{n}'
+'codelink-bracket.game.shortTiebreak' = 'TB{n}'

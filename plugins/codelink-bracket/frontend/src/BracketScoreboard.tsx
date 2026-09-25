@@ -1,13 +1,26 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
-import { Skeleton } from '@broccoli/web-sdk/ui';
+import { Button, Skeleton } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, Crown, Trophy } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import {
+  AlertTriangle,
+  Crown,
+  Maximize2,
+  Minimize2,
+  Trophy,
+} from 'lucide-react';
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { useBracketApi } from './hooks/useBracketApi';
+import { gamePips, type Pip, seedsFrom } from './lib/pips';
 import { playerLabel } from './lib/player';
 import {
   matchesInRound,
@@ -17,7 +30,7 @@ import {
 } from './lib/rounds';
 import { sideOf } from './lib/stage';
 import { MatchSheet } from './MatchSheet';
-import { MyMatchPanel } from './MyMatchPanel';
+import { MyMatchStrip } from './MyMatchStrip';
 import { StatusPill, useGameClock } from './parts';
 import { SetupPanel } from './SetupPanel';
 import type { MatchView } from './types';
@@ -48,6 +61,8 @@ export function BracketScoreboard({
   const api = useBracketApi();
   const auth = useAuth();
   const [openMatch, setOpenMatch] = useState<number | null>(null);
+  const presentRef = useRef<HTMLDivElement>(null);
+  const presenting = useFullscreen(presentRef);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['codelink-bracket-bracket', contestId],
@@ -97,19 +112,31 @@ export function BracketScoreboard({
   return (
     <div className="space-y-6">
       {mine && mySide && (
-        <MyMatchPanel
-          contestId={contestId}
-          match={mine}
-          side={mySide}
-          onOpenDetails={() => setOpenMatch(mine.id)}
-        />
+        <MyMatchStrip contestId={contestId} match={mine} side={mySide} />
       )}
-      <SummaryBar matches={matches} isStaff={isStaff} />
-      <BracketTree
-        matches={matches}
-        viewerId={viewerId}
-        onOpen={setOpenMatch}
-      />
+      <div
+        ref={presentRef}
+        className={cn(
+          'space-y-6',
+          presenting && 'overflow-auto bg-background p-8',
+        )}
+      >
+        <SummaryBar
+          matches={matches}
+          isStaff={isStaff}
+          presenting={presenting}
+          onTogglePresent={() =>
+            presenting
+              ? void document.exitFullscreen()
+              : void presentRef.current?.requestFullscreen()
+          }
+        />
+        <BracketTree
+          matches={matches}
+          viewerId={presenting ? null : viewerId}
+          onOpen={setOpenMatch}
+        />
+      </div>
       <MatchSheet
         contestId={contestId}
         matchId={openMatch}
@@ -119,12 +146,27 @@ export function BracketScoreboard({
   );
 }
 
+/** Whether `ref`'s element is currently the fullscreen element. */
+function useFullscreen(ref: RefObject<HTMLElement | null>): boolean {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const sync = () => setOn(document.fullscreenElement === ref.current);
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, [ref]);
+  return on;
+}
+
 function SummaryBar({
   matches,
   isStaff,
+  presenting,
+  onTogglePresent,
 }: {
   matches: MatchView[];
   isStaff: boolean;
+  presenting: boolean;
+  onTogglePresent: () => void;
 }) {
   const { t } = useTranslation();
   const decided = matches.filter((m) => m.state === 'decided').length;
@@ -167,14 +209,28 @@ function SummaryBar({
       )}
       {stat(decided, t('codelink-bracket.summary.decided', { total: 15 }))}
       {isStaff &&
+        !presenting &&
         ready > 0 &&
         stat(ready, t('codelink-bracket.summary.ready'), 'text-sky-600')}
-      {isStaff && attention > 0 && (
-        <div className="ml-auto flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-300">
-          <AlertTriangle className="h-4 w-4" />
-          {t('codelink-bracket.summary.attention', { count: attention })}
-        </div>
-      )}
+      <div className="ml-auto flex items-center gap-3">
+        {/* Staff-only signal: kept off the projected view. */}
+        {isStaff && !presenting && attention > 0 && (
+          <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-300">
+            <AlertTriangle className="h-4 w-4" />
+            {t('codelink-bracket.summary.attention', { count: attention })}
+          </div>
+        )}
+        <Button size="sm" variant="outline" onClick={onTogglePresent}>
+          {presenting ? (
+            <Minimize2 className="mr-1.5 h-3.5 w-3.5" />
+          ) : (
+            <Maximize2 className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {presenting
+            ? t('codelink-bracket.summary.exitPresent')
+            : t('codelink-bracket.summary.present')}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -190,6 +246,7 @@ function BracketTree({
 }) {
   const { t } = useTranslation();
   const at = new Map(matches.map((m) => [`${m.round}:${m.pos}`, m]));
+  const seeds = seedsFrom(matches);
   const final = at.get(`${ROUND_COUNT}:0`);
   const champion =
     final?.state === 'decided' && final.winner !== null
@@ -242,6 +299,7 @@ function BracketTree({
                     {match ? (
                       <MatchCard
                         match={match}
+                        seeds={seeds}
                         isMine={sideOf(match, viewerId) !== null}
                         onOpen={() => onOpen(match.id)}
                       />
@@ -301,17 +359,47 @@ function PendingSlot({ round, pos }: { round: number; pos: number }) {
   );
 }
 
+const PIP: Record<Pip, string> = {
+  won: 'bg-emerald-500',
+  lost: 'bg-muted-foreground/35',
+  void: 'border border-muted-foreground/40',
+  live: 'bg-emerald-500 animate-pulse ring-2 ring-emerald-500/30',
+  upcoming: 'border border-dashed border-muted-foreground/30',
+};
+
+function Pips({ pips }: { pips: Pip[] }) {
+  return (
+    <span aria-hidden className="flex shrink-0 items-center gap-1">
+      {pips.map((p, i) => (
+        <span
+          key={i}
+          className={cn('h-2 w-2 rounded-full', PIP[p], i === 3 && 'ml-1')}
+        />
+      ))}
+    </span>
+  );
+}
+
 function MatchCard({
   match,
+  seeds,
   isMine,
   onOpen,
 }: {
   match: MatchView;
+  seeds: ReadonlyMap<number, number>;
   isMine: boolean;
   onOpen: () => void;
 }) {
   const { t } = useTranslation();
   const clock = useGameClock(match);
+  const game = match.current_xiaoju_index;
+  const liveTag =
+    clock && game !== null
+      ? game >= 3
+        ? t('codelink-bracket.game.shortTiebreak', { n: game - 2 })
+        : t('codelink-bracket.game.short', { n: game + 1 })
+      : null;
   const row = (name: string, id: number, score: number) => {
     const won = match.winner === id;
     const lost = match.winner !== null && !won;
@@ -322,6 +410,9 @@ function MatchCard({
           won && 'bg-emerald-500/5',
         )}
       >
+        <span className="w-4 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
+          {seeds.get(id)}
+        </span>
         <span
           className={cn(
             'min-w-0 flex-1 truncate text-sm',
@@ -335,6 +426,9 @@ function MatchCard({
           {name}
         </span>
         {won && <Trophy className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
+        {match.state !== 'pending' && match.state !== 'ordering' && (
+          <Pips pips={gamePips(match, id)} />
+        )}
         <span
           className={cn(
             'w-5 text-right font-mono text-sm tabular-nums',
@@ -390,6 +484,9 @@ function MatchCard({
               clock.overdue ? 'text-amber-700' : 'text-muted-foreground',
             )}
           >
+            {liveTag && (
+              <span className="mr-1.5 font-sans font-semibold">{liveTag}</span>
+            )}
             {clock.text}
           </span>
         )}

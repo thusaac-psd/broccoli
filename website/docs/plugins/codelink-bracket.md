@@ -84,11 +84,17 @@ contest's **Configure** dialog.
 
 ## Play a match
 
-The **Rankings** page shows the bracket as a tree. Select a match to open its
-details in a side panel: the score, each game's problems and winner, both
-players' submissions with links to their judging, and the staff controls.
-Players also see a **Your match** panel above the bracket with their current
-step. The **Overview** page shows the rules.
+The **Rankings** page shows the bracket as a tree. Each card shows the seeds,
+one dot per game (who won it, or which game is live), and the live game's
+clock. **Present** shows the bracket full screen for an audience and hides the
+staff-only counts. Select a match to open its details in a side panel: the
+score, each game's problems and winner, both players' submissions with links
+to their judging, and the staff controls.
+
+Contestants work from the contest's **Overview** page. It opens with their own
+match: a stepper for where they are, the drag-to-rank list when it is their
+turn to rank, and the current problem with its clock once a game is live. The
+Rankings page shows them a one-line link back to it.
 
 1. Each player drags the opponent's three problems into the order the opponent
    must solve them.
