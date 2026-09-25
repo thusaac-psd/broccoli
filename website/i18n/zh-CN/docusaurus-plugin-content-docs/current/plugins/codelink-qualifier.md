@@ -1,12 +1,12 @@
 ---
-title: Codelink
-sidebar_label: Codelink
+title: Codelink 晋级赛
+sidebar_label: Codelink 晋级赛
 sidebar_position: 2
 ---
 
-# Codelink
+# Codelink 晋级赛
 
-上午场晋级赛使用 `codelink` 比赛类型。选手从比赛题集中自由选做，获得足够的计分名额后晋级下午场。每场比赛可以分别设置名额上限、晋级题数和刷新间隔。
+上午场晋级赛使用 `codelink-qualifier` 比赛类型。选手从比赛题集中自由选做，获得足够的计分名额后晋级下午场。每场比赛可以分别设置名额上限、晋级题数和刷新间隔。
 
 ## 构建并启用插件
 
@@ -14,16 +14,16 @@ sidebar_position: 2
 
 ```bash
 pnpm --filter @broccoli/web-sdk build
-just build-plugin plugins/codelink --install
+just build-plugin plugins/codelink-qualifier --install
 ```
 
-构建产物包括 `plugins/codelink/codelink.wasm` 和 `plugins/codelink/web/dist` 下的前端包。服务器从配置的插件目录发现该插件，默认目录为 `./plugins`。启动服务器，或在管理界面使用**重新加载所有插件**，即可发现该插件。
+构建产物包括 `plugins/codelink-qualifier/codelink_qualifier.wasm` 和 `plugins/codelink-qualifier/frontend/dist` 下的前端包。服务器从配置的插件目录发现该插件，默认目录为 `./plugins`。启动服务器，或在管理界面使用**重新加载所有插件**，即可发现该插件。
 
-在比赛编辑页面选择 `codelink` 比赛类型，设置上午场的开始和结束时间，并添加题目。每道题需要测试数据，以及对应的评测器、检查器和语言插件。将参赛选手加入上午场比赛，榜单只统计已报名的选手。
+在比赛编辑页面选择 `codelink-qualifier` 比赛类型，设置上午场的开始和结束时间，并添加题目。每道题需要测试数据，以及对应的评测器、检查器和语言插件。将参赛选手加入上午场比赛，榜单只统计已报名的选手。
 
 ## 配置比赛
 
-在管理界面打开该比赛的**配置**对话框，选择 `codelink` 插件的 `contest` 设置。
+在管理界面打开该比赛的**配置**对话框，选择 `codelink-qualifier` 插件的 `contest` 设置。
 
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |

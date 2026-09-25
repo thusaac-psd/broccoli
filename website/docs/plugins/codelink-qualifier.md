@@ -1,12 +1,12 @@
 ---
-title: Codelink
-sidebar_label: Codelink
+title: Codelink qualifier
+sidebar_label: Codelink qualifier
 sidebar_position: 2
 ---
 
-# Codelink
+# Codelink qualifier
 
-Use the `codelink` contest type for the morning qualification round. Contestants
+Use the `codelink-qualifier` contest type for the morning qualification round. Contestants
 choose freely among the contest's problems and qualify for the afternoon by
 earning scoring slots. Each contest can set its own slot limit, qualification
 threshold, and refresh interval.
@@ -18,15 +18,15 @@ dependencies.
 
 ```bash
 pnpm --filter @broccoli/web-sdk build
-just build-plugin plugins/codelink --install
+just build-plugin plugins/codelink-qualifier --install
 ```
 
-The build produces `plugins/codelink/codelink.wasm` and the frontend bundle under
-`plugins/codelink/web/dist`. The server discovers the plugin from its configured
+The build produces `plugins/codelink-qualifier/codelink_qualifier.wasm` and the frontend bundle under
+`plugins/codelink-qualifier/frontend/dist`. The server discovers the plugin from its configured
 plugins directory, which defaults to `./plugins`. Start the server or use
 **Reload all plugins** in the admin area to discover it.
 
-In the contest editor, select `codelink` as the contest type, set the morning
+In the contest editor, select `codelink-qualifier` as the contest type, set the morning
 start and end times, and add the problems. Each problem needs test cases and
 its usual evaluator, checker, and language plugins. Enroll the contestants in
 the morning contest. The standings include enrolled contestants only.
@@ -34,7 +34,7 @@ the morning contest. The standings include enrolled contestants only.
 ## Configure a contest
 
 Open the contest's **Configure** dialog in the admin area and select the
-`codelink` plugin's `contest` settings.
+`codelink-qualifier` plugin's `contest` settings.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
