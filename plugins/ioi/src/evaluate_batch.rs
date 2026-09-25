@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::error::SdkError;
 use broccoli_server_sdk::evaluator::{
-    CaseOutcome, ContestJudge, DetachedEval, JudgeProgress, JudgeStep,
+    CaseOutcome, ContestJudge, DetachedEval, JudgeProgress, JudgeStep, without_bodies,
 };
 use broccoli_server_sdk::types::*;
 use serde::{Deserialize, Serialize};
@@ -142,7 +142,9 @@ pub fn evaluate_all_detached(
     subtask_defs: &[SubtaskDef],
 ) -> Result<OnSubmissionOutput, SdkError> {
     let policy = IoiJudge {
-        all_test_cases: all_test_cases.to_vec(),
+        // Scoring reads only id / score / is_sample. The policy rides the
+        // session state on every callback, so it must not carry bodies.
+        all_test_cases: all_test_cases.iter().map(without_bodies).collect(),
         subtask_defs: subtask_defs.to_vec(),
         short_circuit: SubtaskShortCircuit::new(subtask_defs, scoring_test_cases),
     };

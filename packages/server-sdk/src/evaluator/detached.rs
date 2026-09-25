@@ -44,8 +44,8 @@ use crate::error::SdkError;
 use crate::types::{
     DetachedEvaluateCallbackEvent, DetachedEvaluateCallbackInput, DetachedEvaluateCallbackOutput,
     OnSubmissionInput, SourceFile, StartEvaluateBatchInput, StartEvaluateCaseInput,
-    TestCaseResultRow, TestCaseRow, TestCaseVerdict, Verdict, default_evaluation_result_timeout_ms,
-    sanitize_result_text_field,
+    TestCaseBodyRef, TestCaseResultRow, TestCaseRow, TestCaseVerdict, Verdict,
+    default_evaluation_result_timeout_ms, sanitize_result_text_field,
 };
 
 /// Message stamped on cases skipped because an earlier case short-circuited
@@ -119,9 +119,13 @@ fn clamp_i32(v: i64) -> i32 {
 /// It exposes exactly what a contest type needs to decide the next step or the
 /// final verdict, and nothing about the host protocol.
 pub struct JudgeProgress<'a> {
-    /// The submission being judged.
+    /// The submission being judged, WITHOUT its test cases or source files:
+    /// the driver drops those after starting the batch (see
+    /// [`without_bodies`]). Ids, limits, language and contest fields remain.
     pub request: &'a OnSubmissionInput,
-    /// The cases the evaluate window draws from.
+    /// The cases the evaluate window draws from, with their `input` and
+    /// `expected_output` bodies replaced by `Missing`. Everything a policy
+    /// scores on (id, score, label, position, flags) is intact.
     pub scoring_cases: &'a [TestCaseRow],
     /// Every outcome recorded so far, in record order (output stripped).
     pub outcomes: &'a [CaseOutcome],
@@ -242,9 +246,16 @@ impl<J: ContestJudge> DetachedEval<J> {
             return Err(SdkError::StaleEpoch);
         }
 
+        // The state is copied into the host and back on EVERY result
+        // callback, so it must not carry the case bodies (or the source):
+        // they are only needed to build `batch_input` above, which the host
+        // keeps for dispatch and retries. Carrying them made each callback
+        // parse and re-serialize the whole inline test data - measured at
+        // ~0.33 s extra per case with 50 x 150 KB cases, and most of the
+        // guest's ~20x memory amplification.
         let mut state = DetachedEval {
-            request: request.clone(),
-            scoring_cases: scoring_cases.to_vec(),
+            request: request_without_bodies(request),
+            scoring_cases: scoring_cases.iter().map(without_bodies).collect(),
             outcomes: Vec::new(),
             recorded_ids: HashSet::new(),
             marked_running: false,
@@ -485,6 +496,49 @@ impl<J: ContestJudge> DetachedEval<J> {
 
 /// Build the host evaluate-batch input for a submission's cases. Uniform across
 /// contest types; exposed so plugins share one definition.
+/// A copy of `tc` with its `input` and `expected_output` bodies dropped
+/// (`Missing`), for anything kept past batch start: session state and
+/// scoring policies need a case's identity and weight, never its data.
+///
+/// Built field by field rather than `..tc.clone()`, which would copy the
+/// bodies only to drop them.
+pub fn without_bodies(tc: &TestCaseRow) -> TestCaseRow {
+    TestCaseRow {
+        id: tc.id,
+        score: tc.score,
+        is_sample: tc.is_sample,
+        position: tc.position,
+        description: tc.description.clone(),
+        label: tc.label.clone(),
+        input: TestCaseBodyRef::Missing,
+        expected_output: TestCaseBodyRef::Missing,
+        is_custom: tc.is_custom,
+    }
+}
+
+/// `req` minus its test cases and source files, for the session state. Every
+/// field is listed on purpose: adding one to `OnSubmissionInput` fails to
+/// compile here until someone decides whether it belongs in state that is
+/// copied on every callback.
+fn request_without_bodies(req: &OnSubmissionInput) -> OnSubmissionInput {
+    OnSubmissionInput {
+        submission_id: req.submission_id,
+        judgement_id: req.judgement_id,
+        fire_after_judging: req.fire_after_judging,
+        user_id: req.user_id,
+        problem_id: req.problem_id,
+        contest_id: req.contest_id,
+        files: Vec::new(),
+        language: req.language.clone(),
+        time_limit_ms: req.time_limit_ms,
+        memory_limit_kb: req.memory_limit_kb,
+        problem_type: req.problem_type.clone(),
+        test_cases: Vec::new(),
+        judge_epoch: req.judge_epoch,
+        target_worker_id: req.target_worker_id.clone(),
+    }
+}
+
 pub fn build_eval_batch_input(
     req: &OnSubmissionInput,
     test_cases: &[TestCaseRow],

@@ -842,6 +842,51 @@ mod detached_tests {
         host.eval.detached_windowed_requests()[0].state.clone()
     }
 
+    /// The session state is copied into the host and back on every result
+    /// callback, so it must not carry test data or the source: those belong
+    /// to the evaluate batch alone. Before this, each callback re-parsed and
+    /// re-serialized the whole inline test data (measured ~0.33 s per case at
+    /// 50 x 150 KB), and it drove most of the guest's memory amplification.
+    #[test]
+    fn session_state_carries_no_test_bodies_or_source() {
+        let host = Host::mock();
+        let body = "X".repeat(100_000);
+        let tcs: Vec<TestCaseRow> = (1..=5)
+            .map(|id| TestCaseRow {
+                input: TestCaseBodyRef::Inline {
+                    text: format!("in{id}{body}"),
+                },
+                expected_output: TestCaseBodyRef::Inline {
+                    text: format!("out{id}{body}"),
+                },
+                ..test_case(id)
+            })
+            .collect();
+        let req = test_submission(tcs.clone());
+
+        let state = start_state(&host, &req, &tcs);
+        let state_json = serde_json::to_string(&state).unwrap();
+        assert!(
+            state_json.len() < 8_000,
+            "state is {} bytes; test bodies leaked into it",
+            state_json.len()
+        );
+        assert!(!state_json.contains("XXXX"), "a test body is in the state");
+        assert!(
+            !state_json.contains("int main"),
+            "the source is in the state"
+        );
+
+        // The batch the host judges from still has every body.
+        let batch = &host.eval.detached_windowed_requests()[0].batch;
+        assert_eq!(batch.test_cases.len(), 5);
+        assert!(serde_json::to_string(batch).unwrap().len() > 5 * 200_000);
+
+        // And the driver still works from the stripped state.
+        let out = drive(&host, state, TestCaseVerdict::accepted(1));
+        assert!(!out.state.is_null());
+    }
+
     fn drive(
         host: &Host,
         state: serde_json::Value,
