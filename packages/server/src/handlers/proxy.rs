@@ -32,9 +32,18 @@ use crate::utils::soft_delete::SoftDeletable;
 
 /// Resolve the caller from the bearer token, returning the `AuthUser` plus the
 /// token's `iat` (issued-at). The `iat` is carried so a permission-gated plugin
-/// route can enforce credential freshness (see [`is_token_fresh`]); an
-/// absent/malformed/invalid token yields `None`, since some plugin routes are
-/// public.
+/// route can enforce credential freshness (see [`is_token_fresh`]).
+///
+/// No `Authorization` header, or a non-Bearer scheme (e.g. the print plugin's
+/// station secret), yields `None`: some plugin routes are public.
+///
+/// A Bearer token that is PRESENT but fails verification (expired, bad
+/// signature, malformed) is `Err(TokenInvalid)` - a 401, exactly as core
+/// routes answer. It used to yield `None`, silently turning an expired session
+/// into an anonymous caller. On routes that check permissions inside the
+/// plugin that surfaced as a 403 "requires contest:manage", which clients do
+/// not treat as "refresh your token", so staff hit a misleading permissions
+/// error on every action once their 5-minute access token lapsed.
 fn resolve_optional_auth_user(
     state: &AppState,
     headers: &HeaderMap,
@@ -52,10 +61,8 @@ fn resolve_optional_auth_user(
         Some(t) => t,
         None => return Ok(None),
     };
-    let claims = match jwt::verify(token, &state.config.auth.jwt_secret) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
+    let claims =
+        jwt::verify(token, &state.config.auth.jwt_secret).map_err(|_| AppError::TokenInvalid)?;
 
     Ok(Some((
         AuthUser {

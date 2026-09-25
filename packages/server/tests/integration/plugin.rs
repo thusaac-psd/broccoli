@@ -207,6 +207,39 @@ mod plugin_routing {
         assert_eq!(invalid.body["code"], "TOKEN_INVALID");
     }
 
+    /// An INVALID or EXPIRED bearer token must be rejected with 401 on an
+    /// unprotected plugin route too - not silently downgraded to anonymous.
+    ///
+    /// Routes that check permissions inside the plugin (no manifest
+    /// `permission`) used to see an expired token as "no caller", so the plugin
+    /// answered 403 "requires contest:manage". Clients refresh their access
+    /// token on 401, never on 403, so a staff member whose 5-minute token
+    /// lapsed hit a misleading permissions error on every afternoon-bracket
+    /// staff action until they reloaded - found running a real 128-candidate
+    /// tournament. Core routes already answer 401 here; plugin routes now match.
+    /// A genuinely ABSENT token is still anonymous, because some plugin routes
+    /// are public.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unprotected_route_rejects_an_invalid_token_but_allows_no_token() {
+        let app = TestApp::spawn_with_plugins().await;
+        let route = routes::plugin_proxy("server-plugin", "reflect/123");
+
+        let invalid = app.get_with_token(&route, "bad.token").await;
+        assert_eq!(
+            invalid.status, 401,
+            "a present-but-invalid token must be a 401 so the client refreshes: {}",
+            invalid.text
+        );
+        assert_eq!(invalid.body["code"], "TOKEN_INVALID");
+
+        let anonymous = app.get_without_token(&route).await;
+        assert_eq!(
+            anonymous.status, 200,
+            "no token at all is still anonymous on a public route: {}",
+            anonymous.text
+        );
+    }
+
     #[tokio::test]
     async fn nonexistent_route_returns_not_found() {
         let app = TestApp::spawn().await;
