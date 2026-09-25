@@ -107,6 +107,30 @@ impl Dispatcher {
             );
         }
 
+        // SystemError-retry reaper: bounded re-judge of plugin-finalized
+        // SystemError verdicts (a system condition, never the contestant's
+        // code), path-agnostic across batch + interactive judging.
+        //
+        // Deliberately NOT behind the lease/steal toggle, which it used to share.
+        // That toggle defaults off and is `false` in the shipped release env
+        // files, so the reaper never ran in the configuration people deploy:
+        // every SystemError stood as the contestant's verdict, contradicting
+        // this fiber's own invariant that none is ever abandoned. Measured on
+        // a real 4-worker stack: 62 SystemError verdicts under a concurrent
+        // burst, zero re-judged.
+        //
+        // It does not need the lease/steal fibers. It writes lease columns on
+        // requeue only so a running steal leaves a re-judging row alone; with
+        // steal off those columns are inert. Its re-dispatch is a direct
+        // `dispatch_submission_to_plugin_with_judgement` call, and every write
+        // is epoch-gated, so concurrent replicas cannot double-requeue.
+        handles.push(tokio::spawn(system_error_retry::run(
+            deps.state.clone(),
+            deps.server_id.clone(),
+            deps.config.max_system_error_retries,
+            cancel_rx.clone(),
+        )));
+
         if lease_steal_enabled {
             handles.push(tokio::spawn(lease::run(
                 deps.state.db.clone(),
@@ -122,17 +146,6 @@ impl Dispatcher {
                 deps.config.steal_scan_interval_secs,
                 deps.config.steal_batch_size,
                 deps.config.max_dispatch_retries,
-                cancel_rx.clone(),
-            )));
-
-            // SystemError-retry reaper: bounded re-judge of plugin-finalized
-            // SystemError verdicts (a system condition, never the contestant's
-            // code), path-agnostic across batch + interactive judging. Shares the
-            // lease/steal toggle because it re-dispatches like the steal does.
-            handles.push(tokio::spawn(system_error_retry::run(
-                deps.state,
-                deps.server_id.clone(),
-                deps.config.max_system_error_retries,
                 cancel_rx.clone(),
             )));
 
