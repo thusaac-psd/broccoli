@@ -1,10 +1,14 @@
 use sea_orm_migration::prelude::*;
 
-/// Indexes for `plugin_timer` that the entity `sync()` (which creates the
-/// table itself) does not express: the unique `(plugin_id, key)` constraint
-/// `timer_schedule` relies on for its `INSERT ... ON CONFLICT` replace
-/// semantics, and a partial index over unclaimed rows that keeps the
-/// dispatcher's due-scan cheap.
+/// The partial index over unclaimed `plugin_timer` rows that keeps the
+/// dispatcher's due-scan cheap - which the entity `sync()` cannot express.
+///
+/// The unique `(plugin_id, key)` constraint `timer_schedule` relies on is NOT
+/// here: it is declared on the entity (`unique_key = "plugin_key"`). An earlier
+/// version created it in this migration, and SeaORM's per-boot `sync()` dropped
+/// it on the next restart because the entity did not declare it - silently
+/// breaking every `timer_schedule` from then on. A partial index is not a
+/// unique key, so `sync()` leaves the one below alone.
 ///
 /// Idempotent (`IF NOT EXISTS`), so an existing deployment that already has
 /// these indexes (e.g. from a prior manual apply) records this as a no-op.
@@ -17,16 +21,12 @@ impl MigrationName for Migration {
 }
 
 const REQUIRED_DDL: &[&str] = &[
-    r#"CREATE UNIQUE INDEX IF NOT EXISTS "plugin_timer_plugin_key_idx" ON "plugin_timer" ("plugin_id", "key")"#,
     // Partial: the table is empty most of the time, and only unclaimed rows
     // are ever scanned by fire_at (see dispatcher::plugin_timer::claim_due).
     r#"CREATE INDEX IF NOT EXISTS "plugin_timer_due_idx" ON "plugin_timer" ("fire_at") WHERE "claimed_at" IS NULL"#,
 ];
 
-const REVERT_DDL: &[&str] = &[
-    r#"DROP INDEX IF EXISTS "plugin_timer_due_idx""#,
-    r#"DROP INDEX IF EXISTS "plugin_timer_plugin_key_idx""#,
-];
+const REVERT_DDL: &[&str] = &[r#"DROP INDEX IF EXISTS "plugin_timer_due_idx""#];
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {

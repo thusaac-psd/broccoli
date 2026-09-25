@@ -207,6 +207,49 @@ mod tests {
         }
     }
 
+    /// Reschedule-by-key must keep working after the server RESTARTS, not
+    /// just on the fresh database every other test here gets.
+    ///
+    /// `timer_schedule` relies on `INSERT ... ON CONFLICT (plugin_id, key)`,
+    /// which needs a unique index on those columns. SeaORM's schema `sync()`
+    /// runs on every boot and DROPS any existing unique index whose column set
+    /// the entity does not declare. So an index created only by a migration
+    /// (which runs once) survived the first boot and vanished on the second:
+    /// every subsequent `timer_schedule` failed with "there is no unique or
+    /// exclusion constraint matching the ON CONFLICT specification", and every
+    /// afternoon-bracket `/start` returned 500. Found on a real stack under
+    /// load, after its server had been restarted - no fresh-database test
+    /// could ever see it. The second `init_db` below is the restart.
+    #[tokio::test]
+    async fn reschedule_still_upserts_after_a_server_restart() {
+        let db = test_db().await;
+        let url = {
+            let port = db
+                ._container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("postgres host port");
+            format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
+        };
+        let restarted = crate::database::init_db(&url)
+            .await
+            .expect("second boot: sync + migrations on an existing schema");
+
+        schedule(&restarted, "p", "k", future_ms(), "first")
+            .await
+            .expect("first schedule after restart");
+        schedule(&restarted, "p", "k", future_ms(), "second")
+            .await
+            .expect("rescheduling the same key after a restart must upsert, not fail");
+
+        let rows = plugin_timer::Entity::find()
+            .all(&restarted)
+            .await
+            .expect("read timers");
+        assert_eq!(rows.len(), 1, "replace, not duplicate: {rows:?}");
+        assert_eq!(rows[0].payload, "second");
+    }
+
     fn future_ms() -> i64 {
         (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_millis()
     }

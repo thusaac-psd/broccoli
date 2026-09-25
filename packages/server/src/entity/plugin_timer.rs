@@ -10,7 +10,16 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
 
+    /// `(plugin_id, key)` is unique: `timer_schedule` upserts with
+    /// `ON CONFLICT (plugin_id, key)`. Declared HERE, not only in a migration,
+    /// because SeaORM's schema `sync()` runs on every boot and drops any
+    /// existing unique index whose column set the entity does not declare - a
+    /// migration-only index survives the first boot and vanishes on the
+    /// second, after which every `timer_schedule` fails. See
+    /// `host_funcs::timer::tests::reschedule_still_upserts_after_a_server_restart`.
+    #[sea_orm(unique_key = "plugin_key")]
     pub plugin_id: String,
+    #[sea_orm(unique_key = "plugin_key")]
     pub key: String,
 
     pub fire_at: DateTimeUtc,
