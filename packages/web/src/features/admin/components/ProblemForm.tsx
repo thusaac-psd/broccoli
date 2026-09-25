@@ -112,8 +112,14 @@ export function ProblemForm({
       newData.checkerFormat = checkerFormats[0] ?? '';
       changed = true;
     }
-    if (!contestTypes.includes(data.defaultContestType)) {
-      newData.defaultContestType = contestTypes[0] ?? '';
+    // Deliberately no auto-pick for the contest type: it decides who judges
+    // practice submissions, so the admin must choose it. An unknown value is
+    // cleared back to the placeholder instead of silently replaced.
+    if (
+      data.defaultContestType &&
+      !contestTypes.includes(data.defaultContestType)
+    ) {
+      newData.defaultContestType = '';
       changed = true;
     }
 

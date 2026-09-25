@@ -98,7 +98,7 @@ export function ProblemFormDialog({
   const [memoryLimit, setMemoryLimit] = useState(262144);
   const [problemType, setProblemType] = useState('standard');
   const [checkerFormat, setCheckerFormat] = useState('exact');
-  const [defaultContestType, setDefaultContestType] = useState('standard');
+  const [defaultContestType, setDefaultContestType] = useState('');
   const [showTestDetails, setShowTestDetails] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
   const [submissionFormat, setSubmissionFormat] = useState<
@@ -168,7 +168,7 @@ export function ProblemFormDialog({
       setMemoryLimit(262144);
       setProblemType('standard');
       setCheckerFormat('exact');
-      setDefaultContestType('standard');
+      setDefaultContestType('');
       setShowTestDetails(false);
       setIsPublic(false);
       setSubmissionFormat({});
@@ -205,6 +205,10 @@ export function ProblemFormDialog({
     }
     if (!content.trim()) {
       toast.error(t('validation.contentRequired'));
+      return;
+    }
+    if (!defaultContestType) {
+      toast.error(t('validation.contestTypeRequired'));
       return;
     }
 

@@ -33,7 +33,10 @@ pub struct CreateProblemRequest {
     #[serde(default = "default_checker_format")]
     #[schema(example = "exact")]
     pub checker_format: String,
-    #[serde(default)]
+    /// Contest type that judges submissions made outside any contest.
+    /// Required: the server never picks one, because any "first registered"
+    /// choice depends on plugin names and can land on a tournament format that
+    /// makes no sense for practice.
     #[schema(example = "ioi")]
     pub default_contest_type: String,
     #[schema(example = false)]
@@ -370,11 +373,6 @@ fn default_checker_format() -> String {
 use crate::registry::{CheckerStageRegistry, ContestTypeRegistry, EvaluatorRegistry};
 
 pub async fn first_registered_evaluator(registry: &EvaluatorRegistry) -> String {
-    let reg = registry.read().await;
-    reg.keys().min().cloned().unwrap_or_default()
-}
-
-pub async fn first_registered_contest_type(registry: &ContestTypeRegistry) -> String {
     let reg = registry.read().await;
     reg.keys().min().cloned().unwrap_or_default()
 }

@@ -37,7 +37,7 @@ export function ProblemEditForm({ problemId }: ProblemEditFormProps) {
     memoryLimit: 262144,
     problemType: 'standard',
     checkerFormat: 'exact',
-    defaultContestType: 'standard',
+    defaultContestType: '',
     showTestDetails: false,
     isPublic: false,
     submissionFormat: {},

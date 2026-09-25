@@ -553,6 +553,7 @@ mod submission_listing {
                     "time_limit": 1000,
                     "memory_limit": 262144,
                     "problem_type": "standard",
+                    "default_contest_type": "standard",
                     "checker_format": "exact",
                     "submission_format": {
                         "cpp": ["main.cpp", "grader.cpp"]

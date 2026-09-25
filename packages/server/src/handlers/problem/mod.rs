@@ -62,11 +62,7 @@ pub async fn create_problem(
     } else {
         payload.problem_type
     };
-    let default_contest_type = if payload.default_contest_type.is_empty() {
-        first_registered_contest_type(&state.registries.contest_type_registry).await
-    } else {
-        payload.default_contest_type
-    };
+    let default_contest_type = payload.default_contest_type;
 
     validate_problem_type(&problem_type, &state.registries.evaluator_registry).await?;
     validate_checker_format(

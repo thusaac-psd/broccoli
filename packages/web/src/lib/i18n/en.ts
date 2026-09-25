@@ -824,6 +824,7 @@ export const en: Record<string, string> = {
   // Validation
   'validation.titleRequired': 'Title is required.',
   'validation.contentRequired': 'Content is required.',
+  'validation.contestTypeRequired': 'Choose a default contest type.',
   'validation.startEndTimeRequired': 'Start time and end time are required.',
   'validation.startBeforeEnd': 'Start time must be before end time.',
   'validation.activateBeforeStart':
