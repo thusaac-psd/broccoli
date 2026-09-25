@@ -785,7 +785,15 @@ impl BroccoliQueue {
 
                     let handle = tokio::spawn(async move {
                         loop {
-                            tokio::time::sleep(sleep).await;
+                            // BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md):
+                            // upstream slept `consume_wait` here before EVERY
+                            // consume, so a consumer that set it to shorten the
+                            // broker's empty-queue nap was also throttled while
+                            // messages were waiting. `consume` below already
+                            // awaits broker I/O (and naps `consume_wait` itself
+                            // when the queue is empty), so this task stays
+                            // abortable without it; just yield.
+                            tokio::task::yield_now().await;
                             let message = broker
                                 .consume(&topic, consume_options.clone())
                                 .await
@@ -1002,7 +1010,15 @@ impl BroccoliQueue {
 
                     let handle = tokio::spawn(async move {
                         loop {
-                            tokio::time::sleep(sleep).await;
+                            // BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md):
+                            // upstream slept `consume_wait` here before EVERY
+                            // consume, so a consumer that set it to shorten the
+                            // broker's empty-queue nap was also throttled while
+                            // messages were waiting. `consume` below already
+                            // awaits broker I/O (and naps `consume_wait` itself
+                            // when the queue is empty), so this task stays
+                            // abortable without it; just yield.
+                            tokio::task::yield_now().await;
                             let message = broker
                                 .consume(&topic, consume_options.clone())
                                 .await

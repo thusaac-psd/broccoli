@@ -7,6 +7,16 @@ use opentelemetry::KeyValue;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// How long each consumer task naps after finding the result queue empty.
+///
+/// Without this the vendored broker's `consume` falls back to a 500 ms sleep
+/// per empty poll. Contest plugins judge one test case at a time (evaluate
+/// window 1), so every case's result sat behind that nap: measured on a real
+/// stack, ~0.35 s of each ~0.47 s per-case turnaround was spent waiting here,
+/// not running. 20 ms keeps delivery prompt while an idle server costs about
+/// 8 tasks x 1 poll / 40 ms = ~200 cheap Redis polls a second.
+pub(crate) const RESULT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 pub async fn consume_operation_results(
     mq: Arc<MqQueue>,
     waiters: OperationWaiters,
@@ -30,7 +40,10 @@ pub async fn consume_operation_results(
         .process_messages(
             &queue_name,
             Some(8),
-            None,
+            Some(mq::ConsumeConfig {
+                consume_wait: Some(RESULT_POLL_INTERVAL),
+                ..Default::default()
+            }),
             move |message: mq::BrokerMessage<TaskReply>| {
                 let waiters = waiters.clone();
                 let evaluate_ops_registry = evaluate_ops_registry.clone();
