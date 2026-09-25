@@ -25,17 +25,33 @@ The build produces `plugins/codelink-bracket/codelink_bracket.wasm` and the
 frontend bundle under `plugins/codelink-bracket/frontend/dist`. Start the server
 or use **Reload all plugins** in the admin area to discover it.
 
-In the contest editor, select `codelink-bracket` as the contest type and add
-every problem the bracket uses. Enroll the sixteen players. Then open the
-contest's **Configure** dialog and enable the `codelink-bracket` plugin's
-`before_submission` check. Without it, players can also submit to problems they
-can see but are not currently playing.
+In the contest editor, select `codelink-bracket` as the contest type, add every
+problem the bracket uses, and enroll the sixteen players.
 
 ## Set up the bracket
 
-Each round needs two groups of three problems and at least one tiebreak problem.
-A problem can appear only once in the whole bracket. Send the setup once, before
-the first match, as a user with `contest:manage`:
+Open the contest's **Rankings** page. Until the bracket exists, staff see the
+setup screen there.
+
+1. **Players and seeding.** The first sixteen enrolled players are listed in
+   registration order. Drag them into seed order, or use **Shuffle**.
+   Neighbours meet in round 1: seed 1 plays seed 2, seed 3 plays seed 4, and so
+   on. Remove a player to swap in someone from the list of other enrolled
+   players.
+2. **Problems per round.** Each round needs three problems for the first player
+   of every match, three for the second, and at least one tiebreak problem. The
+   slots are filled from the contest's problem order to start with. A problem
+   can appear only once in the whole bracket.
+3. **Timing.** Set the game length, the break between rounds, and how long a
+   game may wait on a stuck judge before staff must decide the match.
+
+**Create bracket** checks all of this first and lists anything missing. Creating
+the bracket also turns on the plugin's `before_submission` check for the
+contest, which stops players submitting to problems they are not currently
+playing. Seeding and problems cannot be changed afterwards.
+
+To script the setup instead, send the same data to the setup route as a user
+with `contest:manage`:
 
 ```bash
 curl -X POST \
@@ -55,6 +71,9 @@ curl -X POST \
   }'
 ```
 
+A scripted setup does not enable the `before_submission` check. Enable it in the
+contest's **Configure** dialog.
+
 | Field | Effect |
 | --- | --- |
 | `seeds` | Sixteen distinct user ids. Adjacent seeds meet in round 1: the first and second, the third and fourth, and so on. |
@@ -65,12 +84,16 @@ curl -X POST \
 
 ## Play a match
 
-The contest's **Rankings** page shows the bracket. Select a match to see its
-details. The **Overview** page shows the rules.
+The **Rankings** page shows the bracket as a tree. Select a match to open its
+details in a side panel: the score, each game's problems and winner, both
+players' submissions with links to their judging, and the staff controls.
+Players also see a **Your match** panel above the bracket with their current
+step. The **Overview** page shows the rules.
 
-1. Each player ranks the opponent's three problems. The ranking is the order the
-   opponent must solve them in.
-2. After both rankings are in, staff press **Start match**.
+1. Each player drags the opponent's three problems into the order the opponent
+   must solve them.
+2. After both rankings are in, staff press **Start match**. The summary above
+   the bracket counts matches that are ready to start.
 3. In each of the three games, both players work on their next problem at the
    same time. The first accepted submission wins the game. Submission time
    decides, and the smaller submission id breaks an exact tie, the same rule as
@@ -91,7 +114,9 @@ names the blocking submission. When the result arrives, the game resolves
 normally.
 
 If the judge does not finish within `escalation_grace_seconds`, the match moves
-to **Needs staff decision**. Check the named submission's result, rejudge it if
-it is stuck, and then use **Award to** to decide the match. On a match that is
-still running, **Force expiry** re-checks the current game right away, for
-example after a rejudge. It does not end a game before its deadline.
+to **Needs staff decision**, and the summary above the bracket counts it. The
+match panel links to the named submission and can rejudge it. Check the result,
+then use **Award to** to decide the match. On a match that is still running,
+**Force expiry** re-checks the current game right away, for example after a
+rejudge. It does not end a game before its deadline. Every staff action asks
+for confirmation first.
