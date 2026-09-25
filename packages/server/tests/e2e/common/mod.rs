@@ -646,6 +646,7 @@ impl E2eTestApp {
                     consumer_evaluate_ops_registry,
                     consumer_queue,
                     consumer_metrics,
+                    std::time::Duration::from_millis(20),
                 )
                 .await;
             }));

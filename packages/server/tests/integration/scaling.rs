@@ -83,6 +83,7 @@ async fn per_replica_result_queue_delivers_to_originating_replica_only() {
         evaluate_ops_registry.clone(),
         queue_a.clone(),
         metrics.clone(),
+        std::time::Duration::from_millis(20),
     ));
     let consumer_b = tokio::spawn(consume_operation_results(
         Arc::clone(&mq_b),
@@ -90,6 +91,7 @@ async fn per_replica_result_queue_delivers_to_originating_replica_only() {
         evaluate_ops_registry,
         queue_b,
         metrics,
+        std::time::Duration::from_millis(20),
     ));
 
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -299,6 +301,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         evaluate_ops_registry.clone(),
         result_queue.clone(),
         metrics.clone(),
+        std::time::Duration::from_millis(20),
     ));
     tokio::time::sleep(Duration::from_millis(250)).await;
 

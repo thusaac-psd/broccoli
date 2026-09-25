@@ -82,6 +82,26 @@ pub struct MqAppConfig {
     pub operation_dlq_queue_name: String,
     #[serde(default)]
     pub dlq: DlqConfig,
+    /// Server only: how long each of the 8 operation-result consumer tasks
+    /// naps after finding the result queue empty. Contest plugins judge one
+    /// test case at a time, so this delay is paid once per case; a shorter
+    /// nap means more Redis polls while idle. Measured on a real stack (50
+    /// tiny cases; idle ops are the server's share):
+    ///
+    /// | nap    | per case | idle Redis ops/s |
+    /// |--------|----------|------------------|
+    /// | 500 ms | 0.52 s   | ~50  (the broker's old default) |
+    /// | 100 ms | 0.21 s   | ~260 |
+    /// | 50 ms  | 0.16 s   | ~490 |
+    /// | 20 ms  | 0.15 s   | ~1150 |
+    ///
+    /// The tasks stay in step, so latency tracks the nap itself, not nap/8.
+    #[serde(default = "default_result_poll_interval_ms")]
+    pub result_poll_interval_ms: u64,
+}
+
+fn default_result_poll_interval_ms() -> u64 {
+    50
 }
 
 fn default_mq_enabled() -> bool {
@@ -117,6 +137,7 @@ impl Default for MqAppConfig {
             operation_result_queue_name: default_operation_result_queue_name(),
             operation_dlq_queue_name: default_operation_dlq_queue_name(),
             dlq: DlqConfig::default(),
+            result_poll_interval_ms: default_result_poll_interval_ms(),
         }
     }
 }
