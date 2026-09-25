@@ -9,6 +9,7 @@ sea-orm = ["dep:sea-orm"]
 object-storage = ["dep:rust-s3", "dep:tokio-util", "dep:futures"]
 
 [dependencies]
+libc = "0.2"
 anyhow.workspace = true
 broccoli-types.workspace = true
 async-trait.workspace = true

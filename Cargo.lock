@@ -1201,6 +1201,7 @@ dependencies = [
  "config",
  "futures",
  "hex",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",
