@@ -79,6 +79,15 @@ fn is_in_flight(status: &SubmissionLifecycle) -> bool {
     )
 }
 
+/// The total order "who got there first" is decided by: submission time in
+/// microseconds, then the smaller submission id on an exact tie. Identical to
+/// the morning round's rule (codelink orders by `(submitted_at_us,
+/// submission_id)`), so both halves of the event agree on arrival order.
+/// Without the id, a same-instant tie was broken by iteration order.
+fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
+    (s.submitted_at_us, s.submission_id)
+}
+
 /// Whether `s` could still turn into a different outcome, so the 小局 must
 /// wait for it: either its lifecycle `status` is still in flight (see
 /// [`is_in_flight`]), or judging finished with a `SystemError` VERDICT.
@@ -107,7 +116,7 @@ pub struct SubmissionRecord {
     pub submission_id: i32,
     pub user_id: i32,
     pub problem_id: i32,
-    pub submitted_at_ms: i64,
+    pub submitted_at_us: i64,
     pub verdict: Option<Verdict>,
     pub status: SubmissionLifecycle,
 }
@@ -200,7 +209,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
     let best_ac = subs
         .iter()
         .filter(|s| s.verdict.as_ref().is_some_and(Verdict::is_accepted))
-        .min_by_key(|s| s.submitted_at_ms);
+        .min_by_key(|s| arrival_order(s));
 
     let winner = match best_ac {
         Some(ac) => {
@@ -209,8 +218,8 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             // staff should rejudge first -- it has been stuck the longest.
             let blocker = subs
                 .iter()
-                .filter(|s| submission_in_flight(s) && s.submitted_at_ms < ac.submitted_at_ms)
-                .min_by_key(|s| s.submitted_at_ms);
+                .filter(|s| submission_in_flight(s) && arrival_order(s) < arrival_order(ac))
+                .min_by_key(|s| arrival_order(s));
             if let Some(blocker) = blocker {
                 if now_ms < deadline_ms {
                     return XiaojuOutcome::NotYet;
@@ -246,7 +255,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             let blocker = subs
                 .iter()
                 .filter(|s| submission_in_flight(s))
-                .min_by_key(|s| s.submitted_at_ms);
+                .min_by_key(|s| arrival_order(s));
             if let Some(blocker) = blocker {
                 return XiaojuOutcome::AwaitingJudge {
                     blocking_submission_id: blocker.submission_id,
@@ -427,7 +436,7 @@ mod tests {
     fn sub(
         user_id: i32,
         problem_id: i32,
-        submitted_at_ms: i64,
+        submitted_at_us: i64,
         verdict: Option<Verdict>,
     ) -> SubmissionRecord {
         // `status` mirrors the verdict for these older tests, which predate
@@ -441,14 +450,14 @@ mod tests {
         } else {
             SubmissionLifecycle::Pending
         };
-        sub_with_status(0, user_id, problem_id, submitted_at_ms, verdict, status)
+        sub_with_status(0, user_id, problem_id, submitted_at_us, verdict, status)
     }
 
     fn sub_with_status(
         submission_id: i32,
         user_id: i32,
         problem_id: i32,
-        submitted_at_ms: i64,
+        submitted_at_us: i64,
         verdict: Option<Verdict>,
         status: SubmissionLifecycle,
     ) -> SubmissionRecord {
@@ -456,10 +465,61 @@ mod tests {
             submission_id,
             user_id,
             problem_id,
-            submitted_at_ms,
+            submitted_at_us,
             verdict,
             status,
         }
+    }
+
+    #[test]
+    fn an_exact_timestamp_tie_goes_to_the_smaller_submission_id() {
+        // Same rule as the morning round (codelink): order by submission time,
+        // and on an exact tie the smaller submission id wins. The two halves of
+        // the event must agree on who "got there first". Supplied with the
+        // HIGHER id first so an arbitrary (iteration-order) tie-break fails.
+        let mut m = match_in_progress_at_xiaoju(0);
+        let subs = [
+            sub_with_status(
+                9,
+                20,
+                203,
+                1_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+            sub_with_status(
+                4,
+                10,
+                103,
+                1_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 9_999),
+            XiaojuOutcome::Decided { winner: Some(10) }
+        );
+    }
+
+    #[test]
+    fn an_older_pending_submission_at_the_same_instant_but_smaller_id_still_blocks() {
+        // The blocking rule uses the same total order: a pending submission
+        // that sorts BEFORE the best AC (same instant, smaller id) could still
+        // beat it, so the 小局 must wait.
+        let mut m = match_in_progress_at_xiaoju(0);
+        let subs = [
+            sub_with_status(4, 10, 103, 1_000, None, SubmissionLifecycle::Pending),
+            sub_with_status(
+                9,
+                20,
+                203,
+                1_000,
+                Some(Verdict::Accepted),
+                SubmissionLifecycle::Judged,
+            ),
+        ];
+        assert_eq!(decide_xiaoju(&mut m, &subs, 9_999), XiaojuOutcome::NotYet);
     }
 
     #[test]

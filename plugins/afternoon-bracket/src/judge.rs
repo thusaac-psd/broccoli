@@ -179,7 +179,7 @@ struct SubRow {
     id: i32,
     user_id: i32,
     problem_id: i32,
-    submitted_at_ms: f64,
+    submitted_at_us: i64,
     verdict: Option<Verdict>,
     status: SubmissionLifecycle,
 }
@@ -232,7 +232,7 @@ fn fetch_subs(
 
     let sql = format!(
         "SELECT id, user_id, problem_id, \
-         EXTRACT(EPOCH FROM created_at) * 1000 AS submitted_at_ms, verdict, \
+         (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS submitted_at_us, verdict, \
          status::text AS status \
          FROM submission WHERE contest_id = {} AND ({})",
         p.bind(contest),
@@ -245,7 +245,7 @@ fn fetch_subs(
             submission_id: r.id,
             user_id: r.user_id,
             problem_id: r.problem_id,
-            submitted_at_ms: r.submitted_at_ms as i64,
+            submitted_at_us: r.submitted_at_us,
             verdict: r.verdict,
             status: r.status,
         })
@@ -920,7 +920,7 @@ mod tests {
             "id": user_id,
             "user_id": user_id,
             "problem_id": 0,
-            "submitted_at_ms": submitted_at_ms as f64,
+            "submitted_at_us": submitted_at_ms * 1000,
             "verdict": "Accepted",
             "status": "Judged",
         })
@@ -941,7 +941,7 @@ mod tests {
             "id": id,
             "user_id": user_id,
             "problem_id": 0,
-            "submitted_at_ms": submitted_at_ms as f64,
+            "submitted_at_us": submitted_at_ms * 1000,
             "verdict": verdict,
             "status": status,
         })
