@@ -84,10 +84,23 @@ pub async fn run(
         "Claim fiber started"
     );
 
+    // Live worker slots, refreshed every `SLOTS_REFRESH` from heartbeats
+    // (a Redis SCAN, too costly to repeat every tick). Sizes the in-flight
+    // cap so it scales with the cluster; see [`effective_cap`].
+    let mut live_slots: u64 = 0;
+    let mut slots_checked: Option<std::time::Instant> = None;
+
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = claim_once(&state, &server_id, batch_size, max_in_flight).await {
+                if max_in_flight > 0
+                    && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
+                {
+                    live_slots = live_worker_slots(&state).await;
+                    slots_checked = Some(std::time::Instant::now());
+                }
+                let cap = effective_cap(max_in_flight, live_slots);
+                if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
                     error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
                 }
             }
@@ -191,6 +204,37 @@ async fn claim_once(
     }
 
     Ok(())
+}
+
+/// How often the claim loop re-reads live worker capacity.
+const SLOTS_REFRESH: Duration = Duration::from_secs(15);
+
+/// In-flight submissions allowed per live worker slot. A submission keeps at
+/// most a few operations in flight, so more than one per busy slot adds no
+/// throughput; 8 leaves ample slack for claim latency and callbacks, so the
+/// cap can never become the bottleneck before the workers do.
+const IN_FLIGHT_PER_WORKER_SLOT: u64 = 8;
+
+/// The in-flight cap in force: the configured value is a floor that scales up
+/// with the cluster's live worker slots, so a large deployment is never
+/// throttled by a default nobody tuned. `configured == 0` disables the cap.
+fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
+    if configured == 0 {
+        return 0;
+    }
+    let scaled = live_worker_slots.saturating_mul(IN_FLIGHT_PER_WORKER_SLOT);
+    u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
+}
+
+/// Sum of `max_concurrency` over live (non-stale) workers, from heartbeats.
+/// 0 when heartbeats are unavailable, which leaves the configured floor.
+async fn live_worker_slots(state: &AppState) -> u64 {
+    crate::handlers::system::read_workers(state)
+        .await
+        .iter()
+        .filter(|w| !w.stale)
+        .map(|w| u64::from(w.max_concurrency.unwrap_or(1)))
+        .sum()
 }
 
 /// Rows to claim this tick: the batch size, but never past the server's
@@ -627,6 +671,19 @@ mod tests {
         assert_eq!(claim_budget(32, 256, 300), 0);
         // 0 means no cap.
         assert_eq!(claim_budget(32, 0, 10_000), 32);
+    }
+
+    #[test]
+    fn the_cap_grows_with_live_worker_capacity_and_never_below_the_floor() {
+        // Small cluster (4 workers x 1 slot): the configured floor applies.
+        assert_eq!(effective_cap(256, 4), 256);
+        // No heartbeat data: still the floor.
+        assert_eq!(effective_cap(256, 0), 256);
+        // Large cluster (100 workers x 8 slots): scales past the floor, so an
+        // untuned default cannot throttle it.
+        assert_eq!(effective_cap(256, 800), 6_400);
+        // Disabled stays disabled.
+        assert_eq!(effective_cap(0, 800), 0);
     }
 
     #[test]

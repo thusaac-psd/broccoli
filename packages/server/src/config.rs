@@ -322,11 +322,14 @@ pub struct ServerConfig {
     /// drain a spike.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
-    /// Most submissions this server judges at once: claimed, not finished.
-    /// The claim fiber takes at most `max_in_flight - in_flight` rows per
-    /// tick, so a burst stays `Queued` in the database (claimable by any
-    /// server) instead of piling into one process's memory. Judging is
-    /// detached after dispatch, so nothing else bounds this. 0 = no cap.
+    /// Floor for how many submissions this server judges at once (claimed,
+    /// not finished). The cap in force is the larger of this and 8 x the
+    /// live worker slots seen in heartbeats, so it grows with the cluster
+    /// and never throttles below worker capacity. The claim fiber takes at
+    /// most `cap - in_flight` rows per tick, so a burst stays `Queued` in the
+    /// database (claimable by any server) instead of piling into one
+    /// process. Judging is detached after dispatch, so nothing else bounds
+    /// this. 0 = no cap.
     #[serde(default = "default_max_in_flight_submissions")]
     pub max_in_flight_submissions: u32,
     /// Tick interval (seconds) for the plugin-timer delivery loop. Default 1s

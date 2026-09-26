@@ -141,9 +141,13 @@ held **979** submissions in judging at once. That puts the backlog in one
 process's memory instead of the database, where any server can take it, and a
 crash strands all of it until the lease expires.
 
-With a cap of 256 (the new default), each tick claims at most
-`min(claim_batch_size, cap - in_flight)`. Same stack, cold caches, same stats
-(full tables in the **perf vs perf + cap** section below):
+With a cap of 256 (the new default floor), each tick claims at most
+`min(claim_batch_size, cap - in_flight)`. The cap in force is the larger of the
+floor and 8 × the live worker slots from heartbeats, so it grows with the
+cluster instead of becoming a bottleneck nobody tuned. That was checked on the
+stack: with the floor set to 16 and 4 live slots, the server peaked at 32
+submissions judging at once. Same stack, cold caches, same stats (full tables in
+the **perf vs perf + cap** section below):
 
 |                                                    | perf (no cap) | perf + cap 256 |
 | -------------------------------------------------- | ------------- | -------------- |

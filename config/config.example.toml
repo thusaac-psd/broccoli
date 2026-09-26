@@ -12,12 +12,13 @@ port = 3000
 # to the wrong replica.
 id = ""
 
-# Most submissions this server judges at once (claimed and not finished).
-# The claim fiber only takes rows up to this cap, so a burst waits as
-# `Queued` in the database, claimable by any server, instead of piling into
-# one process. Measured: at 1000 submissions / 100 concurrent it cut one
-# server's peak from 979 in-flight to 256 at the same throughput, and its
-# peak memory by ~13%. 0 = no cap.
+# Floor for how many submissions this server judges at once (claimed and not
+# finished). The cap in force is the larger of this and 8 x the live worker
+# slots from heartbeats, so it grows with the cluster and never throttles below
+# worker capacity; you do not need to tune it when adding workers. Past the
+# cap, a burst waits as `Queued` in the database, claimable by any server.
+# Measured: 1000 submissions / 100 concurrent went from 979 in flight on one
+# server to 256, same throughput, ~13% less peak memory. 0 = no cap.
 max_in_flight_submissions = 256
 
 # UP#39 backpressure-on-post: cap on durable `Queued` rows across
