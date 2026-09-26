@@ -67,6 +67,7 @@ pub async fn run(
     server_id: String,
     interval_ms: u64,
     batch_size: u32,
+    max_in_flight: u32,
     mut cancel: watch::Receiver<bool>,
 ) {
     // The poll interval clamps to a 50ms floor so a misconfigured
@@ -79,13 +80,27 @@ pub async fn run(
         server_id = %server_id,
         interval_ms = interval_dur.as_millis() as u64,
         batch_size,
+        max_in_flight,
         "Claim fiber started"
     );
+
+    // Live worker slots, refreshed every `SLOTS_REFRESH` from heartbeats
+    // (a Redis SCAN, too costly to repeat every tick). Sizes the in-flight
+    // cap so it scales with the cluster; see [`effective_cap`].
+    let mut live_slots: u64 = 0;
+    let mut slots_checked: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = claim_once(&state, &server_id, batch_size).await {
+                if max_in_flight > 0
+                    && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
+                {
+                    live_slots = live_worker_slots(&state).await;
+                    slots_checked = Some(std::time::Instant::now());
+                }
+                let cap = effective_cap(max_in_flight, live_slots);
+                if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
                     error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
                 }
             }
@@ -117,8 +132,25 @@ pub async fn run(
 /// claim from dispatch. Don't introduce a bounded join-set or `await`
 /// here without re-thinking that contract: an inline `await` would make
 /// the claim fiber the bottleneck for dispatch throughput.
-async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyhow::Result<()> {
-    let submission_models = claim_queued_submissions(state, server_id, batch_size).await?;
+async fn claim_once(
+    state: &AppState,
+    server_id: &str,
+    batch_size: u32,
+    max_in_flight: u32,
+) -> anyhow::Result<()> {
+    let in_flight = if max_in_flight == 0 {
+        0
+    } else {
+        count_in_flight(state, server_id).await?
+    };
+    let budget = claim_budget(batch_size, max_in_flight, in_flight);
+    let submission_models = if budget > 0 {
+        claim_queued_submissions(state, server_id, budget).await?
+    } else {
+        Vec::new()
+    };
+    // Deferred rejudges are judging work too: they share what is left.
+    let rejudge_budget = budget.saturating_sub(submission_models.len() as u32);
     for model in submission_models {
         let state_clone = state.clone();
         tokio::spawn(async move {
@@ -142,7 +174,11 @@ async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyho
     // symmetrically with the submission path. The parent submission's
     // own status is unchanged for these rows, so the submission scan
     // above doesn't reach them - the judgement scan does.
-    let judgement_pairs = claim_queued_judgements(state, server_id, batch_size).await?;
+    let judgement_pairs = if rejudge_budget > 0 {
+        claim_queued_judgements(state, server_id, rejudge_budget).await?
+    } else {
+        Vec::new()
+    };
     for (sub_model, judgement_model) in judgement_pairs {
         let state_clone = state.clone();
         let judgement_id = judgement_model.id;
@@ -168,6 +204,62 @@ async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyho
     }
 
     Ok(())
+}
+
+/// How often the claim loop re-reads live worker capacity.
+const SLOTS_REFRESH: Duration = Duration::from_secs(15);
+
+/// In-flight submissions allowed per live worker slot. A submission keeps at
+/// most a few operations in flight, so more than one per busy slot adds no
+/// throughput; 8 leaves ample slack for claim latency and callbacks, so the
+/// cap can never become the bottleneck before the workers do.
+const IN_FLIGHT_PER_WORKER_SLOT: u64 = 8;
+
+/// The in-flight cap in force: the configured value is a floor that scales up
+/// with the cluster's live worker slots, so a large deployment is never
+/// throttled by a default nobody tuned. `configured == 0` disables the cap.
+fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
+    if configured == 0 {
+        return 0;
+    }
+    let scaled = live_worker_slots.saturating_mul(IN_FLIGHT_PER_WORKER_SLOT);
+    u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
+}
+
+/// Sum of `max_concurrency` over live (non-stale) workers, from heartbeats.
+/// 0 when heartbeats are unavailable, which leaves the configured floor.
+async fn live_worker_slots(state: &AppState) -> u64 {
+    crate::handlers::system::read_workers(state)
+        .await
+        .iter()
+        .filter(|w| !w.stale)
+        .map(|w| u64::from(w.max_concurrency.unwrap_or(1)))
+        .sum()
+}
+
+/// Rows to claim this tick: the batch size, but never past the server's
+/// in-flight cap. `max_in_flight == 0` means no cap.
+fn claim_budget(batch_size: u32, max_in_flight: u32, in_flight: u64) -> u32 {
+    if max_in_flight == 0 {
+        return batch_size;
+    }
+    let room = u64::from(max_in_flight).saturating_sub(in_flight);
+    std::cmp::min(batch_size, u32::try_from(room).unwrap_or(u32::MAX))
+}
+
+/// Submissions this server has claimed and not finished judging.
+pub async fn count_in_flight(state: &AppState, server_id: &str) -> anyhow::Result<u64> {
+    let row = state
+        .db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS n FROM submission \
+             WHERE owner_server_id = $1 AND status IN ('Pending', 'Compiling', 'Running')",
+            [server_id.into()],
+        ))
+        .await?;
+    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 async fn claim_queued_submissions(
@@ -566,6 +658,32 @@ mod tests {
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("status = 'Queued'"));
         assert!(sql.contains("ORDER BY created_at"));
+    }
+
+    #[test]
+    fn claim_budget_fills_up_to_the_in_flight_cap_and_no_further() {
+        // Plenty of room: the batch size is the limit.
+        assert_eq!(claim_budget(32, 256, 0), 32);
+        // Close to the cap: only the room that is left.
+        assert_eq!(claim_budget(32, 256, 250), 6);
+        // At or past the cap (e.g. after a steal): claim nothing.
+        assert_eq!(claim_budget(32, 256, 256), 0);
+        assert_eq!(claim_budget(32, 256, 300), 0);
+        // 0 means no cap.
+        assert_eq!(claim_budget(32, 0, 10_000), 32);
+    }
+
+    #[test]
+    fn the_cap_grows_with_live_worker_capacity_and_never_below_the_floor() {
+        // Small cluster (4 workers x 1 slot): the configured floor applies.
+        assert_eq!(effective_cap(256, 4), 256);
+        // No heartbeat data: still the floor.
+        assert_eq!(effective_cap(256, 0), 256);
+        // Large cluster (100 workers x 8 slots): scales past the floor, so an
+        // untuned default cannot throttle it.
+        assert_eq!(effective_cap(256, 800), 6_400);
+        // Disabled stays disabled.
+        assert_eq!(effective_cap(0, 800), 0);
     }
 
     #[test]

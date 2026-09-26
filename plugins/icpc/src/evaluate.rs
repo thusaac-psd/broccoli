@@ -90,9 +90,9 @@ impl ContestJudge for IcpcJudge {
         };
         crate::persist::persist_and_track(
             host,
-            progress.request.submission_id,
-            progress.request.judgement_id,
-            progress.request.judge_epoch,
+            progress.submission.submission_id,
+            progress.submission.judgement_id,
+            progress.submission.judge_epoch,
             &eval,
         )?;
         Ok(())
@@ -840,6 +840,84 @@ mod detached_tests {
     fn start_state(host: &Host, req: &OnSubmissionInput, tcs: &[TestCaseRow]) -> serde_json::Value {
         evaluate_short_circuit_detached(host, req, tcs, req.submission_id).unwrap();
         host.eval.detached_windowed_requests()[0].state.clone()
+    }
+
+    /// The session state is copied into the host and back on every result
+    /// callback, so it must not carry test data or the source: those belong
+    /// to the evaluate batch alone. Before this, each callback re-parsed and
+    /// re-serialized the whole inline test data (measured ~0.33 s per case at
+    /// 50 x 150 KB), and it drove most of the guest's memory amplification.
+    #[test]
+    fn session_state_carries_no_test_bodies_or_source() {
+        let host = Host::mock();
+        let body = "X".repeat(100_000);
+        let tcs: Vec<TestCaseRow> = (1..=5)
+            .map(|id| TestCaseRow {
+                input: TestCaseBodyRef::Inline {
+                    text: format!("in{id}{body}"),
+                },
+                expected_output: TestCaseBodyRef::Inline {
+                    text: format!("out{id}{body}"),
+                },
+                ..test_case(id)
+            })
+            .collect();
+        let req = test_submission(tcs.clone());
+
+        let state = start_state(&host, &req, &tcs);
+        let state_json = serde_json::to_string(&state).unwrap();
+        assert!(
+            state_json.len() < 8_000,
+            "state is {} bytes; test bodies leaked into it",
+            state_json.len()
+        );
+        assert!(!state_json.contains("XXXX"), "a test body is in the state");
+        assert!(
+            !state_json.contains("int main"),
+            "the source is in the state"
+        );
+
+        // The batch the host judges from still has every body.
+        let batch = &host.eval.detached_windowed_requests()[0].batch;
+        assert_eq!(batch.test_cases.len(), 5);
+        assert!(serde_json::to_string(batch).unwrap().len() > 5 * 200_000);
+
+        // And the driver still works from the stripped state.
+        let out = drive(&host, state, TestCaseVerdict::accepted(1));
+        assert!(!out.state.is_null());
+    }
+
+    /// A session started by an older plugin build stored the whole request
+    /// (test cases, source) and full test-case rows. After an upgrade those
+    /// sessions must keep working: the narrower state types ignore the extra
+    /// fields rather than failing to deserialize mid-judging.
+    #[test]
+    fn a_session_state_written_by_an_older_build_still_drives_callbacks() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=3)
+            .map(|id| TestCaseRow {
+                input: TestCaseBodyRef::Inline {
+                    text: format!("in{id}"),
+                },
+                expected_output: TestCaseBodyRef::Inline {
+                    text: format!("out{id}"),
+                },
+                ..test_case(id)
+            })
+            .collect();
+        let req = test_submission(tcs.clone());
+        let mut state = start_state(&host, &req, &tcs);
+        // Rewrite it into the old shape: full input and full rows.
+        state["request"] = serde_json::to_value(&req).unwrap();
+        state["scoring_cases"] = serde_json::to_value(&tcs).unwrap();
+
+        let out = drive(&host, state, TestCaseVerdict::accepted(1));
+        assert!(!out.state.is_null());
+        assert_eq!(
+            host.submission.results().len(),
+            1,
+            "the result was recorded"
+        );
     }
 
     fn drive(

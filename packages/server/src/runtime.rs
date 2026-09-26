@@ -281,6 +281,8 @@ impl ServerRuntime {
             let op_waiters = operation_waiters.clone();
             let op_evaluate_ops_registry = evaluate_ops_registry.clone();
             let op_result_metrics = metrics.clone();
+            let op_result_poll =
+                std::time::Duration::from_millis(app_config.mq.result_poll_interval_ms);
             tokio::spawn(async move {
                 consume_operation_results(
                     op_consumer_mq,
@@ -288,6 +290,7 @@ impl ServerRuntime {
                     op_evaluate_ops_registry,
                     op_result_queue,
                     op_result_metrics,
+                    op_result_poll,
                 )
                 .await;
             });

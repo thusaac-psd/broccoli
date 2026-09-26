@@ -13,6 +13,8 @@ pub async fn consume_operation_results(
     evaluate_ops_registry: EvaluateBatchOpsRegistry,
     queue_name: String,
     metrics: Metrics,
+    // How long each task naps after an empty poll (`mq.result_poll_interval_ms`).
+    poll_interval: std::time::Duration,
 ) {
     info!(
         queue = %queue_name,
@@ -30,7 +32,10 @@ pub async fn consume_operation_results(
         .process_messages(
             &queue_name,
             Some(8),
-            None,
+            Some(mq::ConsumeConfig {
+                consume_wait: Some(poll_interval),
+                ..Default::default()
+            }),
             move |message: mq::BrokerMessage<TaskReply>| {
                 let waiters = waiters.clone();
                 let evaluate_ops_registry = evaluate_ops_registry.clone();

@@ -12,6 +12,15 @@ port = 3000
 # to the wrong replica.
 id = ""
 
+# Floor for how many submissions this server judges at once (claimed and not
+# finished). The cap in force is the larger of this and 8 x the live worker
+# slots from heartbeats, so it grows with the cluster and never throttles below
+# worker capacity; you do not need to tune it when adding workers. Past the
+# cap, a burst waits as `Queued` in the database, claimable by any server.
+# Measured: 1000 submissions / 100 concurrent went from 979 in flight on one
+# server to 256, same throughput, ~13% less peak memory. 0 = no cap.
+max_in_flight_submissions = 256
+
 # UP#39 backpressure-on-post: cap on durable `Queued` rows across
 # `submission`, `code_run`, and `submission_judgement` combined. When
 # the live depth is at or above this value, POST endpoints that would
@@ -48,6 +57,10 @@ pool_size = 5
 operation_queue_name = "operation_tasks"
 operation_result_queue_name = "operation_results"
 operation_dlq_queue_name = "operation_tasks_dlq"
+# How long the server waits between polls of an empty result queue. Contest
+# plugins judge one test case at a time, so this is paid per case: 50 ms costs
+# ~0.16 s per case and ~490 idle Redis ops/s; 20 ms ~0.15 s and ~1150 ops/s.
+result_poll_interval_ms = 50
 
 [mq.dlq]
 max_retries = 3

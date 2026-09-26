@@ -676,6 +676,7 @@ impl TestApp {
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
+                max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
                 plugin_timer_lease_secs: 30,
                 plugin_timer_batch: 64,
