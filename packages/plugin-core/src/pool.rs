@@ -50,7 +50,7 @@ use tracing::warn;
 
 /// A factory that builds a fresh plugin instance. Not `Send`/`Sync`: the
 /// extism host functions it captures hold `Arc<Mutex<dyn Any>>` user data.
-/// See the `unsafe impl`s on [`Shared`] for why sharing it is sound.
+/// See the `unsafe impl`s on `Shared` for why sharing it is sound.
 pub type PluginSource<T = Plugin> = Arc<dyn Fn() -> Result<T, Error>>;
 
 #[derive(Default, Clone, Copy)]
