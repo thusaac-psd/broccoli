@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { GameView, MatchView } from '../types.ts';
+import { makeMatch } from './fixtures.test-util.ts';
 import { gamePips, seedsFrom } from './pips.ts';
 
 const game = (
@@ -19,34 +20,8 @@ const game = (
   decided,
 });
 
-function match(overrides: Partial<MatchView>): MatchView {
-  return {
-    id: 0,
-    round: 1,
-    pos: 0,
-    player_a: 10,
-    player_b: 20,
-    player_a_name: null,
-    player_b_name: null,
-    group_a: [null, null, null],
-    group_b: [null, null, null],
-    order_a: null,
-    order_b: null,
-    tiebreak_problem: null,
-    score_a: 0,
-    score_b: 0,
-    state: 'in_progress',
-    winner: null,
-    decided_at_ms: 0,
-    awaiting_submission_id: null,
-    current_xiaoju_index: null,
-    current_xiaoju_deadline_ms: null,
-    current_xiaoju_opened_at_ms: null,
-    games: [],
-    starts_at_ms: null,
-    ...overrides,
-  };
-}
+const match = (overrides: Partial<MatchView>): MatchView =>
+  makeMatch({ state: 'in_progress', ...overrides });
 
 test('a running match shows results, the live game, then what is left', () => {
   const m = match({ games: [game(0, 10), game(1, null, false)] });

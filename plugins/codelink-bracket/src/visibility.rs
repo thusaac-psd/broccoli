@@ -330,7 +330,8 @@ fn decide_visibility_decisions(
         let sql = format!(
             "SELECT cp.problem_id AS problem_id, cp.contest_id AS contest_id \
              FROM contest_problem cp JOIN contest c ON c.id = cp.contest_id \
-             WHERE c.contest_type = 'codelink-bracket' AND cp.problem_id IN ({})",
+             WHERE c.contest_type = 'codelink-bracket' AND c.deleted_at IS NULL \
+             AND cp.problem_id IN ({})",
             placeholders.join(",")
         );
         let rows: Vec<ContextFreeProblemContestRow> =
@@ -1165,6 +1166,13 @@ mod tests {
         assert!(
             queries[0].sql.contains("IN ("),
             "must be a single IN(...) batch query: {}",
+            queries[0].sql
+        );
+        // A deleted bracket contest no longer runs, so it must stop hiding
+        // the problems it shared with other contests.
+        assert!(
+            queries[0].sql.contains("c.deleted_at IS NULL"),
+            "must ignore soft-deleted contests: {}",
             queries[0].sql
         );
 

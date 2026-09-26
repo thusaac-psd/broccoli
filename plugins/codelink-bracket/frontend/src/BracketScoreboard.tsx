@@ -6,6 +6,7 @@ import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  Clock,
   Crown,
   Maximize2,
   Minimize2,
@@ -20,6 +21,7 @@ import {
 } from 'react';
 
 import { useBracketApi } from './hooks/useBracketApi';
+import { useNow } from './hooks/useNow';
 import { gamePips, type Pip, seedsFrom } from './lib/pips';
 import { playerLabel } from './lib/player';
 import {
@@ -29,6 +31,7 @@ import {
   roundShortKey,
 } from './lib/rounds';
 import { sideOf } from './lib/stage';
+import { contestEndWarning, MATCH_COUNT, roundsInPlay } from './lib/summary';
 import { MatchSheet } from './MatchSheet';
 import { MyMatchStrip } from './MyMatchStrip';
 import { StatusPill, useGameClock, useStartsIn } from './parts';
@@ -121,6 +124,7 @@ export function BracketScoreboard({
       >
         <SummaryBar
           matches={matches}
+          contestEndMs={data.contest_end_ms}
           isStaff={isStaff}
           presenting={presenting}
           onTogglePresent={() =>
@@ -157,21 +161,22 @@ function useFullscreen(ref: RefObject<HTMLElement | null>): boolean {
 
 function SummaryBar({
   matches,
+  contestEndMs,
   isStaff,
   presenting,
   onTogglePresent,
 }: {
   matches: MatchView[];
+  contestEndMs?: number | null;
   isStaff: boolean;
   presenting: boolean;
   onTogglePresent: () => void;
 }) {
   const { t } = useTranslation();
+  const now = useNow(15_000);
   const decided = matches.filter((m) => m.state === 'decided').length;
-  const currentRound =
-    Math.min(
-      ...matches.filter((m) => m.state !== 'decided').map((m) => m.round),
-    ) || ROUND_COUNT;
+  const inPlay = roundsInPlay(matches);
+  const endWarning = contestEndWarning(matches, contestEndMs, now);
   const stat = (value: number, label: string, tone?: string) => (
     <div className="flex items-baseline gap-1.5">
       <span
@@ -190,13 +195,9 @@ function SummaryBar({
           {t('codelink-bracket.summary.stage')}
         </div>
         <div className="font-semibold">
-          {decided === 15
+          {inPlay.length === 0
             ? t('codelink-bracket.summary.finished')
-            : t(
-                roundNameKey(
-                  Number.isFinite(currentRound) ? currentRound : ROUND_COUNT,
-                ),
-              )}
+            : inPlay.map((r) => t(roundNameKey(r))).join(' · ')}
         </div>
       </div>
       {stat(
@@ -204,8 +205,23 @@ function SummaryBar({
         t('codelink-bracket.summary.live'),
         'text-emerald-600',
       )}
-      {stat(decided, t('codelink-bracket.summary.decided', { total: 15 }))}
+      {stat(
+        decided,
+        t('codelink-bracket.summary.decided', { total: MATCH_COUNT }),
+      )}
       <div className="ml-auto flex items-center gap-3">
+        {isStaff && !presenting && endWarning && (
+          <div className="flex items-center gap-2 rounded-lg bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-800 dark:text-amber-200">
+            <Clock className="h-4 w-4" />
+            {endWarning.kind === 'ended'
+              ? t('codelink-bracket.summary.contestEnded', {
+                  count: endWarning.unfinished,
+                })
+              : t('codelink-bracket.summary.contestEndCutoff', {
+                  count: endWarning.count,
+                })}
+          </div>
+        )}
         {/* Staff-only signal: kept off the projected view. */}
         {isStaff && !presenting && attention > 0 && (
           <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-700 dark:text-red-300">

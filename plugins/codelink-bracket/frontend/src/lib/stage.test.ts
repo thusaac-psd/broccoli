@@ -1,37 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { MatchView } from '../types.ts';
+import { makeMatch } from './fixtures.test-util.ts';
 import { matchSteps, playerStage, sideOf } from './stage.ts';
 
-function match(overrides: Partial<MatchView>): MatchView {
-  return {
-    id: 0,
-    round: 1,
-    pos: 0,
-    player_a: 10,
-    player_b: 20,
-    player_a_name: 'alice',
-    player_b_name: 'bob',
-    group_a: [101, 102, 103],
-    group_b: [201, 202, 203],
-    order_a: null,
-    order_b: null,
-    tiebreak_problem: null,
-    score_a: 0,
-    score_b: 0,
-    state: 'ordering',
-    winner: null,
-    decided_at_ms: 0,
-    awaiting_submission_id: null,
-    current_xiaoju_index: null,
-    current_xiaoju_deadline_ms: null,
-    current_xiaoju_opened_at_ms: null,
-    games: [],
-    starts_at_ms: null,
-    ...overrides,
-  };
-}
+const match = makeMatch;
 
 test('sideOf finds the viewer, or null for anyone else', () => {
   const m = match({});

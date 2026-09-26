@@ -53,11 +53,14 @@ export interface MatchView {
   /**
    * The id of the in-flight submission this match is blocked on. Set while
    * `state === 'awaiting_judge'` and kept if that block escalates to
-   * `needs_adjudication` -- so in that state, non-null means "a judge never
-   * finished" and null means "the tiebreak list ran out". Never masked
-   * (structural, like `state` itself).
+   * `needs_adjudication`. Never masked (structural, like `state` itself).
    */
   awaiting_submission_id: number | null;
+  /**
+   * Why the match needs staff; set only in `needs_adjudication`. Null for
+   * matches escalated before the server recorded reasons.
+   */
+  adjudication_reason: AdjudicationReason | null;
   /**
    * The currently open (or most recently open) 小局's index/deadline/open
    * time, from `MatchState::xiaoju.last()`. `None` before the first 小局
@@ -99,7 +102,15 @@ export interface GameView {
 
 export interface BracketResponse {
   matches: MatchView[];
+  /** The contest's end time; null (or absent) if the server could not read it. */
+  contest_end_ms?: number | null;
 }
+
+export type AdjudicationReason =
+  | 'stuck_judge'
+  | 'tiebreak_exhausted'
+  | 'setup_missing'
+  | 'contest_ended';
 
 /**
  * `POST /matches/{id}/order` response. NOT the same shape as `MatchView`'s

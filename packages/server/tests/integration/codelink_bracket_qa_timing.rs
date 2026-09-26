@@ -34,7 +34,7 @@ use crate::common::{TestApp, TestResponse, routes};
 use broccoli_server_sdk::permissions as perm;
 use chrono::{Duration as ChronoDuration, Utc};
 use common::{SubmissionStatus, Verdict};
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Set};
 use serde_json::{Value, json};
 use server::dispatcher::plugin_timer::{TimerConfig, tick_once};
 use server::entity::submission;
@@ -603,11 +603,19 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
 /// polling for the background dispatcher loop to get around to it. The only
 /// sleeps here wait out the UNAVOIDABLE real wall-clock deadlines
 /// (`xiaoju_seconds`, `escalation_grace_seconds` are computed from real
-/// `NOW()`); delivery itself is always forced deterministically via
+/// `NOW()`), and they are derived from the deadline the server reports, not
+/// guessed; delivery itself is always forced deterministically via
 /// `tick_once` immediately afterwards.
+///
+/// Both submissions are inserted directly with fixed verdicts. An earlier
+/// version sent B's AC through the real judging pipeline with a short game,
+/// and failed whenever a loaded test run judged it late or pushed the
+/// pre-deadline check past a 3 s deadline.
 #[tokio::test]
 async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
-    let fx = setup_fixture_with_timing(3, 0, 2).await;
+    const GAME_SECONDS: i64 = 8;
+    const GRACE_SECONDS: i64 = 2;
+    let fx = setup_fixture_with_timing(GAME_SECONDS, 0, GRACE_SECONDS).await;
     order_match_0(&fx).await;
     start_match_0(&fx).await;
 
@@ -616,26 +624,21 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     let prob_a = fx.rounds[0].group_a[0];
     let prob_b = fx.rounds[0].group_b[0];
 
-    // A's submission never resolves -- inserted directly so no real
-    // evaluator is ever dispatched for it.
-    let stuck = insert_submission(
+    // A's submission never resolves; B's, submitted later, is already an
+    // AC. That makes A's submission a BLOCKER rather than simply the only
+    // submission on the board (see the separate defect test for that case).
+    let t0 = Utc::now();
+    let stuck = insert_submission(&fx, a.id, prob_a, SubmissionStatus::Running, None, t0).await;
+    insert_submission(
         &fx,
-        a.id,
-        prob_a,
-        SubmissionStatus::Running,
-        None,
-        Utc::now(),
+        b.id,
+        prob_b,
+        SubmissionStatus::Judged,
+        Some(Verdict::Accepted),
+        t0 + ChronoDuration::milliseconds(50),
     )
     .await;
 
-    // B gets a REAL, confirmed AC through the actual judging pipeline --
-    // this is what makes A's stuck submission a BLOCKER rather than simply
-    // the only submission on the board (see the separate defect test for
-    // that other case).
-    let res = submit(&fx.app, fx.contest_id, prob_b, &b.token, "ACCEPT").await;
-    assert_eq!(res.status, 201, "B's submission failed: {}", res.text);
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let res = force_decide(&fx, 0, None).await;
     assert_eq!(
         res.status, 200,
@@ -643,6 +646,14 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
         res.text
     );
     let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    let deadline_ms = view["current_xiaoju_deadline_ms"]
+        .as_i64()
+        .expect("game 1 is open and has a deadline");
+    assert!(
+        Utc::now().timestamp_millis() < deadline_ms,
+        "the pre-deadline check ran after the {GAME_SECONDS}s deadline; the run is too \
+         slow for this test to say anything"
+    );
     assert_eq!(
         view["state"], "in_progress",
         "must stay in_progress (blocked, not yet decided) while A's older submission is \
@@ -651,9 +662,8 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     assert_eq!(view["score_a"].as_i64(), Some(0));
     assert_eq!(view["score_b"].as_i64(), Some(0));
 
-    // Wait out the unavoidable real 3s deadline, then force delivery
-    // deterministically.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait out the real deadline, then force delivery deterministically.
+    sleep_until_ms(deadline_ms + 250).await;
     let config = TimerConfig::default();
     tick_once(&fx.app.state, &config)
         .await
@@ -671,9 +681,9 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
         "the blocking submission id exposed to staff must be A's stuck submission"
     );
 
-    // Wait out the unavoidable real 2s escalation grace period, then force
-    // delivery deterministically again.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // The escalation timer was armed during the tick above, so the grace
+    // period is over GRACE_SECONDS after it returned.
+    sleep_until_ms(Utc::now().timestamp_millis() + GRACE_SECONDS * 1_000 + 250).await;
     tick_once(&fx.app.state, &config)
         .await
         .expect("tick_once (escalation) failed");
@@ -684,6 +694,63 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
         "a match still blocked after the escalation grace period must escalate for staff, \
          got {view}"
     );
+    assert_eq!(view["adjudication_reason"], "stuck_judge");
+}
+
+/// The contest ending mid-game: nobody can submit any more, so the game
+/// must not be scored as if both players had failed. It goes to staff with
+/// the reason, and neither the auto-start nor a staff start can begin
+/// another match afterwards.
+#[tokio::test]
+async fn a_game_cut_off_by_the_contest_end_goes_to_staff() {
+    let fx = setup_fixture_with_timing(30, 0, 2).await;
+    order_match_0(&fx).await;
+    start_match_0(&fx).await;
+
+    // Staff pull the end forward to well before game 1's deadline.
+    fx.app
+        .db
+        .execute_unprepared(&format!(
+            "UPDATE contest SET end_time = NOW() + INTERVAL '1 second' WHERE id = {}",
+            fx.contest_id
+        ))
+        .await
+        .expect("move the contest end");
+    sleep_until_ms(Utc::now().timestamp_millis() + 1_500).await;
+
+    // Anything that looks at the match after the end (a verdict landing, a
+    // timer, this nudge) must see that the game can no longer be played.
+    let res = force_decide(&fx, 0, None).await;
+    assert_eq!(
+        res.status, 200,
+        "advance after the end failed: {}",
+        res.text
+    );
+
+    let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(view["state"], "needs_adjudication", "got {view}");
+    assert_eq!(view["adjudication_reason"], "contest_ended");
+    assert_eq!(view["score_a"].as_i64(), Some(0));
+    assert_eq!(view["score_b"].as_i64(), Some(0));
+    assert_eq!(
+        view["games"][0]["decided"], false,
+        "the cut-off game is left unscored for staff, got {view}"
+    );
+
+    // A second match ranked after the end neither starts by itself nor on
+    // a staff start.
+    order_match(&fx, 1, &fx.rounds[0], &fx.players[2], &fx.players[3]).await;
+    let view = get_match(&fx.app, fx.contest_id, 1, &fx.staff_token).await;
+    assert_eq!(view["state"], "ordering", "got {view}");
+    let res = start_match(&fx, 1).await;
+    assert_eq!(res.status, 400, "staff start after the end: {}", res.text);
+}
+
+async fn sleep_until_ms(at_ms: i64) {
+    let wait = at_ms - Utc::now().timestamp_millis();
+    if wait > 0 {
+        tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+    }
 }
 
 /// DEFECT: `decide_xiaoju`'s `best_ac == None` branch never checks for an

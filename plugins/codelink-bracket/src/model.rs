@@ -96,6 +96,12 @@ pub struct MatchState {
     /// otherwise. See `MatchPhase::AwaitingJudge`'s doc comment for the
     /// policy this exists to support.
     pub awaiting_submission_id: Option<i32>,
+    /// Why the match is in `NeedsAdjudication`, so staff (and the UI) are
+    /// told the actual cause instead of guessing it from other fields.
+    /// `None` in any other phase, and for documents written before this
+    /// field existed (`#[serde(default)]`).
+    #[serde(default)]
+    pub adjudication_reason: Option<AdjudicationReason>,
     /// The 小局 duration (seconds) this match's FIRST 小局 opened under,
     /// pinned once by `judge::open_xiaoju` the moment it actually opens (see
     /// that function's doc comment) so a LATER `/setup` call rewriting the
@@ -131,6 +137,22 @@ pub struct XiaojuState {
     pub deadline_ms: i64,
     pub winner: Option<i32>,
     pub decided: bool,
+}
+
+/// Why a match needs a staff decision.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdjudicationReason {
+    /// A submission was still being judged when the escalation grace ran
+    /// out (`awaiting_submission_id` names it).
+    StuckJudge,
+    /// Every tiebreak problem ended scoreless.
+    TiebreakExhausted,
+    /// The round has no problem definition to continue with.
+    SetupMissing,
+    /// The contest's end time arrived before the match could finish: nobody
+    /// can submit any more, so the remaining games cannot be played.
+    ContestEnded,
 }
 
 /// A match's lifecycle phase.

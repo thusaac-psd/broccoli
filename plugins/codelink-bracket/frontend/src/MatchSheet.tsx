@@ -39,6 +39,7 @@ import { problemPath, submissionPath } from './lib/links';
 import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
 import { sideOf } from './lib/stage';
+import { adjudicationMessage } from './lib/summary';
 import { OrderingPanel } from './OrderingPanel';
 import {
   ConfirmButton,
@@ -363,12 +364,11 @@ function AttentionBanner({
     return null;
   }
   const severe = match.state === 'needs_adjudication';
+  const adjudication = adjudicationMessage(match);
   const message =
     match.state === 'awaiting_judge'
       ? t('codelink-bracket.match.awaitingJudge')
-      : id !== null
-        ? t('codelink-bracket.match.stuckJudge', { id })
-        : t('codelink-bracket.match.tiebreakExhausted');
+      : t(adjudication.key, adjudication.params);
   return (
     <div
       role="status"
