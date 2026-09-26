@@ -1,5 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth, useAuthReady } from '@broccoli/web-sdk/auth';
+import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 
-import { fetchContestProblemList } from '@/features/contest/api/fetch-contest-problem-list';
+import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 import {
   fetchAllContestSubmissions,
@@ -56,7 +56,6 @@ function parseStatus(value: string | null): SubmissionStatusFilterValue {
 export function ContestSubmissions({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
   const { user } = useAuth();
-  const authReady = useAuthReady();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -147,11 +146,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     ],
   );
 
-  const { data: problems = [] } = useQuery({
-    queryKey: ['contest-problems', contestId],
-    enabled: authReady && Number.isFinite(contestId),
-    queryFn: () => fetchContestProblemList(apiClient, contestId),
-  });
+  const { data: problems = [] } = useContestProblems(contestId);
 
   const { data: supportedLanguages = [] } = useQuery({
     queryKey: ['supported-languages'],

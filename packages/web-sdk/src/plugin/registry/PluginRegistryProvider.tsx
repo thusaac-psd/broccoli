@@ -19,6 +19,11 @@ import type {
   SlotConfig,
 } from '@/plugin/types';
 
+type RemoteLoadResult = 'ok' | 'partial' | 'unreachable';
+
+const REMOTE_RETRY_BASE_MS = 1_000;
+const REMOTE_RETRY_MAX_MS = 30_000;
+
 interface PluginRegistryProviderProps {
   children: ReactNode;
   backendUrl: string;
@@ -211,18 +216,30 @@ export function PluginRegistryProvider({
     [unloadPlugin],
   );
 
+  /**
+   * Fetch the active plugin list and load every plugin not loaded yet.
+   * `'unreachable'` if the list could not be fetched (e.g. a gateway 502
+   * while the server restarts), `'partial'` if some plugin failed to load.
+   */
   const loadRemotePlugins = useCallback(
-    async (bustCache = false) => {
-      const { data: pluginList, error } =
-        await apiClient.GET('/plugins/active');
+    async (bustCache = false): Promise<RemoteLoadResult> => {
+      const pluginList = await (async () => {
+        try {
+          const { data, error } = await apiClient.GET('/plugins/active');
+          if (!error && Array.isArray(data)) return data;
+          console.warn(`Failed to fetch active plugins:`, error ?? data);
+        } catch (error) {
+          console.warn(`Failed to fetch active plugins:`, error);
+        }
+        return null;
+      })();
+      if (!pluginList) return 'unreachable';
 
-      if (error) {
-        console.warn(`Failed to fetch active plugins:`, error);
-        return;
-      }
-
+      const pending = pluginList.filter(
+        (pluginInfo) => !activeManifests.current.has(pluginInfo.id),
+      );
       const results = await Promise.allSettled(
-        pluginList.map(async (pluginInfo) => {
+        pending.map(async (pluginInfo) => {
           // Load CSS files declared by the plugin
           if (pluginInfo.css && pluginInfo.css.length > 0) {
             for (const cssUrl of pluginInfo.css) {
@@ -264,20 +281,21 @@ export function PluginRegistryProvider({
       await refreshI18n();
       if (failed.length > 0) {
         console.warn(
-          `${failed.length}/${pluginList.length} plugins failed to load.`,
+          `${failed.length}/${pending.length} plugins failed to load.`,
         );
         for (const r of failed) {
           console.error('Plugin load error:', r.reason);
         }
+        return 'partial';
       }
+      return 'ok';
     },
     [apiClient, loadPlugin, refreshI18n, resolvePluginEntryUrl],
   );
 
-  const loadAllPlugins = useCallback(
-    async () => loadRemotePlugins(false),
-    [loadRemotePlugins],
-  );
+  const loadAllPlugins = useCallback(async () => {
+    await loadRemotePlugins(false);
+  }, [loadRemotePlugins]);
 
   const reloadPlugin = useCallback(
     async (pluginId: string) => {
@@ -412,14 +430,32 @@ export function PluginRegistryProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load active plugins from backend on mount
+  // Load active plugins from backend on mount, retrying with backoff until
+  // every plugin has loaded. Without the retry, one failed request (a
+  // gateway 502 while the server restarts) left the page without its plugin
+  // views until a manual reload. Stays `isLoading` until the list itself has
+  // been fetched, so pages show a loading state rather than an empty one.
   useEffect(() => {
-    const load = async () => {
-      await loadAllPlugins();
-      setRemoteLoaded(true);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = async (n: number) => {
+      // Retries bust the module cache so a failed import is fetched again.
+      const result = await loadRemotePlugins(n > 0);
+      if (cancelled) return;
+      if (result !== 'unreachable') setRemoteLoaded(true);
       await refreshI18n();
+      if (result !== 'ok' && !cancelled) {
+        timer = setTimeout(
+          () => void attempt(n + 1),
+          Math.min(REMOTE_RETRY_MAX_MS, REMOTE_RETRY_BASE_MS * 2 ** n),
+        );
+      }
     };
-    load();
+    void attempt(0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
