@@ -61,6 +61,11 @@ pub struct Model {
     /// dispatch age independent of a still-live server's heartbeat refresh.
     #[sea_orm(nullable)]
     pub leased_at: Option<DateTimeUtc>,
+    /// Dispatch ATTEMPTS so far, despite the name: bumped on every claim,
+    /// steal and re-dispatch, so it is 1 after a normal first dispatch and the
+    /// number of retries is `retry_count - 1`. `max_dispatch_retries` /
+    /// `max_stuck_retries` are budgets on this count. (Column name kept for
+    /// schema compatibility.)
     #[sea_orm(default_value = 0)]
     pub retry_count: i32,
 

@@ -386,6 +386,23 @@ impl ServerRuntime {
 
         crate::handlers::system::spawn_queue_depth_sampler(state.clone(), Duration::from_secs(5));
 
+        if let Some(idle_for) = app_config.plugin.pool_idle_timeout() {
+            let plugins = state.plugins.clone();
+            tokio::spawn(async move {
+                // Sweeping at a fraction of the timeout bounds how long past
+                // it an idle instance can linger.
+                let mut interval =
+                    tokio::time::interval((idle_for / 4).max(Duration::from_secs(1)));
+                loop {
+                    interval.tick().await;
+                    let plugins = plugins.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || plugins.evict_idle_instances(idle_for))
+                            .await;
+                }
+            });
+        }
+
         {
             let detector_state = state.clone();
             let detector_config = app_config.mq.dlq.clone();

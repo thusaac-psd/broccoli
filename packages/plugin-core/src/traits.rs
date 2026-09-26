@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use extism::{Manifest, PluginBuilder, PoolBuilder, Wasm};
+use extism::{Manifest, PluginBuilder, Wasm};
 use opentelemetry::KeyValue;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, error, info, instrument, warn};
@@ -172,7 +172,7 @@ pub trait PluginInvoker: Send + Sync {
                 let _span_guard = parent_span.enter();
                 crate::host_context::with_context(host_context, || {
                     let acquire_start = std::time::Instant::now();
-                    let plugin = match pool.get(timeout) {
+                    let mut plugin = match pool.get(timeout) {
                         Ok(Some(plugin)) => {
                             record_pool_acquire_metrics(
                                 metrics.as_ref(),
@@ -208,7 +208,7 @@ pub trait PluginInvoker: Send + Sync {
                         }
                     };
 
-                    if !plugin.plugin().function_exists(&func_name) {
+                    if !plugin.function_exists(&func_name) {
                         return Err(PluginError::FunctionNotFound {
                             plugin_id: plugin_id.clone(),
                             func_name: func_name.clone(),
@@ -221,7 +221,7 @@ pub trait PluginInvoker: Send + Sync {
                     // pool can weigh how much data this instance churned through.
                     crate::host_context::reset_stream_bytes();
                     let call_result: Result<Vec<u8>, PluginError> = plugin
-                        .call(func_name.as_str(), input)
+                        .call::<_, Vec<u8>>(func_name.as_str(), input)
                         .map_err(|e| PluginError::ExecutionFailed {
                             plugin_id: plugin_id.clone(),
                             func_name: func_name.clone(),
@@ -252,7 +252,7 @@ pub trait PluginInvoker: Send + Sync {
                     // for completeness.
                     let processed_bytes =
                         input_len as u64 + output_len as u64 + crate::host_context::stream_bytes();
-                    if pool.note_call(&plugin, processed_bytes) {
+                    if plugin.note_call(processed_bytes) {
                         debug!(
                             plugin_id = %plugin_id,
                             func = %func_name,
@@ -390,6 +390,33 @@ pub trait PluginManager: PluginInvoker {
         Ok(())
     }
 
+    /// Drop pooled instances that have sat unused for `idle_for`, across
+    /// every loaded plugin. Returns how many were dropped. Blocking: frees
+    /// WASM memory, so run it off the async runtime.
+    fn evict_idle_instances(&self, idle_for: std::time::Duration) -> usize {
+        let pools: Vec<(String, crate::pool::RecyclingPool)> = {
+            let registry = self.get_registry().read().unwrap();
+            registry
+                .values()
+                .filter_map(|entry| Some((entry.id.clone(), entry.runtime.clone()?)))
+                .collect()
+        };
+        let mut total = 0;
+        for (plugin_id, pool) in pools {
+            let evicted = pool.evict_idle(idle_for);
+            if evicted > 0 {
+                debug!(plugin_id = %plugin_id, evicted, "Evicted idle plugin instances");
+                if let Some(metrics) = self.get_metrics() {
+                    metrics
+                        .plugin_instance_evicted_total
+                        .add(evicted as u64, &[KeyValue::new("plugin.id", plugin_id)]);
+                }
+            }
+            total += evicted;
+        }
+        total
+    }
+
     #[instrument(skip(self), fields(plugin_id = %plugin_id))]
     fn load_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
         let mut registry = self
@@ -438,9 +465,7 @@ pub trait PluginManager: PluginInvoker {
             let reclaim_bytes = self.get_config().instance_reclaim_bytes;
             let min_calls = self.get_config().instance_min_calls_before_recycle;
 
-            // One shared factory: extism's pool calls it to create instances on
-            // demand; the recycling wrapper calls it to rebuild a bloated one.
-            // `Arc<dyn Fn>` so both can hold and invoke it.
+            // One factory builds instances on demand and rebuilds bloated ones.
             let build_metrics = self.get_metrics().cloned();
             let build_plugin_id = plugin_id.to_string();
             let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
@@ -458,14 +483,9 @@ pub trait PluginManager: PluginInvoker {
                 }
                 built
             });
-            let source_for_pool = source.clone();
-            let pool = PoolBuilder::new()
-                .with_max_instances(max_instances)
-                .build(move || (source_for_pool)());
-
             runtime = Some(crate::pool::RecyclingPool::new(
-                pool,
                 source,
+                max_instances,
                 reclaim_bytes,
                 min_calls,
             ));

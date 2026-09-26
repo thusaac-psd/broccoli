@@ -189,11 +189,15 @@ pub struct ServerConfig {
     pub steal_batch_size: u32,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
+    /// Maximum dispatch ATTEMPTS (first dispatch included) the claim and
+    /// lease-steal paths make before finalizing a row as SystemError; compared
+    /// against the row's `retry_count`, which counts attempts.
     #[serde(default = "default_max_dispatch_retries")]
     pub max_dispatch_retries: u32,
     /// Retry budget for the global stuck detector. Rows with
-    /// `retry_count <= max_stuck_retries` are left for claim/lease-steal
-    /// recovery; rows above the budget are finalized as SystemError.
+    /// `retry_count <= max_stuck_retries` (`retry_count` counts dispatch
+    /// attempts) are left for claim/lease-steal recovery; rows above the
+    /// budget are finalized as SystemError.
     #[serde(default = "default_max_stuck_retries")]
     pub max_stuck_retries: u32,
     /// Retry budget for the SystemError-retry reaper. A `SystemError` verdict is

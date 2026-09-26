@@ -63,6 +63,13 @@ pub struct PluginConfig {
     /// `instance_reclaim_bytes` is set.
     #[serde(default = "default_instance_min_calls_before_recycle")]
     pub instance_min_calls_before_recycle: usize,
+    /// Drop a pooled instance once it has sat unused this long, so the
+    /// instances a burst created do not stay resident for the life of the
+    /// process. Free instances are reused most recently used first, so steady
+    /// traffic keeps the few it needs warm and only the surplus ages out.
+    /// Rebuilding one costs ~10 ms. `0` disables eviction.
+    #[serde(default = "default_pool_idle_timeout")]
+    pub pool_idle_timeout_secs: u64,
 }
 
 fn default_plugins_dir() -> PathBuf {
@@ -97,6 +104,10 @@ fn default_instance_min_calls_before_recycle() -> usize {
     4
 }
 
+fn default_pool_idle_timeout() -> u64 {
+    300
+}
+
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
@@ -109,11 +120,18 @@ impl Default for PluginConfig {
             max_instance_memory_pages: default_max_instance_memory_pages(),
             instance_reclaim_bytes: default_instance_reclaim_bytes(),
             instance_min_calls_before_recycle: default_instance_min_calls_before_recycle(),
+            pool_idle_timeout_secs: default_pool_idle_timeout(),
         }
     }
 }
 
 impl PluginConfig {
+    /// `pool_idle_timeout_secs` as a duration; `None` when eviction is off.
+    pub fn pool_idle_timeout(&self) -> Option<std::time::Duration> {
+        (self.pool_idle_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.pool_idle_timeout_secs))
+    }
+
     pub fn check_plugins_dir(&self) -> bool {
         self.plugins_dir.exists() && self.plugins_dir.is_dir()
     }
