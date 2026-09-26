@@ -56,6 +56,7 @@ import {
 import { Link, useLocation } from 'react-router';
 
 import { useContest } from '@/features/contest/contexts/contest-context';
+import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 
 import logo from '../../resources/Logo.png';
 import { LocaleSelector } from './LocaleSelector';
@@ -200,17 +201,7 @@ function ContestProblemsGroup() {
 
   const resolvedTitle = contestTitle ?? contestData?.title ?? null;
 
-  const { data: problems = [] } = useQuery({
-    queryKey: ['contest-problems', contestId],
-    enabled: authReady && !!contestId,
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
-        params: { path: { id: contestId! } },
-      });
-      if (error) throw error;
-      return data;
-    },
-  });
+  const { data: problems = [] } = useContestProblems(contestId);
 
   if (!contestId) return <></>;
 

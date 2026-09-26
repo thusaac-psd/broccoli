@@ -1,41 +1,33 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth, useAuthReady } from '@broccoli/web-sdk/auth';
+import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { Skeleton } from '@broccoli/web-sdk/ui';
-import { useQuery } from '@tanstack/react-query';
 import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router';
 
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
+import {
+  useContestProblems,
+  usePassed,
+} from '@/features/contest/hooks/use-contest-problems';
 
 export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
   const { user } = useAuth();
-  const authReady = useAuthReady();
-  const apiClient = useApiClient();
   const { contest } = useContestInfo(contestId);
 
   const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
-  const contestNotStarted =
-    !!contest && Date.now() < new Date(contest.start_time).getTime();
+  const started = usePassed(
+    contest ? new Date(contest.start_time).getTime() : null,
+  );
+  const contestNotStarted = !!contest && !started;
   const shouldBlockByStartTime = contestNotStarted && !canManageContest;
 
   const {
     data: problems = [],
     isLoading,
     error,
-  } = useQuery({
-    queryKey: ['contest-problems', contestId],
-    enabled: authReady && Number.isFinite(contestId) && !shouldBlockByStartTime,
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
-        params: { path: { id: contestId } },
-      });
-      if (error) throw error;
-      return data;
-    },
-  });
+  } = useContestProblems(contestId, { enabled: !shouldBlockByStartTime });
 
   return (
     <div>

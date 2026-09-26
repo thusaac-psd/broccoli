@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import type { EditorFile } from '@/components/CodeEditor';
+import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
 
 import { ProblemCodingTab } from './ProblemCodingTab';
@@ -93,18 +94,7 @@ export default function ProblemView({
     },
   });
 
-  const { data: contestProblems = [] } = useQuery({
-    queryKey: ['contest-problems', contestId],
-    enabled: authReady && Number.isFinite(contestId),
-    queryFn: async () => {
-      if (!contestId) return [];
-      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
-        params: { path: { id: contestId } },
-      });
-      if (error || !data) return [];
-      return data;
-    },
-  });
+  const { data: contestProblems = [] } = useContestProblems(contestId);
 
   const { data: submissionHistory = [] } = useQuery<SubmissionSummary[]>({
     queryKey: ['problem-recent-submissions', contestId, problemId, user?.id],
