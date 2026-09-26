@@ -108,11 +108,11 @@ once the pools had grown under load.
    number of workers.
 2. **Server overhead (C2).** With 32 slots the server became the limit, and
    perf's lower per-case overhead gave 2.3× throughput.
-3. **Claim rate (all bursts).** The dispatcher claims 32 submissions per 1 s
-   poll (`server.claim_batch_size`, `server.claim_poll_interval_ms`). A
-   1000-submission burst waits ~15 s (p50) just to be claimed, in both builds.
-   Perf in C2 (27 submissions/s) is already close to that 32/s ceiling, so
-   raising the batch size is the next lever.
+3. **Claim rate is not a limit.** The dispatcher claims 32 submissions per 1 s
+   poll, so a 1000-submission burst waits ~15 s (p50) to be claimed. Raising the
+   batch to 128 gave no speedup (C3: 37.3 s against 36.0 s), because the work
+   only moves from the database queue into the server. The default stays 32. See
+   the in-flight cap below.
 
 **Trade-offs of the perf changes, measured.**
 
@@ -130,6 +130,28 @@ once the pools had grown under load.
 - One API note: `JudgeProgress::request` no longer carries test cases or source
   files. No in-repo plugin reads them there; a third-party plugin that did would
   see them empty.
+
+## Follow-up: in-flight cap (`server.max_in_flight_submissions`)
+
+Before, a server claimed a batch every tick however much it was already judging,
+and judging is detached after dispatch, so nothing bounded it. In C1 one server
+held **979** submissions in judging at once. That puts the backlog in one
+process's memory instead of the database, where any server can take it, and a
+crash strands all of it until the lease expires.
+
+With a cap of 256 (the new default), each tick claims at most
+`min(claim_batch_size, cap - in_flight)`. Same stack, cold caches, same stats
+(full tables in the **perf vs perf + cap** section below):
+
+|                                                    | perf (no cap) | perf + cap 256 |
+| -------------------------------------------------- | ------------- | -------------- |
+| C1 (4 slots): wall                                 | 155.1 s       | 156.3 s        |
+| C1: most submissions judging at once on the server | 979           | 256            |
+| C1: server memory peak                             | 1570 MiB      | 1360 MiB       |
+| C2 (32 slots): wall                                | 37.0 s        | 36.0 s         |
+| C2: server memory peak                             | 1598 MiB      | 1525 MiB       |
+| C3 (32 slots, batch 128): wall                     | —             | 37.3 s         |
+| SystemErrors / re-dispatches                       | 0 / 0         | 0 / 0          |
 
 ## Full results
 
@@ -639,3 +661,581 @@ means within 5%.
 | Server container memory peak (incl. page cache)          | 1733 MiB             | 1602 MiB             | 0.92×  |
 | Server CPU time                                          | 103.34 s             | 63.49 s              | 0.61×  |
 | Workers CPU time (all 4)                                 | 263.27 s             | 277.34 s             | 1.05×  |
+
+# perf vs perf + cap
+
+## S0-cold-small
+
+1 submission(s), concurrency 1, 50 test cases × 64 bytes each.
+
+|                                                          | perf              | perfcap | change |
+| -------------------------------------------------------- | ----------------- | ------- | ------ |
+| **Outcome**                                              |                   |         |        |
+| Submissions judged                                       | 1                 | —       |        |
+| Verdicts                                                 | Judged/Accepted 1 | —       |        |
+| SystemError (final)                                      | 0                 | —       |        |
+| Re-dispatches (hidden retries)                           | 0                 | —       |        |
+| Re-judged (epoch > 0)                                    | 0                 | —       |        |
+| Submit request errors                                    | 0                 | —       |        |
+| **Latency**                                              |                   |         |        |
+| Wall time (whole scenario)                               | 7.72 s            | —       |        |
+| Submission latency p50 (created→judged)                  | 7.59 s            | —       |        |
+| Submission latency p95                                   | 7.59 s            | —       |        |
+| Submission latency max                                   | 7.59 s            | —       |        |
+| Waiting to be claimed p50 (created→leased)               | 104 ms            | —       |        |
+| Waiting to be claimed p95                                | 104 ms            | —       |        |
+| Judging p50 (leased→judged)                              | 7.49 s            | —       |        |
+| Judging per test case p50                                | 150 ms            | —       |        |
+| Throughput (submissions / s)                             | 0.13              | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Plugin calls                                             | 304               | —       |        |
+| Plugin call time, total                                  | 539 ms            | —       |        |
+| Plugin call p95                                          | 8 ms              | —       |        |
+| icpc: calls / total time                                 | 52 / 320 ms       | —       |        |
+| batch-evaluator: calls / total time                      | 100 / 151 ms      | —       |        |
+| standard-checkers: calls / total time                    | 100 / 21 ms       | —       |        |
+| standard-languages: calls / total time                   | 50 / 43 ms        | —       |        |
+| Pool acquire wait, total                                 | 0 ms              | —       |        |
+| Pool acquire wait p99                                    | 0 ms              | —       |        |
+| Pool acquire failures                                    | 0                 | —       |        |
+| Instances built (compile + instantiate)                  | 0                 | —       |        |
+| Instance build time, total                               | 0 ms              | —       |        |
+| Instance build time, mean                                | —                 | —       |        |
+| Instances recycled                                       | 0                 | —       |        |
+| Evaluator semaphore wait, total                          | 0 ms              | —       |        |
+| Host function time, total                                | 539 ms            | —       |        |
+| **Queues**                                               |                   |         |        |
+| Operation round trip p50 (enqueue→result delivered)      | 151 ms            | —       |        |
+| Operation round trip p95                                 | 240 ms            | —       |        |
+| Worker queue wait p50                                    | 25 ms             | —       |        |
+| Worker queue wait p95                                    | 48 ms             | —       |        |
+| Message age at consume p95                               | 48 ms             | —       |        |
+| Redis commands                                           | 11,216            | —       |        |
+| **Worker**                                               |                   |         |        |
+| Operations run                                           | 50                | —       |        |
+| Operation processing p50                                 | 95 ms             | —       |        |
+| Operation processing p95                                 | 233 ms            | —       |        |
+| Step 'compile' mean                                      | 4 ms              | —       |        |
+| Step 'testcase' mean                                     | 30 ms             | —       |        |
+| Sandbox init mean                                        | 4 ms              | —       |        |
+| Sandbox cleanup mean                                     | 2 ms              | —       |        |
+| File materialization mean                                | 0 ms              | —       |        |
+| Blob cache hits / misses                                 | 46 / 3            | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Live pooled instances (all plugins, since boot)          | 11                | —       |        |
+| icpc: live / built / recycled (since boot)               | 1 / 1 / 0         | —       |        |
+| batch-evaluator: live / built / recycled (since boot)    | 1 / 1 / 0         | —       |        |
+| standard-checkers: live / built / recycled (since boot)  | 1 / 1 / 0         | —       |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0         | —       |        |
+| **Resources**                                            |                   |         |        |
+| Server RSS at start                                      | 561 MiB           | —       |        |
+| Server RSS peak                                          | 561 MiB           | —       |        |
+| Server RSS mean                                          | 554 MiB           | —       |        |
+| Server RSS idle after the run                            | 554 MiB           | —       |        |
+| Server container memory peak (incl. page cache)          | 570 MiB           | —       |        |
+| Server CPU time                                          | 1.03 s            | —       |        |
+| Workers CPU time (all 4)                                 | 1.54 s            | —       |        |
+
+## S1-small
+
+3 submission(s), concurrency 1, 50 test cases × 64 bytes each.
+
+|                                                          | perf              | perfcap | change |
+| -------------------------------------------------------- | ----------------- | ------- | ------ |
+| **Outcome**                                              |                   |         |        |
+| Submissions judged                                       | 3                 | —       |        |
+| Verdicts                                                 | Judged/Accepted 3 | —       |        |
+| SystemError (final)                                      | 0                 | —       |        |
+| Re-dispatches (hidden retries)                           | 0                 | —       |        |
+| Re-judged (epoch > 0)                                    | 0                 | —       |        |
+| Submit request errors                                    | 0                 | —       |        |
+| **Latency**                                              |                   |         |        |
+| Wall time (whole scenario)                               | 24.50 s           | —       |        |
+| Submission latency p50 (created→judged)                  | 7.95 s            | —       |        |
+| Submission latency p95                                   | 8.19 s            | —       |        |
+| Submission latency max                                   | 8.21 s            | —       |        |
+| Waiting to be claimed p50 (created→leased)               | 832 ms            | —       |        |
+| Waiting to be claimed p95                                | 908 ms            | —       |        |
+| Judging p50 (leased→judged)                              | 7.16 s            | —       |        |
+| Judging per test case p50                                | 143 ms            | —       |        |
+| Throughput (submissions / s)                             | 0.12              | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Plugin calls                                             | 912               | —       |        |
+| Plugin call time, total                                  | 1.44 s            | —       |        |
+| Plugin call p95                                          | 5 ms              | —       |        |
+| icpc: calls / total time                                 | 156 / 857 ms      | —       |        |
+| batch-evaluator: calls / total time                      | 300 / 410 ms      | —       |        |
+| standard-checkers: calls / total time                    | 300 / 55 ms       | —       |        |
+| standard-languages: calls / total time                   | 150 / 119 ms      | —       |        |
+| Pool acquire wait, total                                 | 1 ms              | —       |        |
+| Pool acquire wait p99                                    | 0 ms              | —       |        |
+| Pool acquire failures                                    | 0                 | —       |        |
+| Instances built (compile + instantiate)                  | 0                 | —       |        |
+| Instance build time, total                               | 0 ms              | —       |        |
+| Instance build time, mean                                | —                 | —       |        |
+| Instances recycled                                       | 0                 | —       |        |
+| Evaluator semaphore wait, total                          | 0 ms              | —       |        |
+| Host function time, total                                | 1.44 s            | —       |        |
+| **Queues**                                               |                   |         |        |
+| Operation round trip p50 (enqueue→result delivered)      | 141 ms            | —       |        |
+| Operation round trip p95                                 | 240 ms            | —       |        |
+| Worker queue wait p50                                    | 25 ms             | —       |        |
+| Worker queue wait p95                                    | 48 ms             | —       |        |
+| Message age at consume p95                               | 48 ms             | —       |        |
+| Redis commands                                           | 34,282            | —       |        |
+| **Worker**                                               |                   |         |        |
+| Operations run                                           | 150               | —       |        |
+| Operation processing p50                                 | 90 ms             | —       |        |
+| Operation processing p95                                 | 233 ms            | —       |        |
+| Step 'compile' mean                                      | 1 ms              | —       |        |
+| Step 'testcase' mean                                     | 27 ms             | —       |        |
+| Sandbox init mean                                        | 5 ms              | —       |        |
+| Sandbox cleanup mean                                     | 2 ms              | —       |        |
+| File materialization mean                                | 0 ms              | —       |        |
+| Blob cache hits / misses                                 | 150 / 0           | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Live pooled instances (all plugins, since boot)          | 11                | —       |        |
+| icpc: live / built / recycled (since boot)               | 1 / 1 / 0         | —       |        |
+| batch-evaluator: live / built / recycled (since boot)    | 1 / 1 / 0         | —       |        |
+| standard-checkers: live / built / recycled (since boot)  | 1 / 1 / 0         | —       |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0         | —       |        |
+| **Resources**                                            |                   |         |        |
+| Server RSS at start                                      | 554 MiB           | —       |        |
+| Server RSS peak                                          | 555 MiB           | —       |        |
+| Server RSS mean                                          | 547 MiB           | —       |        |
+| Server RSS idle after the run                            | 547 MiB           | —       |        |
+| Server container memory peak (incl. page cache)          | 560 MiB           | —       |        |
+| Server CPU time                                          | 2.87 s            | —       |        |
+| Workers CPU time (all 4)                                 | 4.51 s            | —       |        |
+
+## S2-inline-150k
+
+3 submission(s), concurrency 1, 50 test cases × 153,600 bytes each.
+
+|                                                          | perf              | perfcap | change |
+| -------------------------------------------------------- | ----------------- | ------- | ------ |
+| **Outcome**                                              |                   |         |        |
+| Submissions judged                                       | 3                 | —       |        |
+| Verdicts                                                 | Judged/Accepted 3 | —       |        |
+| SystemError (final)                                      | 0                 | —       |        |
+| Re-dispatches (hidden retries)                           | 0                 | —       |        |
+| Re-judged (epoch > 0)                                    | 0                 | —       |        |
+| Submit request errors                                    | 0                 | —       |        |
+| **Latency**                                              |                   |         |        |
+| Wall time (whole scenario)                               | 27.34 s           | —       |        |
+| Submission latency p50 (created→judged)                  | 8.88 s            | —       |        |
+| Submission latency p95                                   | 9.06 s            | —       |        |
+| Submission latency max                                   | 9.07 s            | —       |        |
+| Waiting to be claimed p50 (created→leased)               | 661 ms            | —       |        |
+| Waiting to be claimed p95                                | 744 ms            | —       |        |
+| Judging p50 (leased→judged)                              | 8.41 s            | —       |        |
+| Judging per test case p50                                | 168 ms            | —       |        |
+| Throughput (submissions / s)                             | 0.11              | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Plugin calls                                             | 912               | —       |        |
+| Plugin call time, total                                  | 3.11 s            | —       |        |
+| Plugin call p95                                          | 29 ms             | —       |        |
+| icpc: calls / total time                                 | 156 / 1.47 s      | —       |        |
+| batch-evaluator: calls / total time                      | 300 / 1.28 s      | —       |        |
+| standard-checkers: calls / total time                    | 300 / 220 ms      | —       |        |
+| standard-languages: calls / total time                   | 150 / 142 ms      | —       |        |
+| Pool acquire wait, total                                 | 1 ms              | —       |        |
+| Pool acquire wait p99                                    | 0 ms              | —       |        |
+| Pool acquire failures                                    | 0                 | —       |        |
+| Instances built (compile + instantiate)                  | 0                 | —       |        |
+| Instance build time, total                               | 0 ms              | —       |        |
+| Instance build time, mean                                | —                 | —       |        |
+| Instances recycled                                       | 0                 | —       |        |
+| Evaluator semaphore wait, total                          | 0 ms              | —       |        |
+| Host function time, total                                | 3.11 s            | —       |        |
+| **Queues**                                               |                   |         |        |
+| Operation round trip p50 (enqueue→result delivered)      | 157 ms            | —       |        |
+| Operation round trip p95                                 | 241 ms            | —       |        |
+| Worker queue wait p50                                    | 25 ms             | —       |        |
+| Worker queue wait p95                                    | 48 ms             | —       |        |
+| Message age at consume p95                               | 48 ms             | —       |        |
+| Redis commands                                           | 38,165            | —       |        |
+| **Worker**                                               |                   |         |        |
+| Operations run                                           | 150               | —       |        |
+| Operation processing p50                                 | 94 ms             | —       |        |
+| Operation processing p95                                 | 232 ms            | —       |        |
+| Step 'compile' mean                                      | 1 ms              | —       |        |
+| Step 'testcase' mean                                     | 25 ms             | —       |        |
+| Sandbox init mean                                        | 5 ms              | —       |        |
+| Sandbox cleanup mean                                     | 2 ms              | —       |        |
+| File materialization mean                                | 1 ms              | —       |        |
+| Blob cache hits / misses                                 | 235 / 53          | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Live pooled instances (all plugins, since boot)          | 11                | —       |        |
+| icpc: live / built / recycled (since boot)               | 1 / 1 / 0         | —       |        |
+| batch-evaluator: live / built / recycled (since boot)    | 1 / 1 / 0         | —       |        |
+| standard-checkers: live / built / recycled (since boot)  | 1 / 1 / 0         | —       |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0         | —       |        |
+| **Resources**                                            |                   |         |        |
+| Server RSS at start                                      | 547 MiB           | —       |        |
+| Server RSS peak                                          | 675 MiB           | —       |        |
+| Server RSS mean                                          | 646 MiB           | —       |        |
+| Server RSS idle after the run                            | 625 MiB           | —       |        |
+| Server container memory peak (incl. page cache)          | 682 MiB           | —       |        |
+| Server CPU time                                          | 5.28 s            | —       |        |
+| Workers CPU time (all 4)                                 | 5.41 s            | —       |        |
+
+## L1-50MBx20
+
+1 submission(s), concurrency 1, 20 test cases × 52,428,800 bytes each.
+
+|                                                          | perf              | perfcap | change |
+| -------------------------------------------------------- | ----------------- | ------- | ------ |
+| **Outcome**                                              |                   |         |        |
+| Submissions judged                                       | 1                 | —       |        |
+| Verdicts                                                 | Judged/Accepted 1 | —       |        |
+| SystemError (final)                                      | 0                 | —       |        |
+| Re-dispatches (hidden retries)                           | 0                 | —       |        |
+| Re-judged (epoch > 0)                                    | 0                 | —       |        |
+| Submit request errors                                    | 0                 | —       |        |
+| **Latency**                                              |                   |         |        |
+| Wall time (whole scenario)                               | 12.83 s           | —       |        |
+| Submission latency p50 (created→judged)                  | 12.47 s           | —       |        |
+| Submission latency p95                                   | 12.47 s           | —       |        |
+| Submission latency max                                   | 12.47 s           | —       |        |
+| Waiting to be claimed p50 (created→leased)               | 638 ms            | —       |        |
+| Waiting to be claimed p95                                | 638 ms            | —       |        |
+| Judging p50 (leased→judged)                              | 11.84 s           | —       |        |
+| Judging per test case p50                                | 592 ms            | —       |        |
+| Throughput (submissions / s)                             | 0.08              | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Plugin calls                                             | 124               | —       |        |
+| Plugin call time, total                                  | 210 ms            | —       |        |
+| Plugin call p95                                          | 7 ms              | —       |        |
+| icpc: calls / total time                                 | 22 / 111 ms       | —       |        |
+| batch-evaluator: calls / total time                      | 40 / 72 ms        | —       |        |
+| standard-checkers: calls / total time                    | 40 / 9 ms         | —       |        |
+| standard-languages: calls / total time                   | 20 / 17 ms        | —       |        |
+| Pool acquire wait, total                                 | 0 ms              | —       |        |
+| Pool acquire wait p99                                    | 0 ms              | —       |        |
+| Pool acquire failures                                    | 0                 | —       |        |
+| Instances built (compile + instantiate)                  | 0                 | —       |        |
+| Instance build time, total                               | 0 ms              | —       |        |
+| Instance build time, mean                                | —                 | —       |        |
+| Instances recycled                                       | 0                 | —       |        |
+| Evaluator semaphore wait, total                          | 0 ms              | —       |        |
+| Host function time, total                                | 210 ms            | —       |        |
+| **Queues**                                               |                   |         |        |
+| Operation round trip p50 (enqueue→result delivered)      | 688 ms            | —       |        |
+| Operation round trip p95                                 | 969 ms            | —       |        |
+| Worker queue wait p50                                    | 25 ms             | —       |        |
+| Worker queue wait p95                                    | 48 ms             | —       |        |
+| Message age at consume p95                               | 48 ms             | —       |        |
+| Redis commands                                           | 14,413            | —       |        |
+| **Worker**                                               |                   |         |        |
+| Operations run                                           | 20                | —       |        |
+| Operation processing p50                                 | 615 ms            | —       |        |
+| Operation processing p95                                 | 962 ms            | —       |        |
+| Step 'compile' mean                                      | 1 ms              | —       |        |
+| Step 'testcase' mean                                     | 75 ms             | —       |        |
+| Sandbox init mean                                        | 8 ms              | —       |        |
+| Sandbox cleanup mean                                     | 5 ms              | —       |        |
+| File materialization mean                                | 128 ms            | —       |        |
+| Blob cache hits / misses                                 | 40 / 20           | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Live pooled instances (all plugins, since boot)          | 11                | —       |        |
+| icpc: live / built / recycled (since boot)               | 1 / 1 / 0         | —       |        |
+| batch-evaluator: live / built / recycled (since boot)    | 1 / 1 / 0         | —       |        |
+| standard-checkers: live / built / recycled (since boot)  | 1 / 1 / 0         | —       |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0         | —       |        |
+| **Resources**                                            |                   |         |        |
+| Server RSS at start                                      | 624 MiB           | —       |        |
+| Server RSS peak                                          | 624 MiB           | —       |        |
+| Server RSS mean                                          | 617 MiB           | —       |        |
+| Server RSS idle after the run                            | 614 MiB           | —       |        |
+| Server container memory peak (incl. page cache)          | 638 MiB           | —       |        |
+| Server CPU time                                          | 925 ms            | —       |        |
+| Workers CPU time (all 4)                                 | 10.86 s           | —       |        |
+
+## L2-50MBx50
+
+1 submission(s), concurrency 1, 50 test cases × 52,428,800 bytes each.
+
+|                                                          | perf              | perfcap | change |
+| -------------------------------------------------------- | ----------------- | ------- | ------ |
+| **Outcome**                                              |                   |         |        |
+| Submissions judged                                       | 1                 | —       |        |
+| Verdicts                                                 | Judged/Accepted 1 | —       |        |
+| SystemError (final)                                      | 0                 | —       |        |
+| Re-dispatches (hidden retries)                           | 0                 | —       |        |
+| Re-judged (epoch > 0)                                    | 0                 | —       |        |
+| Submit request errors                                    | 0                 | —       |        |
+| **Latency**                                              |                   |         |        |
+| Wall time (whole scenario)                               | 30.39 s           | —       |        |
+| Submission latency p50 (created→judged)                  | 30.01 s           | —       |        |
+| Submission latency p95                                   | 30.01 s           | —       |        |
+| Submission latency max                                   | 30.01 s           | —       |        |
+| Waiting to be claimed p50 (created→leased)               | 526 ms            | —       |        |
+| Waiting to be claimed p95                                | 526 ms            | —       |        |
+| Judging p50 (leased→judged)                              | 29.48 s           | —       |        |
+| Judging per test case p50                                | 590 ms            | —       |        |
+| Throughput (submissions / s)                             | 0.03              | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Plugin calls                                             | 304               | —       |        |
+| Plugin call time, total                                  | 539 ms            | —       |        |
+| Plugin call p95                                          | 8 ms              | —       |        |
+| icpc: calls / total time                                 | 52 / 325 ms       | —       |        |
+| batch-evaluator: calls / total time                      | 100 / 159 ms      | —       |        |
+| standard-checkers: calls / total time                    | 100 / 17 ms       | —       |        |
+| standard-languages: calls / total time                   | 50 / 37 ms        | —       |        |
+| Pool acquire wait, total                                 | 0 ms              | —       |        |
+| Pool acquire wait p99                                    | 0 ms              | —       |        |
+| Pool acquire failures                                    | 0                 | —       |        |
+| Instances built (compile + instantiate)                  | 0                 | —       |        |
+| Instance build time, total                               | 0 ms              | —       |        |
+| Instance build time, mean                                | —                 | —       |        |
+| Instances recycled                                       | 0                 | —       |        |
+| Evaluator semaphore wait, total                          | 0 ms              | —       |        |
+| Host function time, total                                | 539 ms            | —       |        |
+| **Queues**                                               |                   |         |        |
+| Operation round trip p50 (enqueue→result delivered)      | 709 ms            | —       |        |
+| Operation round trip p95                                 | 971 ms            | —       |        |
+| Worker queue wait p50                                    | 25 ms             | —       |        |
+| Worker queue wait p95                                    | 48 ms             | —       |        |
+| Message age at consume p95                               | 48 ms             | —       |        |
+| Redis commands                                           | 35,332            | —       |        |
+| **Worker**                                               |                   |         |        |
+| Operations run                                           | 50                | —       |        |
+| Operation processing p50                                 | 609 ms            | —       |        |
+| Operation processing p95                                 | 961 ms            | —       |        |
+| Step 'compile' mean                                      | 1 ms              | —       |        |
+| Step 'testcase' mean                                     | 69 ms             | —       |        |
+| Sandbox init mean                                        | 8 ms              | —       |        |
+| Sandbox cleanup mean                                     | 3 ms              | —       |        |
+| File materialization mean                                | 132 ms            | —       |        |
+| Blob cache hits / misses                                 | 100 / 50          | —       |        |
+| **Plugin host (server)**                                 |                   |         |        |
+| Live pooled instances (all plugins, since boot)          | 11                | —       |        |
+| icpc: live / built / recycled (since boot)               | 1 / 1 / 0         | —       |        |
+| batch-evaluator: live / built / recycled (since boot)    | 1 / 1 / 0         | —       |        |
+| standard-checkers: live / built / recycled (since boot)  | 1 / 1 / 0         | —       |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0         | —       |        |
+| **Resources**                                            |                   |         |        |
+| Server RSS at start                                      | 614 MiB           | —       |        |
+| Server RSS peak                                          | 615 MiB           | —       |        |
+| Server RSS mean                                          | 614 MiB           | —       |        |
+| Server RSS idle after the run                            | 613 MiB           | —       |        |
+| Server container memory peak (incl. page cache)          | 629 MiB           | —       |        |
+| Server CPU time                                          | 2.28 s            | —       |        |
+| Workers CPU time (all 4)                                 | 27.29 s           | —       |        |
+
+## C1-1000@100
+
+1000 submission(s), concurrency 100, 10 test cases × 64 bytes each.
+
+|                                                          | perf                 | perfcap              | change |
+| -------------------------------------------------------- | -------------------- | -------------------- | ------ |
+| **Outcome**                                              |                      |                      |        |
+| Submissions judged                                       | 1,000                | 1,000                | ≈      |
+| Verdicts                                                 | Judged/Accepted 1000 | Judged/Accepted 1000 |        |
+| SystemError (final)                                      | 0                    | 0                    |        |
+| Re-dispatches (hidden retries)                           | 0                    | 0                    |        |
+| Re-judged (epoch > 0)                                    | 0                    | 0                    |        |
+| Submit request errors                                    | 0                    | 0                    |        |
+| **Latency**                                              |                      |                      |        |
+| Wall time (whole scenario)                               | 155.09 s             | 156.28 s             | ≈      |
+| Submission latency p50 (created→judged)                  | 141.94 s             | 86.27 s              | 0.61×  |
+| Submission latency p95                                   | 152.51 s             | 153.35 s             | ≈      |
+| Submission latency max                                   | 153.19 s             | 154.04 s             | ≈      |
+| Waiting to be claimed p50 (created→leased)               | 14.84 s              | 47.24 s              | 3.18×  |
+| Waiting to be claimed p95                                | 28.36 s              | 122.74 s             | 4.33×  |
+| Judging p50 (leased→judged)                              | 124.78 s             | 38.49 s              | 0.31×  |
+| Judging per test case p50                                | 12.48 s              | 3.85 s               | 0.31×  |
+| Throughput (submissions / s)                             | 6.45                 | 6.40                 | ≈      |
+| **Plugin host (server)**                                 |                      |                      |        |
+| Plugin calls                                             | 64,000               | 64,000               | ≈      |
+| Plugin call time, total                                  | 123.52 s             | 124.64 s             | ≈      |
+| Plugin call p95                                          | 5 ms                 | 5 ms                 | ≈      |
+| icpc: calls / total time                                 | 12,000 / 47.61 s     | 12,000 / 43.59 s     |        |
+| batch-evaluator: calls / total time                      | 20,000 / 36.50 s     | 20,000 / 43.71 s     |        |
+| standard-checkers: calls / total time                    | 20,000 / 2.90 s      | 20,000 / 2.84 s      |        |
+| standard-languages: calls / total time                   | 10,000 / 7.87 s      | 10,000 / 7.87 s      |        |
+| Pool acquire wait, total                                 | 35.12 s              | 33.93 s              | ≈      |
+| Pool acquire wait p99                                    | 20 ms                | 20 ms                | ≈      |
+| Pool acquire failures                                    | 0                    | 0                    |        |
+| Instances built (compile + instantiate)                  | 87                   | 111                  | 1.28×  |
+| Instance build time, total                               | 1.14 s               | 1.44 s               | 1.27×  |
+| Instance build time, mean                                | 13 ms                | 13 ms                | ≈      |
+| Instances recycled                                       | 0                    | 0                    |        |
+| Evaluator semaphore wait, total                          | 5 ms                 | 6 ms                 | 1.07×  |
+| Host function time, total                                | 123.52 s             | 124.64 s             | ≈      |
+| **Queues**                                               |                      |                      |        |
+| Operation round trip p50 (enqueue→result delivered)      | 821 ms               | 828 ms               | ≈      |
+| Operation round trip p95                                 | 2.17 s               | 2.19 s               | ≈      |
+| Worker queue wait p50                                    | 753 ms               | 752 ms               | ≈      |
+| Worker queue wait p95                                    | 984 ms               | 982 ms               | ≈      |
+| Message age at consume p95                               | 984 ms               | 982 ms               | ≈      |
+| Redis commands                                           | 554,497              | 522,641              | 0.94×  |
+| **Worker**                                               |                      |                      |        |
+| Operations run                                           | 10,000               | 10,000               | ≈      |
+| Operation processing p50                                 | 75 ms                | 75 ms                | ≈      |
+| Operation processing p95                                 | 98 ms                | 98 ms                | ≈      |
+| Step 'compile' mean                                      | 1 ms                 | 1 ms                 | 1.18×  |
+| Step 'testcase' mean                                     | 6 ms                 | 6 ms                 | ≈      |
+| Sandbox init mean                                        | 2 ms                 | 2 ms                 | ≈      |
+| Sandbox cleanup mean                                     | 1 ms                 | 1 ms                 | ≈      |
+| File materialization mean                                | 0 ms                 | 0 ms                 | ≈      |
+| Blob cache hits / misses                                 | 10,000 / 0           | 9,996 / 3            |        |
+| **Plugin host (server)**                                 |                      |                      |        |
+| Live pooled instances (all plugins, since boot)          | 98                   | 122                  | 1.24×  |
+| icpc: live / built / recycled (since boot)               | 34 / 34 / 0          | 37 / 37 / 0          |        |
+| batch-evaluator: live / built / recycled (since boot)    | 13 / 13 / 0          | 35 / 35 / 0          |        |
+| standard-checkers: live / built / recycled (since boot)  | 4 / 4 / 0            | 5 / 5 / 0            |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0            | 1 / 1 / 0            |        |
+| **Resources**                                            |                      |                      |        |
+| Server RSS at start                                      | 617 MiB              | 529 MiB              | 0.86×  |
+| Server RSS peak                                          | 1570 MiB             | 1360 MiB             | 0.87×  |
+| Server RSS mean                                          | 1298 MiB             | 1188 MiB             | 0.92×  |
+| Server RSS idle after the run                            | 1166 MiB             | 1108 MiB             | ≈      |
+| Server container memory peak (incl. page cache)          | 1605 MiB             | 1356 MiB             | 0.85×  |
+| Server CPU time                                          | 90.27 s              | 73.15 s              | 0.81×  |
+| Workers CPU time (all 4)                                 | 197.30 s             | 198.59 s             | ≈      |
+
+## C2-1000@100-32slots
+
+1000 submission(s), concurrency 100, 10 test cases × 64 bytes each.
+
+|                                                          | perf                 | perfcap              | change |
+| -------------------------------------------------------- | -------------------- | -------------------- | ------ |
+| **Outcome**                                              |                      |                      |        |
+| Submissions judged                                       | 1,000                | 1,000                | ≈      |
+| Verdicts                                                 | Judged/Accepted 1000 | Judged/Accepted 1000 |        |
+| SystemError (final)                                      | 0                    | 0                    |        |
+| Re-dispatches (hidden retries)                           | 0                    | 0                    |        |
+| Re-judged (epoch > 0)                                    | 0                    | 0                    |        |
+| Submit request errors                                    | 0                    | 0                    |        |
+| **Latency**                                              |                      |                      |        |
+| Wall time (whole scenario)                               | 37.05 s              | 36.04 s              | ≈      |
+| Submission latency p50 (created→judged)                  | 20.87 s              | 20.24 s              | ≈      |
+| Submission latency p95                                   | 35.05 s              | 34.34 s              | ≈      |
+| Submission latency max                                   | 35.32 s              | 34.76 s              | ≈      |
+| Waiting to be claimed p50 (created→leased)               | 14.95 s              | 14.80 s              | ≈      |
+| Waiting to be claimed p95                                | 28.47 s              | 28.26 s              | ≈      |
+| Judging p50 (leased→judged)                              | 5.75 s               | 5.33 s               | 0.93×  |
+| Judging per test case p50                                | 575 ms               | 533 ms               | 0.93×  |
+| Throughput (submissions / s)                             | 26.99                | 27.75                | ≈      |
+| **Plugin host (server)**                                 |                      |                      |        |
+| Plugin calls                                             | 64,000               | 64,000               | ≈      |
+| Plugin call time, total                                  | 261.04 s             | 164.58 s             | 0.63×  |
+| Plugin call p95                                          | 30 ms                | 15 ms                | 0.50×  |
+| icpc: calls / total time                                 | 12,000 / 94.05 s     | 12,000 / 41.89 s     |        |
+| batch-evaluator: calls / total time                      | 20,000 / 142.13 s    | 20,000 / 90.72 s     |        |
+| standard-checkers: calls / total time                    | 20,000 / 2.88 s      | 20,000 / 3.12 s      |        |
+| standard-languages: calls / total time                   | 10,000 / 9.00 s      | 10,000 / 7.65 s      |        |
+| Pool acquire wait, total                                 | 39.56 s              | 31.15 s              | 0.79×  |
+| Pool acquire wait p99                                    | 30 ms                | 23 ms                | 0.76×  |
+| Pool acquire failures                                    | 0                    | 0                    |        |
+| Instances built (compile + instantiate)                  | 150                  | 113                  | 0.75×  |
+| Instance build time, total                               | 1.93 s               | 1.48 s               | 0.76×  |
+| Instance build time, mean                                | 13 ms                | 13 ms                | ≈      |
+| Instances recycled                                       | 0                    | 0                    |        |
+| Evaluator semaphore wait, total                          | 5 ms                 | 5 ms                 | ≈      |
+| Host function time, total                                | 261.04 s             | 164.58 s             | 0.63×  |
+| **Queues**                                               |                      |                      |        |
+| Operation round trip p50 (enqueue→result delivered)      | 196 ms               | 198 ms               | ≈      |
+| Operation round trip p95                                 | 444 ms               | 448 ms               | ≈      |
+| Worker queue wait p50                                    | 75 ms                | 77 ms                | ≈      |
+| Worker queue wait p95                                    | 200 ms               | 200 ms               | ≈      |
+| Message age at consume p95                               | 200 ms               | 200 ms               | ≈      |
+| Redis commands                                           | 474,799              | 458,147              | ≈      |
+| **Worker**                                               |                      |                      |        |
+| Operations run                                           | 10,000               | 10,000               | ≈      |
+| Operation processing p50                                 | 120 ms               | 121 ms               | ≈      |
+| Operation processing p95                                 | 238 ms               | 238 ms               | ≈      |
+| Step 'compile' mean                                      | 1 ms                 | 1 ms                 | ≈      |
+| Step 'testcase' mean                                     | 17 ms                | 17 ms                | ≈      |
+| Sandbox init mean                                        | 9 ms                 | 8 ms                 | ≈      |
+| Sandbox cleanup mean                                     | 9 ms                 | 9 ms                 | ≈      |
+| File materialization mean                                | 0 ms                 | 0 ms                 | ≈      |
+| Blob cache hits / misses                                 | 9,996 / 3            | 9,996 / 3            |        |
+| **Plugin host (server)**                                 |                      |                      |        |
+| Live pooled instances (all plugins, since boot)          | 161                  | 124                  | 0.77×  |
+| icpc: live / built / recycled (since boot)               | 50 / 50 / 0          | 35 / 35 / 0          |        |
+| batch-evaluator: live / built / recycled (since boot)    | 60 / 60 / 0          | 36 / 36 / 0          |        |
+| standard-checkers: live / built / recycled (since boot)  | 8 / 8 / 0            | 9 / 9 / 0            |        |
+| standard-languages: live / built / recycled (since boot) | 1 / 1 / 0            | 1 / 1 / 0            |        |
+| **Resources**                                            |                      |                      |        |
+| Server RSS at start                                      | 571 MiB              | 528 MiB              | 0.92×  |
+| Server RSS peak                                          | 1598 MiB             | 1525 MiB             | ≈      |
+| Server RSS mean                                          | 1378 MiB             | 1284 MiB             | 0.93×  |
+| Server RSS idle after the run                            | 1488 MiB             | 1147 MiB             | 0.77×  |
+| Server container memory peak (incl. page cache)          | 1602 MiB             | 1521 MiB             | 0.95×  |
+| Server CPU time                                          | 63.49 s              | 62.30 s              | ≈      |
+| Workers CPU time (all 4)                                 | 277.34 s             | 279.46 s             | ≈      |
+
+## C3-1000@100-32slots-batch128
+
+1000 submission(s), concurrency 100, 10 test cases × 64 bytes each.
+
+|                                                          | perf | perfcap              | change |
+| -------------------------------------------------------- | ---- | -------------------- | ------ |
+| **Outcome**                                              |      |                      |        |
+| Submissions judged                                       | —    | 1,000                |        |
+| Verdicts                                                 | —    | Judged/Accepted 1000 |        |
+| SystemError (final)                                      | —    | 0                    |        |
+| Re-dispatches (hidden retries)                           | —    | 0                    |        |
+| Re-judged (epoch > 0)                                    | —    | 0                    |        |
+| Submit request errors                                    | —    | 0                    |        |
+| **Latency**                                              |      |                      |        |
+| Wall time (whole scenario)                               | —    | 37.28 s              |        |
+| Submission latency p50 (created→judged)                  | —    | 19.04 s              |        |
+| Submission latency p95                                   | —    | 34.77 s              |        |
+| Submission latency max                                   | —    | 34.98 s              |        |
+| Waiting to be claimed p50 (created→leased)               | —    | 10.99 s              |        |
+| Waiting to be claimed p95                                | —    | 27.44 s              |        |
+| Judging p50 (leased→judged)                              | —    | 8.23 s               |        |
+| Judging per test case p50                                | —    | 823 ms               |        |
+| Throughput (submissions / s)                             | —    | 26.82                |        |
+| **Plugin host (server)**                                 |      |                      |        |
+| Plugin calls                                             | —    | 64,000               |        |
+| Plugin call time, total                                  | —    | 195.22 s             |        |
+| Plugin call p95                                          | —    | 25 ms                |        |
+| icpc: calls / total time                                 | —    | 12,000 / 74.62 s     |        |
+| batch-evaluator: calls / total time                      | —    | 20,000 / 93.59 s     |        |
+| standard-checkers: calls / total time                    | —    | 20,000 / 3.14 s      |        |
+| standard-languages: calls / total time                   | —    | 10,000 / 7.85 s      |        |
+| Pool acquire wait, total                                 | —    | 59.28 s              |        |
+| Pool acquire wait p99                                    | —    | 43 ms                |        |
+| Pool acquire failures                                    | —    | 0                    |        |
+| Instances built (compile + instantiate)                  | —    | 120                  |        |
+| Instance build time, total                               | —    | 1.63 s               |        |
+| Instance build time, mean                                | —    | 14 ms                |        |
+| Instances recycled                                       | —    | 0                    |        |
+| Evaluator semaphore wait, total                          | —    | 12 ms                |        |
+| Host function time, total                                | —    | 195.22 s             |        |
+| **Queues**                                               |      |                      |        |
+| Operation round trip p50 (enqueue→result delivered)      | —    | 201 ms               |        |
+| Operation round trip p95                                 | —    | 453 ms               |        |
+| Worker queue wait p50                                    | —    | 78 ms                |        |
+| Worker queue wait p95                                    | —    | 208 ms               |        |
+| Message age at consume p95                               | —    | 208 ms               |        |
+| Redis commands                                           | —    | 469,074              |        |
+| **Worker**                                               |      |                      |        |
+| Operations run                                           | —    | 10,000               |        |
+| Operation processing p50                                 | —    | 125 ms               |        |
+| Operation processing p95                                 | —    | 239 ms               |        |
+| Step 'compile' mean                                      | —    | 1 ms                 |        |
+| Step 'testcase' mean                                     | —    | 17 ms                |        |
+| Sandbox init mean                                        | —    | 9 ms                 |        |
+| Sandbox cleanup mean                                     | —    | 9 ms                 |        |
+| File materialization mean                                | —    | 0 ms                 |        |
+| Blob cache hits / misses                                 | —    | 9,996 / 3            |        |
+| **Plugin host (server)**                                 |      |                      |        |
+| Live pooled instances (all plugins, since boot)          | —    | 131                  |        |
+| icpc: live / built / recycled (since boot)               | —    | 44 / 44 / 0          |        |
+| batch-evaluator: live / built / recycled (since boot)    | —    | 32 / 32 / 0          |        |
+| standard-checkers: live / built / recycled (since boot)  | —    | 7 / 7 / 0            |        |
+| standard-languages: live / built / recycled (since boot) | —    | 1 / 1 / 0            |        |
+| **Resources**                                            |      |                      |        |
+| Server RSS at start                                      | —    | 503 MiB              |        |
+| Server RSS peak                                          | —    | 1691 MiB             |        |
+| Server RSS mean                                          | —    | 1526 MiB             |        |
+| Server RSS idle after the run                            | —    | 1440 MiB             |        |
+| Server container memory peak (incl. page cache)          | —    | 1694 MiB             |        |
+| Server CPU time                                          | —    | 61.90 s              |        |
+| Workers CPU time (all 4)                                 | —    | 277.45 s             |        |
