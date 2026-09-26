@@ -53,6 +53,8 @@ pub struct Model {
     /// Immutable dispatch anchor; see `submission::Model::leased_at`.
     #[sea_orm(nullable)]
     pub leased_at: Option<DateTimeUtc>,
+    /// Dispatch attempts so far (1 after the first); see
+    /// `submission::Model::retry_count`.
     #[sea_orm(default_value = 0)]
     pub retry_count: i32,
     #[sea_orm(default_value = 0)]

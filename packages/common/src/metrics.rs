@@ -42,8 +42,11 @@ pub struct Metrics {
     /// compile + instantiate). Paid on pool growth and on every recycle.
     pub plugin_instance_create_duration: Histogram<f64>,
     /// Pooled plugin instances built, by plugin. Live pool size is this
-    /// minus `plugin_instance_recycled_total` (a recycle rebuilds one).
+    /// minus `plugin_instance_recycled_total` (a recycle rebuilds one) minus
+    /// `plugin_instance_evicted_total`.
     pub plugin_instance_created_total: Counter<u64>,
+    /// Pooled plugin instances dropped after sitting idle, by plugin.
+    pub plugin_instance_evicted_total: Counter<u64>,
 
     pub host_fn_duration: Histogram<f64>,
     pub host_fn_calls_total: Counter<u64>,
@@ -308,6 +311,10 @@ impl Metrics {
             plugin_instance_created_total: meter
                 .u64_counter("broccoli.plugin.instance.created")
                 .with_description("Total pooled plugin instances built")
+                .build(),
+            plugin_instance_evicted_total: meter
+                .u64_counter("broccoli.plugin.instance.evicted")
+                .with_description("Total pooled plugin instances dropped after sitting idle")
                 .build(),
             plugin_instance_recycled_total: meter
                 .u64_counter("broccoli.plugin.instance.recycled")

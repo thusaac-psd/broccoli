@@ -105,6 +105,9 @@ temp_dir = ""
 [plugin]
 plugins_dir = "./plugins"
 enable_wasi = true
+# Drop a pooled plugin instance after it sits unused this long (seconds), so
+# a burst's instances do not stay resident. 0 keeps them forever.
+# pool_idle_timeout_secs = 300
 
 [observability]
 log_format = "pretty"       # "pretty" for dev, "json" for production
