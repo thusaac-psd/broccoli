@@ -97,6 +97,7 @@ impl Dispatcher {
                 deps.server_id.clone(),
                 deps.config.claim_poll_interval_ms,
                 deps.config.claim_batch_size,
+                deps.config.max_in_flight_submissions,
                 cancel_rx.clone(),
             )));
         } else {

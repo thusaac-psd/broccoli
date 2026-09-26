@@ -509,6 +509,7 @@ impl E2eTestApp {
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
+                max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
                 plugin_timer_lease_secs: 30,
                 plugin_timer_batch: 64,
@@ -658,6 +659,7 @@ impl E2eTestApp {
                 format!("e2e-{test_id}"),
                 state.config.server.claim_poll_interval_ms,
                 state.config.server.claim_batch_size,
+                state.config.server.max_in_flight_submissions,
                 claim_cancel_rx,
             )));
 

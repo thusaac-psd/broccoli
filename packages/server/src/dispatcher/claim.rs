@@ -67,6 +67,7 @@ pub async fn run(
     server_id: String,
     interval_ms: u64,
     batch_size: u32,
+    max_in_flight: u32,
     mut cancel: watch::Receiver<bool>,
 ) {
     // The poll interval clamps to a 50ms floor so a misconfigured
@@ -79,13 +80,14 @@ pub async fn run(
         server_id = %server_id,
         interval_ms = interval_dur.as_millis() as u64,
         batch_size,
+        max_in_flight,
         "Claim fiber started"
     );
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = claim_once(&state, &server_id, batch_size).await {
+                if let Err(e) = claim_once(&state, &server_id, batch_size, max_in_flight).await {
                     error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
                 }
             }
@@ -117,8 +119,25 @@ pub async fn run(
 /// claim from dispatch. Don't introduce a bounded join-set or `await`
 /// here without re-thinking that contract: an inline `await` would make
 /// the claim fiber the bottleneck for dispatch throughput.
-async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyhow::Result<()> {
-    let submission_models = claim_queued_submissions(state, server_id, batch_size).await?;
+async fn claim_once(
+    state: &AppState,
+    server_id: &str,
+    batch_size: u32,
+    max_in_flight: u32,
+) -> anyhow::Result<()> {
+    let in_flight = if max_in_flight == 0 {
+        0
+    } else {
+        count_in_flight(state, server_id).await?
+    };
+    let budget = claim_budget(batch_size, max_in_flight, in_flight);
+    let submission_models = if budget > 0 {
+        claim_queued_submissions(state, server_id, budget).await?
+    } else {
+        Vec::new()
+    };
+    // Deferred rejudges are judging work too: they share what is left.
+    let rejudge_budget = budget.saturating_sub(submission_models.len() as u32);
     for model in submission_models {
         let state_clone = state.clone();
         tokio::spawn(async move {
@@ -142,7 +161,11 @@ async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyho
     // symmetrically with the submission path. The parent submission's
     // own status is unchanged for these rows, so the submission scan
     // above doesn't reach them - the judgement scan does.
-    let judgement_pairs = claim_queued_judgements(state, server_id, batch_size).await?;
+    let judgement_pairs = if rejudge_budget > 0 {
+        claim_queued_judgements(state, server_id, rejudge_budget).await?
+    } else {
+        Vec::new()
+    };
     for (sub_model, judgement_model) in judgement_pairs {
         let state_clone = state.clone();
         let judgement_id = judgement_model.id;
@@ -168,6 +191,31 @@ async fn claim_once(state: &AppState, server_id: &str, batch_size: u32) -> anyho
     }
 
     Ok(())
+}
+
+/// Rows to claim this tick: the batch size, but never past the server's
+/// in-flight cap. `max_in_flight == 0` means no cap.
+fn claim_budget(batch_size: u32, max_in_flight: u32, in_flight: u64) -> u32 {
+    if max_in_flight == 0 {
+        return batch_size;
+    }
+    let room = u64::from(max_in_flight).saturating_sub(in_flight);
+    std::cmp::min(batch_size, u32::try_from(room).unwrap_or(u32::MAX))
+}
+
+/// Submissions this server has claimed and not finished judging.
+pub async fn count_in_flight(state: &AppState, server_id: &str) -> anyhow::Result<u64> {
+    let row = state
+        .db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint AS n FROM submission \
+             WHERE owner_server_id = $1 AND status IN ('Pending', 'Compiling', 'Running')",
+            [server_id.into()],
+        ))
+        .await?;
+    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 async fn claim_queued_submissions(
@@ -566,6 +614,19 @@ mod tests {
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("status = 'Queued'"));
         assert!(sql.contains("ORDER BY created_at"));
+    }
+
+    #[test]
+    fn claim_budget_fills_up_to_the_in_flight_cap_and_no_further() {
+        // Plenty of room: the batch size is the limit.
+        assert_eq!(claim_budget(32, 256, 0), 32);
+        // Close to the cap: only the room that is left.
+        assert_eq!(claim_budget(32, 256, 250), 6);
+        // At or past the cap (e.g. after a steal): claim nothing.
+        assert_eq!(claim_budget(32, 256, 256), 0);
+        assert_eq!(claim_budget(32, 256, 300), 0);
+        // 0 means no cap.
+        assert_eq!(claim_budget(32, 0, 10_000), 32);
     }
 
     #[test]

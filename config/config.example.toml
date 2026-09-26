@@ -12,6 +12,14 @@ port = 3000
 # to the wrong replica.
 id = ""
 
+# Most submissions this server judges at once (claimed and not finished).
+# The claim fiber only takes rows up to this cap, so a burst waits as
+# `Queued` in the database, claimable by any server, instead of piling into
+# one process. Measured: at 1000 submissions / 100 concurrent it cut one
+# server's peak from 979 in-flight to 256 at the same throughput, and its
+# peak memory by ~13%. 0 = no cap.
+max_in_flight_submissions = 256
+
 # UP#39 backpressure-on-post: cap on durable `Queued` rows across
 # `submission`, `code_run`, and `submission_judgement` combined. When
 # the live depth is at or above this value, POST endpoints that would

@@ -322,6 +322,13 @@ pub struct ServerConfig {
     /// drain a spike.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
+    /// Most submissions this server judges at once: claimed, not finished.
+    /// The claim fiber takes at most `max_in_flight - in_flight` rows per
+    /// tick, so a burst stays `Queued` in the database (claimable by any
+    /// server) instead of piling into one process's memory. Judging is
+    /// detached after dispatch, so nothing else bounds this. 0 = no cap.
+    #[serde(default = "default_max_in_flight_submissions")]
+    pub max_in_flight_submissions: u32,
     /// Tick interval (seconds) for the plugin-timer delivery loop. Default 1s
     /// to suit sub-second-adjacent deadlines (e.g. a match window's fixed
     /// end time); the loop is a single indexed query against a table that is
@@ -390,6 +397,7 @@ impl Default for ServerConfig {
             claim_fiber_enabled: default_claim_fiber_enabled(),
             claim_poll_interval_ms: default_claim_poll_interval_ms(),
             claim_batch_size: default_claim_batch_size(),
+            max_in_flight_submissions: default_max_in_flight_submissions(),
             plugin_timer_tick_interval_secs: default_plugin_timer_tick_interval_secs(),
             plugin_timer_lease_secs: default_plugin_timer_lease_secs(),
             plugin_timer_batch: default_plugin_timer_batch(),
@@ -506,6 +514,10 @@ fn default_claim_poll_interval_ms() -> u64 {
 
 fn default_claim_batch_size() -> u32 {
     32
+}
+
+fn default_max_in_flight_submissions() -> u32 {
+    256
 }
 
 fn default_plugin_timer_tick_interval_secs() -> u64 {
