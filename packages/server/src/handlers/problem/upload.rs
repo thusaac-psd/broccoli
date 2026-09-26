@@ -10,6 +10,10 @@ use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `upload_test_cases` requires perm::PROBLEM_EDIT
+// at handler entry, pinned by `contestant_cannot_upload_test_cases`
+// (tests/integration/problem.rs). This is a write path only - it never
+// returns test case content to a viewer.
 use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::FreshAuthUser;

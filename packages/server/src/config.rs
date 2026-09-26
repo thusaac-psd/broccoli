@@ -322,6 +322,27 @@ pub struct ServerConfig {
     /// drain a spike.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
+    /// Tick interval (seconds) for the plugin-timer delivery loop. Default 1s
+    /// to suit sub-second-adjacent deadlines (e.g. a match window's fixed
+    /// end time); the loop is a single indexed query against a table that is
+    /// empty most of the time, so a 1s tick is cheap. Spawned unconditionally
+    /// — independent of `dispatcher_lease_steal_enabled`, which governs
+    /// submission judging, not plugin timers.
+    #[serde(default = "default_plugin_timer_tick_interval_secs")]
+    pub plugin_timer_tick_interval_secs: u64,
+    /// Claim lease (seconds) for a plugin timer row: how long a claiming
+    /// replica has to deliver before another replica may reclaim it. Default
+    /// 30s. Mirrors `lease_ttl_secs`'s crash-recovery role for submissions.
+    #[serde(default = "default_plugin_timer_lease_secs")]
+    pub plugin_timer_lease_secs: i64,
+    /// Bounded batch size for one plugin-timer claim tick. Default 64.
+    #[serde(default = "default_plugin_timer_batch")]
+    pub plugin_timer_batch: u64,
+    /// Maximum delivery attempts before a plugin timer is dropped with a
+    /// loud error rather than retried forever. Default 5. A trapping
+    /// handler must not wedge the loop for every other plugin's timers.
+    #[serde(default = "default_plugin_timer_max_attempts")]
+    pub plugin_timer_max_attempts: i32,
 }
 
 /// Serde field defaults below are the single source of truth for server
@@ -369,6 +390,10 @@ impl Default for ServerConfig {
             claim_fiber_enabled: default_claim_fiber_enabled(),
             claim_poll_interval_ms: default_claim_poll_interval_ms(),
             claim_batch_size: default_claim_batch_size(),
+            plugin_timer_tick_interval_secs: default_plugin_timer_tick_interval_secs(),
+            plugin_timer_lease_secs: default_plugin_timer_lease_secs(),
+            plugin_timer_batch: default_plugin_timer_batch(),
+            plugin_timer_max_attempts: default_plugin_timer_max_attempts(),
         }
     }
 }
@@ -481,6 +506,22 @@ fn default_claim_poll_interval_ms() -> u64 {
 
 fn default_claim_batch_size() -> u32 {
     32
+}
+
+fn default_plugin_timer_tick_interval_secs() -> u64 {
+    1
+}
+
+fn default_plugin_timer_lease_secs() -> i64 {
+    30
+}
+
+fn default_plugin_timer_batch() -> u64 {
+    64
+}
+
+fn default_plugin_timer_max_attempts() -> i32 {
+    5
 }
 
 fn default_frontend_dist() -> PathBuf {

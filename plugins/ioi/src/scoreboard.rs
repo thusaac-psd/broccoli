@@ -1,20 +1,38 @@
+// Only used by the wasm32-gated cell loaders below; this file has no
+// #[cfg(test)] use of HashMap, the SDK prelude, or serde's Deserialize.
+#[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use serde::Deserialize;
 
-use crate::config::{
-    ContestConfig, ScoreboardTiebreaker, ScoreboardVisibility, ScoringMode, SubtaskDef,
-    resolve_tc_label,
-};
+// ContestConfig/ScoringMode/SubtaskDef/resolve_tc_label are only used by the
+// wasm32-gated cell loaders below; ScoreboardTiebreaker/ScoreboardVisibility
+// are also used directly by the #[cfg(test)] unit tests, so gate the latter
+// two more broadly.
+#[cfg(target_arch = "wasm32")]
+use crate::config::{ContestConfig, ScoringMode, SubtaskDef, resolve_tc_label};
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::config::{ScoreboardTiebreaker, ScoreboardVisibility};
+#[cfg(target_arch = "wasm32")]
 use crate::scoring::score_best_tokened_or_last;
+#[cfg(target_arch = "wasm32")]
 use crate::subtasks::score_all_subtasks;
+#[cfg(target_arch = "wasm32")]
 use crate::tokens::TokenState;
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config};
 
+// Used by `scoreboard_entries_tied` (wasm32+test) and the wasm32-only cell
+// loaders below; gate broadly enough to cover both.
+#[cfg(any(target_arch = "wasm32", test))]
 const SCORE_EPSILON: f64 = 1e-9;
 
+// Called from the wasm32-gated `api.rs` scoreboard handler AND directly by
+// the #[cfg(test)] unit tests below; gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn full_scoreboard_visible_for_phase(
     phase: &str,
     can_view_all: bool,
@@ -25,6 +43,12 @@ pub(crate) fn full_scoreboard_visible_for_phase(
         || (phase == "during" && scoreboard_visibility == ScoreboardVisibility::AllContestViewers)
 }
 
+// Called from the wasm32-gated `api.rs` scoreboard handler AND directly by the
+// #[cfg(test)] unit tests below; gate the same way. Gating this to wasm32 alone
+// would make the tiebreaker arithmetic structurally unreachable from any host
+// test - the same mistake that once hid `standings_restriction` behind a wasm32
+// gate on this branch.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn combined_score_time_seconds(tiebreaker: ScoreboardTiebreaker, times: &[i64]) -> i64 {
     match tiebreaker {
         ScoreboardTiebreaker::EqualRank => 0,
@@ -33,6 +57,9 @@ pub(crate) fn combined_score_time_seconds(tiebreaker: ScoreboardTiebreaker, time
     }
 }
 
+// Called from the wasm32-gated `api.rs` scoreboard handler AND directly by
+// the #[cfg(test)] unit tests below; gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn compare_scoreboard_entries(
     a_score: f64,
     a_time: i64,
@@ -54,6 +81,9 @@ pub(crate) fn compare_scoreboard_entries(
         .then_with(|| a_username.cmp(b_username))
 }
 
+// Called from the wasm32-gated `api.rs` scoreboard handler AND directly by
+// the #[cfg(test)] unit tests below; gate the same way.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn scoreboard_entries_tied(
     a_score: f64,
     a_time: i64,
@@ -70,6 +100,9 @@ pub(crate) fn scoreboard_entries_tied(
         }
 }
 
+// Only constructed by the wasm32-gated `load_max_submission_scoreboard_cells`
+// below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct MaxSubmissionScoreboardRow {
     user_id: i32,
@@ -78,12 +111,17 @@ struct MaxSubmissionScoreboardRow {
     score_time_seconds: i64,
 }
 
+// Only constructed by the wasm32-gated cell loaders below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ScoreboardCell {
     pub(crate) score: f64,
     pub(crate) score_time_seconds: i64,
 }
 
+// Only constructed by the wasm32-gated
+// `load_best_tokened_or_last_scoreboard_cells` below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct ScoreboardSubmissionRow {
     user_id: i32,
@@ -92,6 +130,9 @@ struct ScoreboardSubmissionRow {
     elapsed_seconds: i64,
 }
 
+// Only constructed by the wasm32-gated `load_sum_best_subtask_scoreboard_cells`
+// below.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct ScoreboardTcScoreRow {
     user_id: i32,
@@ -495,6 +536,66 @@ mod tests {
             assert!(full_scoreboard_visible_for_phase(
                 phase,
                 true,
+                ScoreboardVisibility::AdminsOnly,
+            ));
+        }
+    }
+
+    #[test]
+    fn combined_score_time_collapses_to_zero_under_equal_rank() {
+        // EqualRank deliberately discards timing entirely, so every contestant
+        // ties on the tiebreaker and ranking falls back to score alone.
+        assert_eq!(
+            combined_score_time_seconds(ScoreboardTiebreaker::EqualRank, &[10, 20, 30]),
+            0
+        );
+    }
+
+    #[test]
+    fn combined_score_time_sums_or_maxes_according_to_the_tiebreaker() {
+        let times = [10, 40, 25];
+        assert_eq!(
+            combined_score_time_seconds(ScoreboardTiebreaker::SumScoreTime, &times),
+            75,
+            "SumScoreTime must add every problem's score-time"
+        );
+        assert_eq!(
+            combined_score_time_seconds(ScoreboardTiebreaker::MaxScoreTime, &times),
+            40,
+            "MaxScoreTime must take the single slowest, not the total"
+        );
+    }
+
+    #[test]
+    fn combined_score_time_of_no_solves_is_zero_for_every_tiebreaker() {
+        // A contestant who has solved nothing has no score-times at all.
+        // `MaxScoreTime` is the interesting one: `max()` on an empty slice is
+        // `None`, and anything other than 0 here would rank a no-solve
+        // contestant against solvers on a fabricated time.
+        for tiebreaker in [
+            ScoreboardTiebreaker::EqualRank,
+            ScoreboardTiebreaker::SumScoreTime,
+            ScoreboardTiebreaker::MaxScoreTime,
+        ] {
+            assert_eq!(combined_score_time_seconds(tiebreaker, &[]), 0);
+        }
+    }
+
+    #[test]
+    fn phase_after_reveals_full_scoreboard_even_without_view_all_or_all_contest_viewers() {
+        assert!(full_scoreboard_visible_for_phase(
+            "after",
+            false,
+            ScoreboardVisibility::AdminsOnly,
+        ));
+    }
+
+    #[test]
+    fn phase_before_and_during_stay_hidden_without_view_all_or_all_contest_viewers() {
+        for phase in ["before", "during"] {
+            assert!(!full_scoreboard_visible_for_phase(
+                phase,
+                false,
                 ScoreboardVisibility::AdminsOnly,
             ));
         }

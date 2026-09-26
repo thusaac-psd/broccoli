@@ -10,6 +10,7 @@ pub mod registry;
 pub mod sql;
 pub mod storage;
 pub mod submissions;
+pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
 use common::metrics::Metrics;
@@ -125,6 +126,34 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             [],
             UserData::new((plugin_id.to_string(), db_clone.clone())),
             storage::store_delete,
+        )
+    });
+
+    // `timer` gates both functions behind a single manifest permission: a
+    // plugin without `"timer"` never sees `host.timer.schedule`/`.cancel` at
+    // all, matching the `storage` capability's shape above. Runs on the
+    // PRIVILEGED pool since `plugin_timer` is a server-owned core table, not
+    // plugin-scoped data reachable through the restricted `broccoli_plugin`
+    // role.
+    let db_clone = privileged_db.clone();
+    hr.register("timer", move |plugin_id| {
+        Function::new(
+            "timer_schedule",
+            [ValType::I64],
+            [ValType::I64],
+            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            timer::timer_schedule,
+        )
+    });
+
+    let db_clone = privileged_db.clone();
+    hr.register("timer", move |plugin_id| {
+        Function::new(
+            "timer_cancel",
+            [ValType::I64],
+            [ValType::I64],
+            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            timer::timer_cancel,
         )
     });
 

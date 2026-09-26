@@ -12,9 +12,7 @@ use crate::evaluate_batch::evaluate_all;
 use crate::evaluate_batch::evaluate_all_detached;
 #[cfg(test)]
 use crate::persist::persist_results;
-use crate::subtasks::{
-    compute_scoring_test_case_ids,
-};
+use crate::subtasks::compute_scoring_test_case_ids;
 #[cfg(test)]
 use crate::subtasks::{score_all_subtasks, test_case_reference_keys};
 
@@ -321,7 +319,6 @@ mod tests {
         JudgeContext {
             task_config: TaskConfig {
                 subtasks: subtask_defs.clone(),
-                ..TaskConfig::default()
             },
             subtask_defs,
             ..default_ctx(test_cases)

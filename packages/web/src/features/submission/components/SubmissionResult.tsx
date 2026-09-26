@@ -104,7 +104,12 @@ export function SubmissionResult({
       >
         {testCases.length > 0
           ? testCases.map((tc, index) => (
-              <TestCaseRow key={tc.id} testCase={tc} index={index + 1} />
+              <TestCaseRow
+                key={tc.id}
+                testCase={tc}
+                index={index + 1}
+                status={submission.status}
+              />
             ))
           : !isRunning &&
             status === 'Judged' && (

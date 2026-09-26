@@ -22,7 +22,8 @@ const sidebars: SidebarsConfig = {
           items: [
             'running-contests/contest-formats/icpc',
             'running-contests/contest-formats/ioi',
-            'plugins/codelink',
+            'plugins/codelink-qualifier',
+            'plugins/codelink-bracket',
           ],
         },
         'running-contests/plugin-settings',

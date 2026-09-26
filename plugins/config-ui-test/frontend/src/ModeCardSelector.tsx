@@ -34,7 +34,13 @@ export function ModeCardSelector({
   inheritedValue,
   inheritedSource,
 }: ConfigFieldSlotProps) {
-  const modes = schema.enum ?? Object.keys(MODE_INFO);
+  // `schema.enum` is `unknown[] | undefined` in the shared slot type (JSON
+  // schema enum values are arbitrary in general); this field is always a
+  // list of mode-name strings in practice, so narrow it defensively rather
+  // than trusting the schema's declared type or casting past it.
+  const modes = (schema.enum ?? Object.keys(MODE_INFO)).filter(
+    (mode): mode is string => typeof mode === 'string',
+  );
   const selected = typeof value === 'string' ? value : '';
   const inherited =
     showAsPlaceholder && typeof inheritedValue === 'string'

@@ -2117,7 +2117,7 @@ export interface components {
       target_worker_ids: string[];
     };
     AdminFanOutSubmissionResponse: {
-      submissions: components['schemas']['SubmissionResponse'][];
+      submissions: components['schemas']['SubmissionResponseAfterMutation'][];
     };
     AttachmentListResponse: {
       attachments: components['schemas']['AttachmentResponse'][];
@@ -2233,7 +2233,12 @@ export interface components {
       target_worker_id?: string | null;
     };
     BulkRejudgeResponse: {
-      /** @example 1234 */
+      /**
+       * @description Count only - never per-id detail, never submission content. See
+       *     `bulk_rejudge_submissions`'s doc comment (`handlers/submission/rejudge.rs`)
+       *     for exactly what this number does and does not disclose.
+       * @example 1234
+       */
       queued: number;
     };
     BulkRetryDlqRequest: {
@@ -2625,7 +2630,20 @@ export interface components {
        */
       updated_at: string;
     };
-    /** @description A single contest type registration entry. */
+    /**
+     * @description A single contest type registration entry.
+     *
+     *     Used to carry a fourth field, `filter_submission_fn`: the function a
+     *     contest-type plugin registered to filter/redact a submission response
+     *     body before it left the server. Retired entirely (not replaced by
+     *     anything in this struct) once the VisibilityKernel took over submission
+     *     visibility end to end - `Decision`/`FieldMask` plus each plugin's
+     *     `topic = "visibility"` query function now own that job, driven by
+     *     `packages/server/src/visibility/`, not by a per-contest-type hook listed
+     *     here. See `git show dc8112d8` ("retire filter_submission_fn plugin hook")
+     *     for the removal and SDD 2026-09-15-visibility-kernel Tasks 13-16 for what
+     *     replaced it.
+     */
     ContestTypeEntry: {
       /**
        * @description Function name invoked for code-run / sample-run dispatch.
@@ -2637,11 +2655,6 @@ export interface components {
        * @example icpc
        */
       contest_type: string;
-      /**
-       * @description Optional function invoked to filter outgoing submission DTOs for a viewer.
-       * @example filter_submission_for_viewer
-       */
-      filter_submission_fn?: string | null;
       /**
        * @description Plugin that registered this contest type.
        * @example icpc
@@ -3672,6 +3685,77 @@ export interface components {
       /** @example alice */
       username: string;
     };
+    /**
+     * @description The wire shape `apply_submission_judgement`, `rejudge_submission`, and
+     *     `admin_fan_out_submission` actually return. All three authorise their
+     *     *mutation* independently of the caller's own Read visibility into the
+     *     submission (`submission:rejudge`/`system:admin`, never
+     *     `submission:view_all`), then route the response through
+     *     `apply_filter_to_response_after_mutation` (`handlers/submission/filter.rs`),
+     *     which runs the same `Resource::Submission` Read decision `GET
+     *     /submissions/{id}` would make for that caller:
+     *
+     *     - `Allow`: every field below is present, identical to `SubmissionResponse`.
+     *     - `Redact`: only the fields the decision nominates come back `null`/`[]`.
+     *     - `Deny`: the mutation still went through, but the response collapses to
+     *       just `id` - every other field below is entirely ABSENT from the JSON
+     *       object (not `null` - omitted), because failing the request outright
+     *       would misrepresent a mutation that did happen. See the `rjv_*` tests in
+     *       `tests/integration/rejudge_visibility.rs`.
+     *
+     *     Every field but `id` is therefore optional here, unlike
+     *     `SubmissionResponse` (used by `GET /submissions/{id}`, where a `Deny`
+     *     degrades to a 404 instead of a sparse body, so its fields stay required).
+     */
+    SubmissionResponseAfterMutation: {
+      /**
+       * Format: int32
+       * @example 1
+       */
+      contest_id?: number | null;
+      /** @example ioi */
+      contest_type?: string | null;
+      /**
+       * Format: date-time
+       * @example 2025-10-01T14:30:00Z
+       */
+      created_at?: string | null;
+      files?: components['schemas']['SubmissionFileDto'][] | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      id: number;
+      /**
+       * Format: int32
+       * @example 0
+       */
+      judge_epoch?: number | null;
+      /** @example cpp */
+      language?: string | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      problem_id?: number | null;
+      /** @example Two Sum */
+      problem_title?: string | null;
+      result?: null | components['schemas']['JudgeResultResponse'];
+      status?: null | components['schemas']['SubmissionStatus'];
+      /**
+       * @description When set, the submission has been pinned to this worker by an admin
+       *     and every operation it produces will run there.
+       * @example worker-1
+       */
+      target_worker_id?: string | null;
+      /**
+       * Format: int32
+       * @example 1
+       */
+      user_id?: number | null;
+      /** @example alice */
+      username?: string | null;
+    };
     /** @enum {string} */
     SubmissionStatus:
       | 'Queued'
@@ -3807,9 +3891,13 @@ export interface components {
       memory_used?: number | null;
       /**
        * Format: double
+       * @description `Option` for the same reason as `verdict` above (this field is masked
+       *     by the same `result.test_case_results.*.score`-shaped `FieldMask`
+       *     paths) - every row that reaches here unmasked always carries a real
+       *     score.
        * @example 10
        */
-      score: number;
+      score?: number | null;
       stderr?: string | null;
       stdout?: string | null;
       /** Format: int32 */
@@ -3819,8 +3907,17 @@ export interface components {
        * @example 5
        */
       time_used?: number | null;
-      /** @example Accepted */
-      verdict: string;
+      /**
+       * @description `Option`, not `Verdict`: a `FieldMask` (e.g. `subtask_scores`'s
+       *     `result.test_case_results.*.verdict`) can blank this to JSON `null`
+       *     for a viewer who isn't entitled to the per-test-case breakdown, and a
+       *     mask can only ever blank a value, never author a replacement - so the
+       *     wire type has to admit `null` even though every row that reaches here
+       *     unmasked always carries a real verdict. See
+       *     `apply_filter_to_judgement_response` for where that null is produced.
+       * @example Accepted
+       */
+      verdict?: string | null;
     };
     /**
      * @example {
@@ -10626,7 +10723,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubmissionResponse'];
+          'application/json': components['schemas']['SubmissionResponseAfterMutation'];
         };
       };
       /** @description Judgement is not finalized (VALIDATION_ERROR) */
@@ -10751,7 +10848,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['SubmissionResponse'];
+          'application/json': components['schemas']['SubmissionResponseAfterMutation'];
         };
       };
       /** @description Invalid worker (VALIDATION_ERROR) */

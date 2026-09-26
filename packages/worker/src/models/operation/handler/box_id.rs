@@ -24,6 +24,27 @@ static SATURATION_FALLBACK: AtomicU32 = AtomicU32::new(0);
 /// [`BoxId`] guard is still alive. See [`allocate_box_id`].
 static IN_USE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
+/// Directory holding the per-slot `flock` files. Set once at startup from
+/// `[worker] box_slot_lock_dir` via [`configure_slot_lock_dir`]; unset means the
+/// process temp dir. Must be SHARED by every worker on a host - see that config
+/// field's doc comment for why a per-container `/tmp` defeats the whole scheme.
+static SLOT_LOCK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Record the configured slot-lock directory. Call once, before the first
+/// environment is created: the slot is claimed lazily on first use, so a later
+/// call cannot change the slot already claimed. Returns `false` if a directory
+/// was already set.
+pub fn configure_slot_lock_dir(dir: std::path::PathBuf) -> bool {
+    SLOT_LOCK_DIR.set(dir).is_ok()
+}
+
+fn slot_lock_dir() -> std::path::PathBuf {
+    SLOT_LOCK_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 /// First box id of this worker process's slot, lazily claimed on first use.
 ///
 /// isolate box ids are a host-wide 0..1000 namespace, and `isolate --init` on
@@ -37,16 +58,19 @@ static IN_USE: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 /// allocates box ids inside `[base, base + BOX_IDS_PER_SLOT)`, making
 /// cross-worker collisions impossible for up to `BOX_ID_SLOTS` workers/host.
 static BOX_SLOT_BASE: std::sync::LazyLock<u32> =
-    std::sync::LazyLock::new(|| claim_box_id_slot() * BOX_IDS_PER_SLOT);
+    std::sync::LazyLock::new(|| claim_box_id_slot_in(&slot_lock_dir()) * BOX_IDS_PER_SLOT);
 
 /// Claim the lowest free box-id slot for the lifetime of this process using a
 /// non-blocking `flock` on a per-slot lock file. The locked fd is intentionally
 /// leaked so the lock is held until the process exits, at which point the kernel
 /// releases it and the slot becomes available to a restarted worker.
-fn claim_box_id_slot() -> u32 {
+fn claim_box_id_slot_in(dir: &std::path::Path) -> u32 {
     use std::os::unix::io::IntoRawFd;
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        warn!(dir = %dir.display(), error = %e, "Cannot create isolate box-id slot lock dir");
+    }
     for slot in 0..BOX_ID_SLOTS {
-        let path = std::env::temp_dir().join(format!("broccoli-box-slot-{slot}.lock"));
+        let path = dir.join(format!("broccoli-box-slot-{slot}.lock"));
         let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -65,6 +89,7 @@ fn claim_box_id_slot() -> u32 {
             info!(
                 slot,
                 base = slot * BOX_IDS_PER_SLOT,
+                lock_dir = %dir.display(),
                 "Claimed isolate box-id slot"
             );
             return slot;
@@ -178,6 +203,41 @@ mod tests {
     fn reset() {
         in_use().clear();
         SATURATION_FALLBACK.store(0, Ordering::Relaxed);
+    }
+
+    // Two workers sharing a lock dir must claim DIFFERENT slots. `flock` locks
+    // belong to the open file description, so two independent opens in one
+    // test process contend exactly as two worker processes would.
+    #[test]
+    fn workers_sharing_a_lock_dir_claim_distinct_slots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = claim_box_id_slot_in(dir.path());
+        let second = claim_box_id_slot_in(dir.path());
+        assert_ne!(
+            first, second,
+            "two workers on one host must never share an isolate box-id slot"
+        );
+    }
+
+    // Pins the mechanism behind the measured failure, so the reason the lock
+    // dir must be shared is checked rather than merely asserted. Separate
+    // directories stand in for separate containers' private `/tmp`: neither
+    // sees the other's lock, both claim slot 0, and both then run contestant
+    // code as the same host UID.
+    #[test]
+    fn workers_with_private_lock_dirs_collide_on_slot_zero() {
+        let a = tempfile::tempdir().expect("tempdir");
+        let b = tempfile::tempdir().expect("tempdir");
+        assert_eq!(claim_box_id_slot_in(a.path()), 0);
+        assert_eq!(claim_box_id_slot_in(b.path()), 0);
+    }
+
+    #[test]
+    fn claiming_creates_a_missing_lock_dir() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let nested = root.path().join("not").join("there").join("yet");
+        assert_eq!(claim_box_id_slot_in(&nested), 0);
+        assert!(nested.join("broccoli-box-slot-0.lock").exists());
     }
 
     // A box id handed to a still-running environment must never be reissued to a

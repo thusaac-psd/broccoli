@@ -51,6 +51,8 @@ permissions! {
     ROLE_MANAGE => "role:manage",
     /// Manage plugins: install, configure, enable/disable.
     PLUGIN_MANAGE => "plugin:manage",
+    /// Schedule one-shot callbacks via the plugin timer.
+    TIMER => "timer",
     /// Manage the dead-letter queue.
     DLQ_MANAGE => "dlq:manage",
     /// View system status and diagnostics.

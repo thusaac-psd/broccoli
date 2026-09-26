@@ -370,21 +370,21 @@ pub fn parse_testlib_partial(stderr: &str) -> (f64, Option<String>) {
         }
     }
 
-    if let Some(first_token) = line.split_whitespace().next() {
-        if let Ok(score) = first_token.parse::<f64>() {
-            let score = if score.is_finite() {
-                score.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let rest = line.get(first_token.len()..).unwrap_or("").trim();
-            let message = if rest.is_empty() {
-                None
-            } else {
-                Some(truncate(rest, 1024))
-            };
-            return (score, message);
-        }
+    if let Some(first_token) = line.split_whitespace().next()
+        && let Ok(score) = first_token.parse::<f64>()
+    {
+        let score = if score.is_finite() {
+            score.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let rest = line.get(first_token.len()..).unwrap_or("").trim();
+        let message = if rest.is_empty() {
+            None
+        } else {
+            Some(truncate(rest, 1024))
+        };
+        return (score, message);
     }
 
     (0.0, extract_testlib_message(stderr))

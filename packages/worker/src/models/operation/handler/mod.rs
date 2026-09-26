@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod box_id;
+pub use box_id::configure_slot_lock_dir;
 mod caching;
 mod environment;
 mod execution;

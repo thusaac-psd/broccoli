@@ -1,0 +1,7 @@
+name = "codelink-bracket-judge-fixture"
+version = "0.1.0"
+description = "Test-only evaluator + language resolver fixture for the codelink-bracket integration test"
+
+[server]
+entry = "codelink_bracket_judge_fixture.wasm"
+permissions = ["logger", "plugin:register"]

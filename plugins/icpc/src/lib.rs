@@ -29,37 +29,75 @@ fn must_hide_other_submission(
             >= crate::config::freeze_window_start_ms(freeze_minutes, duration_ms)
 }
 
-/// Blank the judged outcome of a submission so the generic submission
-/// endpoints cannot leak a verdict the ICPC scoreboard hides. Handles both
-/// host shapes: list items carry verdict/score/time/memory at the top level
-/// and omit `result`; detail responses nest everything under `result`.
+/// Whether a viewer's `/standings` view must be restricted to their OWN row,
+/// and if so, which row. This is the ONLY enforcement point for
+/// `public_standings = false`: it drives the SQL `WHERE cu.user_id = $N` in
+/// `handle_standings` that removes every other team's row from the query
+/// entirely, a distinct mechanism from `decide_visibility_decisions`'
+/// per-submission field redaction (which blanks fields, not rows). Extracted
+/// out from behind `#[cfg(target_arch = "wasm32")]` so it is reachable by
+/// `cargo test`, mirroring `must_hide_other_submission` above and
+/// `decide_visibility_decisions` below.
 #[cfg(any(target_arch = "wasm32", test))]
-fn hide_submission_result(submission: &mut serde_json::Value) {
-    use serde_json::Value;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandingsRestriction {
+    /// No restriction: every registered contestant's row is visible.
+    Unrestricted,
+    /// Restricted to exactly this viewer's own row.
+    RestrictedTo(i32),
+    /// Restricted, but the viewer is unauthenticated -- there is no "own
+    /// row" to show, so the caller must return an empty board rather than
+    /// query at all.
+    RestrictedAnonymous,
+}
 
-    // List items omit `result`; detail responses include it (possibly null).
-    // Same heuristic as the IOI plugin - replace with an explicit flag if the
-    // list DTO ever grows a `result` field.
-    let in_list = submission.get("result").is_none();
-
-    if in_list {
-        if let Some(obj) = submission.as_object_mut() {
-            obj.insert("verdict".into(), Value::Null);
-            obj.insert("score".into(), Value::Null);
-            obj.insert("time_used".into(), Value::Null);
-            obj.insert("memory_used".into(), Value::Null);
-        }
-    } else if let Some(result) = submission.get_mut("result")
-        && let Some(obj) = result.as_object_mut()
-    {
-        obj.insert("verdict".into(), Value::Null);
-        obj.insert("score".into(), Value::Null);
-        obj.insert("time_used".into(), Value::Null);
-        obj.insert("memory_used".into(), Value::Null);
-        obj.insert("compile_output".into(), Value::Null);
-        obj.insert("error_message".into(), Value::Null);
-        obj.insert("test_case_results".into(), Value::Array(vec![]));
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn standings_restriction(
+    phase: &str,
+    can_view_all: bool,
+    public_standings: bool,
+    viewer_id: Option<i32>,
+) -> StandingsRestriction {
+    // Restrict a contestant to their own row during the contest UNLESS the
+    // organizer opted into a public live scoreboard. Organizers always see all.
+    let is_restricted =
+        (phase == "before" || phase == "during") && !can_view_all && !public_standings;
+    if !is_restricted {
+        return StandingsRestriction::Unrestricted;
     }
+    match viewer_id {
+        Some(uid) => StandingsRestriction::RestrictedTo(uid),
+        None => StandingsRestriction::RestrictedAnonymous,
+    }
+}
+
+/// Field mask covering every field `hide_submission_result` used to blank on
+/// EITHER host shape, unioned into one list. The host applies a mask with
+/// `apply_mask` (`packages/server/src/visibility/mask.rs`), which is a
+/// documented no-op on a path that does not exist - a missing key, a type
+/// mismatch, or `*` on a non-array never inserts anything. That is what
+/// makes one union mask safe to use for both shapes `decide_visibility` is
+/// never told apart (list items carry verdict/score/time_used/memory_used at
+/// the top level and have no `result` key at all; detail responses nest the
+/// same four fields, plus compile_output/error_message/test_case_results,
+/// under `result`): whichever shape the host happens to be rendering, only
+/// the paths that actually exist in THAT shape are blanked, and the paths
+/// belonging to the other shape are silently skipped.
+#[cfg(any(target_arch = "wasm32", test))]
+fn hidden_result_mask_fields() -> Vec<String> {
+    vec![
+        "verdict".to_string(),
+        "score".to_string(),
+        "time_used".to_string(),
+        "memory_used".to_string(),
+        "result.verdict".to_string(),
+        "result.score".to_string(),
+        "result.time_used".to_string(),
+        "result.memory_used".to_string(),
+        "result.compile_output".to_string(),
+        "result.error_message".to_string(),
+        "result.test_case_results".to_string(),
+    ]
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -172,46 +210,686 @@ mod filter_tests {
     }
 
     #[test]
-    fn hide_blanks_list_item_fields() {
-        let mut sub = serde_json::json!({
-            "id": 7,
-            "user_id": 2,
-            "status": "Judged",
-            "verdict": "Accepted",
-            "score": 100.0,
-            "time_used": 12,
-            "memory_used": 1024
-        });
-        hide_submission_result(&mut sub);
-        assert!(sub["verdict"].is_null());
-        assert!(sub["score"].is_null());
-        assert!(sub["time_used"].is_null());
-        assert!(sub["memory_used"].is_null());
-        assert_eq!(sub["status"], "Judged", "status stays (pending '?' cell)");
+    fn standings_restrict_contestant_to_own_row_when_private_and_during_contest() {
+        assert_eq!(
+            standings_restriction("during", false, false, Some(42)),
+            StandingsRestriction::RestrictedTo(42)
+        );
+        assert_eq!(
+            standings_restriction("before", false, false, Some(42)),
+            StandingsRestriction::RestrictedTo(42)
+        );
     }
 
     #[test]
-    fn hide_blanks_detail_result_and_test_cases() {
-        let mut sub = serde_json::json!({
-            "id": 7,
-            "user_id": 2,
-            "status": "Judged",
-            "result": {
-                "verdict": "WrongAnswer",
-                "score": 0.0,
-                "time_used": 12,
-                "memory_used": 1024,
-                "compile_output": "warning: unused",
-                "error_message": null,
-                "test_case_results": [{"verdict": "WrongAnswer"}]
+    fn standings_restrict_anonymous_viewer_gets_no_row_rather_than_an_id() {
+        assert_eq!(
+            standings_restriction("during", false, false, None),
+            StandingsRestriction::RestrictedAnonymous
+        );
+    }
+
+    #[test]
+    fn standings_public_standings_true_lifts_the_restriction_during_the_contest() {
+        assert_eq!(
+            standings_restriction("during", false, true, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
+    }
+
+    #[test]
+    fn standings_organizer_always_sees_everyone_even_when_private() {
+        assert_eq!(
+            standings_restriction("during", true, false, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
+    }
+
+    #[test]
+    fn standings_after_phase_is_unrestricted_regardless_of_public_standings() {
+        assert_eq!(
+            standings_restriction("after", false, false, Some(42)),
+            StandingsRestriction::Unrestricted
+        );
+    }
+
+    #[test]
+    fn hidden_result_mask_covers_every_list_shape_field_hide_used_to_blank() {
+        // Old `hide_submission_result` list-item branch: verdict, score,
+        // time_used, memory_used, and nothing else (status was deliberately
+        // left alone so the pending '?' cell still renders).
+        let fields = hidden_result_mask_fields();
+        for f in ["verdict", "score", "time_used", "memory_used"] {
+            assert!(
+                fields.contains(&f.to_string()),
+                "missing list-shape field {f}"
+            );
+        }
+        assert!(
+            !fields.iter().any(|f| f == "status"),
+            "status must stay visible"
+        );
+    }
+
+    #[test]
+    fn hidden_result_mask_covers_every_detail_shape_field_hide_used_to_blank() {
+        // Old `hide_submission_result` detail branch: the same four, plus
+        // compile_output/error_message/test_case_results, all nested under
+        // `result`.
+        let fields = hidden_result_mask_fields();
+        for f in [
+            "result.verdict",
+            "result.score",
+            "result.time_used",
+            "result.memory_used",
+            "result.compile_output",
+            "result.error_message",
+            "result.test_case_results",
+        ] {
+            assert!(
+                fields.contains(&f.to_string()),
+                "missing detail-shape field {f}"
+            );
+        }
+    }
+
+    fn subject(user_id: Option<i32>) -> QuerySubject {
+        QuerySubject {
+            user_id,
+            authenticated: user_id.is_some(),
+            permissions: Vec::new(),
+        }
+    }
+
+    fn submission_resource(id: i32, contest_id: i32) -> QueryResource {
+        QueryResource {
+            kind: "submission".to_string(),
+            id: id.to_string(),
+            contest_id: Some(contest_id),
+            problem_id: None,
+        }
+    }
+
+    // Test-only fixture: each parameter mirrors one column of the mocked
+    // freeze-status DB row 1:1, which keeps every call site self-documenting.
+    // Bundling them into a params struct would only relocate the same list
+    // one level of indirection without reducing the real complexity here.
+    #[allow(clippy::too_many_arguments)]
+    fn seed_freeze_row(
+        host: &Host,
+        submission_id: i32,
+        user_id: i32,
+        contest_type: &str,
+        phase: &str,
+        duration_ms: i64,
+        now_elapsed_ms: i64,
+        submission_elapsed_ms: i64,
+    ) {
+        host.db.queue_query_result(serde_json::json!([{
+            "submission_id": submission_id,
+            "user_id": user_id,
+            "contest_type": contest_type,
+            "phase": phase,
+            "duration_ms": duration_ms as f64,
+            "now_elapsed_ms": now_elapsed_ms as f64,
+            "submission_elapsed_ms": submission_elapsed_ms as f64,
+        }]));
+    }
+
+    #[test]
+    fn decide_visibility_redacts_the_exact_hide_submission_result_field_set_for_a_frozen_peer_submission()
+     {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": true,
+                "freeze_minutes": 60,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            IN_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer is NOT the submission owner (2).
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                // Hard-coded literal, NOT a second call to
+                // hidden_result_mask_fields(): comparing the SUT's output
+                // against the same helper it is built from is a tautology
+                // that stays green even if the helper's field list drifts
+                // away from what hide_submission_result actually blanks.
+                let mut want = vec![
+                    "verdict".to_string(),
+                    "score".to_string(),
+                    "time_used".to_string(),
+                    "memory_used".to_string(),
+                    "result.verdict".to_string(),
+                    "result.score".to_string(),
+                    "result.time_used".to_string(),
+                    "result.memory_used".to_string(),
+                    "result.compile_output".to_string(),
+                    "result.error_message".to_string(),
+                    "result.test_case_results".to_string(),
+                ];
+                want.sort();
+                assert_eq!(
+                    got.len(),
+                    11,
+                    "no extra fields beyond the documented set: {got:?}"
+                );
+                assert_eq!(
+                    got, want,
+                    "decide_visibility must redact EXACTLY what hide_submission_result blanked"
+                );
             }
-        });
-        hide_submission_result(&mut sub);
-        let result = &sub["result"];
-        assert!(result["verdict"].is_null());
-        assert!(result["score"].is_null());
-        assert!(result["compile_output"].is_null());
-        assert_eq!(result["test_case_results"], serde_json::json!([]));
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_allows_the_owner_even_while_frozen() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": true,
+                "freeze_minutes": 60,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            IN_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // viewer IS the submission owner.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    // Task: C3 -- every existing `decide_visibility_decisions` test (above)
+    // and every e2e test hardcodes `"public_standings": true`, so the config
+    // wiring itself (as opposed to the freeze mechanism, covered above) was
+    // empirically confirmed unreachable: hardcoding the call site's argument
+    // to `true` left every one of them green. This pair of tests pins
+    // `public_standings = false` end-to-end through `decide_visibility_decisions`,
+    // with the freeze mechanism neutralised (`freeze_minutes: 0`, a
+    // pre-freeze-window submission) so ONLY the `public_standings` wiring is
+    // under test.
+    #[test]
+    fn decide_visibility_redacts_a_peer_submission_when_public_standings_is_false() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": false,
+                "freeze_minutes": 0,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            PRE_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer is NOT the submission owner (2).
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            WireDecision::Redact { .. } => {}
+            other => panic!("expected Redact when public_standings is false, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_allows_a_peer_submission_when_public_standings_is_true() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": true,
+                "freeze_minutes": 0,
+            }),
+        );
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "icpc",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            PRE_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer is NOT the submission owner (2).
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Allow {}),
+            "expected Allow when public_standings is true and there is no freeze, got {:?}",
+            decisions[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_allows_a_submission_from_a_non_icpc_contest() {
+        // Every visibility plugin is queried for every resource regardless of
+        // contest type - ICPC must default to Allow rather than incorrectly
+        // hiding another contest type's submissions.
+        let host = Host::mock();
+        seed_freeze_row(
+            &host,
+            7,
+            2,
+            "ioi",
+            "during",
+            DUR,
+            NOW_IN_WINDOW,
+            IN_FREEZE_SUB,
+        );
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_allows_non_submission_resources_and_contest_less_resources_without_querying()
+     {
+        let host = Host::mock();
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![
+                QueryResource {
+                    kind: "contest".to_string(),
+                    id: "10".to_string(),
+                    contest_id: Some(10),
+                    problem_id: None,
+                },
+                QueryResource {
+                    kind: "submission".to_string(),
+                    id: "7".to_string(),
+                    contest_id: None, // standalone submission, no contest.
+                    problem_id: None,
+                },
+            ],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(
+            host.db.queries().is_empty(),
+            "must not query the database when nothing needs it"
+        );
+    }
+
+    #[test]
+    fn decide_visibility_admin_bypass_allows_everything_without_querying() {
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::SUBMISSION_VIEW_ALL.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    #[test]
+    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
+        // Task 17: a viewer holding `contest:manage` WITHOUT
+        // `submission:view_all` must ALSO bypass to Allow for the whole
+        // batch, without querying - mirroring the `SUBMISSION_VIEW_ALL`
+        // bypass above exactly, so a future change cannot special-case one
+        // permission's short-circuit without the other. This is the unit-level
+        // pin for the fix `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+        // pins end to end.
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    #[test]
+    fn decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch() {
+        // The critical N+1 guard: a batch of MANY submissions must cost ONE
+        // query, not one query per submission.
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({
+                "public_standings": true,
+                "freeze_minutes": 60,
+            }),
+        );
+        host.db.queue_query_result(serde_json::json!([
+            {
+                "submission_id": 7, "user_id": 2, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": IN_FREEZE_SUB as f64,
+            },
+            {
+                "submission_id": 8, "user_id": 3, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": PRE_FREEZE_SUB as f64,
+            },
+            {
+                "submission_id": 9, "user_id": 4, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": PRE_FREEZE_SUB as f64,
+            },
+        ]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![
+                submission_resource(7, 10),
+                submission_resource(8, 10),
+                submission_resource(9, 10),
+            ],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 3);
+        let queries = host.db.queries();
+        assert_eq!(
+            queries.len(),
+            1,
+            "must issue exactly one query for the whole batch, got: {queries:?}"
+        );
+        assert!(
+            queries[0].sql.contains("IN ("),
+            "must be a single IN(...) batch query: {}",
+            queries[0].sql
+        );
+
+        // The batching property alone (one query) is not evidence of
+        // correctness: a bug that issues exactly one query and then maps
+        // every resource to Allow regardless of what `must_hide_other_submission`
+        // says would still pass the assertions above. Pin what the three
+        // decisions actually are: submission 7 is in the freeze window for a
+        // non-owner viewer (99) and must be Redact with the full hidden-result
+        // mask; submissions 8 and 9 predate the freeze window and must be
+        // Allow.
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                // Hard-coded literal - see the sibling comment in
+                // decide_visibility_redacts_the_exact_hide_submission_result_field_set_for_a_frozen_peer_submission
+                // for why this must not re-derive from hidden_result_mask_fields().
+                let mut want = vec![
+                    "verdict".to_string(),
+                    "score".to_string(),
+                    "time_used".to_string(),
+                    "memory_used".to_string(),
+                    "result.verdict".to_string(),
+                    "result.score".to_string(),
+                    "result.time_used".to_string(),
+                    "result.memory_used".to_string(),
+                    "result.compile_output".to_string(),
+                    "result.error_message".to_string(),
+                    "result.test_case_results".to_string(),
+                ];
+                want.sort();
+                assert_eq!(
+                    got.len(),
+                    11,
+                    "no extra fields beyond the documented set: {got:?}"
+                );
+                assert_eq!(
+                    got, want,
+                    "submission 7 (in-freeze, non-owner) must be Redact with the exact hidden-result mask"
+                );
+            }
+            other => {
+                panic!("expected submission 7 (in-freeze, non-owner) to be Redact, got {other:?}")
+            }
+        }
+        assert!(
+            matches!(decisions[1], WireDecision::Allow {}),
+            "submission 8 predates the freeze window: expected Allow, got {:?}",
+            decisions[1]
+        );
+        assert!(
+            matches!(decisions[2], WireDecision::Allow {}),
+            "submission 9 predates the freeze window: expected Allow, got {:?}",
+            decisions[2]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_issues_exactly_one_batched_storage_read_for_reveal_flags_across_many_contests()
+     {
+        // M20: the reveal flag load used to be one `host.storage.get_one()`
+        // call per DISTINCT contest id in the batch (one extism host-fn
+        // crossing per contest). It must now be ONE `host.storage.get()`
+        // call for the whole batch, mirroring the DB query batching pinned by
+        // `decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch`
+        // just above. Two DISTINCT contests are required here - a
+        // single-contest batch would pass even with the old per-contest loop.
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "10",
+            "contest",
+            serde_json::json!({ "public_standings": true, "freeze_minutes": 60 }),
+        );
+        host.config.seed(
+            "contest",
+            "20",
+            "contest",
+            serde_json::json!({ "public_standings": true, "freeze_minutes": 60 }),
+        );
+        // Contest 20 has been revealed; contest 10 has not (no key at all -
+        // the fail-frozen default).
+        host.storage.set(&[("reveal:20", "1")]).unwrap();
+
+        host.db.queue_query_result(serde_json::json!([
+            {
+                "submission_id": 7, "user_id": 2, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": IN_FREEZE_SUB as f64,
+            },
+            {
+                "submission_id": 8, "user_id": 3, "contest_type": "icpc",
+                "phase": "during", "duration_ms": DUR as f64,
+                "now_elapsed_ms": NOW_IN_WINDOW as f64,
+                "submission_elapsed_ms": IN_FREEZE_SUB as f64,
+            },
+        ]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // viewer owns neither submission.
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 20)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+
+        assert_eq!(
+            host.storage.get_call_count(),
+            1,
+            "must issue exactly one storage.get() for both contests' reveal flags"
+        );
+
+        // Batching alone is not evidence of correctness - pin that the two
+        // contests' reveal states were resolved independently and correctly:
+        // contest 10 (not revealed) still hides submission 7 from the
+        // non-owner viewer; contest 20 (revealed) lets submission 8 through.
+        assert!(
+            matches!(decisions[0], WireDecision::Redact { .. }),
+            "contest 10 is not revealed: submission 7 must stay Redact, got {:?}",
+            decisions[0]
+        );
+        assert!(
+            matches!(decisions[1], WireDecision::Allow {}),
+            "contest 20 is revealed: submission 8 must be Allow, got {:?}",
+            decisions[1]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_on_contest_submission_mismatch() {
+        // No row at all for the submission id: the old code's "fail hidden
+        // rather than leak" branch.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Redact { .. }));
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_even_for_a_viewer_who_would_be_the_owner_when_the_row_is_missing()
+     {
+        // Deliberate, safe-direction ordering deviation from the old code:
+        // `filter_submission_for_viewer` was handed the submission's own JSON
+        // (already carrying its `user_id`) and checked ownership FIRST, so an
+        // owner could never reach the "hide it" branch. `decide_visibility`
+        // is handed only a resource id and has no `user_id` to compare until
+        // AFTER the batched query returns a row for that id. When the query
+        // returns no row at all (contest/submission id mismatch, or any other
+        // data-integrity gap), there is nothing to compare the viewer against,
+        // so the missing-row fail-hidden branch runs unconditionally - even
+        // for a viewer who would in fact be the submission's owner if a row
+        // existed. This can only over-hide (Redact), never leak (Allow), so
+        // it is intentionally left as-is. If you reorder these checks to
+        // "restore" the old owner-first semantics, you are removing this
+        // fail-hidden guarantee for the missing-row case - make sure that is
+        // actually what you want.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // would be the owner, if a row existed.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Redact { .. }),
+            "a missing row must fail hidden even for a viewer who would otherwise be the owner, got {:?}",
+            decisions[0]
+        );
     }
 }
 
@@ -234,20 +912,24 @@ mod sql_tests {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use std::collections::HashMap;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::permissions as perm;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};
+#[cfg(any(target_arch = "wasm32", test))]
+use serde::Deserialize;
 #[cfg(target_arch = "wasm32")]
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::config::ContestConfig;
 #[cfg(target_arch = "wasm32")]
-use crate::config::{ContestConfig, ProblemState, freeze_view, freeze_window_start_ms};
+use crate::config::{ProblemState, freeze_view, freeze_window_start_ms};
 #[cfg(target_arch = "wasm32")]
 use crate::evaluate::{
     evaluate_short_circuit_detached, handle_detached_eval_callback, recover_detached_callback_error,
@@ -264,130 +946,246 @@ use crate::standings::{
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    host.registry.register_contest_type_with_filter(
+    host.registry.register_contest_type(
         "icpc",
         "handle_icpc_submission",
         "handle_icpc_code_run",
-        Some("filter_submission_for_viewer"),
     )?;
     host.log.info("ICPC contest plugin registered")?;
     Ok("ok".into())
 }
 
-// -- Submission visibility filter ----------------------------------------
+// -- Submission visibility decisions -------------------------------------
 //
-// Invoked by the host for every submission the generic REST endpoints return
-// (list items, detail, judgement history). Without it, a contestant in a
-// contest with `submissions_visible = true` could read other teams' live
-// verdicts through GET /submissions/{id}, bypassing the scoreboard freeze and
-// the private-standings mode that `handle_standings` enforces.
+// Invoked by the host's visibility kernel (`[[server.queries]] topic =
+// "visibility"`) for every resource in a query batch, for EVERY plugin
+// registered on that topic - not just ICPC contests, and not just
+// submissions. `decide_visibility_decisions` therefore defaults to Allow for
+// anything it has no opinion about (kind != "submission", no contest_id, or
+// a submission belonging to a non-ICPC contest): Allow is the identity
+// element of the host's `Decision::meet` lattice, so it can never widen what
+// the host or another plugin already decided.
 //
-// `FilterSubmissionInput`/`FilterSubmissionOutput` are the shared wire types
-// from `broccoli_server_sdk::types` (via the prelude).
+// Replaces the old `filter_submission_for_viewer` host-fn hook. Enforces on
+// the generic GET /submissions endpoints (list, detail, judgement history)
+// the SAME two scoreboard-integrity rules `handle_standings` enforces on its
+// own view - private standings during the contest, and the scoreboard
+// freeze - via a `Redact` field mask instead of a host-fn-supplied JSON
+// mutation. `must_hide_other_submission` is the same predicate that backed
+// the old mechanism, unchanged; only the output changed shape.
 
-#[cfg(target_arch = "wasm32")]
-#[plugin_fn]
-pub fn filter_submission_for_viewer(input: String) -> FnResult<String> {
-    let host = Host::new();
-    let req: FilterSubmissionInput = serde_json::from_str(&input)?;
-
-    let submission = apply_scoreboard_filter(&host, &req)?;
-
-    Ok(serde_json::to_string(&FilterSubmissionOutput {
-        submission,
-    })?)
+/// Row shape for the batched freeze/private-standings query below: one row
+/// per submission resource in the batch, keyed by submission id.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Deserialize)]
+struct SubmissionFreezeRow {
+    submission_id: i32,
+    user_id: i32,
+    contest_type: Option<String>,
+    phase: String,
+    duration_ms: Option<f64>,
+    now_elapsed_ms: Option<f64>,
+    submission_elapsed_ms: Option<f64>,
 }
 
 #[cfg(target_arch = "wasm32")]
-fn apply_scoreboard_filter(
+#[plugin_fn]
+pub fn decide_visibility(input: String) -> FnResult<String> {
+    let host = Host::new();
+    let req: VisibilityQueryInput = serde_json::from_str(&input)?;
+    let decisions = decide_visibility_decisions(&host, &req)?;
+    Ok(serde_json::to_string(&VisibilityQueryOutput { decisions })?)
+}
+
+/// Core decision logic. Exercised directly by tests via `Host::mock()` (no
+/// wasm32 target required); the freeze-redaction branch is additionally
+/// pinned end-to-end by
+/// `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+/// in `packages/server/tests/e2e/plugins/icpc.rs` (see below).
+#[cfg(any(target_arch = "wasm32", test))]
+fn decide_visibility_decisions(
     host: &Host,
-    req: &FilterSubmissionInput,
-) -> Result<serde_json::Value, SdkError> {
-    let mut submission = req.submission.clone();
-    cap_submission_detail_texts(&mut submission);
-
-    // Admin / view-all bypass.
+    req: &VisibilityQueryInput,
+) -> Result<Vec<WireDecision>, SdkError> {
+    // Admin / view-all / organiser bypass, for the whole batch at once - it
+    // does not depend on any individual resource.
+    //
+    // `CONTEST_MANAGE` is checked here (Task 17) alongside the pre-existing
+    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE, not
+    // a regression fix: `git show d9860bc8^` confirms the pre-kernel
+    // `apply_scoreboard_filter` also checked only `SUBMISSION_VIEW_ALL`, so
+    // the kernel migration ported this inconsistency verbatim rather than
+    // introducing it. It contradicted `handle_standings` (below), which DOES
+    // check `CONTEST_MANAGE` so organisers see the unfrozen board, and the
+    // documented invariant in `config.rs`: "Organizers (`contest:manage`)
+    // always see the real board." A viewer holding `contest:manage` without
+    // `submission:view_all` - a plausible problem-setter or judge role - was
+    // wrongly redacted during the freeze window; see
+    // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+    // in `packages/server/tests/e2e/plugins/icpc.rs` for the viewer that
+    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
     if req
-        .viewer_permissions
+        .subject
+        .permissions
         .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL)
+        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
     {
-        return Ok(submission);
+        return Ok(req
+            .resources
+            .iter()
+            .map(|_| WireDecision::Allow {})
+            .collect());
     }
 
-    let Some(contest_id) = req.contest_id else {
-        return Ok(submission);
-    };
+    // Resources this plugin has any opinion about at all: `kind ==
+    // "submission"` with a resolvable id and a known contest_id. Everything
+    // else defaults to Allow without touching the database.
+    let by_index: Vec<Option<i32>> = req
+        .resources
+        .iter()
+        .map(|resource| {
+            if resource.kind == "submission" && resource.contest_id.is_some() {
+                resource.id.parse::<i32>().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    // A team always sees its own results, even while the board is frozen.
-    let owner_id = submission.get("user_id").and_then(|v| v.as_i64());
-    let viewer_id = req.viewer_user_id.map(i64::from);
-    if matches!((owner_id, viewer_id), (Some(o), Some(v)) if o == v) {
-        return Ok(submission);
+    let mut submission_ids: Vec<i32> = by_index.iter().filter_map(|id| *id).collect();
+    if submission_ids.is_empty() {
+        return Ok(req
+            .resources
+            .iter()
+            .map(|_| WireDecision::Allow {})
+            .collect());
     }
+    submission_ids.sort_unstable();
+    submission_ids.dedup();
 
-    let config: ContestConfig = contest::load_config(host, contest_id)?;
-
-    let Some(submission_id) = submission.get("id").and_then(|v| v.as_i64()) else {
-        // Cannot place the submission on the contest timeline: fail hidden.
-        hide_submission_result(&mut submission);
-        return Ok(submission);
-    };
-
-    // Contest phase + times, and the submission's position on the contest
-    // timeline, computed exactly like handle_standings computes them (float
-    // epoch * 1000, truncated) so the freeze boundary compares like-with-like.
-    #[derive(Deserialize)]
-    struct FilterTimes {
-        phase: String,
-        duration_ms: Option<f64>,
-        now_elapsed_ms: Option<f64>,
-        submission_elapsed_ms: Option<f64>,
-    }
+    // ONE batched query for every submission id in the batch - never one
+    // query per submission, which would reintroduce an N+1 on the
+    // submission-list hot path. `contest_type` is returned (rather than
+    // filtered in the WHERE clause) so a submission belonging to a non-ICPC
+    // contest can be told apart from a genuine contest/submission data
+    // mismatch: the former must Allow (this plugin has no opinion on
+    // non-ICPC contests), the latter fails hidden like the old per-submission
+    // query's `None` branch did.
     let mut p = Params::new();
+    let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
-        "SELECT CASE WHEN NOW() < c.start_time THEN 'before' \
+        "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
+                CASE WHEN NOW() < c.start_time THEN 'before' \
                      WHEN NOW() > c.end_time THEN 'after' \
                      ELSE 'during' END AS phase, \
                 EXTRACT(EPOCH FROM (c.end_time - c.start_time)) * 1000 AS duration_ms, \
                 EXTRACT(EPOCH FROM (NOW() - c.start_time)) * 1000 AS now_elapsed_ms, \
                 EXTRACT(EPOCH FROM (s.created_at - c.start_time)) * 1000 AS submission_elapsed_ms \
-         FROM contest c \
-         JOIN submission s ON s.id = {} AND s.contest_id = c.id \
-         WHERE c.id = {}",
-        p.bind(submission_id as i32),
-        p.bind(contest_id)
+         FROM submission s \
+         JOIN contest c ON c.id = s.contest_id \
+         WHERE s.id IN ({})",
+        placeholders.join(",")
     );
-    let times: Option<FilterTimes> = host.db.query_one_with_args(&sql, &p.into_args())?;
-    let Some(times) = times else {
-        // Contest/submission mismatch: fail hidden rather than leaking.
-        hide_submission_result(&mut submission);
-        return Ok(submission);
-    };
+    let rows: Vec<SubmissionFreezeRow> = host.db.query_with_args(&sql, &p.into_args())?;
+    let rows_by_id: HashMap<i32, SubmissionFreezeRow> =
+        rows.into_iter().map(|r| (r.submission_id, r)).collect();
 
-    // Same fail-frozen reveal handling as handle_standings: a storage read
-    // error is swallowed to `revealed = false` - never accidentally unfreeze.
-    let revealed = host
-        .storage
-        .get_one(&format!("reveal:{contest_id}"))
-        .ok()
-        .flatten()
-        .as_deref()
-        == Some("1");
+    // Distinct ICPC contest ids actually present in the batch: config and
+    // the reveal flag are loaded once per DISTINCT contest, never once per
+    // submission.
+    let mut icpc_contest_ids: Vec<i32> = req
+        .resources
+        .iter()
+        .zip(&by_index)
+        .filter_map(|(resource, id)| {
+            let sub_id = (*id)?;
+            let row = rows_by_id.get(&sub_id)?;
+            if row.contest_type.as_deref() == Some("icpc") {
+                resource.contest_id
+            } else {
+                None
+            }
+        })
+        .collect();
+    icpc_contest_ids.sort_unstable();
+    icpc_contest_ids.dedup();
 
-    if must_hide_other_submission(
-        config.public_standings,
-        config.freeze_minutes,
-        &times.phase,
-        revealed,
-        times.duration_ms.unwrap_or(0.0) as i64,
-        times.now_elapsed_ms.unwrap_or(0.0) as i64,
-        times.submission_elapsed_ms.unwrap_or(0.0).max(0.0) as i64,
-    ) {
-        hide_submission_result(&mut submission);
+    let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
+    for contest_id in &icpc_contest_ids {
+        configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
     }
 
-    Ok(submission)
+    // Reveal flags: ONE batched storage read across every distinct contest
+    // id in the batch, mirroring IOI's `tokens:{contest_id}:{viewer}` load
+    // in `feedback::decide_visibility_decisions` - never one `get_one` call
+    // per contest, which is one extism host-fn crossing per contest instead
+    // of one for the whole batch. Same fail-frozen handling as before (and
+    // as `handle_standings`): a storage read error is swallowed to an empty
+    // map, so every contest in this batch defaults to `revealed = false` -
+    // never accidentally unfreeze.
+    let mut revealed: HashMap<i32, bool> = HashMap::new();
+    if !icpc_contest_ids.is_empty() {
+        let keys: Vec<String> = icpc_contest_ids
+            .iter()
+            .map(|cid| format!("reveal:{cid}"))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let raw = host.storage.get(&key_refs).ok().unwrap_or_default();
+        for (contest_id, key) in icpc_contest_ids.iter().zip(keys.iter()) {
+            let is_revealed = raw.get(key).map(String::as_str) == Some("1");
+            revealed.insert(*contest_id, is_revealed);
+        }
+    }
+
+    let viewer_id = req.subject.user_id;
+    let mask_fields = hidden_result_mask_fields();
+
+    let decisions = req
+        .resources
+        .iter()
+        .zip(&by_index)
+        .map(|(resource, id)| {
+            let Some(sub_id) = id else {
+                return WireDecision::Allow {};
+            };
+            let Some(row) = rows_by_id.get(sub_id) else {
+                // Contest/submission mismatch: fail hidden rather than leak.
+                return WireDecision::Redact {
+                    fields: mask_fields.clone(),
+                };
+            };
+            if row.contest_type.as_deref() != Some("icpc") {
+                // Not an ICPC contest: this plugin has no opinion.
+                return WireDecision::Allow {};
+            }
+            // A team always sees its own results, even while frozen.
+            if viewer_id == Some(row.user_id) {
+                return WireDecision::Allow {};
+            }
+            let Some(contest_id) = resource.contest_id else {
+                return WireDecision::Allow {};
+            };
+            let config = configs.get(&contest_id).cloned().unwrap_or_default();
+            let is_revealed = revealed.get(&contest_id).copied().unwrap_or(false);
+            if must_hide_other_submission(
+                config.public_standings,
+                config.freeze_minutes,
+                &row.phase,
+                is_revealed,
+                row.duration_ms.unwrap_or(0.0) as i64,
+                row.now_elapsed_ms.unwrap_or(0.0) as i64,
+                row.submission_elapsed_ms.unwrap_or(0.0).max(0.0) as i64,
+            ) {
+                WireDecision::Redact {
+                    fields: mask_fields.clone(),
+                }
+            } else {
+                WireDecision::Allow {}
+            }
+        })
+        .collect();
+
+    Ok(decisions)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -740,14 +1538,11 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     let phase = &info.phase;
     let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
-    // Restrict a contestant to their own row during the contest UNLESS the
-    // organizer opted into a public live scoreboard. Organizers always see all.
-    let is_restricted =
-        (phase == "before" || phase == "during") && !can_view_all && !config.public_standings;
-    let restricted_user_id = if is_restricted {
-        match req.user_id() {
-            Some(uid) => Some(uid),
-            None => {
+    let restricted_user_id =
+        match standings_restriction(phase, can_view_all, config.public_standings, req.user_id()) {
+            StandingsRestriction::Unrestricted => None,
+            StandingsRestriction::RestrictedTo(uid) => Some(uid),
+            StandingsRestriction::RestrictedAnonymous => {
                 return Ok(PluginHttpResponse {
                     status: 200,
                     headers: None,
@@ -759,10 +1554,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
                     })),
                 });
             }
-        }
-    } else {
-        None
-    };
+        };
 
     // Freeze: in the final `freeze_minutes` a contestant's board stops updating and
     // submissions during the window show as pending "?". Organizers always see the

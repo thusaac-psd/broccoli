@@ -37,8 +37,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Before anything opens sockets or files; see `common::rlimit`.
+    let nofile = common::rlimit::raise_nofile_limit();
     let config = WorkerAppConfig::load().context("Failed to load config")?;
     let _telemetry_guard = common::observability::init_tracing(&config.observability);
+    nofile.log();
     let runtime = WorkerRuntime::build(config).await?;
     runtime.run().await
 }

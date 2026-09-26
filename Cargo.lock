@@ -879,6 +879,7 @@ dependencies = [
  "extism-pdk",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1200,6 +1201,7 @@ dependencies = [
  "config",
  "futures",
  "hex",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-prometheus",

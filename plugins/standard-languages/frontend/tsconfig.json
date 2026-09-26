@@ -9,10 +9,7 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "declaration": true,
-    "declarationDir": "dist",
-    "paths": {
-      "@broccoli/web-sdk/*": ["../../../packages/web-sdk/src/*"]
-    }
+    "declarationDir": "dist"
   },
   "include": ["src"]
 }

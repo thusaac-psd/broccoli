@@ -101,6 +101,57 @@ pub struct SubmissionResponse {
     pub result: Option<JudgeResultResponse>,
 }
 
+/// The wire shape `apply_submission_judgement`, `rejudge_submission`, and
+/// `admin_fan_out_submission` actually return. All three authorise their
+/// *mutation* independently of the caller's own Read visibility into the
+/// submission (`submission:rejudge`/`system:admin`, never
+/// `submission:view_all`), then route the response through
+/// `apply_filter_to_response_after_mutation` (`handlers/submission/filter.rs`),
+/// which runs the same `Resource::Submission` Read decision `GET
+/// /submissions/{id}` would make for that caller:
+///
+/// - `Allow`: every field below is present, identical to `SubmissionResponse`.
+/// - `Redact`: only the fields the decision nominates come back `null`/`[]`.
+/// - `Deny`: the mutation still went through, but the response collapses to
+///   just `id` - every other field below is entirely ABSENT from the JSON
+///   object (not `null` - omitted), because failing the request outright
+///   would misrepresent a mutation that did happen. See the `rjv_*` tests in
+///   `tests/integration/rejudge_visibility.rs`.
+///
+/// Every field but `id` is therefore optional here, unlike
+/// `SubmissionResponse` (used by `GET /submissions/{id}`, where a `Deny`
+/// degrades to a 404 instead of a sparse body, so its fields stay required).
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SubmissionResponseAfterMutation {
+    #[schema(example = 1)]
+    pub id: i32,
+    pub files: Option<Vec<SubmissionFileDto>>,
+    #[schema(example = "cpp")]
+    pub language: Option<String>,
+    pub status: Option<SubmissionStatus>,
+    #[schema(example = 1)]
+    pub user_id: Option<i32>,
+    #[schema(example = "alice")]
+    pub username: Option<String>,
+    #[schema(example = 1)]
+    pub problem_id: Option<i32>,
+    #[schema(example = "Two Sum")]
+    pub problem_title: Option<String>,
+    #[schema(example = 1)]
+    pub contest_id: Option<i32>,
+    #[schema(example = "ioi")]
+    pub contest_type: Option<String>,
+    #[schema(example = 0)]
+    pub judge_epoch: Option<i32>,
+    /// When set, the submission has been pinned to this worker by an admin
+    /// and every operation it produces will run there.
+    #[schema(example = "worker-1")]
+    pub target_worker_id: Option<String>,
+    #[schema(example = "2025-10-01T14:30:00Z")]
+    pub created_at: Option<DateTime<Utc>>,
+    pub result: Option<JudgeResultResponse>,
+}
+
 #[derive(Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SubmissionListItem {
     #[schema(example = 1)]
@@ -193,10 +244,21 @@ pub struct SubmissionJudgementResponse {
 pub struct TestCaseResultResponse {
     #[schema(example = 1)]
     pub id: i32,
-    #[schema(value_type = String, example = "Accepted")]
-    pub verdict: Verdict,
+    /// `Option`, not `Verdict`: a `FieldMask` (e.g. `subtask_scores`'s
+    /// `result.test_case_results.*.verdict`) can blank this to JSON `null`
+    /// for a viewer who isn't entitled to the per-test-case breakdown, and a
+    /// mask can only ever blank a value, never author a replacement - so the
+    /// wire type has to admit `null` even though every row that reaches here
+    /// unmasked always carries a real verdict. See
+    /// `apply_filter_to_judgement_response` for where that null is produced.
+    #[schema(value_type = Option<String>, example = "Accepted")]
+    pub verdict: Option<Verdict>,
+    /// `Option` for the same reason as `verdict` above (this field is masked
+    /// by the same `result.test_case_results.*.score`-shaped `FieldMask`
+    /// paths) - every row that reaches here unmasked always carries a real
+    /// score.
     #[schema(example = 10.0)]
-    pub score: f64,
+    pub score: Option<f64>,
     #[schema(example = 5)]
     pub time_used: Option<i32>,
     #[schema(example = 256)]
@@ -275,11 +337,14 @@ pub struct AdminFanOutSubmissionRequest {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct AdminFanOutSubmissionResponse {
-    pub submissions: Vec<SubmissionResponse>,
+    pub submissions: Vec<SubmissionResponseAfterMutation>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct BulkRejudgeResponse {
+    /// Count only - never per-id detail, never submission content. See
+    /// `bulk_rejudge_submissions`'s doc comment (`handlers/submission/rejudge.rs`)
+    /// for exactly what this number does and does not disclose.
     #[schema(example = 1234)]
     pub queued: usize,
 }
@@ -356,8 +421,8 @@ impl From<crate::entity::test_case_result::Model> for TestCaseResultResponse {
     fn from(m: crate::entity::test_case_result::Model) -> Self {
         Self {
             id: m.id,
-            verdict: m.verdict,
-            score: m.score,
+            verdict: Some(m.verdict),
+            score: Some(m.score),
             time_used: m.time_used,
             memory_used: m.memory_used,
             test_case_id: m.test_case_id,

@@ -36,6 +36,45 @@ mod plugin_management {
         assert_eq!(res.body["code"], "TOKEN_MISSING");
     }
 
+    /// `plugin:manage` is the sole gate on every `handlers/admin.rs` endpoint -
+    /// this pins that gate (previously untested against a non-admin
+    /// authenticated user) for the guard test's `visibility-bypass-audited`
+    /// comment above that file's entity import.
+    #[tokio::test]
+    async fn contestant_cannot_manage_plugins() {
+        let app = TestApp::spawn().await;
+        let contestant = app
+            .create_user_with_role("contestant_plugin_mgmt", "securepass", "contestant")
+            .await;
+
+        let res = app.get_with_token(routes::ADMIN_PLUGINS, &contestant).await;
+        assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+
+        let res = app
+            .get_with_token(&routes::admin_plugin_details("server-plugin"), &contestant)
+            .await;
+        assert_eq!(res.status, 403);
+
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_enable("server-plugin"),
+                &json!({}),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 403);
+
+        let res = app
+            .post_with_token(
+                &routes::admin_plugin_disable("server-plugin"),
+                &json!({}),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 403);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn admin_can_enable_a_valid_plugin() {
         let app = TestApp::spawn_with_plugins().await;
@@ -166,6 +205,39 @@ mod plugin_routing {
             .await;
         assert_eq!(invalid.status, 401);
         assert_eq!(invalid.body["code"], "TOKEN_INVALID");
+    }
+
+    /// An INVALID or EXPIRED bearer token must be rejected with 401 on an
+    /// unprotected plugin route too - not silently downgraded to anonymous.
+    ///
+    /// Routes that check permissions inside the plugin (no manifest
+    /// `permission`) used to see an expired token as "no caller", so the plugin
+    /// answered 403 "requires contest:manage". Clients refresh their access
+    /// token on 401, never on 403, so a staff member whose 5-minute token
+    /// lapsed hit a misleading permissions error on every codelink-bracket
+    /// staff action until they reloaded - found running a real 128-candidate
+    /// tournament. Core routes already answer 401 here; plugin routes now match.
+    /// A genuinely ABSENT token is still anonymous, because some plugin routes
+    /// are public.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unprotected_route_rejects_an_invalid_token_but_allows_no_token() {
+        let app = TestApp::spawn_with_plugins().await;
+        let route = routes::plugin_proxy("server-plugin", "reflect/123");
+
+        let invalid = app.get_with_token(&route, "bad.token").await;
+        assert_eq!(
+            invalid.status, 401,
+            "a present-but-invalid token must be a 401 so the client refreshes: {}",
+            invalid.text
+        );
+        assert_eq!(invalid.body["code"], "TOKEN_INVALID");
+
+        let anonymous = app.get_without_token(&route).await;
+        assert_eq!(
+            anonymous.status, 200,
+            "no token at all is still anonymous on a public route: {}",
+            anonymous.text
+        );
     }
 
     #[tokio::test]

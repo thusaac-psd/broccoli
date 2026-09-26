@@ -1,3 +1,7 @@
+import type {
+  Clarification,
+  ClarificationReply,
+} from '@broccoli/web-sdk/clarification';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -23,8 +27,6 @@ import {
   User,
 } from 'lucide-react';
 import { useState } from 'react';
-
-import type { Clarification, ClarificationReply } from '../api/types';
 
 interface ClarificationCardProps {
   clarification: Clarification;

@@ -34,7 +34,11 @@ fn cpp_default_flags_are_o2_only_no_std_for_noi_parity() {
     // the parity behavior. The global default must be exactly ["-O2"] and carry
     // no `-std=` (never reintroduce `-std=c++NN` as the global default).
     let flags = default_cpp_flags();
-    assert_eq!(flags, vec!["-O2".to_string()], "cpp default must be -O2 only");
+    assert_eq!(
+        flags,
+        vec!["-O2".to_string()],
+        "cpp default must be -O2 only"
+    );
     assert!(
         !flags.iter().any(|f| f.starts_with("-std=")),
         "C++ default must carry no -std (gnu++14 parity): {flags:?}"

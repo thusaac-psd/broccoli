@@ -114,8 +114,8 @@ export function PrintQueuePage() {
 
   const batchAct = useCallback(
     (action: (id: number) => Promise<unknown>) => {
-      if (selected.size === 0) return;
-      act(async () => {
+      if (selected.size === 0) return Promise.resolve();
+      return act(async () => {
         for (const id of selected) await action(id);
       });
     },

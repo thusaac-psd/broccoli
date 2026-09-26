@@ -12,8 +12,25 @@ use serde::Deserialize;
 use tracing::{info, instrument};
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
-use crate::entity::judgement_reset::ClearJudgementActiveModel;
-use crate::entity::{submission, submission_judgement, test_case_result};
+// visibility-bypass-audited: every handler in this module requires
+// perm::SUBMISSION_REJUDGE at entry (the `target_worker_id` override further
+// requires perm::SYSTEM_ADMIN), pinned by `contestant_cannot_rejudge` and
+// `contestant_cannot_bulk_rejudge` (tests/integration/submission.rs). This is
+// system/judge-operator tooling that mutates submissions, not a viewer read
+// path - but the `SubmissionResponse` it builds is still routed through
+// `VisibilityKernel::decide`/`fetch_visible` before it ships (see
+// `apply_filter_to_response_after_mutation`), because `submission:rejudge`/
+// `system:admin` are independent of `Resource::Submission`'s own Read
+// reachability: an operator can trigger a rejudge on a submission they could
+// not themselves `GET` (not the owner, no `submission:view_all`, not a
+// contest participant), and a frozen ICPC contest / restricted IOI feedback
+// level must redact this response exactly as it would that `GET`. Only the
+// *mutation* is authorised by `submission:rejudge` alone; what comes back
+// reflects the actor's own Read visibility, not a blanket admin view. Pinned
+// by `tests/integration/rejudge_visibility.rs`.
+use crate::entity::{
+    judgement_reset::ClearJudgementActiveModel, submission, submission_judgement, test_case_result,
+};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::FreshAuthUser;
 use crate::extractors::json::AppJson;
@@ -24,8 +41,10 @@ use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest};
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
+use crate::visibility::{Subject, VisibilityKernel};
 
 use super::dispatch::open_rejudge_judgement;
+use super::filter::apply_filter_to_response_after_mutation;
 use super::response::{VisibilityContext, build_submission_response};
 
 #[utoipa::path(
@@ -40,7 +59,7 @@ use super::response::{VisibilityContext, build_submission_response};
         ("judgement_id" = i32, Path, description = "Judgement ID")
     ),
     responses(
-        (status = 200, description = "Applied judgement", body = SubmissionResponse),
+        (status = 200, description = "Applied judgement", body = SubmissionResponseAfterMutation),
         (status = 400, description = "Judgement is not finalized (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
@@ -53,7 +72,7 @@ pub async fn apply_submission_judgement(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
-) -> Result<Json<SubmissionResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
@@ -113,12 +132,11 @@ pub async fn apply_submission_judgement(
     )
     .await;
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
 }
 
@@ -206,7 +224,7 @@ pub struct RejudgeQuery {
     ),
     request_body = RejudgeRequest,
     responses(
-        (status = 200, description = "Submission re-queued", body = SubmissionResponse),
+        (status = 200, description = "Submission re-queued", body = SubmissionResponseAfterMutation),
         (status = 400, description = "Invalid worker (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
@@ -222,7 +240,7 @@ pub async fn rejudge_submission(
     AppPath(id): AppPath<i32>,
     Query(query): Query<RejudgeQuery>,
     body: Bytes,
-) -> Result<Json<SubmissionResponse>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let payload = if body.is_empty() {
@@ -325,15 +343,42 @@ pub async fn rejudge_submission(
     // crash between txn.commit() and the response no longer loses the
     // rejudge.
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
         build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
 }
 
+/// Bulk-rejudges every submission in `payload.submission_ids` that exists,
+/// returning only `{ queued: N }` - never a per-id success/failure list,
+/// never any submission content.
+///
+/// `N` counts every *requested, deduplicated* id found in the `submission`
+/// table, regardless of the caller's own `Resource::Submission` Read
+/// visibility into any of them - this endpoint is gated on
+/// `submission:rejudge`, a mutation permission independent of Read
+/// reachability (see `apply_filter_to_response_after_mutation`'s doc comment
+/// in `filter.rs` for the sibling reasoning on the single-submission path).
+/// A caller who repeatedly narrows `submission_ids` and reads back `queued`
+/// can therefore binary-search which ids exist, even ones they could never
+/// `GET` - an aggregate *existence* oracle over the id space.
+///
+/// That is a real disclosure; do not describe it as "nothing to leak". It is
+/// judged acceptable because it discloses existence only, never content: no
+/// field of a submission the caller can't Read (owner, verdict, code,
+/// timestamps, ...) is ever observable through this count, only whether the
+/// row is present. That is the same disclosure class the single-submission
+/// surface already has and keeps after the submission:rejudge visibility
+/// fix - `GET /submissions/{id}` still answers 200 vs. 404 for exactly this
+/// reason, and `apply_submission_judgement`/`rejudge_submission` still
+/// succeed-or-404 on a nonexistent id - just aggregated across up to 10,000
+/// ids in one round trip instead of one id per request. It is not a
+/// regression introduced by that fix. Don't close it by changing this
+/// endpoint's behaviour alone: the identical oracle stays reachable one id
+/// at a time via the endpoints above, so narrowing only this one would trade
+/// a fast leak for a slow one rather than closing it.
 #[utoipa::path(
     post,
     path = "/bulk-rejudge",
@@ -618,22 +663,19 @@ pub async fn admin_fan_out_submission(
         "Admin fan-out submission created"
     );
 
-    let visibility = Some(VisibilityContext {
-        viewer_id: auth_user.user_id,
-        has_view_all: true,
-    });
+    let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     let mut responses = Vec::with_capacity(models.len());
     for model in models {
         let response =
             build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
+        let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
         responses.push(response);
     }
 
     Ok((
         StatusCode::CREATED,
-        Json(AdminFanOutSubmissionResponse {
-            submissions: responses,
-        }),
+        Json(serde_json::json!({ "submissions": responses })),
     ))
 }

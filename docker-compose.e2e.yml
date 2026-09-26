@@ -49,7 +49,13 @@ x-worker-common: &worker-common
     BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY: "broccoli_s3_secret"
     BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE: "true"
     BROCCOLI__STORAGE__DATA_DIR: "/data"
+    # All worker services on this host share one lock dir so each claims a
+    # distinct isolate box-id slot (see `box_slot_lock_dir` in
+    # packages/worker/src/config.rs).
+    BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR: "/var/lib/broccoli/box-slots"
     RUST_LOG: "info"
+  volumes:
+    - worker_box_slots:/var/lib/broccoli/box-slots
   restart: unless-stopped
 
 services:
@@ -176,3 +182,4 @@ services:
 volumes:
   e2e_pg_data:
   e2e_seaweed_data:
+  worker_box_slots:

@@ -13,6 +13,20 @@ use tracing::instrument;
 
 use crate::client_ip::ClientIp;
 use crate::config::ServerConfig;
+// visibility-bypass-audited: this module has no permission gate to name
+// because it has no third-party resource parameter to gate - every query is
+// scoped to the identity resolved from the request's own credentials
+// (password match, refresh-token selector match, or the caller's own JWT
+// claims), never to a user/contest/problem id supplied by the caller. Login
+// cannot be pointed at another account (`cannot_login_with_wrong_password`,
+// `cannot_login_with_nonexistent_username`), a refresh only rotates the
+// token family it was issued from and a stale/reused one kills that family
+// rather than touching anyone else's
+// (`reused_refresh_token_past_grace_kills_the_family`), and `/me` returns
+// only the caller's own profile with no id parameter
+// (`authenticated_user_can_retrieve_their_profile`) - all in
+// tests/integration/auth.rs. There is no `Resource::User` in the kernel this
+// could route through.
 use crate::entity::{refresh_token, role, role_permission, user, user_role};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

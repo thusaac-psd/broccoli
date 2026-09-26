@@ -6,6 +6,32 @@ use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `add_participant`/`remove_participant`/
+// `bulk_add_participants` require perm::CONTEST_MANAGE, pinned by
+// `contestant_cannot_add_participant`, `contestant_cannot_remove_participant`,
+// and `contestant_cannot_bulk_add_participants`. `register_for_contest`/
+// `unregister_from_contest` are self-service writes on the caller's own
+// membership row (window/is_public checked inline), not a third-party read.
+// `list_participants` gates contest reachability through
+// `kernel.decide(Action::Read, Resource::Contest(id)).is_denied()` - the
+// same `Resource::Contest` gate `get_contest`/`list_contest_problems` use
+// (`visibility::host_rules::decide_contest` is a verified byte-identical
+// port of the window/is_public/participant rule `check_contest_access` used
+// to apply directly here, so this is not a behavioural change). There is
+// deliberately NO `Resource::Participant` in the kernel: nothing here ever
+// masks or denies an INDIVIDUAL participant row - the whole list is
+// admitted or rejected as one block, which is exactly what
+// `Resource::Contest` already decides. Adding a new resource variant for a
+// decision the kernel already makes at contest granularity would be the
+// wrong grain, and would obligate every plugin to handle a wire kind with
+// no real per-row use here. After the reachability gate, the list still
+// separately requires `show_participants_list` or perm::CONTEST_MANAGE -
+// that check is orthogonal to reachability (a per-contest participants-list
+// visibility toggle, not a "can you reach this contest" question) and stays
+// inline, unchanged - pinned by
+// `hidden_participant_list_denies_non_manager_participant` and
+// `hidden_participant_list_still_readable_by_contest_manager`
+// (tests/integration/contest.rs).
 use crate::entity::{contest_user, role, user, user_role};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -13,8 +39,9 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::state::AppState;
-use crate::utils::contest::{check_contest_access, find_contest};
+use crate::utils::contest::find_contest;
 use crate::utils::soft_delete::SoftDeletable;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 use super::find_contest_for_update;
 
@@ -103,7 +130,16 @@ pub async fn list_participants(
     AppPath(contest_id): AppPath<i32>,
 ) -> Result<Json<Vec<ContestParticipantResponse>>, AppError> {
     let contest_model = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest_model).await?;
+
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    if kernel
+        .decide(Action::Read, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
 
     if !contest_model.show_participants_list && !auth_user.has_permission(perm::CONTEST_MANAGE) {
         return Err(AppError::PermissionDenied);

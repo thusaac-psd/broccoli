@@ -12,6 +12,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
+
 const POLL_INTERVAL_MS = 1000;
 
 export interface SubmissionEntry {
@@ -228,26 +230,48 @@ export function useSubmissions({
           if (res.error) throw res.error;
 
           const created = res.data.submissions;
-          // Match each created submission back to its placeholder by worker.
+          // Pair each created submission back to its placeholder by request
+          // order (not by echoing `target_worker_id` back from the
+          // response): that field is absent whenever the admin's own Read
+          // visibility into a just-created submission is Deny, which a
+          // field-equality match can't tell apart from "nothing came back at
+          // all". See `fan-out-response.ts` for the full reasoning.
+          const pairings = pairFanOutSubmissions(targetWorkerIds, created);
+
           setEntries((prev) =>
             prev.map((e) => {
               if (e.groupKey !== groupKey) return e;
-              const match = created.find(
-                (s) => s.target_worker_id === e.targetWorkerId,
-              );
-              if (!match) {
+              const index = placeholderEntries.findIndex((p) => p.id === e.id);
+              const pairing = index === -1 ? undefined : pairings[index];
+              if (!pairing) return e;
+
+              if (pairing.withheld) {
+                // The mutation succeeded - `pairing.submission.id` is real -
+                // but the caller's own Read visibility into this submission
+                // is Deny, so the server disclosed nothing else about it.
+                // Polling `GET /submissions/{id}` would just 404 forever
+                // (that endpoint degrades the same Deny decision to a 404
+                // rather than a sparse body), so we don't start it, and we
+                // say so explicitly rather than leaving the entry looking
+                // like it's still in flight.
                 return {
                   ...e,
                   status: 'error' as const,
                   error: {
-                    code: 'NO_MATCH',
-                    message: `No submission returned for worker ${e.targetWorkerId}`,
+                    code: 'SUBMISSION_WITHHELD',
+                    message: t('toast.submission.fanOutWithheld', {
+                      workerId: e.targetWorkerId ?? pairing.workerId,
+                    }),
                   },
                 };
               }
+
               return {
                 ...e,
-                submission: match,
+                // Safe: `pairing.withheld` is false, so every field this
+                // relies on (status, result, ...) is actually present - see
+                // `isWithheldFanOutSubmission`.
+                submission: pairing.submission as unknown as Submission,
                 status: 'polling' as const,
               };
             }),
@@ -271,12 +295,13 @@ export function useSubmissions({
             }),
           );
 
-          for (const sub of created) {
-            const placeholder = placeholderEntries.find(
-              (p) => p.targetWorkerId === sub.target_worker_id,
-            );
-            if (placeholder) startSubmissionPolling(placeholder.id, sub.id);
-          }
+          pairings.forEach((pairing, index) => {
+            if (pairing.withheld) return;
+            const placeholder = placeholderEntries[index];
+            if (placeholder) {
+              startSubmissionPolling(placeholder.id, pairing.submission.id);
+            }
+          });
         } catch (err) {
           console.error('Fan-out submission failed:', err);
           const submissionError = parseSubmissionError(err);

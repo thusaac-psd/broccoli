@@ -230,7 +230,11 @@ export const en: Record<string, string> = {
   'submissionDetail.timeDelta': 'Time {value} ms',
   'submissionDetail.memoryDelta': 'Memory {value} KB',
   'submissionDetail.caseChanges': '{count} case changes vs current',
+  'submissionDetail.caseChangesUnknown':
+    '{count} case(s) hidden - cannot verify change vs current',
   'submissionDetail.changedFromCase': 'Changed from {verdict}, {score} pts',
+  'submissionDetail.maskedCaseDiff': 'Result hidden - cannot verify change',
+  'submissionDetail.hiddenValue': 'hidden',
   'submissionDetail.newCaseInVersion': 'New in this version',
   'submissionDetail.noVisibleResultDetails': 'No visible result details.',
   'submissionDetail.errorCode': 'Error code',
@@ -725,6 +729,8 @@ export const en: Record<string, string> = {
   'toast.submission.submitted': 'Code submitted successfully.',
   'toast.submission.fannedOut':
     'Code pinned to {count} worker(s). Comparing results below.',
+  'toast.submission.fanOutWithheld':
+    "Submission created on {workerId}, but you don't have permission to view it.",
   'submit.pinTo': 'Pin to:',
   'submit.pinToHint': 'Admin only — submit to specific workers.',
   'submit.addWorker': '+ Add worker…',

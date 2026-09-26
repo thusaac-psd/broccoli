@@ -157,6 +157,10 @@ fn load_entry_point_config(
 }
 
 /// Per-language compilation config from the admin UI / plugin.toml schema defaults.
+/// Only constructed by the wasm32-gated `load_lang_config`/`resolve_standard_language`
+/// entry points; gated the same way so a native (test/clippy) build doesn't see it
+/// as dead code.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize, Default)]
 struct LanguageCompilationConfig {
     compiler: Option<String>,
@@ -173,6 +177,9 @@ pub struct EntryPointConfig {
 }
 
 /// Override schema accepted by this resolver in `ResolveLanguageInput.overrides`.
+/// Only constructed by the wasm32-gated `resolve_standard_language` entry point;
+/// gated the same way so a native (test/clippy) build doesn't see it as dead code.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize, Default)]
 struct CompilerOverrides {
     compiler: Option<String>,

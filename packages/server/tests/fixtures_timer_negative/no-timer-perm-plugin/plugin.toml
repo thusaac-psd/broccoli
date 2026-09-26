@@ -1,0 +1,12 @@
+name = "no-timer-perm-plugin"
+version = "0.1.0"
+description = "Fixture plugin that imports timer_schedule without declaring the timer permission"
+
+[server]
+entry = "no_timer_perm_plugin.wasm"
+permissions = []
+
+[[server.routes]]
+path = "/schedule"
+method = "POST"
+handler = "schedule"

@@ -1,6 +1,7 @@
 import { useApiFetch } from '@broccoli/web-sdk/api';
 import { useCallback, useMemo } from 'react';
 
+import { buildAdminJobsQueryParams } from '../lib/adminJobsQuery';
 import type {
   AdminJobsQuery,
   ArbitraryJobInput,
@@ -74,18 +75,10 @@ export function usePrintApi() {
         ),
 
       // Staff
-      adminListJobs: (q: AdminJobsQuery) => {
-        const params = new URLSearchParams();
-        params.set('page', String(q.page));
-        params.set('per_page', String(q.per_page));
-        if (q.search) params.set('search', q.search);
-        if (q.sort_by) params.set('sort_by', q.sort_by);
-        if (q.sort_order) params.set('sort_order', q.sort_order);
-        if (q.status) params.set('status', q.status);
-        return request<PagedResponse<PrintJob>>(
-          `${PLUGIN_BASE}/admin/jobs?${params.toString()}`,
-        );
-      },
+      adminListJobs: (q: AdminJobsQuery) =>
+        request<PagedResponse<PrintJob>>(
+          `${PLUGIN_BASE}/admin/jobs?${buildAdminJobsQueryParams(q).toString()}`,
+        ),
 
       approveJob: (id: number) =>
         post(`${PLUGIN_BASE}/admin/jobs/${id}/approve`),

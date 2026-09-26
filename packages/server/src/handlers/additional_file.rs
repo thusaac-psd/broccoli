@@ -10,6 +10,13 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, Transactio
 use tracing::instrument;
 use uuid::Uuid;
 
+// visibility-bypass-audited: all four handlers require perm::PROBLEM_EDIT,
+// pinned by tests/integration/additional_file.rs's
+// `contestant_cannot_upload_additional_file`, `contestant_cannot_list_additional_files`,
+// `contestant_cannot_download_additional_file`, and
+// `contestant_cannot_delete_additional_file`. These are judge-private files
+// (grader headers, etc.) - never contestant-facing, regardless of contest
+// participation.
 use crate::entity::{additional_file, problem};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

@@ -78,6 +78,25 @@ pub struct WorkerConfig {
     pub cache_follower_max_wait_secs: u64,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Directory holding the `flock` files a worker uses to claim a disjoint
+    /// isolate box-id slot (see `handler::box_id`). Defaults to the process
+    /// temp dir.
+    ///
+    /// isolate runs box `N` as host UID `60000 + N`, and its `--processes`
+    /// limit is enforced per UID across the whole kernel. Workers on one host
+    /// must therefore claim DIFFERENT slots - which only works if they can see
+    /// each other's lock files. Separate containers each have a private
+    /// `/tmp`, so with the default every container claims slot 0, all run
+    /// contestant code as the same UID, and exhaust each other's process
+    /// limit: `execve` fails with EAGAIN and correct solutions come back
+    /// SystemError or TimeLimitExceeded. Measured on a 4-worker host under a
+    /// 64-submission burst: 0/64 Accepted with private temp dirs, 64/64 with a
+    /// shared one.
+    ///
+    /// Point every worker container on a host at the SAME directory (e.g. a
+    /// shared volume). Native installs, which share `/tmp`, need nothing.
+    #[serde(default)]
+    pub box_slot_lock_dir: Option<String>,
 }
 
 fn default_worker_id() -> String {
@@ -134,6 +153,7 @@ impl Default for WorkerConfig {
             cache_follower_poll_interval_ms: default_cache_follower_poll_interval_ms(),
             cache_follower_max_wait_secs: default_cache_follower_max_wait_secs(),
             tools: ToolsConfig::default(),
+            box_slot_lock_dir: None,
         }
     }
 }

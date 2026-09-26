@@ -1,8 +1,11 @@
+use broccoli_server_sdk::permissions as perm;
 use chrono::{Duration, TimeZone, Utc};
 use common::{SubmissionStatus, Verdict};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde_json::json;
-use server::entity::{plugin_storage, submission, submission_judgement, user};
+use server::entity::{
+    contest, plugin_storage, submission, submission_judgement, test_case_result, user,
+};
 
 use crate::common::E2eTestApp;
 
@@ -220,6 +223,175 @@ async fn icpc_standings_reflects_judged_submission() {
     );
 }
 
+// Task: C2b -- `handle_standings`' `is_restricted`/`restricted_user_id` row
+// filter (now `standings_restriction`) is the ONLY enforcement point for
+// `public_standings = false`: it drives the SQL `WHERE cu.user_id = $N` that
+// removes every other team's row from the query entirely. Every prior
+// `/standings` e2e test registered exactly one contestant, so this filter
+// could be deleted with zero test failures. This test registers TWO
+// contestants and never sets `public_standings` (defaults to `false`) to make
+// the row-filter observable: a contestant must see only their own row, while
+// an organizer (`contest:manage`) must see everyone's.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_standings_private_by_default_restricts_each_contestant_to_their_own_row() {
+    let app = E2eTestApp::spawn().await;
+
+    let admin = app
+        .create_user_with_role("icpc_priv_admin", "password", "admin")
+        .await;
+    let contestant_a = app
+        .create_authenticated_user("icpc_priv_a", "password")
+        .await;
+    let contestant_b = app
+        .create_authenticated_user("icpc_priv_b", "password")
+        .await;
+
+    let problem_id = app
+        .create_problem(&admin, "ICPC Private Standings Problem")
+        .await;
+
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Private Standings Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant_a).await;
+    app.register_for_contest(contest_id, &contestant_b).await;
+
+    // Default config: `public_standings` is never set, so it defaults to
+    // `false` (`#[serde(default)]` on `ContestConfig::public_standings`).
+    seed_accepted_icpc_submission(&app, "icpc_priv_a", problem_id, contest_id).await;
+    seed_accepted_icpc_submission(&app, "icpc_priv_b", problem_id, contest_id).await;
+
+    let standings_path = format!("/api/v1/p/icpc/api/plugins/icpc/contests/{contest_id}/standings");
+
+    // Contestant A, mid-contest, private standings: must see ONLY their own row.
+    let res_a = app.get_with_token(&standings_path, &contestant_a).await;
+    assert_eq!(
+        res_a.status, 200,
+        "Standings request failed: {}",
+        res_a.text
+    );
+    let rows_a = res_a.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_a.len(),
+        1,
+        "private standings should restrict a contestant to exactly their own row, got: {rows_a:?}"
+    );
+    assert_eq!(rows_a[0]["username"], "icpc_priv_a");
+
+    // Contestant B: must likewise see only their own row, not A's.
+    let res_b = app.get_with_token(&standings_path, &contestant_b).await;
+    assert_eq!(
+        res_b.status, 200,
+        "Standings request failed: {}",
+        res_b.text
+    );
+    let rows_b = res_b.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_b.len(),
+        1,
+        "private standings should restrict a contestant to exactly their own row, got: {rows_b:?}"
+    );
+    assert_eq!(rows_b[0]["username"], "icpc_priv_b");
+
+    // The organizer (`contest:manage`) always sees every row regardless of
+    // `public_standings`.
+    let res_admin = app.get_with_token(&standings_path, &admin).await;
+    assert_eq!(
+        res_admin.status, 200,
+        "Standings request failed: {}",
+        res_admin.text
+    );
+    let rows_admin = res_admin.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_admin.len(),
+        2,
+        "an organizer should see every contestant's row, got: {rows_admin:?}"
+    );
+}
+
+// Companion to the test above: with `public_standings: true` explicitly set,
+// the SAME two-contestant setup must show every row to every viewer -- proving
+// the flag (not some other factor) is what differentiates the two outcomes.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_standings_public_standings_true_shows_every_contestant_their_row() {
+    let app = E2eTestApp::spawn().await;
+
+    let admin = app
+        .create_user_with_role("icpc_pub_admin", "password", "admin")
+        .await;
+    let contestant_a = app
+        .create_authenticated_user("icpc_pub_a", "password")
+        .await;
+    let contestant_b = app
+        .create_authenticated_user("icpc_pub_b", "password")
+        .await;
+
+    let problem_id = app
+        .create_problem(&admin, "ICPC Public Standings Problem")
+        .await;
+
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Public Standings Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant_a).await;
+    app.register_for_contest(contest_id, &contestant_b).await;
+
+    let config_path = format!("/api/v1/contests/{contest_id}/config/icpc/contest");
+    let put_res = app
+        .put_with_token(
+            &config_path,
+            &json!({
+                "config": {
+                    "public_standings": true
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(
+        put_res.status, 200,
+        "Failed to set ICPC public_standings config: {}",
+        put_res.text
+    );
+
+    seed_accepted_icpc_submission(&app, "icpc_pub_a", problem_id, contest_id).await;
+    seed_accepted_icpc_submission(&app, "icpc_pub_b", problem_id, contest_id).await;
+
+    let standings_path = format!("/api/v1/p/icpc/api/plugins/icpc/contests/{contest_id}/standings");
+
+    let res_a = app.get_with_token(&standings_path, &contestant_a).await;
+    assert_eq!(
+        res_a.status, 200,
+        "Standings request failed: {}",
+        res_a.text
+    );
+    let rows_a = res_a.body["rows"]
+        .as_array()
+        .expect("rows should be an array");
+    assert_eq!(
+        rows_a.len(),
+        2,
+        "public standings should show every contestant's row, got: {rows_a:?}"
+    );
+    let usernames: Vec<&str> = rows_a
+        .iter()
+        .map(|r| r["username"].as_str().unwrap())
+        .collect();
+    assert!(usernames.contains(&"icpc_pub_a"));
+    assert!(usernames.contains(&"icpc_pub_b"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn icpc_standings_uses_current_judgements_instead_of_stale_storage() {
     let app = E2eTestApp::spawn().await;
@@ -422,6 +594,329 @@ async fn icpc_config_penalty_minutes() {
     assert_eq!(
         get_res.body["config"]["show_test_details"].as_bool(),
         Some(true)
+    );
+}
+
+// Pins the ICPC scoreboard freeze end to end: the redaction it depends on is
+// authored by the `icpc` plugin's own `decide_visibility` export (see
+// `plugins/icpc/src/lib.rs::decide_visibility_decisions`), reached through
+// the generic `GET /api/v1/submissions/{id}` handler rather than a
+// plugin-specific endpoint. Before this test, the entire evidence base for
+// this contest-integrity feature was 2 unit tests exercising the plugin in
+// isolation against a mocked host - nothing proved the mechanism was even
+// wired up behind a real HTTP handler with a real registered plugin. Mirrors
+// the shape of `ioi_feedback_filter_redacts_judgement_history`.
+#[tokio::test(flavor = "multi_thread")]
+async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer() {
+    let app = E2eTestApp::spawn().await;
+
+    let admin = app
+        .create_user_with_role("icpc_freeze_admin", "password", "admin")
+        .await;
+    let contestant_a = app
+        .create_authenticated_user("icpc_freeze_a", "password")
+        .await;
+    let contestant_b = app
+        .create_authenticated_user("icpc_freeze_b", "password")
+        .await;
+    // Task 17: holds `contest:manage` WITHOUT `submission:view_all` - unlike
+    // `admin` above, which holds BOTH and so cannot isolate which permission
+    // a bypass actually checks. A plausible problem-setter/judge role.
+    let manage_only = app
+        .create_user_with_permissions(
+            "icpc_freeze_manage_only",
+            "password",
+            &[perm::CONTEST_MANAGE],
+        )
+        .await;
+
+    let problem_id = app.create_problem(&admin, "ICPC Freeze Problem").await;
+    app.create_test_case(problem_id, &admin).await;
+
+    let contest_id = app
+        .create_typed_contest(&admin, "ICPC Freeze Contest", "icpc", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant_a).await;
+    app.register_for_contest(contest_id, &contestant_b).await;
+    // Host-level reachability for a non-owner, non-`submission:view_all`
+    // viewer requires contest participation when `submissions_visible` is
+    // true (see `visibility::host_rules::decide_submission`) - `contest:manage`
+    // alone does not grant it. Without this, the request 404s before the
+    // plugin's decision is ever consulted, and the assertions below would
+    // not actually exercise the fix.
+    app.register_for_contest(contest_id, &manage_only).await;
+
+    // Non-zero freeze window, and public standings so the redaction under
+    // test is purely the freeze mechanism, not the separate
+    // hide-other-teams-during-the-contest rule that also lives in
+    // `must_hide_other_submission`.
+    let config_path = format!("/api/v1/contests/{contest_id}/config/icpc/contest");
+    let put_res = app
+        .put_with_token(
+            &config_path,
+            &json!({
+                "config": {
+                    "public_standings": true,
+                    "freeze_minutes": 4
+                },
+                "enabled": true
+            }),
+            &admin,
+        )
+        .await;
+    assert_eq!(
+        put_res.status, 200,
+        "Failed to set ICPC freeze config: {}",
+        put_res.text
+    );
+
+    // Advance into the freeze window. There is no clock-mocking harness for
+    // e2e tests, so this is done the same way the rest of this file
+    // simulates "elapsed contest time": by writing concrete timestamps
+    // directly. A 10-minute contest, already 8 minutes in, with a 4-minute
+    // freeze: the freeze window (the final 4 minutes) opened 2 minutes ago
+    // and the contest has not ended yet ("during").
+    let now = Utc::now();
+    let start_time = now - Duration::minutes(8);
+    let end_time = now + Duration::minutes(2);
+    let contest_model = contest::Entity::find_by_id(contest_id)
+        .one(&app.db)
+        .await
+        .expect("query contest")
+        .expect("contest should exist");
+    let mut contest_active: contest::ActiveModel = contest_model.into();
+    contest_active.start_time = Set(start_time);
+    contest_active.end_time = Set(end_time);
+    contest_active.activate_time = Set(Some(start_time));
+    contest_active
+        .update(&app.db)
+        .await
+        .expect("advance contest into its freeze window");
+
+    let user_b = user::Entity::find()
+        .filter(user::Column::Username.eq("icpc_freeze_b"))
+        .one(&app.db)
+        .await
+        .expect("query contestant B")
+        .expect("contestant B should exist");
+
+    // Submitted 7 minutes after contest start: past the freeze start (6
+    // minutes in, i.e. duration 10 - freeze 4) and before "now" (8 minutes
+    // in), so it is a genuinely past submission sitting inside the window.
+    let submitted_at = start_time + Duration::minutes(7);
+    let submission_model = submission::ActiveModel {
+        files: Set(json!([{ "filename": "main.cpp", "content": "int main() { return 0; }" }])),
+        language: Set("cpp".into()),
+        user_id: Set(user_b.id),
+        problem_id: Set(problem_id),
+        contest_id: Set(Some(contest_id)),
+        contest_type: Set("icpc".into()),
+        status: Set(SubmissionStatus::Judged),
+        verdict: Set(Some(Verdict::Accepted)),
+        score: Set(Some(1.0)),
+        time_used: Set(Some(123)),
+        memory_used: Set(Some(4096)),
+        judge_epoch: Set(1),
+        created_at: Set(submitted_at),
+        judged_at: Set(Some(submitted_at)),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert frozen ICPC submission");
+    let sub_id = submission_model.id;
+
+    let judgement_model = submission_judgement::ActiveModel {
+        submission_id: Set(sub_id),
+        version: Set(1),
+        is_current: Set(true),
+        is_finalized: Set(true),
+        triggered_by_user_id: Set(None),
+        status: Set(SubmissionStatus::Judged),
+        verdict: Set(Some(Verdict::Accepted)),
+        score: Set(Some(1.0)),
+        time_used: Set(Some(123)),
+        memory_used: Set(Some(4096)),
+        judge_epoch: Set(1),
+        created_at: Set(submitted_at),
+        finalized_at: Set(Some(submitted_at)),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert frozen ICPC judgement");
+
+    // A non-empty test_case_results so the peer/owner distinction on this
+    // field ([] vs non-empty) is meaningful rather than a no-op.
+    test_case_result::ActiveModel {
+        submission_id: Set(sub_id),
+        judgement_id: Set(Some(judgement_model.id)),
+        test_case_id: Set(None),
+        verdict: Set(Verdict::Accepted),
+        score: Set(1.0),
+        time_used: Set(Some(123)),
+        memory_used: Set(Some(4096)),
+        created_at: Set(submitted_at),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert frozen ICPC test case result");
+
+    let sub_path = format!("/api/v1/submissions/{sub_id}");
+
+    // Peer (contestant A) reading contestant B's submission during the
+    // freeze: verdict/score/time/memory blanked, and test_case_results is an
+    // empty array - not null.
+    let peer_res = app.get_with_token(&sub_path, &contestant_a).await;
+    assert_eq!(peer_res.status, 200, "Peer read failed: {}", peer_res.text);
+    assert_eq!(
+        peer_res.body["result"]["verdict"],
+        serde_json::Value::Null,
+        "{}",
+        peer_res.text
+    );
+    assert_eq!(
+        peer_res.body["result"]["score"],
+        serde_json::Value::Null,
+        "{}",
+        peer_res.text
+    );
+    assert_eq!(
+        peer_res.body["result"]["time_used"],
+        serde_json::Value::Null,
+        "{}",
+        peer_res.text
+    );
+    assert_eq!(
+        peer_res.body["result"]["memory_used"],
+        serde_json::Value::Null,
+        "{}",
+        peer_res.text
+    );
+    assert_eq!(
+        peer_res.body["result"]["test_case_results"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a frozen peer must see an empty array, not null: {}",
+        peer_res.text
+    );
+
+    // Owner (contestant B) reading their own submission during the same
+    // freeze: a team always sees its own results, even while frozen.
+    let owner_res = app.get_with_token(&sub_path, &contestant_b).await;
+    assert_eq!(
+        owner_res.status, 200,
+        "Owner read failed: {}",
+        owner_res.text
+    );
+    assert_eq!(
+        owner_res.body["result"]["verdict"].as_str(),
+        Some("Accepted"),
+        "the owner must not be blanked: {}",
+        owner_res.text
+    );
+    assert_eq!(
+        owner_res.body["result"]["score"].as_f64(),
+        Some(1.0),
+        "{}",
+        owner_res.text
+    );
+    assert_eq!(
+        owner_res.body["result"]["time_used"].as_i64(),
+        Some(123),
+        "{}",
+        owner_res.text
+    );
+    assert_eq!(
+        owner_res.body["result"]["memory_used"].as_i64(),
+        Some(4096),
+        "{}",
+        owner_res.text
+    );
+    assert_eq!(
+        owner_res.body["result"]["test_case_results"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the owner should still see their own test case result: {}",
+        owner_res.text
+    );
+
+    // Organizer (contest:manage, via the admin role) reading contestant B's
+    // submission during the freeze: the ICPC rule is that organisers always
+    // see the true board.
+    let organizer_res = app.get_with_token(&sub_path, &admin).await;
+    assert_eq!(
+        organizer_res.status, 200,
+        "Organizer read failed: {}",
+        organizer_res.text
+    );
+    assert_eq!(
+        organizer_res.body["result"]["verdict"].as_str(),
+        Some("Accepted"),
+        "an organiser must see the true board: {}",
+        organizer_res.text
+    );
+    assert_eq!(
+        organizer_res.body["result"]["score"].as_f64(),
+        Some(1.0),
+        "{}",
+        organizer_res.text
+    );
+    assert_eq!(
+        organizer_res.body["result"]["time_used"].as_i64(),
+        Some(123),
+        "{}",
+        organizer_res.text
+    );
+    assert_eq!(
+        organizer_res.body["result"]["memory_used"].as_i64(),
+        Some(4096),
+        "{}",
+        organizer_res.text
+    );
+
+    // Task 17: a viewer holding `contest:manage` WITHOUT `submission:view_all`
+    // reading contestant B's submission during the freeze. Before this task,
+    // `decide_visibility_decisions` checked only `SUBMISSION_VIEW_ALL`, so
+    // this viewer would have been wrongly redacted here - the `organizer_res`
+    // assertions above pass via `admin`'s `SUBMISSION_VIEW_ALL` alone and
+    // never actually exercise the `CONTEST_MANAGE` branch, since the default
+    // `admin` role holds both permissions. This is the assertion that pins
+    // the fix and would fail against pre-fix code.
+    let manage_only_res = app.get_with_token(&sub_path, &manage_only).await;
+    assert_eq!(
+        manage_only_res.status, 200,
+        "contest:manage-only read failed: {}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["verdict"].as_str(),
+        Some("Accepted"),
+        "a viewer with contest:manage but not submission:view_all must see the true board: {}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["score"].as_f64(),
+        Some(1.0),
+        "{}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["time_used"].as_i64(),
+        Some(123),
+        "{}",
+        manage_only_res.text
+    );
+    assert_eq!(
+        manage_only_res.body["result"]["memory_used"].as_i64(),
+        Some(4096),
+        "{}",
+        manage_only_res.text
     );
 }
 

@@ -41,127 +41,127 @@ pub fn interpret_result(
         };
     }
 
-    if let Some(compile_mgr) = result.task_results.get("compile_manager") {
-        if !compile_mgr.success {
-            return TestCaseVerdict {
-                test_case_id,
-                verdict: Verdict::SystemError,
-                score: 0.0,
-                time_used_ms: None,
-                memory_used_kb: None,
-                message: Some(truncate(
-                    &compile_mgr.sandbox_result.stderr,
-                    "Manager compilation failed",
-                )),
-                stdout: None,
-                stderr: None,
-            };
-        }
+    if let Some(compile_mgr) = result.task_results.get("compile_manager")
+        && !compile_mgr.success
+    {
+        return TestCaseVerdict {
+            test_case_id,
+            verdict: Verdict::SystemError,
+            score: 0.0,
+            time_used_ms: None,
+            memory_used_kb: None,
+            message: Some(truncate(
+                &compile_mgr.sandbox_result.stderr,
+                "Manager compilation failed",
+            )),
+            stdout: None,
+            stderr: None,
+        };
     }
 
     for i in 0..num_processes {
         let step_id = format!("compile_contestant_{i}");
-        if let Some(compile_c) = result.task_results.get(&step_id) {
-            if !compile_c.success {
-                // Classify a failed contestant compile with the SAME precedence as
-                // broccoli_server_sdk::evaluator precheck_verdict's compile arm, so
-                // interactive and batch problems agree on infra-vs-source faults:
-                //   (1) an isolate-tagged internal error (clobbered box, vanished
-                //       redirect file) -> SystemError,
-                //   (2) a non-zero exit WITH diagnostics -> genuine, terminal
-                //       CompileError (gcc/g++/javac/py_compile always say why they
-                //       reject source),
-                //   (3) a non-zero exit with NO diagnostics on either stream -> a
-                //       transient EAGAIN during JVM thread-init under per-uid
-                //       RLIMIT_NPROC pressure makes javac exit non-zero writing
-                //       nothing; infra, not source -> retryable SystemError,
-                //   (4) a compile aborted before it could exit (signal / timeout /
-                //       OOM, exit_code None) -> SystemError.
-                // Only (2) is terminal; the rest self-heal via the server's
-                // SystemError-retry reaper instead of pinning a permanent wrong
-                // CompileError on valid code under burst.
-                let sandbox = &compile_c.sandbox_result;
-                if sandbox.status_kind() == SandboxStatus::InternalError {
+        if let Some(compile_c) = result.task_results.get(&step_id)
+            && !compile_c.success
+        {
+            // Classify a failed contestant compile with the SAME precedence as
+            // broccoli_server_sdk::evaluator precheck_verdict's compile arm, so
+            // interactive and batch problems agree on infra-vs-source faults:
+            //   (1) an isolate-tagged internal error (clobbered box, vanished
+            //       redirect file) -> SystemError,
+            //   (2) a non-zero exit WITH diagnostics -> genuine, terminal
+            //       CompileError (gcc/g++/javac/py_compile always say why they
+            //       reject source),
+            //   (3) a non-zero exit with NO diagnostics on either stream -> a
+            //       transient EAGAIN during JVM thread-init under per-uid
+            //       RLIMIT_NPROC pressure makes javac exit non-zero writing
+            //       nothing; infra, not source -> retryable SystemError,
+            //   (4) a compile aborted before it could exit (signal / timeout /
+            //       OOM, exit_code None) -> SystemError.
+            // Only (2) is terminal; the rest self-heal via the server's
+            // SystemError-retry reaper instead of pinning a permanent wrong
+            // CompileError on valid code under burst.
+            let sandbox = &compile_c.sandbox_result;
+            if sandbox.status_kind() == SandboxStatus::InternalError {
+                return TestCaseVerdict {
+                    test_case_id,
+                    verdict: Verdict::SystemError,
+                    score: 0.0,
+                    time_used_ms: None,
+                    memory_used_kb: None,
+                    message: Some(opt_nonempty(&sandbox.message).unwrap_or_else(|| {
+                        format!("Contestant {i} compilation sandbox reported an internal error")
+                    })),
+                    stdout: None,
+                    stderr: None,
+                };
+            }
+            match sandbox.exit_code {
+                // Compiled cleanly despite the success flag; keep checking.
+                Some(0) => {}
+                Some(_) => {
+                    return match opt_nonempty(&sandbox.stderr)
+                        .or_else(|| opt_nonempty(&sandbox.stdout))
+                    {
+                        // Output that is the signature of the toolchain failing
+                        // to run (JVM thread-init EAGAIN, cc1 fork failure,
+                        // native OOM) is infra, not a source diagnostic -> the
+                        // same retryable SystemError as the no-output case.
+                        // Single-sourced with server-sdk so the two classifiers
+                        // cannot drift on which strings count as infra.
+                        Some(diagnostics) if compile_output_is_infra_fault(&diagnostics) => {
+                            TestCaseVerdict {
+                                test_case_id,
+                                verdict: Verdict::SystemError,
+                                score: 0.0,
+                                time_used_ms: None,
+                                memory_used_kb: None,
+                                message: Some(truncate(
+                                    &diagnostics,
+                                    "Contestant compilation could not run (transient infrastructure fault)",
+                                )),
+                                stdout: None,
+                                stderr: None,
+                            }
+                        }
+                        Some(diagnostics) => TestCaseVerdict {
+                            test_case_id,
+                            verdict: Verdict::CompileError,
+                            score: 0.0,
+                            time_used_ms: None,
+                            memory_used_kb: None,
+                            message: Some(truncate(&diagnostics, "Compilation failed")),
+                            stdout: None,
+                            stderr: None,
+                        },
+                        None => TestCaseVerdict {
+                            test_case_id,
+                            verdict: Verdict::SystemError,
+                            score: 0.0,
+                            time_used_ms: None,
+                            memory_used_kb: None,
+                            message: Some(format!(
+                                "Contestant {i} compilation failed with no diagnostics (transient infrastructure fault)"
+                            )),
+                            stdout: None,
+                            stderr: None,
+                        },
+                    };
+                }
+                None => {
                     return TestCaseVerdict {
                         test_case_id,
                         verdict: Verdict::SystemError,
                         score: 0.0,
                         time_used_ms: None,
                         memory_used_kb: None,
-                        message: Some(opt_nonempty(&sandbox.message).unwrap_or_else(|| {
-                            format!("Contestant {i} compilation sandbox reported an internal error")
-                        })),
+                        message: Some(truncate(
+                            &sandbox.stderr,
+                            "Compilation step failed (sandbox error)",
+                        )),
                         stdout: None,
                         stderr: None,
                     };
-                }
-                match sandbox.exit_code {
-                    // Compiled cleanly despite the success flag; keep checking.
-                    Some(0) => {}
-                    Some(_) => {
-                        return match opt_nonempty(&sandbox.stderr)
-                            .or_else(|| opt_nonempty(&sandbox.stdout))
-                        {
-                            // Output that is the signature of the toolchain failing
-                            // to run (JVM thread-init EAGAIN, cc1 fork failure,
-                            // native OOM) is infra, not a source diagnostic -> the
-                            // same retryable SystemError as the no-output case.
-                            // Single-sourced with server-sdk so the two classifiers
-                            // cannot drift on which strings count as infra.
-                            Some(diagnostics) if compile_output_is_infra_fault(&diagnostics) => {
-                                TestCaseVerdict {
-                                    test_case_id,
-                                    verdict: Verdict::SystemError,
-                                    score: 0.0,
-                                    time_used_ms: None,
-                                    memory_used_kb: None,
-                                    message: Some(truncate(
-                                        &diagnostics,
-                                        "Contestant compilation could not run (transient infrastructure fault)",
-                                    )),
-                                    stdout: None,
-                                    stderr: None,
-                                }
-                            }
-                            Some(diagnostics) => TestCaseVerdict {
-                                test_case_id,
-                                verdict: Verdict::CompileError,
-                                score: 0.0,
-                                time_used_ms: None,
-                                memory_used_kb: None,
-                                message: Some(truncate(&diagnostics, "Compilation failed")),
-                                stdout: None,
-                                stderr: None,
-                            },
-                            None => TestCaseVerdict {
-                                test_case_id,
-                                verdict: Verdict::SystemError,
-                                score: 0.0,
-                                time_used_ms: None,
-                                memory_used_kb: None,
-                                message: Some(format!(
-                                    "Contestant {i} compilation failed with no diagnostics (transient infrastructure fault)"
-                                )),
-                                stdout: None,
-                                stderr: None,
-                            },
-                        };
-                    }
-                    None => {
-                        return TestCaseVerdict {
-                            test_case_id,
-                            verdict: Verdict::SystemError,
-                            score: 0.0,
-                            time_used_ms: None,
-                            memory_used_kb: None,
-                            message: Some(truncate(
-                                &sandbox.stderr,
-                                "Compilation step failed (sandbox error)",
-                            )),
-                            stdout: None,
-                            stderr: None,
-                        };
-                    }
                 }
             }
         }
@@ -199,9 +199,9 @@ pub fn interpret_result(
             }
 
             if !run_c.success || sandbox.exit_code != Some(0) {
-                let mem_exceeded = sandbox.memory_used.map_or(false, |m| {
-                    req_memory_limit_kb > 0 && m >= req_memory_limit_kb
-                });
+                let mem_exceeded = sandbox
+                    .memory_used
+                    .is_some_and(|m| req_memory_limit_kb > 0 && m >= req_memory_limit_kb);
                 if sandbox.cg_oom_killed || (sandbox.killed && mem_exceeded) {
                     return TestCaseVerdict {
                         test_case_id,
@@ -344,7 +344,10 @@ pub fn interpret_result(
 
     let message = opt_nonempty(mgr_sandbox.stderr.trim());
 
-    let capped_score = score.min(1.0).max(0.0);
+    // `score` is guaranteed finite here (the `is_finite()` guard above rejects
+    // NaN/infinite manager output), so `clamp` is equivalent to the previous
+    // `.min(1.0).max(0.0)` chain without clamp's NaN-propagation caveat.
+    let capped_score = score.clamp(0.0, 1.0);
     let verdict = if capped_score >= 1.0 {
         Verdict::Accepted
     } else {
