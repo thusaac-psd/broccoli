@@ -1,5 +1,8 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import type { TestCaseResult, Verdict } from '@broccoli/web-sdk/submission';
+import type {
+  SubmissionStatus,
+  TestCaseResult,
+} from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import {
   AlertCircle,
@@ -8,6 +11,9 @@ import {
   MinusCircle,
   XCircle,
 } from 'lucide-react';
+
+import type { VerdictKey } from './verdict-key';
+import { getVerdictKey } from './verdict-key';
 
 // Cap how much of each test-case text field we render. The server/worker keep up
 // to 64 KiB per field; painting that raw in a wrapping <pre> (times many cases)
@@ -38,18 +44,6 @@ function OutputBlock({ label, text }: { label: string; text: string }) {
     </div>
   );
 }
-
-type VerdictKey =
-  | 'accepted'
-  | 'wrong_answer'
-  | 'time_limit'
-  | 'memory_limit'
-  | 'runtime_error'
-  | 'system_error'
-  | 'skipped'
-  | 'cancelled'
-  | 'custom'
-  | 'pending';
 
 const VERDICT_CONFIG: Record<
   VerdictKey,
@@ -111,32 +105,6 @@ const VERDICT_CONFIG: Record<
   },
 };
 
-export function getVerdictKey(verdict?: Verdict | null): VerdictKey {
-  switch (verdict) {
-    case 'Accepted':
-      return 'accepted';
-    case 'WrongAnswer':
-      return 'wrong_answer';
-    case 'TimeLimitExceeded':
-      return 'time_limit';
-    case 'MemoryLimitExceeded':
-      return 'memory_limit';
-    case 'RuntimeError':
-      return 'runtime_error';
-    case 'SystemError':
-      return 'system_error';
-    case 'Skipped':
-      return 'skipped';
-    case 'Cancelled':
-      return 'cancelled';
-    case null:
-    case undefined:
-      return 'pending';
-    default:
-      return 'custom';
-  }
-}
-
 export function formatMemory(kb: number): string {
   const mb = kb / 1024;
   return mb.toFixed(mb >= 10 ? 0 : 1);
@@ -145,12 +113,19 @@ export function formatMemory(kb: number): string {
 export function TestCaseRow({
   testCase,
   index,
+  status,
 }: {
   testCase: TestCaseResult;
   index: number;
+  /**
+   * Status of the submission/judgement this test case belongs to. Required
+   * so a masked (`null`) verdict can be told apart from a genuinely pending
+   * one -- see `getVerdictKey`.
+   */
+  status: SubmissionStatus;
 }) {
   const { t } = useTranslation();
-  const verdictKey = getVerdictKey(testCase.verdict);
+  const verdictKey = getVerdictKey(testCase.verdict, status);
   const config = VERDICT_CONFIG[verdictKey];
   const Icon = config.icon;
 

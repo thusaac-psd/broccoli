@@ -10,6 +10,7 @@ mod registry;
 mod shared;
 mod storage;
 mod submissions;
+mod timer;
 
 pub use checker::Checker;
 pub use code_runs::CodeRuns;
@@ -22,6 +23,7 @@ pub use operations::Operations;
 pub use registry::Registry;
 pub use storage::Storage;
 pub use submissions::Submissions;
+pub use timer::Timer;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use db::{RecordedExecution, RecordedQuery};
@@ -38,6 +40,7 @@ pub struct Host {
     pub checker: Checker,
     pub language: Language,
     pub registry: Registry,
+    pub timer: Timer,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -55,6 +58,7 @@ impl Host {
             checker: Checker {},
             language: Language {},
             registry: Registry {},
+            timer: Timer {},
         }
     }
 }
@@ -87,14 +91,11 @@ impl Host {
             operations: Operations {
                 inner: operations::OperationsMock::new(),
             },
-            checker: Checker {
-                inner: checker::CheckerMock::new(),
-            },
-            language: Language {
-                inner: language::LanguageMock::new(),
-            },
-            registry: Registry {
-                inner: registry::RegistryMock::new(),
+            checker: Checker {},
+            language: Language {},
+            registry: Registry {},
+            timer: Timer {
+                inner: timer::TimerMock::new(),
             },
         }
     }

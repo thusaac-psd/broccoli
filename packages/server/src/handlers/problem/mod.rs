@@ -8,6 +8,15 @@ use sea_orm::sea_query::{Func, LikeExpr};
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `create_problem`/`update_problem`/`delete_problem`
+// require perm::PROBLEM_CREATE/PROBLEM_EDIT/PROBLEM_DELETE, and `list_problems`
+// (the admin problem-bank browser, not the contestant-facing problem list)
+// requires PROBLEM_CREATE or PROBLEM_EDIT - all asserted at handler entry and
+// pinned by tests/integration/problem.rs's permission-denial tests for each
+// verb. The one viewer-facing read, `get_problem`, routes through
+// `VisibilityKernel` below (`Resource::Problem`); `contest`/`contest_problem`
+// here are only used for the pre-kernel row fetch and for the admin write
+// paths' own bookkeeping.
 use crate::entity::{contest, contest_problem, problem, test_case};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -18,11 +27,11 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
-use crate::utils::contest::require_problem_read_access;
 use crate::utils::problem::find_problem;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::test_case_body::test_case_body_size;
 use crate::utils::text::{sanitize_db_json, sanitize_db_text};
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 mod checker_source;
 mod test_cases;
@@ -228,12 +237,44 @@ pub async fn get_problem(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-) -> Result<Json<ProblemResponse>, AppError> {
-    require_problem_read_access(&state.db, &auth_user, id).await?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let resource = Resource::Problem {
+        contest_id: None,
+        problem_id: id,
+    };
+
+    // Fail fast, before doing any of the reads below, on a resource the
+    // kernel already knows is unreachable. This single Problem decision
+    // folds in what the pre-kernel handler checked as `require_problem_read_access`
+    // (permission bypass, `is_public`, and - for a hidden draft - reachability
+    // via any contest it is attached to) - see
+    // `visibility::host_rules::decide_standalone_problem_access`.
+    if kernel
+        .decide(Action::Read, resource.clone())
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Problem not found".into()));
+    }
 
     let mut response = ProblemResponse::from(find_problem(&state.db, id).await?);
     response.samples = load_sample_test_cases(&state.db, id).await?;
-    Ok(Json(response))
+
+    // The DTO reaches the response body only through `into_masked_json`, so
+    // a `Redact` decision on this Problem resource can never be forgotten at
+    // the serialization step. The kernel memoizes per (Action, Resource), so
+    // this re-decides the same `resource` already `Allow`ed above at no
+    // extra DB cost, and the `None` arm is unreachable in practice (it was
+    // already `Allow`, not `Deny`) but kept honest rather than `.unwrap()`-ed
+    // away.
+    let visible = kernel
+        .fetch_visible(Action::Read, resource, response)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Problem not found".into()))?;
+
+    Ok(Json(visible.into_masked_json()?))
 }
 
 #[utoipa::path(

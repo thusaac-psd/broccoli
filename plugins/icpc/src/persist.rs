@@ -169,7 +169,11 @@ mod tests {
         // A submission whose every outcome was cancelled/skipped (host-side
         // cancellation, worker restart) was never actually judged. Even if the
         // upstream evaluator mislabels it accepted, it must not become a solve.
-        let eval = eval_result(vec![(1, Verdict::Cancelled), (2, Verdict::Skipped)], false, true);
+        let eval = eval_result(
+            vec![(1, Verdict::Cancelled), (2, Verdict::Skipped)],
+            false,
+            true,
+        );
 
         let out =
             persist_and_track(&host, SUBMISSION_ID, JUDGEMENT_ID, JUDGE_EPOCH, &eval).unwrap();

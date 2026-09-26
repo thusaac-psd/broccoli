@@ -1173,6 +1173,52 @@ mod test_case_detail {
         assert_eq!(res.status, 404);
         assert_eq!(res.body["code"], "NOT_FOUND");
     }
+
+    /// The two tests above both use a reachable problem (public, via an
+    /// active contest) and vary only `is_sample`. This one pins the
+    /// `kernel.decide()` call itself: a problem the contestant cannot reach
+    /// by ANY path - not public, no contest link, not theirs - must 404 even
+    /// for its sample test case, so a future no-op regression in that call
+    /// (e.g. an accidental `Decision::Allow` default) cannot slip through
+    /// unnoticed.
+    #[tokio::test]
+    async fn contestant_cannot_access_test_case_for_a_wholly_unreachable_problem() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_tc_unreachable", "password123", "admin")
+            .await;
+        let contestant = app
+            .create_authenticated_user("contestant_tc_unreachable", "password123")
+            .await;
+
+        let pid = app
+            .create_hidden_problem(&admin, "Wholly Unreachable Problem")
+            .await;
+
+        let sample_res = app
+            .post_with_token(
+                &routes::test_cases(pid),
+                &json!({
+                    "input": "1 2",
+                    "expected_output": "3",
+                    "score": 10,
+                    "is_sample": true,
+                    "label": "sample_01",
+                }),
+                &admin,
+            )
+            .await;
+        assert_eq!(sample_res.status, 201);
+        let sample_id = sample_res.id();
+
+        // No contest, not public, not owned by the contestant: the problem
+        // is not reachable through any path the kernel recognizes.
+        let res = app
+            .get_with_token(&routes::test_case(pid, sample_id), &contestant)
+            .await;
+        assert_eq!(res.status, 404);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
 }
 
 mod test_case_update {
@@ -1681,6 +1727,36 @@ mod test_case_zip_upload {
         assert_eq!(tcs[0]["is_sample"], false);
         assert_eq!(tcs[0]["score"], 50);
         assert_eq!(tcs[1]["score"], 50);
+    }
+
+    #[tokio::test]
+    async fn contestant_cannot_upload_test_cases() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_upload_perm", "password123", "admin")
+            .await;
+        let contestant = app
+            .create_user_with_role("contestant_upload_perm", "password123", "contestant")
+            .await;
+
+        let pid = app.create_problem(&admin, "Test Problem").await;
+
+        let zip_data = build_zip(&[("01.in", "1 2\n"), ("01.ans", "3\n")]);
+
+        let res = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "tests.zip",
+                zip_data,
+                Some("*.in"),
+                Some("*.ans"),
+                Some("replace"),
+                &contestant,
+            )
+            .await;
+
+        assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
     }
 
     #[tokio::test]

@@ -48,23 +48,3 @@ pub struct OnSubmissionOutput {
     pub success: bool,
     pub error_message: Option<String>,
 }
-
-/// Host -> plugin request for the per-contest-type submission visibility
-/// filter (the `filter_submission_fn` a plugin registers alongside its
-/// contest type). The host serializes the submission response as opaque
-/// JSON; the plugin returns it - possibly redacted - unchanged in shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FilterSubmissionInput {
-    pub submission: serde_json::Value,
-    pub is_list_item: bool,
-    pub contest_id: Option<i32>,
-    pub viewer_user_id: Option<i32>,
-    #[serde(default)]
-    pub viewer_permissions: Vec<String>,
-}
-
-/// Plugin -> host response for the submission visibility filter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FilterSubmissionOutput {
-    pub submission: serde_json::Value,
-}

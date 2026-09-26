@@ -3,6 +3,18 @@ import type { components } from '@/api/schema';
 export type SubmissionStatus = components['schemas']['SubmissionStatus'];
 
 export type Submission = components['schemas']['SubmissionResponse'];
+/**
+ * The shape `POST /admin/submissions/fan-out`, `PATCH .../rejudge`, and
+ * judgement-apply endpoints return: every field but `id` is optional. `id`
+ * is always present; the rest are present (Allow), present-but-`null`
+ * (Redact), or entirely absent from the response object (Deny - the caller's
+ * own Read visibility into this submission was denied even though the
+ * mutation that produced it went through). See
+ * `SubmissionResponseAfterMutation`'s doc comment in
+ * `packages/server/src/models/submission.rs` for the full contract.
+ */
+export type SubmissionAfterMutation =
+  components['schemas']['SubmissionResponseAfterMutation'];
 export type SubmissionSummary = components['schemas']['SubmissionListItem'];
 export type SubmissionJudgement =
   components['schemas']['SubmissionJudgementResponse'];

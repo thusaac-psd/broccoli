@@ -15,6 +15,11 @@ use tracing::{instrument, warn};
 
 use common::worker::HeartbeatPayload;
 
+// visibility-bypass-audited: all three handlers require perm::SYSTEM_VIEW,
+// pinned by tests/integration/system.rs's `contestant_cannot_list_workers`,
+// `contestant_cannot_list_queues`, and `contestant_cannot_view_system_overview`.
+// This is aggregate operator telemetry (worker/queue/DLQ counts), never a
+// per-row Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::{code_run, dead_letter_message, submission, submission_judgement};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;

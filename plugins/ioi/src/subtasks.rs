@@ -260,7 +260,10 @@ mod tests {
         let s = scores(&[("big_01", 1.0)]);
 
         let group_min = make_def(SubtaskScoringMethod::GroupMin, 30.0, vec!["42"]);
-        assert_eq!(score_subtask(&group_min, &[tc.clone()], &s).score, 30.0);
+        assert_eq!(
+            score_subtask(&group_min, std::slice::from_ref(&tc), &s).score,
+            30.0
+        );
 
         let sum = make_def(SubtaskScoringMethod::Sum, 100.0, vec!["42"]);
         assert_eq!(score_subtask(&sum, &[tc], &s).score, 100.0);

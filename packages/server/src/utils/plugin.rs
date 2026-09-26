@@ -104,6 +104,16 @@ pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), Pl
             purge_plugin_registrations(&state.registries, plugin_id).await;
             let _ = state.plugins.unload_plugin(plugin_id);
             let _ = mark_plugin_failed(state.plugins.as_ref(), plugin_id, &error);
+            if let Err(e) =
+                crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id)
+                    .await
+            {
+                tracing::error!(
+                    plugin_id,
+                    error = %e,
+                    "Failed to delete pending timers for a plugin that failed activation"
+                );
+            }
             tracing::error!("Plugin '{}' init() failed: {}", plugin_id, error);
             Err(error)
         }

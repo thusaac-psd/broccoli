@@ -1,12 +1,28 @@
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+use std::collections::HashMap;
+
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::permissions as perm;
+// Host/PluginHttpRequest/SdkError/WireDecision/VisibilityQueryInput/Params are
+// used by both the wasm32-gated handlers below and the #[cfg(test)] unit
+// tests in `visibility_tests`, which exercise `decide_visibility_decisions`
+// directly via `Host::mock()`; gate the same way so a native (test/clippy)
+// build doesn't see this as unused.
+#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 
+// ContestConfig/FeedbackLevel are used by `decide_visibility_decisions` and
+// `mask_for_level` (both wasm32-gated production code) and directly by the
+// #[cfg(test)] unit tests below; gate the same way so a native (test/clippy)
+// build doesn't see this as unused.
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::config::{ContestConfig, FeedbackLevel};
 #[cfg(target_arch = "wasm32")]
 use crate::load_token_state;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::scoreboard::full_scoreboard_visible_for_phase;
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::tokens::TokenState;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn can_view_privileged_submission_feedback(req: &PluginHttpRequest) -> bool {
@@ -28,193 +44,922 @@ pub(crate) fn viewer_has_token_feedback_for_submission(
     Ok(token_state.tokened_submission_ids.contains(&submission_id))
 }
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn apply_feedback_filter(
-    host: &Host,
-    req: &FilterSubmissionInput,
-) -> Result<serde_json::Value, SdkError> {
-    let mut submission = req.submission.clone();
-    cap_submission_detail_texts(&mut submission);
+// -- Submission visibility decisions -------------------------------------
+//
+// Replaces the old `filter_submission_for_viewer` host-fn hook, which handed
+// the host a plugin-authored submission JSON blob after only a shape check --
+// a plugin could alter a verdict, a score, or otherwise author content by
+// WRITING into it. A field mask can only blank a value, never author one:
+// `subtask_scores`/`total_only` used to WRITE `verdict: "Skipped"` and
+// `score: 0.0` into every element of `test_case_results`. The mask below
+// NULLS those two fields instead; the IOI frontend renders a null verdict /
+// null score exactly like the old `"Skipped"` / `0.0` did (see
+// `IoiSubmissionResult.tsx`). Equivalence is defined at the rendered level,
+// not the wire level.
+//
+// Invoked by the host's visibility kernel (`[[server.queries]] topic =
+// "visibility"`) for every resource in a query batch, for EVERY plugin
+// registered on that topic -- not just IOI contests, and not just
+// submissions. `decide_visibility_decisions` therefore defaults to Allow for
+// anything it has no opinion about (kind != "submission", no contest_id, or a
+// submission belonging to a non-IOI contest): Allow is the identity element
+// of the host's `Decision::meet` lattice, so it can never widen what the host
+// or another plugin already decided.
+//
+// Unlike ICPC (binary "hidden or not", so the owner is always unconditional
+// Allow), IOI narrows even the OWNER's own view by `feedback_level` -- a
+// contestant does not automatically see their own per-test-case results
+// while the configured level withholds them. A spent per-submission token
+// overrides this and unlocks Allow for that one submission, mirroring the
+// old `apply_feedback_filter`'s tokened-owner bypass.
 
-    // Admin / view-all bypass.
-    if req
-        .viewer_permissions
-        .iter()
-        .any(|p| p == perm::SUBMISSION_VIEW_ALL)
-    {
-        return Ok(submission);
-    }
-
-    let Some(contest_id) = req.contest_id else {
-        return Ok(submission);
-    };
-
-    let owner_id = submission.get("user_id").and_then(|v| v.as_i64());
-    let submission_id = submission.get("id").and_then(|v| v.as_i64());
-    let viewer_id = req.viewer_user_id.map(|x| x as i64);
-
-    let is_owner = matches!((owner_id, viewer_id), (Some(o), Some(v)) if o == v);
-
-    if is_owner && let (Some(viewer), Some(sid)) = (req.viewer_user_id, submission_id) {
-        let token_state = load_token_state(host, contest_id, viewer)?;
-        if token_state.tokened_submission_ids.contains(&(sid as i32)) {
-            return Ok(submission);
-        }
-    }
-
-    let contest_config: ContestConfig = contest::load_config(host, contest_id)?;
-
-    // Scoreboard-integrity gate (mirrors the ICPC filter's rationale): when the
-    // full scoreboard is not visible to a non-owner in this phase -- e.g. the
-    // default `admins_only` during the live contest -- a peer must not read
-    // another contestant's verdict/score/per-test-case results through the
-    // submission endpoint. `feedback_level` alone would leak exactly the data
-    // the scoreboard withholds, so when the scoreboard is hidden we redact the
-    // scoring data entirely (the None-level redaction), regardless of
-    // feedback_level. The IOI scoreboard depends only on the contest phase (no
-    // ICPC-style per-submission freeze window), so only the phase is needed.
-    #[derive(serde::Deserialize)]
-    struct ContestPhase {
-        phase: String,
-    }
-    let mut p = Params::new();
-    let phase_sql = format!(
-        "SELECT CASE WHEN NOW() < start_time THEN 'before' \
-                     WHEN NOW() > end_time THEN 'after' \
-                     ELSE 'during' END AS phase \
-         FROM contest WHERE id = {}",
-        p.bind(contest_id)
-    );
-    let phase = match host
-        .db
-        .query_one_with_args::<ContestPhase>(&phase_sql, &p.into_args())?
-    {
-        Some(row) => row.phase,
-        // Contest row missing: fail closed rather than leak.
-        None => {
-            redact_submission_for_level(&mut submission, FeedbackLevel::None);
-            return Ok(submission);
-        }
-    };
-    // The gate protects PEERS only: a contestant must not read another
-    // contestant's scoring through the submission endpoint when the scoreboard
-    // withholds it. An owner always sees their own submission's feedback per the
-    // contest `feedback_level` (tokened owners already returned the full record
-    // above) -- own-feedback is governed by tokens + feedback_level, not by
-    // scoreboard visibility. This mirrors the ICPC filter, which exempts owners
-    // unconditionally ("a team always sees its own results, even while frozen").
-    if !is_owner
-        && !full_scoreboard_visible_for_phase(&phase, false, contest_config.scoreboard_visibility)
-    {
-        redact_submission_for_level(&mut submission, FeedbackLevel::None);
-        return Ok(submission);
-    }
-
-    let level = contest_config.feedback_level;
-    redact_submission_for_level(&mut submission, level);
-    Ok(submission)
+/// Field mask covering every per-test-case field the old
+/// `redact_submission_for_level` used to blank/overwrite for
+/// `subtask_scores`/`total_only`. `verdict`/`score` are now NULLED (never
+/// authored as `"Skipped"`/`0.0`); the frontend restores the equivalent
+/// rendering. Uses the `*` wildcard (Task 18 grammar) to reach every element
+/// of `result.test_case_results` with one path per field, rather than one
+/// path per test case.
+#[cfg(any(target_arch = "wasm32", test))]
+fn per_test_case_mask_fields() -> Vec<String> {
+    vec![
+        "result.test_case_results.*.verdict".to_string(),
+        "result.test_case_results.*.score".to_string(),
+        "result.test_case_results.*.time_used".to_string(),
+        "result.test_case_results.*.memory_used".to_string(),
+        "result.test_case_results.*.input".to_string(),
+        "result.test_case_results.*.expected_output".to_string(),
+        "result.test_case_results.*.stdout".to_string(),
+        "result.test_case_results.*.stderr".to_string(),
+        "result.test_case_results.*.checker_output".to_string(),
+    ]
 }
 
-fn redact_submission_for_level(submission: &mut serde_json::Value, level: FeedbackLevel) {
-    use serde_json::Value;
+/// Field mask covering every field the old `redact_submission_for_level`
+/// blanked for `FeedbackLevel::None`, unioned across every host DTO shape it
+/// can apply to: list items carry verdict/score/time_used/memory_used at the
+/// top level and have no `result` key at all; detail responses nest the same
+/// four fields, plus compile_output/error_message/test_case_results, under
+/// `result`; the judgement-history endpoint applies the mask to a synthetic
+/// `SubmissionResponse { result: ... }` wrapper built around the flat
+/// `SubmissionJudgementResponse`, so the `result.*` paths reach it too.
+/// `apply_mask` (`packages/server/src/visibility/mask.rs`) is a documented
+/// no-op on a path that does not exist in the shape actually being masked --
+/// a missing key, a type mismatch, or `*` on a non-array never inserts
+/// anything -- so one union list is safe for all three shapes: whichever
+/// shape the host happens to be rendering, only the paths that actually
+/// exist in THAT shape are blanked. Blanking the whole
+/// `result.test_case_results` array produces `[]`, the same empty array the
+/// old code hand-wrote.
+#[cfg(any(target_arch = "wasm32", test))]
+fn none_level_mask_fields() -> Vec<String> {
+    vec![
+        "verdict".to_string(),
+        "score".to_string(),
+        "time_used".to_string(),
+        "memory_used".to_string(),
+        "result.verdict".to_string(),
+        "result.score".to_string(),
+        "result.time_used".to_string(),
+        "result.memory_used".to_string(),
+        "result.compile_output".to_string(),
+        "result.error_message".to_string(),
+        "result.test_case_results".to_string(),
+    ]
+}
 
-    // List items omit `result`; detail responses include it (possibly null).
-    // Adding `result` to the list DTO would silently flip list rows to the
-    // detail-shape redaction path - replace this heuristic with an explicit
-    // flag if that ever happens.
-    let in_list = submission.get("result").is_none();
-
+/// The mask for a given `FeedbackLevel`. `Full` blanks nothing, so it is
+/// `Allow` -- the identity decision, not a `Redact` with an empty field list.
+/// `SubtaskScores` and `TotalOnly` are byte-identical, exactly like the old
+/// `redact_submission_for_level`'s `FeedbackLevel::SubtaskScores |
+/// FeedbackLevel::TotalOnly` arm: the distinction between the two levels is
+/// enforced by IOI's own `/subtask-scores` route (`api::
+/// handle_submission_subtask_scores`), not by this generic submission-DTO
+/// mask.
+#[cfg(any(target_arch = "wasm32", test))]
+fn mask_for_level(level: FeedbackLevel) -> WireDecision {
     match level {
-        FeedbackLevel::Full => {}
-        FeedbackLevel::SubtaskScores | FeedbackLevel::TotalOnly => {
-            // Keep total verdict + score; blank per-test-case data.
-            if let Some(result) = submission.get_mut("result")
-                && let Some(tcrs) = result.get_mut("test_case_results")
-                && let Some(arr) = tcrs.as_array_mut()
-            {
-                for tcr in arr.iter_mut() {
-                    if let Some(obj) = tcr.as_object_mut() {
-                        // Presentation redaction only: this does not mean the test case was skipped during execution.
-                        obj.insert("verdict".into(), Value::String("Skipped".into()));
-                        obj.insert("score".into(), Value::from(0.0));
-                        obj.insert("time_used".into(), Value::Null);
-                        obj.insert("memory_used".into(), Value::Null);
-                        obj.insert("input".into(), Value::Null);
-                        obj.insert("expected_output".into(), Value::Null);
-                        obj.insert("stdout".into(), Value::Null);
-                        obj.insert("stderr".into(), Value::Null);
-                        obj.insert("checker_output".into(), Value::Null);
-                    }
-                }
+        FeedbackLevel::Full => WireDecision::Allow {},
+        FeedbackLevel::SubtaskScores | FeedbackLevel::TotalOnly => WireDecision::Redact {
+            fields: per_test_case_mask_fields(),
+        },
+        FeedbackLevel::None => WireDecision::Redact {
+            fields: none_level_mask_fields(),
+        },
+    }
+}
+
+/// Row shape for the batched query below: one row per submission resource in
+/// the batch, keyed by submission id.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, serde::Deserialize)]
+struct SubmissionVisibilityRow {
+    submission_id: i32,
+    user_id: i32,
+    contest_type: Option<String>,
+    phase: String,
+}
+
+/// Core decision logic. Exercised directly by tests via `Host::mock()` (no
+/// wasm32 target required); the organiser-bypass branch is additionally
+/// pinned end-to-end by
+/// `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
+/// in `packages/server/tests/e2e/plugins/ioi.rs` (see below). No e2e test
+/// pins every other branch of this function's behavior, so those unit tests
+/// remain the evidence they still work.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn decide_visibility_decisions(
+    host: &Host,
+    req: &VisibilityQueryInput,
+) -> Result<Vec<WireDecision>, SdkError> {
+    // Admin / view-all / organiser bypass, for the whole batch at once -- it
+    // does not depend on any individual resource.
+    //
+    // `CONTEST_MANAGE` is checked here alongside the pre-existing
+    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE,
+    // not a regression fix: `git show 3dde5d42:plugins/ioi/src/feedback.rs`
+    // confirms the pre-kernel `apply_feedback_filter`'s "Admin / view-all
+    // bypass" also checked only `SUBMISSION_VIEW_ALL`, so the kernel
+    // migration ported this inconsistency verbatim rather than introducing
+    // it. It contradicted `can_view_privileged_submission_feedback` (top of
+    // this file) and `api.rs`'s scoreboard ranking, which DO check
+    // `CONTEST_MANAGE` so organisers see full data, and mirrors the same
+    // Task 17 fix already applied to ICPC's scoreboard-freeze decision. A
+    // viewer holding `contest:manage` without `submission:view_all` -- a
+    // plausible problem-setter or judge role -- was wrongly redacted here;
+    // see
+    // `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
+    // in `packages/server/tests/e2e/plugins/ioi.rs` for the viewer that
+    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
+    //
+    // Note: this bypass does not change host-level reachability.
+    // `decide_submission` (host rule) does not bypass on `CONTEST_MANAGE`,
+    // so a non-enrolled `contest:manage` organiser still gets a 404 before
+    // this plugin ever runs -- "organisers always see the real data" holds
+    // only for organisers who are also enrolled participants.
+    if req
+        .subject
+        .permissions
+        .iter()
+        .any(|p| p == perm::SUBMISSION_VIEW_ALL || p == perm::CONTEST_MANAGE)
+    {
+        return Ok(req
+            .resources
+            .iter()
+            .map(|_| WireDecision::Allow {})
+            .collect());
+    }
+
+    // Resources this plugin has any opinion about at all: `kind ==
+    // "submission"` with a resolvable id and a known contest_id. Everything
+    // else defaults to Allow without touching the database.
+    let by_index: Vec<Option<i32>> = req
+        .resources
+        .iter()
+        .map(|resource| {
+            if resource.kind == "submission" && resource.contest_id.is_some() {
+                resource.id.parse::<i32>().ok()
+            } else {
+                None
             }
-        }
-        FeedbackLevel::None => {
-            if in_list {
-                // SubmissionListItem: blank verdict + score + time/memory.
-                if let Some(obj) = submission.as_object_mut() {
-                    obj.insert("verdict".into(), Value::Null);
-                    obj.insert("score".into(), Value::Null);
-                    obj.insert("time_used".into(), Value::Null);
-                    obj.insert("memory_used".into(), Value::Null);
-                }
-            } else if let Some(result) = submission.get_mut("result")
-                && let Some(obj) = result.as_object_mut()
-            {
-                obj.insert("verdict".into(), Value::Null);
-                obj.insert("score".into(), Value::Null);
-                obj.insert("time_used".into(), Value::Null);
-                obj.insert("memory_used".into(), Value::Null);
-                obj.insert("compile_output".into(), Value::Null);
-                obj.insert("error_message".into(), Value::Null);
-                obj.insert("test_case_results".into(), Value::Array(vec![]));
+        })
+        .collect();
+
+    let mut submission_ids: Vec<i32> = by_index.iter().filter_map(|id| *id).collect();
+    if submission_ids.is_empty() {
+        return Ok(req
+            .resources
+            .iter()
+            .map(|_| WireDecision::Allow {})
+            .collect());
+    }
+    submission_ids.sort_unstable();
+    submission_ids.dedup();
+
+    // ONE batched query for every submission id in the batch -- never one
+    // query per submission, which would reintroduce an N+1 on the
+    // submission-list hot path. `contest_type` is returned (rather than
+    // filtered in the WHERE clause) so a submission belonging to a non-IOI
+    // contest can be told apart from a genuine contest/submission data
+    // mismatch: the former must Allow (this plugin has no opinion on
+    // non-IOI contests), the latter fails hidden like the old per-submission
+    // query's "contest row missing" branch did.
+    let mut p = Params::new();
+    let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
+    let sql = format!(
+        "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
+                CASE WHEN NOW() < c.start_time THEN 'before' \
+                     WHEN NOW() > c.end_time THEN 'after' \
+                     ELSE 'during' END AS phase \
+         FROM submission s \
+         JOIN contest c ON c.id = s.contest_id \
+         WHERE s.id IN ({})",
+        placeholders.join(",")
+    );
+    let rows: Vec<SubmissionVisibilityRow> = host.db.query_with_args(&sql, &p.into_args())?;
+    let rows_by_id: HashMap<i32, SubmissionVisibilityRow> =
+        rows.into_iter().map(|r| (r.submission_id, r)).collect();
+
+    // Distinct IOI contest ids actually present in the batch: config is
+    // loaded once per DISTINCT contest, never once per submission.
+    let mut ioi_contest_ids: Vec<i32> = req
+        .resources
+        .iter()
+        .zip(&by_index)
+        .filter_map(|(resource, id)| {
+            let sub_id = (*id)?;
+            let row = rows_by_id.get(&sub_id)?;
+            if row.contest_type.as_deref() == Some("ioi") {
+                resource.contest_id
+            } else {
+                None
+            }
+        })
+        .collect();
+    ioi_contest_ids.sort_unstable();
+    ioi_contest_ids.dedup();
+
+    let mut configs: HashMap<i32, ContestConfig> = HashMap::new();
+    for contest_id in &ioi_contest_ids {
+        configs.insert(*contest_id, contest::load_config(host, *contest_id)?);
+    }
+
+    // Token state: a query batch always has exactly one subject, so this is
+    // ONE batched storage read across every distinct contest id in the batch
+    // -- never one read per submission.
+    let viewer_id = req.subject.user_id;
+    let mut token_states: HashMap<i32, TokenState> = HashMap::new();
+    if let Some(viewer) = viewer_id
+        && !ioi_contest_ids.is_empty()
+    {
+        let keys: Vec<String> = ioi_contest_ids
+            .iter()
+            .map(|cid| format!("tokens:{cid}:{viewer}"))
+            .collect();
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let raw = host.storage.get(&key_refs)?;
+        for (contest_id, key) in ioi_contest_ids.iter().zip(keys.iter()) {
+            if let Some(json) = raw.get(key) {
+                token_states.insert(*contest_id, serde_json::from_str(json).unwrap_or_default());
             }
         }
     }
+
+    let decisions = req
+        .resources
+        .iter()
+        .zip(&by_index)
+        .map(|(resource, id)| {
+            let Some(sub_id) = id else {
+                return WireDecision::Allow {};
+            };
+            let Some(row) = rows_by_id.get(sub_id) else {
+                // Contest/submission mismatch: fail hidden rather than leak.
+                return mask_for_level(FeedbackLevel::None);
+            };
+            if row.contest_type.as_deref() != Some("ioi") {
+                // Not an IOI contest: this plugin has no opinion.
+                return WireDecision::Allow {};
+            }
+            let Some(contest_id) = resource.contest_id else {
+                return WireDecision::Allow {};
+            };
+            let config = configs.get(&contest_id).cloned().unwrap_or_default();
+
+            if viewer_id == Some(row.user_id) {
+                // Owner. A spent token unlocks full feedback for this ONE
+                // submission regardless of feedback_level; otherwise the
+                // owner is narrowed by feedback_level exactly like a peer
+                // would be once the scoreboard opens up.
+                let tokened = token_states
+                    .get(&contest_id)
+                    .map(|s| s.tokened_submission_ids.contains(sub_id))
+                    .unwrap_or(false);
+                if tokened {
+                    return WireDecision::Allow {};
+                }
+                return mask_for_level(config.feedback_level);
+            }
+
+            // Peer: scoreboard-integrity gate (mirrors the old filter's
+            // rationale). When the full scoreboard is not visible to a
+            // non-owner in this phase -- e.g. the default `admins_only`
+            // during the live contest -- a peer must not read another
+            // contestant's verdict/score/per-test-case results through the
+            // submission endpoint. `feedback_level` alone would leak exactly
+            // the data the scoreboard withholds, so force the None-level
+            // mask regardless of the configured feedback_level.
+            if !full_scoreboard_visible_for_phase(&row.phase, false, config.scoreboard_visibility) {
+                return mask_for_level(FeedbackLevel::None);
+            }
+            mask_for_level(config.feedback_level)
+        })
+        .collect();
+
+    Ok(decisions)
 }
 
 #[cfg(test)]
-mod tests {
+mod visibility_tests {
     use super::*;
 
     #[test]
-    fn submission_detail_text_fields_are_capped() {
-        let long_text = "x".repeat(DETAIL_TEXT_RESPONSE_LIMIT_BYTES + 1024);
-        let mut submission = serde_json::json!({
-            "result": {
-                "compile_output": long_text,
-                "error_message": "short",
-                "test_case_results": [{
-                    "input": long_text,
-                    "expected_output": long_text,
-                    "stdout": long_text,
-                    "stderr": long_text,
-                    "checker_output": long_text
-                }]
-            }
-        });
-
-        cap_submission_detail_texts(&mut submission);
-
-        let result = &submission["result"];
-        assert_eq!(
-            result["compile_output"].as_str().unwrap().len(),
-            DETAIL_TEXT_RESPONSE_LIMIT_BYTES
-        );
-        assert_eq!(result["error_message"], "short");
-
-        let tc = &result["test_case_results"][0];
-        for field in [
-            "input",
-            "expected_output",
-            "stdout",
-            "stderr",
-            "checker_output",
+    fn per_test_case_mask_covers_every_field_the_old_code_wrote_or_blanked() {
+        // Old `redact_submission_for_level`'s SubtaskScores/TotalOnly arm:
+        // verdict + score (overwritten with "Skipped"/0.0, now nulled) and
+        // seven more fields (nulled then, nulled now).
+        let fields = per_test_case_mask_fields();
+        for f in [
+            "result.test_case_results.*.verdict",
+            "result.test_case_results.*.score",
+            "result.test_case_results.*.time_used",
+            "result.test_case_results.*.memory_used",
+            "result.test_case_results.*.input",
+            "result.test_case_results.*.expected_output",
+            "result.test_case_results.*.stdout",
+            "result.test_case_results.*.stderr",
+            "result.test_case_results.*.checker_output",
         ] {
-            assert_eq!(
-                tc[field].as_str().unwrap().len(),
-                DETAIL_TEXT_RESPONSE_LIMIT_BYTES,
-                "{field} should be capped"
-            );
+            assert!(fields.contains(&f.to_string()), "missing field {f}");
+        }
+        assert_eq!(fields.len(), 9, "no extra fields beyond the old write set");
+    }
+
+    #[test]
+    fn none_level_mask_covers_every_field_the_old_code_blanked_on_either_shape() {
+        let fields = none_level_mask_fields();
+        for f in [
+            "verdict",
+            "score",
+            "time_used",
+            "memory_used",
+            "result.verdict",
+            "result.score",
+            "result.time_used",
+            "result.memory_used",
+            "result.compile_output",
+            "result.error_message",
+            "result.test_case_results",
+        ] {
+            assert!(fields.contains(&f.to_string()), "missing field {f}");
+        }
+        assert_eq!(fields.len(), 11, "no extra fields beyond the old blank set");
+    }
+
+    #[test]
+    fn mask_for_full_is_allow_not_an_empty_redact() {
+        assert!(matches!(
+            mask_for_level(FeedbackLevel::Full),
+            WireDecision::Allow {}
+        ));
+    }
+
+    #[test]
+    fn mask_for_subtask_scores_and_total_only_are_byte_identical() {
+        // Mirrors the old code's `FeedbackLevel::SubtaskScores |
+        // FeedbackLevel::TotalOnly` single match arm: the two levels produce
+        // exactly the same submission-DTO redaction; the difference between
+        // them lives entirely in the plugin's own `/subtask-scores` route.
+        let a = mask_for_level(FeedbackLevel::SubtaskScores);
+        let b = mask_for_level(FeedbackLevel::TotalOnly);
+        match (a, b) {
+            (WireDecision::Redact { fields: fa }, WireDecision::Redact { fields: fb }) => {
+                let mut fa = fa;
+                let mut fb = fb;
+                fa.sort();
+                fb.sort();
+                assert_eq!(fa, fb);
+            }
+            other => panic!("expected both to be Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mask_for_none_is_redact_with_the_none_level_fields() {
+        match mask_for_level(FeedbackLevel::None) {
+            WireDecision::Redact { fields } => {
+                let mut got = fields;
+                got.sort();
+                let mut want = none_level_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    fn subject(user_id: Option<i32>) -> QuerySubject {
+        QuerySubject {
+            user_id,
+            authenticated: user_id.is_some(),
+            permissions: Vec::new(),
+        }
+    }
+
+    fn submission_resource(id: i32, contest_id: i32) -> QueryResource {
+        QueryResource {
+            kind: "submission".to_string(),
+            id: id.to_string(),
+            contest_id: Some(contest_id),
+            problem_id: None,
+        }
+    }
+
+    fn seed_row(host: &Host, submission_id: i32, user_id: i32, contest_type: &str, phase: &str) {
+        host.db.queue_query_result(serde_json::json!([{
+            "submission_id": submission_id,
+            "user_id": user_id,
+            "contest_type": contest_type,
+            "phase": phase,
+        }]));
+    }
+
+    fn seed_ioi_config(host: &Host, contest_id: i32, config: serde_json::Value) {
+        host.config
+            .seed("contest", &contest_id.to_string(), "contest", config);
+    }
+
+    #[test]
+    fn decide_visibility_admin_bypass_allows_everything_without_querying() {
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::SUBMISSION_VIEW_ALL.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    /// Deliberate BEHAVIOUR CHANGE (see the comment on
+    /// `decide_visibility_decisions`): a viewer holding `contest:manage`
+    /// without `submission:view_all` -- a plausible problem-setter or judge
+    /// role -- must also bypass the whole batch, matching
+    /// `can_view_privileged_submission_feedback` and mirroring ICPC's Task
+    /// 17 fix.
+    #[test]
+    fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
+        let host = Host::mock();
+        let mut sub = subject(Some(99));
+        sub.permissions.push(perm::CONTEST_MANAGE.to_string());
+        let req = VisibilityQueryInput {
+            subject: sub,
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10), submission_resource(8, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(host.db.queries().is_empty());
+    }
+
+    #[test]
+    fn decide_visibility_allows_non_submission_resources_and_contest_less_resources_without_querying()
+     {
+        let host = Host::mock();
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![
+                QueryResource {
+                    kind: "contest".to_string(),
+                    id: "10".to_string(),
+                    contest_id: Some(10),
+                    problem_id: None,
+                },
+                QueryResource {
+                    kind: "submission".to_string(),
+                    id: "7".to_string(),
+                    contest_id: None, // standalone submission, no contest.
+                    problem_id: None,
+                },
+            ],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert!(
+            decisions
+                .iter()
+                .all(|d| matches!(d, WireDecision::Allow {}))
+        );
+        assert!(
+            host.db.queries().is_empty(),
+            "must not query the database when nothing needs it"
+        );
+    }
+
+    #[test]
+    fn decide_visibility_allows_a_submission_from_a_non_ioi_contest() {
+        let host = Host::mock();
+        seed_row(&host, 7, 2, "icpc", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_on_contest_submission_mismatch() {
+        // No row at all for the submission id: the old code's "contest row
+        // missing -- fail hidden rather than leak" branch.
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = none_level_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_fails_hidden_even_for_a_viewer_who_would_be_the_owner_when_the_row_is_missing()
+     {
+        // Deliberate, safe-direction ordering deviation from the old code
+        // (mirrors ICPC's `decide_visibility`): the old
+        // `filter_submission_for_viewer` was handed the submission's own
+        // JSON (already carrying its `user_id`) and checked ownership FIRST.
+        // `decide_visibility` is handed only a resource id and has no
+        // `user_id` to compare until AFTER the batched query returns a row.
+        // When the query returns no row at all, there is nothing to compare
+        // the viewer against, so the missing-row fail-hidden branch runs
+        // unconditionally -- even for a viewer who would in fact be the
+        // submission's owner if a row existed. This can only over-hide
+        // (Redact), never leak (Allow).
+        let host = Host::mock();
+        host.db.queue_query_result(serde_json::json!([]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // would be the owner, if a row existed.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(
+            matches!(decisions[0], WireDecision::Redact { .. }),
+            "a missing row must fail hidden even for a viewer who would otherwise be the owner, got {:?}",
+            decisions[0]
+        );
+    }
+
+    #[test]
+    fn decide_visibility_allows_the_owner_at_full_feedback() {
+        let host = Host::mock();
+        seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "full" }));
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // viewer IS the submission owner.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_redacts_the_owner_at_subtask_scores_with_the_per_test_case_mask() {
+        let host = Host::mock();
+        seed_ioi_config(
+            &host,
+            10,
+            serde_json::json!({ "feedback_level": "subtask_scores" }),
+        );
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = per_test_case_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_redacts_the_owner_at_total_only_with_the_per_test_case_mask() {
+        let host = Host::mock();
+        seed_ioi_config(
+            &host,
+            10,
+            serde_json::json!({ "feedback_level": "total_only" }),
+        );
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = per_test_case_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_redacts_the_owner_at_none_with_the_none_level_mask() {
+        // This is the exact scenario the failing e2e test pins: the OWNER,
+        // under `feedback_level: "none"`, must still be narrowed -- `meet`
+        // between the kernel's unconditional owner Allow and IOI's Redact is
+        // Redact, so `score` renders as `null` even for the submitter.
+        let host = Host::mock();
+        seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = none_level_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_tokened_owner_bypasses_feedback_level() {
+        let host = Host::mock();
+        seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
+        seed_row(&host, 7, 2, "ioi", "during");
+        host.storage
+            .set(&[(
+                "tokens:10:2",
+                &serde_json::json!({ "used": 1, "tokened_submission_ids": [7] }).to_string(),
+            )])
+            .unwrap();
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_untokened_submission_is_unaffected_by_a_token_on_another_submission() {
+        let host = Host::mock();
+        seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
+        seed_row(&host, 7, 2, "ioi", "during");
+        host.storage
+            .set(&[(
+                "tokens:10:2",
+                &serde_json::json!({ "used": 1, "tokened_submission_ids": [999] }).to_string(),
+            )])
+            .unwrap();
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Redact { .. }));
+    }
+
+    #[test]
+    fn decide_visibility_redacts_a_peer_to_none_level_when_the_scoreboard_is_hidden_in_this_phase()
+    {
+        // Scoreboard-integrity gate: even though feedback_level is "full",
+        // a peer must not see another contestant's results while the
+        // scoreboard itself withholds them (default admins_only, during).
+        let host = Host::mock();
+        seed_ioi_config(
+            &host,
+            10,
+            serde_json::json!({
+                "feedback_level": "full",
+                "scoreboard_visibility": "admins_only",
+            }),
+        );
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)), // NOT the owner.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = none_level_mask_fields();
+                want.sort();
+                assert_eq!(
+                    got, want,
+                    "scoreboard-hidden peer must get the None-level mask regardless of feedback_level"
+                );
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_allows_a_peer_the_configured_level_once_the_scoreboard_is_visible() {
+        let host = Host::mock();
+        seed_ioi_config(
+            &host,
+            10,
+            serde_json::json!({
+                "feedback_level": "full",
+                "scoreboard_visibility": "all_contest_viewers",
+            }),
+        );
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions[0], WireDecision::Allow {}));
+    }
+
+    #[test]
+    fn decide_visibility_redacts_a_peer_per_feedback_level_once_the_scoreboard_is_visible() {
+        // The scoreboard being visible does not itself grant full feedback;
+        // the configured feedback_level still applies to peers too.
+        let host = Host::mock();
+        seed_ioi_config(
+            &host,
+            10,
+            serde_json::json!({
+                "feedback_level": "subtask_scores",
+                "scoreboard_visibility": "all_contest_viewers",
+            }),
+        );
+        seed_row(&host, 7, 2, "ioi", "during");
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(99)),
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![submission_resource(7, 10)],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        match &decisions[0] {
+            WireDecision::Redact { fields } => {
+                let mut got = fields.clone();
+                got.sort();
+                let mut want = per_test_case_mask_fields();
+                want.sort();
+                assert_eq!(got, want);
+            }
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_visibility_issues_exactly_one_batched_query_for_the_whole_batch() {
+        // The critical N+1 guard: a batch of MANY submissions must cost ONE
+        // query, not one query per submission.
+        let host = Host::mock();
+        seed_ioi_config(&host, 10, serde_json::json!({ "feedback_level": "none" }));
+        host.db.queue_query_result(serde_json::json!([
+            { "submission_id": 7, "user_id": 2, "contest_type": "ioi", "phase": "during" },
+            { "submission_id": 8, "user_id": 3, "contest_type": "ioi", "phase": "during" },
+            { "submission_id": 9, "user_id": 4, "contest_type": "ioi", "phase": "during" },
+        ]));
+
+        let req = VisibilityQueryInput {
+            subject: subject(Some(2)), // owns submission 7, peer to 8 and 9.
+            action: "view".to_string(),
+            context: QueryContext {
+                contest_id: Some(10),
+            },
+            resources: vec![
+                submission_resource(7, 10),
+                submission_resource(8, 10),
+                submission_resource(9, 10),
+            ],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert_eq!(decisions.len(), 3);
+        let queries = host.db.queries();
+        assert_eq!(
+            queries.len(),
+            1,
+            "must issue exactly one query for the whole batch, got: {queries:?}"
+        );
+        assert!(
+            queries[0].sql.contains("IN ("),
+            "must be a single IN(...) batch query: {}",
+            queries[0].sql
+        );
+
+        // The batching property alone is not evidence of correctness: pin
+        // what the three decisions actually are. All three are
+        // feedback_level "none" with the scoreboard hidden (default
+        // admins_only, during) -- submission 7's owner (2) is narrowed by
+        // feedback_level same as submissions 8 and 9's peer viewing.
+        for (i, decision) in decisions.iter().enumerate() {
+            match decision {
+                WireDecision::Redact { fields } => {
+                    let mut got = fields.clone();
+                    got.sort();
+                    let mut want = none_level_mask_fields();
+                    want.sort();
+                    assert_eq!(got, want, "decision {i} mask mismatch");
+                }
+                other => panic!("decision {i}: expected Redact, got {other:?}"),
+            }
         }
     }
 }

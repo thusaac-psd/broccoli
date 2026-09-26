@@ -13,6 +13,12 @@ use plugin_core::registry::PluginEntry;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: every handler in this module (list_all_plugins,
+// get_plugin_details, enable_plugin, disable_plugin, reload_plugin,
+// reload_all_plugins, upload_plugin) requires perm::PLUGIN_MANAGE, pinned by
+// tests/integration/plugin.rs's `contestant_cannot_manage_plugins`. This is
+// operator tooling over the plugin registry, never a per-row
+// Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::plugin as plugin_entity;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -172,6 +178,14 @@ pub async fn disable_plugin(
     purge_plugin_registrations(&state.registries, &id).await;
     state.plugins.unload_plugin(&id)?;
     state.plugins.update_translations()?;
+    if let Err(e) = crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, &id).await
+    {
+        tracing::error!(
+            plugin_id = %id,
+            error = %e,
+            "Failed to delete pending timers for a disabled plugin"
+        );
+    }
 
     let plugin_model = plugin_entity::ActiveModel {
         id: Unchanged(id.clone()),

@@ -1,3 +1,9 @@
+# Root plugin crate: intentionally outside the Cargo workspace (see top-level
+# Cargo.toml `exclude`). An explicit empty `[workspace]` pins this crate as its
+# own workspace root so cargo resolves it standalone even when the checkout is
+# nested inside another workspace (e.g. a git worktree under `.claude/worktrees`).
+[workspace]
+
 [package]
 name = "standard-languages"
 version = "0.1.0"

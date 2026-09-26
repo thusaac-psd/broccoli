@@ -42,8 +42,34 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # `plugins` is excluded from the root workspace (wasm32 targets, own
+      # `[workspace]` pins), so `cargo fmt --all --check` above never looks at
+      # plugin crates. This iterates over them separately; see the script for
+      # why a script beats a hardcoded crate list here.
+      - name: Check plugin formatting
+        run: ./scripts/fmt-plugins.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Same exclusion problem as formatting: `cargo clippy --workspace`
+      # above never looks at plugin crates, so their lint findings never ran
+      # in CI. See the script for why a script beats a hardcoded crate list
+      # here.
+      - name: Clippy plugins
+        run: ./scripts/clippy-plugins.sh
+
+      # `broccoli-server-sdk`'s `guest` feature (the WASM guest-side surface
+      # every plugin crate depends on, gating e.g. the `extism-pdk` calls and
+      # `#[cfg(target_arch = "wasm32")]` code in `sdk/eval.rs`) is off by
+      # default, so neither the workspace Clippy step above (packages/server
+      # depends on this crate with default features only) nor Clippy plugins
+      # above (that script only lints each plugin's own crate, not its path
+      # dependencies) ever lints server-sdk with it enabled. See the script
+      # for why this is a single fixed invocation rather than a discovery
+      # loop like the plugin scripts above.
+      - name: Clippy server-sdk (guest feature)
+        run: ./scripts/clippy-server-sdk-guest.sh
 
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh
@@ -54,10 +80,24 @@ jobs:
           E2E_SANDBOX_BACKEND: mock
         run: cargo test --workspace --locked -- --test-threads=4
 
+      # Same exclusion problem as formatting: `cargo test --workspace` never
+      # touches plugin crates, so their tests (including the ICPC
+      # submission-freeze mask and IOI feedback mask tests) never ran in CI.
+      - name: Test plugins
+        run: ./scripts/test-plugins.sh
+
       - name: Documentation
         run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+      # `plugins` is excluded from the root workspace, so the step above never
+      # documents a plugin crate -- the same gap already closed for fmt,
+      # clippy and tests. A broken intra-doc link in a plugin went undetected
+      # by every other gate until this one existed. See the script for why it
+      # discovers crates rather than listing them.
+      - name: Documentation (plugins)
+        run: ./scripts/doc-plugins.sh
 
   frontend:
     name: Frontend
@@ -87,8 +127,19 @@ jobs:
       - name: Type check
         run: pnpm typecheck
 
+      # `pnpm typecheck` above only runs `pnpm --filter @broccoli/web
+      # typecheck`; no plugin frontend is type-checked by anything else
+      # (`pnpm build` in those packages transpiles via tsdown/vite without a
+      # full type-check). See the script for why a script beats a hardcoded
+      # package list here.
+      - name: Type check plugin frontends
+        run: ./scripts/typecheck-plugin-frontends.sh
+
       - name: Check formatting
         run: pnpm format:check
+
+      - name: Test
+        run: pnpm test
 
       - name: Build
         run: pnpm build

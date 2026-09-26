@@ -116,7 +116,7 @@ fn resolve_primary<'a>(
     (primary, basename)
 }
 
-fn collect_files<'a>(req: &'a ResolveLanguageInput) -> Vec<&'a str> {
+fn collect_files(req: &ResolveLanguageInput) -> Vec<&str> {
     req.submitted_files
         .iter()
         .map(|s| s.as_str())

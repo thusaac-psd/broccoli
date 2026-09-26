@@ -36,6 +36,8 @@ extern "ExtismHost" {
     fn store_get(input: String) -> String;
     fn db_execute(sql: String, args: String) -> String;
     fn db_query(sql: String, args: String) -> String;
+    fn timer_schedule(input: String) -> String;
+    fn timer_cancel(input: String) -> String;
 }
 
 #[plugin_fn]
@@ -91,6 +93,370 @@ pub fn kv_read(input: String) -> FnResult<String> {
         status,
         body: Some(body),
     })?)
+}
+
+// -- Timer routes (`[[server.routes]]` / `[[server.timers]]`) -------------
+//
+// `timer_schedule_route`/`timer_cancel_route` are ordinary HTTP-routed
+// handlers: the proxy wraps the request in `PluginHttpRequest` the same way
+// it does for `kv_write`/`kv_read` above. `on_timer`, by contrast, is called
+// directly by the dispatcher's `deliver()` via `PluginInvoker::call_raw` -
+// NOT through the HTTP proxy - so its `input` is the bare
+// `{"key","payload","fire_at_ms","attempt"}` JSON the dispatcher serializes,
+// with no `PluginHttpRequest` envelope.
+
+#[derive(Deserialize)]
+struct TimerScheduleBody {
+    key: String,
+    fire_at_ms: i64,
+    payload: String,
+}
+
+#[derive(Deserialize)]
+struct TimerCancelBody {
+    key: String,
+}
+
+#[derive(Serialize)]
+struct TimerScheduleHostInput<'a> {
+    key: &'a str,
+    fire_at_ms: i64,
+    payload: &'a str,
+}
+
+#[derive(Serialize)]
+struct TimerCancelHostInput<'a> {
+    key: &'a str,
+}
+
+#[plugin_fn]
+pub fn timer_schedule_route(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let body: TimerScheduleBody = serde_json::from_value(req.body.unwrap_or_default())?;
+    let host_input = TimerScheduleHostInput {
+        key: &body.key,
+        fire_at_ms: body.fire_at_ms,
+        payload: &body.payload,
+    };
+    unsafe {
+        timer_schedule(serde_json::to_string(&host_input)?)?;
+    }
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: None,
+    })?)
+}
+
+#[plugin_fn]
+pub fn timer_cancel_route(input: String) -> FnResult<String> {
+    let req: PluginHttpRequest = serde_json::from_str(&input)?;
+    let body: TimerCancelBody = serde_json::from_value(req.body.unwrap_or_default())?;
+    let host_input = TimerCancelHostInput { key: &body.key };
+    unsafe {
+        timer_cancel(serde_json::to_string(&host_input)?)?;
+    }
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: None,
+    })?)
+}
+
+#[plugin_fn]
+pub fn timer_deliveries_route(_input: String) -> FnResult<String> {
+    let deliveries = read_deliveries_list()?;
+    Ok(serde_json::to_string(&PluginHttpResponse {
+        status: 200,
+        body: Some(serde_json::Value::Array(deliveries)),
+    })?)
+}
+
+#[derive(Deserialize)]
+struct TimerCallbackInputIn {
+    key: String,
+    payload: String,
+    #[allow(dead_code)]
+    fire_at_ms: i64,
+    #[allow(dead_code)]
+    attempt: i32,
+}
+
+/// Invoked directly by the dispatcher (`deliver()`), not via the HTTP proxy.
+/// `"trap_on_timer"` (seeded through `kv_write`, exactly like
+/// `decide_visibility`'s `"trap"` mode) forces a real WASM trap so the
+/// integration suite can prove retry-then-drop without wedging the loop.
+#[plugin_fn]
+pub fn on_timer(input: String) -> FnResult<String> {
+    if read_kv_single("trap_on_timer")?.as_deref() == Some("1") {
+        panic!("on_timer: forced trap for failure-injection test");
+    }
+
+    let cb: TimerCallbackInputIn = serde_json::from_str(&input)?;
+    let mut deliveries = read_deliveries_list()?;
+    deliveries.push(serde_json::json!({ "key": cb.key, "payload": cb.payload }));
+
+    let store_input = serde_json::json!({
+        "entries": [{ "key": "timer_deliveries", "value": serde_json::to_string(&deliveries)? }],
+    });
+    unsafe {
+        store_set(serde_json::to_string(&store_input)?)?;
+    }
+    Ok("{}".to_string())
+}
+
+/// Reads the JSON array previously accumulated under the fixed
+/// `"timer_deliveries"` KV key, defaulting to empty when nothing has been
+/// delivered yet.
+fn read_deliveries_list() -> FnResult<Vec<serde_json::Value>> {
+    match read_kv_single("timer_deliveries")? {
+        Some(raw) => Ok(serde_json::from_str(&raw)?),
+        None => Ok(Vec::new()),
+    }
+}
+
+// -- Visibility querier (`[[server.queries]] topic = "visibility"`) -------
+//
+// Hand-rolled mirrors of `broccoli-types`' `VisibilityQueryInput` /
+// `VisibilityQueryOutput` / `WireDecision` wire shapes, matching the style
+// already used above for the HTTP request/response types rather than
+// pulling in `broccoli-server-sdk` as a new dependency of this fixture.
+
+#[derive(Deserialize)]
+struct VisibilityQuerySubjectIn {
+    #[allow(dead_code)]
+    user_id: Option<i32>,
+    #[allow(dead_code)]
+    authenticated: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    permissions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct VisibilityQueryContextIn {
+    #[allow(dead_code)]
+    contest_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct VisibilityQueryResourceIn {
+    kind: String,
+    id: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    contest_id: Option<i32>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    problem_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct VisibilityQueryInputIn {
+    #[allow(dead_code)]
+    subject: VisibilityQuerySubjectIn,
+    #[allow(dead_code)]
+    action: String,
+    #[allow(dead_code)]
+    context: VisibilityQueryContextIn,
+    resources: Vec<VisibilityQueryResourceIn>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireDecisionOut {
+    Allow {},
+    Deny {},
+    Redact { fields: Vec<String> },
+}
+
+#[derive(Serialize)]
+struct VisibilityQueryOutputOut {
+    decisions: Vec<WireDecisionOut>,
+}
+
+/// Test-only visibility querier, switched between behaviors by the
+/// `visibility_mode` KV key (seeded through the existing `kv_write`
+/// route/host functions above). Deliberately tries several things a plugin
+/// must never be able to pull off, so the integration suite
+/// (`tests/integration/visibility_plugin.rs`) can prove the host refuses all
+/// of them without ever surfacing a 500:
+///
+/// - unset/`"normal"` (the default): a WORKING decision function. It answers
+///   `Allow` for EVERY resource by default, including ones the host has
+///   already denied - `Decision::meet` must keep the host's `Deny` no matter
+///   what a plugin answers (`plugin_cannot_widen_host_decision`). Resources
+///   nominated (by `"kind:id"`) via `deny_resource_keys` get `Deny`;
+///   resources nominated via `redact_resource_keys` get `Redact` with the
+///   fields from `redact_resource_fields` (defaulting to `label` /
+///   `problem_title`, the contest-problem list DTO's own fields); submission
+///   ids nominated via the older, submission-only `redact_submission_ids`
+///   key get `Redact` on `result.verdict` / `result.score` - kept unchanged
+///   so `plugin_cannot_author_a_verdict` still exercises exactly the
+///   mechanism it always has. `WireDecision::Redact` only ever carries field
+///   PATHS, never a replacement value, so blanking fields is the closest a
+///   plugin can get to "authoring" content - the masked fields must come
+///   back `null`/`[]`, never plugin-supplied content.
+/// - `"trap"`: panics before even parsing `input`, forcing a genuine WASM
+///   trap (this target has no unwind support, so a panic lowers to
+///   `unreachable`).
+/// - `"non_json"`: returns a successful `FnResult` whose payload is not JSON
+///   at all.
+/// - `"short_vector"`: returns one fewer decision than there are resources.
+/// - `"unknown_variant"`: hand-crafts raw JSON using a decision tag the host
+///   has never heard of, bypassing `WireDecisionOut` entirely.
+/// - `"over_limit_segments"` / `"over_limit_bytes"` / `"over_limit_fields"`:
+///   answers `Redact` with a field mask that exceeds one of the host's
+///   `MAX_MASK_PATH_SEGMENTS` / `MAX_MASK_PATH_BYTES` / `MAX_MASK_FIELDS`
+///   caps (`packages/server/src/visibility/plugin_query.rs`) respectively.
+///
+/// Every failure mode above must deny the WHOLE batch - never a partial
+/// result, never a 500. This includes a failure mode with no dedicated
+/// `visibility_mode` value: if ANY `store_get` call this function makes
+/// (reading `visibility_mode` itself, or any of the normal path's KV lists)
+/// hits a genuine host error - not "key never seeded", see `read_kv_single`'s
+/// doc comment - this function returns `Err` and the whole batch denies the
+/// same way it would for a trap. A plugin that cannot read its own decision
+/// inputs must never silently fall back to allowing everything (N1).
+#[plugin_fn]
+pub fn decide_visibility(input: String) -> FnResult<String> {
+    let mode = read_kv_single("visibility_mode")?.unwrap_or_default();
+
+    if mode == "trap" {
+        panic!("decide_visibility: forced trap for failure-injection test");
+    }
+
+    let req: VisibilityQueryInputIn = serde_json::from_str(&input)?;
+
+    if mode == "non_json" {
+        return Ok("this is deliberately not JSON".to_string());
+    }
+
+    if mode == "unknown_variant" {
+        // Bypass `WireDecisionOut` entirely: a tag the host has never heard
+        // of, once per resource in the batch.
+        let decisions: Vec<serde_json::Value> = req
+            .resources
+            .iter()
+            .map(|_| serde_json::json!({ "mystery": {} }))
+            .collect();
+        return Ok(serde_json::json!({ "decisions": decisions }).to_string());
+    }
+
+    if mode == "short_vector" {
+        let mut decisions: Vec<WireDecisionOut> = req
+            .resources
+            .iter()
+            .map(|_| WireDecisionOut::Allow {})
+            .collect();
+        decisions.pop();
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+    }
+
+    if mode == "over_limit_segments" || mode == "over_limit_bytes" || mode == "over_limit_fields" {
+        let fields = match mode.as_str() {
+            // 40 dot-separated segments: over the host's 32-segment cap.
+            "over_limit_segments" => vec![vec!["a"; 40].join(".")],
+            // A single 300-byte segment: over the host's 256-byte cap.
+            "over_limit_bytes" => vec!["x".repeat(300)],
+            // 70 distinct field paths: over the host's 64-field cap.
+            "over_limit_fields" => (0..70).map(|i| format!("field_{i}")).collect(),
+            _ => unreachable!(),
+        };
+        let decisions = req
+            .resources
+            .iter()
+            .map(|_| WireDecisionOut::Redact {
+                fields: fields.clone(),
+            })
+            .collect();
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+    }
+
+    // -- Normal path -------------------------------------------------------
+    let redact_submission_ids = read_kv_csv("redact_submission_ids")?;
+    let deny_keys = read_kv_csv("deny_resource_keys")?;
+    let redact_keys = read_kv_csv("redact_resource_keys")?;
+    let redact_fields = {
+        let fields = read_kv_csv("redact_resource_fields")?;
+        if fields.is_empty() {
+            vec!["label".to_string(), "problem_title".to_string()]
+        } else {
+            fields
+        }
+    };
+
+    let decisions = req
+        .resources
+        .iter()
+        .map(|r| {
+            let key = format!("{}:{}", r.kind, r.id);
+            if deny_keys.iter().any(|k| k == &key) {
+                WireDecisionOut::Deny {}
+            } else if redact_keys.iter().any(|k| k == &key) {
+                WireDecisionOut::Redact {
+                    fields: redact_fields.clone(),
+                }
+            } else if r.kind == "submission" && redact_submission_ids.iter().any(|id| id == &r.id)
+            {
+                WireDecisionOut::Redact {
+                    fields: vec!["result.verdict".to_string(), "result.score".to_string()],
+                }
+            } else {
+                WireDecisionOut::Allow {}
+            }
+        })
+        .collect();
+
+    Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?)
+}
+
+/// Read a single KV value written via the `kv_write` route.
+///
+/// `Ok(None)` means the key is legitimately absent: it was never written, so
+/// `store_get` succeeds and simply returns no entry for it. `Err` means the
+/// host call itself failed (e.g. `store_get` hitting DB-pool contention) or
+/// its response could not be parsed as the expected shape - a GENUINE fault,
+/// not "not seeded yet".
+///
+/// This distinction is load-bearing (N1): an earlier version of this
+/// function collapsed BOTH cases to `None`, which made `decide_visibility`'s
+/// normal path read a host error the same way it reads "no deny/redact list
+/// configured" - i.e. `Allow`. That is fail-OPEN, the opposite of this
+/// kernel's contract (`packages/server/src/visibility/plugin_query.rs`'s
+/// module doc: every plugin failure mode must collapse to `Deny`). A test
+/// fixture that fails open can hide a real fail-open regression in the
+/// kernel itself, since the test would stay green for the wrong reason.
+///
+/// Callers propagate `Err` with `?` up through `decide_visibility`, so a
+/// host error here becomes a plugin call failure exactly like a trap or
+/// non-JSON output - `decisions_from_output` in `plugin_query.rs` denies the
+/// whole batch for that, which is what we want: a plugin that cannot read
+/// its own inputs must deny, not silently agree with the host.
+fn read_kv_single(key: &str) -> FnResult<Option<String>> {
+    let store_input = serde_json::to_string(&serde_json::json!({ "keys": [key] }))?;
+    let raw = unsafe { store_get(store_input) }?;
+    let result: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(result
+        .get("values")
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
+}
+
+/// Read a comma-separated KV value written via the `kv_write` route. Empty
+/// when the key is legitimately absent (never written). Propagates `Err` on
+/// a genuine host error exactly like `read_kv_single` - see its doc comment
+/// for why this must NOT collapse to "no ids", which is indistinguishable
+/// from `Allow` in every one of this function's call sites.
+fn read_kv_csv(key: &str) -> FnResult<Vec<String>> {
+    let Some(raw) = read_kv_single(key)? else {
+        return Ok(Vec::new());
+    };
+    Ok(raw
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 #[plugin_fn]

@@ -31,6 +31,7 @@ pub mod services;
 pub mod state;
 pub mod upload_limits;
 pub mod utils;
+pub mod visibility;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

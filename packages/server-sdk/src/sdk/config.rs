@@ -297,7 +297,6 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::types::ConfigSource;
     use serde_json::json;
 

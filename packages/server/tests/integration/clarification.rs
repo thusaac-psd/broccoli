@@ -377,6 +377,91 @@ mod clarification_actions {
             .await;
         assert_eq!(res_res.status, 403);
     }
+
+    /// A stranger to a *private* contest (never registered, no `contest:manage`)
+    /// must get an identical 404 for `reply`/`resolve` whether the target
+    /// clarification id exists or not. Before the fix, `reply_clarification`/
+    /// `resolve_clarification` fetched the row before checking contest
+    /// reachability: an existing id fell through to the admin/author/recipient
+    /// check and returned 403 PermissionDenied, while a non-existing id returned
+    /// 404 NotFound - letting the stranger confirm a clarification exists in a
+    /// contest they cannot otherwise reach at all.
+    #[tokio::test]
+    async fn stranger_to_private_contest_cannot_distinguish_existing_from_missing_clarification() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let u1 = app
+            .create_user_with_role("u1", "pass1234", "contestant")
+            .await;
+        let stranger = app
+            .create_user_with_role("stranger1", "pass1234", "contestant")
+            .await;
+        // Private contest: `is_public: false`. `stranger` is never registered
+        // and has no `contest:manage` permission, so `check_contest_access`/
+        // the kernel's `Resource::Contest` decision denies them outright.
+        // `register_for_contest` is self-service and only works on public
+        // contests, so `u1` is enrolled via the admin `add_participant`
+        // endpoint instead.
+        let cid = app.create_contest(&admin, "Private C1", false, false).await;
+        let u1_id = app.get_with_token(routes::ME, &u1).await.id();
+        let add_res = app
+            .post_with_token(
+                &routes::contest_participants(cid),
+                &json!({ "user_id": u1_id }),
+                &admin,
+            )
+            .await;
+        assert_eq!(add_res.status, 201);
+
+        // admin can create in a private contest without being a registered
+        // participant (`contest:manage` bypasses the reachability gate).
+        let q_res = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &json!({
+                    "content": "Existing question",
+                    "clarification_type": "question"
+                }),
+                &admin,
+            )
+            .await;
+        assert_eq!(q_res.status, 201);
+        let existing_clar_id = q_res.id();
+        let missing_clar_id = existing_clar_id + 999_000;
+
+        for clar_id in [existing_clar_id, missing_clar_id] {
+            let reply_res = app
+                .post_with_token(
+                    &routes::contest_clarification_reply(cid, clar_id),
+                    &json!({
+                        "content": "Trying to peek",
+                        "is_public": false
+                    }),
+                    &stranger,
+                )
+                .await;
+            assert_eq!(
+                reply_res.status, 404,
+                "reply: clarification_id={clar_id} must be indistinguishable from a missing one"
+            );
+            assert_eq!(reply_res.body["code"], "NOT_FOUND");
+
+            let resolve_res = app
+                .post_with_token(
+                    &routes::contest_clarification_resolve(cid, clar_id),
+                    &json!({"resolved": true}),
+                    &stranger,
+                )
+                .await;
+            assert_eq!(
+                resolve_res.status, 404,
+                "resolve: clarification_id={clar_id} must be indistinguishable from a missing one"
+            );
+            assert_eq!(resolve_res.body["code"], "NOT_FOUND");
+        }
+    }
 }
 
 mod clarification_reply_publishing {

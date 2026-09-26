@@ -1602,6 +1602,59 @@ mod contest_participants {
     }
 
     #[tokio::test]
+    async fn hidden_participant_list_denies_non_manager_participant() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_hide_list", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user_hide_list", "pass1234", "contestant")
+            .await;
+        let contest_id = create_contest_as_admin(&app, &admin, "Hidden list", true).await;
+
+        let patch_res = app
+            .patch_with_token(
+                &routes::contest(contest_id),
+                &json!({"show_participants_list": false}),
+                &admin,
+            )
+            .await;
+        assert_eq!(patch_res.status, 200, "patch failed: {}", patch_res.text);
+
+        app.post_with_token(&routes::contest_register(contest_id), &json!({}), &user)
+            .await;
+
+        let res = app
+            .get_with_token(&routes::contest_participants(contest_id), &user)
+            .await;
+        assert_eq!(res.status, 403);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+    }
+
+    #[tokio::test]
+    async fn hidden_participant_list_still_readable_by_contest_manager() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_hide_list2", "pass1234", "admin")
+            .await;
+        let contest_id = create_contest_as_admin(&app, &admin, "Hidden list 2", true).await;
+
+        let patch_res = app
+            .patch_with_token(
+                &routes::contest(contest_id),
+                &json!({"show_participants_list": false}),
+                &admin,
+            )
+            .await;
+        assert_eq!(patch_res.status, 200, "patch failed: {}", patch_res.text);
+
+        let res = app
+            .get_with_token(&routes::contest_participants(contest_id), &admin)
+            .await;
+        assert_eq!(res.status, 200);
+    }
+
+    #[tokio::test]
     async fn admin_can_remove_participant() {
         let app = TestApp::spawn().await;
         let admin = app

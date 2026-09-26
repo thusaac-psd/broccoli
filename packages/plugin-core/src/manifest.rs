@@ -115,6 +115,12 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub hooks: Vec<HookDeclaration>,
+
+    #[serde(default)]
+    pub queries: Vec<ServerQuery>,
+
+    #[serde(default)]
+    pub timers: Vec<ServerTimer>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -125,6 +131,26 @@ pub struct HookDeclaration {
     pub scope: HookScope,
     #[serde(default)]
     pub mode: HookMode,
+}
+
+/// A `[[server.queries]]` declaration. Unlike `[[server.hooks]]` (which
+/// answers "should this event proceed"), a query answers "here is a decision
+/// for each of these resources" -- e.g. the visibility kernel's per-resource
+/// access query. Declaring a query is itself the opt-in; it requires no
+/// separate permission grant.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerQuery {
+    pub topic: String,
+    pub function: String,
+}
+
+/// A `[[server.timers]]` declaration: the function invoked when one of this
+/// plugin's scheduled timers comes due. A plugin has at most one, and
+/// declaring it is the opt-in for receiving callbacks -- scheduling them
+/// additionally requires the `timer` permission.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerTimer {
+    pub function: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, utoipa::ToSchema)]
@@ -875,5 +901,71 @@ mod tests {
         let manifest: PluginManifest = toml::from_str(toml_str).unwrap();
         let server = manifest.server.unwrap();
         assert_eq!(server.hooks[0].mode, HookMode::Blocking);
+    }
+
+    #[test]
+    fn parses_server_queries_section() {
+        let toml = r#"
+name = "t"
+version = "0.1.0"
+
+[server]
+entry = "t.wasm"
+permissions = ["logger"]
+
+[[server.queries]]
+topic = "visibility"
+function = "decide_visibility"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        let queries = &manifest.server.as_ref().unwrap().queries;
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].topic, "visibility");
+        assert_eq!(queries[0].function, "decide_visibility");
+    }
+
+    #[test]
+    fn manifest_without_queries_defaults_to_empty() {
+        let toml = r#"
+name = "t"
+version = "0.1.0"
+
+[server]
+entry = "t.wasm"
+permissions = ["logger"]
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        assert!(manifest.server.as_ref().unwrap().queries.is_empty());
+    }
+
+    #[test]
+    fn parses_server_timers_section() {
+        let toml = r#"
+name = "p"
+version = "0.1.0"
+
+[server]
+entry = "p.wasm"
+
+[[server.timers]]
+function = "on_timer"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        let timers = &manifest.server.as_ref().unwrap().timers;
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0].function, "on_timer");
+    }
+
+    #[test]
+    fn manifest_without_timers_defaults_to_empty() {
+        let toml = r#"
+name = "p"
+version = "0.1.0"
+
+[server]
+entry = "p.wasm"
+"#;
+        let manifest: PluginManifest = toml::from_str(toml).expect("manifest parses");
+        assert!(manifest.server.as_ref().unwrap().timers.is_empty());
     }
 }

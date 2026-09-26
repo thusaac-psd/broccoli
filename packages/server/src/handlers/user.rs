@@ -8,6 +8,13 @@ use sea_orm::sea_query::LockType;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: `list_users`/`get_user`/`update_user`/
+// `delete_user`/`assign_role`/`revoke_role` all require perm::USER_MANAGE,
+// pinned by `non_admin_cannot_list_all_users` and
+// `user_cannot_modify_themselves_without_permission`
+// (tests/integration/user.rs). `contest`/`contest_user` here are only used
+// internally by `delete_user` to drop the deleted user's future contest
+// registrations - never returned to a response body.
 use crate::entity::{contest, contest_user, refresh_token, role, role_permission, user, user_role};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

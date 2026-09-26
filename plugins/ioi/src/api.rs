@@ -1,33 +1,50 @@
+#[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::permissions as perm;
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ContestConfig, FeedbackLevel, TaskConfig, resolve_tc_label, round_score};
+#[cfg(target_arch = "wasm32")]
+use crate::config::{ContestConfig, TaskConfig, resolve_tc_label, round_score};
+// Used by both the wasm32 handlers below and subtask_scores_access_decision,
+// which is deliberately reachable under `#[cfg(test)]` too (see its doc
+// comment) so `cargo test` can exercise the feedback-level access matrix.
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::config::FeedbackLevel;
 #[cfg(target_arch = "wasm32")]
 use crate::feedback::{
     can_view_privileged_submission_feedback, viewer_has_token_feedback_for_submission,
 };
+#[cfg(target_arch = "wasm32")]
 use crate::score::{TcMaxScore, score_submission_subtask_details};
 #[cfg(target_arch = "wasm32")]
 use crate::score::{compute_official_task_score, load_current_submission_test_case_results};
 #[cfg(target_arch = "wasm32")]
 use crate::scoreboard::load_scoreboard_cells;
+#[cfg(target_arch = "wasm32")]
 use crate::scoreboard::{
     combined_score_time_seconds, compare_scoreboard_entries, full_scoreboard_visible_for_phase,
     scoreboard_entries_tied,
 };
+#[cfg(target_arch = "wasm32")]
 use crate::tokens::{TokenState, available_tokens, next_regen_elapsed_min};
 #[cfg(target_arch = "wasm32")]
 use crate::{load_effective_subtasks, load_task_config, load_token_state};
 
+// Only ever queried by the wasm32-gated token handlers below; gated the same
+// way so a native (test/clippy) build -- which never calls those handlers --
+// doesn't see these as dead code.
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct ElapsedMinutes {
     elapsed_minutes: Option<f64>,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct NextRegenAtRow {
     next_regen_at: Option<String>,
@@ -614,6 +631,75 @@ pub(crate) fn handle_scoreboard(
     })
 }
 
+/// Result of `subtask_scores_access_decision`: either the request must be
+/// rejected before any subtask data is computed, or it may proceed with
+/// `can_view_subtask_scores` telling the caller whether the per-subtask
+/// breakdown itself should be populated or nulled.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubtaskScoresAccess {
+    Denied { status: u16, message: &'static str },
+    Allowed { can_view_subtask_scores: bool },
+}
+
+/// Pure access-control core of `handle_submission_subtask_scores`, extracted
+/// out from behind `#[cfg(target_arch = "wasm32")]` so it is reachable by
+/// `cargo test` (this file previously had zero `#[cfg(test)]` coverage
+/// because every function in it only compiled for the wasm32 target).
+///
+/// Per `feedback.rs`'s `mask_for_level` doc comment, the
+/// `can_view_subtask_scores` computation below is the ONLY place
+/// `FeedbackLevel::SubtaskScores` is told apart from `FeedbackLevel::TotalOnly`
+/// -- the generic submission-DTO mask (`mask_for_level`) treats the two as
+/// byte-identical by design, deferring the distinction entirely to this
+/// function. A repo-wide grep confirms there is no second enforcement point.
+///
+/// No host calls or I/O: `tokened_feedback` is the caller's precomputed
+/// answer to "does a spent token unlock full feedback for this submission
+/// right now", so the wasm shell can skip that storage read entirely when it
+/// cannot affect the outcome (mirrors the original short-circuit of
+/// `can_view_all_submissions || phase == "after" || (... token check)`).
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn subtask_scores_access_decision(
+    phase: &str,
+    viewer_id: Option<i32>,
+    submission_owner_id: i32,
+    can_view_all_submissions: bool,
+    tokened_feedback: bool,
+    feedback_level: FeedbackLevel,
+) -> SubtaskScoresAccess {
+    if phase != "after" {
+        match viewer_id {
+            Some(uid) if uid == submission_owner_id => {} // owner -- allowed
+            Some(_) if can_view_all_submissions => {}
+            Some(_) => {
+                return SubtaskScoresAccess::Denied {
+                    status: 403,
+                    message: "Cannot view another user's subtask scores",
+                };
+            }
+            None => {
+                return SubtaskScoresAccess::Denied {
+                    status: 401,
+                    message: "Authentication required",
+                };
+            }
+        }
+    }
+
+    let can_view_full_feedback = can_view_all_submissions || phase == "after" || tokened_feedback;
+
+    let can_view_subtask_scores = can_view_full_feedback
+        || matches!(
+            feedback_level,
+            FeedbackLevel::Full | FeedbackLevel::SubtaskScores
+        );
+
+    SubtaskScoresAccess::Allowed {
+        can_view_subtask_scores,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn handle_submission_subtask_scores(
     host: &Host,
@@ -651,32 +737,32 @@ pub(crate) fn handle_submission_subtask_scores(
 
     let can_view_all_submissions = can_view_privileged_submission_feedback(&req);
 
-    if phase != "after" {
-        match req.user_id() {
-            Some(uid) if uid == sub_info.user_id => {} // owner -- allowed
-            Some(_) if can_view_all_submissions => {}
-            Some(_) => {
-                return Ok(PluginHttpResponse::error(
-                    403,
-                    "Cannot view another user's subtask scores",
-                ));
-            }
-            None => {
-                return Ok(PluginHttpResponse::error(401, "Authentication required"));
-            }
+    // Only spend the storage read on a token lookup when it could actually
+    // change the outcome for `subtask_scores_access_decision` below.
+    let tokened_feedback = if !can_view_all_submissions && phase != "after" {
+        tokens_enabled(&contest_config)
+            && viewer_has_token_feedback_for_submission(host, &req, contest_id, submission_id)?
+    } else {
+        false
+    };
+
+    let access = subtask_scores_access_decision(
+        phase,
+        req.user_id(),
+        sub_info.user_id,
+        can_view_all_submissions,
+        tokened_feedback,
+        contest_config.feedback_level,
+    );
+
+    let can_view_subtask_scores = match access {
+        SubtaskScoresAccess::Denied { status, message } => {
+            return Ok(PluginHttpResponse::error(status, message));
         }
-    }
-
-    let can_view_full_feedback = can_view_all_submissions
-        || phase == "after"
-        || (tokens_enabled(&contest_config)
-            && viewer_has_token_feedback_for_submission(host, &req, contest_id, submission_id)?);
-
-    let can_view_subtask_scores = can_view_full_feedback
-        || matches!(
-            contest_config.feedback_level,
-            FeedbackLevel::Full | FeedbackLevel::SubtaskScores
-        );
+        SubtaskScoresAccess::Allowed {
+            can_view_subtask_scores,
+        } => can_view_subtask_scores,
+    };
 
     let subtasks = if can_view_subtask_scores {
         let task_config = load_task_config(host, contest_id, problem_id)?;
@@ -703,4 +789,163 @@ pub(crate) fn handle_submission_subtask_scores(
             "subtasks": subtasks
         })),
     })
+}
+
+#[cfg(test)]
+mod subtask_scores_access_tests {
+    use super::*;
+
+    // The owner, mid-contest, with no token spent: the ONLY inputs varying
+    // across these two calls are the feedback levels being distinguished.
+    // This is the direct pin for finding C2a -- previously nothing in
+    // `cargo test` could reach this branch at all.
+    #[test]
+    fn subtask_scores_are_visible_at_subtask_scores_level_but_not_total_only() {
+        let subtask_scores = subtask_scores_access_decision(
+            "during",
+            Some(2),
+            2,
+            false,
+            false,
+            FeedbackLevel::SubtaskScores,
+        );
+        assert_eq!(
+            subtask_scores,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: true
+            },
+            "SubtaskScores level must expose the per-subtask breakdown"
+        );
+
+        let total_only = subtask_scores_access_decision(
+            "during",
+            Some(2),
+            2,
+            false,
+            false,
+            FeedbackLevel::TotalOnly,
+        );
+        assert_eq!(
+            total_only,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: false
+            },
+            "TotalOnly level must NOT expose the per-subtask breakdown"
+        );
+    }
+
+    #[test]
+    fn full_feedback_level_always_shows_subtask_scores() {
+        let decision =
+            subtask_scores_access_decision("during", Some(2), 2, false, false, FeedbackLevel::Full);
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: true
+            }
+        );
+    }
+
+    #[test]
+    fn none_feedback_level_never_shows_subtask_scores_for_the_plain_owner() {
+        let decision =
+            subtask_scores_access_decision("during", Some(2), 2, false, false, FeedbackLevel::None);
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: false
+            }
+        );
+    }
+
+    #[test]
+    fn can_view_all_submissions_bypasses_the_feedback_level_entirely() {
+        // An organiser/view-all viewer sees subtask scores regardless of
+        // configured level, even TotalOnly, and even for someone else's
+        // submission.
+        let decision = subtask_scores_access_decision(
+            "during",
+            Some(99),
+            2,
+            true,
+            false,
+            FeedbackLevel::TotalOnly,
+        );
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_spent_token_bypasses_the_feedback_level_for_the_owner() {
+        let decision = subtask_scores_access_decision(
+            "during",
+            Some(2),
+            2,
+            false,
+            true, // tokened_feedback
+            FeedbackLevel::TotalOnly,
+        );
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: true
+            }
+        );
+    }
+
+    #[test]
+    fn phase_after_shows_subtask_scores_to_anyone_regardless_of_level() {
+        // Once the contest is over, feedback opens up for everyone -- even a
+        // peer who is not the owner and does not hold view-all.
+        let decision = subtask_scores_access_decision(
+            "after",
+            Some(99),
+            2,
+            false,
+            false,
+            FeedbackLevel::TotalOnly,
+        );
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Allowed {
+                can_view_subtask_scores: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_peer_is_denied_before_the_contest_ends() {
+        let decision = subtask_scores_access_decision(
+            "during",
+            Some(99),
+            2,
+            false,
+            false,
+            FeedbackLevel::Full,
+        );
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Denied {
+                status: 403,
+                message: "Cannot view another user's subtask scores",
+            }
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_viewer_is_denied_before_the_contest_ends() {
+        let decision =
+            subtask_scores_access_decision("during", None, 2, false, false, FeedbackLevel::Full);
+        assert_eq!(
+            decision,
+            SubtaskScoresAccess::Denied {
+                status: 401,
+                message: "Authentication required",
+            }
+        );
+    }
 }

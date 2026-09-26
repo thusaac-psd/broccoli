@@ -15,6 +15,9 @@ use crate::entity::{
 };
 use crate::hooks;
 use crate::state::AppState;
+use crate::utils::test_case_body::{
+    AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES, select_inline_within_budget,
+};
 
 #[derive(FromQueryResult)]
 struct SubmissionDispatchTestCaseRow {
@@ -708,20 +711,112 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
                 return;
             }
         };
-        db_tcs
-            .into_iter()
-            .map(|tc| TestCaseRow {
-                id: tc.id,
-                score: tc.score as f64,
-                is_sample: tc.is_sample,
-                position: tc.position,
-                description: tc.description,
-                label: Some(tc.label),
-                input: body_ref(tc.input, tc.input_blob_hash),
-                expected_output: body_ref(tc.expected_output, tc.expected_output_blob_hash),
-                is_custom: false,
+        // Bound the TOTAL inline bytes (input + expected_output, across every
+        // test case) assembled into this submission's plugin payload, not
+        // just each body individually. `INLINE_TEST_CASE_BODY_THRESHOLD_BYTES`
+        // (checked at test-case create time) only bounds one body at a time;
+        // fifty legally-under-threshold bodies can still sum to tens of MiB,
+        // which is the measured cause of a guest OOM (see
+        // AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES's doc comment). Bodies that
+        // are already blob-backed are untouched -- they never occupy the
+        // inline budget in the first place.
+        //
+        // This check runs on EVERY dispatch, so it also transparently repairs
+        // problems that were already stored over-budget before this fix
+        // existed: there is no separate backfill migration, because the split
+        // is re-derived from current storage state each time a submission is
+        // judged. Candidates are walked in a fixed order (test-case
+        // `position`, already the query's ORDER BY, then input before
+        // expected_output within a case), so the split is deterministic and
+        // stable across rejudges of the same test-case set.
+        let candidate_sizes: Vec<usize> = db_tcs
+            .iter()
+            .flat_map(|tc| {
+                [
+                    tc.input_blob_hash.is_none().then_some(tc.input.len()),
+                    tc.expected_output_blob_hash
+                        .is_none()
+                        .then_some(tc.expected_output.len()),
+                ]
             })
-            .collect()
+            .flatten()
+            .collect();
+        let mut keep_flags =
+            select_inline_within_budget(&candidate_sizes, AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES)
+                .into_iter();
+
+        let mut resolved_test_cases = Vec::with_capacity(db_tcs.len());
+        for tc in db_tcs {
+            let SubmissionDispatchTestCaseRow {
+                id,
+                score,
+                is_sample,
+                position,
+                description,
+                label,
+                input,
+                expected_output,
+                input_blob_hash,
+                expected_output_blob_hash,
+            } = tc;
+
+            let input_ref = match resolve_body_ref(&state, input_blob_hash, input, &mut keep_flags)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    error!(error = %e, "Failed to spill over-budget inline test case input to blob store");
+                    record_dispatch_failure(
+                        &state.db,
+                        &state.metrics,
+                        submission.id,
+                        judgement_id,
+                        "BLOB_STORE_ERROR",
+                        &format!("Failed to store oversized inline test case input: {e}"),
+                        submission.judge_epoch,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let expected_output_ref = match resolve_body_ref(
+                &state,
+                expected_output_blob_hash,
+                expected_output,
+                &mut keep_flags,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    error!(error = %e, "Failed to spill over-budget inline test case expected_output to blob store");
+                    record_dispatch_failure(
+                        &state.db,
+                        &state.metrics,
+                        submission.id,
+                        judgement_id,
+                        "BLOB_STORE_ERROR",
+                        &format!("Failed to store oversized inline test case expected_output: {e}"),
+                        submission.judge_epoch,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            resolved_test_cases.push(TestCaseRow {
+                id,
+                score: score as f64,
+                is_sample,
+                position,
+                description,
+                label: Some(label),
+                input: input_ref,
+                expected_output: expected_output_ref,
+                is_custom: false,
+            });
+        }
+        resolved_test_cases
     };
 
     let input = OnSubmissionInput {
@@ -895,11 +990,44 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
     });
 }
 
-fn body_ref(inline: String, blob_hash: Option<String>) -> TestCaseBodyRef {
-    match blob_hash {
-        Some(hash) => TestCaseBodyRef::blob(hash),
-        None => TestCaseBodyRef::inline(inline),
+/// Resolve one test-case body (input or expected_output) to its dispatch
+/// reference.
+///
+/// An already blob-backed body passes through unchanged -- it never
+/// consumed a `keep_flags` entry (see `candidate_sizes` at the call site) and
+/// is untouched by the aggregate inline budget. Otherwise this consumes the
+/// next aggregate-budget decision -- callers must visit candidates in
+/// exactly the order `candidate_sizes` was built in, so each body sees the
+/// flag [`select_inline_within_budget`] computed for it -- and either keeps
+/// the text inline or spills it to the blob store.
+///
+/// The blob store is content-addressed (`put` hashes the bytes and is a
+/// no-op if that hash is already stored), so spilling a body that turns out
+/// to already exist as a blob elsewhere, or re-spilling the same body on a
+/// rejudge, is idempotent and cheap.
+async fn resolve_body_ref(
+    state: &AppState,
+    blob_hash: Option<String>,
+    inline_text: String,
+    keep_flags: &mut impl Iterator<Item = bool>,
+) -> Result<TestCaseBodyRef, common::storage::StorageError> {
+    if let Some(hash) = blob_hash {
+        return Ok(TestCaseBodyRef::blob(hash));
     }
+
+    // `candidate_sizes` produces exactly one flag per inline candidate, in
+    // the same order candidates are resolved here, so this always has a
+    // matching entry. Fall back to "keep inline" (today's behavior) rather
+    // than panicking if that invariant is ever violated by a future edit --
+    // a stale/missing flag should degrade to the pre-fix behavior, not take
+    // down submission dispatch.
+    let keep = keep_flags.next().unwrap_or(true);
+    if keep {
+        return Ok(TestCaseBodyRef::inline(inline_text));
+    }
+
+    let hash = state.blob_store.put(inline_text.as_bytes()).await?;
+    Ok(TestCaseBodyRef::blob(hash.to_hex()))
 }
 
 /// Real-Postgres regression tests for dispatch-time judgement bookkeeping.

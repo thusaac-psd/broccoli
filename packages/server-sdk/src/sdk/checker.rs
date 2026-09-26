@@ -3,10 +3,13 @@ use crate::error::SdkError;
 use crate::types::InterpretCheckerInput;
 use crate::types::{CheckerRunOutcome, CheckerStage, CheckerVerdict, ResolveCheckerInput};
 
-pub struct Checker {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) inner: CheckerMock,
-}
+// No mock-state field: unlike `Db`/`Eval`/`Config`/etc., the host-target mock
+// impl below has nothing to record or replay -- it always returns a fixed
+// error -- so there is no wasm32-or-otherwise consumer to cfg-gate a state
+// field to. A previous `#[cfg(not(target_arch = "wasm32"))] inner: CheckerMock`
+// field carried a zero-sized, never-read placeholder and triggered a
+// "field is never read" warning on host builds.
+pub struct Checker {}
 
 #[cfg(target_arch = "wasm32")]
 impl Checker {
@@ -36,16 +39,6 @@ impl Checker {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) struct CheckerMock;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl CheckerMock {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 impl Checker {
     pub fn resolve(&self, _input: &ResolveCheckerInput) -> Result<CheckerStage, SdkError> {
         Err(SdkError::Other("Mock checker not implemented".into()))
@@ -66,9 +59,7 @@ mod tests {
     use crate::types::JudgeFile;
 
     fn checker() -> Checker {
-        Checker {
-            inner: CheckerMock::new(),
-        }
+        Checker {}
     }
 
     #[test]

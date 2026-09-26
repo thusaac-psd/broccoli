@@ -1,0 +1,12 @@
+[package]
+name = "no-timer-perm-plugin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+extism-pdk = "1.4.1"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]

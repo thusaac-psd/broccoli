@@ -19,6 +19,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Before anything opens sockets or files. See `common::rlimit` for why the
+    // default soft limit of 1024 is not enough for a server.
+    let nofile = common::rlimit::raise_nofile_limit();
+
     let app_config = AppConfig::load().context("Failed to load configuration")?;
 
     if app_config.jwt_secret_is_weak() {
@@ -49,6 +53,7 @@ fn main() -> anyhow::Result<()> {
 
     tokio_runtime.block_on(async move {
         let server_runtime = ServerRuntime::build(app_config).await?;
+        nofile.log();
         server_runtime.serve().await
     })
 }

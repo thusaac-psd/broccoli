@@ -1,3 +1,11 @@
+# The native print client is a standalone binary, built and released on its own
+# (see release.yml's build-print-client job) rather than with the WASM plugin.
+# An explicit empty `[workspace]` pins it as its own workspace root: without it,
+# `plugins/print/Cargo.toml`'s `[workspace]` table claims this crate as a member
+# and cargo refuses to build it. (`[package] exclude` there is the packaging
+# exclude, which has no bearing on workspace membership.)
+[workspace]
+
 [package]
 name = "broccoli-print-client"
 version = "0.1.0"

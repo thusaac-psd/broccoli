@@ -28,7 +28,7 @@ use server::config::{
     AppConfig, AuthConfig, BlobStoreConfig, BootstrapConfig, CorsConfig, DatabaseConfig,
     MqAppConfig, ServerConfig, SubmissionConfig,
 };
-use server::entity::{user, user_role};
+use server::entity::{role, role_permission, user, user_role};
 use server::manager::ServerManager;
 use server::registry::{
     CheckerStageRegistry, ContestTypeRegistry, EvaluateBatches, EvaluatorRegistry,
@@ -253,6 +253,8 @@ pub mod routes {
         format!("/api/v1/roles/{role_name}/permissions/{permission_name}")
     }
 
+    pub const ADMIN_PLUGINS: &str = "/api/v1/admin/plugins";
+
     pub fn admin_plugin_details(id: &str) -> String {
         format!("/api/v1/admin/plugins/{id}")
     }
@@ -358,6 +360,8 @@ pub mod routes {
         format!("/api/v1/submissions/{id}/judgements/{judgement_id}/discard")
     }
 
+    pub const ADMIN_FAN_OUT_SUBMISSION: &str = "/api/v1/admin/submissions/fan-out";
+
     pub fn problem_submissions(problem_id: i32) -> String {
         format!("/api/v1/problems/{problem_id}/submissions")
     }
@@ -427,12 +431,24 @@ pub mod routes {
     pub const DLQ_BULK: &str = "/api/v1/dlq/bulk";
     pub const SUBMISSIONS_BULK_REJUDGE: &str = "/api/v1/submissions/bulk-rejudge";
 
+    pub const SYSTEM_WORKERS: &str = "/api/v1/admin/system/workers";
+    pub const SYSTEM_QUEUES: &str = "/api/v1/admin/system/queues";
+    pub const SYSTEM_OVERVIEW: &str = "/api/v1/admin/system/overview";
+
     pub fn attachments(problem_id: i32) -> String {
         format!("/api/v1/problems/{problem_id}/attachments")
     }
 
     pub fn attachment(problem_id: i32, ref_id: &str) -> String {
         format!("/api/v1/problems/{problem_id}/attachments/{ref_id}")
+    }
+
+    pub fn additional_files(problem_id: i32) -> String {
+        format!("/api/v1/problems/{problem_id}/additional-files")
+    }
+
+    pub fn additional_file(problem_id: i32, ref_id: &str) -> String {
+        format!("/api/v1/problems/{problem_id}/additional-files/{ref_id}")
     }
 
     pub fn problem_config(problem_id: i32) -> String {
@@ -479,6 +495,11 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub client: Client,
     pub db: DatabaseConnection,
+    /// A clone of the `AppState` the router was built from. Lets a test call
+    /// a dispatcher-internal `pub` function directly (e.g.
+    /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP -
+    /// the same pattern `scaling.rs` uses for `dispatcher::sweeper::sweep_once`.
+    pub state: AppState,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -524,7 +545,7 @@ pub struct TestResponse {
 /// `Self::spawn_internal`. Add a field here when a test needs to
 /// observe a non-default `ServerConfig` value rather than copy-pasting
 /// the entire fixture in the test.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct SpawnOptions {
     /// UP#39: cap on durable `Queued` rows accepted at POST time.
     /// `Some(0)` (the fixture default) disables the cap; `Some(n)`
@@ -540,6 +561,30 @@ pub struct SpawnOptions {
     /// opt in so the shared test database is not hammered by hundreds
     /// of background pollers during parallel integration runs.
     pub start_dispatcher: bool,
+    /// Wire a real Redis connection into `AppState.redis_client`. The
+    /// fixture defaults to `None` (no Redis), which makes
+    /// `handlers::system::live_worker_ids` always return an empty set -
+    /// fine for the overwhelming majority of tests, but it means any
+    /// endpoint that requires a live worker heartbeat (`system:admin`
+    /// `target_worker_id` overrides, `admin_fan_out_submission`) can never
+    /// reach its success path under the plain fixture. A test that needs
+    /// that path starts its own `testcontainers_modules::redis::Redis`
+    /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
+    /// container's URL here.
+    pub redis_url: Option<String>,
+    /// Overrides `PluginConfig.plugins_dir` (default: the shared
+    /// `tests/fixtures`). Used to isolate a plugin whose activation is
+    /// EXPECTED to fail (e.g. an unresolved host-function import from a
+    /// missing permission) from the shared fixtures directory, so it does
+    /// not fail every other test that loads `tests/fixtures`.
+    pub plugins_dir: Option<PathBuf>,
+    /// When `false` (the default), `spawn_internal` hard-asserts that every
+    /// discovered plugin activated successfully - the right default, since
+    /// an unexpected activation failure almost always means a fixture is
+    /// broken. A test that deliberately loads a plugin whose activation
+    /// cannot succeed (see `plugins_dir` above) sets this to `true` instead
+    /// of weakening that assertion for everyone else.
+    pub allow_plugin_activation_failures: bool,
 }
 
 impl TestApp {
@@ -553,6 +598,10 @@ impl TestApp {
 
     pub async fn spawn_with_options(options: SpawnOptions) -> Self {
         Self::spawn_internal(false, options).await
+    }
+
+    pub async fn spawn_with_plugins_and_options(options: SpawnOptions) -> Self {
+        Self::spawn_internal(true, options).await
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
@@ -627,6 +676,10 @@ impl TestApp {
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
+                plugin_timer_tick_interval_secs: 1,
+                plugin_timer_lease_secs: 30,
+                plugin_timer_batch: 64,
+                plugin_timer_max_attempts: 5,
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
@@ -642,7 +695,7 @@ impl TestApp {
                 login_failure_window_secs: 60,
             },
             plugin: PluginConfig {
-                plugins_dir: fixtures_dir(),
+                plugins_dir: options.plugins_dir.clone().unwrap_or_else(fixtures_dir),
                 ..Default::default()
             },
             submission: SubmissionConfig::default(),
@@ -735,7 +788,6 @@ impl TestApp {
                     plugin_id: "__test__".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
-                    filter_submission_fn: None,
                 },
             );
             let mut languages = language_resolver_registry.write().await;
@@ -764,12 +816,17 @@ impl TestApp {
             }
         }
 
+        let redis_client = options
+            .redis_url
+            .as_ref()
+            .map(|url| Arc::new(redis::Client::open(url.clone()).expect("valid redis url")));
+
         let state = AppState {
             plugins,
             db: db.clone(),
             config: app_config,
             mq: None,
-            redis_client: None,
+            redis_client,
             blob_store,
             registries: server::state::RegistryState {
                 contest_type_registry,
@@ -801,17 +858,20 @@ impl TestApp {
         });
         if load_plugins {
             let failures = sync_plugins(&state).await.expect("Failed to sync plugins");
-            assert!(
-                failures.is_empty(),
-                "Plugin activations failed: {}",
-                failures
-                    .iter()
-                    .map(|f| format!("{}: {}", f.plugin_id, f.error))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
+            if !options.allow_plugin_activation_failures {
+                assert!(
+                    failures.is_empty(),
+                    "Plugin activations failed: {}",
+                    failures
+                        .iter()
+                        .map(|f| format!("{}: {}", f.plugin_id, f.error))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+            }
         }
 
+        let state_for_app = state.clone();
         let app = server::build_router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -837,6 +897,7 @@ impl TestApp {
                 .build()
                 .expect("Failed to build reqwest client"),
             db,
+            state: state_for_app,
             server_handle: Some(server_handle),
             dispatcher,
         }
@@ -1186,6 +1247,34 @@ impl TestApp {
         TestResponse::from_response(res).await
     }
 
+    pub async fn upload_additional_file(
+        &self,
+        problem_id: i32,
+        file_name: &str,
+        file_bytes: Vec<u8>,
+        language: &str,
+        token: &str,
+    ) -> TestResponse {
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("application/octet-stream")
+            .expect("Failed to set MIME type");
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("language", language.to_string());
+
+        let res = self
+            .client
+            .post(self.url(&routes::additional_files(problem_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .multipart(form)
+            .send()
+            .await
+            .expect("Failed to send additional file upload request");
+
+        TestResponse::from_response(res).await
+    }
+
     pub async fn download_raw(&self, path: &str, token: &str) -> reqwest::Response {
         self.client
             .get(self.url(path))
@@ -1241,6 +1330,41 @@ impl TestApp {
             .as_str()
             .expect("Login response should contain a token")
             .to_string()
+    }
+
+    /// Creates a user and a brand-new role carrying EXACTLY the given
+    /// permissions - not one of the seeded `DEFAULT_MAPPINGS` roles ("admin",
+    /// "problem_setter", "contestant"), which each bundle several permissions
+    /// together. Use this when a test needs to isolate ONE permission's
+    /// effect from another that a stock role would always grant alongside it
+    /// (e.g. `admin` holds both `contest:manage` and `submission:view_all`,
+    /// so it cannot tell apart which one a given bypass actually checks).
+    pub async fn create_user_with_permissions(
+        &self,
+        username: &str,
+        password: &str,
+        permissions: &[&str],
+    ) -> String {
+        let role_name = format!("{username}_role");
+        role::ActiveModel {
+            name: Set(role_name.clone()),
+        }
+        .insert(&self.db)
+        .await
+        .expect("Failed to insert custom role");
+
+        for permission in permissions {
+            role_permission::ActiveModel {
+                role: Set(role_name.clone()),
+                permission: Set(permission.to_string()),
+            }
+            .insert(&self.db)
+            .await
+            .expect("Failed to insert custom role permission");
+        }
+
+        self.create_user_with_role(username, password, &role_name)
+            .await
     }
 }
 

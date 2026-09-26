@@ -1,3 +1,7 @@
+// Only used by the #[cfg(test)] short-circuit test harness below (production
+// evaluation never needs these); gate the import the same way to keep normal
+// (non-test) builds from flagging it as unused.
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 
 use broccoli_server_sdk::Host;
@@ -464,7 +468,7 @@ fn build_tc_row(
     tc_map: &HashMap<i32, &TestCaseRow>,
 ) -> TestCaseResultRow {
     let tc = tc_map.get(&outcome.test_case_id);
-    let is_custom = tc.map_or(false, |t| t.is_custom);
+    let is_custom = tc.is_some_and(|t| t.is_custom);
     let (tc_id, run_index) = if is_custom {
         (None, Some(outcome.test_case_id))
     } else {

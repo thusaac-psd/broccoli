@@ -1,4 +1,5 @@
 import { useApiClient, useApiFetch } from '@broccoli/web-sdk/api';
+import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
 import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -11,7 +12,6 @@ import {
   resolveClarification,
   toggleReplyPublic,
 } from '../api/api';
-import type { CreateClarificationBody } from '../api/types';
 
 export function useClarifications(contestId: number, enabled: boolean) {
   const apiClient = useApiClient();

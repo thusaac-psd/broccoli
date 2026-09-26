@@ -7,6 +7,17 @@ use sea_orm::prelude::Expr;
 use sea_orm::*;
 use tracing::instrument;
 
+// visibility-bypass-audited: the admin writes (`add_contest_problem`,
+// `update_contest_problem`, `remove_contest_problem`, `reorder_contest_problems`,
+// `bulk_delete_contest_problems`) all require perm::CONTEST_MANAGE, pinned by
+// `contestant_cannot_add_problem_to_contest`, `contestant_cannot_update_contest_problem`,
+// `contestant_cannot_remove_contest_problem`, and
+// `contestant_cannot_reorder_contest_problems` (tests/integration/contest.rs).
+// The one viewer-facing read, `list_contest_problems`, already routes through
+// `VisibilityKernel` below (`Resource::Contest` then `Resource::Problem` per
+// row via `fetch_visible_batch`); these entity types are only used for the
+// pre-kernel row fetch that builds the (Resource, DTO) pairs the kernel then
+// decides on - the same pattern as `handlers/submission/mod.rs`.
 use crate::entity::{contest_problem, problem};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -15,10 +26,9 @@ use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::services::plugin_config::{ConfigTarget, delete_config_by_target};
 use crate::state::AppState;
-use crate::utils::contest::{
-    check_contest_access, find_contest, find_contest_problem, require_contest_started,
-};
+use crate::utils::contest::{find_contest, find_contest_problem, require_contest_started};
 use crate::utils::soft_delete::SoftDeletable;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 use super::find_contest_for_update;
 
@@ -123,10 +133,10 @@ pub async fn list_contest_problems(
     auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
-) -> Result<Json<Vec<ContestProblemResponse>>, AppError> {
-    let contest_model = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest_model).await?;
-    require_contest_started(&auth_user, &contest_model)?;
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject. `decide`
+    // and `decide_batch` therefore take no `subject` argument.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     let rows = contest_problem::Entity::find()
         .filter(contest_problem::Column::ContestId.eq(contest_id))
@@ -135,12 +145,79 @@ pub async fn list_contest_problems(
         .all(&state.db)
         .await?;
 
-    let items = rows
-        .into_iter()
-        .map(|(cp, prob)| contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default()))
-        .collect();
+    // `Resource::Contest(contest_id)` goes into the SAME batch as every
+    // `Resource::Problem` row below, as element 0, rather than its own
+    // earlier `kernel.decide(...)` call. `Resource::Contest` and
+    // `Resource::Problem` are different memo keys (see `VisibilityKernel`'s
+    // docs), so deciding the contest gate on its own first and the problem
+    // rows in a second `fetch_visible_batch` call - the previous shape here
+    // - paid for a second `host_decide` query batch and a second plugin
+    // WASM crossing to re-establish reachability for the SAME contest the
+    // first call had just resolved, even though every one of THIS
+    // contest's problems is going to ask the same host/plugin machinery
+    // about that same contest anyway (rule 8/9's "open and started"
+    // window). One `fetch_visible_batch` call over `[Contest, Problem,
+    // Problem, ...]` costs at most one `host_decide` batch and one plugin
+    // crossing total for this whole page. The trade is that the
+    // `contest_problem` row query above no longer gets skipped on a denied
+    // contest (it used to short-circuit before any row fetch); that is a
+    // small, bounded extra query on the deny path in exchange for removing
+    // a full WASM crossing on the (far more common) allow path.
+    //
+    // The contest entry carries `None::<ContestProblemResponse>` as its T -
+    // `Visible::new` is `pub(super)` to `visibility::`, so `fetch_visible_batch`
+    // is the only way to get one, and `Option<T>`'s `Serialize` impl is
+    // transparent (no wrapper), so this costs nothing at the wire even
+    // though the contest entry is never itself rendered - only its `Deny`
+    // vs. not-`Deny` outcome (`is_none()` below) is used.
+    let mut items: Vec<(Resource, Option<ContestProblemResponse>)> =
+        Vec::with_capacity(rows.len() + 1);
+    items.push((Resource::Contest(contest_id), None));
+    items.extend(rows.into_iter().map(|(cp, prob)| {
+        let resource = Resource::Problem {
+            contest_id: Some(contest_id),
+            problem_id: cp.problem_id,
+        };
+        let dto = contest_problem_response(cp, prob.map(|p| p.title).unwrap_or_default());
+        (resource, Some(dto))
+    }));
 
-    Ok(Json(items))
+    let mut visible = kernel.fetch_visible_batch(Action::Read, items).await?;
+    let contest_visible = visible.remove(0);
+
+    // NOTE: this is a pure reachability gate on the contest itself, distinct
+    // from the `Resource::Problem` decisions handled below (which DO go
+    // through `into_masked_json` and so honor `Redact` correctly).
+    // `is_none()` treats a hypothetical `Redact` on this `Resource::Contest`
+    // decision the same as `Allow`, and this decision's contest is never
+    // rendered from here, so `Redact` degenerates to `Allow`. No plugin
+    // currently returns `Redact` for `Resource::Contest`, so this is a
+    // documented no-op today, not a live bug - see Task 20 Item 6.
+    if contest_visible.is_none() {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
+    // The kernel's Contest decision already folds in the activation-window
+    // gate (`check_contest_access` + `require_contest_started`'s window
+    // predicate - see `visibility::host_rules`). It deliberately does NOT
+    // cover `require_contest_started`'s `now < start_time` business-rule
+    // rejection (a 400, not a reachability outcome), so that check is
+    // re-applied here on top of the kernel's `Allow`.
+    let contest_model = find_contest(&state.db, contest_id).await?;
+    require_contest_started(&auth_user, &contest_model)?;
+
+    // A denied problem is omitted from the list, never rendered as a
+    // placeholder - a placeholder would confirm it exists, the exact fact a
+    // staged-release contest format is hiding. Every surviving DTO passes
+    // through `into_masked_json`, so a `Redact` decision cannot be
+    // forgotten at serialization time.
+    let body: Vec<serde_json::Value> = visible
+        .into_iter()
+        .flatten()
+        .map(|v| v.into_masked_json())
+        .collect::<Result<_, _>>()?;
+
+    Ok(Json(body))
 }
 #[utoipa::path(
     patch,

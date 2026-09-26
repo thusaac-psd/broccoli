@@ -23,6 +23,7 @@ import { toast } from 'sonner';
 import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
 
 import { getVerdictBadge } from '../utils/verdict';
+import { testCaseDiffStatus } from './testCaseDiff';
 import { TestCaseRow } from './TestCaseRow';
 
 const PRESERVE_TARGET_WORKER = '__preserve__';
@@ -402,7 +403,11 @@ function JudgementRow({
                     )}
                     testCase={testCase}
                   />
-                  <TestCaseRow testCase={testCase} index={index + 1} />
+                  <TestCaseRow
+                    testCase={testCase}
+                    index={index + 1}
+                    status={judgement.status}
+                  />
                 </div>
               ))}
             </div>
@@ -426,7 +431,7 @@ function JudgementDeltaSummary({
 }: {
   judgement: SubmissionJudgement;
   currentJudgement: SubmissionJudgement | null;
-  caseChanges: number;
+  caseChanges: CaseChangeCounts;
 }) {
   const { t } = useTranslation();
   if (!currentJudgement || judgement.id === currentJudgement.id) return null;
@@ -441,7 +446,13 @@ function JudgementDeltaSummary({
     currentJudgement.memory_used,
   );
 
-  if (!scoreDelta && !timeDelta && !memoryDelta && caseChanges === 0) {
+  if (
+    !scoreDelta &&
+    !timeDelta &&
+    !memoryDelta &&
+    caseChanges.changed === 0 &&
+    caseChanges.unknown === 0
+  ) {
     return null;
   }
 
@@ -462,9 +473,18 @@ function JudgementDeltaSummary({
           {t('submissionDetail.memoryDelta', { value: memoryDelta })}
         </Badge>
       )}
-      {caseChanges > 0 && (
+      {caseChanges.changed > 0 && (
         <Badge variant="outline">
-          {t('submissionDetail.caseChanges', { count: String(caseChanges) })}
+          {t('submissionDetail.caseChanges', {
+            count: String(caseChanges.changed),
+          })}
+        </Badge>
+      )}
+      {caseChanges.unknown > 0 && (
+        <Badge variant="outline">
+          {t('submissionDetail.caseChangesUnknown', {
+            count: String(caseChanges.unknown),
+          })}
         </Badge>
       )}
     </div>
@@ -485,13 +505,37 @@ function TestCaseDiffNote({
     );
   }
 
-  if (!testCaseChanged(testCase, currentTestCase)) return null;
+  const status = testCaseDiffStatus(testCase, currentTestCase);
+  if (status === 'unchanged') return null;
+
+  if (status === 'unknown') {
+    // Both this version's and the current version's fields are masked by a
+    // visibility rule (ICPC freeze, IOI feedback level, ...) for this
+    // viewer: we genuinely cannot tell whether the result changed. That is
+    // a different fact from "it did not change" and must say so rather
+    // than staying silent.
+    return (
+      <Badge variant="outline">{t('submissionDetail.maskedCaseDiff')}</Badge>
+    );
+  }
+
+  // `status === 'changed'`: at least one field is observably different.
+  // The current verdict/score themselves may still individually be masked
+  // (a different field could be the one that changed), so fall back to an
+  // explicit placeholder instead of feeding `null`/`undefined` into the
+  // translation interpolation.
+  const verdictLabel =
+    currentTestCase.verdict ?? t('submissionDetail.hiddenValue');
+  const scoreLabel =
+    currentTestCase.score == null
+      ? t('submissionDetail.hiddenValue')
+      : formatNumber(currentTestCase.score);
 
   return (
     <Badge variant="outline">
       {t('submissionDetail.changedFromCase', {
-        verdict: currentTestCase.verdict,
-        score: formatNumber(currentTestCase.score),
+        verdict: verdictLabel,
+        score: scoreLabel,
       })}
     </Badge>
   );
@@ -504,11 +548,18 @@ function testCaseKey(
   return testCase.test_case_id ?? index;
 }
 
+interface CaseChangeCounts {
+  changed: number;
+  unknown: number;
+}
+
 function countCaseChanges(
   judgement: SubmissionJudgement,
   currentJudgement: SubmissionJudgement | null,
-) {
-  if (!currentJudgement || judgement.id === currentJudgement.id) return 0;
+): CaseChangeCounts {
+  if (!currentJudgement || judgement.id === currentJudgement.id) {
+    return { changed: 0, unknown: 0 };
+  }
 
   const currentResults = new Map(
     currentJudgement.test_case_results.map((testCase, index) => [
@@ -517,22 +568,23 @@ function countCaseChanges(
     ]),
   );
 
-  return judgement.test_case_results.filter((testCase, index) => {
-    const currentTestCase = currentResults.get(testCaseKey(testCase, index));
-    return !currentTestCase || testCaseChanged(testCase, currentTestCase);
-  }).length;
-}
+  return judgement.test_case_results.reduce<CaseChangeCounts>(
+    (counts, testCase, index) => {
+      const currentTestCase = currentResults.get(testCaseKey(testCase, index));
+      if (!currentTestCase) {
+        return { ...counts, changed: counts.changed + 1 };
+      }
 
-function testCaseChanged(
-  testCase: SubmissionJudgement['test_case_results'][number],
-  currentTestCase: SubmissionJudgement['test_case_results'][number],
-) {
-  return (
-    testCase.verdict !== currentTestCase.verdict ||
-    testCase.score !== currentTestCase.score ||
-    testCase.time_used !== currentTestCase.time_used ||
-    testCase.memory_used !== currentTestCase.memory_used ||
-    testCase.checker_output !== currentTestCase.checker_output
+      const status = testCaseDiffStatus(testCase, currentTestCase);
+      if (status === 'changed') {
+        return { ...counts, changed: counts.changed + 1 };
+      }
+      if (status === 'unknown') {
+        return { ...counts, unknown: counts.unknown + 1 };
+      }
+      return counts;
+    },
+    { changed: 0, unknown: 0 },
   );
 }
 

@@ -18,7 +18,6 @@ pub struct ContestTypeHandlers {
     pub plugin_id: String,
     pub submission_fn: String,
     pub code_run_fn: String,
-    pub filter_submission_fn: Option<String>,
 }
 
 pub struct BatchState<T> {

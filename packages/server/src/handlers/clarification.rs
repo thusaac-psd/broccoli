@@ -7,6 +7,26 @@ use sea_orm::*;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
+// visibility-bypass-audited: `list_clarifications`/`create_clarification`/
+// `reply_clarification`/`resolve_clarification` all route contest
+// reachability through `VisibilityKernel` (`Resource::Contest` below)
+// BEFORE any row lookup, and `list_clarifications`'s per-row visibility is
+// the kernel's `fetch_visible_batch`
+// (`visibility::host_rules::decide_clarification`) - see the comments at
+// those call sites. `reply_clarification`/`toggle_reply_public`/
+// `resolve_clarification` are write paths on a single clarification the
+// caller must already be the admin, author, or recipient of (asserted
+// inline, since "is a party to this thread" has no `Resource::Clarification`
+// read-decision equivalent) - the contest-reachability gate only prevents
+// an unreachable contest's existing-vs-missing clarification id from being
+// distinguishable via 403-vs-404; it does not replace the inline
+// admin/author/recipient check. Every response they return reflects only
+// that one clarification the caller was just authorized to act on - the
+// same write-reflects-own-result pattern as `handlers/submission/rejudge.rs`.
+// `user` here is only used by `resolve_usernames`, a post-authorization
+// display helper. Pinned by the frozen
+// `tests/integration/visibility_matrix.rs::contest_clarification_list` suite
+// and `tests/integration/clarification.rs::clarification_actions`.
 use crate::entity::{clarification, clarification_reply, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -14,8 +34,8 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::clarification::*;
 use crate::state::AppState;
-use crate::utils::contest::{check_contest_access, find_contest};
 use crate::utils::text::sanitize_db_text;
+use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn resolve_usernames(
     db: &DatabaseConnection,
@@ -60,9 +80,32 @@ pub async fn list_clarifications(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     Query(query): Query<ClarificationListQuery>,
-) -> Result<Json<ClarificationListResponse>, AppError> {
-    let contest = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest).await?;
+) -> Result<Json<serde_json::Value>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before reading any clarification rows below, on a contest
+    // the kernel already knows is unreachable. Folds in what `find_contest`
+    // + `check_contest_access` used to check here (existence, the
+    // activation window, `is_public`, `contest_user` membership) - see
+    // `visibility::host_rules::decide_contest`. Both of that pair's `Err`
+    // branches already returned exactly this same `AppError::NotFound`
+    // message, so this is not a behavioural change.
+    //
+    // NOTE: this is a pure reachability gate - `is_denied()` treats a
+    // hypothetical `Redact` on this `Resource::Contest` decision the same
+    // as `Allow`, and the contest itself is never rendered from this
+    // decision (only used to decide whether to proceed), so `Redact`
+    // degenerates to `Allow` here. No plugin currently returns `Redact` for
+    // `Resource::Contest`, so this is a documented no-op today, not a live
+    // bug - see Task 20 Item 6.
+    if kernel
+        .decide(Action::Read, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
 
     let is_admin = auth_user.has_permission(perm::CONTEST_MANAGE);
 
@@ -73,15 +116,12 @@ pub async fn list_clarifications(
         select = select.filter(clarification::Column::ClarificationType.eq(type_filter.as_str()));
     }
 
-    if !is_admin {
-        select = select.filter(
-            Condition::any()
-                .add(clarification::Column::AuthorId.eq(auth_user.user_id))
-                .add(clarification::Column::IsPublic.eq(true))
-                .add(clarification::Column::RecipientId.eq(auth_user.user_id)),
-        );
-    }
-
+    // The author/is_public/recipient prefilter that used to live here is now
+    // the kernel's job (`visibility::host_rules::decide_clarification`,
+    // rule 10): every row for this contest (matching the optional type
+    // filter) is fetched, and a row this viewer may not see comes back
+    // `Deny` from `fetch_visible_batch` below and is dropped from `data`,
+    // never rendered as a placeholder.
     let rows = select
         .order_by_desc(clarification::Column::CreatedAt)
         .all(&state.db)
@@ -125,7 +165,7 @@ pub async fn list_clarifications(
 
     let user_map = resolve_usernames(&state.db, &user_ids).await?;
 
-    let data = rows
+    let items: Vec<(Resource, ClarificationResponse)> = rows
         .into_iter()
         .map(|r| {
             let author_name = user_map
@@ -138,22 +178,22 @@ pub async fn list_clarifications(
                 .and_then(|raid| user_map.get(&raid).cloned());
             let resolved_by_name = r.resolved_by.and_then(|uid| user_map.get(&uid).cloned());
 
+            // Still needed for the `replies` array's own per-element filter
+            // below (`clarification.rs:157-171`'s original predicate, kept
+            // verbatim) - a `FieldMask` can blank a field uniformly across
+            // every array element but cannot omit only SOME elements by a
+            // per-element predicate, so that part stays handler-side (see
+            // `visibility::host_rules`'s module docs, "Deliberately not
+            // ported"). Whether THIS ROW is shown at all, and whether its own
+            // legacy `reply_*` fields are redacted, is now entirely the
+            // kernel's job via `Resource::Clarification` below - the
+            // `show_question`/`show_reply` locals this used to compute for
+            // that are gone.
             let is_participant = is_admin
                 || r.author_id == auth_user.user_id
                 || r.recipient_id == Some(auth_user.user_id);
-            let show_question = is_participant || r.is_public;
 
             let all_replies = replies_map.remove(&r.id).unwrap_or_default();
-            // The legacy denormalized `reply_*` fields mirror the LATEST reply,
-            // whereas `reply_is_public` is recomputed as "ANY reply is public"
-            // (see toggle_reply_public). Gating the legacy content on
-            // reply_is_public would therefore leak the latest reply's private
-            // content whenever some OTHER, older reply is public. Gate on the
-            // latest reply's own visibility instead; if there is no reply to
-            // confirm (legacy rows), hide it from non-participants.
-            let latest_reply_public = all_replies.last().map(|rep| rep.is_public).unwrap_or(false);
-            let show_reply = is_participant || latest_reply_public;
-
             let replies = all_replies
                 .into_iter()
                 .filter(|rep| is_admin || rep.is_public || is_participant)
@@ -170,29 +210,22 @@ pub async fn list_clarifications(
                 })
                 .collect();
 
-            ClarificationResponse {
+            let resource = Resource::Clarification(r.id);
+            let dto = ClarificationResponse {
                 id: r.id,
                 contest_id: r.contest_id,
                 author_id: r.author_id,
-                author_name: if show_question {
-                    author_name
-                } else {
-                    "Anonymous".into()
-                },
-                content: if show_question {
-                    r.content
-                } else {
-                    String::new()
-                },
+                author_name,
+                content: r.content,
                 clarification_type: r.clarification_type,
                 recipient_id: r.recipient_id,
                 recipient_name,
                 is_public: r.is_public,
-                reply_content: if show_reply { r.reply_content } else { None },
-                reply_author_id: if show_reply { r.reply_author_id } else { None },
-                reply_author_name: if show_reply { reply_author_name } else { None },
+                reply_content: r.reply_content,
+                reply_author_id: r.reply_author_id,
+                reply_author_name,
                 reply_is_public: r.reply_is_public,
-                replied_at: if show_reply { r.replied_at } else { None },
+                replied_at: r.replied_at,
                 replies,
                 resolved: r.resolved,
                 resolved_at: r.resolved_at,
@@ -200,11 +233,26 @@ pub async fn list_clarifications(
                 resolved_by_name,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
-            }
+            };
+            (resource, dto)
         })
         .collect();
 
-    Ok(Json(ClarificationListResponse { data }))
+    // Per-row kernel decision: a denied row (kernel `Deny`, e.g. a private
+    // question this viewer is neither the author, the recipient, nor
+    // `contest:manage` for) is omitted from `data` outright via `.flatten()`
+    // - never rendered as a placeholder, which would itself confirm the row
+    // exists. A `Redact` decision blanks exactly the legacy `reply_content`/
+    // `reply_author_id`/`reply_author_name`/`replied_at` fields once
+    // serialized - see `visibility::host_rules::decide_clarification`.
+    let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
+    let data: Vec<serde_json::Value> = visible
+        .into_iter()
+        .flatten()
+        .map(|v| v.into_masked_json())
+        .collect::<Result<_, _>>()?;
+
+    Ok(Json(serde_json::json!({ "data": data })))
 }
 
 #[utoipa::path(
@@ -234,8 +282,34 @@ pub async fn create_clarification(
 ) -> Result<impl IntoResponse, AppError> {
     validate_create_clarification(&payload)?;
 
-    let contest = find_contest(&state.db, contest_id).await?;
-    check_contest_access(&state.db, &auth_user, &contest).await?;
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before any of the business-rule checks below, on a contest
+    // the kernel already knows is unreachable. There is no clarification row
+    // yet to decide about at POST time, only "can this subject reach this
+    // contest at all" - so this reuses `Resource::Contest`/rules 1-4
+    // verbatim via `Action::Clarify` (`host_decide` does not branch on
+    // `Action` for `Resource::Contest`, so this is byte-identical to the
+    // `Action::Read` gate above it in `list_clarifications`). Both of the
+    // `find_contest` + `check_contest_access` pair's `Err` branches already
+    // returned exactly this same `AppError::NotFound` message, so this is
+    // not a behavioural change. See `visibility::host_rules`'s module docs
+    // for why this needs no new host-rule code.
+    //
+    // NOTE: as in `list_clarifications` above, this is a pure reachability
+    // gate - `is_denied()` treats a hypothetical `Redact` here the same as
+    // `Allow`, and this decision's `Resource::Contest` is never rendered
+    // from here, so `Redact` degenerates to `Allow`. No plugin currently
+    // returns `Redact` for `Resource::Contest`, so this is a documented
+    // no-op today, not a live bug - see Task 20 Item 6.
+    if kernel
+        .decide(Action::Clarify, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
 
     let is_admin = auth_user.has_permission(perm::CONTEST_MANAGE);
 
@@ -341,6 +415,26 @@ pub async fn reply_clarification(
     AppJson(payload): AppJson<ReplyClarificationRequest>,
 ) -> Result<Json<ClarificationResponse>, AppError> {
     validate_reply_clarification(&payload)?;
+
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before the row lookup below, on a contest the kernel
+    // already knows is unreachable - the same `Resource::Contest`/
+    // `Action::Clarify` gate `create_clarification` uses. Without this, a
+    // stranger to a private or inactive contest could distinguish an
+    // existing clarification id (403 PermissionDenied, since the row exists
+    // but they're neither admin, author, nor recipient) from a non-existing
+    // one (404 NotFound) - confirming the row exists without ever being
+    // authorized to see it. Gating reachability first collapses both cases
+    // to the same 404, matching `list_clarifications`/`create_clarification`.
+    if kernel
+        .decide(Action::Clarify, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
 
     let existing = clarification::Entity::find_by_id(clarification_id)
         .filter(clarification::Column::ContestId.eq(contest_id))
@@ -584,6 +678,22 @@ pub async fn resolve_clarification(
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ResolveClarificationRequest>,
 ) -> Result<Json<ClarificationResponse>, AppError> {
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+
+    // Fail fast, before the row lookup below, on a contest the kernel
+    // already knows is unreachable - same rationale and gate as
+    // `reply_clarification` above: without this, a stranger to a private
+    // or inactive contest could distinguish an existing clarification id
+    // (403 PermissionDenied) from a non-existing one (404 NotFound).
+    if kernel
+        .decide(Action::Clarify, Resource::Contest(contest_id))
+        .await?
+        .is_denied()
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+
     let existing = clarification::Entity::find_by_id(clarification_id)
         .filter(clarification::Column::ContestId.eq(contest_id))
         .one(&state.db)

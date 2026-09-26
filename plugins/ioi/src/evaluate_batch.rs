@@ -576,12 +576,10 @@ impl SubtaskShortCircuit {
 
         self.failed_subtasks.extend(failing_subtasks);
 
-        let cancellable = self
-            .cancellable_cases_for_failure(test_case_id, &self.failed_subtasks)
+        self.cancellable_cases_for_failure(test_case_id, &self.failed_subtasks)
             .into_iter()
             .filter(|id| !already_recorded.contains(id))
-            .collect::<Vec<_>>();
-        cancellable
+            .collect::<Vec<_>>()
     }
 
     fn mark_cancelled(&mut self, test_case_ids: &[i32]) {
@@ -670,7 +668,7 @@ fn build_tc_row(
         Some(tc) => scale_score(outcome.raw_score, tc),
         None => 0.0,
     };
-    let is_custom = tc.map_or(false, |t| t.is_custom);
+    let is_custom = tc.is_some_and(|t| t.is_custom);
     let (tc_id, run_index) = if is_custom {
         (None, Some(outcome.test_case_id))
     } else {
@@ -707,6 +705,13 @@ fn flush_results(host: &Host, buf: &mut Vec<TestCaseResultRow>) -> Result<(), Sd
 /// Append a row for `outcome` to `buf`; flush when the buffer reaches
 /// `RESULT_BATCH_FLUSH_THRESHOLD`.
 #[cfg(test)]
+// Test-only fixture: each parameter mirrors one argument of the production
+// batch-recording call site (host handle, output buffer, and the row
+// identity/outcome/lookup values `build_tc_row` needs) 1:1, which keeps every
+// call site self-documenting. Bundling them into a params struct would only
+// relocate the same list one level of indirection without reducing the real
+// complexity here.
+#[allow(clippy::too_many_arguments)]
 fn record_outcome(
     host: &Host,
     buf: &mut Vec<TestCaseResultRow>,

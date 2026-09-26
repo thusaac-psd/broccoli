@@ -8,6 +8,14 @@ use std::collections::HashSet;
 use plugin_core::registry::PluginStatus;
 use plugin_core::traits::PluginManager;
 
+// visibility-bypass-audited: the global config endpoints require
+// perm::PLUGIN_MANAGE (pinned by
+// tests/integration/plugin_config.rs::permission_denied_for_non_admin), the
+// per-problem endpoints require perm::PROBLEM_EDIT (pinned by
+// `user_without_permission_cannot_access_problem_config`), and the
+// per-contest/contest-problem endpoints require perm::CONTEST_MANAGE (pinned
+// by `user_without_permission_cannot_access_contest_config`). This is
+// operator/setter configuration storage, never contestant-facing content.
 use crate::entity::plugin_config;
 use crate::error::AppError;
 use crate::extractors::auth::{AuthUser, FreshAuthUser};

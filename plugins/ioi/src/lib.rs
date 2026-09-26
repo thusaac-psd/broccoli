@@ -10,13 +10,22 @@ pub mod scoring;
 pub mod subtasks;
 pub mod tokens;
 
+// Host/SdkError/TestCaseRow (via the prelude) and everything below are only
+// used by the wasm32-gated plugin entry points and loader helpers in this
+// file; this file has no #[cfg(test)] unit tests of its own, so gate the
+// same way a native (test/clippy) build doesn't see these as unused.
+#[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};
 
+#[cfg(target_arch = "wasm32")]
 use crate::config::{SubtaskDef, TaskConfig};
+#[cfg(target_arch = "wasm32")]
 use crate::evaluate_batch::{handle_detached_eval_callback, recover_detached_callback_error};
+#[cfg(target_arch = "wasm32")]
 use crate::subtasks::build_default_subtasks;
+#[cfg(target_arch = "wasm32")]
 use crate::tokens::TokenState;
 
 #[cfg(target_arch = "wasm32")]
@@ -66,12 +75,8 @@ pub(crate) fn load_token_state(
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    host.registry.register_contest_type_with_filter(
-        "ioi",
-        "handle_ioi_submission",
-        "handle_ioi_code_run",
-        Some("filter_submission_for_viewer"),
-    )?;
+    host.registry
+        .register_contest_type("ioi", "handle_ioi_submission", "handle_ioi_code_run")?;
     host.log.info("IOI contest plugin registered")?;
     Ok("ok".into())
 }
@@ -151,20 +156,13 @@ pub fn on_ioi_eval_result(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&output)?)
 }
 
-// `FilterSubmissionInput`/`FilterSubmissionOutput` are the shared wire types
-// from `broccoli_server_sdk::types` (via the prelude).
-
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
-pub fn filter_submission_for_viewer(input: String) -> FnResult<String> {
+pub fn decide_visibility(input: String) -> FnResult<String> {
     let host = Host::new();
-    let req: FilterSubmissionInput = serde_json::from_str(&input)?;
-
-    let submission = feedback::apply_feedback_filter(&host, &req)?;
-
-    Ok(serde_json::to_string(&FilterSubmissionOutput {
-        submission,
-    })?)
+    let req: VisibilityQueryInput = serde_json::from_str(&input)?;
+    let decisions = feedback::decide_visibility_decisions(&host, &req)?;
+    Ok(serde_json::to_string(&VisibilityQueryOutput { decisions })?)
 }
 
 #[cfg(target_arch = "wasm32")]

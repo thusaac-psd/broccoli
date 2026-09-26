@@ -15,8 +15,15 @@ use tracing::{info, instrument, warn};
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 use crate::dlq::{DlqService, ResolveResult, dlq_service};
-use crate::entity::judgement_reset::ClearJudgementColumns;
-use crate::entity::{dead_letter_message, submission};
+// visibility-bypass-audited: every handler in this module requires
+// perm::DLQ_MANAGE, pinned by tests/integration/dlq.rs's
+// `contestant_cannot_list_dlq`, `contestant_cannot_get_stats`,
+// `contestant_cannot_get_dlq_detail`, `contestant_cannot_resolve_dlq_message`,
+// `contestant_cannot_retry_dlq_message`, `contestant_cannot_bulk_retry`, and
+// `contestant_cannot_bulk_delete`. This is judge-operator tooling over the
+// dead letter queue, never a per-row Contest/Problem/Submission view the
+// kernel governs.
+use crate::entity::{dead_letter_message, judgement_reset::ClearJudgementColumns, submission};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;

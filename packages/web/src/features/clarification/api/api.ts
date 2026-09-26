@@ -1,12 +1,11 @@
 import type { ApiClient } from '@broccoli/web-sdk/api';
-
 import type {
   Clarification,
   ClarificationReply,
   CreateClarificationBody,
   ReplyClarificationBody,
   ResolveClarificationBody,
-} from './types';
+} from '@broccoli/web-sdk/clarification';
 
 export async function fetchClarifications(
   apiClient: ApiClient,

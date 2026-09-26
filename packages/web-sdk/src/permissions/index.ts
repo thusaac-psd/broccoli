@@ -13,6 +13,7 @@ export const CONTEST_DELETE = 'contest:delete';
 export const USER_MANAGE = 'user:manage';
 export const ROLE_MANAGE = 'role:manage';
 export const PLUGIN_MANAGE = 'plugin:manage';
+export const TIMER = 'timer';
 export const DLQ_MANAGE = 'dlq:manage';
 export const SYSTEM_VIEW = 'system:view';
 export const SYSTEM_ADMIN = 'system:admin';
@@ -30,6 +31,7 @@ export const ALL_PERMISSIONS = [
   USER_MANAGE,
   ROLE_MANAGE,
   PLUGIN_MANAGE,
+  TIMER,
   DLQ_MANAGE,
   SYSTEM_VIEW,
   SYSTEM_ADMIN,
