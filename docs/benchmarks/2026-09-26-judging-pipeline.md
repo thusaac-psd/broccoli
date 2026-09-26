@@ -127,9 +127,11 @@ once the pools had grown under load.
   plugin suites (556 tests) and the full workspace suite (1921 tests, including
   e2e) pass. The state shape is unchanged, so in-flight sessions survive a
   plugin upgrade.
-- One API note: `JudgeProgress::request` no longer carries test cases or source
-  files. No in-repo plugin reads them there; a third-party plugin that did would
-  see them empty.
+- API change: judging policies now get `JudgeProgress::submission` (a
+  `JudgedSubmission`) and `ScoringCase`s. Test data and source are not part of
+  those types, so a policy cannot read them after judging starts: it is a
+  compile error, not a silently empty list. All in-repo contest plugins compile
+  unchanged apart from the field rename.
 
 ## Follow-up: in-flight cap (`server.max_in_flight_submissions`)
 
