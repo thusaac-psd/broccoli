@@ -38,6 +38,12 @@ pub struct Metrics {
     /// grown WASM linear memory. A healthy rate is low and steady; a rate
     /// approaching the call rate means `instance_reclaim_bytes` is set too low.
     pub plugin_instance_recycled_total: Counter<u64>,
+    /// Wall time to build one pooled plugin instance (engine + module
+    /// compile + instantiate). Paid on pool growth and on every recycle.
+    pub plugin_instance_create_duration: Histogram<f64>,
+    /// Pooled plugin instances built, by plugin. Live pool size is this
+    /// minus `plugin_instance_recycled_total` (a recycle rebuilds one).
+    pub plugin_instance_created_total: Counter<u64>,
 
     pub host_fn_duration: Histogram<f64>,
     pub host_fn_calls_total: Counter<u64>,
@@ -290,6 +296,18 @@ impl Metrics {
             plugin_call_failures: meter
                 .u64_counter("broccoli.plugin.call.failures")
                 .with_description("Total number of failed WASM plugin calls")
+                .build(),
+            plugin_instance_create_duration: meter
+                .f64_histogram("broccoli.plugin.instance.create.duration")
+                .with_unit("s")
+                .with_description(
+                    "Wall time to build one pooled plugin instance (compile + instantiate)",
+                )
+                .with_boundaries(PLUGIN_BUCKETS_SECONDS.to_vec())
+                .build(),
+            plugin_instance_created_total: meter
+                .u64_counter("broccoli.plugin.instance.created")
+                .with_description("Total pooled plugin instances built")
                 .build(),
             plugin_instance_recycled_total: meter
                 .u64_counter("broccoli.plugin.instance.recycled")

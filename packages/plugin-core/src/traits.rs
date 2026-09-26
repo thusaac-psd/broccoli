@@ -441,11 +441,22 @@ pub trait PluginManager: PluginInvoker {
             // One shared factory: extism's pool calls it to create instances on
             // demand; the recycling wrapper calls it to rebuild a bloated one.
             // `Arc<dyn Fn>` so both can hold and invoke it.
+            let build_metrics = self.get_metrics().cloned();
+            let build_plugin_id = plugin_id.to_string();
             let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
-                PluginBuilder::new(&manifest)
+                let started = std::time::Instant::now();
+                let built = PluginBuilder::new(&manifest)
                     .with_wasi(wasi)
                     .with_functions(host_functions.clone())
-                    .build()
+                    .build();
+                if let Some(metrics) = build_metrics.as_ref() {
+                    let attrs = [KeyValue::new("plugin.id", build_plugin_id.clone())];
+                    metrics
+                        .plugin_instance_create_duration
+                        .record(started.elapsed().as_secs_f64(), &attrs);
+                    metrics.plugin_instance_created_total.add(1, &attrs);
+                }
+                built
             });
             let source_for_pool = source.clone();
             let pool = PoolBuilder::new()
