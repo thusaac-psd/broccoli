@@ -219,9 +219,29 @@ async fn start_match(fx: &Fixture, match_id: u8) -> TestResponse {
         .await
 }
 
+/// Matches start by themselves once both players have ranked: assert that
+/// happened (formerly staff had to POST /start).
 async fn start_match_0(fx: &Fixture) {
-    let res = start_match(fx, 0).await;
-    assert_eq!(res.status, 200, "starting match 0 failed: {}", res.text);
+    expect_auto_started(fx, 0).await;
+}
+
+async fn expect_auto_started(fx: &Fixture, match_id: u8) {
+    let res = fx
+        .app
+        .get_with_token(
+            &bracket_route(fx.contest_id, &format!("/matches/{match_id}")),
+            &fx.staff_token,
+        )
+        .await;
+    assert_eq!(
+        res.status, 200,
+        "reading match {match_id} failed: {}",
+        res.text
+    );
+    assert_eq!(
+        res.body["state"], "in_progress",
+        "match {match_id} should start by itself once both players have ranked"
+    );
 }
 
 async fn force_decide(fx: &Fixture, match_id: u8, winner: Option<i32>) -> TestResponse {
@@ -552,8 +572,7 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
     order_match_0(&fx).await;
     start_match_0(&fx).await;
     order_match(&fx, 1, &fx.rounds[0], &fx.players[2], &fx.players[3]).await;
-    let res = start_match(&fx, 1).await;
-    assert_eq!(res.status, 200, "starting match 1 failed: {}", res.text);
+    expect_auto_started(&fx, 1).await;
 
     let winner0 = fx.players[0].id;
     let winner1 = fx.players[2].id;
@@ -936,8 +955,10 @@ async fn ranking_rejects_a_submitter_not_in_the_match() {
     );
 }
 
+/// A player who never ranks must not stall the bracket: the staff start
+/// override fills the missing ranking with the setup's listed order.
 #[tokio::test]
-async fn start_rejects_a_match_missing_one_ranking() {
+async fn staff_start_fills_a_missing_ranking_with_the_listed_order() {
     let fx = setup_fixture().await;
     let b = &fx.players[1];
     let res = fx
@@ -949,17 +970,29 @@ async fn start_rejects_a_match_missing_one_ranking() {
         )
         .await;
     assert_eq!(res.status, 200, "B's ranking failed: {}", res.text);
-    // A never ranks B's problems.
-    let res = start_match(&fx, 0).await;
+    // A never ranks B's problems, so the match cannot start by itself.
+    let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
     assert_eq!(
-        res.status, 400,
-        "starting a match missing one ranking must be rejected: {}",
-        res.text
+        view["state"], "ordering",
+        "must wait for A's ranking, got {view}"
     );
     assert!(
-        res.text.contains("both players"),
-        "unexpected rejection message: {}",
-        res.text
+        view["starts_at_ms"].is_null(),
+        "no start time without both rankings"
+    );
+
+    let res = start_match(&fx, 0).await;
+    assert_eq!(res.status, 200, "staff override failed: {}", res.text);
+    let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(view["state"], "in_progress", "got {view}");
+    // Orders are masked for this staff user (no submission:view_all), so
+    // read B's own view: B plays order_b and sees only its current, first
+    // entry - which must be the first problem of the listed group.
+    let b_view = get_match(&fx.app, fx.contest_id, 0, &b.token).await;
+    assert_eq!(
+        b_view["order_b"][0],
+        json!(fx.rounds[0].group_b[0]),
+        "A's missing ranking of B's problems becomes the listed order: {b_view}"
     );
 }
 
@@ -1076,20 +1109,19 @@ async fn setup_rejects_an_empty_tiebreak_list() {
     );
 }
 
-/// Decides every round-1 match (8 of them, required for
-/// `round_ended_at_ms` to be `Some`), then attempts to start the round-2
-/// match immediately -- before the configured inter-round intermission has
-/// elapsed.
+/// Round 2 starts per pair, after each player's own break - not when the
+/// whole round finishes and not on staff action. Decides only the two feeder
+/// matches, ranks the round-2 match during the 5 s break, and checks it
+/// waits, then starts by itself when its start timer fires.
 #[tokio::test]
-async fn round2_match_cannot_start_before_the_intermission_elapses() {
-    let fx = setup_fixture_with_timing(3, 5, 120).await; // 5s intermission
+async fn round2_match_waits_for_the_players_break_then_starts_by_itself() {
+    let fx = setup_fixture_with_timing(3, 5, 120).await; // 5s break
 
-    for pos in 0u8..8 {
+    for pos in 0u8..2 {
         let a = &fx.players[(pos * 2) as usize];
         let b = &fx.players[(pos * 2 + 1) as usize];
         order_match(&fx, pos, &fx.rounds[0], a, b).await;
-        let res = start_match(&fx, pos).await;
-        assert_eq!(res.status, 200, "starting match {pos} failed: {}", res.text);
+        expect_auto_started(&fx, pos).await;
         let res = force_decide(&fx, pos, Some(a.id)).await;
         assert_eq!(
             res.status, 200,
@@ -1098,36 +1130,38 @@ async fn round2_match_cannot_start_before_the_intermission_elapses() {
         );
     }
 
-    // Round 2 match 8 (fed by round-1 matches 0 and 1) now exists.
+    // Round 2 match 8 (fed by round-1 matches 0 and 1) exists although the
+    // other six round-1 matches have not even started.
     let round2 = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
-    assert_eq!(
-        round2["state"], "ordering",
-        "round 2 match should exist and be awaiting ordering, got {round2}"
-    );
-    let pa_id = round2["player_a"].as_i64().expect("player_a") as i32;
-    let pb_id = round2["player_b"].as_i64().expect("player_b") as i32;
-    let pa = fx
-        .players
-        .iter()
-        .find(|p| p.id == pa_id)
-        .expect("player_a should be a known player");
-    let pb = fx
-        .players
-        .iter()
-        .find(|p| p.id == pb_id)
-        .expect("player_b should be a known player");
+    assert_eq!(round2["state"], "ordering", "got {round2}");
+    let find = |id: i64| {
+        fx.players
+            .iter()
+            .find(|p| p.id as i64 == id)
+            .expect("known player")
+    };
+    let pa = find(round2["player_a"].as_i64().unwrap());
+    let pb = find(round2["player_b"].as_i64().unwrap());
     order_match(&fx, 8, &fx.rounds[1], pa, pb).await;
 
-    let res = start_match(&fx, 8).await;
+    let view = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
     assert_eq!(
-        res.status, 400,
-        "starting round 2 before the 5s inter-round intermission has elapsed must be \
-         rejected: {}",
-        res.text
+        view["state"], "ordering",
+        "must wait out the break, got {view}"
     );
     assert!(
-        res.text.contains("intermission"),
-        "unexpected rejection message: {}",
-        res.text
+        view["starts_at_ms"].as_i64().is_some(),
+        "both ranked, so the view must say when it starts: {view}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    tick_once(&fx.app.state, &TimerConfig::default())
+        .await
+        .expect("tick_once (start timer) failed");
+
+    let view = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
+    assert_eq!(
+        view["state"], "in_progress",
+        "should start once the break is over, got {view}"
     );
 }

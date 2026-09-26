@@ -145,6 +145,16 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         other => ApiError::from(other),
     })?;
 
+    // Matches start by themselves: if this was the second ranking, start now
+    // (or schedule the start for when the contest opens or a break ends).
+    // The ranking is already saved, so a failure here is logged, not
+    // returned; the start timer and the staff override still cover it.
+    if let Err(e) = crate::judge::try_autostart(host, contest_id, match_id) {
+        let _ = host.log.info(&format!(
+            "codelink-bracket: autostart after ranking failed: {e:?}"
+        ));
+    }
+
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,

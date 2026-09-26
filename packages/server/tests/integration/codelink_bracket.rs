@@ -460,19 +460,8 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
         res.text
     );
 
-    let res = app
-        .post_with_token(
-            &bracket_route(contest_id, "/matches/0/order"),
-            &json!({"order": rounds[0].group_b}),
-            &a.token,
-        )
-        .await;
-    assert_eq!(
-        res.status, 200,
-        "A's ranking of B's problems failed: {}",
-        res.text
-    );
-
+    // Checked while only B has ranked: A's ranking below is the second one,
+    // and the match starts by itself the moment it lands.
     let ids_for_b = visible_problem_ids(&app, contest_id, &b.token).await;
     for pid in rounds[0].group_a {
         assert!(
@@ -503,15 +492,28 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
         );
     }
 
-    // === Phase 2: start the match ========================================
     let res = app
         .post_with_token(
-            &bracket_route(contest_id, "/matches/0/start"),
-            &json!({}),
-            &staff_token,
+            &bracket_route(contest_id, "/matches/0/order"),
+            &json!({"order": rounds[0].group_b}),
+            &a.token,
         )
         .await;
-    assert_eq!(res.status, 200, "starting match 0 failed: {}", res.text);
+    assert_eq!(
+        res.status, 200,
+        "A's ranking of B's problems failed: {}",
+        res.text
+    );
+
+    // === Phase 2: the match starts by itself once both have ranked =======
+    let res = app
+        .get_with_token(&bracket_route(contest_id, "/matches/0"), &staff_token)
+        .await;
+    assert_eq!(res.status, 200, "reading match 0 failed: {}", res.text);
+    assert_eq!(
+        res.body["state"], "in_progress",
+        "match 0 should start by itself once both players have ranked"
+    );
 
     // === Phase 3: 小局 0 - current-not-future, and the submission gate ===
     let ids_for_a = visible_problem_ids(&app, contest_id, &a.token).await;

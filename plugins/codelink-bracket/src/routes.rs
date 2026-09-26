@@ -18,21 +18,21 @@ use serde::{Deserialize, Serialize};
 use crate::bracket;
 use crate::decide;
 use crate::judge;
-use crate::model::{MatchPhase, MatchState, RoundDef};
+use crate::model::{MatchPhase, MatchState, RoundDef, Setup};
 use crate::storage;
 use crate::visibility::{self, VisibilityCtx};
 
-/// Reject a `/start` unless both players have submitted their ranking; the
-/// match BLOCKS until both rankings are in (spec: "Match started with
-/// orders missing -- `/start` rejects; blocking until both rankings are in
-/// is the decided behaviour"). Delegates the phase + intermission-timing
-/// check to `bracket::start_match_at`, which deliberately leaves this
-/// precondition to its caller -- see that function's doc comment.
-fn start_match(m: &mut MatchState, now: i64, opens: i64) -> Result<(), &'static str> {
-    if m.order_a.is_none() || m.order_b.is_none() {
-        return Err("both players must submit their ranking before the match can start");
+/// Staff override: start `m` now. Matches normally start by themselves
+/// (see `bracket` and `judge::try_autostart`); this is for a match stuck on a
+/// player who never ranks. A missing ranking becomes the listed order, and
+/// the players' breaks are not waited for - staff asked for now.
+fn force_start(m: &mut MatchState) -> Result<(), &'static str> {
+    if m.state != MatchPhase::Ordering {
+        return Err("match is not awaiting start");
     }
-    bracket::start_match_at(m, now, opens)
+    bracket::fill_missing_orders(m);
+    m.state = MatchPhase::InProgress;
+    Ok(())
 }
 
 /// Handle `POST /matches/{match_id}/start`. Staff only (`contest:manage`).
@@ -51,57 +51,25 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         .ok_or_else(|| PluginHttpResponse::error(400, "The bracket has not been set up yet"))?;
     let current = storage::load_match(host, contest_id, match_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
-
-    // Cheap, DB-free precondition, checked first: a request rejected for
-    // missing orders should not also pay for a round-gate lookup (below) or
-    // a `now()` query it will never use. Mirrors `start_match`'s own check
-    // order (see that function) -- this can never disagree with what the
-    // CAS closure ultimately enforces, since `start_match` re-checks the
-    // same thing against the live document.
-    if current.order_a.is_none() || current.order_b.is_none() {
-        return Err(PluginHttpResponse::error(
-            400,
-            "both players must submit their ranking before the match can start",
-        )
-        .into());
+    if info.phase == "before" {
+        return Err(PluginHttpResponse::error(400, "The contest has not started yet").into());
     }
 
-    // The round-intermission boundary is computed once, outside the CAS
-    // retry loop below, from a snapshot of the whole bracket: a match's own
-    // round-opening time does not depend on anything the retry loop itself
-    // writes, so recomputing it on every retry (as `step`'s `now_ms` call
-    // deliberately IS recomputed) would only add redundant reads, not
-    // correctness.
-    let opens = if current.round <= 1 {
-        0
-    } else {
-        let matches = storage::load_all_matches(host, contest_id)?;
-        let Some(previous_round_ended) = bracket::round_ended_at_ms(&matches, current.round - 1)
-        else {
-            return Err(PluginHttpResponse::error(
-                409,
-                "The previous round has not finished for every match yet",
-            )
-            .into());
-        };
-        bracket::round_opens_at_ms(&setup, current.round, previous_round_ended)
-    };
-
-    // Validate against a snapshot first, mirroring `ordering::handle_order`,
-    // so a rejection is reported as 400 rather than masked as 500 by
-    // `SdkError`'s blanket `ApiError` conversion.
-    let now_probe = judge::now_ms(host)?;
+    // Validate against a snapshot first so a rejection is a 400, not the
+    // 500 `SdkError`'s blanket `ApiError` conversion would give it.
     let mut probe = current.clone();
-    start_match(&mut probe, now_probe, opens).map_err(|msg| PluginHttpResponse::error(400, msg))?;
+    force_start(&mut probe).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let updated = storage::update_match(host, contest_id, match_id, |m| {
         let now = judge::now_ms(host)?;
-        start_match(m, now, opens).map_err(|e| SdkError::Other(e.to_string()))?;
-        // The moment a match leaves `Ordering`, its first regular 小局 must
-        // open -- nothing else in this plugin opens 小局 index 0 (`step`
-        // only ever opens the NEXT one once the current one decides).
+        force_start(m).map_err(|e| SdkError::Other(e.to_string()))?;
         judge::open_xiaoju(host, contest_id, match_id, &setup, now, m)
     })?;
+    // A start timer may still be pending; it will find the match started
+    // and do nothing, but cancel it rather than leave it to fire.
+    let _ = host
+        .timer
+        .cancel(&judge::start_timer_key(contest_id, match_id));
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -285,6 +253,10 @@ struct MatchView {
     /// this adds no visibility that `order_a`/`order_b`/`tiebreak_problem`
     /// do not already grant.
     games: Vec<GameView>,
+    /// While `Ordering`: when the match will start by itself (contest start
+    /// or the end of a player's break), or `None` while a ranking is still
+    /// missing. Always `None` once started. Structural, never masked.
+    starts_at_ms: Option<i64>,
 }
 
 /// One opened 小局 as seen by the requesting viewer. Regular games (index
@@ -412,6 +384,26 @@ fn match_view(
                 }
             })
             .collect(),
+        starts_at_ms: None,
+    }
+}
+
+/// Fill in `starts_at_ms` for every view (see [`bracket::start_at_ms`]).
+/// Best-effort like the names: a failed contest lookup leaves it `None`.
+fn attach_start_times(
+    host: &Host,
+    contest: i32,
+    setup: &Setup,
+    matches: &[(u8, MatchState)],
+    views: &mut [MatchView],
+) {
+    let Ok(contest_start) = judge::contest_start_ms(host, contest) else {
+        return;
+    };
+    for v in views.iter_mut() {
+        if let Some((_, m)) = matches.iter().find(|(id, _)| *id == v.id) {
+            v.starts_at_ms = bracket::start_at_ms(setup, matches, m, contest_start);
+        }
     }
 }
 
@@ -511,6 +503,7 @@ pub fn handle_get_bracket(
         })
         .collect();
     attach_player_names(host, &mut views);
+    attach_start_times(host, contest_id, &setup, &matches, &mut views);
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -544,6 +537,10 @@ pub fn handle_get_match(
     let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
     let mut view = [match_view(match_id, &m, round_def, viewer, can_view_all)];
     attach_player_names(host, &mut view);
+    if m.state == MatchPhase::Ordering {
+        let matches = storage::load_all_matches(host, contest_id)?;
+        attach_start_times(host, contest_id, &setup, &matches, &mut view);
+    }
     let [view] = view;
 
     Ok(PluginHttpResponse {
@@ -622,30 +619,25 @@ mod tests {
             .unwrap();
     }
 
-    // -- start_match (pure) --
+    // -- force_start (pure) --
 
     #[test]
-    fn start_is_rejected_while_an_order_is_missing() {
-        // Decided behaviour: the match BLOCKS until both rankings are in.
+    fn the_staff_override_starts_a_match_whose_ranking_never_came() {
+        // A player who never ranks must not stall the bracket forever: the
+        // override fills the missing order with the listed group.
         let mut m = match_in_ordering();
         m.order_a = Some([103, 101, 102]);
-        // order_b is still None -- only one side has ranked.
-        let err = start_match(&mut m, 0, 0).unwrap_err();
-        assert!(err.contains("ranking"), "got: {err}");
-        assert_eq!(
-            m.state,
-            MatchPhase::Ordering,
-            "a rejected start must not mutate state"
-        );
+        force_start(&mut m).unwrap();
+        assert_eq!(m.state, MatchPhase::InProgress);
+        assert_eq!(m.order_b, Some(m.group_b));
+        assert_eq!(m.order_a, Some([103, 101, 102]), "a real ranking is kept");
     }
 
     #[test]
-    fn start_succeeds_once_both_orders_are_in_and_the_round_has_opened() {
+    fn the_staff_override_refuses_a_match_that_is_not_waiting_to_start() {
         let mut m = match_in_ordering();
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
-        start_match(&mut m, 100, 0).unwrap();
-        assert_eq!(m.state, MatchPhase::InProgress);
+        m.state = MatchPhase::InProgress;
+        assert!(force_start(&mut m).is_err());
     }
 
     // -- handle_start (host wiring) --
@@ -704,26 +696,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_start_rejects_when_an_order_is_missing() {
+    fn handle_start_overrides_a_missing_ranking_with_the_listed_order() {
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.order_a = Some([103, 101, 102]);
-        // order_b missing.
-        seed(&host, 7, &setup, storage::match_id_for(1, 0), &m);
+        // order_b missing: player A never ranked B's problems.
+        let match_id = storage::match_id_for(1, 0);
+        seed(&host, 7, &setup, match_id, &m);
+        queue_now(&host, 1_000);
 
-        let err = handle_start(
-            &host,
-            &request(7, storage::match_id_for(1, 0), Some(staff_auth())),
-        )
-        .unwrap_err();
-        assert_eq!(err.into_response().status, 400);
+        let resp = handle_start(&host, &request(7, match_id, Some(staff_auth()))).unwrap();
+        assert_eq!(resp.status, 200);
 
-        let reloaded = storage::load_match(&host, 7, storage::match_id_for(1, 0))
-            .unwrap()
-            .unwrap();
-        assert_eq!(reloaded.state, MatchPhase::Ordering);
+        let reloaded = storage::load_match(&host, 7, match_id).unwrap().unwrap();
+        assert_eq!(reloaded.state, MatchPhase::InProgress);
+        assert_eq!(reloaded.order_b, Some(reloaded.group_b));
+        assert_eq!(reloaded.order_a, Some([103, 101, 102]));
     }
 
     #[test]
@@ -737,9 +727,7 @@ mod tests {
         let match_id = storage::match_id_for(1, 0);
         seed(&host, 7, &setup, match_id, &m);
 
-        // `handle_start` probe-validates with one `now_ms` query, then a
-        // second inside the CAS closure -- both need a queued row.
-        queue_now(&host, 1_000);
+        // `handle_start` reads the clock once, inside the CAS closure.
         queue_now(&host, 1_000);
 
         let resp = handle_start(&host, &request(7, match_id, Some(staff_auth()))).unwrap();

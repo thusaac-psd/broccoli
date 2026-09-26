@@ -88,7 +88,7 @@ pub struct MatchState {
     /// the next round may not open before the fixed intermission has
     /// elapsed after the LAST match of the previous round finished, which
     /// requires knowing when each match finished, not just that it did.
-    /// See `bracket::round_ended_at_ms`.
+    /// Read by `bracket::player_free_at_ms` to time the winner's break.
     pub decided_at_ms: i64,
     /// While `state == MatchPhase::AwaitingJudge`: the id of the in-flight
     /// submission this match is blocked on, so staff reading

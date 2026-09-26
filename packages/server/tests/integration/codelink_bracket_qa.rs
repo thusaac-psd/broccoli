@@ -170,16 +170,18 @@ async fn order_match_0(fx: &Fixture) {
     );
 }
 
+/// Matches start by themselves once both players have ranked: assert that
+/// happened (formerly staff had to POST /start).
 async fn start_match_0(fx: &Fixture) {
     let res = fx
         .app
-        .post_with_token(
-            &bracket_route(fx.contest_id, "/matches/0/start"),
-            &json!({}),
-            &fx.staff_token,
-        )
+        .get_with_token(&bracket_route(fx.contest_id, "/matches/0"), &fx.staff_token)
         .await;
-    assert_eq!(res.status, 200, "starting match 0 failed: {}", res.text);
+    assert_eq!(res.status, 200, "reading match 0 failed: {}", res.text);
+    assert_eq!(
+        res.body["state"], "in_progress",
+        "match 0 should start by itself once both players have ranked"
+    );
 }
 
 // =====================================================================

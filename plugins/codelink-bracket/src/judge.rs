@@ -51,6 +51,7 @@ use broccoli_server_sdk::types::*;
 use extism_pdk::{FnResult, plugin_fn};
 use serde::{Deserialize, Serialize};
 
+use crate::bracket;
 use crate::decide::{self, MatchOutcome, SubmissionLifecycle, SubmissionRecord, XiaojuOutcome};
 use crate::model::{MatchPhase, MatchState, RoundDef, Setup, XiaojuState};
 use crate::storage;
@@ -107,6 +108,73 @@ pub fn parse_judgewait_timer_key(key: &str) -> Option<(i32, u8)> {
     let match_id: u8 = parts.next()?.parse().ok()?;
     parts.next()?;
     Some((contest, match_id))
+}
+
+/// Timer key for a match's automatic start (see [`try_autostart`]). One
+/// per match: rescheduling it simply replaces the earlier fire time.
+pub fn start_timer_key(contest: i32, match_id: u8) -> String {
+    format!("start:{contest}:{match_id}")
+}
+
+/// Parse a `start:{contest}:{match_id}` key.
+pub fn parse_start_timer_key(key: &str) -> Option<(i32, u8)> {
+    let mut parts = key.split(':');
+    if parts.next() != Some("start") {
+        return None;
+    }
+    let contest: i32 = parts.next()?.parse().ok()?;
+    let match_id: u8 = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((contest, match_id))
+}
+
+#[derive(Debug, Deserialize)]
+struct ContestStartRow {
+    start_ms: f64,
+}
+
+/// The contest's start time, epoch ms. Round 1 cannot start before it.
+pub(crate) fn contest_start_ms(host: &Host, contest: i32) -> Result<i64, SdkError> {
+    let mut p = Params::new();
+    let sql = format!(
+        "SELECT EXTRACT(EPOCH FROM start_time) * 1000 AS start_ms FROM contest WHERE id = {}",
+        p.bind(contest)
+    );
+    let row: Option<ContestStartRow> = host.db.query_one_with_args(&sql, &p.into_args())?;
+    row.map(|r| r.start_ms as i64)
+        .ok_or_else(|| SdkError::Other("contest not found".into()))
+}
+
+/// Start `match_id` now if it is due (see [`bracket::start_at_ms`]),
+/// otherwise make sure its start timer fires when it will be. Called after
+/// every ranking and from the start timer; idempotent and safe to race,
+/// because the actual start re-checks the live document inside the
+/// compare-and-set and only one caller can move it out of `Ordering`.
+pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> {
+    let Some(setup) = storage::load_setup(host, contest)? else {
+        return Ok(());
+    };
+    let Some(current) = storage::load_match(host, contest, match_id)? else {
+        return Ok(());
+    };
+    let matches = storage::load_all_matches(host, contest)?;
+    let contest_start = contest_start_ms(host, contest)?;
+    let Some(at) = bracket::start_at_ms(&setup, &matches, &current, contest_start) else {
+        return Ok(());
+    };
+    let now = now_ms(host)?;
+    if now < at {
+        return host
+            .timer
+            .schedule(at, &start_timer_key(contest, match_id), "");
+    }
+    storage::update_match(host, contest, match_id, |m| {
+        if bracket::start_at_ms(&setup, &matches, m, contest_start).is_none() {
+            return Ok(()); // someone else started it, or it is no longer due
+        }
+        m.state = MatchPhase::InProgress;
+        open_xiaoju(host, contest, match_id, &setup, now, m)
+    })?;
+    Ok(())
 }
 
 /// The problem `player` should currently be submitting to in match `m`,
@@ -840,6 +908,13 @@ pub fn on_timer(input: String) -> extism_pdk::FnResult<String> {
         if let Err(e) = advance(&host, contest, match_id) {
             let _ = host.log.info(&format!(
                 "codelink-bracket: on_timer advance failed for key {}: {e:?}",
+                input.key
+            ));
+        }
+    } else if let Some((contest, match_id)) = parse_start_timer_key(&input.key) {
+        if let Err(e) = try_autostart(&host, contest, match_id) {
+            let _ = host.log.info(&format!(
+                "codelink-bracket: on_timer autostart failed for key {}: {e:?}",
                 input.key
             ));
         }
@@ -1852,5 +1927,126 @@ mod tests {
             .unwrap();
         assert!(force_decide(&host, 7, 5, 10).is_err());
         assert!(storage::load_match(&host, 7, 5).unwrap().is_none());
+    }
+
+    // -- try_autostart: matches start by themselves --
+
+    fn ranked_match(round: u8, a: i32, b: i32) -> MatchState {
+        MatchState {
+            round,
+            player_a: a,
+            player_b: b,
+            group_a: [101, 102, 103],
+            group_b: [201, 202, 203],
+            order_a: Some([103, 101, 102]),
+            order_b: Some([203, 201, 202]),
+            state: MatchPhase::Ordering,
+            ..Default::default()
+        }
+    }
+
+    fn queue_contest_start(host: &Host, start_ms: i64) {
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": start_ms as f64 }]));
+    }
+
+    #[test]
+    fn a_ranked_match_starts_by_itself_once_the_contest_is_running() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &ranked_match(1, 10, 20));
+        queue_contest_start(&host, 1_000);
+        queue_now(&host, 5_000);
+
+        try_autostart(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::InProgress);
+        assert_eq!(m.xiaoju.len(), 1, "game 1 opened");
+        assert!(host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 0)));
+    }
+
+    #[test]
+    fn a_match_ranked_before_the_contest_starts_is_timed_for_the_start() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &ranked_match(1, 10, 20));
+        queue_contest_start(&host, 60_000);
+        queue_now(&host, 5_000);
+
+        try_autostart(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::Ordering);
+        assert_eq!(
+            host.timer.scheduled_at(&start_timer_key(7, 0)),
+            Some(60_000)
+        );
+    }
+
+    #[test]
+    fn a_later_match_waits_for_the_later_players_break() {
+        let host = Host::mock();
+        let setup = setup_two_rounds(); // 600 s break
+        let won = |pos: u8, winner: i32, at: i64| MatchState {
+            round: 1,
+            pos,
+            winner: Some(winner),
+            decided_at_ms: at,
+            state: MatchPhase::Decided,
+            ..Default::default()
+        };
+        seed(
+            &host,
+            7,
+            &setup,
+            storage::match_id_for(1, 0),
+            &won(0, 10, 100_000),
+        );
+        seed(
+            &host,
+            7,
+            &setup,
+            storage::match_id_for(1, 1),
+            &won(1, 20, 300_000),
+        );
+        let next = storage::match_id_for(2, 0);
+        seed(&host, 7, &setup, next, &ranked_match(2, 10, 20));
+        queue_contest_start(&host, 0);
+        queue_now(&host, 400_000);
+
+        try_autostart(&host, 7, next).unwrap();
+
+        let m = storage::load_match(&host, 7, next).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::Ordering, "player 20 is still resting");
+        assert_eq!(
+            host.timer.scheduled_at(&start_timer_key(7, next)),
+            Some(300_000 + 600_000)
+        );
+    }
+
+    #[test]
+    fn a_match_missing_a_ranking_waits_without_a_timer() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = ranked_match(1, 10, 20);
+        m.order_b = None;
+        seed(&host, 7, &setup, 0, &m);
+        queue_contest_start(&host, 0);
+
+        try_autostart(&host, 7, 0).unwrap();
+
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().state,
+            MatchPhase::Ordering
+        );
+        assert!(!host.timer.is_scheduled(&start_timer_key(7, 0)));
+    }
+
+    #[test]
+    fn start_timer_key_round_trips_and_rejects_other_keys() {
+        assert_eq!(parse_start_timer_key(&start_timer_key(7, 3)), Some((7, 3)));
+        assert_eq!(parse_start_timer_key("xiaoju:7:3:0"), None);
+        assert_eq!(parse_start_timer_key("start:7:3:extra"), None);
     }
 }
