@@ -2740,7 +2740,7 @@ export interface components {
       /** @example Given an array of integers `nums` and an integer `target`... */
       content: string;
       /** @example ioi */
-      default_contest_type?: string;
+      default_contest_type: string;
       /** @example false */
       is_public?: boolean | null;
       /**

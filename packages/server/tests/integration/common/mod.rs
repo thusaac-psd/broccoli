@@ -1077,6 +1077,7 @@ impl TestApp {
                     "time_limit": 1000,
                     "memory_limit": 262144,
                     "problem_type": "standard",
+                    "default_contest_type": "standard",
                     "checker_format": "exact",
                     // Public so a contestant can read/submit to the standalone
                     // problem; `require_problem_read_access` (correctly) hides
@@ -1103,6 +1104,7 @@ impl TestApp {
                     "time_limit": 1000,
                     "memory_limit": 262144,
                     "problem_type": "standard",
+                    "default_contest_type": "standard",
                     "checker_format": "exact",
                     "is_public": false,
                 }),

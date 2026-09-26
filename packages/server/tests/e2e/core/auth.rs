@@ -236,6 +236,7 @@ mod permissions {
                     "time_limit": 1000,
                     "memory_limit": 262144,
                     "problem_type": "batch",
+                    "default_contest_type": app.contest_type,
                     "checker_format": "exact",
                 }),
                 &token,

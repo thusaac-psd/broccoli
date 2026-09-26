@@ -292,6 +292,10 @@ pub struct E2eTestApp {
     claim_handle: Option<JoinHandle<()>>,
     worker_handle: Option<JoinHandle<()>>,
     result_consumer_handle: Option<JoinHandle<()>>,
+    /// A contest type this server actually registers, for problem creation
+    /// (which requires one): `icpc` from the real plugins, or the stub
+    /// `standard` a plugin-less server registers instead.
+    pub contest_type: &'static str,
 }
 
 impl Drop for E2eTestApp {
@@ -412,6 +416,8 @@ impl E2eTestApp {
             claim_handle: None,
             worker_handle: None,
             result_consumer_handle: None,
+            // An external server runs with the real plugins.
+            contest_type: "icpc",
         }
     }
 
@@ -772,6 +778,7 @@ impl E2eTestApp {
             claim_handle: claim_handle_opt,
             worker_handle: worker_handle_opt,
             result_consumer_handle: result_consumer_handle_opt,
+            contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }
 
@@ -1078,6 +1085,7 @@ impl E2eTestApp {
                     "time_limit": 2000,
                     "memory_limit": 262144,
                     "problem_type": "batch",
+                    "default_contest_type": self.contest_type,
                     "checker_format": checker_format,
                     "is_public": is_public,
                 }),

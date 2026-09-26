@@ -98,7 +98,8 @@ mod problem_creation {
                     "title": "Two Sum",
                     "content": "Find two numbers that sum to target.",
                     "time_limit": 1000,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -125,13 +126,60 @@ mod problem_creation {
                     "title": "Array Max",
                     "content": "Find the maximum.",
                     "time_limit": 2000,
-                    "memory_limit": 131072
+                    "memory_limit": 131072,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
             .await;
 
         assert_eq!(res.status, 201);
+    }
+
+    #[tokio::test]
+    async fn create_problem_requires_an_explicit_contest_type() {
+        // No server-side default: a "first registered" pick depends on plugin
+        // names and once landed practice judging on a tournament format.
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("admin_ct_required", "password123", "admin")
+            .await;
+        let body = |extra: serde_json::Value| {
+            let mut b = json!({
+                "title": "No Contest Type",
+                "content": "x",
+                "time_limit": 1000,
+                "memory_limit": 262144
+            });
+            b.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            b
+        };
+
+        let missing = app
+            .post_with_token(routes::PROBLEMS, &body(json!({})), &token)
+            .await;
+        assert_eq!(missing.status, 400, "missing type: {}", missing.text);
+
+        let empty = app
+            .post_with_token(
+                routes::PROBLEMS,
+                &body(json!({"default_contest_type": ""})),
+                &token,
+            )
+            .await;
+        assert_eq!(empty.status, 400, "empty type: {}", empty.text);
+
+        let ok = app
+            .post_with_token(
+                routes::PROBLEMS,
+                &body(json!({"default_contest_type": "standard"})),
+                &token,
+            )
+            .await;
+        assert_eq!(ok.status, 201, "explicit type: {}", ok.text);
+        assert_eq!(ok.body["default_contest_type"], "standard");
     }
 
     #[tokio::test]
@@ -148,7 +196,8 @@ mod problem_creation {
                     "title": "Nope",
                     "content": "Should fail.",
                     "time_limit": 1000,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -172,7 +221,8 @@ mod problem_creation {
                     "title": "   ",
                     "content": "Some content",
                     "time_limit": 1000,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -187,7 +237,8 @@ mod problem_creation {
                     "title": "Valid",
                     "content": "Some content",
                     "time_limit": 0,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -210,7 +261,8 @@ mod problem_creation {
                     "title": "  Padded Title  ",
                     "content": "Some content",
                     "time_limit": 1000,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -238,7 +290,8 @@ mod problem_listing {
                     "title": format!("Problem {i}"),
                     "content": "Content",
                     "time_limit": 1000,
-                    "memory_limit": 262144
+                    "memory_limit": 262144,
+                    "default_contest_type": "standard"
                 }),
                 &token,
             )
@@ -268,7 +321,8 @@ mod problem_listing {
                 "title": "Binary Search",
                 "content": "Implement binary search.",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
@@ -280,7 +334,8 @@ mod problem_listing {
                 "title": "Two Sum",
                 "content": "Find pairs.",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
@@ -309,7 +364,8 @@ mod problem_listing {
                 "title": "100% Done",
                 "content": "Content",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
@@ -321,7 +377,8 @@ mod problem_listing {
                 "title": "Totally Different",
                 "content": "Content",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
@@ -365,7 +422,8 @@ mod problem_listing {
                 "title": "Zebra",
                 "content": "Z problem.",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
@@ -377,7 +435,8 @@ mod problem_listing {
                 "title": "Apple",
                 "content": "A problem.",
                 "time_limit": 1000,
-                "memory_limit": 262144
+                "memory_limit": 262144,
+                "default_contest_type": "standard"
             }),
             &token,
         )
