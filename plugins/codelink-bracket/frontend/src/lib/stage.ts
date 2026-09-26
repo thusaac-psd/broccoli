@@ -9,7 +9,8 @@ export type Side = 'a' | 'b';
 export type PlayerStage =
   | { kind: 'waiting_opponent' }
   | { kind: 'rank' }
-  | { kind: 'waiting_start' }
+  /** Ranked; `startsAtMs` null means the opponent has not ranked yet. */
+  | { kind: 'waiting_start'; startsAtMs: number | null }
   | { kind: 'play'; game: number; problemId: number | null }
   | { kind: 'judging' }
   | { kind: 'staff' }
@@ -38,7 +39,7 @@ export function playerStage(match: MatchView, side: Side): PlayerStage {
     case 'ordering':
       return submittedRanking === null
         ? { kind: 'rank' }
-        : { kind: 'waiting_start' };
+        : { kind: 'waiting_start', startsAtMs: match.starts_at_ms };
     case 'in_progress': {
       const game = match.current_xiaoju_index ?? 0;
       return { kind: 'play', game, problemId: ownOrder?.[game] ?? null };

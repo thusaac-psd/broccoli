@@ -5,6 +5,7 @@ import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 
 import { useBracketApi } from './hooks/useBracketApi';
+import { useMyMatch } from './hooks/useMyMatch';
 import {
   deriveCountdownStatus,
   formatCountdownLabel,
@@ -65,6 +66,9 @@ export function BracketLiveXiaoju({
   submissions,
 }: LiveXiaojuViewProps) {
   const { t } = useTranslation();
+  // Keeps the problem lists fresh as the viewer's match moves on (see
+  // `useRevealRefresh`); the result itself is not needed here.
+  useMyMatch(contestId);
   const api = useBracketApi();
   const auth = useAuth();
   const viewerId = auth.user?.id ?? null;

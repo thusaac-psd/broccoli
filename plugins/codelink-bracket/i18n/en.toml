@@ -27,7 +27,7 @@
 'codelink-bracket.match.tiebreakExhausted' = 'The tiebreak problems ran out without a winner. Staff must decide this match manually.'
 
 'codelink-bracket.staff.title' = 'Staff controls'
-'codelink-bracket.staff.start' = 'Start match'
+'codelink-bracket.staff.start' = 'Start now'
 'codelink-bracket.staff.starting' = 'Starting…'
 'codelink-bracket.staff.forceExpiry' = 'Force expiry'
 'codelink-bracket.staff.awardTo' = 'Award to {name}'
@@ -36,7 +36,7 @@
 'codelink-bracket.error.forceDecide' = 'Failed to decide the match.'
 
 'codelink-bracket.ordering.hidden' = "Waiting to see the opponent's problems before you can rank them."
-'codelink-bracket.ordering.resubmit' = 'You already submitted a ranking. Submitting again replaces it until the match starts.'
+'codelink-bracket.ordering.resubmit' = 'You have ranked. You can change it until your opponent ranks too; then the match starts.'
 'codelink-bracket.ordering.instructions' = "Drag your opponent's 3 problems into the order they must solve them."
 'codelink-bracket.ordering.submit' = 'Submit ranking'
 'codelink-bracket.ordering.submitting' = 'Submitting…'
@@ -72,7 +72,6 @@
 'codelink-bracket.my.title' = 'Your match'
 'codelink-bracket.my.vs' = 'vs {name}'
 'codelink-bracket.my.waitingOpponent' = 'Your opponent is not decided yet.'
-'codelink-bracket.my.waitingStart' = 'Your ranking is in. The match starts when both players have ranked and staff start it.'
 'codelink-bracket.ordering.hint' = 'The top problem is the one they must solve first.'
 'codelink-bracket.ordering.openProblem' = 'Open problem in a new tab'
 'codelink-bracket.ordering.update' = 'Update ranking'
@@ -91,7 +90,7 @@
 'codelink-bracket.setup.addTiebreak' = 'Add a tiebreak problem'
 'codelink-bracket.setup.autofill' = 'Fill from problem order'
 'codelink-bracket.setup.bench' = 'Other enrolled players ({count})'
-'codelink-bracket.setup.breakMinutes' = 'Break between rounds (minutes)'
+'codelink-bracket.setup.breakMinutes' = "Break between a player's matches (minutes)"
 'codelink-bracket.setup.confirmDescription' = 'The seeding and problem assignment cannot be changed once matches exist. This also turns on the submission check for this contest.'
 'codelink-bracket.setup.confirmTitle' = 'Create the bracket?'
 'codelink-bracket.setup.create' = 'Create bracket'
@@ -124,7 +123,6 @@
 'codelink-bracket.sortable.up' = 'Move up'
 'codelink-bracket.staff.awardDescription' = '{name} wins this match and moves to the next round. This cannot be undone.'
 'codelink-bracket.staff.awardTitle' = 'Award the match to {name}?'
-'codelink-bracket.staff.startNeedsRankings' = 'Both players need to rank first.'
 'codelink-bracket.step.rank' = 'Rank'
 'codelink-bracket.step.result' = 'Result'
 'codelink-bracket.step.start' = 'Start'
@@ -133,7 +131,6 @@
 'codelink-bracket.summary.decided' = 'of {total} decided'
 'codelink-bracket.summary.finished' = 'Tournament finished'
 'codelink-bracket.summary.live' = 'live'
-'codelink-bracket.summary.ready' = 'ready to start'
 'codelink-bracket.summary.stage' = 'Current stage'
 'codelink-bracket.phase.short.pending' = 'Not started'
 'codelink-bracket.phase.short.ordering' = 'Ranking'
@@ -149,8 +146,8 @@
 'codelink-bracket.game.upcoming' = 'Upcoming'
 'codelink-bracket.game.judging' = 'Waiting on judge'
 'codelink-bracket.game.halted' = 'Awaiting staff'
-'codelink-bracket.confirm.startTitle' = 'Start {a} vs {b}?'
-'codelink-bracket.confirm.startDescription' = 'Game 1 opens immediately for both players and the clock starts. The rankings are locked.'
+'codelink-bracket.confirm.startTitle' = 'Start {a} vs {b} now?'
+'codelink-bracket.confirm.startDescription' = 'Matches start by themselves once both players have ranked. This starts it now instead: a player who has not ranked gets the listed order, and any remaining break is skipped.'
 'codelink-bracket.confirm.expiryTitle' = 'Re-check the current game now?'
 'codelink-bracket.confirm.expiryDescription' = 'Runs the normal decision for the current game right away, using the results judged so far. Use it after a rejudge. It does not end a game before its deadline.'
 'codelink-bracket.confirm.rejudgeTitle' = 'Rejudge submission #{id}?'
@@ -159,7 +156,7 @@
 'codelink-bracket.confirm.autofillDescription' = "Every round is refilled from the contest's problem order. The problems you picked by hand are lost."
 'codelink-bracket.strip.waiting_opponent' = 'Waiting for your opponent'
 'codelink-bracket.strip.rank' = "Rank your opponent's problems"
-'codelink-bracket.strip.waiting_start' = 'Ranked · waiting to start'
+'codelink-bracket.strip.waiting_start' = 'Waiting for your opponent to rank'
 'codelink-bracket.strip.judging' = 'Waiting on the judge'
 'codelink-bracket.strip.staff' = 'Staff are deciding'
 'codelink-bracket.strip.advanced' = 'You advanced'
@@ -169,3 +166,9 @@
 'codelink-bracket.summary.exitPresent' = 'Exit'
 'codelink-bracket.game.short' = 'G{n}'
 'codelink-bracket.game.shortTiebreak' = 'TB{n}'
+'codelink-bracket.card.starting' = 'Starting…'
+'codelink-bracket.card.startsIn' = 'starts {time}'
+'codelink-bracket.start.whenRanked' = 'Starts by itself once both players have ranked.'
+'codelink-bracket.start.inTime' = 'Both have ranked. Starts by itself in {time}.'
+'codelink-bracket.my.waitingRanking' = 'Your ranking is in. The match starts as soon as {name} ranks too.'
+'codelink-bracket.my.startsIn' = 'Both rankings are in. Your match starts in {time}.'

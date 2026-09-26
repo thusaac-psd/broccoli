@@ -1,5 +1,6 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
 
 import { type Side, sideOf } from '../lib/stage';
 import type { MatchView } from '../types';
@@ -26,5 +27,32 @@ export function useMyMatch(
     .filter((m) => sideOf(m, viewerId) !== null)
     .sort((a, b) => b.round - a.round)[0];
   const side = match ? sideOf(match, viewerId) : null;
+  useRevealRefresh(contestId, match);
   return match && side ? { match, side } : null;
+}
+
+/**
+ * Refetch the contest's problem lists (the host sidebar and problem table,
+ * and this plugin's label lookup) whenever the viewer's match moves on: it
+ * starts, a new game opens, or they reach a new match. Each of those reveals
+ * a problem the lists fetched earlier could not include, and nothing else
+ * would refresh them until a page reload.
+ */
+export function useRevealRefresh(
+  contestId: number | undefined,
+  match: MatchView | undefined,
+) {
+  const queryClient = useQueryClient();
+  const stage = match
+    ? `${match.id}:${match.state}:${match.current_xiaoju_index ?? '-'}`
+    : null;
+  useEffect(() => {
+    if (!contestId || stage === null) return;
+    void queryClient.invalidateQueries({
+      queryKey: ['contest-problems', contestId],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: ['codelink-bracket-problems', contestId],
+    });
+  }, [contestId, stage, queryClient]);
 }

@@ -20,7 +20,11 @@ export function gamePips(match: MatchView, playerId: number): Pip[] {
       if (match.state !== 'decided') pips.push('upcoming');
       continue;
     }
-    if (!g.decided) pips.push('live');
+    // A game left open when staff decided the match (award, or a stuck
+    // judge) never finished: nobody scored it, and it is not live.
+    const matchOver =
+      match.state === 'decided' || match.state === 'needs_adjudication';
+    if (!g.decided) pips.push(matchOver ? 'void' : 'live');
     else if (g.winner === null) pips.push('void');
     else pips.push(g.winner === playerId ? 'won' : 'lost');
   }

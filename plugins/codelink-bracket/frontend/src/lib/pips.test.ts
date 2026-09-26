@@ -43,6 +43,7 @@ function match(overrides: Partial<MatchView>): MatchView {
     current_xiaoju_deadline_ms: null,
     current_xiaoju_opened_at_ms: null,
     games: [],
+    starts_at_ms: null,
     ...overrides,
   };
 }
@@ -88,4 +89,14 @@ test('seeds come from first-round positions', () => {
       [8, 8],
     ],
   );
+});
+
+test('a game left open when staff decided the match is not shown as live', () => {
+  const m = match({
+    state: 'decided',
+    winner: 10,
+    games: [game(0, null), game(1, null, false)],
+  });
+  assert.deepEqual(gamePips(m, 10), ['void', 'void']);
+  assert.deepEqual(gamePips(m, 20), ['void', 'void']);
 });

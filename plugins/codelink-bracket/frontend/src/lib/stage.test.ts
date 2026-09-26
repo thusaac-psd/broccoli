@@ -28,6 +28,7 @@ function match(overrides: Partial<MatchView>): MatchView {
     current_xiaoju_deadline_ms: null,
     current_xiaoju_opened_at_ms: null,
     games: [],
+    starts_at_ms: null,
     ...overrides,
   };
 }
@@ -43,7 +44,10 @@ test('sideOf finds the viewer, or null for anyone else', () => {
 test("a player's own ranking lands in the OPPONENT's order", () => {
   // A ranked (order_b is set) but B has not (order_a is null).
   const m = match({ order_b: [203, 201, 202] });
-  assert.equal(playerStage(m, 'a').kind, 'waiting_start');
+  assert.deepEqual(playerStage(m, 'a'), {
+    kind: 'waiting_start',
+    startsAtMs: null,
+  });
   assert.equal(playerStage(m, 'b').kind, 'rank');
 });
 
@@ -140,4 +144,16 @@ test('the tiebreak step appears only once a tiebreak has opened', () => {
     'tiebreak',
     'result',
   ]);
+});
+
+test('once both have ranked, the waiting player learns when the match starts', () => {
+  const m = match({
+    order_a: [103, 101, 102],
+    order_b: [203, 201, 202],
+    starts_at_ms: 90_000,
+  });
+  assert.deepEqual(playerStage(m, 'a'), {
+    kind: 'waiting_start',
+    startsAtMs: 90_000,
+  });
 });

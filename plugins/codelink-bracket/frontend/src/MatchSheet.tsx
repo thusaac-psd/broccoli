@@ -40,7 +40,13 @@ import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
 import { sideOf } from './lib/stage';
 import { OrderingPanel } from './OrderingPanel';
-import { ConfirmButton, StatusPill, useGameClock, VerdictBadge } from './parts';
+import {
+  ConfirmButton,
+  StatusPill,
+  useGameClock,
+  useStartsIn,
+  VerdictBadge,
+} from './parts';
 import type { GameView, MatchView } from './types';
 
 interface MatchSheetProps {
@@ -50,9 +56,15 @@ interface MatchSheetProps {
 }
 
 export function MatchSheet({ contestId, matchId, onClose }: MatchSheetProps) {
+  const { t } = useTranslation();
   return (
     <Sheet open={matchId !== null} onOpenChange={(open) => !open && onClose()}>
       <SheetContent size="2xl" className="w-full overflow-y-auto p-0 sm:w-3/4">
+        {/* Always present, even while the match loads: a dialog without a
+            title is unnamed for screen readers (Radix warns about it). */}
+        <SheetTitle className="sr-only">
+          {t('codelink-bracket.my.details')}
+        </SheetTitle>
         {matchId !== null && (
           <MatchDetail contestId={contestId} matchId={matchId} />
         )}
@@ -132,13 +144,6 @@ function MatchDetail({
           <span aria-hidden>·</span>
           {t('codelink-bracket.match.number', { n: match.pos + 1 })}
         </div>
-        <SheetTitle className="sr-only">
-          {t('codelink-bracket.match.heading', {
-            round: match.round,
-            a: nameA,
-            b: nameB,
-          })}
-        </SheetTitle>
         <SheetDescription asChild>
           <div className="pt-3">
             <Scoreline match={match} nameA={nameA} nameB={nameB} />
@@ -184,6 +189,7 @@ function MatchDetail({
               <RankingStatus name={nameA} done={match.order_b !== null} />
               <RankingStatus name={nameB} done={match.order_a !== null} />
             </div>
+            {match.state === 'ordering' && <StartNote match={match} />}
           </Section>
         )}
 
@@ -406,6 +412,21 @@ function AttentionBanner({
         )}
       </div>
     </div>
+  );
+}
+
+/** Why a ranked-or-ranking match has not started, and when it will. */
+function StartNote({ match }: { match: MatchView }) {
+  const { t } = useTranslation();
+  const startsIn = useStartsIn(match.starts_at_ms);
+  return (
+    <p className="text-sm text-muted-foreground">
+      {startsIn === null
+        ? t('codelink-bracket.start.whenRanked')
+        : startsIn === 'now'
+          ? t('codelink-bracket.card.starting')
+          : t('codelink-bracket.start.inTime', { time: startsIn })}
+    </p>
   );
 }
 
@@ -663,7 +684,6 @@ function StaffControls({
     match.state === 'awaiting_judge';
   const canAward = live || match.state === 'needs_adjudication';
   if (match.state !== 'ordering' && !canAward) return null;
-  const bothRanked = match.order_a !== null && match.order_b !== null;
   const award = (winner: number, name: string) => (
     <ConfirmButton
       size="sm"
@@ -684,7 +704,8 @@ function StaffControls({
         {match.state === 'ordering' && (
           <ConfirmButton
             size="sm"
-            disabled={!bothRanked || busy}
+            variant="outline"
+            disabled={busy}
             title={t('codelink-bracket.confirm.startTitle', {
               a: nameA,
               b: nameB,
@@ -698,11 +719,6 @@ function StaffControls({
               ? t('codelink-bracket.staff.starting')
               : t('codelink-bracket.staff.start')}
           </ConfirmButton>
-        )}
-        {match.state === 'ordering' && !bothRanked && (
-          <span className="self-center text-xs text-muted-foreground">
-            {t('codelink-bracket.staff.startNeedsRankings')}
-          </span>
         )}
         {/* Expiry re-runs the normal decision, which never reopens an
             escalated match -- only an explicit award does. */}

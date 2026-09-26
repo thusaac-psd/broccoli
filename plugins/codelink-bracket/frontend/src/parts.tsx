@@ -60,6 +60,17 @@ export function StatusPill({
   );
 }
 
+/**
+ * Time until a match starts by itself, as m:ss; `'now'` once due (the
+ * server is starting it); null when there is no start time yet.
+ */
+export function useStartsIn(startsAtMs: number | null): string | null {
+  const now = useNow();
+  if (startsAtMs === null) return null;
+  const left = startsAtMs - now;
+  return left > 0 ? formatDurationMs(left) : 'now';
+}
+
 /** mm:ss left in the current game, or null when no clock should show. */
 export function useGameClock(match: MatchView): {
   text: string;

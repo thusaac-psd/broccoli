@@ -42,8 +42,9 @@ setup screen there.
    of every match, three for the second, and at least one tiebreak problem. The
    slots are filled from the contest's problem order to start with. A problem
    can appear only once in the whole bracket.
-3. **Timing.** Set the game length, the break between rounds, and how long a
-   game may wait on a stuck judge before staff must decide the match.
+3. **Timing.** Set the game length, the break each player gets between their
+   matches, and how long a game may wait on a stuck judge before staff must
+   decide the match.
 
 **Create bracket** checks all of this first and lists anything missing. Creating
 the bracket also turns on the plugin's `before_submission` check for the
@@ -79,7 +80,7 @@ contest's **Configure** dialog.
 | `seeds` | Sixteen distinct user ids. Adjacent seeds meet in round 1: the first and second, the third and fourth, and so on. |
 | `rounds` | Exactly four rounds. In every match of a round, the first player owns `group_a` and the second owns `group_b`. |
 | `xiaoju_seconds` | Time limit for each game. Must be greater than 0. |
-| `round_intermission_seconds` | Minimum pause after the last match of a round before a match of the next round can start. |
+| `round_intermission_seconds` | Break each player gets after their own match before their next match can start. |
 | `escalation_grace_seconds` | How long a game may wait for a stuck judge before staff must decide the match. Defaults to 120. |
 
 ## Play a match
@@ -98,8 +99,10 @@ Rankings page shows them a one-line link back to it.
 
 1. Each player drags the opponent's three problems into the order the opponent
    must solve them.
-2. After both rankings are in, staff press **Start match**. The summary above
-   the bracket counts matches that are ready to start.
+2. The match starts by itself as soon as both players have ranked, the contest
+   has started, and both players have had their break since their previous
+   match. There is no ranking deadline: a match waits until both rankings are
+   in. The bracket shows each waiting match's countdown.
 3. In each of the three games, both players work on their next problem at the
    same time. The first accepted submission wins the game. Submission time
    decides, and the smaller submission id breaks an exact tie, the same rule as
@@ -108,6 +111,15 @@ Rankings page shows them a one-line link back to it.
 4. After three games, the player with more wins advances. A level score,
    including 0-0, opens the round's first tiebreak problem, which both players
    solve. A scoreless tiebreak moves to the next tiebreak problem.
+
+Matches do not wait for the rest of their round, so the winner of a quick match
+can start the next round while other matches are still running. Every match in
+a round uses the same problems, so a pair that starts later faces problems that
+earlier pairs have already seen. Run the round in a supervised room.
+
+If a player never ranks, staff can use **Start now** in the match panel. A
+missing ranking becomes the problems' listed order, and any remaining break is
+skipped.
 
 Players see only the problems they have reached. The winner is placed into the
 next round automatically.

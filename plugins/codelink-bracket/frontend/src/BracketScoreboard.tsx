@@ -31,7 +31,7 @@ import {
 import { sideOf } from './lib/stage';
 import { MatchSheet } from './MatchSheet';
 import { MyMatchStrip } from './MyMatchStrip';
-import { StatusPill, useGameClock } from './parts';
+import { StatusPill, useGameClock, useStartsIn } from './parts';
 import { SetupPanel } from './SetupPanel';
 import type { MatchView } from './types';
 
@@ -43,8 +43,6 @@ interface BracketScoreboardProps {
 
 const needsAttention = (m: MatchView) =>
   m.state === 'awaiting_judge' || m.state === 'needs_adjudication';
-const readyToStart = (m: MatchView) =>
-  m.state === 'ordering' && m.order_a !== null && m.order_b !== null;
 const isLive = (m: MatchView) =>
   m.state === 'in_progress' || m.state === 'tiebreak';
 
@@ -185,7 +183,6 @@ function SummaryBar({
     </div>
   );
   const attention = matches.filter(needsAttention).length;
-  const ready = matches.filter(readyToStart).length;
   return (
     <div className="flex flex-wrap items-center gap-x-8 gap-y-3 rounded-xl border border-border bg-card px-5 py-3">
       <div>
@@ -208,10 +205,6 @@ function SummaryBar({
         'text-emerald-600',
       )}
       {stat(decided, t('codelink-bracket.summary.decided', { total: 15 }))}
-      {isStaff &&
-        !presenting &&
-        ready > 0 &&
-        stat(ready, t('codelink-bracket.summary.ready'), 'text-sky-600')}
       <div className="ml-auto flex items-center gap-3">
         {/* Staff-only signal: kept off the projected view. */}
         {isStaff && !presenting && attention > 0 && (
@@ -393,6 +386,7 @@ function MatchCard({
 }) {
   const { t } = useTranslation();
   const clock = useGameClock(match);
+  const startsIn = useStartsIn(match.starts_at_ms);
   const game = match.current_xiaoju_index;
   const liveTag =
     clock && game !== null
@@ -475,6 +469,13 @@ function MatchCard({
         {isMine && (
           <span className="rounded bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
             {t('codelink-bracket.card.you')}
+          </span>
+        )}
+        {startsIn && (
+          <span className="ml-auto font-mono text-[11px] tabular-nums text-sky-700 dark:text-sky-300">
+            {startsIn === 'now'
+              ? t('codelink-bracket.card.starting')
+              : t('codelink-bracket.card.startsIn', { time: startsIn })}
           </span>
         )}
         {clock && (

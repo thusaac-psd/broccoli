@@ -77,6 +77,12 @@ export interface MatchView {
    * `order_a`/`order_b`; games not yet opened are absent.
    */
   games: GameView[];
+  /**
+   * While ranking: when the match starts by itself (contest start or the
+   * end of a player's break); null while a ranking is still missing. Null
+   * once the match has started.
+   */
+  starts_at_ms: number | null;
 }
 
 /** One opened game (小局). Index 0-2 are regular games, 3+ are tiebreaks. */

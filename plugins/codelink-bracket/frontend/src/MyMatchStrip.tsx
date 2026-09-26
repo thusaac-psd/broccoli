@@ -7,7 +7,7 @@ import { Link } from 'react-router';
 import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
 import { playerStage, type Side } from './lib/stage';
-import { useGameClock } from './parts';
+import { useGameClock, useStartsIn } from './parts';
 import type { MatchView } from './types';
 
 /**
@@ -26,6 +26,7 @@ export function MyMatchStrip({
 }) {
   const { t } = useTranslation();
   const clock = useGameClock(match);
+  const startsIn = useStartsIn(match.starts_at_ms);
   const stage = playerStage(match, side);
   const opponent =
     side === 'a'
@@ -38,7 +39,11 @@ export function MyMatchStrip({
             ? t('codelink-bracket.game.tiebreak', { n: stage.game - 2 })
             : t('codelink-bracket.game.regular', { n: stage.game + 1 })
         }${clock ? ` · ${clock.text}` : ''}`
-      : t(`codelink-bracket.strip.${stage.kind}`);
+      : stage.kind === 'waiting_start' && startsIn !== null
+        ? startsIn === 'now'
+          ? t('codelink-bracket.card.starting')
+          : t('codelink-bracket.my.startsIn', { time: startsIn })
+        : t(`codelink-bracket.strip.${stage.kind}`);
   const urgent = stage.kind === 'rank' || stage.kind === 'play';
   return (
     <div

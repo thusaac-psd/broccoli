@@ -20,7 +20,7 @@ import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
 import { matchSteps, playerStage, type Side, type Step } from './lib/stage';
 import { OrderingPanel } from './OrderingPanel';
-import { useGameClock } from './parts';
+import { useGameClock, useStartsIn } from './parts';
 import type { MatchView } from './types';
 
 interface MyMatchPanelProps {
@@ -121,6 +121,35 @@ function Stepper({ steps }: { steps: Step[] }) {
   );
 }
 
+function opponentName(match: MatchView, side: Side): string {
+  return side === 'a'
+    ? playerLabel(match.player_b_name, match.player_b)
+    : playerLabel(match.player_a_name, match.player_a);
+}
+
+function WaitingStart({
+  startsAtMs,
+  opponent,
+}: {
+  startsAtMs: number | null;
+  opponent: string;
+}) {
+  const { t } = useTranslation();
+  const startsIn = useStartsIn(startsAtMs);
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <Check className="h-4 w-4 text-emerald-600" />
+      <p>
+        {startsIn === null
+          ? t('codelink-bracket.my.waitingRanking', { name: opponent })
+          : startsIn === 'now'
+            ? t('codelink-bracket.card.starting')
+            : t('codelink-bracket.my.startsIn', { time: startsIn })}
+      </p>
+    </div>
+  );
+}
+
 function CurrentTask({
   contestId,
   match,
@@ -184,9 +213,11 @@ function CurrentTask({
         </div>
       );
     case 'waiting_start':
-      return note(
-        <Check className="h-4 w-4 text-emerald-600" />,
-        t('codelink-bracket.my.waitingStart'),
+      return (
+        <WaitingStart
+          startsAtMs={stage.startsAtMs}
+          opponent={opponentName(match, side)}
+        />
       );
     case 'play': {
       const p =
