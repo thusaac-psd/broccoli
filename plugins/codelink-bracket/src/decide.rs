@@ -15,7 +15,7 @@
 use broccoli_server_sdk::prelude::Verdict;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{MatchPhase, MatchState, Setup};
+use crate::model::{AdjudicationReason, MatchPhase, MatchState, Setup};
 
 /// The 3 regular 小局 (index 0..3); 附加赛 (tiebreak) attempts are appended
 /// only once `m.state` becomes `Tiebreak`. Shared with `judge.rs`, which
@@ -102,6 +102,14 @@ fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
 /// fault. A SystemError verdict is never the contestant's outcome.
 fn submission_in_flight(s: &SubmissionRecord) -> bool {
     is_in_flight(&s.status) || matches!(s.verdict, Some(Verdict::SystemError))
+}
+
+/// The oldest submission still being judged, if any.
+pub fn oldest_in_flight(subs: &[SubmissionRecord]) -> Option<i32> {
+    subs.iter()
+        .filter(|s| submission_in_flight(s))
+        .min_by_key(|s| arrival_order(s))
+        .map(|s| s.submission_id)
 }
 
 /// One submission, as `decide_xiaoju` needs to see it: which player made it,
@@ -332,6 +340,7 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
         // No round definition to find 附加赛 problems in -- cannot safely
         // proceed. Escalate rather than guess or panic.
         m.state = MatchPhase::NeedsAdjudication;
+        m.adjudication_reason = Some(AdjudicationReason::SetupMissing);
         return MatchOutcome::NeedsAdjudication;
     };
 
@@ -359,6 +368,7 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
                     }
                     None => {
                         m.state = MatchPhase::NeedsAdjudication;
+                        m.adjudication_reason = Some(AdjudicationReason::TiebreakExhausted);
                         MatchOutcome::NeedsAdjudication
                     }
                 }
@@ -394,6 +404,7 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
             }
             None => {
                 m.state = MatchPhase::NeedsAdjudication;
+                m.adjudication_reason = Some(AdjudicationReason::TiebreakExhausted);
                 MatchOutcome::NeedsAdjudication
             }
         },
@@ -838,6 +849,7 @@ mod tests {
             tiebreak_index: 0,
             decided_at_ms: 0,
             awaiting_submission_id: None,
+            adjudication_reason: None,
             xiaoju_seconds: 0,
         }
     }
@@ -892,6 +904,7 @@ mod tests {
             tiebreak_index,
             decided_at_ms: 0,
             awaiting_submission_id: None,
+            adjudication_reason: None,
             xiaoju_seconds: 0,
         }
     }
@@ -954,6 +967,10 @@ mod tests {
         assert_eq!(
             decide_match(&mut m, &setup()),
             MatchOutcome::NeedsAdjudication
+        );
+        assert_eq!(
+            m.adjudication_reason,
+            Some(AdjudicationReason::TiebreakExhausted)
         );
     }
 

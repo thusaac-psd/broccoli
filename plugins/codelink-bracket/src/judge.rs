@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bracket;
 use crate::decide::{self, MatchOutcome, SubmissionLifecycle, SubmissionRecord, XiaojuOutcome};
-use crate::model::{MatchPhase, MatchState, RoundDef, Setup, XiaojuState};
+use crate::model::{AdjudicationReason, MatchPhase, MatchState, RoundDef, Setup, XiaojuState};
 use crate::storage;
 
 /// The storage/timer key for one 小局's deadline. Shared by `step` (which
@@ -128,20 +128,33 @@ pub fn parse_start_timer_key(key: &str) -> Option<(i32, u8)> {
 }
 
 #[derive(Debug, Deserialize)]
-struct ContestStartRow {
+struct ContestTimesRow {
     start_ms: f64,
+    #[serde(default)]
+    end_ms: Option<f64>,
+}
+
+/// A contest's start and end, epoch ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContestTimes {
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
 }
 
 /// The contest's start time, epoch ms. Round 1 cannot start before it.
-pub(crate) fn contest_start_ms(host: &Host, contest: i32) -> Result<i64, SdkError> {
+pub(crate) fn contest_times(host: &Host, contest: i32) -> Result<ContestTimes, SdkError> {
     let mut p = Params::new();
     let sql = format!(
-        "SELECT EXTRACT(EPOCH FROM start_time) * 1000 AS start_ms FROM contest WHERE id = {}",
+        "SELECT EXTRACT(EPOCH FROM start_time) * 1000 AS start_ms, \
+         EXTRACT(EPOCH FROM end_time) * 1000 AS end_ms FROM contest WHERE id = {}",
         p.bind(contest)
     );
-    let row: Option<ContestStartRow> = host.db.query_one_with_args(&sql, &p.into_args())?;
-    row.map(|r| r.start_ms as i64)
-        .ok_or_else(|| SdkError::Other("contest not found".into()))
+    let row: Option<ContestTimesRow> = host.db.query_one_with_args(&sql, &p.into_args())?;
+    row.map(|r| ContestTimes {
+        start_ms: r.start_ms as i64,
+        end_ms: r.end_ms.map(|e| e as i64),
+    })
+    .ok_or_else(|| SdkError::Other("contest not found".into()))
 }
 
 /// Start `match_id` now if it is due (see [`bracket::start_at_ms`]),
@@ -157,12 +170,17 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
         return Ok(());
     };
     let matches = storage::load_all_matches(host, contest)?;
-    let contest_start = contest_start_ms(host, contest)?;
+    let contest_start = contest_times(host, contest)?.start_ms;
     let Some(at) = bracket::start_at_ms(&setup, &matches, &current, contest_start) else {
         return Ok(());
     };
-    let now = now_ms(host)?;
-    if now < at {
+    let clock = clock(host, contest)?;
+    // A match that would start at or after the contest end could never be
+    // played: leave it waiting for staff instead of starting or scheduling.
+    if clock.contest_ended() || clock.contest_end.is_some_and(|end| at >= end) {
+        return Ok(());
+    }
+    if clock.now < at {
         return host
             .timer
             .schedule(at, &start_timer_key(contest, match_id), "");
@@ -172,7 +190,7 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
             return Ok(()); // someone else started it, or it is no longer due
         }
         m.state = MatchPhase::InProgress;
-        open_xiaoju(host, contest, match_id, &setup, now, m)
+        open_xiaoju(host, contest, match_id, &setup, clock, m)
     })?;
     Ok(())
 }
@@ -240,6 +258,60 @@ pub(crate) fn now_ms(host: &Host) -> Result<i64, SdkError> {
         .query_one("SELECT EXTRACT(EPOCH FROM NOW()) * 1000 AS now_ms")?;
     let row = row.ok_or_else(|| SdkError::Other("NOW() query returned no row".into()))?;
     Ok(row.now_ms as i64)
+}
+
+#[derive(Debug, Deserialize)]
+struct ClockRow {
+    now_ms: f64,
+    #[serde(default)]
+    end_ms: Option<f64>,
+}
+
+/// The server time together with the contest's end time, both epoch ms.
+/// Nobody can submit once the contest has ended, so no game may open or
+/// run past `contest_end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Clock {
+    pub now: i64,
+    /// `None` only if the contest row could not be read.
+    pub contest_end: Option<i64>,
+}
+
+impl Clock {
+    #[cfg(test)]
+    pub(crate) fn at(now: i64) -> Self {
+        Self {
+            now,
+            contest_end: None,
+        }
+    }
+
+    pub(crate) fn contest_ended(&self) -> bool {
+        self.contest_end.is_some_and(|end| self.now >= end)
+    }
+
+    /// When a game with this deadline must be looked at again: its own
+    /// deadline, or the contest end if that comes first.
+    pub(crate) fn cutoff(&self, deadline_ms: i64) -> i64 {
+        self.contest_end
+            .map_or(deadline_ms, |end| deadline_ms.min(end))
+    }
+}
+
+/// [`now_ms`] and the contest end in one round trip.
+pub(crate) fn clock(host: &Host, contest: i32) -> Result<Clock, SdkError> {
+    let mut p = Params::new();
+    let sql = format!(
+        "SELECT EXTRACT(EPOCH FROM NOW()) * 1000 AS now_ms, \
+         (SELECT EXTRACT(EPOCH FROM end_time) * 1000 FROM contest WHERE id = {}) AS end_ms",
+        p.bind(contest)
+    );
+    let row: Option<ClockRow> = host.db.query_one_with_args(&sql, &p.into_args())?;
+    let row = row.ok_or_else(|| SdkError::Other("NOW() query returned no row".into()))?;
+    Ok(Clock {
+        now: row.now_ms as i64,
+        contest_end: row.end_ms.map(|e| e as i64),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,9 +411,10 @@ pub(crate) fn open_xiaoju(
     contest: i32,
     match_id: u8,
     setup: &Setup,
-    now: i64,
+    clock: Clock,
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
+    let now = clock.now;
     if m.xiaoju_seconds == 0 {
         m.xiaoju_seconds = setup.xiaoju_seconds;
     }
@@ -354,8 +427,11 @@ pub(crate) fn open_xiaoju(
         winner: None,
         decided: false,
     });
-    host.timer
-        .schedule(deadline_ms, &xiaoju_timer_key(contest, match_id, index), "")
+    host.timer.schedule(
+        clock.cutoff(deadline_ms),
+        &xiaoju_timer_key(contest, match_id, index),
+        "",
+    )
 }
 
 /// Write a decided match's winner into its next-round feeder slot, and try
@@ -401,6 +477,7 @@ fn step(
         return Ok(());
     };
     let current_index = current.index;
+    let current_deadline = current.deadline_ms;
 
     let Some(round_def) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
         // No round definition to resolve a current problem in -- cannot
@@ -410,12 +487,42 @@ fn step(
         return Ok(());
     };
 
-    let now = now_ms(host)?;
+    let clock = clock(host, contest)?;
+    let now = clock.now;
     let subs = fetch_subs(host, contest, m, round_def)?;
-    let outcome = decide::decide_xiaoju(m, &subs, now);
+    let mut outcome = decide::decide_xiaoju(m, &subs, now);
+
+    // Past the contest end nobody can submit, so an undecided game cannot
+    // be won any more. A verdict still in flight may yet settle it (wait
+    // for that exactly as at a deadline); otherwise it goes to staff rather
+    // than being scored as if both players had simply failed.
+    if outcome == XiaojuOutcome::NotYet && clock.contest_ended() {
+        match decide::oldest_in_flight(&subs) {
+            Some(blocking_submission_id) => {
+                outcome = XiaojuOutcome::AwaitingJudge {
+                    blocking_submission_id,
+                };
+            }
+            None => {
+                host.timer
+                    .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
+                escalate_contest_ended(host, contest, match_id, current_index, m)?;
+                return Ok(());
+            }
+        }
+    }
 
     match outcome {
-        XiaojuOutcome::NotYet => Ok(()),
+        XiaojuOutcome::NotYet => {
+            // A timer can fire early (it was clamped to a contest end that
+            // staff have since moved later); keep one pending for the real
+            // cutoff. Rescheduling replaces the key, so this is idempotent.
+            host.timer.schedule(
+                clock.cutoff(current_deadline),
+                &xiaoju_timer_key(contest, match_id, current_index),
+                "",
+            )
+        }
         XiaojuOutcome::AwaitingJudge {
             blocking_submission_id,
         } => {
@@ -474,8 +581,13 @@ fn step(
             }
 
             match decide::decide_match(m, setup) {
+                MatchOutcome::NotYet | MatchOutcome::OpenTiebreak { .. }
+                    if clock.contest_ended() =>
+                {
+                    escalate_contest_ended(host, contest, match_id, current_index, m)
+                }
                 MatchOutcome::NotYet | MatchOutcome::OpenTiebreak { .. } => {
-                    open_xiaoju(host, contest, match_id, setup, now, m)
+                    open_xiaoju(host, contest, match_id, setup, clock, m)
                 }
                 MatchOutcome::Decided { winner } => {
                     m.decided_at_ms = now;
@@ -485,6 +597,23 @@ fn step(
             }
         }
     }
+}
+
+/// Hand a match the contest end cut short to staff. Leaves the score and
+/// games as they are so staff can see how far it got.
+fn escalate_contest_ended(
+    host: &Host,
+    contest: i32,
+    match_id: u8,
+    index: u8,
+    m: &mut MatchState,
+) -> Result<(), SdkError> {
+    host.timer
+        .cancel(&judgewait_timer_key(contest, match_id, index))?;
+    m.state = MatchPhase::NeedsAdjudication;
+    m.adjudication_reason = Some(AdjudicationReason::ContestEnded);
+    m.awaiting_submission_id = None;
+    Ok(())
 }
 
 /// Drive match `match_id` forward from whatever state it is currently in.
@@ -550,6 +679,7 @@ pub fn escalate(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError>
             return Ok(());
         }
         m.state = MatchPhase::NeedsAdjudication;
+        m.adjudication_reason = Some(AdjudicationReason::StuckJudge);
         Ok(())
     })?;
     Ok(())
@@ -619,6 +749,7 @@ pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> R
     // match was forced out of `AwaitingJudge`, so `GET /matches/{id}`
     // never shows a stale blocking-submission id next to a final result.
     m.awaiting_submission_id = None;
+    m.adjudication_reason = None;
     Ok(())
 }
 
@@ -1175,7 +1306,7 @@ mod tests {
         let mut m = match_in_progress();
         m.xiaoju.clear();
 
-        open_xiaoju(&host, 7, 0, &setup, 1_000, &mut m).unwrap();
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
 
         assert_eq!(m.xiaoju.len(), 1);
         assert_eq!(m.xiaoju[0].index, 0);
@@ -1201,7 +1332,7 @@ mod tests {
         m.xiaoju.clear();
         m.xiaoju_seconds = 0; // sentinel: not yet pinned
 
-        open_xiaoju(&host, 7, 0, &setup, 1_000, &mut m).unwrap();
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
         assert_eq!(
             m.xiaoju_seconds, 3,
             "the first open should pin the then-live setup value"
@@ -1214,7 +1345,7 @@ mod tests {
 
         // ...but opening this match's NEXT 小局 must still use the 3s it
         // actually started under, not the new 300s.
-        open_xiaoju(&host, 7, 0, &reconfigured, 2_000, &mut m).unwrap();
+        open_xiaoju(&host, 7, 0, &reconfigured, Clock::at(2_000), &mut m).unwrap();
         assert_eq!(
             m.xiaoju_seconds, 3,
             "a pinned value must not change on later opens"
@@ -1238,7 +1369,7 @@ mod tests {
         m.xiaoju.clear();
         m.xiaoju_seconds = 0; // sentinel: never opened a 小局 yet
 
-        open_xiaoju(&host, 7, 0, &corrected_setup, 1_000, &mut m).unwrap();
+        open_xiaoju(&host, 7, 0, &corrected_setup, Clock::at(1_000), &mut m).unwrap();
         assert_eq!(
             m.xiaoju_seconds, 120,
             "an unstarted match must pick up the corrected setup value"
@@ -1732,6 +1863,10 @@ mod tests {
 
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(reloaded.state, MatchPhase::NeedsAdjudication);
+        assert_eq!(
+            reloaded.adjudication_reason,
+            Some(AdjudicationReason::StuckJudge)
+        );
     }
 
     #[test]
@@ -2048,5 +2183,147 @@ mod tests {
         assert_eq!(parse_start_timer_key(&start_timer_key(7, 3)), Some((7, 3)));
         assert_eq!(parse_start_timer_key("xiaoju:7:3:0"), None);
         assert_eq!(parse_start_timer_key("start:7:3:extra"), None);
+    }
+
+    // -- the contest end cuts the bracket short --
+
+    fn queue_clock(host: &Host, now: i64, end: i64) {
+        host.db.queue_query_result(
+            serde_json::json!([{ "now_ms": now as f64, "end_ms": end as f64 }]),
+        );
+    }
+
+    #[test]
+    fn a_game_opened_near_the_contest_end_is_timed_for_the_end() {
+        let host = Host::mock();
+        let setup = setup_two_rounds(); // 1800 s games
+        seed(&host, 7, &setup, 0, &match_in_progress());
+        queue_clock(&host, 500_000, 600_000);
+        queue_subs(&host, vec![ac_row(10, 100)]);
+
+        advance(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.xiaoju.len(), 2);
+        assert_eq!(
+            m.xiaoju[1].deadline_ms,
+            500_000 + 1_800_000,
+            "the game's own clock is unchanged"
+        );
+        assert_eq!(
+            host.timer.scheduled_at(&xiaoju_timer_key(7, 0, 1)),
+            Some(600_000)
+        );
+    }
+
+    #[test]
+    fn an_unwon_game_at_the_contest_end_goes_to_staff_instead_of_scoring_nil() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress());
+        queue_clock(&host, 600_000, 600_000);
+        queue_subs(&host, vec![]);
+
+        advance(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::NeedsAdjudication);
+        assert_eq!(
+            m.adjudication_reason,
+            Some(AdjudicationReason::ContestEnded)
+        );
+        assert!(!m.xiaoju[0].decided, "the cut-off game is not scored");
+        assert_eq!((m.score_a, m.score_b), (0, 0));
+        assert!(host.timer.was_cancelled(&xiaoju_timer_key(7, 0, 0)));
+    }
+
+    #[test]
+    fn a_verdict_in_flight_at_the_contest_end_is_waited_for() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress());
+        queue_clock(&host, 600_000, 600_000);
+        queue_subs(
+            &host,
+            vec![row_with_status(55, 10, 590_000, None, "Pending")],
+        );
+
+        advance(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::AwaitingJudge);
+        assert_eq!(m.awaiting_submission_id, Some(55));
+        assert!(host.timer.is_scheduled(&judgewait_timer_key(7, 0, 0)));
+    }
+
+    #[test]
+    fn a_game_won_at_the_contest_end_counts_but_no_next_game_opens() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress());
+        queue_clock(&host, 600_000, 600_000);
+        queue_subs(&host, vec![ac_row(10, 590_000)]);
+
+        advance(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.score_a, 1, "a win before the end still counts");
+        assert_eq!(m.xiaoju.len(), 1, "no game opens after the end");
+        assert_eq!(m.state, MatchPhase::NeedsAdjudication);
+        assert_eq!(
+            m.adjudication_reason,
+            Some(AdjudicationReason::ContestEnded)
+        );
+        assert!(!host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 1)));
+    }
+
+    #[test]
+    fn a_timer_that_fired_before_a_moved_contest_end_is_rescheduled() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &match_in_progress()); // deadline 1_000_000
+        queue_clock(&host, 600_000, 700_000);
+        queue_subs(&host, vec![]);
+
+        advance(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::InProgress);
+        assert_eq!(
+            host.timer.scheduled_at(&xiaoju_timer_key(7, 0, 0)),
+            Some(700_000)
+        );
+    }
+
+    #[test]
+    fn awarding_a_match_clears_its_adjudication_reason() {
+        let mut m = match_in_progress();
+        m.state = MatchPhase::NeedsAdjudication;
+        m.adjudication_reason = Some(AdjudicationReason::ContestEnded);
+        apply_force_decide(&mut m, 10, 1_000).unwrap();
+        assert_eq!(m.adjudication_reason, None);
+    }
+
+    #[test]
+    fn no_match_starts_or_is_timed_at_or_after_the_contest_end() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed(&host, 7, &setup, 0, &ranked_match(1, 10, 20));
+        queue_contest_start(&host, 1_000);
+        queue_clock(&host, 5_000, 5_000);
+
+        try_autostart(&host, 7, 0).unwrap();
+
+        let m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.state, MatchPhase::Ordering);
+        assert!(!host.timer.is_scheduled(&start_timer_key(7, 0)));
+
+        // Ranked before the start of a contest that ends at its start time.
+        let host = Host::mock();
+        seed(&host, 7, &setup, 0, &ranked_match(1, 10, 20));
+        queue_contest_start(&host, 60_000);
+        queue_clock(&host, 5_000, 60_000);
+        try_autostart(&host, 7, 0).unwrap();
+        assert!(!host.timer.is_scheduled(&start_timer_key(7, 0)));
     }
 }

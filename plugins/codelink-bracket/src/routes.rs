@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::bracket;
 use crate::decide;
 use crate::judge;
-use crate::model::{MatchPhase, MatchState, RoundDef, Setup};
+use crate::model::{AdjudicationReason, MatchPhase, MatchState, RoundDef, Setup};
 use crate::storage;
 use crate::visibility::{self, VisibilityCtx};
 
@@ -54,6 +54,9 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     if info.phase == "before" {
         return Err(PluginHttpResponse::error(400, "The contest has not started yet").into());
     }
+    if info.phase == "after" {
+        return Err(PluginHttpResponse::error(400, "The contest has ended").into());
+    }
 
     // Validate against a snapshot first so a rejection is a 400, not the
     // 500 `SdkError`'s blanket `ApiError` conversion would give it.
@@ -61,9 +64,9 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     force_start(&mut probe).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let updated = storage::update_match(host, contest_id, match_id, |m| {
-        let now = judge::now_ms(host)?;
+        let clock = judge::clock(host, contest_id)?;
         force_start(m).map_err(|e| SdkError::Other(e.to_string()))?;
-        judge::open_xiaoju(host, contest_id, match_id, &setup, now, m)
+        judge::open_xiaoju(host, contest_id, match_id, &setup, clock, m)
     })?;
     // A start timer may still be pending; it will find the match started
     // and do nothing, but cancel it rather than leave it to fire.
@@ -210,12 +213,14 @@ struct MatchView {
     /// Mirrors `MatchState::awaiting_submission_id`: set while
     /// `state == MatchPhase::AwaitingJudge`, and KEPT when that block times out
     /// into `NeedsAdjudication` (so staff know which submission to rejudge;
-    /// its absence there means the tiebreak list ran out instead). Never
+    /// `adjudication_reason` says why a match needs staff). Never
     /// masked -- like `state` itself, this is structural, not a problem id. Lets staff reading
     /// `GET /matches/{id}` distinguish "still solving" (`InProgress`) from
     /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
     /// to diff two responses over time.
     awaiting_submission_id: Option<i32>,
+    /// Mirrors `MatchState::adjudication_reason`. Structural, never masked.
+    adjudication_reason: Option<AdjudicationReason>,
     /// The last 小局's index, deadline and open time, taken from
     /// `MatchState::xiaoju.last()`.
     ///
@@ -361,6 +366,7 @@ fn match_view(
         winner: m.winner,
         decided_at_ms: m.decided_at_ms,
         awaiting_submission_id: m.awaiting_submission_id,
+        adjudication_reason: m.adjudication_reason,
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
@@ -388,23 +394,23 @@ fn match_view(
     }
 }
 
-/// Fill in `starts_at_ms` for every view (see [`bracket::start_at_ms`]).
-/// Best-effort like the names: a failed contest lookup leaves it `None`.
+/// Fill in `starts_at_ms` for every view (see [`bracket::start_at_ms`]),
+/// returning the contest's end time. Best-effort like the names: a failed
+/// contest lookup leaves both `None`.
 fn attach_start_times(
     host: &Host,
     contest: i32,
     setup: &Setup,
     matches: &[(u8, MatchState)],
     views: &mut [MatchView],
-) {
-    let Ok(contest_start) = judge::contest_start_ms(host, contest) else {
-        return;
-    };
+) -> Option<i64> {
+    let times = judge::contest_times(host, contest).ok()?;
     for v in views.iter_mut() {
         if let Some((_, m)) = matches.iter().find(|(id, _)| *id == v.id) {
-            v.starts_at_ms = bracket::start_at_ms(setup, matches, m, contest_start);
+            v.starts_at_ms = bracket::start_at_ms(setup, matches, m, times.start_ms);
         }
     }
+    times.end_ms
 }
 
 /// The problems each player faces in 小局 `index`: position `index` of the
@@ -503,12 +509,12 @@ pub fn handle_get_bracket(
         })
         .collect();
     attach_player_names(host, &mut views);
-    attach_start_times(host, contest_id, &setup, &matches, &mut views);
+    let contest_end_ms = attach_start_times(host, contest_id, &setup, &matches, &mut views);
 
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
-        body: Some(serde_json::json!({ "matches": views })),
+        body: Some(serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms })),
     })
 }
 
