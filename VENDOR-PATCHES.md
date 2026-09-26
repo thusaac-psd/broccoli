@@ -92,7 +92,7 @@ unset (every other consumer) behavior is unchanged: upstream slept zero there.
 ### Re-vendoring
 
 To pull a new upstream version: replace `third_party/broccoli_queue`, bump the
-version here and in `[patch.crates-io]`, and re-apply all four patches (grep
-for `BROCCOLI VENDOR PATCH`). If upstream fixes the two message-loss bugs, drop
-the vendor and the `[patch.crates-io]` entry (the lint patch is only needed
-while we vendor).
+version here and in `[patch.crates-io]`, and re-apply all four patches (grep for
+`BROCCOLI VENDOR PATCH`). If upstream fixes the two message-loss bugs, drop the
+vendor and the `[patch.crates-io]` entry (the lint patch is only needed while we
+vendor).
