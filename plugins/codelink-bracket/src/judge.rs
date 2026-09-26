@@ -730,7 +730,7 @@ impl ContestJudge for CodelinkBracketJudge {
             None
         };
 
-        let req = progress.request;
+        let req = progress.submission;
         let affected = host.submission.update(&SubmissionUpdate {
             submission_id: req.submission_id,
             judgement_id: req.judgement_id,

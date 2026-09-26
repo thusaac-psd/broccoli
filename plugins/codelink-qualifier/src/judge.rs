@@ -85,7 +85,7 @@ pub fn handle_eval_callback(
 }
 
 fn persist(host: &Host, progress: &JudgeProgress<'_>) -> Result<(), SdkError> {
-    let req = progress.request;
+    let req = progress.submission;
     let all_accepted = progress.all_recorded()
         && !progress.outcomes.is_empty()
         && progress.outcomes.iter().all(|o| o.verdict.is_accepted());

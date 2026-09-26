@@ -90,9 +90,9 @@ impl ContestJudge for IcpcJudge {
         };
         crate::persist::persist_and_track(
             host,
-            progress.request.submission_id,
-            progress.request.judgement_id,
-            progress.request.judge_epoch,
+            progress.submission.submission_id,
+            progress.submission.judgement_id,
+            progress.submission.judge_epoch,
             &eval,
         )?;
         Ok(())
@@ -885,6 +885,39 @@ mod detached_tests {
         // And the driver still works from the stripped state.
         let out = drive(&host, state, TestCaseVerdict::accepted(1));
         assert!(!out.state.is_null());
+    }
+
+    /// A session started by an older plugin build stored the whole request
+    /// (test cases, source) and full test-case rows. After an upgrade those
+    /// sessions must keep working: the narrower state types ignore the extra
+    /// fields rather than failing to deserialize mid-judging.
+    #[test]
+    fn a_session_state_written_by_an_older_build_still_drives_callbacks() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=3)
+            .map(|id| TestCaseRow {
+                input: TestCaseBodyRef::Inline {
+                    text: format!("in{id}"),
+                },
+                expected_output: TestCaseBodyRef::Inline {
+                    text: format!("out{id}"),
+                },
+                ..test_case(id)
+            })
+            .collect();
+        let req = test_submission(tcs.clone());
+        let mut state = start_state(&host, &req, &tcs);
+        // Rewrite it into the old shape: full input and full rows.
+        state["request"] = serde_json::to_value(&req).unwrap();
+        state["scoring_cases"] = serde_json::to_value(&tcs).unwrap();
+
+        let out = drive(&host, state, TestCaseVerdict::accepted(1));
+        assert!(!out.state.is_null());
+        assert_eq!(
+            host.submission.results().len(),
+            1,
+            "the result was recorded"
+        );
     }
 
     fn drive(

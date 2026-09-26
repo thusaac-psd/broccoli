@@ -119,14 +119,11 @@ fn clamp_i32(v: i64) -> i32 {
 /// It exposes exactly what a contest type needs to decide the next step or the
 /// final verdict, and nothing about the host protocol.
 pub struct JudgeProgress<'a> {
-    /// The submission being judged, WITHOUT its test cases or source files:
-    /// the driver drops those after starting the batch (see
-    /// [`without_bodies`]). Ids, limits, language and contest fields remain.
-    pub request: &'a OnSubmissionInput,
-    /// The cases the evaluate window draws from, with their `input` and
-    /// `expected_output` bodies replaced by `Missing`. Everything a policy
-    /// scores on (id, score, label, position, flags) is intact.
-    pub scoring_cases: &'a [TestCaseRow],
+    /// The submission being judged: identity, limits and contest fields.
+    /// Its test data and source are deliberately not part of this type.
+    pub submission: &'a JudgedSubmission,
+    /// The cases the evaluate window draws from: identity and weight only.
+    pub scoring_cases: &'a [ScoringCase],
     /// Every outcome recorded so far, in record order (output stripped).
     pub outcomes: &'a [CaseOutcome],
     /// The outcome that triggered this decision. `None` in `finalize` when the
@@ -185,7 +182,7 @@ pub trait ContestJudge: Serialize + DeserializeOwned + Sized {
     /// The score written to the persisted test-case-result row. Defaults to the
     /// outcome's own per-case score; override to weight it by the case (IOI:
     /// `raw * tc.score`).
-    fn db_score(&self, outcome: &CaseOutcome, _tc: &TestCaseRow) -> f64 {
+    fn db_score(&self, outcome: &CaseOutcome, _tc: &ScoringCase) -> f64 {
         outcome.score
     }
 
@@ -201,8 +198,11 @@ pub trait ContestJudge: Serialize + DeserializeOwned + Sized {
 #[derive(Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "J: Serialize", deserialize = "J: DeserializeOwned"))]
 pub struct DetachedEval<J: ContestJudge> {
-    request: OnSubmissionInput,
-    scoring_cases: Vec<TestCaseRow>,
+    // Serialized as `request` for compatibility: a session started by an
+    // older plugin build carries the full input under that name, and the
+    // narrower type simply ignores the extra fields.
+    request: JudgedSubmission,
+    scoring_cases: Vec<ScoringCase>,
     outcomes: Vec<CaseOutcome>,
     recorded_ids: HashSet<i32>,
     marked_running: bool,
@@ -254,8 +254,8 @@ impl<J: ContestJudge> DetachedEval<J> {
         // ~0.33 s extra per case with 50 x 150 KB cases, and most of the
         // guest's ~20x memory amplification.
         let mut state = DetachedEval {
-            request: request_without_bodies(request),
-            scoring_cases: scoring_cases.iter().map(without_bodies).collect(),
+            request: JudgedSubmission::from(request),
+            scoring_cases: scoring_cases.iter().map(ScoringCase::from).collect(),
             outcomes: Vec::new(),
             recorded_ids: HashSet::new(),
             marked_running: false,
@@ -374,7 +374,7 @@ impl<J: ContestJudge> DetachedEval<J> {
                 ..
             } = self;
             let progress = JudgeProgress {
-                request,
+                submission: request,
                 scoring_cases,
                 outcomes,
                 last: outcomes.last(),
@@ -472,7 +472,7 @@ impl<J: ContestJudge> DetachedEval<J> {
 
     fn finalize(&self, host: &Host) -> Result<(), SdkError> {
         let progress = JudgeProgress {
-            request: &self.request,
+            submission: &self.request,
             scoring_cases: &self.scoring_cases,
             outcomes: &self.outcomes,
             last: None,
@@ -516,26 +516,77 @@ pub fn without_bodies(tc: &TestCaseRow) -> TestCaseRow {
     }
 }
 
-/// `req` minus its test cases and source files, for the session state. Every
-/// field is listed on purpose: adding one to `OnSubmissionInput` fails to
-/// compile here until someone decides whether it belongs in state that is
-/// copied on every callback.
-fn request_without_bodies(req: &OnSubmissionInput) -> OnSubmissionInput {
-    OnSubmissionInput {
-        submission_id: req.submission_id,
-        judgement_id: req.judgement_id,
-        fire_after_judging: req.fire_after_judging,
-        user_id: req.user_id,
-        problem_id: req.problem_id,
-        contest_id: req.contest_id,
-        files: Vec::new(),
-        language: req.language.clone(),
-        time_limit_ms: req.time_limit_ms,
-        memory_limit_kb: req.memory_limit_kb,
-        problem_type: req.problem_type.clone(),
-        test_cases: Vec::new(),
-        judge_epoch: req.judge_epoch,
-        target_worker_id: req.target_worker_id.clone(),
+/// A submission as policies see it once judging has started. Test cases and
+/// source files are deliberately absent: they are only needed to build the
+/// evaluate batch, which the host keeps. A policy therefore cannot read them
+/// after start (a compile error, not a silently empty list), and the session
+/// state copied on every result callback stays small.
+///
+/// Field names match `OnSubmissionInput`, so a session state written by an
+/// older plugin build (which stored the whole input) still deserializes.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct JudgedSubmission {
+    pub submission_id: i32,
+    pub judgement_id: i32,
+    pub judge_epoch: i32,
+    pub fire_after_judging: bool,
+    pub user_id: i32,
+    pub problem_id: i32,
+    pub contest_id: Option<i32>,
+    pub language: String,
+    pub time_limit_ms: i32,
+    pub memory_limit_kb: i32,
+    pub problem_type: String,
+    pub target_worker_id: Option<String>,
+}
+
+impl From<&OnSubmissionInput> for JudgedSubmission {
+    fn from(req: &OnSubmissionInput) -> Self {
+        Self {
+            submission_id: req.submission_id,
+            judgement_id: req.judgement_id,
+            judge_epoch: req.judge_epoch,
+            fire_after_judging: req.fire_after_judging,
+            user_id: req.user_id,
+            problem_id: req.problem_id,
+            contest_id: req.contest_id,
+            language: req.language.clone(),
+            time_limit_ms: req.time_limit_ms,
+            memory_limit_kb: req.memory_limit_kb,
+            problem_type: req.problem_type.clone(),
+            target_worker_id: req.target_worker_id.clone(),
+        }
+    }
+}
+
+/// A test case as policies see it: identity and weight, never its data.
+/// Field names match `TestCaseRow` for the same compatibility reason as
+/// [`JudgedSubmission`].
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct ScoringCase {
+    pub id: i32,
+    pub score: f64,
+    pub is_sample: bool,
+    pub position: i32,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub is_custom: bool,
+}
+
+impl From<&TestCaseRow> for ScoringCase {
+    fn from(tc: &TestCaseRow) -> Self {
+        Self {
+            id: tc.id,
+            score: tc.score,
+            is_sample: tc.is_sample,
+            position: tc.position,
+            description: tc.description.clone(),
+            label: tc.label.clone(),
+            is_custom: tc.is_custom,
+        }
     }
 }
 
@@ -575,10 +626,10 @@ pub fn build_eval_batch_input(
 /// only policy input is the already-computed `score`. Custom (user-submitted)
 /// cases persist under `run_index` rather than `test_case_id`.
 fn build_tc_row(
-    req: &OnSubmissionInput,
+    req: &JudgedSubmission,
     outcome: &CaseOutcome,
     score: f64,
-    tc: Option<&TestCaseRow>,
+    tc: Option<&ScoringCase>,
 ) -> TestCaseResultRow {
     let is_custom = tc.is_some_and(|t| t.is_custom);
     let (test_case_id, run_index) = if is_custom {

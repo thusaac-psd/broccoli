@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::error::SdkError;
 use broccoli_server_sdk::evaluator::{
-    CaseOutcome, ContestJudge, DetachedEval, JudgeProgress, JudgeStep, without_bodies,
+    CaseOutcome, ContestJudge, DetachedEval, JudgeProgress, JudgeStep, ScoringCase, without_bodies,
 };
 use broccoli_server_sdk::types::*;
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ impl ContestJudge for IoiJudge {
         CaseOutcome::from_verdict(result, normalize_raw_score(result.score))
     }
 
-    fn db_score(&self, outcome: &CaseOutcome, tc: &TestCaseRow) -> f64 {
+    fn db_score(&self, outcome: &CaseOutcome, tc: &ScoringCase) -> f64 {
         // Weight the case's raw 0..1 score by its point value.
         round_score(outcome.score * tc.score)
     }
@@ -107,9 +107,9 @@ impl ContestJudge for IoiJudge {
             .collect();
         persist_results(
             host,
-            progress.request.submission_id,
-            progress.request.judgement_id,
-            progress.request.judge_epoch,
+            progress.submission.submission_id,
+            progress.submission.judgement_id,
+            progress.submission.judge_epoch,
             &persist_outcomes,
             submission_score,
         )?;
