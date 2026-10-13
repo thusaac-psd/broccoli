@@ -966,6 +966,45 @@ mod judgement_history {
             .await;
         let (submission_id, _, _) = seed_history(&app, "admin_jhist2", problem_id).await;
 
+        // The current judgement has a testcase that did not exist in the old
+        // judgement. The history summary must count this current-only row as
+        // a change as well as the modified shared testcase.
+        let current_judgement_id = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .one(&app.db)
+            .await
+            .expect("query current judgement")
+            .expect("current judgement should exist")
+            .id;
+        let added_case = test_case::ActiveModel {
+            problem_id: Set(problem_id),
+            input: Set("3 4\n".to_string()),
+            expected_output: Set("7\n".to_string()),
+            score: Set(100),
+            label: Set("added".to_string()),
+            is_sample: Set(false),
+            position: Set(2),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert added test case");
+        test_case_result::ActiveModel {
+            submission_id: Set(submission_id),
+            judgement_id: Set(Some(current_judgement_id)),
+            test_case_id: Set(Some(added_case.id)),
+            run_index: Set(None),
+            verdict: Set(Verdict::Accepted),
+            score: Set(100.0),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert added test case result");
+
         let res = app
             .get_with_token(&routes::submission_judgements(submission_id), &admin_token)
             .await;
@@ -976,7 +1015,7 @@ mod judgement_history {
         assert_eq!(versions[0]["version"], 10);
         assert_eq!(versions[0]["test_case_results"], json!([]));
         assert_eq!(versions[0]["test_case_pagination"]["total"], 1);
-        assert_eq!(versions[0]["case_changes"], 1);
+        assert_eq!(versions[0]["case_changes"], 2);
         assert_eq!(versions[1]["version"], 11);
         assert_eq!(versions[1]["is_current"], true);
         let version_id = versions[0]["id"].as_i64().unwrap();

@@ -583,16 +583,30 @@ async fn build_visible_judgement(
     )
     .await?;
     if visibility.has_view_all && !response.is_current {
-        let row = state.db.query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT COUNT(*) AS count FROM test_case_result r
-             LEFT JOIN test_case_result c ON c.test_case_id = r.test_case_id
-               AND c.judgement_id = (SELECT id FROM submission_judgement WHERE submission_id = $1 AND is_current)
-             WHERE r.judgement_id = $2 AND (c.id IS NULL OR
+        let row = state
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "WITH old_results AS (
+                 SELECT * FROM test_case_result WHERE judgement_id = $2
+             ), current_results AS (
+                 SELECT * FROM test_case_result
+                 WHERE judgement_id = (
+                     SELECT id FROM submission_judgement
+                     WHERE submission_id = $1 AND is_current
+                 )
+             )
+             SELECT COUNT(*) AS count
+             FROM old_results r
+             FULL OUTER JOIN current_results c
+             ON c.test_case_id = r.test_case_id
+             WHERE r.id IS NULL OR c.id IS NULL OR
                (r.verdict, r.score, r.time_used, r.memory_used, r.checker_output)
-               IS DISTINCT FROM (c.verdict, c.score, c.time_used, c.memory_used, c.checker_output))",
-            [sub.id.into(), response.id.into()],
-        )).await?;
+               IS DISTINCT FROM
+               (c.verdict, c.score, c.time_used, c.memory_used, c.checker_output)",
+                [sub.id.into(), response.id.into()],
+            ))
+            .await?;
         response.case_changes = row
             .map(|r| r.try_get::<i64>("", "count"))
             .transpose()?
