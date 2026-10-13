@@ -141,9 +141,9 @@ where
 /// Create the match at `(round, pos)`, but ONLY once both of its feeder
 /// slots (`slot_key(contest, round, pos*2)` and `..pos*2+1`) have been
 /// filled. A no-op, not an error, while either slot is still empty -- the
-/// caller (round 1: `setup::handle_setup`; later rounds: `judge::step` via
-/// `write_next_round_slot`) is expected to call this once per slot write,
-/// and only the write that completes the PAIR actually creates anything.
+/// caller (round 1: `setup::handle_setup`; later rounds: the synchronized
+/// stage opener in `judge`) calls this for every position only after the
+/// stage's opening barrier has passed.
 ///
 /// Uses `compare_and_set(key, None, ..)` (create-only) rather than
 /// `update_match`'s read-modify-write, so calling this again once the match

@@ -127,6 +127,22 @@ pub fn parse_start_timer_key(key: &str) -> Option<(i32, u8)> {
     parts.next().is_none().then_some((contest, match_id))
 }
 
+/// Timer key for opening a synchronized stage after the previous stage and
+/// its intermission are complete.
+pub fn stage_timer_key(contest: i32, round: u8) -> String {
+    format!("stage:{contest}:{round}")
+}
+
+pub fn parse_stage_timer_key(key: &str) -> Option<(i32, u8)> {
+    let mut parts = key.split(':');
+    if parts.next() != Some("stage") {
+        return None;
+    }
+    let contest: i32 = parts.next()?.parse().ok()?;
+    let round: u8 = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((contest, round))
+}
+
 #[derive(Debug, Deserialize)]
 struct ContestTimesRow {
     start_ms: f64,
@@ -192,6 +208,45 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
         m.state = MatchPhase::InProgress;
         open_xiaoju(host, contest, match_id, &setup, clock, m)
     })?;
+    Ok(())
+}
+
+/// Open a later stage once every match in the previous stage is decided. The
+/// stage's match documents are created together at this point, so rankings
+/// cannot be submitted before the official stage opening.
+pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkError> {
+    let Some(setup) = storage::load_setup(host, contest)? else {
+        return Ok(());
+    };
+    if round == 0 {
+        return Ok(());
+    }
+    if round as usize > setup.rounds.len() {
+        return Ok(());
+    }
+    let matches = storage::load_all_matches(host, contest)?;
+    if round > 1 && bracket::stage_open_at_ms(&setup, &matches, round, 0).is_none() {
+        return Ok(());
+    }
+    let times = contest_times(host, contest)?;
+    let Some(at) = bracket::stage_open_at_ms(&setup, &matches, round, times.start_ms) else {
+        return Ok(());
+    };
+    let now = now_ms(host)?;
+    if times.end_ms.is_some_and(|end| now >= end || at >= end) {
+        host.timer.cancel(&stage_timer_key(contest, round))?;
+        return Ok(());
+    }
+    if now < at {
+        return host
+            .timer
+            .schedule(at, &stage_timer_key(contest, round), "");
+    }
+
+    for pos in 0..storage::matches_in_round(round) {
+        storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
+    }
+    host.timer.cancel(&stage_timer_key(contest, round))?;
     Ok(())
 }
 
@@ -452,7 +507,11 @@ fn write_next_round_slot(
         storage::slot_key(contest, next_round, m.pos).as_str(),
         winner.to_string().as_str(),
     )])?;
-    storage::create_match_if_both_slots_filled(host, contest, setup, next_round, m.pos >> 1)
+    // The next stage is opened as a whole only after every match in this
+    // stage is decided. The caller invokes `try_open_stage` after this
+    // match's CAS update has been persisted, so the final predecessor is
+    // visible when the completion barrier is checked.
+    Ok(())
 }
 
 /// The core per-attempt state transition, run inside `storage::update_match`'s
@@ -634,9 +693,12 @@ pub fn advance(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> 
     if storage::load_match(host, contest, match_id)?.is_none() {
         return Ok(());
     }
-    storage::update_match(host, contest, match_id, |m| {
+    let updated = storage::update_match(host, contest, match_id, |m| {
         step(host, contest, match_id, &setup, m)
     })?;
+    if updated.state == MatchPhase::Decided {
+        try_open_stage(host, contest, updated.round + 1)?;
+    }
     Ok(())
 }
 
@@ -788,7 +850,8 @@ pub fn force_decide(host: &Host, contest: i32, match_id: u8, winner: i32) -> Res
         let now = now_ms(host)?;
         apply_force_decide(m, winner, now).map_err(SdkError::Other)
     })?;
-    write_next_round_slot(host, contest, &setup, &updated, winner)
+    write_next_round_slot(host, contest, &setup, &updated, winner)?;
+    try_open_stage(host, contest, updated.round + 1)
 }
 
 /// Bracket judging policy for the shared detached-evaluate driver: binary
@@ -1046,6 +1109,13 @@ pub fn on_timer(input: String) -> extism_pdk::FnResult<String> {
         if let Err(e) = try_autostart(&host, contest, match_id) {
             let _ = host.log.info(&format!(
                 "codelink-bracket: on_timer autostart failed for key {}: {e:?}",
+                input.key
+            ));
+        }
+    } else if let Some((contest, round)) = parse_stage_timer_key(&input.key) {
+        if let Err(e) = try_open_stage(&host, contest, round) {
+            let _ = host.log.info(&format!(
+                "codelink-bracket: on_timer stage open failed for key {}: {e:?}",
                 input.key
             ));
         }
@@ -2085,6 +2155,174 @@ mod tests {
             .queue_query_result(serde_json::json!([{ "start_ms": start_ms as f64 }]));
     }
 
+    fn seed_completed_first_stage(host: &Host, setup: &Setup) {
+        for pos in 0..storage::matches_in_round(1) {
+            let winner = 100 + i32::from(pos);
+            seed(
+                host,
+                7,
+                setup,
+                storage::match_id_for(1, pos),
+                &MatchState {
+                    round: 1,
+                    pos,
+                    winner: Some(winner),
+                    decided_at_ms: 100_000,
+                    state: MatchPhase::Decided,
+                    ..Default::default()
+                },
+            );
+            host.storage
+                .set(&[(
+                    storage::slot_key(7, 2, pos).as_str(),
+                    winner.to_string().as_str(),
+                )])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn stage_opening_waits_for_intermission_then_creates_every_match_once() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        queue_contest_start(&host, 0);
+        queue_now(&host, 100_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        assert_eq!(
+            host.timer.scheduled_at(&stage_timer_key(7, 2)),
+            Some(700_000)
+        );
+        assert!(
+            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+                .unwrap()
+                .is_none()
+        );
+
+        queue_contest_start(&host, 0);
+        queue_now(&host, 700_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        for pos in 0..storage::matches_in_round(2) {
+            let m = storage::load_match(&host, 7, storage::match_id_for(2, pos))
+                .unwrap()
+                .unwrap();
+            assert_eq!(m.state, MatchPhase::Ordering);
+            assert_eq!(m.player_a, 100 + i32::from(pos) * 2);
+            assert_eq!(m.player_b, 101 + i32::from(pos) * 2);
+        }
+        assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
+        let id = storage::match_id_for(2, 0);
+        storage::update_match(&host, 7, id, |m| {
+            m.order_a = Some([401, 402, 403]);
+            Ok(())
+        })
+        .unwrap();
+        queue_contest_start(&host, 0);
+        queue_now(&host, 800_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        assert_eq!(
+            storage::load_match(&host, 7, id).unwrap().unwrap().order_a,
+            Some([401, 402, 403])
+        );
+    }
+
+    #[test]
+    fn final_staff_decision_schedules_the_next_stage_after_persisting_the_result() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        let id = storage::match_id_for(1, 7);
+        storage::update_match(&host, 7, id, |m| {
+            m.state = MatchPhase::NeedsAdjudication;
+            m.player_a = 107;
+            m.player_b = 207;
+            m.winner = None;
+            Ok(())
+        })
+        .unwrap();
+        queue_now(&host, 200_000);
+        queue_contest_start(&host, 0);
+        queue_now(&host, 200_000);
+        force_decide(&host, 7, id, 107).unwrap();
+        assert_eq!(
+            host.timer.scheduled_at(&stage_timer_key(7, 2)),
+            Some(800_000)
+        );
+        assert!(
+            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn incomplete_stage_does_not_create_the_next_stage_or_schedule_it() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        storage::update_match(&host, 7, storage::match_id_for(1, 7), |m| {
+            m.state = MatchPhase::NeedsAdjudication;
+            Ok(())
+        })
+        .unwrap();
+        try_open_stage(&host, 7, 2).unwrap();
+        assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
+        assert!(
+            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stage_opening_does_not_schedule_or_create_matches_after_contest_end() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": 0.0, "end_ms": 600_000.0 }]));
+        queue_now(&host, 700_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
+        assert!(
+            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn first_stage_is_created_only_at_the_contest_start() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        host.storage
+            .set(&[(
+                storage::setup_key(7).as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            )])
+            .unwrap();
+        for pos in 0..16 {
+            host.storage
+                .set(&[(
+                    storage::slot_key(7, 1, pos).as_str(),
+                    (100 + i32::from(pos)).to_string().as_str(),
+                )])
+                .unwrap();
+        }
+        queue_contest_start(&host, 60_000);
+        queue_now(&host, 5_000);
+        try_open_stage(&host, 7, 1).unwrap();
+        assert!(storage::load_all_matches(&host, 7).unwrap().is_empty());
+        assert_eq!(
+            host.timer.scheduled_at(&stage_timer_key(7, 1)),
+            Some(60_000)
+        );
+        queue_contest_start(&host, 60_000);
+        queue_now(&host, 60_000);
+        try_open_stage(&host, 7, 1).unwrap();
+        assert_eq!(storage::load_all_matches(&host, 7).unwrap().len(), 8);
+    }
+
     #[test]
     fn a_ranked_match_starts_by_itself_once_the_contest_is_running() {
         let host = Host::mock();
@@ -2120,7 +2358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_match_waits_for_the_later_players_break() {
+    fn a_later_stage_waits_for_the_whole_previous_stage() {
         let host = Host::mock();
         let setup = setup_two_rounds(); // 600 s break
         let won = |pos: u8, winner: i32, at: i64| MatchState {
@@ -2131,20 +2369,25 @@ mod tests {
             state: MatchPhase::Decided,
             ..Default::default()
         };
-        seed(
-            &host,
-            7,
-            &setup,
-            storage::match_id_for(1, 0),
-            &won(0, 10, 100_000),
-        );
-        seed(
-            &host,
-            7,
-            &setup,
-            storage::match_id_for(1, 1),
-            &won(1, 20, 300_000),
-        );
+        for pos in 0..storage::matches_in_round(1) {
+            seed(
+                &host,
+                7,
+                &setup,
+                storage::match_id_for(1, pos),
+                &won(
+                    pos,
+                    if pos == 0 {
+                        10
+                    } else if pos == 1 {
+                        20
+                    } else {
+                        100 + pos as i32
+                    },
+                    if pos == 7 { 300_000 } else { 100_000 },
+                ),
+            );
+        }
         let next = storage::match_id_for(2, 0);
         seed(&host, 7, &setup, next, &ranked_match(2, 10, 20));
         queue_contest_start(&host, 0);
@@ -2156,7 +2399,7 @@ mod tests {
         assert_eq!(m.state, MatchPhase::Ordering, "player 20 is still resting");
         assert_eq!(
             host.timer.scheduled_at(&start_timer_key(7, next)),
-            Some(300_000 + 600_000)
+            Some(900_000)
         );
     }
 

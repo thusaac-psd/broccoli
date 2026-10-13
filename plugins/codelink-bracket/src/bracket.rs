@@ -1,15 +1,11 @@
 //! Match pacing: when a match may leave `Ordering` on its own.
 //!
-//! Matches start per pair, when ready, with no staff action: a match starts
-//! once both players have ranked, the contest has started, and each player
-//! has had `Setup::round_intermission_seconds` of rest since their OWN
-//! previous match. There is no round-wide synchronisation and no ranking
-//! deadline - a match waits for its rankings indefinitely (staff can force
-//! it with `/start`, which fills a missing ranking with the listed order).
-//!
-//! Known, accepted consequence (the owner chose this over synchronised
-//! rounds): every match of a round shares the round's problems, so a pair
-//! that starts later faces problems earlier pairs have already seen.
+//! Matches start per pair once their stage has opened and both players are
+//! ready. Stages are synchronized: every match in the previous stage must be
+//! decided before the next stage's intermission can begin. There is no ranking
+//! deadline - once a stage opens, a match waits for its rankings indefinitely
+//! (staff can force it with `/start`, which fills a missing ranking with the
+//! listed order).
 
 use crate::model::{MatchPhase, MatchState, Setup};
 
@@ -35,8 +31,40 @@ pub fn player_free_at_ms(
         .unwrap_or(i64::MAX)
 }
 
+/// When a stage opens. Round one opens with the contest; every later stage
+/// opens after *all* matches in the immediately preceding stage are decided,
+/// followed by the configured intermission. `None` means the preceding stage
+/// is not complete yet.
+pub fn stage_open_at_ms(
+    setup: &Setup,
+    matches: &[(u8, MatchState)],
+    round: u8,
+    contest_start_ms: i64,
+) -> Option<i64> {
+    if round <= 1 {
+        return Some(contest_start_ms);
+    }
+
+    let previous_round = round - 1;
+    let expected = crate::storage::matches_in_round(previous_round) as usize;
+    let previous: Vec<&MatchState> = matches
+        .iter()
+        .map(|(_, m)| m)
+        .filter(|m| m.round == previous_round)
+        .collect();
+    if previous.len() != expected || previous.iter().any(|m| m.state != MatchPhase::Decided) {
+        return None;
+    }
+
+    previous
+        .iter()
+        .map(|m| m.decided_at_ms)
+        .max()
+        .map(|last| last + setup.round_intermission_seconds * 1_000)
+}
+
 /// When match `m` may start by itself: `None` while it is not in `Ordering`
-/// or a ranking is still missing; otherwise the latest of the contest start
+/// or a ranking is still missing; otherwise the latest of the stage opening
 /// and both players' [`player_free_at_ms`].
 pub fn start_at_ms(
     setup: &Setup,
@@ -48,7 +76,7 @@ pub fn start_at_ms(
         return None;
     }
     Some(
-        contest_start_ms
+        stage_open_at_ms(setup, matches, m.round, contest_start_ms)?
             .max(player_free_at_ms(setup, matches, m.player_a, m.round))
             .max(player_free_at_ms(setup, matches, m.player_b, m.round)),
     )
@@ -119,14 +147,26 @@ mod tests {
     }
 
     #[test]
-    fn a_later_match_waits_for_each_players_own_break_not_the_whole_round() {
-        // Player 10 won at t=100 s, player 20 at t=400 s; other round-1
-        // matches are still running, and that must not matter.
-        let matches = vec![
-            decided(1, 0, 10, 100_000),
-            decided(1, 1, 20, 400_000),
-            (2, ranked(1, 30, 40)),
-        ];
+    fn a_later_stage_waits_for_the_whole_previous_stage() {
+        // The latest round-1 match finishes at t=400 s. The next stage is
+        // therefore unavailable until the full intermission has elapsed.
+        let mut matches = (0..8)
+            .map(|pos| {
+                decided(
+                    1,
+                    pos,
+                    if pos == 0 {
+                        10
+                    } else if pos == 1 {
+                        20
+                    } else {
+                        100 + pos as i32
+                    },
+                    if pos == 7 { 400_000 } else { 100_000 },
+                )
+            })
+            .collect::<Vec<_>>();
+        matches.push((2, ranked(2, 30, 40)));
         let m = ranked(2, 10, 20);
         assert_eq!(start_at_ms(&setup(60), &matches, &m, 0), Some(460_000));
     }

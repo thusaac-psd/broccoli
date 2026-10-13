@@ -27,8 +27,8 @@
 //! `.superpowers/sdd/2026-09-19-afternoon-bracket/qa-timing-setup.md`.
 
 use crate::codelink_bracket::{
-    Player, RoundProblems, XIAOJU_SECONDS, bracket_route, create_all_round_problems, get_match,
-    player, spawn_bracket_app, submit,
+    Player, RoundProblems, XIAOJU_SECONDS, bracket_route, create_all_round_problems,
+    finish_first_stage, get_match, player, spawn_bracket_app, submit,
 };
 use crate::common::{TestApp, TestResponse, routes};
 use broccoli_server_sdk::permissions as perm;
@@ -567,6 +567,8 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
     );
     assert_eq!(r0.status, 200, "force-decide match 0 failed: {}", r0.text);
     assert_eq!(r1.status, 200, "force-decide match 1 failed: {}", r1.text);
+
+    finish_first_stage(&fx.app, fx.contest_id, &fx.staff_token, &fx.players, 2).await;
 
     // Round 2 match id 8 = storage::match_id_for(2, 0), fed by round-1
     // matches 0 and 1 (pos/2 == 0 for both).
@@ -1161,59 +1163,47 @@ async fn setup_rejects_an_empty_tiebreak_list() {
     );
 }
 
-/// Round 2 starts per pair, after each player's own break - not when the
-/// whole round finishes and not on staff action. Decides only the two feeder
-/// matches, ranks the round-2 match during the 5 s break, and checks it
-/// waits, then starts by itself when its start timer fires.
+/// Round 2 opens only after every first-stage match and the intermission.
+/// Ordering and staff starts remain unavailable until the opening timer fires.
 #[tokio::test]
-async fn round2_match_waits_for_the_players_break_then_starts_by_itself() {
-    let fx = setup_fixture_with_timing(3, 5, 120).await; // 5s break
-
+async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
+    let fx = setup_fixture_with_timing(3, 5, 120).await;
     for pos in 0u8..2 {
-        let a = &fx.players[(pos * 2) as usize];
-        let b = &fx.players[(pos * 2 + 1) as usize];
-        order_match(&fx, pos, &fx.rounds[0], a, b).await;
-        expect_auto_started(&fx, pos).await;
-        let res = force_decide(&fx, pos, Some(a.id)).await;
-        assert_eq!(
-            res.status, 200,
-            "force-deciding match {pos} failed: {}",
-            res.text
-        );
+        let res = force_decide(&fx, pos, Some(fx.players[usize::from(pos) * 2].id)).await;
+        assert_eq!(res.status, 200, "{}", res.text);
     }
-
-    // Round 2 match 8 (fed by round-1 matches 0 and 1) exists although the
-    // other six round-1 matches have not even started.
-    let round2 = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
-    assert_eq!(round2["state"], "ordering", "got {round2}");
-    let find = |id: i64| {
-        fx.players
-            .iter()
-            .find(|p| p.id as i64 == id)
-            .expect("known player")
-    };
-    let pa = find(round2["player_a"].as_i64().unwrap());
-    let pb = find(round2["player_b"].as_i64().unwrap());
-    order_match(&fx, 8, &fx.rounds[1], pa, pb).await;
-
-    let view = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
+    let route = bracket_route(fx.contest_id, "/matches/8");
+    let waiting = fx.app.get_with_token(&route, &fx.staff_token).await;
     assert_eq!(
-        view["state"], "ordering",
-        "must wait out the break, got {view}"
+        waiting.status, 404,
+        "remaining matches must block stage creation"
     );
-    assert!(
-        view["starts_at_ms"].as_i64().is_some(),
-        "both ranked, so the view must say when it starts: {view}"
+    finish_first_stage(&fx.app, fx.contest_id, &fx.staff_token, &fx.players, 2).await;
+    let waiting = fx.app.get_with_token(&route, &fx.staff_token).await;
+    assert_eq!(waiting.status, 404, "stage must wait for the intermission");
+    let ranking = fx
+        .app
+        .post_with_token(
+            &format!("{route}/order"),
+            &json!({"order": fx.rounds[1].group_b}),
+            &fx.players[0].token,
+        )
+        .await;
+    assert_eq!(ranking.status, 404, "ordering cannot precede stage opening");
+    assert_eq!(
+        start_match(&fx, 8).await.status,
+        404,
+        "staff cannot bypass opening"
     );
 
     tokio::time::sleep(Duration::from_millis(5_500)).await;
     tick_once(&fx.app.state, &TimerConfig::default())
         .await
-        .expect("tick_once (start timer) failed");
-
-    let view = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
-    assert_eq!(
-        view["state"], "in_progress",
-        "should start once the break is over, got {view}"
-    );
+        .expect("stage timer failed");
+    for id in 8..12 {
+        let view = get_match(&fx.app, fx.contest_id, id, &fx.staff_token).await;
+        assert_eq!(view["state"], "ordering", "stage match {id}: {view}");
+    }
+    order_match(&fx, 8, &fx.rounds[1], &fx.players[0], &fx.players[2]).await;
+    expect_auto_started(&fx, 8).await;
 }
