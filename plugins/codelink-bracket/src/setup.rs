@@ -35,6 +35,9 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
     if setup.xiaoju_seconds <= 0 {
         return Err("xiaoju_seconds must be greater than 0".to_string());
     }
+    if setup.penalty_seconds < 0 {
+        return Err("penalty_seconds must be greater than or equal to 0".to_string());
+    }
 
     // A problem belongs to exactly one group of one round. Tracked globally
     // (not per-round) because the visibility kernel's opponent-ranking
@@ -91,6 +94,8 @@ struct SetupRequest {
     rounds: Vec<RoundDef>,
     xiaoju_seconds: i64,
     round_intermission_seconds: i64,
+    #[serde(default = "crate::model::default_penalty_seconds")]
+    penalty_seconds: i64,
     /// Optional: a request that omits this falls back to
     /// [`crate::model::default_escalation_grace_seconds`], same as a
     /// persisted `Setup` document written before this field existed.
@@ -169,6 +174,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         rounds: body.rounds,
         xiaoju_seconds: body.xiaoju_seconds,
         round_intermission_seconds: body.round_intermission_seconds,
+        penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
     };
     validate_setup(&setup, &body.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
@@ -244,6 +250,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         }
     }
 
@@ -304,6 +311,29 @@ mod tests {
         assert!(err.contains("xiaoju_seconds"), "got: {err}");
     }
 
+    #[test]
+    fn validates_penalties_and_defaults_older_setup_documents_to_twenty_seconds() {
+        assert_eq!(Setup::default().penalty_seconds, 20);
+        let mut setup = valid_setup();
+        setup.penalty_seconds = -1;
+        assert!(
+            validate_setup(&setup, &valid_seeds())
+                .unwrap_err()
+                .contains("penalty_seconds")
+        );
+        setup.penalty_seconds = 0;
+        assert!(validate_setup(&setup, &valid_seeds()).is_ok());
+
+        let mut legacy = serde_json::to_value(&setup).unwrap();
+        legacy.as_object_mut().unwrap().remove("penalty_seconds");
+        assert_eq!(
+            serde_json::from_value::<Setup>(legacy)
+                .unwrap()
+                .penalty_seconds,
+            20
+        );
+    }
+
     fn manage_request(contest_id: i32) -> PluginHttpRequest {
         let mut params = HashMap::new();
         params.insert("contest_id".to_string(), contest_id.to_string());
@@ -343,6 +373,27 @@ mod tests {
             .queue_query_result(serde_json::json!([{ "start_ms": 0.0 }]));
         host.db
             .queue_query_result(serde_json::json!([{ "now_ms": 1_000.0 }]));
+    }
+
+    #[test]
+    fn setup_persists_custom_and_disabled_penalties_and_defaults_omitted_requests() {
+        for penalty in [None, Some(7), Some(0)] {
+            let host = Host::mock();
+            queue_bracket_contest_info(&host);
+            queue_stage_open_now(&host);
+            let mut req = manage_request(7);
+            if let Some(seconds) = penalty {
+                req.body.as_mut().unwrap()["penalty_seconds"] = serde_json::json!(seconds);
+            }
+            assert_eq!(handle_setup(&host, &req).unwrap().status, 200);
+            assert_eq!(
+                storage::load_setup(&host, 7)
+                    .unwrap()
+                    .unwrap()
+                    .penalty_seconds,
+                penalty.unwrap_or(20)
+            );
+        }
     }
 
     #[test]

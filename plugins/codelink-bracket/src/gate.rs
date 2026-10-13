@@ -239,8 +239,14 @@ fn resolve_rejection(
     if let Err(rejection) = check(&ctx, event.user_id, event.problem_id) {
         return Ok(Err(rejection));
     }
-    let feedback =
-        crate::feedback::player_feedback(host, contest_id, &m, event.user_id, event.problem_id)?;
+    let feedback = crate::feedback::player_feedback(
+        host,
+        contest_id,
+        &m,
+        event.user_id,
+        event.problem_id,
+        setup.penalty_seconds,
+    )?;
     if feedback.pending_submission_id.is_some() {
         return Ok(Err(Rejection::new(
             "SUBMISSION_IN_FLIGHT",
@@ -251,9 +257,7 @@ fn resolve_rejection(
         .xiaoju
         .last()
         .ok_or_else(|| SdkError::Other("no open game".into()))?;
-    let delay_seconds = feedback
-        .penalty_count
-        .saturating_mul(crate::feedback::PENALTY_SECONDS);
+    let delay_seconds = feedback.delay_seconds;
     let clock = crate::judge::clock(host, contest_id)?;
     let deadline_ms = clock.cutoff(game.deadline_ms);
     if clock
@@ -378,6 +382,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         }
     }
 
@@ -498,6 +503,31 @@ mod tests {
         }]));
         let response = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
         assert_eq!(rejection_code(response), "SUBMISSION_IN_FLIGHT");
+    }
+
+    #[test]
+    fn admission_uses_the_configured_penalty_including_zero() {
+        for seconds in [7, 0] {
+            let host = Host::mock();
+            seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+            let mut setup = seeded_setup();
+            setup.penalty_seconds = seconds;
+            host.storage
+                .set(&[(
+                    storage::setup_key(7).as_str(),
+                    serde_json::to_string(&setup).unwrap().as_str(),
+                )])
+                .unwrap();
+            host.db.queue_query_result(serde_json::json!([{
+                "penalty_count": 1, "pending_submission_id": null, "effective_at_us": null
+            }]));
+            host.db
+                .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
+            let admission = resolve_rejection(&host, &event(10, 103, Some(7)))
+                .unwrap()
+                .unwrap();
+            assert_eq!(admission.delay_seconds, seconds);
+        }
     }
 
     #[test]

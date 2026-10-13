@@ -1308,6 +1308,76 @@ async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
 }
 
 #[tokio::test]
+async fn configured_penalties_control_admission_and_player_feedback_including_zero() {
+    for seconds in [30, 0] {
+        let fx = setup_fixture_with_timing(120, 0, 120).await;
+        let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
+        let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
+        body["penalty_seconds"] = json!(seconds);
+        let configured = fx
+            .app
+            .post_with_token(
+                &bracket_route(fx.contest_id, "/setup"),
+                &body,
+                &fx.staff_token,
+            )
+            .await;
+        assert_eq!(configured.status, 200, "{}", configured.text);
+        order_match_0(&fx).await;
+        let a = &fx.players[0];
+        let wrong = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[0],
+            &a.token,
+            "WRONG",
+        )
+        .await;
+        assert_eq!(wrong.status, 201, "{}", wrong.text);
+        assert_eq!(
+            wait_published(&fx, wrong.id(), &a.token).await["result"]["verdict"],
+            "WrongAnswer"
+        );
+        let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+        assert_eq!(view["own_feedback"]["penalty_count"], 1);
+        assert_eq!(view["own_feedback"]["delay_seconds"], seconds);
+
+        let accepted = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[0],
+            &a.token,
+            "ACCEPT",
+        )
+        .await;
+        assert_eq!(accepted.status, 201, "{}", accepted.text);
+        let raw = wait_raw_judgement(&fx, accepted.id()).await;
+        let feedback = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT delay_seconds, effective_at_us FROM submission_feedback WHERE submission_id = $1",
+            [accepted.id().into()],
+        )).await.unwrap().unwrap();
+        assert_eq!(
+            feedback.try_get::<i64>("", "delay_seconds").unwrap(),
+            seconds
+        );
+        assert_eq!(
+            feedback.try_get::<i64>("", "effective_at_us").unwrap()
+                - raw.created_at.timestamp_micros(),
+            seconds * 1_000_000
+        );
+        if seconds == 0 {
+            assert_eq!(
+                wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+                "Accepted"
+            );
+        } else {
+            assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn penalty_delays_ac_allows_opponent_to_win_and_resets_next_game() {
     let fx = setup_fixture_with_timing(120, 0, 120).await;
     order_match_0(&fx).await;

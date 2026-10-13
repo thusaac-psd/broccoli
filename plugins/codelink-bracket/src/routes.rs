@@ -608,7 +608,12 @@ fn attach_own_feedback(
             continue;
         };
         view.own_feedback = Some(crate::feedback::player_feedback(
-            host, contest, m, viewer, problem,
+            host,
+            contest,
+            m,
+            viewer,
+            problem,
+            setup.penalty_seconds,
         )?);
     }
     Ok(())
@@ -638,6 +643,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         }
     }
 

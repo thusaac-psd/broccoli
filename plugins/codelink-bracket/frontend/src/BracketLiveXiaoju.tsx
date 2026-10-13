@@ -130,7 +130,7 @@ export function BracketLiveXiaoju({
         <p className="text-xs text-muted-foreground">
           {t('codelink-bracket.live.penalty', {
             count: match.own_feedback.penalty_count,
-            seconds: match.own_feedback.penalty_count * 20,
+            seconds: match.own_feedback.delay_seconds,
           })}
         </p>
       )}

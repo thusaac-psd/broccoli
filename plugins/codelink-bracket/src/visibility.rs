@@ -679,6 +679,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         };
         host.storage
             .set(&[(
@@ -741,6 +742,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         };
         host.storage
             .set(&[(

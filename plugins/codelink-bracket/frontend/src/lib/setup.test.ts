@@ -55,3 +55,15 @@ test('a game must last longer than zero minutes', () => {
     { kind: 'badTiming' },
   ]);
 });
+
+test('penalties accept zero and custom whole seconds and reject invalid values', () => {
+  const rounds = autoFillRounds(problems);
+  for (const seconds of [0, 7, 30]) {
+    assert.deepEqual(validateSetup(seeds, rounds, 30, seconds), []);
+  }
+  for (const seconds of [-1, 1.5, NaN, Infinity]) {
+    assert.deepEqual(validateSetup(seeds, rounds, 30, seconds), [
+      { kind: 'badPenalty' },
+    ]);
+  }
+});

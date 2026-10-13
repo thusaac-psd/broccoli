@@ -3,7 +3,7 @@
 
 'codelink-bracket.rules.title' = 'Afternoon knockout round'
 'codelink-bracket.rules.description' = "Single elimination. Before each match, both players rank the other player's three problems. The match is three games. In each game, each player works on the next problem in the order their opponent chose, and the first accepted submission wins the game. If neither player solves their problem before the deadline, nobody scores. After three games, the player with more wins advances. A level score goes to tiebreak problems."
-'codelink-bracket.rules.order' = 'Game winners follow the submission time of accepted solutions. Submission ID breaks exact time ties. If a submission is still being judged at the deadline, the game waits for its result. Staff decide the match if judging does not finish in time.'
+'codelink-bracket.rules.order' = 'Games are decided by effective submission time, including accumulated penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured delay to subsequent submissions in the same game; the count resets each game. Wait for your previous result before submitting again. Correct results wait for earlier effective submissions to finish judging. Staff decide the match if judging cannot finish in time.'
 
 'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
 'codelink-bracket.bracket.empty' = 'The bracket has not been set up yet.'
@@ -101,6 +101,8 @@
 'codelink-bracket.setup.firstPlayer' = 'First player'
 'codelink-bracket.setup.gameMinutes' = 'Game length (minutes)'
 'codelink-bracket.setup.graceSeconds' = 'Judge wait before staff step in (seconds)'
+'codelink-bracket.setup.penaltySeconds' = 'Penalty per wrong submission (seconds, 0 to disable)'
+'codelink-bracket.setup.issue.badPenalty' = 'Penalty must be a nonnegative whole number of seconds.'
 'codelink-bracket.setup.issue.badTiming' = 'Games must last longer than 0 minutes.'
 'codelink-bracket.setup.issue.duplicate' = '{label} is used more than once. Each problem can appear only once.'
 'codelink-bracket.setup.issue.emptySlot' = '{round} still has empty problem slots.'

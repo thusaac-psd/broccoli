@@ -6,8 +6,6 @@ use crate::decide::{SubmissionLifecycle, SubmissionRecord, submission_in_flight}
 use crate::model::{MatchPhase, MatchState};
 use crate::storage;
 
-pub const PENALTY_SECONDS: i64 = 20;
-
 pub fn game_scope(contest: i32, match_id: u8, index: u8) -> String {
     format!("game:{contest}:{match_id}:{index}")
 }
@@ -15,6 +13,8 @@ pub fn game_scope(contest: i32, match_id: u8, index: u8) -> String {
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Clone)]
 pub struct PlayerFeedback {
     pub penalty_count: i64,
+    #[serde(default)]
+    pub delay_seconds: i64,
     pub pending_submission_id: Option<i32>,
     pub effective_at_us: Option<i64>,
 }
@@ -27,6 +27,7 @@ pub fn player_feedback(
     m: &MatchState,
     user: i32,
     problem: i32,
+    penalty_seconds: i64,
 ) -> Result<PlayerFeedback, SdkError> {
     let Some(game) = m.xiaoju.last() else {
         return Ok(PlayerFeedback::default());
@@ -47,10 +48,12 @@ pub fn player_feedback(
         p.bind(problem),
         p.bind(game.opened_at_ms)
     );
-    Ok(host
+    let mut feedback: PlayerFeedback = host
         .db
         .query_one_with_args(&sql, &p.into_args())?
-        .unwrap_or_default())
+        .unwrap_or_default();
+    feedback.delay_seconds = feedback.penalty_count.saturating_mul(penalty_seconds);
+    Ok(feedback)
 }
 
 #[derive(Deserialize)]

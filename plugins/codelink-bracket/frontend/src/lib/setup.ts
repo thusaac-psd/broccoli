@@ -38,12 +38,14 @@ export type SetupIssue =
   | { kind: 'players'; count: number }
   | { kind: 'emptySlot'; round: number }
   | { kind: 'duplicate'; problemId: number }
-  | { kind: 'badTiming' };
+  | { kind: 'badTiming' }
+  | { kind: 'badPenalty' };
 
 export function validateSetup(
   seeds: number[],
   rounds: RoundDraft[],
   gameMinutes: number,
+  penaltySeconds = 20,
 ): SetupIssue[] {
   const issues: SetupIssue[] = [];
   if (new Set(seeds).size !== PLAYER_COUNT || seeds.length !== PLAYER_COUNT) {
@@ -65,5 +67,8 @@ export function validateSetup(
   });
   for (const problemId of dupes) issues.push({ kind: 'duplicate', problemId });
   if (!(gameMinutes > 0)) issues.push({ kind: 'badTiming' });
+  if (!Number.isSafeInteger(penaltySeconds) || penaltySeconds < 0) {
+    issues.push({ kind: 'badPenalty' });
+  }
   return issues;
 }
