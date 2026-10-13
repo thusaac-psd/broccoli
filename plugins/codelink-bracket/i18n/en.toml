@@ -175,3 +175,7 @@
 'codelink-bracket.start.inTime' = 'Both have ranked. Starts by itself in {time}.'
 'codelink-bracket.my.waitingRanking' = 'Your ranking is in. The match starts as soon as {name} ranks too.'
 'codelink-bracket.my.startsIn' = 'Both rankings are in. Your match starts in {time}.'
+
+'codelink-bracket.live.penalty' = 'Errors this game: {count} · submission delay: {seconds}s'
+'codelink-bracket.live.waitPrevious' = 'Wait for your previous submission’s result before submitting again.'
+'codelink-bracket.live.closed' = 'This problem is not open for submissions in your current game.'

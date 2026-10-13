@@ -3,5 +3,6 @@ pub mod evaluate_batch;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod submission_dispatch;
+pub mod submission_feedback;
 pub mod user_accounts;
 pub mod windowed_session;

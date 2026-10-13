@@ -201,12 +201,12 @@ fn gate_ctx_from_match(m: &MatchState, round_def: &RoundDef) -> GateCtx {
 fn resolve_rejection(
     host: &Host,
     event: &BeforeSubmissionEvent,
-) -> Result<Option<Rejection>, SdkError> {
+) -> Result<Result<SubmissionAdmission, Rejection>, SdkError> {
     let Some(contest_id) = event.contest_id else {
-        return Ok(Some(Rejection::not_in_match()));
+        return Ok(Err(Rejection::not_in_match()));
     };
     let Some(setup) = storage::load_setup(host, contest_id)? else {
-        return Ok(Some(Rejection::not_in_match()));
+        return Ok(Err(Rejection::not_in_match()));
     };
     let Some(round_index) = setup.rounds.iter().position(|r| {
         r.group_a.contains(&event.problem_id)
@@ -215,22 +215,68 @@ fn resolve_rejection(
     }) else {
         // Not part of this bracket at all this round -- certainly not
         // "yours" to submit to.
-        return Ok(Some(Rejection::not_your_problem()));
+        return Ok(Err(Rejection::not_your_problem()));
     };
     let round_def = &setup.rounds[round_index];
     let round = (round_index + 1) as u8;
 
     let matches = storage::load_all_matches(host, contest_id)?;
     let Some(m) = storage::find_players_match(&matches, round, event.user_id) else {
-        return Ok(Some(Rejection::not_in_match()));
+        return Ok(Err(Rejection::not_in_match()));
     };
 
+    let state_key = storage::match_key(contest_id, storage::match_id_for(m.round, m.pos));
+    let expected_state = host
+        .storage
+        .get_one(&state_key)?
+        .ok_or_else(|| SdkError::Other("match disappeared during submission".into()))?;
+    let m: MatchState = serde_json::from_str(&expected_state)?;
     if m.state != MatchPhase::InProgress && m.state != MatchPhase::Tiebreak {
-        return Ok(Some(Rejection::match_not_started()));
+        return Ok(Err(Rejection::match_not_started()));
     }
 
-    let ctx = gate_ctx_from_match(m, round_def);
-    Ok(check(&ctx, event.user_id, event.problem_id).err())
+    let ctx = gate_ctx_from_match(&m, round_def);
+    if let Err(rejection) = check(&ctx, event.user_id, event.problem_id) {
+        return Ok(Err(rejection));
+    }
+    let feedback =
+        crate::feedback::player_feedback(host, contest_id, &m, event.user_id, event.problem_id)?;
+    if feedback.pending_submission_id.is_some() {
+        return Ok(Err(Rejection::new(
+            "SUBMISSION_IN_FLIGHT",
+            "Wait for your previous submission's result before submitting again.",
+        )));
+    }
+    let game = m
+        .xiaoju
+        .last()
+        .ok_or_else(|| SdkError::Other("no open game".into()))?;
+    let delay_seconds = feedback
+        .penalty_count
+        .saturating_mul(crate::feedback::PENALTY_SECONDS);
+    let clock = crate::judge::clock(host, contest_id)?;
+    let deadline_ms = clock.cutoff(game.deadline_ms);
+    if clock
+        .now
+        .saturating_add(delay_seconds.saturating_mul(1_000))
+        > deadline_ms
+    {
+        return Ok(Err(Rejection::new(
+            "SUBMISSION_TOO_LATE",
+            "The effective submission time is past this game's deadline.",
+        )));
+    }
+    Ok(Ok(SubmissionAdmission {
+        state_key,
+        scope_key: crate::feedback::game_scope(
+            contest_id,
+            storage::match_id_for(m.round, m.pos),
+            game.index,
+        ),
+        expected_state,
+        delay_seconds,
+        deadline_ms,
+    }))
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -239,8 +285,12 @@ fn check_submission_response(
     event: &BeforeSubmissionEvent,
 ) -> Result<HookResponse, SdkError> {
     match resolve_rejection(host, event)? {
-        None => Ok(HookResponse::pass()),
-        Some(rejection) => Ok(HookResponse::reject(
+        Ok(admission) => {
+            let mut payload = serde_json::to_value(event)?;
+            payload["submission_admission"] = serde_json::to_value(admission)?;
+            Ok(HookResponse::modified(payload))
+        }
+        Err(rejection) => Ok(HookResponse::reject(
             rejection.code,
             rejection.message,
             400,
@@ -396,8 +446,11 @@ mod tests {
     fn check_submission_response_accepts_the_right_players_current_problem() {
         let host = Host::mock();
         seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        host.db.queue_query_result(serde_json::json!([]));
+        host.db
+            .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
         let resp = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
-        assert!(matches!(resp, HookResponse::Pass));
+        assert!(matches!(resp, HookResponse::Modified { .. }));
     }
 
     #[test]
@@ -434,5 +487,29 @@ mod tests {
         let host = Host::mock();
         let resp = check_submission_response(&host, &event(10, 103, None)).unwrap();
         assert_eq!(rejection_code(resp), "NOT_IN_MATCH");
+    }
+
+    #[test]
+    fn unfinished_feedback_blocks_the_next_submission() {
+        let host = Host::mock();
+        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        host.db.queue_query_result(serde_json::json!([{
+            "penalty_count": 0, "pending_submission_id": 42, "effective_at_us": 1_000_000
+        }]));
+        let response = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
+        assert_eq!(rejection_code(response), "SUBMISSION_IN_FLIGHT");
+    }
+
+    #[test]
+    fn a_penalty_that_pushes_arrival_past_the_deadline_is_rejected() {
+        let host = Host::mock();
+        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        host.db.queue_query_result(serde_json::json!([{
+            "penalty_count": 1, "pending_submission_id": null, "effective_at_us": null
+        }]));
+        host.db
+            .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
+        let response = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
+        assert_eq!(rejection_code(response), "SUBMISSION_TOO_LATE");
     }
 }

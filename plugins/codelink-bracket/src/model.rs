@@ -58,6 +58,12 @@ pub struct RoundDef {
 /// the test that asserts the direction explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MatchState {
+    /// Bumped by atomic host admission so concurrent decisions retry their CAS.
+    #[serde(default)]
+    pub admission_revision: u64,
+    /// Reject stale hooks from this player even after their pending slot clears.
+    #[serde(default)]
+    pub admission_by_user: std::collections::BTreeMap<i32, u64>,
     pub round: u8,
     pub pos: u8,
     pub player_a: i32,

@@ -29,7 +29,8 @@
 //!
 //! # Timer key discipline
 //!
-//! One timer per 小局: `xiaoju:{contest}:{match_id}:{index}`
+//! One deadline timer per 小局: `xiaoju:{contest}:{match_id}:{index}`
+//! plus a separate `:effective:{submission_id}` wakeup for each delayed AC.
 //! ([`xiaoju_timer_key`]). When a 小局 ends EARLY (an AC before its
 //! deadline), `step` cancels that 小局's timer before opening the next
 //! one or deciding the match. Without this, a stale timer for the OLD 小局
@@ -61,6 +62,52 @@ use crate::storage;
 /// the fired timer's key).
 pub fn xiaoju_timer_key(contest: i32, match_id: u8, index: u8) -> String {
     format!("xiaoju:{contest}:{match_id}:{index}")
+}
+
+/// A delayed AC owns a separate wakeup: an overlapping callback with an older
+/// submission snapshot cannot postpone it by rescheduling the game deadline.
+/// The xiaoju prefix routes this through the same timer handler.
+pub(crate) fn effective_timer_key(
+    contest: i32,
+    match_id: u8,
+    index: u8,
+    submission: i32,
+) -> String {
+    format!(
+        "{}:effective:{submission}",
+        xiaoju_timer_key(contest, match_id, index)
+    )
+}
+
+fn schedule_wakeups(
+    host: &Host,
+    contest: i32,
+    match_id: u8,
+    current: &XiaojuState,
+    clock: Clock,
+    subs: &[SubmissionRecord],
+) -> Result<(), SdkError> {
+    let cutoff = clock.cutoff(current.deadline_ms);
+    // Keep the deadline independently of effective-time wakeups, including
+    // when staff move the contest end after a timer was first scheduled.
+    host.timer.schedule(
+        cutoff,
+        &xiaoju_timer_key(contest, match_id, current.index),
+        "",
+    )?;
+    for sub in subs.iter().filter(|s| {
+        !decide::submission_in_flight(s) && s.verdict.as_ref().is_some_and(Verdict::is_accepted)
+    }) {
+        let effective_ms = sub.effective_at_us.saturating_add(999) / 1_000;
+        if effective_ms > clock.now && sub.effective_at_us <= cutoff.saturating_mul(1_000) {
+            host.timer.schedule(
+                effective_ms,
+                &effective_timer_key(contest, match_id, current.index, sub.submission_id),
+                "",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Parse a `xiaoju:{contest}:{match_id}:{index}` key back into
@@ -256,7 +303,7 @@ pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkErr
 /// decides who WINS a 小局, `gate.rs` decides what may be SUBMITTED to it,
 /// and the two must agree on the current problem or a valid submission
 /// could be judged against the wrong 小局).
-fn current_problem(m: &MatchState, round_def: &RoundDef, player: i32) -> Option<i32> {
+pub(crate) fn current_problem(m: &MatchState, round_def: &RoundDef, player: i32) -> Option<i32> {
     match m.state {
         MatchPhase::Tiebreak => round_def.tiebreak.get(m.tiebreak_index).copied(),
         MatchPhase::InProgress => current_regular_problem(m, player),
@@ -375,6 +422,8 @@ struct SubRow {
     user_id: i32,
     problem_id: i32,
     submitted_at_us: i64,
+    #[serde(default)]
+    effective_at_us: Option<i64>,
     verdict: Option<Verdict>,
     status: SubmissionLifecycle,
 }
@@ -409,14 +458,14 @@ fn fetch_subs(
     let mut clauses = Vec::new();
     if let Some(pid) = prob_a {
         clauses.push(format!(
-            "(user_id = {} AND problem_id = {})",
+            "(s.user_id = {} AND s.problem_id = {})",
             p.bind(m.player_a),
             p.bind(pid)
         ));
     }
     if let Some(pid) = prob_b {
         clauses.push(format!(
-            "(user_id = {} AND problem_id = {})",
+            "(s.user_id = {} AND s.problem_id = {})",
             p.bind(m.player_b),
             p.bind(pid)
         ));
@@ -426,12 +475,14 @@ fn fetch_subs(
     }
 
     let sql = format!(
-        "SELECT id, user_id, problem_id, \
-         (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS submitted_at_us, verdict, \
-         status::text AS status \
-         FROM submission WHERE contest_id = {} AND ({})",
+        "SELECT s.id, s.user_id, s.problem_id, \
+         (EXTRACT(EPOCH FROM s.created_at) * 1000000)::bigint AS submitted_at_us, verdict, \
+         s.status::text AS status, f.effective_at_us \
+         FROM submission s LEFT JOIN submission_feedback f ON f.submission_id = s.id \
+         WHERE s.contest_id = {} AND ({}) AND s.created_at >= to_timestamp({}::double precision / 1000)",
         p.bind(contest),
-        clauses.join(" OR ")
+        clauses.join(" OR "),
+        p.bind(m.xiaoju.last().map(|g| g.opened_at_ms).unwrap_or(0))
     );
     let rows: Vec<SubRow> = host.db.query_with_args(&sql, &p.into_args())?;
     Ok(rows
@@ -441,6 +492,7 @@ fn fetch_subs(
             user_id: r.user_id,
             problem_id: r.problem_id,
             submitted_at_us: r.submitted_at_us,
+            effective_at_us: r.effective_at_us.unwrap_or(r.submitted_at_us),
             verdict: r.verdict,
             status: r.status,
         })
@@ -536,7 +588,6 @@ fn step(
         return Ok(());
     };
     let current_index = current.index;
-    let current_deadline = current.deadline_ms;
 
     let Some(round_def) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
         // No round definition to resolve a current problem in -- cannot
@@ -572,16 +623,14 @@ fn step(
     }
 
     match outcome {
-        XiaojuOutcome::NotYet => {
-            // A timer can fire early (it was clamped to a contest end that
-            // staff have since moved later); keep one pending for the real
-            // cutoff. Rescheduling replaces the key, so this is idempotent.
-            host.timer.schedule(
-                clock.cutoff(current_deadline),
-                &xiaoju_timer_key(contest, match_id, current_index),
-                "",
-            )
-        }
+        XiaojuOutcome::NotYet => schedule_wakeups(
+            host,
+            contest,
+            match_id,
+            m.xiaoju.last().unwrap(),
+            clock,
+            &subs,
+        ),
         XiaojuOutcome::AwaitingJudge {
             blocking_submission_id,
         } => {
@@ -611,6 +660,14 @@ fn step(
             Ok(())
         }
         XiaojuOutcome::Decided { .. } => {
+            for sub in &subs {
+                host.timer.cancel(&effective_timer_key(
+                    contest,
+                    match_id,
+                    current_index,
+                    sub.submission_id,
+                ))?;
+            }
             // The 小局 that just concluded (or was already concluded by an
             // earlier, successful `step` -- see the module doc comment)
             // must have its deadline cancelled BEFORE anything opens next,
@@ -696,6 +753,7 @@ pub fn advance(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> 
     let updated = storage::update_match(host, contest, match_id, |m| {
         step(host, contest, match_id, &setup, m)
     })?;
+    crate::feedback::publish(host, contest, match_id, &updated)?;
     if updated.state == MatchPhase::Decided {
         try_open_stage(host, contest, updated.round + 1)?;
     }
@@ -850,6 +908,7 @@ pub fn force_decide(host: &Host, contest: i32, match_id: u8, winner: i32) -> Res
         let now = now_ms(host)?;
         apply_force_decide(m, winner, now).map_err(SdkError::Other)
     })?;
+    crate::feedback::publish(host, contest, match_id, &updated)?;
     write_next_round_slot(host, contest, &setup, &updated, winner)?;
     try_open_stage(host, contest, updated.round + 1)
 }
@@ -1189,6 +1248,70 @@ mod tests {
 
     fn queue_subs(host: &Host, rows: Vec<serde_json::Value>) {
         host.db.queue_query_result(serde_json::Value::Array(rows));
+    }
+
+    #[test]
+    fn a_future_effective_ac_schedules_a_wakeup_without_escalating_the_judge() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        queue_now(&host, 10_000);
+        let mut ac = ac_row(10, 10_000);
+        ac["effective_at_us"] = serde_json::json!(30_000_001);
+        queue_subs(&host, vec![ac]);
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(
+            host.timer.scheduled_at(&effective_timer_key(7, 0, 0, 10)),
+            Some(30_001)
+        );
+        assert_eq!(
+            host.timer.scheduled_at(&xiaoju_timer_key(7, 0, 0)),
+            Some(1_000_000)
+        );
+        assert!(!host.timer.is_scheduled(&judgewait_timer_key(7, 0, 0)));
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().state,
+            MatchPhase::InProgress
+        );
+    }
+
+    #[test]
+    fn stale_callbacks_cannot_postpone_an_earlier_ac_wakeup() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let original = match_in_progress();
+        let mut first = ac_row(10, 10_000);
+        first["effective_at_us"] = serde_json::json!(30_000_001);
+        let mut later = ac_row(20, 10_000);
+        later["effective_at_us"] = serde_json::json!(50_000_000);
+
+        // Reproduce the side-effect order of overlapping callbacks: the AC
+        // callback schedules first, then two stale snapshots schedule later.
+        // All leave the document unchanged, so a CAS cannot detect this race.
+        for rows in [vec![first.clone()], vec![], vec![later.clone()]] {
+            let mut snapshot = original.clone();
+            queue_now(&host, 10_000);
+            queue_subs(&host, rows);
+            step(&host, 7, 0, &setup, &mut snapshot).unwrap();
+            assert_eq!(snapshot, original);
+        }
+        let key = effective_timer_key(7, 0, 0, 10);
+        assert_eq!(host.timer.scheduled_at(&key), Some(30_001));
+        assert_eq!(
+            host.timer.scheduled_at(&effective_timer_key(7, 0, 0, 20)),
+            Some(50_000)
+        );
+        assert_eq!(parse_xiaoju_timer_key(&key), Some((7, 0)));
+
+        // Deliver the preserved earlier wakeup through the normal advance
+        // path. It must award the game now, far ahead of its deadline.
+        seed(&host, 7, &setup, 0, &original);
+        queue_now(&host, 30_001);
+        queue_subs(&host, vec![first, later]);
+        advance(&host, 7, 0).unwrap();
+        let decided = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(decided.score_a, 1);
+        assert_eq!(decided.xiaoju.len(), 2);
+        assert!(host.timer.was_cancelled(&key));
     }
 
     fn ac_row(user_id: i32, submitted_at_ms: i64) -> serde_json::Value {
@@ -2241,6 +2364,7 @@ mod tests {
         })
         .unwrap();
         queue_now(&host, 200_000);
+        host.db.queue_query_result(serde_json::json!([]));
         queue_contest_start(&host, 0);
         queue_now(&host, 200_000);
         force_decide(&host, 7, id, 107).unwrap();

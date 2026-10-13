@@ -9,13 +9,17 @@
 //! stands in for that sandbox so the integration test can drive real
 //! submissions through the real `DetachedEval`/host dispatch machinery
 //! without needing a real compiler toolchain: it decides Accepted/WrongAnswer
-//! purely by reading the submitted source verbatim (`"ACCEPT"` -> AC, anything
-//! else -> WA), matching the exact `BuildEvalOpsInput` -> `TestCaseVerdict`
+//! purely by reading the submitted source verbatim (`"ACCEPT"` -> AC,
+//! `"COMPILE_ERROR"` -> CE, `"SYSTEM_ERROR"` -> system error, `"TIME_LIMIT"` -> TLE,
+//! `"MEMORY_LIMIT"` -> MLE, `"RUNTIME_ERROR"` -> RE, otherwise WA),
+//! matching the exact `BuildEvalOpsInput` -> `TestCaseVerdict`
 //! contract `batch-evaluator::evaluate_batch` implements for real.
 #[cfg(target_arch = "wasm32")]
 use broccoli_server_sdk::prelude::*;
 #[cfg(target_arch = "wasm32")]
-use broccoli_server_sdk::types::{BuildEvalOpsInput, ResolveLanguageOutput, RunSpec, TestCaseVerdict};
+use broccoli_server_sdk::types::{
+    BuildEvalOpsInput, ResolveLanguageOutput, RunSpec, TestCaseVerdict,
+};
 #[cfg(target_arch = "wasm32")]
 use extism_pdk::{FnResult, plugin_fn};
 
@@ -51,7 +55,21 @@ pub fn evaluate(input: String) -> FnResult<String> {
         .map(|f| f.content.trim())
         .unwrap_or_default();
 
-    let verdict = if submitted == "ACCEPT" {
+    let verdict = if submitted == "SYSTEM_ERROR" {
+        TestCaseVerdict::system_error(req.test_case_id)
+    } else if submitted == "COMPILE_ERROR" {
+        TestCaseVerdict::compile_error(req.test_case_id)
+    } else if submitted == "TIME_LIMIT" {
+        TestCaseVerdict::tle(req.test_case_id)
+    } else if submitted == "MEMORY_LIMIT" || submitted == "RUNTIME_ERROR" {
+        let mut result = TestCaseVerdict::wrong_answer(req.test_case_id);
+        result.verdict = if submitted == "MEMORY_LIMIT" {
+            Verdict::MemoryLimitExceeded
+        } else {
+            Verdict::RuntimeError
+        };
+        result
+    } else if submitted == "ACCEPT" {
         TestCaseVerdict::accepted(req.test_case_id)
     } else {
         TestCaseVerdict::wrong_answer(req.test_case_id)

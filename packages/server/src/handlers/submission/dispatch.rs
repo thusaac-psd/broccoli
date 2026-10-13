@@ -1,4 +1,6 @@
-use broccoli_server_sdk::types::{AfterSubmissionEvent, BeforeSubmissionEvent};
+use broccoli_server_sdk::types::{
+    AfterSubmissionEvent, BeforeSubmissionEvent, SubmissionAdmission,
+};
 use chrono::Utc;
 use common::SubmissionStatus;
 use sea_orm::*;
@@ -18,13 +20,19 @@ pub(super) async fn dispatch_before_submission_hooks(
     state: &AppState,
     event: &BeforeSubmissionEvent,
     enabled_plugins: Option<&hooks::ResourceEnablements>,
-) -> Result<(), AppError> {
+) -> Result<Option<SubmissionAdmission>, AppError> {
     let outcome =
         hooks::dispatch_hooks_typed(event, enabled_plugins, &state.registries.hook_registry)
             .await?;
 
     match outcome {
-        HookOutcome::Allowed(_) | HookOutcome::Stopped => Ok(()),
+        HookOutcome::Allowed(payload) => payload
+            .get("submission_admission")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| AppError::Internal(format!("Invalid submission admission: {e}"))),
+        HookOutcome::Stopped => Ok(None),
         HookOutcome::Rejected {
             code,
             message,

@@ -197,9 +197,17 @@ pub async fn delete_timers_for_plugin(
 /// it. Errors are logged, not propagated: the row is left claimed either
 /// way, so the worst case is a redelivery after the lease expires, not a
 /// silent loss.
-async fn delete_timer(db: &DatabaseConnection, id: i64) {
-    if let Err(e) = plugin_timer::Entity::delete_by_id(id).exec(db).await {
-        error!(id, error = %e, "Failed to delete plugin_timer row after delivery");
+async fn delete_timer(db: &DatabaseConnection, row: &plugin_timer::Model) {
+    // A callback may reschedule its own key (or another caller may replace it
+    // during delivery). Scheduling clears the claim, so only delete the exact
+    // delivery we claimed, never the replacement's future wakeup.
+    if let Err(e) = plugin_timer::Entity::delete_by_id(row.id)
+        .filter(plugin_timer::Column::ClaimedAt.eq(row.claimed_at))
+        .filter(plugin_timer::Column::Attempts.eq(row.attempts))
+        .exec(db)
+        .await
+    {
+        error!(id = row.id, error = %e, "Failed to delete plugin_timer row after delivery");
     }
 }
 
@@ -246,7 +254,7 @@ async fn deliver(state: &AppState, config: &TimerConfig, row: plugin_timer::Mode
                  currently loaded. Reachable if a plugin drops the declaration (or is \
                  disabled/uninstalled) while timers are pending."
             );
-            delete_timer(&state.db, row.id).await;
+            delete_timer(&state.db, &row).await;
             return;
         }
         Err(()) => {
@@ -286,7 +294,7 @@ async fn deliver(state: &AppState, config: &TimerConfig, row: plugin_timer::Mode
         .await
     {
         Ok(_) => {
-            delete_timer(&state.db, row.id).await;
+            delete_timer(&state.db, &row).await;
         }
         Err(e) => {
             if row.attempts >= config.max_attempts {
@@ -297,7 +305,7 @@ async fn deliver(state: &AppState, config: &TimerConfig, row: plugin_timer::Mode
                     error = %e,
                     "Dropping plugin timer after exhausting delivery attempts"
                 );
-                delete_timer(&state.db, row.id).await;
+                delete_timer(&state.db, &row).await;
             } else {
                 warn!(
                     plugin_id = %row.plugin_id,
@@ -403,6 +411,42 @@ mod tests {
 
         let keys: Vec<&str> = claimed.iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, vec!["due"], "only the due, unclaimed timer is taken");
+    }
+
+    #[tokio::test]
+    async fn delivered_timer_cleanup_preserves_a_rescheduled_wakeup() {
+        let db = test_db().await;
+        seed_timer(&db, "p", "rearm", now() - Duration::seconds(1), None).await;
+        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        let delivery = &claimed[0];
+        crate::host_funcs::timer::schedule(
+            &db,
+            "p",
+            "rearm",
+            (now() + Duration::seconds(60)).timestamp_millis(),
+            "next",
+        )
+        .await
+        .unwrap();
+        delete_timer(&db, delivery).await;
+        let next = plugin_timer::Entity::find_by_id(delivery.id)
+            .one(&*db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.payload, "next");
+        assert!(next.claimed_at.is_none());
+
+        seed_timer(&db, "p", "finished", now() - Duration::seconds(1), None).await;
+        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        delete_timer(&db, &claimed[0]).await;
+        assert!(
+            plugin_timer::Entity::find_by_id(claimed[0].id)
+                .one(&*db)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

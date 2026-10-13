@@ -175,3 +175,7 @@
 'codelink-bracket.start.inTime' = '双方已完成排序，{time} 后自动开始。'
 'codelink-bracket.my.waitingRanking' = '你的排序已提交。{name} 完成排序后比赛立即开始。'
 'codelink-bracket.my.startsIn' = '双方排序已完成，你的比赛将在 {time} 后开始。'
+
+'codelink-bracket.live.penalty' = '本小局错误次数：{count} · 提交罚时：{seconds} 秒'
+'codelink-bracket.live.waitPrevious' = '上一发提交的结果尚未返回，请等待后再提交。'
+'codelink-bracket.live.closed' = '当前小局不能向这道题提交。'

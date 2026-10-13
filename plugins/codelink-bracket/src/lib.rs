@@ -7,6 +7,7 @@
 
 pub mod bracket;
 pub mod decide;
+pub mod feedback;
 pub mod gate;
 pub mod judge;
 pub mod model;
@@ -28,7 +29,7 @@ use broccoli_server_sdk::prelude::*;
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    host.registry.register_contest_type(
+    host.registry.register_contest_type_with_delayed_feedback(
         "codelink-bracket",
         "handle_codelink_bracket_submission",
         "handle_codelink_bracket_code_run",

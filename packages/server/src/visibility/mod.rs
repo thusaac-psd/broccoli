@@ -392,10 +392,19 @@ impl<'a> VisibilityKernel<'a> {
         resource: Resource,
         entity: T,
     ) -> Result<Option<Visible<T>>, AppError> {
-        let decision = self.decide(action, resource).await?;
+        let decision = self.decide(action, resource.clone()).await?;
+        let feedback = if decision.is_denied() {
+            HashMap::new()
+        } else {
+            self.submission_feedback(std::slice::from_ref(&resource))
+                .await?
+        };
         Ok(match decision {
             Decision::Deny => None,
-            d => Some(Visible::new(entity, d)),
+            d => Some(Visible::new(entity, d).with_feedback(match resource {
+                Resource::Submission(id) => feedback.get(&id).copied(),
+                _ => None,
+            })),
         })
     }
 
@@ -408,14 +417,46 @@ impl<'a> VisibilityKernel<'a> {
     ) -> Result<Vec<Option<Visible<T>>>, AppError> {
         let resources: Vec<Resource> = items.iter().map(|(r, _)| r.clone()).collect();
         let decisions = self.decide_batch(action, &resources).await?;
+        let allowed_resources: Vec<_> = resources
+            .iter()
+            .zip(&decisions)
+            .filter(|(_, decision)| !decision.is_denied())
+            .map(|(r, _)| r.clone())
+            .collect();
+        let feedback = self.submission_feedback(&allowed_resources).await?;
         Ok(items
             .into_iter()
             .zip(decisions)
-            .map(|((_, entity), d)| match d {
+            .map(|((resource, entity), d)| match d {
                 Decision::Deny => None,
-                d => Some(Visible::new(entity, d)),
+                d => Some(Visible::new(entity, d).with_feedback(match resource {
+                    Resource::Submission(id) => feedback.get(&id).copied(),
+                    _ => None,
+                })),
             })
             .collect())
+    }
+
+    async fn submission_feedback(
+        &self,
+        resources: &[Resource],
+    ) -> Result<HashMap<i32, crate::services::submission_feedback::Feedback>, AppError> {
+        if self
+            .subject
+            .permissions
+            .iter()
+            .any(|p| p == broccoli_server_sdk::permissions::SUBMISSION_VIEW_ALL)
+        {
+            return Ok(HashMap::new());
+        }
+        let ids: Vec<i32> = resources
+            .iter()
+            .filter_map(|r| match r {
+                Resource::Submission(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        crate::services::submission_feedback::load(self.state, &ids).await
     }
 }
 
