@@ -25,7 +25,7 @@ use crate::visibility::{self, VisibilityCtx};
 /// Staff override: start `m` now. Matches normally start by themselves
 /// (see `bracket` and `judge::try_autostart`); this is for a match stuck on a
 /// player who never ranks. A missing ranking becomes the listed order, and
-/// the players' breaks are not waited for - staff asked for now.
+/// the stage must already be open before staff can use this override.
 fn force_start(m: &mut MatchState) -> Result<(), &'static str> {
     if m.state != MatchPhase::Ordering {
         return Err("match is not awaiting start");
@@ -56,6 +56,15 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     if info.phase == "after" {
         return Err(PluginHttpResponse::error(400, "The contest has ended").into());
+    }
+    if current.round > 1 {
+        let matches = storage::load_all_matches(host, contest_id)?;
+        let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0) else {
+            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+        };
+        if judge::now_ms(host)? < stage_at {
+            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+        }
     }
 
     // Validate against a snapshot first so a rejection is a 400, not the
@@ -699,6 +708,22 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.into_response().status, 403);
+    }
+
+    #[test]
+    fn staff_start_cannot_bypass_an_incomplete_previous_stage() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        let mut m = match_in_ordering();
+        m.round = 2;
+        let id = storage::match_id_for(2, 0);
+        seed(&host, 7, &setup_two_rounds(), id, &m);
+        let err = handle_start(&host, &request(7, id, Some(staff_auth()))).unwrap_err();
+        assert_eq!(err.into_response().status, 409);
+        assert_eq!(
+            storage::load_match(&host, 7, id).unwrap().unwrap().state,
+            MatchPhase::Ordering
+        );
     }
 
     #[test]

@@ -196,14 +196,11 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         .collect();
     host.storage.set(&seed_entries_ref)?;
 
-    // Every round-1 match's BOTH slots are filled at once by the seeding
-    // above (unlike later rounds, whose slots trickle in one winner at a
-    // time from `judge::write_next_round_slot`) -- so unlike that path,
-    // round 1's matches must be created explicitly here rather than
-    // relying on a slot write to trigger it.
-    for pos in 0..storage::matches_in_round(1) {
-        storage::create_match_if_both_slots_filled(host, contest_id, &setup, 1, pos)?;
-    }
+    // Round one is opened by the same stage barrier as every later round:
+    // immediately if the contest is already running, or by a timer at the
+    // contest start. This keeps the ordering phase inside the official stage
+    // window rather than exposing it during setup.
+    crate::judge::try_open_stage(host, contest_id, 1)?;
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -341,6 +338,13 @@ mod tests {
         }]));
     }
 
+    fn queue_stage_open_now(host: &Host) {
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": 0.0 }]));
+        host.db
+            .queue_query_result(serde_json::json!([{ "now_ms": 1_000.0 }]));
+    }
+
     #[test]
     fn handle_setup_still_accepts_a_second_call_correcting_an_unstarted_bracket() {
         // Documents the "accept, don't reject" rule from `handle_setup`'s doc
@@ -350,7 +354,9 @@ mod tests {
         // second call correcting e.g. the timing must still succeed.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
+        queue_stage_open_now(&host);
         queue_bracket_contest_info(&host);
+        queue_stage_open_now(&host);
 
         let first = handle_setup(&host, &manage_request(7)).unwrap();
         assert_eq!(first.status, 200);
@@ -371,6 +377,7 @@ mod tests {
         // matches for `judge::advance`/`ordering::handle_order` to act on.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
+        queue_stage_open_now(&host);
 
         let resp = handle_setup(&host, &manage_request(7)).unwrap();
         assert_eq!(resp.status, 200);

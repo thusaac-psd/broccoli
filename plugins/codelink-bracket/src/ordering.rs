@@ -16,6 +16,7 @@
 use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
+use crate::bracket;
 use crate::model::{MatchPhase, MatchState};
 use crate::storage;
 
@@ -113,6 +114,22 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let current = storage::load_match(host, contest_id, match_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+
+    // Ordering is part of the stage, so it cannot begin before the stage's
+    // official opening. Round one opens with the contest; later rounds open
+    // only after the complete preceding round and its intermission.
+    if let Some(setup) = storage::load_setup(host, contest_id)? {
+        let matches = storage::load_all_matches(host, contest_id)?;
+        let contest_start = crate::judge::contest_times(host, contest_id)?.start_ms;
+        let Some(stage_at) =
+            bracket::stage_open_at_ms(&setup, &matches, current.round, contest_start)
+        else {
+            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+        };
+        if crate::judge::now_ms(host)? < stage_at {
+            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+        }
+    }
 
     // Validate against a snapshot BEFORE entering the compare-and-set retry
     // loop below, so a rejection is reported as 400, not masked as a 500 by
@@ -296,6 +313,33 @@ mod tests {
                 serde_json::to_string(m).unwrap().as_str(),
             )])
             .unwrap();
+    }
+
+    #[test]
+    fn ordering_is_rejected_before_the_official_stage_opening() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        let mut m = match_in_ordering(10, 20, group_a(), group_b());
+        m.round = 1;
+        seed_match(&host, 7, 0, &m);
+        host.storage
+            .set(&[(
+                storage::setup_key(7).as_str(),
+                serde_json::to_string(&crate::model::Setup::default())
+                    .unwrap()
+                    .as_str(),
+            )])
+            .unwrap();
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": 60_000.0 }]));
+        host.db
+            .queue_query_result(serde_json::json!([{ "now_ms": 5_000.0 }]));
+        let err = handle_order(&host, &order_request(7, 0, 20, [103, 102, 101])).unwrap_err();
+        assert_eq!(err.into_response().status, 409);
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().order_a,
+            None
+        );
     }
 
     #[test]
