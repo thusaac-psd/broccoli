@@ -171,6 +171,12 @@ pub async fn create_submission(
         }
         None => problem.default_contest_type.clone(),
     };
+    crate::services::submission_feedback::require_standalone_allowed(
+        &state,
+        problem_id,
+        &contest_type,
+    )
+    .await?;
 
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
@@ -278,7 +284,10 @@ pub async fn list_submissions(
         base_select = base_select.filter(submission::Column::Language.eq(lang.trim()));
     }
     if let Some(status) = query.status {
-        base_select = base_select.filter(submission::Column::Status.eq(status));
+        base_select = base_select.filter(
+            crate::services::submission_feedback::public_status(can_view_all)
+                .eq(status.to_string()),
+        );
     }
     if let Some(ref raw) = query.q {
         let escaped = escape_like(raw.trim());
@@ -373,7 +382,10 @@ pub async fn list_submissions(
 
     let select = match query.sort_by.as_deref().unwrap_or("created_at") {
         "created_at" => select.order_by(submission::Column::CreatedAt, sort_order),
-        "status" => select.order_by(submission::Column::Status, sort_order),
+        "status" => select.order_by(
+            crate::services::submission_feedback::public_status(can_view_all),
+            sort_order,
+        ),
         _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
     };
 
@@ -793,7 +805,8 @@ pub async fn create_contest_submission(
         language: payload.language.trim().to_string(),
         file_count: payload.files.len(),
     };
-    dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins)).await?;
+    let admission =
+        dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins)).await?;
 
     let language = payload.language.trim().to_string();
     let contest_type = required_contest_type(&contest_model)?;
@@ -812,7 +825,31 @@ pub async fn create_contest_submission(
         ..Default::default()
     };
 
-    let model = new_submission.insert(&state.db).await?;
+    let handler = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .get(&new_submission.contest_type.clone().unwrap())
+        .cloned();
+    let model = match (handler, admission) {
+        (Some(handler), Some(admission)) if handler.delayed_feedback => {
+            crate::services::submission_feedback::insert_admitted(
+                &state,
+                new_submission,
+                &admission,
+                &handler.plugin_id,
+            )
+            .await?
+        }
+        (Some(handler), None) if handler.delayed_feedback => {
+            return Err(AppError::Internal(
+                "Contest plugin did not provide submission admission".into(),
+            ));
+        }
+        (_, Some(_)) => return Err(AppError::Internal("Unexpected submission admission".into())),
+        _ => new_submission.insert(&state.db).await?,
+    };
 
     fire_after_submission_hooks(
         &state,
@@ -828,6 +865,7 @@ pub async fn create_contest_submission(
     let response =
         build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
 
+    let response = apply_filter_to_response(&kernel, response).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -956,7 +994,10 @@ pub async fn list_contest_submissions(
         base_select = base_select.filter(submission::Column::Language.eq(lang.trim()));
     }
     if let Some(status) = query.status {
-        base_select = base_select.filter(submission::Column::Status.eq(status));
+        base_select = base_select.filter(
+            crate::services::submission_feedback::public_status(can_view_all)
+                .eq(status.to_string()),
+        );
     }
 
     let total = base_select.clone().count(&state.db).await?;
@@ -971,7 +1012,10 @@ pub async fn list_contest_submissions(
 
     let select = match query.sort_by.as_deref().unwrap_or("created_at") {
         "created_at" => select.order_by(submission::Column::CreatedAt, sort_order),
-        "status" => select.order_by(submission::Column::Status, sort_order),
+        "status" => select.order_by(
+            crate::services::submission_feedback::public_status(can_view_all),
+            sort_order,
+        ),
         _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
     };
 

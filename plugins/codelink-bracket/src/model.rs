@@ -9,13 +9,21 @@ pub fn default_escalation_grace_seconds() -> i64 {
     120
 }
 
+pub fn default_penalty_seconds() -> i64 {
+    20
+}
+
 /// Round-level problem assignment and timing, submitted once via `/setup`
 /// before the bracket begins. Stored under [`crate::storage::setup_key`].
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Setup {
     pub rounds: Vec<RoundDef>,
     pub xiaoju_seconds: i64,
     pub round_intermission_seconds: i64,
+    /// Delay added to subsequent submissions for each WA/TLE/MLE/RE in a
+    /// game. Zero disables penalties; older setups retain the 20s default.
+    #[serde(default = "default_penalty_seconds")]
+    pub penalty_seconds: i64,
     /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on
     /// an in-flight submission past its 小局 deadline) before escalating to
     /// `MatchPhase::NeedsAdjudication` for staff. `#[serde(default)]` so
@@ -25,6 +33,18 @@ pub struct Setup {
     /// deserialize or silently becoming `0`.
     #[serde(default = "default_escalation_grace_seconds")]
     pub escalation_grace_seconds: i64,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            rounds: Vec::new(),
+            xiaoju_seconds: 0,
+            round_intermission_seconds: 0,
+            penalty_seconds: default_penalty_seconds(),
+            escalation_grace_seconds: default_escalation_grace_seconds(),
+        }
+    }
 }
 
 /// One round's problem split: two groups of 3 (one per player of a match),
@@ -58,6 +78,12 @@ pub struct RoundDef {
 /// the test that asserts the direction explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MatchState {
+    /// Bumped by atomic host admission so concurrent decisions retry their CAS.
+    #[serde(default)]
+    pub admission_revision: u64,
+    /// Reject stale hooks from this player even after their pending slot clears.
+    #[serde(default)]
+    pub admission_by_user: std::collections::BTreeMap<i32, u64>,
     pub round: u8,
     pub pos: u8,
     pub player_a: i32,

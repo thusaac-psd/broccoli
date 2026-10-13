@@ -48,6 +48,13 @@ impl Params {
         placeholder
     }
 
+    fn bind_optional_int(&mut self, value: Option<i32>) -> String {
+        // JSON null is bound as text by sql::parse_args. Keep non-null values
+        // text too: sqlx caches parameter types by SQL, so switching a cached
+        // text parameter to binary integer encoding produces a UTF8 0x00 error.
+        format!("{}::int", self.bind(json!(value.map(|v| v.to_string()))))
+    }
+
     fn into_args(self) -> Vec<JsonValue> {
         self.args
     }
@@ -217,16 +224,16 @@ host_fn!(pub submission_insert_results(user_data: (String, DatabaseConnection); 
         let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
         let stderr = r.stderr.as_deref().map(sanitize_result_text_field);
         rows.push(format!(
-            "({}, {}::int, {}, {}::int, {}::int, {}, {}, {}::int, {}::int, {}::text, {}::text, {}::text, NOW())",
+            "({}, {}::int, {}, {}, {}, {}, {}, {}, {}, {}::text, {}::text, {}::text, NOW())",
             p.bind(r.submission_id),
-            p.bind(json!(r.judgement_id)),
+            p.bind(r.judgement_id),
             p.bind(r.judge_epoch),
-            p.bind(json!(r.test_case_id)),
-            p.bind(json!(r.run_index)),
+            p.bind_optional_int(r.test_case_id),
+            p.bind_optional_int(r.run_index),
             p.bind(r.verdict.to_db_str()),
             p.bind(score_val),
-            p.bind(json!(r.time_used)),
-            p.bind(json!(r.memory_used)),
+            p.bind_optional_int(r.time_used),
+            p.bind_optional_int(r.memory_used),
             p.bind(json!(message.as_deref())),
             p.bind(json!(stdout.as_deref())),
             p.bind(json!(stderr.as_deref())),

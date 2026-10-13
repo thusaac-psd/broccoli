@@ -316,46 +316,23 @@ async fn defect_standalone_sample_test_case_leaks_own_not_yet_open_bracket_probl
 // =====================================================================
 
 #[tokio::test]
-#[ignore = "DEFECT (host-side residual, confirmed separate from the reachability leak this \
-            file's sibling tests document -- see the plugin-side visibility fix's report at \
-            .superpowers/sdd/2026-09-19-afternoon-bracket/standalone-visibility-fix-report.md): \
-            this test's scenario is A submitting to B's CURRENT (opponent's) problem, which is \
-            READABLE by A per the rule table's own 'opponent allowed once ordering reached' rule \
-            (see this file's `submitting_during_ordering_phase_is_rejected_as_match_not_started` \
-            comment, and `visibility.rs`'s `the_same_problem_is_allowed_to_the_opponent_and_\
-            denied_to_its_owner` unit test) -- so `kernel.decide(Action::Submit, Resource::\
-            Problem{contest_id: None, problem_id})` correctly resolves Allow, matching the \
-            IDENTICAL contest-scoped call in `create_contest_submission` (also Allow, confirmed \
-            by this test's own sanity check below expecting 400 NOT_YOUR_PROBLEM, not 404). The \
-            standalone visibility fix (this plugin's `decide_problem_for_contest`, shared \
-            verbatim by both the contest-scoped and context-free arms of `decide_visibility_\
-            decisions`) is therefore proven correct and CANNOT distinguish this case -- it is \
-            reachability, not a business rule, by explicit design (`create_submission`'s own \
-            code comment: 'REACHABILITY FIRST... same as viewing the problem'). The 400 \
-            NOT_YOUR_PROBLEM the contest-scoped route correctly returns comes ENTIRELY from the \
-            `before_submission` hook (gate.rs::check_submission_response), a separate, later \
-            check. `VisibilityQueryInput.action` IS on the wire (`packages/broccoli-types/src/\
-            types/visibility.rs`), so an action-aware plugin rule (stricter for \"submit\" than \
-            \"view\") was considered and REJECTED: since `create_contest_submission` gates \
-            Action::Submit through the exact same `Resource::Problem{contest_id: Some(cid)}` \
-            arm, tightening it there too would flip the SAME currently-passing 400 \
-            NOT_YOUR_PROBLEM sanity check below (and likely codelink_bracket.rs's own gate-probe \
-            tests) to 404 -- collapsing the design's deliberate reachability/business-rule \
-            separation and regressing already-passing coverage, not fixing this one. The actual \
-            root cause remains exactly as originally diagnosed: `hooks::fetch_resource_\
-            enablements` (packages/server/src/hooks.rs) only adds its \"contest\"/\"contest_\
-            problem\"-scoped SQL conditions inside `if let Some(cid) = contest_id` -- skipped \
-            entirely when `create_submission` passes `contest_id: None` -- so the bracket's \
-            CONTEST-scoped before_submission enablement row is never found and the hook never \
-            dispatches on this path. This is HOST code (packages/server/src/hooks.rs or \
-            create_submission's contest resolution), out of scope for a plugin-only fix and \
-            explicitly excluded by this task's constraints; fixing it requires either \
-            `fetch_resource_enablements` not dropping contest-scoped rows when `contest_id: \
-            None`, or `create_submission` resolving the problem's bracket contest (the SAME \
-            batched `contest_problem` join this plugin's visibility fix already performs) and \
-            passing it through to the hook dispatch, not just the kernel check."]
-async fn defect_standalone_submission_route_bypasses_bracket_gate_entirely() {
+async fn standalone_submission_cannot_bypass_bracket_admission() {
     let fx = setup_fixture().await;
+    fx.app
+        .state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "practice".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "codelink-bracket-judge-fixture".into(),
+                submission_fn: "unused".into(),
+                code_run_fn: "unused".into(),
+                delayed_feedback: false,
+            },
+        );
     order_match_0(&fx).await;
     start_match_0(&fx).await;
 
@@ -381,38 +358,31 @@ async fn defect_standalone_submission_route_bypasses_bracket_gate_entirely() {
     );
     assert_eq!(res.body["code"], "NOT_YOUR_PROBLEM");
 
-    // The standalone route should reject the identical submission the same
-    // way (or, at an absolute minimum, must not silently accept it as a
-    // real, judged submission).
-    let res = fx
-        .app
-        .post_with_token(
-            &routes::problem_submissions(opponents_current_problem),
-            &json!({
+    // Both a readable opponent problem and the player's own current problem
+    // require contest context, including an explicitly selected other type.
+    for problem in [opponents_current_problem, fx.rounds[0].group_a[0]] {
+        for contest_type in [None, Some("practice")] {
+            let mut body = json!({
                 "files": [{"filename": "main.cpp", "content": "ACCEPT"}],
                 "language": "cpp",
-            }),
-            &a.token,
-        )
-        .await;
-    assert_ne!(
-        res.status, 201,
-        "GATE BYPASS: POST /problems/{{id}}/submissions (standalone) accepted A's submission \
-         to B's current (opponent's) problem {opponents_current_problem} with status {} (body: \
-         {}) -- the bracket's before_submission gate was never invoked on this path at all",
-        res.status, res.text
-    );
+            });
+            if let Some(contest_type) = contest_type {
+                body["contest_type"] = json!(contest_type);
+            }
+            let res = fx
+                .app
+                .post_with_token(&routes::problem_submissions(problem), &body, &a.token)
+                .await;
+            assert_eq!(res.status, 400, "{}", res.text);
+            assert_eq!(
+                res.body["code"], "CONTEST_SUBMISSION_REQUIRED",
+                "{}",
+                res.text
+            );
+        }
+    }
 }
 
-/// THE test that decides whether the format is defeatable.
-///
-/// The residual host-side gate bypass above lets a player submit to their
-/// OPPONENT'S current problem via the standalone route. That is low harm:
-/// they are already entitled to read it (they ranked it), and solving it
-/// advances nothing -- `decide_xiaoju` scores each player against their OWN
-/// problem, and a `contest_id: NULL` submission is not counted by its
-/// `WHERE contest_id = ?` query at all.
-///
 /// Submitting to one's OWN not-yet-open problem is the case that would
 /// destroy the format: read 小局-3's problem during 小局 1, develop against
 /// the real judge, then submit instantly the moment it opens. That is

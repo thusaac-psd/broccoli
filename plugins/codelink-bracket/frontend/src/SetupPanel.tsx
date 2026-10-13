@@ -37,6 +37,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
   const [gameMinutes, setGameMinutes] = useState(30);
   const [breakMinutes, setBreakMinutes] = useState(10);
   const [graceSeconds, setGraceSeconds] = useState(120);
+  const [penaltySeconds, setPenaltySeconds] = useState(20);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,7 +57,12 @@ export function SetupPanel({ contestId }: { contestId: number }) {
       ? autoFillRounds(problemList.map((p) => p.problem_id))
       : Array.from({ length: 4 }, emptyRound));
   const bench = people.filter((p) => !seedList.includes(p.user_id));
-  const issues = validateSetup(seedList, roundList, gameMinutes);
+  const issues = validateSetup(
+    seedList,
+    roundList,
+    gameMinutes,
+    penaltySeconds,
+  );
 
   const setRound = (i: number, next: RoundDraft) =>
     setRounds(roundList.map((r, j) => (j === i ? next : r)));
@@ -75,6 +81,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
         xiaoju_seconds: Math.round(gameMinutes * 60),
         round_intermission_seconds: Math.round(breakMinutes * 60),
         escalation_grace_seconds: Math.round(graceSeconds),
+        penalty_seconds: penaltySeconds,
       });
       await queryClient.invalidateQueries({
         queryKey: ['codelink-bracket-bracket', contestId],
@@ -241,7 +248,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
           </Panel>
 
           <Panel title={t('codelink-bracket.setup.timing')}>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               <NumberField
                 id="bracket-game-minutes"
                 label={t('codelink-bracket.setup.gameMinutes')}
@@ -259,6 +266,12 @@ export function SetupPanel({ contestId }: { contestId: number }) {
                 label={t('codelink-bracket.setup.graceSeconds')}
                 value={graceSeconds}
                 onChange={setGraceSeconds}
+              />
+              <NumberField
+                id="bracket-penalty-seconds"
+                label={t('codelink-bracket.setup.penaltySeconds')}
+                value={penaltySeconds}
+                onChange={setPenaltySeconds}
               />
             </div>
           </Panel>
@@ -314,6 +327,8 @@ function describeIssue(
       });
     case 'badTiming':
       return t('codelink-bracket.setup.issue.badTiming');
+    case 'badPenalty':
+      return t('codelink-bracket.setup.issue.badPenalty');
   }
 }
 

@@ -1,6 +1,6 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import type { Submission } from '@broccoli/web-sdk/submission';
+import { type Submission, useSubmitGate } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 
@@ -77,19 +77,32 @@ export function BracketLiveXiaoju({
     queryKey: ['codelink-bracket-bracket', contestId],
     enabled: !!contestId && viewerId !== null,
     queryFn: () => api.getBracket(contestId as number),
-    refetchInterval: 5_000,
+    refetchInterval: 1_000,
   });
 
-  if (!contestId || !problemId || viewerId === null || !data) {
-    return null;
-  }
-
-  const match = data.matches.find(
+  const match = data?.matches.find(
     (m) =>
       (m.player_a === viewerId || m.player_b === viewerId) &&
+      problemId !== undefined &&
       matchTouchesProblem(m, problemId),
   );
-  if (!match) {
+  const pending = match?.own_feedback?.pending_submission_id != null;
+  const lastGame = match?.games[match.games.length - 1];
+  const ownProblem =
+    viewerId === match?.player_a ? lastGame?.problem_a : lastGame?.problem_b;
+  const closed =
+    !!match && (!isActivelyPlaying(match.state) || ownProblem !== problemId);
+  useSubmitGate(
+    'codelink-bracket',
+    pending || closed,
+    pending
+      ? t('codelink-bracket.live.waitPrevious')
+      : closed
+        ? t('codelink-bracket.live.closed')
+        : undefined,
+  );
+
+  if (!contestId || !problemId || viewerId === null || !match) {
     return null;
   }
 
@@ -112,6 +125,20 @@ export function BracketLiveXiaoju({
           {ownScore} - {opponentScore}
         </span>
       </div>
+
+      {match.own_feedback && (
+        <p className="text-xs text-muted-foreground">
+          {t('codelink-bracket.live.penalty', {
+            count: match.own_feedback.penalty_count,
+            seconds: match.own_feedback.delay_seconds,
+          })}
+        </p>
+      )}
+      {pending && (
+        <p className="text-xs text-amber-700">
+          {t('codelink-bracket.live.waitPrevious')}
+        </p>
+      )}
 
       {match.state === 'awaiting_judge' && (
         <p className="text-xs text-amber-700">

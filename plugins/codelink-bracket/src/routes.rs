@@ -198,6 +198,8 @@ fn map_force_decide_error(e: SdkError) -> ApiError {
 /// spec's visibility rules are about PROBLEMS, not about bracket shape.
 #[derive(Debug, Serialize)]
 struct MatchView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    own_feedback: Option<crate::feedback::PlayerFeedback>,
     id: u8,
     round: u8,
     pos: u8,
@@ -355,6 +357,7 @@ fn match_view(
     };
 
     MatchView {
+        own_feedback: None,
         id,
         round: m.round,
         pos: m.pos,
@@ -518,6 +521,7 @@ pub fn handle_get_bracket(
         })
         .collect();
     attach_player_names(host, &mut views);
+    attach_own_feedback(host, contest_id, &setup, &matches, &mut views, viewer)?;
     let contest_end_ms = attach_start_times(host, contest_id, &setup, &matches, &mut views);
 
     Ok(PluginHttpResponse {
@@ -552,6 +556,14 @@ pub fn handle_get_match(
     let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
     let mut view = [match_view(match_id, &m, round_def, viewer, can_view_all)];
     attach_player_names(host, &mut view);
+    attach_own_feedback(
+        host,
+        contest_id,
+        &setup,
+        &[(match_id, m.clone())],
+        &mut view,
+        viewer,
+    )?;
     if m.state == MatchPhase::Ordering {
         let matches = storage::load_all_matches(host, contest_id)?;
         attach_start_times(host, contest_id, &setup, &matches, &mut view);
@@ -563,6 +575,48 @@ pub fn handle_get_match(
         headers: None,
         body: Some(serde_json::to_value(view)?),
     })
+}
+
+fn attach_own_feedback(
+    host: &Host,
+    contest: i32,
+    setup: &Setup,
+    matches: &[(u8, MatchState)],
+    views: &mut [MatchView],
+    viewer: Option<i32>,
+) -> Result<(), SdkError> {
+    let Some(viewer) = viewer else {
+        return Ok(());
+    };
+    for view in views {
+        let Some((_, m)) = matches
+            .iter()
+            .find(|(id, m)| *id == view.id && (m.player_a == viewer || m.player_b == viewer))
+        else {
+            continue;
+        };
+        if !matches!(
+            m.state,
+            MatchPhase::InProgress | MatchPhase::Tiebreak | MatchPhase::AwaitingJudge
+        ) {
+            continue;
+        }
+        let Some(round) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
+            continue;
+        };
+        let Some(problem) = judge::current_problem(m, round, viewer) else {
+            continue;
+        };
+        view.own_feedback = Some(crate::feedback::player_feedback(
+            host,
+            contest,
+            m,
+            viewer,
+            problem,
+            setup.penalty_seconds,
+        )?);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -589,6 +643,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         }
     }
 

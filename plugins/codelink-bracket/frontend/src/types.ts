@@ -32,6 +32,13 @@ export type MaskedTriple = [number | null, number | null, number | null];
 
 /** One match, visibility-filtered for the requesting viewer. */
 export interface MatchView {
+  /** Only present for this viewer's active match. */
+  own_feedback?: {
+    penalty_count: number;
+    delay_seconds: number;
+    pending_submission_id: number | null;
+    effective_at_us: number | null;
+  };
   id: number;
   round: number;
   pos: number;
@@ -157,5 +164,6 @@ export interface SetupRequest {
   rounds: RoundSetup[];
   xiaoju_seconds: number;
   round_intermission_seconds: number;
+  penalty_seconds: number;
   escalation_grace_seconds: number;
 }

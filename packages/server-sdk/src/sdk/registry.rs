@@ -24,6 +24,22 @@ impl Registry {
         Ok(())
     }
 
+    pub fn register_contest_type_with_delayed_feedback(
+        &self,
+        contest_type: &str,
+        submission_handler: &str,
+        code_run_handler: &str,
+    ) -> Result<(), SdkError> {
+        let input = serde_json::json!({
+            "type": contest_type,
+            "submission_handler": submission_handler,
+            "code_run_handler": code_run_handler,
+            "delayed_feedback": true,
+        });
+        unsafe { crate::host::raw::register_contest_type(serde_json::to_string(&input)?)? };
+        Ok(())
+    }
+
     pub fn register_evaluator(&self, evaluator_type: &str, handler: &str) -> Result<(), SdkError> {
         let input = serde_json::json!({
             "type": evaluator_type,
@@ -82,6 +98,15 @@ impl Registry {
         _code_run_handler: &str,
     ) -> Result<(), SdkError> {
         Ok(())
+    }
+
+    pub fn register_contest_type_with_delayed_feedback(
+        &self,
+        contest_type: &str,
+        submission_handler: &str,
+        code_run_handler: &str,
+    ) -> Result<(), SdkError> {
+        self.register_contest_type(contest_type, submission_handler, code_run_handler)
     }
 
     pub fn register_evaluator(

@@ -30,13 +30,26 @@ use crate::error::AppError;
 pub struct Visible<T> {
     inner: T,
     decision: Decision,
+    feedback: Option<crate::services::submission_feedback::Feedback>,
 }
 
 impl<T: serde::Serialize> Visible<T> {
     /// Only reachable from within `visibility` (this module and `mod.rs`) —
     /// see the module docs for why that is the entire point of this type.
     pub(super) fn new(inner: T, decision: Decision) -> Self {
-        Self { inner, decision }
+        Self {
+            inner,
+            decision,
+            feedback: None,
+        }
+    }
+
+    pub(super) fn with_feedback(
+        mut self,
+        feedback: Option<crate::services::submission_feedback::Feedback>,
+    ) -> Self {
+        self.feedback = feedback;
+        self
     }
 
     /// Borrow the entity for non-serializing internal use within the
@@ -90,6 +103,9 @@ impl<T: serde::Serialize> Visible<T> {
     pub fn into_masked_json(self) -> Result<serde_json::Value, AppError> {
         let mut value = serde_json::to_value(&self.inner)
             .map_err(|e| AppError::Internal(format!("visibility serialize: {e}")))?;
+        if let Some(feedback) = self.feedback {
+            crate::services::submission_feedback::project(&mut value, feedback);
+        }
         if let Decision::Redact(mask) = &self.decision {
             super::apply_mask(&mut value, mask);
         }

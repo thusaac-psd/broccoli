@@ -199,6 +199,12 @@ pub(super) async fn apply_filter_to_judgement_response(
         AppError::Internal("Judgement response did not serialize to a JSON object".into())
     })?;
 
+    obj.insert("status".into(), filtered_value["status"].clone());
+    if filtered_value["status"] == "Running" && masked_result.is_null() {
+        obj.insert("is_finalized".into(), serde_json::Value::Bool(false));
+        obj.insert("finalized_at".into(), serde_json::Value::Null);
+    }
+
     if masked_result.is_null() {
         obj.insert("test_case_pagination".into(), serde_json::Value::Null);
         obj.insert("case_changes".into(), serde_json::Value::Null);

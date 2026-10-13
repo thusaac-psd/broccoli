@@ -622,7 +622,7 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
         prob_b,
         SubmissionStatus::Judged,
         Some(Verdict::Accepted),
-        t0 + ChronoDuration::milliseconds(50),
+        t0 + ChronoDuration::seconds(1),
     )
     .await;
 
@@ -649,14 +649,33 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     assert_eq!(view["score_a"].as_i64(), Some(0));
     assert_eq!(view["score_b"].as_i64(), Some(0));
 
+    // The first AC wakeup cannot decide while A is unresolved. The independent
+    // deadline timer must remain armed after that wakeup is delivered.
+    let config = TimerConfig::default();
+    sleep_until_ms(t0.timestamp_millis() + 1_250).await;
+    tick_once(&fx.app.state, &config)
+        .await
+        .expect("early AC wakeup");
+
     // Wait out the real deadline, then force delivery deterministically.
     sleep_until_ms(deadline_ms + 250).await;
-    let config = TimerConfig::default();
     tick_once(&fx.app.state, &config)
         .await
         .expect("tick_once (xiaoju deadline) failed");
 
-    let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    // The background timer loop may have claimed the row just before our
+    // explicit tick. Wait for its delivery rather than inspecting mid-call.
+    let view = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+            if view["state"] != "in_progress" {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("deadline callback did not complete");
     assert_eq!(
         view["state"], "awaiting_judge",
         "the deadline passed while blocked on A's still-in-flight submission with B's AC \
@@ -1206,4 +1225,603 @@ async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
     }
     order_match(&fx, 8, &fx.rounds[1], &fx.players[0], &fx.players[2]).await;
     expect_auto_started(&fx, 8).await;
+}
+
+// Penalties and feedback use real HTTP submissions and the real WASM plugin.
+async fn wait_raw_judgement(fx: &Fixture, id: i32) -> submission::Model {
+    use sea_orm::EntityTrait;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = submission::Entity::find_by_id(id)
+                .one(&fx.app.db)
+                .await
+                .unwrap()
+                .unwrap();
+            if row.status.is_terminal() {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("submission did not finish judging")
+}
+
+async fn wait_published(fx: &Fixture, id: i32, token: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let response = fx.app.get_with_token(&routes::submission(id), token).await;
+            assert_eq!(response.status, 200, "{}", response.text);
+            if matches!(
+                response.body["status"].as_str(),
+                Some("Judged" | "CompilationError")
+            ) {
+                return response.body;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("submission feedback did not release")
+}
+
+async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
+    let detail = fx.app.get_with_token(&routes::submission(id), token).await;
+    assert_eq!(detail.status, 200, "{}", detail.text);
+    assert_eq!(detail.body["status"], "Running");
+    assert!(detail.body["result"].is_null(), "{}", detail.text);
+    for list in [
+        routes::SUBMISSIONS.to_string(),
+        routes::contest_submissions(fx.contest_id),
+    ] {
+        for (status, present) in [("Running", true), ("Judged", false)] {
+            let response = fx
+                .app
+                .get_with_token(&format!("{list}?status={status}&sort_by=status"), token)
+                .await;
+            assert_eq!(response.status, 200, "{}", response.text);
+            let found = response.body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == id);
+            assert_eq!(found, present, "{}", response.text);
+        }
+    }
+    let history = fx
+        .app
+        .get_with_token(&routes::submission_judgements(id), token)
+        .await;
+    assert_eq!(history.status, 200, "{}", history.text);
+    for judgement in history.body.as_array().unwrap() {
+        assert_eq!(judgement["status"], "Running");
+        assert_eq!(judgement["is_finalized"], false);
+        assert!(judgement["verdict"].is_null() && judgement["score"].is_null());
+        assert!(judgement["finalized_at"].is_null());
+        assert!(
+            judgement["test_case_results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_penalties_control_admission_and_player_feedback_including_zero() {
+    for seconds in [30, 0] {
+        let fx = setup_fixture_with_timing(120, 0, 120).await;
+        let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
+        let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
+        body["penalty_seconds"] = json!(seconds);
+        let configured = fx
+            .app
+            .post_with_token(
+                &bracket_route(fx.contest_id, "/setup"),
+                &body,
+                &fx.staff_token,
+            )
+            .await;
+        assert_eq!(configured.status, 200, "{}", configured.text);
+        order_match_0(&fx).await;
+        let a = &fx.players[0];
+        let wrong = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[0],
+            &a.token,
+            "WRONG",
+        )
+        .await;
+        assert_eq!(wrong.status, 201, "{}", wrong.text);
+        assert_eq!(
+            wait_published(&fx, wrong.id(), &a.token).await["result"]["verdict"],
+            "WrongAnswer"
+        );
+        let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+        assert_eq!(view["own_feedback"]["penalty_count"], 1);
+        assert_eq!(view["own_feedback"]["delay_seconds"], seconds);
+
+        let accepted = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[0],
+            &a.token,
+            "ACCEPT",
+        )
+        .await;
+        assert_eq!(accepted.status, 201, "{}", accepted.text);
+        let raw = wait_raw_judgement(&fx, accepted.id()).await;
+        let feedback = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT delay_seconds, effective_at_us FROM submission_feedback WHERE submission_id = $1",
+            [accepted.id().into()],
+        )).await.unwrap().unwrap();
+        assert_eq!(
+            feedback.try_get::<i64>("", "delay_seconds").unwrap(),
+            seconds
+        );
+        assert_eq!(
+            feedback.try_get::<i64>("", "effective_at_us").unwrap()
+                - raw.created_at.timestamp_micros(),
+            seconds * 1_000_000
+        );
+        if seconds == 0 {
+            assert_eq!(
+                wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+                "Accepted"
+            );
+        } else {
+            assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn penalty_delays_ac_allows_opponent_to_win_and_resets_next_game() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let b = &fx.players[1];
+    let wrong = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &a.token,
+        "WRONG",
+    )
+    .await;
+    assert_eq!(wrong.status, 201, "{}", wrong.text);
+    let wrong_result = wait_published(&fx, wrong.id(), &a.token).await;
+    assert_eq!(wrong_result["result"]["verdict"], "WrongAnswer");
+    let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(view["own_feedback"]["penalty_count"], 1);
+
+    let accepted = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(accepted.status, 201, "{}", accepted.text);
+    let raw = wait_raw_judgement(&fx, accepted.id()).await;
+    assert_eq!(raw.verdict, Some(Verdict::Accepted));
+    assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
+    let feedback = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        "SELECT delay_seconds, effective_at_us FROM submission_feedback WHERE submission_id = $1",
+        [accepted.id().into()],
+    )).await.unwrap().unwrap();
+    assert_eq!(feedback.try_get::<i64>("", "delay_seconds").unwrap(), 20);
+    assert_eq!(
+        feedback.try_get::<i64>("", "effective_at_us").unwrap() - raw.created_at.timestamp_micros(),
+        20_000_000
+    );
+    let again = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(again.body["code"], "SUBMISSION_IN_FLIGHT", "{}", again.text);
+
+    let opponent = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_b[0],
+        &b.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(opponent.status, 201, "{}", opponent.text);
+    assert_eq!(
+        wait_published(&fx, opponent.id(), &b.token).await["result"]["verdict"],
+        "Accepted"
+    );
+    assert_eq!(
+        wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+        "TooLate"
+    );
+    assert_eq!(
+        wait_raw_judgement(&fx, accepted.id()).await.verdict,
+        Some(Verdict::Accepted)
+    );
+    let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(view["score_b"], 1);
+    assert_eq!(view["current_xiaoju_index"], 1);
+    assert_eq!(view["own_feedback"]["penalty_count"], 0);
+    let next = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[1],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(next.status, 201, "{}", next.text);
+    assert_eq!(
+        wait_published(&fx, next.id(), &a.token).await["result"]["verdict"],
+        "Accepted"
+    );
+}
+
+#[tokio::test]
+async fn slow_earlier_judge_withholds_only_correct_opponent_results() {
+    for earlier_correct in [true, false] {
+        let fx = setup_fixture_with_timing(120, 0, 120).await;
+        order_match_0(&fx).await;
+        let a = &fx.players[0];
+        let b = &fx.players[1];
+        let earlier = insert_submission(
+            &fx,
+            a.id,
+            fx.rounds[0].group_a[0],
+            SubmissionStatus::Running,
+            None,
+            Utc::now(),
+        )
+        .await;
+        let wrong = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_b[0],
+            &b.token,
+            "WRONG",
+        )
+        .await;
+        assert_eq!(wrong.status, 201, "{}", wrong.text);
+        assert_eq!(
+            wait_published(&fx, wrong.id(), &b.token).await["result"]["verdict"],
+            "WrongAnswer"
+        );
+        let accepted = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_b[0],
+            &b.token,
+            "ACCEPT",
+        )
+        .await;
+        assert_eq!(accepted.status, 201, "{}", accepted.text);
+        wait_raw_judgement(&fx, accepted.id()).await;
+        // Remove B's test-induced penalty while keeping A as an earlier blocker.
+        fx.app.db.execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+            "UPDATE submission_feedback SET effective_at_us = (SELECT (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint FROM submission WHERE id = $1) WHERE submission_id = $1",
+            [accepted.id().into()],
+        )).await.unwrap();
+        assert_eq!(force_decide(&fx, 0, None).await.status, 200);
+        assert_feedback_withheld(&fx, accepted.id(), &b.token).await;
+        let mut earlier: submission::ActiveModel = earlier.into();
+        earlier.status = Set(SubmissionStatus::Judged);
+        earlier.verdict = Set(Some(if earlier_correct {
+            Verdict::Accepted
+        } else {
+            Verdict::WrongAnswer
+        }));
+        earlier.update(&fx.app.db).await.unwrap();
+        assert_eq!(force_decide(&fx, 0, None).await.status, 200);
+        let public = wait_published(&fx, accepted.id(), &b.token).await;
+        assert_eq!(
+            public["result"]["verdict"],
+            if earlier_correct {
+                "TooLate"
+            } else {
+                "Accepted"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn four_errors_accumulate_and_compile_errors_do_not_add_penalty() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let ce = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &a.token,
+        "COMPILE_ERROR",
+    )
+    .await;
+    assert_eq!(ce.status, 201, "{}", ce.text);
+    assert_eq!(
+        wait_published(&fx, ce.id(), &a.token).await["status"],
+        "CompilationError"
+    );
+    assert_eq!(
+        get_match(&fx.app, fx.contest_id, 0, &a.token).await["own_feedback"]["penalty_count"],
+        0
+    );
+    for (index, source) in ["WRONG", "TIME_LIMIT", "MEMORY_LIMIT", "RUNTIME_ERROR"]
+        .into_iter()
+        .enumerate()
+    {
+        let wrong = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[0],
+            &a.token,
+            source,
+        )
+        .await;
+        assert_eq!(wrong.status, 201, "{}", wrong.text);
+        wait_published(&fx, wrong.id(), &a.token).await;
+        assert_eq!(
+            get_match(&fx.app, fx.contest_id, 0, &a.token).await["own_feedback"]["penalty_count"],
+            index + 1
+        );
+    }
+    let accepted = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(accepted.status, 201, "{}", accepted.text);
+    wait_raw_judgement(&fx, accepted.id()).await;
+    assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
+    let row = fx
+        .app
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT delay_seconds FROM submission_feedback WHERE submission_id = $1",
+            [accepted.id().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "delay_seconds").unwrap(), 80);
+}
+
+#[tokio::test]
+async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cutoff() {
+    use broccoli_server_sdk::types::SubmissionAdmission;
+    use sea_orm::EntityTrait;
+    use server::entity::plugin_storage;
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let state_key = format!("match:{}:0", fx.contest_id);
+    let guard = plugin_storage::Entity::find_by_id((
+        "codelink-bracket".to_string(),
+        "default".to_string(),
+        state_key.clone(),
+    ))
+    .one(&fx.app.db)
+    .await
+    .unwrap()
+    .unwrap();
+    let admission = SubmissionAdmission {
+        state_key,
+        scope_key: format!("game:{}:0:0", fx.contest_id),
+        expected_state: guard.data.as_str().unwrap().to_string(),
+        delay_seconds: 0,
+        deadline_ms: Utc::now().timestamp_millis() + 120_000,
+    };
+    let new = submission::ActiveModel {
+        user_id: Set(fx.players[0].id),
+        problem_id: Set(fx.rounds[0].group_a[0]),
+        contest_id: Set(Some(fx.contest_id)),
+        contest_type: Set("codelink-bracket".into()),
+        files: Set(json!([])),
+        language: Set("cpp".into()),
+        status: Set(SubmissionStatus::Running),
+        created_at: Set(Utc::now()),
+        ..Default::default()
+    };
+    let mut too_late = admission.clone();
+    too_late.delay_seconds = 20;
+    too_late.deadline_ms = Utc::now().timestamp_millis() + 10_000;
+    let rejected = server::services::submission_feedback::insert_admitted(
+        &fx.app.state,
+        new.clone(),
+        &too_late,
+        "codelink-bracket",
+    )
+    .await;
+    assert!(
+        matches!(rejected, Err(server::error::AppError::PluginRejection { ref code, .. }) if code == "SUBMISSION_TOO_LATE")
+    );
+    let outcomes = futures::future::join_all((0..8).map(|_| {
+        server::services::submission_feedback::insert_admitted(
+            &fx.app.state,
+            new.clone(),
+            &admission,
+            "codelink-bracket",
+        )
+    }))
+    .await;
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    for error in outcomes.into_iter().filter_map(Result::err) {
+        assert!(
+            matches!(error, server::error::AppError::PluginRejection { ref code, .. } if code == "SUBMISSION_IN_FLIGHT"),
+            "{error:?}"
+        );
+    }
+
+    // Simulate the first request finishing before another stale request writes.
+    // The unique pending index alone cannot catch this case: hooks must rerun
+    // to include the newly earned penalty, even though the slot is now free.
+    fx.app
+        .db
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "UPDATE submission_feedback SET outcome = 'released' WHERE contest_id = $1",
+            [fx.contest_id.into()],
+        ))
+        .await
+        .unwrap();
+    let stale = server::services::submission_feedback::insert_admitted(
+        &fx.app.state,
+        new,
+        &admission,
+        "codelink-bracket",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(stale, server::error::AppError::PluginRejection { code, .. } if code == "SUBMISSION_IN_FLIGHT")
+    );
+}
+
+#[tokio::test]
+async fn penalty_ac_releases_at_effective_time_without_another_submission() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let problem = fx.rounds[0].group_a[0];
+    let wrong = submit(&fx.app, fx.contest_id, problem, &a.token, "WRONG").await;
+    assert_eq!(wrong.status, 201, "{}", wrong.text);
+    wait_published(&fx, wrong.id(), &a.token).await;
+    let accepted = submit(&fx.app, fx.contest_id, problem, &a.token, "ACCEPT").await;
+    assert_eq!(accepted.status, 201, "{}", accepted.text);
+    let raw = wait_raw_judgement(&fx, accepted.id()).await;
+    assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
+    sleep_until_ms(raw.created_at.timestamp_millis() + 20_250).await;
+    assert_eq!(
+        wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+        "Accepted"
+    );
+    let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(view["score_a"], 1);
+    assert_eq!(view["current_xiaoju_index"], 1);
+}
+
+#[tokio::test]
+async fn system_errors_remain_pending_without_penalizing_the_player() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let problem = fx.rounds[0].group_a[0];
+    let failed = submit(&fx.app, fx.contest_id, problem, &a.token, "SYSTEM_ERROR").await;
+    assert_eq!(failed.status, 201, "{}", failed.text);
+    assert_eq!(
+        wait_raw_judgement(&fx, failed.id()).await.verdict,
+        Some(Verdict::SystemError)
+    );
+    assert_feedback_withheld(&fx, failed.id(), &a.token).await;
+    let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(view["own_feedback"]["penalty_count"], 0);
+    let next = submit(&fx.app, fx.contest_id, problem, &a.token, "ACCEPT").await;
+    assert_eq!(next.body["code"], "SUBMISSION_IN_FLIGHT", "{}", next.text);
+}
+
+#[tokio::test]
+async fn staff_force_decision_retires_stuck_admissions_and_unblocks_the_next_stage() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let b = &fx.players[1];
+    let mut stuck = Vec::new();
+    for (player, problem) in [(a, fx.rounds[0].group_a[0]), (b, fx.rounds[0].group_b[0])] {
+        let response = submit(
+            &fx.app,
+            fx.contest_id,
+            problem,
+            &player.token,
+            "SYSTEM_ERROR",
+        )
+        .await;
+        assert_eq!(response.status, 201, "{}", response.text);
+        assert_eq!(
+            wait_raw_judgement(&fx, response.id()).await.verdict,
+            Some(Verdict::SystemError)
+        );
+        assert_feedback_withheld(&fx, response.id(), &player.token).await;
+        stuck.push(response.id());
+    }
+    assert_eq!(force_decide(&fx, 0, Some(a.id)).await.status, 200);
+    for (id, player) in stuck.iter().zip([a, b]) {
+        assert_feedback_withheld(&fx, *id, &player.token).await;
+        let row = fx
+            .app
+            .db
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "SELECT outcome FROM submission_feedback WHERE submission_id = $1",
+                [(*id).into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get::<String>("", "outcome").unwrap(), "retired");
+        assert_eq!(
+            wait_raw_judgement(&fx, *id).await.verdict,
+            Some(Verdict::SystemError)
+        );
+    }
+
+    finish_first_stage(&fx.app, fx.contest_id, &fx.staff_token, &fx.players, 1).await;
+    order_match(&fx, 8, &fx.rounds[1], a, &fx.players[2]).await;
+    expect_auto_started(&fx, 8).await;
+    let view = get_match(&fx.app, fx.contest_id, 8, &a.token).await;
+    assert!(
+        view["own_feedback"]["pending_submission_id"].is_null(),
+        "{view}"
+    );
+    let next = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[1].group_a[0],
+        &a.token,
+        "WRONG",
+    )
+    .await;
+    assert_eq!(next.status, 201, "{}", next.text);
+    let judged = wait_raw_judgement(&fx, next.id()).await;
+    assert_eq!(judged.verdict, Some(Verdict::WrongAnswer), "{judged:?}");
+    wait_published(&fx, next.id(), &a.token).await;
+
+    // A late repaired result must still use the closed match's outcome, and
+    // neither change the staff decision nor reacquire the admission slot.
+    for id in &stuck {
+        fx.app
+            .db
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                "UPDATE submission SET status = 'Judged', verdict = 'Accepted' WHERE id = $1",
+                [(*id).into()],
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(force_decide(&fx, 0, None).await.status, 200);
+    assert_eq!(
+        wait_published(&fx, stuck[1], &b.token).await["result"]["verdict"],
+        "TooLate"
+    );
+    assert_eq!(
+        wait_published(&fx, stuck[0], &a.token).await["result"]["verdict"],
+        "Accepted"
+    );
+    let closed = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(closed["winner"], a.id);
 }

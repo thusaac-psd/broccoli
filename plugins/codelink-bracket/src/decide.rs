@@ -79,13 +79,11 @@ fn is_in_flight(status: &SubmissionLifecycle) -> bool {
     )
 }
 
-/// The total order "who got there first" is decided by: submission time in
-/// microseconds, then the smaller submission id on an exact tie. Identical to
-/// the morning round's rule (codelink-qualifier orders by `(submitted_at_us,
-/// submission_id)`), so both halves of the event agree on arrival order.
+/// Effective submission time (arrival + the player's accumulated penalty)
+/// in microseconds, then the smaller submission id on an exact tie.
 /// Without the id, a same-instant tie was broken by iteration order.
 fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
-    (s.submitted_at_us, s.submission_id)
+    (s.effective_at_us, s.submission_id)
 }
 
 /// Whether `s` could still turn into a different outcome, so the 小局 must
@@ -100,7 +98,7 @@ fn arrival_order(s: &SubmissionRecord) -> (i64, i32) {
 /// correct solutions came back `Judged/SystemError` and lost their 小局 - to
 /// the opponent's later AC, or 0-0 at the deadline - purely to a platform
 /// fault. A SystemError verdict is never the contestant's outcome.
-fn submission_in_flight(s: &SubmissionRecord) -> bool {
+pub(crate) fn submission_in_flight(s: &SubmissionRecord) -> bool {
     is_in_flight(&s.status) || matches!(s.verdict, Some(Verdict::SystemError))
 }
 
@@ -125,6 +123,7 @@ pub struct SubmissionRecord {
     pub user_id: i32,
     pub problem_id: i32,
     pub submitted_at_us: i64,
+    pub effective_at_us: i64,
     pub verdict: Option<Verdict>,
     pub status: SubmissionLifecycle,
 }
@@ -168,29 +167,16 @@ pub enum XiaojuOutcome {
 /// that 小局 is already decided -- see the module doc comment on why that is
 /// load-bearing, not a nicety.
 ///
-/// # The winner is the earliest SUBMISSION, not the earliest JUDGED result
+/// # The winner is the earliest effective submission, independent of judge latency
 ///
-/// Quoted from the spec:
+/// Each arrival is fixed at admission: real submission time plus 20 seconds
+/// for each prior penalized error in this game. A correct result cannot win
+/// before that effective time, even if judging finishes sooner. The opponent
+/// may still produce an earlier effective submission in the meantime.
 ///
-/// > Winner = whichever player has an accepted submission to their own
-/// > current problem with the earliest submission time -- not the earliest
-/// > judged time. Judging latency varies with problem and queue depth, so
-/// > ranking by judged time would let the player who submitted second win
-/// > whenever their problem happened to judge faster. The race is between
-/// > the players, not their judges.
-///
-/// A consequence: if the best AC found so far was submitted at `t`, and some
-/// OTHER submission older than `t` is still IN FLIGHT (see `is_in_flight`
-/// -- not simply `verdict.is_none()`: a terminally-failed submission can
-/// also have no verdict written, see that function's doc comment), the 小局
-/// is not yet decidable -- that submission could still turn out accepted
-/// and, having been submitted earlier, would have to win instead.
-/// `decide_xiaoju` returns [`XiaojuOutcome::NotYet`] in that case BEFORE the
-/// deadline, rather than awarding a winner it might have to revoke once the
-/// verdict arrives. Once the deadline has passed while still blocked, it
-/// returns [`XiaojuOutcome::AwaitingJudge`] instead -- see that variant's
-/// doc comment for why neither awarding the AC nor staying `NotYet` forever
-/// is acceptable at that point.
+/// An unresolved submission only blocks an AC with a later effective arrival.
+/// After the deadline, such a blocker enters `AwaitingJudge`; a submission
+/// whose effective time exceeds the deadline cannot win or block the game.
 ///
 /// Does not validate that `problem_id` is the player's actual current
 /// problem -- that is `gate.rs`'s job (submissions to the wrong problem are
@@ -214,17 +200,28 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
     // `current` is a shared borrow of `m.xiaoju`'s last element.
     let deadline_ms = current.deadline_ms;
 
-    let best_ac = subs
+    let eligible: Vec<_> = subs
         .iter()
-        .filter(|s| s.verdict.as_ref().is_some_and(Verdict::is_accepted))
+        .filter(|s| s.effective_at_us <= deadline_ms.saturating_mul(1_000))
+        .collect();
+    let best_ac = eligible
+        .iter()
+        .filter(|s| {
+            !submission_in_flight(s) && s.verdict.as_ref().is_some_and(Verdict::is_accepted)
+        })
         .min_by_key(|s| arrival_order(s));
 
     let winner = match best_ac {
         Some(ac) => {
+            // A fast judge must not close the race before the penalty-adjusted
+            // arrival: an opponent may still submit an earlier effective AC.
+            if now_ms.saturating_mul(1_000) < ac.effective_at_us {
+                return XiaojuOutcome::NotYet;
+            }
             // The OLDEST in-flight submission older than the best AC: if it
             // is still blocking once the deadline passes, that is the one
             // staff should rejudge first -- it has been stuck the longest.
-            let blocker = subs
+            let blocker = eligible
                 .iter()
                 .filter(|s| submission_in_flight(s) && arrival_order(s) < arrival_order(ac))
                 .min_by_key(|s| arrival_order(s));
@@ -260,7 +257,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             // exactly as the sibling arm does, so staff can force a rejudge,
             // and let the escalation timer fall through to NeedsAdjudication
             // if it stays stuck.
-            let blocker = subs
+            let blocker = eligible
                 .iter()
                 .filter(|s| submission_in_flight(s))
                 .min_by_key(|s| arrival_order(s));
@@ -477,8 +474,65 @@ mod tests {
             user_id,
             problem_id,
             submitted_at_us,
+            effective_at_us: submitted_at_us,
             verdict,
             status,
+        }
+    }
+
+    #[test]
+    fn a_penalized_ac_waits_and_an_opponent_can_still_beat_it() {
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 600_000);
+        let mut a = sub(10, 103, 250_000_000, Some(Verdict::Accepted)); // 04:10
+        a.effective_at_us += 20_000_000; // 04:30
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a.clone()], 251_000),
+            XiaojuOutcome::NotYet
+        );
+        let b = sub(20, 203, 260_000_000, Some(Verdict::Accepted)); // 04:20
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a, b], 261_000),
+            XiaojuOutcome::Decided { winner: Some(20) }
+        );
+    }
+
+    #[test]
+    fn four_errors_shift_a_five_minute_submission_to_six_twenty() {
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 600_000);
+        let mut a = sub(10, 103, 300_000_000, Some(Verdict::Accepted));
+        a.effective_at_us += 4 * 20_000_000;
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a.clone()], 379_999),
+            XiaojuOutcome::NotYet
+        );
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a], 380_000),
+            XiaojuOutcome::Decided { winner: Some(10) }
+        );
+    }
+
+    #[test]
+    fn an_earlier_real_submission_with_later_effective_time_does_not_block() {
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 600_000);
+        let mut a = sub(10, 103, 60_000_000, None);
+        a.effective_at_us += 20_000_000;
+        let b = sub(20, 203, 61_000_000, Some(Verdict::Accepted));
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a, b], 62_000),
+            XiaojuOutcome::Decided { winner: Some(20) }
+        );
+    }
+
+    #[test]
+    fn effective_times_after_the_deadline_neither_win_nor_block() {
+        for verdict in [Some(Verdict::Accepted), None] {
+            let mut m = match_in_progress_at_xiaoju_with_deadline(0, 360_000);
+            let mut a = sub(10, 103, 350_000_000, verdict);
+            a.effective_at_us += 20_000_000;
+            assert_eq!(
+                decide_xiaoju(&mut m, &[a], 360_000),
+                XiaojuOutcome::Decided { winner: None }
+            );
         }
     }
 
@@ -804,6 +858,7 @@ mod tests {
             xiaoju_seconds: 1_800,
             round_intermission_seconds: 300,
             escalation_grace_seconds: 120,
+            penalty_seconds: crate::model::default_penalty_seconds(),
         }
     }
 
@@ -851,6 +906,8 @@ mod tests {
             awaiting_submission_id: None,
             adjudication_reason: None,
             xiaoju_seconds: 0,
+            admission_revision: 0,
+            admission_by_user: Default::default(),
         }
     }
 
@@ -906,6 +963,8 @@ mod tests {
             awaiting_submission_id: None,
             adjudication_reason: None,
             xiaoju_seconds: 0,
+            admission_revision: 0,
+            admission_by_user: Default::default(),
         }
     }
 
