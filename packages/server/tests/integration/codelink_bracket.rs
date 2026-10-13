@@ -256,6 +256,30 @@ pub(crate) fn bracket_route(contest_id: i32, sub_path: &str) -> String {
     )
 }
 
+/// Resolve remaining first-stage matches so tests can exercise the next stage.
+pub(crate) async fn finish_first_stage(
+    app: &TestApp,
+    contest_id: i32,
+    token: &str,
+    players: &[Player],
+    first_pos: u8,
+) {
+    for pos in first_pos..8 {
+        let res = app
+            .post_with_token(
+                &bracket_route(contest_id, &format!("/matches/{pos}/force-decide")),
+                &json!({"winner": players[usize::from(pos) * 2].id}),
+                token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 200,
+            "force-deciding match {pos} failed: {}",
+            res.text
+        );
+    }
+}
+
 pub(crate) async fn get_match(app: &TestApp, contest_id: i32, match_id: u8, token: &str) -> Value {
     let res = app
         .get_with_token(
@@ -662,6 +686,14 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
         "force-deciding match 1 failed: {}",
         res.text
     );
+
+    // Both feeder winners are ready, but the other six matches still block
+    // the next stage. Complete them before checking the round-2 pairing.
+    let waiting = app
+        .get_with_token(&bracket_route(contest_id, "/matches/8"), &staff_token)
+        .await;
+    assert_eq!(waiting.status, 404);
+    finish_first_stage(&app, contest_id, &staff_token, &players, 2).await;
 
     // Round 1 match 0's `pos` (0) writes round 2 slot 0 (-> player_a);
     // match 1's `pos` (1) writes round 2 slot 1 (-> player_b) - see
