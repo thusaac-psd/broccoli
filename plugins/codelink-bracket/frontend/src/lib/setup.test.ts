@@ -27,7 +27,7 @@ test('a complete, distinct setup has no issues', () => {
 test('too few problems leaves empty slots in the later rounds', () => {
   const issues = validateSetup(
     seeds,
-    autoFillRounds(problems.slice(0, 20, 120)),
+    autoFillRounds(problems.slice(0, 20)),
     20,
     120,
   );
