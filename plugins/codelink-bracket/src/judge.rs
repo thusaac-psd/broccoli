@@ -505,6 +505,11 @@ fn fetch_subs(
             verdict: r.verdict,
             status: r.status,
         })
+        .filter(|s| {
+            m.xiaoju
+                .last()
+                .is_some_and(|game| game.contains_submission_at_us(s.submitted_at_us))
+        })
         .collect())
 }
 
@@ -524,6 +529,15 @@ pub(crate) fn open_xiaoju(
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
     let now = clock.now;
+    // A zero balance may mean exhausted, not uninitialized. Only a match
+    // with no opened games receives an allowance; old running matches do not.
+    if m.xiaoju.is_empty() {
+        m.match_extra_time_seconds = setup.match_extra_time_seconds;
+        m.extra_time_remaining_ms = setup
+            .match_extra_time_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| SdkError::Other("Extra time is too large".into()))?;
+    }
     let round = setup
         .rounds
         .get(m.round.saturating_sub(1) as usize)
@@ -535,17 +549,27 @@ pub(crate) fn open_xiaoju(
     } else {
         durations.tiebreak_seconds
     };
-    let deadline_ms = now
+    let base_deadline_ms = now
         .checked_add(
             seconds
                 .checked_mul(1_000)
                 .ok_or_else(|| SdkError::Other("game duration overflow".into()))?,
         )
         .ok_or_else(|| SdkError::Other("game deadline overflow".into()))?;
+    let extra_ms = if decide::is_regular_xiaoju_index(index) {
+        m.extra_time_remaining_ms
+    } else {
+        0
+    };
+    let deadline_ms = base_deadline_ms
+        .checked_add(extra_ms)
+        .ok_or_else(|| SdkError::Other("Game deadline is too large".into()))?;
     m.xiaoju.push(XiaojuState {
         index,
         opened_at_ms: now,
+        base_deadline_ms: Some(base_deadline_ms),
         deadline_ms,
+        extra_time_used_ms: 0,
         winner: None,
         decided: false,
     });
@@ -615,7 +639,8 @@ fn step(
     let clock = clock(host, contest)?;
     let now = clock.now;
     let subs = fetch_subs(host, contest, m, round_def)?;
-    let mut outcome = decide::decide_xiaoju(m, &subs, now);
+    let cutoff_ms = clock.cutoff(m.xiaoju.last().unwrap().deadline_ms);
+    let mut outcome = decide::decide_game_at_cutoff(m, &subs, now, cutoff_ms);
 
     // Past the contest end nobody can submit, so an undecided game cannot
     // be won any more. A verdict still in flight may yet settle it (wait
@@ -1242,6 +1267,7 @@ mod tests {
             ],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         }
     }
 
@@ -1262,6 +1288,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             }],
             ..Default::default()
         }
@@ -1270,6 +1297,168 @@ mod tests {
     fn queue_now(host: &Host, now: i64) {
         host.db
             .queue_query_result(serde_json::json!([{ "now_ms": now as f64 }]));
+    }
+
+    #[test]
+    fn shared_extra_time_carries_across_games_and_storage_reload_without_refilling() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].xiaoju_seconds = 10;
+        setup.match_extra_time_seconds = 5;
+        let mut m = match_in_progress();
+        m.xiaoju.clear();
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
+        assert_eq!(m.xiaoju[0].base_deadline_ms(), 11_000);
+        assert_eq!(m.xiaoju[0].deadline_ms, 16_000);
+        seed(&host, 7, &setup, 0, &m);
+
+        queue_now(&host, 11_000);
+        queue_subs(&host, vec![]);
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), m);
+
+        queue_now(&host, 14_000);
+        queue_subs(&host, vec![ac_row(10, 13_000)]);
+        advance(&host, 7, 0).unwrap();
+        let after = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(after.score_a, 1);
+        assert_eq!(after.extra_time_remaining_ms, 3_000);
+        assert_eq!(after.xiaoju[0].extra_time_used_ms, 2_000);
+        assert_eq!(after.xiaoju[1].deadline_ms, 27_000);
+
+        // Redelivering the old AC cannot settle the newly opened game.
+        queue_now(&host, 14_500);
+        queue_subs(&host, vec![ac_row(10, 13_000)]);
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), after);
+
+        setup.rounds[0].xiaoju_seconds = 100;
+        setup.match_extra_time_seconds = 100;
+        host.storage
+            .set(&[(
+                storage::setup_key(7).as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            )])
+            .unwrap();
+        queue_now(&host, 27_000);
+        queue_subs(&host, vec![]);
+        advance(&host, 7, 0).unwrap();
+        let after = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(after.extra_time_remaining_ms, 0);
+        assert_eq!(after.match_extra_time_seconds, 5);
+        assert_eq!(after.xiaoju[1].extra_time_used_ms, 3_000);
+        assert_eq!(after.xiaoju[2].base_deadline_ms(), 37_000);
+        assert_eq!(after.xiaoju[2].deadline_ms, 37_000);
+    }
+
+    #[test]
+    fn first_timeout_exhausts_the_pool_and_tiebreaks_get_only_base_time() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].xiaoju_seconds = 10;
+        setup.rounds[0].tiebreak_seconds = 20;
+        setup.match_extra_time_seconds = 5;
+        let mut m = match_in_progress();
+        m.xiaoju.clear();
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(0), &mut m).unwrap();
+        seed(&host, 7, &setup, 0, &m);
+        for (now, next_deadline) in [(15_000, 25_000), (25_000, 35_000), (35_000, 55_000)] {
+            queue_now(&host, now);
+            queue_subs(&host, vec![]);
+            advance(&host, 7, 0).unwrap();
+            m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+            assert_eq!((m.score_a, m.score_b, m.extra_time_remaining_ms), (0, 0, 0));
+            assert_eq!(m.xiaoju.last().unwrap().deadline_ms, next_deadline);
+        }
+        assert_eq!(m.state, MatchPhase::Tiebreak);
+        assert_eq!(m.xiaoju[0].extra_time_used_ms, 5_000);
+        assert_eq!(m.xiaoju[3].base_deadline_ms(), m.xiaoju[3].deadline_ms);
+    }
+
+    #[test]
+    fn tiebreak_deadline_does_not_include_an_unspent_allowance() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.xiaoju = vec![XiaojuState::default(); 3];
+        m.extra_time_remaining_ms = 5_000;
+        m.state = MatchPhase::Tiebreak;
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
+        assert_eq!(m.xiaoju[3].deadline_ms, 1_801_000);
+        assert_eq!(m.extra_time_remaining_ms, 5_000);
+    }
+
+    #[test]
+    fn concurrent_settlement_cas_retry_does_not_double_charge_extra_time() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].xiaoju_seconds = 10;
+        setup.match_extra_time_seconds = 5;
+        let mut m = match_in_progress();
+        m.xiaoju.clear();
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(0), &mut m).unwrap();
+        seed(&host, 7, &setup, 0, &m);
+        let subs = [SubmissionRecord {
+            submission_id: 1,
+            user_id: m.player_a,
+            problem_id: 103,
+            submitted_at_us: 12_000_000,
+            effective_at_us: 12_000_000,
+            verdict: Some(Verdict::Accepted),
+            status: SubmissionLifecycle::Judged,
+        }];
+        let raced = AtomicBool::new(false);
+        let settled = storage::update_match(&host, 7, 0, |snapshot| {
+            if !raced.swap(true, Ordering::SeqCst) {
+                // Another callback commits between this attempt's read and CAS.
+                storage::update_match(&host, 7, 0, |other| {
+                    decide::decide_xiaoju(other, &subs, 14_000);
+                    Ok(())
+                })?;
+            }
+            decide::decide_xiaoju(snapshot, &subs, 14_000);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(settled.score_a, 1);
+        assert_eq!(settled.extra_time_remaining_ms, 3_000);
+        assert_eq!(settled.xiaoju[0].extra_time_used_ms, 2_000);
+    }
+
+    #[test]
+    fn legacy_running_match_is_not_granted_extra_time_by_a_new_setup() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.match_extra_time_seconds = 100;
+        let mut raw = serde_json::to_value(match_in_progress()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("match_extra_time_seconds");
+        raw.as_object_mut()
+            .unwrap()
+            .remove("extra_time_remaining_ms");
+        raw["xiaoju_seconds"] = serde_json::json!(10);
+        raw.as_object_mut().unwrap().remove("game_durations");
+        raw["xiaoju"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("base_deadline_ms");
+        raw["xiaoju"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("extra_time_used_ms");
+        host.storage
+            .set(&[(storage::match_key(7, 0).as_str(), raw.to_string().as_str())])
+            .unwrap();
+        crate::migration::run(&host).unwrap();
+        let mut m = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(m.xiaoju[0].base_deadline_ms(), m.xiaoju[0].deadline_ms);
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
+        assert_eq!(m.extra_time_remaining_ms, 0);
+        assert_eq!(m.match_extra_time_seconds, 0);
+        assert_eq!(m.xiaoju[1].deadline_ms, 11_000);
     }
 
     fn queue_subs(host: &Host, rows: Vec<serde_json::Value>) {
@@ -1662,6 +1851,7 @@ mod tests {
             deadline_ms: 1_000_000,
             winner: None,
             decided: false,
+            ..Default::default()
         }];
         assert_eq!(current_problem(&m, round_def, 10), Some(302));
         assert_eq!(current_problem(&m, round_def, 20), Some(302));
@@ -1872,6 +2062,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: Some(10),
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 1,
@@ -1879,6 +2070,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 2,
@@ -1886,6 +2078,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             },
         ];
         seed(&host, 7, &setup, 0, &m);
@@ -1928,6 +2121,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: Some(10),
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 1,
@@ -1935,6 +2129,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: Some(20),
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 2,
@@ -1942,6 +2137,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             },
         ];
         seed(&host, 7, &setup, 0, &m);
@@ -1975,6 +2171,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: Some(20),
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 1,
@@ -1982,6 +2179,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 2,
@@ -1989,6 +2187,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             },
         ];
         seed(&host, 7, &setup, 0, &m);
@@ -2024,6 +2223,7 @@ mod tests {
             deadline_ms: 1_000_000,
             winner: None,
             decided: false,
+            ..Default::default()
         }];
         seed(&host, 7, &setup, 0, &m);
 
@@ -2189,6 +2389,7 @@ mod tests {
             deadline_ms: 1_000_000,
             winner: None,
             decided: false,
+            ..Default::default()
         }];
         seed(&host, 7, &setup, 0, &m);
 

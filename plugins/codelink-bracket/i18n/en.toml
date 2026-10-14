@@ -3,7 +3,7 @@
 
 'codelink-bracket.rules.title' = 'Afternoon knockout round'
 'codelink-bracket.rules.description' = "Single elimination. Before each match, both players rank the other player's three problems. The match is three games. In each game, each player works on the next problem in the order their opponent chose, and the first accepted submission wins the game. If neither player solves their problem before the deadline, nobody scores. After three games, the player with more wins advances. A level score goes to tiebreak problems."
-'codelink-bracket.rules.order' = 'Games are decided by effective submission time, including accumulated penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured delay to subsequent submissions in the same game; the count resets each game. Wait for your previous result before submitting again. Correct results wait for earlier effective submissions to finish judging. Staff decide the match if judging cannot finish in time.'
+'codelink-bracket.rules.order' = 'Games compare actual submission time plus accumulated score penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured penalty to subsequent submissions in the same game; the count resets each game. Penalties do not shorten the submission window or consume shared extra time. Wait for your previous result before submitting again. Correct results wait for submissions that could beat their score to finish judging. Staff decide the match if judging cannot finish in time.'
 
 'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
 'codelink-bracket.bracket.empty' = 'The bracket has not been set up yet.'
@@ -18,6 +18,12 @@
 
 'codelink-bracket.countdown.noData' = 'Live timing is not available for this match yet.'
 'codelink-bracket.countdown.counting' = 'Time remaining: {time}'
+'codelink-bracket.countdown.base' = 'Base {time} · Shared extra {extra}'
+'codelink-bracket.countdown.extra' = 'Using shared extra time: {time}'
+'codelink-bracket.countdown.baseLabel' = 'Base time remaining'
+'codelink-bracket.countdown.extraLabel' = 'Using shared extra time'
+'codelink-bracket.countdown.extraBalance' = 'Shared extra time: {time}'
+'codelink-bracket.countdown.waitingShort' = 'Waiting for judging'
 'codelink-bracket.countdown.waitingForServer' = 'Deadline passed {time} ago. Waiting for the server to decide.'
 'codelink-bracket.countdown.decided' = 'This game has been decided.'
 
@@ -99,12 +105,15 @@
 'codelink-bracket.setup.creating' = 'Creating…'
 'codelink-bracket.setup.failed' = 'Could not create the bracket.'
 'codelink-bracket.setup.firstPlayer' = 'First player'
-'codelink-bracket.setup.gameMinutes' = 'Regular game length (minutes)'
+'codelink-bracket.setup.gameMinutes' = 'Regular game base time (minutes)'
 'codelink-bracket.setup.graceSeconds' = 'Judge wait before staff step in (seconds)'
 'codelink-bracket.setup.penaltySeconds' = 'Penalty per wrong submission (seconds, 0 to disable)'
 'codelink-bracket.setup.issue.badPenalty' = 'Penalty must be a nonnegative whole number of seconds.'
+'codelink-bracket.setup.issue.badExtra' = 'Shared extra time must be a finite, nonnegative duration.'
 'codelink-bracket.setup.issue.badGrace' = 'Judge wait must be a nonnegative whole number of seconds.'
 'codelink-bracket.setup.issue.badTiming' = '{round} needs positive game and tiebreak durations and a nonnegative break.'
+'codelink-bracket.setup.extraMinutes' = 'Shared extra time per match (minutes)'
+'codelink-bracket.setup.extraHint' = 'Regular games share this allowance. Extra time starts automatically when base time runs out; players cannot skip it to save time for later games. Tiebreaks use their stage duration without shared extra time.'
 'codelink-bracket.setup.issue.duplicate' = '{label} is used more than once. Each problem can appear only once.'
 'codelink-bracket.setup.issue.emptySlot' = '{round} still has empty problem slots.'
 'codelink-bracket.setup.issue.players' = 'Choose exactly 16 players ({count} chosen).'
@@ -180,6 +189,6 @@
 'codelink-bracket.my.waitingRanking' = 'Your ranking is in. The match starts as soon as {name} ranks too.'
 'codelink-bracket.my.startsIn' = 'Both rankings are in. Your match starts in {time}.'
 
-'codelink-bracket.live.penalty' = 'Errors this game: {count} · submission delay: {seconds}s'
+'codelink-bracket.live.penalty' = 'Errors this game: {count} · score penalty: {seconds}s'
 'codelink-bracket.live.waitPrevious' = 'Wait for your previous submission’s result before submitting again.'
 'codelink-bracket.live.closed' = 'This problem is not open for submissions in your current game.'

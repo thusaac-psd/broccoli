@@ -177,6 +177,8 @@ test('formatCountdownLabel produces a non-empty, distinct label for every Countd
   const statuses: Parameters<typeof formatCountdownLabel>[0][] = [
     { kind: 'no-data' },
     { kind: 'counting', remainingMs: 65_000 },
+    { kind: 'base', remainingMs: 65_000, extraRemainingMs: 30_000 },
+    { kind: 'extra', remainingMs: 30_000 },
     { kind: 'waiting-for-server', overdueMs: 2_500 },
     { kind: 'decided' },
   ];
@@ -185,6 +187,71 @@ test('formatCountdownLabel produces a non-empty, distinct label for every Countd
     assert.ok(label.length > 0);
   }
   assert.equal(new Set(labels).size, labels.length, 'labels must be distinct');
+});
+
+test('the clock switches from base to shared extra time at the base deadline', () => {
+  const timing = { baseDeadlineMs: 10_000, deadlineMs: 15_000, decided: false };
+  assert.deepEqual(deriveCountdownStatus(timing, 9_000), {
+    kind: 'base',
+    remainingMs: 1_000,
+    extraRemainingMs: 5_000,
+  });
+  assert.deepEqual(deriveCountdownStatus(timing, 10_000), {
+    kind: 'extra',
+    remainingMs: 5_000,
+  });
+  assert.deepEqual(deriveCountdownStatus(timing, 12_000), {
+    kind: 'extra',
+    remainingMs: 3_000,
+  });
+  assert.deepEqual(deriveCountdownStatus(timing, 15_000), {
+    kind: 'waiting-for-server',
+    overdueMs: 0,
+  });
+});
+
+test('exhausted extra time leaves a base-only game and does not invent a result', () => {
+  const timing = { baseDeadlineMs: 10_000, deadlineMs: 10_000, decided: false };
+  assert.deepEqual(deriveCountdownStatus(timing, 9_000), {
+    kind: 'base',
+    remainingMs: 1_000,
+    extraRemainingMs: 0,
+  });
+  assert.deepEqual(deriveCountdownStatus(timing, 11_000), {
+    kind: 'waiting-for-server',
+    overdueMs: 1_000,
+  });
+});
+
+test('server timing enables shared clocks only for regular games', () => {
+  const match = {
+    state: 'in_progress' as const,
+    current_xiaoju_index: 0,
+    current_xiaoju_deadline_ms: 15_000,
+    current_game_base_deadline_ms: 10_000,
+    match_extra_time_seconds: 5,
+    games: [{ index: 0, tiebreak: false }],
+  };
+  assert.deepEqual(xiaojuTimingFromMatch(match), {
+    deadlineMs: 15_000,
+    decided: false,
+    baseDeadlineMs: 10_000,
+  });
+  assert.deepEqual(
+    xiaojuTimingFromMatch({ ...match, match_extra_time_seconds: 0 }),
+    {
+      deadlineMs: 15_000,
+      decided: false,
+    },
+  );
+  assert.deepEqual(
+    xiaojuTimingFromMatch({
+      ...match,
+      state: 'tiebreak',
+      games: [{ index: 0, tiebreak: true }],
+    }),
+    { deadlineMs: 15_000, decided: false },
+  );
 });
 
 test('formatCountdownLabel embeds the formatted remaining time for "counting"', () => {

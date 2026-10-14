@@ -97,7 +97,7 @@ pub async fn insert_admitted(
     let now: DateTime<Utc> = clock.try_get("", "now")?;
     if admission
         .latest_arrival_ms
-        .is_some_and(|end| now.timestamp_micros() > end.saturating_mul(1000))
+        .is_some_and(|end| i128::from(now.timestamp_micros()) >= i128::from(end) * 1000)
     {
         return Err(rejected(
             "SUBMISSION_TOO_LATE",

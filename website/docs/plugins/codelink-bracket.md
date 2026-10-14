@@ -64,10 +64,11 @@ setup screen there.
    types and 10 minutes for later stage breaks. Round one opens with the
    contest and has no preceding break. Penalty seconds and the wait for a stuck
    judge apply to the whole contest, with defaults of 20 and 120 seconds.
+   Set shared extra time per match separately. It defaults to 0 minutes.
 
 **Create bracket** checks all of this and lists anything missing. The setup
 screen closes after creation. Staff can submit a corrected setup through the
-API. A match keeps both game durations from when its first game opened.
+API. A match keeps both game durations and its extra allowance from when its first game opened.
 Corrections to durations apply to matches that have not started. Stage breaks
 remain live. Existing matches keep their players and assigned problem groups.
 
@@ -90,6 +91,7 @@ curl -X POST \
       { "group_a": [131, 132, 133], "group_b": [134, 135, 136], "tiebreak": [137],
         "xiaoju_seconds": 3000, "tiebreak_seconds": 3600, "break_before_seconds": 900 }
     ],
+    "match_extra_time_seconds": 300,
     "penalty_seconds": 20,
     "escalation_grace_seconds": 120
   }'
@@ -99,11 +101,35 @@ curl -X POST \
 | --- | --- |
 | `seeds` | Sixteen distinct user ids in seed order. The first plays the second in round 1, the third plays the fourth, and so on. |
 | `rounds` | Exactly four rounds. In every match of a round, the first player gets `group_a` and the second gets `group_b`. |
-| `rounds[].xiaoju_seconds` | Required positive duration for each of the stage's three regular games, in seconds. |
+| `rounds[].xiaoju_seconds` | Required positive base duration for each of the stage's three regular games, in seconds. |
 | `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
 | `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
-| `penalty_seconds` | Delay added by each wrong submission within a game. Defaults to 20. Set to 0 to disable the delay. |
+| `match_extra_time_seconds` | Extra time shared by the regular games of each match. Must be nonnegative. Defaults to 0. |
+| `penalty_seconds` | Score penalty added by each wrong submission within a game. Defaults to 20. Set to 0 to disable. |
 | `escalation_grace_seconds` | How long a game waits for a stuck judge before staff must decide. Defaults to 120. |
+
+### Shared extra time
+
+Set **Shared extra time per match** to give each match an allowance shared by
+both contestants across its three regular games. When base time runs out,
+extra time starts automatically and continues until someone wins or the
+allowance runs out. Contestants cannot skip extra time to save it for later.
+If neither contestant solves the game, it uses all remaining extra time and
+nobody scores. Later games then have only their base duration.
+
+For example, with 10 minutes per game and 5 shared extra minutes, a winning
+submission at minute 12 uses 2 extra minutes. The next game has its usual
+10 minutes plus at most 3 extra minutes. Unused base time does not increase
+the allowance. Each new match receives a fresh allowance, and tiebreak games
+use their stage's configured tiebreak duration without shared extra time.
+
+Extra time is settled using the winning submission's actual submission time.
+Neither score penalties nor waiting for its judge result consume extra time.
+A submission must arrive before the final deadline. It remains eligible even
+if adding its penalty puts its score time beyond that deadline.
+Game durations and extra time are fixed
+when the first game opens, so later setup changes do not alter a running match.
+Matches already running when this feature is installed keep their old timing.
 
 ## How a match is won
 
@@ -115,8 +141,8 @@ curl -X POST \
    Players can rank only after their stage opens. Each match then starts as
    soon as both rankings are in. There is no ranking deadline.
 3. **Games.** In each of the three games, both players work on their next
-   problem at the same time. The first accepted submission wins the game.
-   Effective submission time includes accumulated penalties for that game.
+   problem at the same time. Accepted submissions are compared using actual
+   submission time plus accumulated penalties. The lowest score time wins.
    Judge completion order does not determine the winner. The smaller
    submission id breaks an exact tie. If neither player solves their
    problem before the game ends, nobody scores. The next game opens as soon as
@@ -125,6 +151,11 @@ curl -X POST \
    level score, including when nobody scored, both players get the round's
    first tiebreak problem. A scoreless tiebreak moves on to the next tiebreak
    problem.
+
+Once an accepted submission exists, the game waits until no future submission
+can beat its score, or until the real deadline. It then waits for any pending
+judging that could change the winner. Score penalties do not shorten the
+submission window or consume shared extra time.
 
 Winners wait together for the next stage to open. Every match in a stage uses
 that stage's problems and durations. A tiebreak without a winner uses the next

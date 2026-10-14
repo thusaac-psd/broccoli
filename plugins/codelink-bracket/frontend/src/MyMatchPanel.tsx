@@ -240,12 +240,15 @@ function CurrentTask({
           </div>
           {clock && (
             <div className="text-right">
-              <div className="text-xs text-muted-foreground">
-                {t('codelink-bracket.my.timeLeft')}
-              </div>
+              <div className="text-xs text-muted-foreground">{clock.label}</div>
               <div className="font-mono text-2xl font-bold tabular-nums">
-                {clock.text}
+                {clock.timeText}
               </div>
+              {clock.extraText && (
+                <div className="text-xs text-muted-foreground">
+                  {clock.extraText}
+                </div>
+              )}
             </div>
           )}
           {stage.problemId !== null && (

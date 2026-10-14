@@ -36,6 +36,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
   const [rounds, setRounds] = useState<RoundDraft[] | null>(null);
   const [graceSeconds, setGraceSeconds] = useState(120);
   const [penaltySeconds, setPenaltySeconds] = useState(20);
+  const [extraMinutes, setExtraMinutes] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +61,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
     roundList,
     penaltySeconds,
     graceSeconds,
+    extraMinutes,
   );
 
   const setRound = (i: number, next: RoundDraft) =>
@@ -81,6 +83,7 @@ export function SetupPanel({ contestId }: { contestId: number }) {
         })),
         escalation_grace_seconds: Math.round(graceSeconds),
         penalty_seconds: penaltySeconds,
+        match_extra_time_seconds: Math.round(extraMinutes * 60),
       });
       await queryClient.invalidateQueries({
         queryKey: ['codelink-bracket-bracket', contestId],
@@ -280,6 +283,12 @@ export function SetupPanel({ contestId }: { contestId: number }) {
           <Panel title={t('codelink-bracket.setup.timing')}>
             <div className="grid gap-3 sm:grid-cols-2">
               <NumberField
+                id="bracket-extra-minutes"
+                label={t('codelink-bracket.setup.extraMinutes')}
+                value={extraMinutes}
+                onChange={setExtraMinutes}
+              />
+              <NumberField
                 id="bracket-grace-seconds"
                 label={t('codelink-bracket.setup.graceSeconds')}
                 value={graceSeconds}
@@ -292,6 +301,9 @@ export function SetupPanel({ contestId }: { contestId: number }) {
                 onChange={setPenaltySeconds}
               />
             </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              {t('codelink-bracket.setup.extraHint')}
+            </p>
           </Panel>
         </div>
       </div>
@@ -349,6 +361,8 @@ function describeIssue(
       });
     case 'badPenalty':
       return t('codelink-bracket.setup.issue.badPenalty');
+    case 'badExtra':
+      return t('codelink-bracket.setup.issue.badExtra');
     case 'badGrace':
       return t('codelink-bracket.setup.issue.badGrace');
   }

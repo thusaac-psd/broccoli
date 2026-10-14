@@ -79,6 +79,21 @@ async fn setup_fixture_with_timing(
     break_before_seconds: i64,
     escalation_grace_seconds: i64,
 ) -> Fixture {
+    setup_fixture_with_extra_time(
+        xiaoju_seconds,
+        0,
+        break_before_seconds,
+        escalation_grace_seconds,
+    )
+    .await
+}
+
+async fn setup_fixture_with_extra_time(
+    xiaoju_seconds: i64,
+    match_extra_time_seconds: i64,
+    break_before_seconds: i64,
+    escalation_grace_seconds: i64,
+) -> Fixture {
     let (app, plugins_tmp) = spawn_bracket_app().await;
 
     let staff_token = app
@@ -128,18 +143,16 @@ async fn setup_fixture_with_timing(
 
     let rounds = create_all_round_problems(&app, contest_id, &staff_token).await;
     let seeds: Vec<i32> = players.iter().map(|p| p.id).collect();
+    let mut setup = full_setup_body(
+        &rounds,
+        &seeds,
+        xiaoju_seconds,
+        break_before_seconds,
+        escalation_grace_seconds,
+    );
+    setup["match_extra_time_seconds"] = json!(match_extra_time_seconds);
     let res = app
-        .post_with_token(
-            &bracket_route(contest_id, "/setup"),
-            &full_setup_body(
-                &rounds,
-                &seeds,
-                xiaoju_seconds,
-                break_before_seconds,
-                escalation_grace_seconds,
-            ),
-            &staff_token,
-        )
+        .post_with_token(&bracket_route(contest_id, "/setup"), &setup, &staff_token)
         .await;
     assert_eq!(res.status, 200, "bracket /setup failed: {}", res.text);
 
@@ -758,6 +771,107 @@ async fn sleep_until_ms(at_ms: i64) {
     if wait > 0 {
         tokio::time::sleep(Duration::from_millis(wait as u64)).await;
     }
+}
+
+#[tokio::test]
+async fn shared_extra_time_settles_a_real_submission_once_through_the_host() {
+    use sea_orm::EntityTrait;
+
+    let fx = setup_fixture_with_extra_time(2, 10, 0, 120).await;
+    order_match_0(&fx).await;
+    start_match_0(&fx).await;
+    let before = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    let base = before["current_game_base_deadline_ms"].as_i64().unwrap();
+    assert_eq!(
+        before["current_xiaoju_deadline_ms"].as_i64(),
+        Some(base + 10_000)
+    );
+
+    // Exercise the real submission hook during extra time, then the fixture
+    // evaluator's callback through the freshly built WASM plugin.
+    sleep_until_ms(base + 200).await;
+    let response = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &fx.players[0].token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(
+        response.status, 201,
+        "extra-time submission failed: {}",
+        response.text
+    );
+    let submitted = submission::Entity::find_by_id(response.id())
+        .one(&fx.app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let used = submitted.created_at.timestamp_millis() - base;
+    assert!(
+        (1..10_000).contains(&used),
+        "submission missed the intended extra-time window"
+    );
+
+    let after = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+            if view["current_xiaoju_index"] == 1 {
+                break view;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("judging callback did not open game 2");
+    assert_eq!(after["score_a"], 1);
+    assert_eq!(after["games"][0]["extra_time_used_ms"], used);
+    assert_eq!(after["extra_time_remaining_ms"], 10_000 - used);
+    assert_eq!(
+        after["current_xiaoju_deadline_ms"].as_i64().unwrap()
+            - after["current_game_base_deadline_ms"].as_i64().unwrap(),
+        10_000 - used
+    );
+
+    // Two independent nudges must not charge the settled game again.
+    let (first, second) = tokio::join!(force_decide(&fx, 0, None), force_decide(&fx, 0, None));
+    assert_eq!(first.status, 200, "{}", first.text);
+    assert_eq!(second.status, 200, "{}", second.text);
+    let after = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(after["score_a"], 1);
+    assert_eq!(after["extra_time_remaining_ms"], 10_000 - used);
+}
+
+#[tokio::test]
+async fn shared_extra_time_timeout_leaves_later_games_and_tiebreaks_at_base_duration() {
+    let fx = setup_fixture_with_extra_time(2, 2, 0, 120).await;
+    order_match_0(&fx).await;
+    start_match_0(&fx).await;
+    for index in 0..3 {
+        let before = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+        assert_eq!(before["current_xiaoju_index"], index);
+        let deadline = before["current_xiaoju_deadline_ms"].as_i64().unwrap();
+        sleep_until_ms(deadline + 100).await;
+        tick_once(&fx.app.state, &TimerConfig::default())
+            .await
+            .unwrap();
+        let response = force_decide(&fx, 0, None).await;
+        assert_eq!(response.status, 200, "{}", response.text);
+        let after = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+        assert_eq!(after["current_xiaoju_index"], index + 1);
+        assert_eq!(after["extra_time_remaining_ms"], 0);
+        assert_eq!(after["score_a"], 0);
+        assert_eq!(after["score_b"], 0);
+        assert_eq!(
+            after["current_xiaoju_deadline_ms"].as_i64().unwrap()
+                - after["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+            2_000
+        );
+    }
+    let after = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(after["state"], "tiebreak");
+    assert_eq!(after["games"][0]["extra_time_used_ms"], 2_000);
 }
 
 /// DEFECT: `decide_xiaoju`'s `best_ac == None` branch never checks for an
@@ -1686,7 +1800,7 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
             expected_value: guard.data.as_str().unwrap().to_string(),
         },
         feedback_key: state_key,
-        metadata: json!({"scope_key":format!("game:{}:0:0",fx.contest_id),"delay_seconds":0,"effective_at_us":null}),
+        metadata: json!({"scope_key":format!("game:{}:0:0",fx.contest_id),"delay_seconds":240,"effective_at_us":null}),
         slot: Some(broccoli_server_sdk::types::SubmissionSlot {
             key: format!("{}:{}", fx.contest_id, fx.players[0].id),
             generation: None,
@@ -1726,6 +1840,22 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
     }))
     .await;
     assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let admitted = outcomes
+        .iter()
+        .find_map(|result| result.as_ref().ok())
+        .unwrap();
+    let feedback = fx
+        .app
+        .db
+        .query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT metadata FROM submission_feedback WHERE submission_id = $1",
+            [admitted.id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(feedback.try_get::<Value>("", "metadata").unwrap()["delay_seconds"] == 240);
     for error in outcomes.into_iter().filter_map(Result::err) {
         assert!(
             matches!(error, server::error::AppError::PluginRejection { ref code, .. } if code == "SUBMISSION_IN_FLIGHT"),
@@ -1779,6 +1909,43 @@ async fn penalty_ac_releases_at_effective_time_without_another_submission() {
     let view = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
     assert_eq!(view["score_a"], 1);
     assert_eq!(view["current_xiaoju_index"], 1);
+}
+
+#[tokio::test]
+async fn score_penalty_does_not_shorten_shared_extra_time_or_block_a_timely_ac() {
+    let fx = setup_fixture_with_extra_time(3, 3, 0, 120).await;
+    order_match_0(&fx).await;
+    let a = &fx.players[0];
+    let problem = fx.rounds[0].group_a[0];
+    let before = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    let base = before["current_game_base_deadline_ms"].as_i64().unwrap();
+    let deadline = before["current_xiaoju_deadline_ms"].as_i64().unwrap();
+    let wrong = submit(&fx.app, fx.contest_id, problem, &a.token, "WRONG").await;
+    assert_eq!(wrong.status, 201, "{}", wrong.text);
+    wait_published(&fx, wrong.id(), &a.token).await;
+    sleep_until_ms(base + 200).await;
+    let accepted = submit(&fx.app, fx.contest_id, problem, &a.token, "ACCEPT").await;
+    assert_eq!(
+        accepted.status, 201,
+        "the real window is still open: {}",
+        accepted.text
+    );
+    let raw = wait_raw_judgement(&fx, accepted.id()).await;
+    assert!(raw.created_at.timestamp_millis() + 20_000 > deadline);
+    let used = raw.created_at.timestamp_millis() - base;
+    assert!((1..3_000).contains(&used));
+    sleep_until_ms(deadline + 100).await;
+    tick_once(&fx.app.state, &TimerConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+        "Accepted"
+    );
+    let after = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
+    assert_eq!(after["score_a"], 1);
+    assert_eq!(after["games"][0]["extra_time_used_ms"], used);
+    assert_eq!(after["extra_time_remaining_ms"], 3_000 - used);
 }
 
 #[tokio::test]

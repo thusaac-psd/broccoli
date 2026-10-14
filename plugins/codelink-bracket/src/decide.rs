@@ -169,20 +169,33 @@ pub enum XiaojuOutcome {
 ///
 /// # The winner is the earliest effective submission, independent of judge latency
 ///
-/// Each arrival is fixed at admission: real submission time plus 20 seconds
-/// for each prior penalized error in this game. A correct result cannot win
-/// before that effective time, even if judging finishes sooner. The opponent
-/// may still produce an earlier effective submission in the meantime.
+/// Each score is fixed at admission: real submission time plus the configured
+/// penalty for prior errors in this game. While submissions are open, an AC
+/// waits until its score time because the opponent may still beat it. Once
+/// the real cutoff is reached, compare all timely submissions even if their
+/// score times exceed that cutoff. Penalties never reduce the submission window.
 ///
 /// An unresolved submission only blocks an AC with a later effective arrival.
-/// After the deadline, such a blocker enters `AwaitingJudge`; a submission
-/// whose effective time exceeds the deadline cannot win or block the game.
+/// After the deadline, such a blocker enters `AwaitingJudge`.
 ///
 /// Does not validate that `problem_id` is the player's actual current
 /// problem -- that is `gate.rs`'s job (submissions to the wrong problem are
 /// rejected before they exist at all); this function trusts every record it
 /// is handed.
 pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64) -> XiaojuOutcome {
+    let cutoff_ms = m.xiaoju.last().map_or(now_ms, |game| game.deadline_ms);
+    decide_game_at_cutoff(m, subs, now_ms, cutoff_ms)
+}
+
+/// The contest end can close submissions before the game's own deadline.
+/// Without an AC, that early cutoff still goes through the caller's staff
+/// adjudication path rather than being scored as a normal timeout.
+pub(crate) fn decide_game_at_cutoff(
+    m: &mut MatchState,
+    subs: &[SubmissionRecord],
+    now_ms: i64,
+    cutoff_ms: i64,
+) -> XiaojuOutcome {
     let Some(current) = m.xiaoju.last() else {
         // Nothing open to decide. Callers (Task 9's `advance`) are expected
         // to only call this while a 小局 is open, but there is no unsafe
@@ -199,30 +212,31 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
     // Copy out what's needed before taking a mutable borrow of `m` below --
     // `current` is a shared borrow of `m.xiaoju`'s last element.
     let deadline_ms = current.deadline_ms;
-
-    let eligible: Vec<_> = subs
-        .iter()
-        .filter(|s| s.effective_at_us <= deadline_ms.saturating_mul(1_000))
-        .collect();
+    let base_deadline_ms = current.base_deadline_ms();
+    let regular = is_regular_xiaoju_index(current.index);
+    let eligible = subs.iter().filter(|s| {
+        current.contains_submission_at_us(s.submitted_at_us)
+            && i128::from(s.submitted_at_us) < i128::from(cutoff_ms) * 1_000
+    });
     let best_ac = eligible
-        .iter()
+        .clone()
         .filter(|s| {
             !submission_in_flight(s) && s.verdict.as_ref().is_some_and(Verdict::is_accepted)
         })
         .min_by_key(|s| arrival_order(s));
 
-    let winner = match best_ac {
+    let (winner, ended_at_ms) = match best_ac {
         Some(ac) => {
             // A fast judge must not close the race before the penalty-adjusted
             // arrival: an opponent may still submit an earlier effective AC.
-            if now_ms.saturating_mul(1_000) < ac.effective_at_us {
+            if now_ms < cutoff_ms && now_ms.saturating_mul(1_000) < ac.effective_at_us {
                 return XiaojuOutcome::NotYet;
             }
             // The OLDEST in-flight submission older than the best AC: if it
             // is still blocking once the deadline passes, that is the one
             // staff should rejudge first -- it has been stuck the longest.
             let blocker = eligible
-                .iter()
+                .clone()
                 .filter(|s| submission_in_flight(s) && arrival_order(s) < arrival_order(ac))
                 .min_by_key(|s| arrival_order(s));
             if let Some(blocker) = blocker {
@@ -233,7 +247,7 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
                     blocking_submission_id: blocker.submission_id,
                 };
             }
-            Some(ac.user_id)
+            (Some(ac.user_id), ac.submitted_at_us / 1_000)
         }
         None => {
             if now_ms < deadline_ms {
@@ -258,7 +272,6 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
             // and let the escalation timer fall through to NeedsAdjudication
             // if it stays stuck.
             let blocker = eligible
-                .iter()
                 .filter(|s| submission_in_flight(s))
                 .min_by_key(|s| arrival_order(s));
             if let Some(blocker) = blocker {
@@ -267,13 +280,25 @@ pub fn decide_xiaoju(m: &mut MatchState, subs: &[SubmissionRecord], now_ms: i64)
                 };
             }
             // 如果在规定时间内双方均未能通过当前题目，则该小局双方均不得分
-            None
+            (None, deadline_ms)
         }
     };
 
+    // Charge only when recording the result, under the caller's CAS update.
+    // The decided guard above makes redelivery harmless, and the winning
+    // actual submission time excludes both penalties and judging delays.
+    let extra_used_ms = if regular {
+        ended_at_ms
+            .saturating_sub(base_deadline_ms)
+            .clamp(0, m.extra_time_remaining_ms)
+    } else {
+        0
+    };
+    m.extra_time_remaining_ms -= extra_used_ms;
     if let Some(slot) = m.xiaoju.last_mut() {
         slot.winner = winner;
         slot.decided = true;
+        slot.extra_time_used_ms = extra_used_ms;
     }
     match winner {
         Some(uid) if uid == m.player_a => m.score_a += 1,
@@ -429,6 +454,7 @@ mod tests {
                 deadline_ms: i64::MAX,
                 winner: None,
                 decided: false,
+                ..Default::default()
             }],
             state: MatchPhase::InProgress,
             ..Default::default()
@@ -439,6 +465,138 @@ mod tests {
         let mut m = match_in_progress_at_xiaoju(index);
         m.xiaoju[0].deadline_ms = deadline_ms;
         m
+    }
+
+    fn game_with_extra_time() -> MatchState {
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 3_000);
+        m.xiaoju[0].opened_at_ms = 1_000;
+        m.xiaoju[0].base_deadline_ms = Some(2_000);
+        m.extra_time_remaining_ms = 1_000;
+        m
+    }
+
+    #[test]
+    fn extra_time_is_charged_once_at_the_winning_submission_time() {
+        for (submitted_at_us, used) in [
+            (1_500_123, 0),
+            (2_000_000, 0),
+            (2_250_000, 250),
+            (2_999_999, 999),
+        ] {
+            let mut m = game_with_extra_time();
+            let subs = [sub(10, 103, submitted_at_us, Some(Verdict::Accepted))];
+            // The verdict arrives long after the final deadline.
+            let outcome = decide_xiaoju(&mut m, &subs, 10_000);
+            assert_eq!(outcome, XiaojuOutcome::Decided { winner: Some(10) });
+            assert_eq!(m.extra_time_remaining_ms, 1_000 - used);
+            assert_eq!(m.xiaoju[0].extra_time_used_ms, used);
+            let settled = m.clone();
+            assert_eq!(decide_xiaoju(&mut m, &subs, 20_000), outcome);
+            assert_eq!(m, settled, "a repeated callback must not charge twice");
+        }
+    }
+
+    #[test]
+    fn timeout_waits_for_eligible_judging_then_charges_only_the_actual_extra_time() {
+        let mut m = game_with_extra_time();
+        let mut subs = [sub(20, 203, 2_400_000, None)];
+        assert!(matches!(
+            decide_xiaoju(&mut m, &subs, 3_000),
+            XiaojuOutcome::AwaitingJudge { .. }
+        ));
+        assert_eq!(m.extra_time_remaining_ms, 1_000);
+        assert!(!m.xiaoju[0].decided);
+        subs[0].verdict = Some(Verdict::Accepted);
+        subs[0].status = SubmissionLifecycle::Judged;
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 8_000),
+            XiaojuOutcome::Decided { winner: Some(20) }
+        );
+        assert_eq!(m.extra_time_remaining_ms, 600);
+    }
+
+    #[test]
+    fn neither_score_penalties_nor_judging_delays_spend_extra_time() {
+        let mut m = game_with_extra_time();
+        let mut accepted = sub(10, 103, 1_500_000, Some(Verdict::Accepted));
+        accepted.effective_at_us = 2_500_000;
+        let subs = [accepted];
+        assert_eq!(decide_xiaoju(&mut m, &subs, 2_400), XiaojuOutcome::NotYet);
+        assert_eq!(m.extra_time_remaining_ms, 1_000);
+        assert_eq!(
+            decide_xiaoju(&mut m, &subs, 8_000),
+            XiaojuOutcome::Decided { winner: Some(10) }
+        );
+        assert_eq!(m.extra_time_remaining_ms, 1_000);
+        assert_eq!(m.xiaoju[0].extra_time_used_ms, 0);
+    }
+
+    #[test]
+    fn score_times_beyond_the_cutoff_can_win_without_consuming_penalty_time() {
+        for effective_at_us in [3_000_000, 3_000_001, 20_000_000] {
+            let mut m = game_with_extra_time();
+            let mut accepted = sub(10, 103, 2_500_000, Some(Verdict::Accepted));
+            accepted.effective_at_us = effective_at_us;
+            assert_eq!(
+                decide_xiaoju(&mut m, &[accepted], 3_000),
+                XiaojuOutcome::Decided { winner: Some(10) }
+            );
+            assert_eq!(m.extra_time_remaining_ms, 500);
+            assert_eq!(m.xiaoju[0].extra_time_used_ms, 500);
+        }
+    }
+
+    #[test]
+    fn contest_cutoff_can_settle_a_penalized_ac_without_waiting_for_its_score_time() {
+        let mut m = game_with_extra_time();
+        let mut accepted = sub(10, 103, 2_200_000, Some(Verdict::Accepted));
+        accepted.effective_at_us = 20_000_000;
+        assert_eq!(
+            decide_game_at_cutoff(&mut m, &[accepted], 2_500, 2_500),
+            XiaojuOutcome::Decided { winner: Some(10) }
+        );
+        assert_eq!(m.extra_time_remaining_ms, 800);
+    }
+
+    #[test]
+    fn at_the_cutoff_compare_penalized_scores_even_when_both_exceed_the_window() {
+        let mut m = game_with_extra_time();
+        let mut a = sub(10, 103, 2_200_000, Some(Verdict::Accepted));
+        a.effective_at_us = 11_000_000;
+        let mut b = sub(20, 203, 2_500_000, Some(Verdict::Accepted));
+        b.effective_at_us = 10_000_000;
+        assert_eq!(
+            decide_xiaoju(&mut m, &[a, b], 3_000),
+            XiaojuOutcome::Decided { winner: Some(20) }
+        );
+        assert_eq!(m.extra_time_remaining_ms, 500);
+    }
+
+    #[test]
+    fn out_of_window_submissions_neither_win_nor_block_settlement() {
+        for verdict in [None, Some(Verdict::Accepted)] {
+            let mut m = game_with_extra_time();
+            let subs = [
+                sub(10, 103, 999_999, verdict.clone()),
+                sub(20, 203, 3_000_000, verdict),
+            ];
+            assert_eq!(
+                decide_xiaoju(&mut m, &subs, 3_000),
+                XiaojuOutcome::Decided { winner: None }
+            );
+            assert_eq!(m.extra_time_remaining_ms, 0);
+            assert_eq!(m.xiaoju[0].extra_time_used_ms, 1_000);
+        }
+    }
+
+    #[test]
+    fn a_tiebreak_does_not_charge_the_regular_games_allowance() {
+        let mut m = game_with_extra_time();
+        m.xiaoju[0].index = 3;
+        m.state = MatchPhase::Tiebreak;
+        decide_xiaoju(&mut m, &[], 3_000);
+        assert_eq!(m.extra_time_remaining_ms, 1_000);
+        assert_eq!(m.xiaoju[0].extra_time_used_ms, 0);
     }
 
     fn sub(
@@ -524,15 +682,19 @@ mod tests {
     }
 
     #[test]
-    fn effective_times_after_the_deadline_neither_win_nor_block() {
+    fn timely_submissions_with_score_times_after_the_deadline_can_win_or_block() {
         for verdict in [Some(Verdict::Accepted), None] {
             let mut m = match_in_progress_at_xiaoju_with_deadline(0, 360_000);
+            let expected = if verdict.is_some() {
+                XiaojuOutcome::Decided { winner: Some(10) }
+            } else {
+                XiaojuOutcome::AwaitingJudge {
+                    blocking_submission_id: 0,
+                }
+            };
             let mut a = sub(10, 103, 350_000_000, verdict);
             a.effective_at_us += 20_000_000;
-            assert_eq!(
-                decide_xiaoju(&mut m, &[a], 360_000),
-                XiaojuOutcome::Decided { winner: None }
-            );
+            assert_eq!(decide_xiaoju(&mut m, &[a], 360_000), expected);
         }
     }
 
@@ -860,6 +1022,7 @@ mod tests {
             }],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         }
     }
 
@@ -885,6 +1048,7 @@ mod tests {
                     deadline_ms: i64::MAX,
                     winner,
                     decided: true,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -907,6 +1071,7 @@ mod tests {
             awaiting_submission_id: None,
             adjudication_reason: None,
             game_durations: None,
+            ..Default::default()
         }
     }
 
@@ -930,6 +1095,7 @@ mod tests {
                     deadline_ms: i64::MAX,
                     winner: Some(10),
                     decided: true,
+                    ..Default::default()
                 },
                 XiaojuState {
                     index: 1,
@@ -937,6 +1103,7 @@ mod tests {
                     deadline_ms: i64::MAX,
                     winner: Some(20),
                     decided: true,
+                    ..Default::default()
                 },
                 XiaojuState {
                     index: 2,
@@ -944,6 +1111,7 @@ mod tests {
                     deadline_ms: i64::MAX,
                     winner: None,
                     decided: true,
+                    ..Default::default()
                 },
                 XiaojuState {
                     index: 3 + tiebreak_index as u8,
@@ -951,6 +1119,7 @@ mod tests {
                     deadline_ms: i64::MAX,
                     winner: None,
                     decided: true,
+                    ..Default::default()
                 },
             ],
             score_a: 1,
@@ -962,6 +1131,7 @@ mod tests {
             awaiting_submission_id: None,
             adjudication_reason: None,
             game_durations: None,
+            ..Default::default()
         }
     }
 

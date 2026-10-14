@@ -85,7 +85,7 @@ impl Rejection {
     }
 
     fn xiaoju_closed() -> Self {
-        Self::new("XIAOJU_CLOSED", "This 小局 has already been decided.")
+        Self::new("XIAOJU_CLOSED", "This game is closed for submissions.")
     }
 
     /// Produced by the host wiring below, never by [`check`]: `problem_id`
@@ -247,15 +247,14 @@ fn resolve_rejection(
         .ok_or_else(|| SdkError::Other("no open game".into()))?;
     let delay_seconds = feedback.delay_seconds;
     let clock = crate::judge::clock(host, contest_id)?;
+    if !game.contains_submission_at_us(clock.now.saturating_mul(1_000)) {
+        return Ok(Err(Rejection::xiaoju_closed()));
+    }
     let deadline_ms = clock.cutoff(game.deadline_ms);
-    if clock
-        .now
-        .saturating_add(delay_seconds.saturating_mul(1_000))
-        > deadline_ms
-    {
+    if clock.now >= deadline_ms {
         return Ok(Err(Rejection::new(
             "SUBMISSION_TOO_LATE",
-            "The effective submission time is past this game's deadline.",
+            "The submission window for this game has closed.",
         )));
     }
     Ok(Ok(SubmissionAdmission {
@@ -277,7 +276,7 @@ fn resolve_rejection(
             key: crate::feedback::player_slot(contest_id, event.user_id),
             generation: feedback.slot_generation,
         }),
-        latest_arrival_ms: Some(deadline_ms.saturating_sub(delay_seconds.saturating_mul(1000))),
+        latest_arrival_ms: Some(deadline_ms),
     }))
 }
 
@@ -434,6 +433,7 @@ mod tests {
             }],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         }
     }
 
@@ -478,6 +478,7 @@ mod tests {
             deadline_ms: 9_999,
             winner: None,
             decided,
+            ..Default::default()
         }]
     }
 
@@ -508,6 +509,36 @@ mod tests {
             .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
         let resp = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
         assert!(matches!(resp, HookResponse::Modified { .. }));
+    }
+
+    #[test]
+    fn submission_gate_uses_the_final_deadline_even_before_the_timer_fires() {
+        for (now, allowed) in [
+            (999, false),
+            (1_000, true),
+            (5_000, true),
+            (9_998, true),
+            (9_999, false),
+            (10_000, false),
+        ] {
+            let host = Host::mock();
+            let mut games = open_xiaoju(0, false);
+            games[0].opened_at_ms = 1_000;
+            games[0].base_deadline_ms = Some(5_000);
+            seed_match(&host, 7, MatchPhase::InProgress, games);
+            host.db.queue_query_result(serde_json::json!([]));
+            host.db
+                .queue_query_result(serde_json::json!([{ "now_ms": now }]));
+            let response = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
+            if allowed {
+                assert!(
+                    matches!(response, HookResponse::Modified { .. }),
+                    "at {now}"
+                );
+            } else {
+                assert_eq!(rejection_code(response), "XIAOJU_CLOSED", "at {now}");
+            }
+        }
     }
 
     #[test]
@@ -583,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn a_penalty_that_pushes_arrival_past_the_deadline_is_rejected() {
+    fn a_score_penalty_does_not_shorten_the_submission_window() {
         let host = Host::mock();
         seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
         host.db.queue_query_result(serde_json::json!([{
@@ -592,6 +623,13 @@ mod tests {
         host.db
             .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
         let response = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
-        assert_eq!(rejection_code(response), "SUBMISSION_TOO_LATE");
+        let HookResponse::Modified { event: payload } = response else {
+            panic!("a timely submission must be admitted despite its score penalty");
+        };
+        assert_eq!(
+            payload["submission_admission"]["metadata"]["delay_seconds"],
+            20
+        );
+        assert_eq!(payload["submission_admission"]["latest_arrival_ms"], 9_999);
     }
 }

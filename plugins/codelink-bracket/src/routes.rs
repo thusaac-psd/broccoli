@@ -262,6 +262,10 @@ struct MatchView {
     current_xiaoju_index: Option<u8>,
     current_xiaoju_deadline_ms: Option<i64>,
     current_xiaoju_opened_at_ms: Option<i64>,
+    current_game_base_deadline_ms: Option<i64>,
+    match_extra_time_seconds: i64,
+    /// Settled balance; the current game's deadlines drive its live consumption.
+    extra_time_remaining_ms: i64,
     /// Every 小局 opened so far, in order - the per-game history staff and
     /// spectators need (who won which game, on which problems, and when). A
     /// game that has not opened is simply absent, and each problem id is
@@ -286,6 +290,8 @@ struct GameView {
     problem_b: Option<i32>,
     opened_at_ms: i64,
     deadline_ms: i64,
+    base_deadline_ms: i64,
+    extra_time_used_ms: i64,
     winner: Option<i32>,
     decided: bool,
 }
@@ -382,6 +388,9 @@ fn match_view(
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
+        current_game_base_deadline_ms: current.map(|x| x.base_deadline_ms()),
+        match_extra_time_seconds: m.match_extra_time_seconds,
+        extra_time_remaining_ms: m.extra_time_remaining_ms,
         games: m
             .xiaoju
             .iter()
@@ -397,6 +406,8 @@ fn match_view(
                     problem_b: mask(b),
                     opened_at_ms: x.opened_at_ms,
                     deadline_ms: x.deadline_ms,
+                    base_deadline_ms: x.base_deadline_ms(),
+                    extra_time_used_ms: x.extra_time_used_ms,
                     winner: x.winner,
                     decided: x.decided,
                 }
@@ -648,6 +659,7 @@ mod tests {
             ],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         }
     }
 
@@ -926,6 +938,7 @@ mod tests {
             deadline_ms: 1_000_000,
             winner: None,
             decided: false,
+            ..Default::default()
         }];
         seed(&host, 7, &setup, 0, &m);
 
@@ -955,6 +968,7 @@ mod tests {
                 deadline_ms: 60_000,
                 winner: Some(10),
                 decided: true,
+                ..Default::default()
             },
             XiaojuState {
                 index: 1,
@@ -962,6 +976,7 @@ mod tests {
                 deadline_ms: 120_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             },
         ];
         let setup = setup_two_rounds();
@@ -1018,6 +1033,7 @@ mod tests {
             deadline_ms: 65_000,
             winner: None,
             decided: false,
+            ..Default::default()
         }];
         let setup = setup_two_rounds();
 
@@ -1041,6 +1057,31 @@ mod tests {
         assert_eq!(view.current_xiaoju_index, None);
         assert_eq!(view.current_xiaoju_opened_at_ms, None);
         assert_eq!(view.current_xiaoju_deadline_ms, None);
+        assert_eq!(view.current_game_base_deadline_ms, None);
+        assert_eq!(view.extra_time_remaining_ms, 0);
+    }
+
+    #[test]
+    fn match_view_exposes_shared_timing_without_revealing_future_problems() {
+        let mut m = match_in_ordering();
+        m.state = MatchPhase::InProgress;
+        m.match_extra_time_seconds = 5;
+        m.extra_time_remaining_ms = 3_000;
+        m.xiaoju.push(XiaojuState {
+            opened_at_ms: 1_000,
+            base_deadline_ms: Some(11_000),
+            deadline_ms: 14_000,
+            ..Default::default()
+        });
+        let setup = setup_two_rounds();
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+        assert_eq!(view.current_game_base_deadline_ms, Some(11_000));
+        assert_eq!(view.current_xiaoju_deadline_ms, Some(14_000));
+        assert_eq!(view.extra_time_remaining_ms, 3_000);
+        assert_eq!(view.match_extra_time_seconds, 5);
+        assert_eq!(view.games[0].base_deadline_ms, 11_000);
+        assert_eq!(view.games[0].extra_time_used_ms, 0);
+        assert_eq!(view.group_a[1], None);
     }
 
     #[test]
@@ -1067,6 +1108,7 @@ mod tests {
             deadline_ms: 70_000,
             winner: Some(10),
             decided: true,
+            ..Default::default()
         }];
         let setup = setup_two_rounds();
 
@@ -1101,6 +1143,7 @@ mod tests {
                 deadline_ms: 1_000_000,
                 winner: None,
                 decided: false,
+                ..Default::default()
             }],
             ..Default::default()
         };

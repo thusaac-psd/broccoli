@@ -35,6 +35,9 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
     if setup.penalty_seconds < 0 {
         return Err("penalty_seconds must be greater than or equal to 0".to_string());
     }
+    if setup.match_extra_time_seconds < 0 {
+        return Err("match_extra_time_seconds must be non-negative".into());
+    }
     if setup.escalation_grace_seconds < 0 || setup.escalation_grace_seconds > i64::MAX / 1_000 {
         return Err(
             "escalation_grace_seconds must be nonnegative seconds within the timer range".into(),
@@ -49,6 +52,16 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
     // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
     for (round_idx, round) in setup.rounds.iter().enumerate() {
+        if round
+            .xiaoju_seconds
+            .checked_add(setup.match_extra_time_seconds)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .is_none()
+        {
+            return Err(format!(
+                "round {round_idx}'s xiaoju_seconds plus match_extra_time_seconds exceed the timer range"
+            ));
+        }
         for (name, seconds) in [
             ("xiaoju_seconds", round.xiaoju_seconds),
             ("tiebreak_seconds", round.tiebreak_seconds),
@@ -115,6 +128,8 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 struct SetupRequest {
     rounds: Vec<RoundDef>,
+    #[serde(default)]
+    match_extra_time_seconds: i64,
     #[serde(default = "crate::model::default_penalty_seconds")]
     penalty_seconds: i64,
     /// Optional: a request that omits this falls back to
@@ -137,7 +152,7 @@ struct SetupRequest {
 /// # A second `/setup` call is accepted, not rejected
 ///
 /// Staff may correct the stage setup before or during a contest. Regular and
-/// tiebreak durations are pinned when a match opens its first game, so a setup
+/// tiebreak durations and shared extra time are pinned when a match opens its first game, so a setup
 /// correction affects only matches that have not started. Breaks and tiebreak
 /// problem lists remain live. Existing match documents are create-only, so
 /// re-seeding does not rewrite matches that have already been created.
@@ -162,6 +177,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let setup = Setup {
         rounds: body.rounds,
+        match_extra_time_seconds: body.match_extra_time_seconds,
         penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
     };
@@ -211,6 +227,33 @@ mod tests {
         std::array::from_fn(|i| (i as i32) + 1)
     }
 
+    #[test]
+    fn shared_extra_time_is_optional_and_checked_against_each_stage_duration() {
+        let mut setup = valid_setup();
+        for extra in [0, 300] {
+            setup.match_extra_time_seconds = extra;
+            assert!(validate_setup(&setup, &valid_seeds()).is_ok());
+        }
+        for extra in [-1, i64::MAX] {
+            setup.match_extra_time_seconds = extra;
+            assert!(validate_setup(&setup, &valid_seeds()).is_err());
+        }
+        let request: SetupRequest =
+            serde_json::from_value(manage_request(7).body.unwrap()).unwrap();
+        assert_eq!(request.match_extra_time_seconds, 0);
+        let mut stored = serde_json::to_value(valid_setup()).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("match_extra_time_seconds");
+        assert_eq!(
+            serde_json::from_value::<Setup>(stored)
+                .unwrap()
+                .match_extra_time_seconds,
+            0
+        );
+    }
+
     fn valid_setup() -> Setup {
         Setup {
             rounds: vec![
@@ -249,6 +292,7 @@ mod tests {
             ],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         }
     }
 

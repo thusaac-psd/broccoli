@@ -14,6 +14,7 @@ import { type ComponentProps, type ReactNode, useState } from 'react';
 import { useNow } from './hooks/useNow';
 import {
   deriveCountdownStatus,
+  formatCountdownLabel,
   formatDurationMs,
   xiaojuTimingFromMatch,
 } from './lib/countdown';
@@ -71,23 +72,56 @@ export function useStartsIn(startsAtMs: number | null): string | null {
   return left > 0 ? formatDurationMs(left) : 'now';
 }
 
-/** mm:ss left in the current game, or null when no clock should show. */
+/** A compact summary and separate labels for the player's larger clock. */
 export function useGameClock(match: MatchView): {
   text: string;
+  timeText: string;
+  label: string;
+  extraText: string | null;
   overdue: boolean;
 } | null {
   const now = useNow();
+  const { t } = useTranslation();
   const live =
     match.state === 'in_progress' ||
     match.state === 'tiebreak' ||
     match.state === 'awaiting_judge';
   if (!live) return null;
   const status = deriveCountdownStatus(xiaojuTimingFromMatch(match), now);
-  if (status.kind === 'counting') {
-    return { text: formatDurationMs(status.remainingMs), overdue: false };
+  if (
+    status.kind === 'counting' ||
+    status.kind === 'base' ||
+    status.kind === 'extra'
+  ) {
+    const timeText = formatDurationMs(status.remainingMs);
+    return {
+      text:
+        status.kind === 'counting' ? timeText : formatCountdownLabel(status, t),
+      timeText,
+      label: t(
+        status.kind === 'base'
+          ? 'codelink-bracket.countdown.baseLabel'
+          : status.kind === 'extra'
+            ? 'codelink-bracket.countdown.extraLabel'
+            : 'codelink-bracket.my.timeLeft',
+      ),
+      extraText:
+        status.kind === 'base'
+          ? t('codelink-bracket.countdown.extraBalance', {
+              time: formatDurationMs(status.extraRemainingMs),
+            })
+          : null,
+      overdue: false,
+    };
   }
   if (status.kind === 'waiting-for-server') {
-    return { text: `+${formatDurationMs(status.overdueMs)}`, overdue: true };
+    return {
+      text: t('codelink-bracket.countdown.waitingShort'),
+      timeText: t('codelink-bracket.countdown.waitingShort'),
+      label: t('codelink-bracket.my.timeLeft'),
+      extraText: null,
+      overdue: true,
+    };
   }
   return null;
 }

@@ -82,6 +82,11 @@ export interface MatchView {
   current_xiaoju_index: number | null;
   current_xiaoju_deadline_ms: number | null;
   current_xiaoju_opened_at_ms: number | null;
+  /** Optional for responses from a server predating shared extra time. */
+  current_game_base_deadline_ms?: number | null;
+  match_extra_time_seconds?: number;
+  /** Balance after settled games; use the current deadlines for the live clock. */
+  extra_time_remaining_ms?: number;
   /**
    * Every game opened so far, in order. Problem ids are masked exactly like
    * `order_a`/`order_b`; games not yet opened are absent.
@@ -103,6 +108,8 @@ export interface GameView {
   problem_b: number | null;
   opened_at_ms: number;
   deadline_ms: number;
+  base_deadline_ms?: number;
+  extra_time_used_ms?: number;
   winner: number | null;
   decided: boolean;
 }
@@ -165,6 +172,7 @@ export interface RoundSetup {
 export interface SetupRequest {
   seeds: number[];
   rounds: RoundSetup[];
+  match_extra_time_seconds: number;
   penalty_seconds: number;
   escalation_grace_seconds: number;
 }

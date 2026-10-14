@@ -16,11 +16,13 @@
 // fields becoming absent (they are not guaranteed to, once the match ends;
 // see that function's doc comment).
 
-import type { MatchPhase } from '../types.ts';
+import type { GameView, MatchPhase } from '../types.ts';
 
 export interface XiaojuTiming {
   deadlineMs: number;
   decided: boolean;
+  /** Present only for regular games of a match with shared extra time enabled. */
+  baseDeadlineMs?: number;
 }
 
 /**
@@ -48,6 +50,10 @@ export interface XiaojuTiming {
 export function xiaojuTimingFromMatch(match: {
   current_xiaoju_deadline_ms: number | null;
   state: MatchPhase;
+  current_game_base_deadline_ms?: number | null;
+  match_extra_time_seconds?: number;
+  current_xiaoju_index?: number | null;
+  games?: Pick<GameView, 'index' | 'tiebreak'>[];
 }): XiaojuTiming | null {
   if (match.current_xiaoju_deadline_ms === null) {
     return null;
@@ -55,12 +61,21 @@ export function xiaojuTimingFromMatch(match: {
   return {
     deadlineMs: match.current_xiaoju_deadline_ms,
     decided: match.state === 'decided' || match.state === 'needs_adjudication',
+    ...((match.match_extra_time_seconds ?? 0) > 0 &&
+    match.current_game_base_deadline_ms != null &&
+    match.games?.some(
+      (game) => game.index === match.current_xiaoju_index && !game.tiebreak,
+    )
+      ? { baseDeadlineMs: match.current_game_base_deadline_ms }
+      : {}),
   };
 }
 
 export type CountdownStatus =
   | { kind: 'no-data' }
   | { kind: 'counting'; remainingMs: number }
+  | { kind: 'base'; remainingMs: number; extraRemainingMs: number }
+  | { kind: 'extra'; remainingMs: number }
   | { kind: 'waiting-for-server'; overdueMs: number }
   | { kind: 'decided' };
 
@@ -82,6 +97,20 @@ export function deriveCountdownStatus(
   }
   const remainingMs = timing.deadlineMs - nowMs;
   if (remainingMs > 0) {
+    if (timing.baseDeadlineMs !== undefined) {
+      const baseRemainingMs = timing.baseDeadlineMs - nowMs;
+      if (baseRemainingMs > 0) {
+        return {
+          kind: 'base',
+          remainingMs: baseRemainingMs,
+          extraRemainingMs: Math.max(
+            0,
+            timing.deadlineMs - timing.baseDeadlineMs,
+          ),
+        };
+      }
+      return { kind: 'extra', remainingMs };
+    }
     return { kind: 'counting', remainingMs };
   }
   // The local clock says time is up, but `decided` is still false: an older
@@ -119,6 +148,15 @@ export function formatCountdownLabel(
       return t('codelink-bracket.countdown.noData');
     case 'counting':
       return t('codelink-bracket.countdown.counting', {
+        time: formatDurationMs(status.remainingMs),
+      });
+    case 'base':
+      return t('codelink-bracket.countdown.base', {
+        time: formatDurationMs(status.remainingMs),
+        extra: formatDurationMs(status.extraRemainingMs),
+      });
+    case 'extra':
+      return t('codelink-bracket.countdown.extra', {
         time: formatDurationMs(status.remainingMs),
       });
     case 'waiting-for-server':

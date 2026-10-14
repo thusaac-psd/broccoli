@@ -6,6 +6,26 @@ import { autoFillRounds, validateSetup } from './setup.ts';
 const seeds = Array.from({ length: 16 }, (_, i) => i + 1);
 const problems = Array.from({ length: 28 }, (_, i) => 100 + i);
 
+test('shared extra time is independent of stage timings, penalties and judge grace', () => {
+  const rounds = autoFillRounds(problems);
+  rounds[0]!.gameMinutes = 10;
+  rounds[1]!.gameMinutes = 20;
+  for (const extra of [0, 5]) {
+    assert.deepEqual(validateSetup(seeds, rounds, 7, 120, extra), []);
+  }
+  for (const extra of [-1, NaN, Infinity, Number.MAX_VALUE]) {
+    assert.deepEqual(validateSetup(seeds, rounds, 7, 120, extra), [
+      { kind: 'badExtra' },
+    ]);
+  }
+  assert.deepEqual(validateSetup(seeds, rounds, -1, 120, 5), [
+    { kind: 'badPenalty' },
+  ]);
+  assert.deepEqual(validateSetup(seeds, rounds, 7, -1, 5), [
+    { kind: 'badGrace' },
+  ]);
+});
+
 test('auto-fill assigns 3 + 3 + 1 problems per round in contest order', () => {
   const rounds = autoFillRounds(problems);
   assert.equal(rounds.length, 4);

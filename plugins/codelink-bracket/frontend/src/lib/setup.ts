@@ -50,6 +50,7 @@ export type SetupIssue =
   | { kind: 'duplicate'; problemId: number }
   | { kind: 'badTiming'; round: number }
   | { kind: 'badPenalty' }
+  | { kind: 'badExtra' }
   | { kind: 'badGrace' };
 
 export function validateSetup(
@@ -57,6 +58,7 @@ export function validateSetup(
   rounds: RoundDraft[],
   penaltySeconds: number,
   graceSeconds: number,
+  extraMinutes = 0,
 ): SetupIssue[] {
   const issues: SetupIssue[] = [];
   if (new Set(seeds).size !== PLAYER_COUNT || seeds.length !== PLAYER_COUNT) {
@@ -95,6 +97,12 @@ export function validateSetup(
   }
   if (!Number.isSafeInteger(graceSeconds) || graceSeconds < 0) {
     issues.push({ kind: 'badGrace' });
+  }
+  if (
+    !Number.isSafeInteger(Math.round(extraMinutes * 60)) ||
+    extraMinutes < 0
+  ) {
+    issues.push({ kind: 'badExtra' });
   }
   return issues;
 }

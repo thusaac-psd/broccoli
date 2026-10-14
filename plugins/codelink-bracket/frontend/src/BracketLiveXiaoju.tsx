@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import { useBracketApi } from './hooks/useBracketApi';
 import { useMyMatch } from './hooks/useMyMatch';
+import { useNow } from './hooks/useNow';
 import {
   deriveCountdownStatus,
   formatCountdownLabel,
@@ -66,6 +67,7 @@ export function BracketLiveXiaoju({
   submissions,
 }: LiveXiaojuViewProps) {
   const { t } = useTranslation();
+  const now = useNow();
   // Keeps the problem lists fresh as the viewer's match moves on (see
   // `useRevealRefresh`); the result itself is not needed here.
   useMyMatch(contestId);
@@ -107,10 +109,7 @@ export function BracketLiveXiaoju({
   }
 
   const status = describeMatchPhase(match.state);
-  const countdown = deriveCountdownStatus(
-    xiaojuTimingFromMatch(match),
-    Date.now(),
-  );
+  const countdown = deriveCountdownStatus(xiaojuTimingFromMatch(match), now);
   const ownScore = viewerId === match.player_a ? match.score_a : match.score_b;
   const opponentScore =
     viewerId === match.player_a ? match.score_b : match.score_a;

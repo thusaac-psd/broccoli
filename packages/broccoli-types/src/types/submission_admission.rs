@@ -9,6 +9,7 @@ pub struct SubmissionAdmission {
     pub feedback_key: String,
     pub metadata: Value,
     pub slot: Option<SubmissionSlot>,
+    /// Optional exclusive cutoff for actual arrival, independent of plugin scoring metadata.
     pub latest_arrival_ms: Option<i64>,
 }
 

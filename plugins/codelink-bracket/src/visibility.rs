@@ -681,6 +681,7 @@ mod tests {
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         };
         host.storage
             .set(&[(
@@ -742,6 +743,7 @@ mod tests {
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
+            ..Default::default()
         };
         host.storage
             .set(&[(

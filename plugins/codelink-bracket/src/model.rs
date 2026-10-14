@@ -18,8 +18,12 @@ pub fn default_penalty_seconds() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Setup {
     pub rounds: Vec<RoundDef>,
-    /// Delay added to subsequent submissions for each WA/TLE/MLE/RE in a
-    /// game. Zero disables penalties; older setups retain the 20s default.
+    /// Shared by both players across this match's regular games only.
+    #[serde(default)]
+    pub match_extra_time_seconds: i64,
+    /// Score penalty added to subsequent submissions for each WA/TLE/MLE/RE
+    /// in a game, without shortening the submission window or spending extra
+    /// time. Zero disables penalties; older setups retain the 20s default.
     #[serde(default = "default_penalty_seconds")]
     pub penalty_seconds: i64,
     /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on
@@ -37,6 +41,7 @@ impl Default for Setup {
     fn default() -> Self {
         Self {
             rounds: Vec::new(),
+            match_extra_time_seconds: 0,
             penalty_seconds: default_penalty_seconds(),
             escalation_grace_seconds: default_escalation_grace_seconds(),
         }
@@ -141,6 +146,14 @@ pub struct MatchState {
     /// None until the first game opens. Both durations then remain fixed for
     /// this match, even if staff correct the stage setup during play.
     pub game_durations: Option<GameDurations>,
+    /// Pinned at the first game along with the base duration. Legacy matches
+    /// that already opened a game keep a zero allowance.
+    #[serde(default)]
+    pub match_extra_time_seconds: i64,
+    /// Balance after settled games. While a game is open, its deadlines
+    /// describe the running clock; only settlement changes this balance.
+    #[serde(default)]
+    pub extra_time_remaining_ms: i64,
 }
 
 /// State of one 小局 (the best-of-one sub-match on a single problem).
@@ -156,9 +169,27 @@ pub struct MatchState {
 pub struct XiaojuState {
     pub index: u8,
     pub opened_at_ms: i64,
+    /// Missing in old documents, whose final deadline is also their base deadline.
+    #[serde(default)]
+    pub base_deadline_ms: Option<i64>,
     pub deadline_ms: i64,
+    #[serde(default)]
+    pub extra_time_used_ms: i64,
     pub winner: Option<i32>,
     pub decided: bool,
+}
+
+impl XiaojuState {
+    pub fn base_deadline_ms(&self) -> i64 {
+        self.base_deadline_ms.unwrap_or(self.deadline_ms)
+    }
+
+    /// The same half-open window is enforced at submission and settlement.
+    /// Use i128 for the comparison so even an unbounded test deadline is safe.
+    pub fn contains_submission_at_us(&self, submitted_at_us: i64) -> bool {
+        let at = i128::from(submitted_at_us);
+        i128::from(self.opened_at_ms) * 1_000 <= at && at < i128::from(self.deadline_ms) * 1_000
+    }
 }
 
 /// Why a match needs a staff decision.
