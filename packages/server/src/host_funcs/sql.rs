@@ -368,7 +368,7 @@ fn lookup_owned_txn<'a>(
 }
 
 #[derive(Serialize)]
-struct HostDbResponse {
+pub(super) struct HostDbResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -376,19 +376,19 @@ struct HostDbResponse {
 }
 
 impl HostDbResponse {
-    fn ok(data: JsonValue) -> Self {
+    pub(super) fn ok(data: JsonValue) -> Self {
         Self {
             data: Some(data),
             error: None,
         }
     }
-    fn err(msg: impl Into<String>) -> Self {
+    pub(super) fn err(msg: impl Into<String>) -> Self {
         Self {
             data: None,
             error: Some(msg.into()),
         }
     }
-    fn to_json_string(&self) -> Result<String, extism::Error> {
+    pub(super) fn to_json_string(&self) -> Result<String, extism::Error> {
         serde_json::to_string(self)
             .map_err(|e| extism::Error::msg(format!("Serialization error: {}", e)))
     }

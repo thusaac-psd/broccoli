@@ -32,14 +32,11 @@
 //! One deadline timer per 小局: `xiaoju:{contest}:{match_id}:{index}`
 //! plus a separate `:effective:{submission_id}` wakeup for each delayed AC.
 //! ([`xiaoju_timer_key`]). When a 小局 ends EARLY (an AC before its
-//! deadline), `step` cancels that 小局's timer before opening the next
-//! one or deciding the match. Without this, a stale timer for the OLD 小局
-//! would still be scheduled to fire at the old deadline, land on the NEW
-//! (or no longer existent) 小局, and -- because `advance` re-reads whatever
-//! is currently open -- decide it prematurely using a deadline that was
-//! never actually set for it. See `tests::deciding_a_xiaoju_early_cancels_its_timer_before_scheduling_the_next`
-//! for the regression test, and the module's own break/restore proof
-//! recorded in the Task 9 report.
+//! deadline), the game timers remain durable through the match CAS and all
+//! post-commit work. They are cancelled only after feedback publication and
+//! stage advancement succeed. A failed delivery rearms its timer. Redelivery
+//! re-reads current state and checks its deadline, so an old wakeup cannot
+//! score the next game early or score the same game twice.
 
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::db::Params;
@@ -58,7 +55,7 @@ use crate::model::{AdjudicationReason, MatchPhase, MatchState, RoundDef, Setup, 
 use crate::storage;
 
 /// The storage/timer key for one 小局's deadline. Shared by `step` (which
-/// schedules and cancels it) and `on_timer` (which parses it back out of
+/// schedules it), post-commit cleanup, and `on_timer` (which parses it back out of
 /// the fired timer's key).
 pub fn xiaoju_timer_key(contest: i32, match_id: u8, index: u8) -> String {
     format!("xiaoju:{contest}:{match_id}:{index}")
@@ -477,14 +474,22 @@ fn fetch_subs(
     let sql = format!(
         "SELECT s.id, s.user_id, s.problem_id, \
          (EXTRACT(EPOCH FROM s.created_at) * 1000000)::bigint AS submitted_at_us, verdict, \
-         s.status::text AS status, f.effective_at_us \
-         FROM submission s LEFT JOIN submission_feedback f ON f.submission_id = s.id \
+         s.status::text AS status, NULL::bigint AS effective_at_us \
+         FROM submission s \
          WHERE s.contest_id = {} AND ({}) AND s.created_at >= to_timestamp({}::double precision / 1000)",
         p.bind(contest),
         clauses.join(" OR "),
         p.bind(m.xiaoju.last().map(|g| g.opened_at_ms).unwrap_or(0))
     );
     let rows: Vec<SubRow> = host.db.query_with_args(&sql, &p.into_args())?;
+    let feedback = host.submission.feedback(&SubmissionFeedbackQuery {
+        submission_ids: Some(rows.iter().map(|r| r.id).collect()),
+        ..Default::default()
+    })?;
+    let effective: std::collections::HashMap<i32, i64> = feedback
+        .iter()
+        .map(|r| crate::feedback::effective_time(r).map(|time| (r.submission_id, time)))
+        .collect::<Result<_, _>>()?;
     Ok(rows
         .into_iter()
         .map(|r| SubmissionRecord {
@@ -492,7 +497,11 @@ fn fetch_subs(
             user_id: r.user_id,
             problem_id: r.problem_id,
             submitted_at_us: r.submitted_at_us,
-            effective_at_us: r.effective_at_us.unwrap_or(r.submitted_at_us),
+            effective_at_us: effective
+                .get(&r.id)
+                .copied()
+                .or(r.effective_at_us)
+                .unwrap_or(r.submitted_at_us),
             verdict: r.verdict,
             status: r.status,
         })
@@ -504,15 +513,8 @@ fn fetch_subs(
 /// because Task 10's `routes::handle_start` also calls this directly, to
 /// open the FIRST regular 小局 the moment a match leaves `Ordering`.
 ///
-/// On this match's very FIRST call (`m.xiaoju_seconds == 0`, the "not yet
-/// pinned" sentinel -- see that field's doc comment), the live
-/// `setup.xiaoju_seconds` is snapshotted into `m.xiaoju_seconds` and used
-/// for every 小局 this match opens from then on, including ones opened by
-/// LATER calls after a `/setup` call has rewritten the shared `Setup`
-/// document's `xiaoju_seconds`. This is what makes a second `/setup` call
-/// safe to accept unconditionally instead of rejecting it (see
-/// `setup::handle_setup`'s doc comment): the pacing a match actually
-/// started under cannot be rewritten out from under it mid-play.
+/// Snapshot this stage's regular and tiebreak durations on the first open.
+/// Later setup corrections affect matches that have not started yet.
 pub(crate) fn open_xiaoju(
     host: &Host,
     contest: i32,
@@ -522,11 +524,24 @@ pub(crate) fn open_xiaoju(
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
     let now = clock.now;
-    if m.xiaoju_seconds == 0 {
-        m.xiaoju_seconds = setup.xiaoju_seconds;
-    }
+    let round = setup
+        .rounds
+        .get(m.round.saturating_sub(1) as usize)
+        .ok_or_else(|| SdkError::Other("round setup missing".into()))?;
+    let durations = m.game_durations.get_or_insert(round.game_durations());
     let index = m.xiaoju.len() as u8;
-    let deadline_ms = now + m.xiaoju_seconds * 1_000;
+    let seconds = if decide::is_regular_xiaoju_index(index) {
+        durations.xiaoju_seconds
+    } else {
+        durations.tiebreak_seconds
+    };
+    let deadline_ms = now
+        .checked_add(
+            seconds
+                .checked_mul(1_000)
+                .ok_or_else(|| SdkError::Other("game duration overflow".into()))?,
+        )
+        .ok_or_else(|| SdkError::Other("game deadline overflow".into()))?;
     m.xiaoju.push(XiaojuState {
         index,
         opened_at_ms: now,
@@ -614,8 +629,6 @@ fn step(
                 };
             }
             None => {
-                host.timer
-                    .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
                 escalate_contest_ended(host, contest, match_id, current_index, m)?;
                 return Ok(());
             }
@@ -634,13 +647,6 @@ fn step(
         XiaojuOutcome::AwaitingJudge {
             blocking_submission_id,
         } => {
-            // The 小局's own deadline has already passed (that is the only
-            // way `decide_xiaoju` returns this) -- that timer has either
-            // already fired (this call IS its callback) or is about to;
-            // either way it has done its job and must not linger.
-            host.timer
-                .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
-
             let entering_now = m.state != MatchPhase::AwaitingJudge;
             m.state = MatchPhase::AwaitingJudge;
             m.awaiting_submission_id = Some(blocking_submission_id);
@@ -650,7 +656,16 @@ fn step(
             // trigger) must not keep pushing the grace period further out
             // -- see `tests::advance_is_idempotent_while_awaiting_judge_and_does_not_reschedule_escalation`.
             if entering_now {
-                let escalate_at_ms = now + setup.escalation_grace_seconds * 1_000;
+                let escalate_at_ms = now
+                    .checked_add(
+                        setup
+                            .escalation_grace_seconds
+                            .checked_mul(1_000)
+                            .ok_or_else(|| {
+                                SdkError::Other("judge wait duration overflow".into())
+                            })?,
+                    )
+                    .ok_or_else(|| SdkError::Other("judge wait deadline overflow".into()))?;
                 host.timer.schedule(
                     escalate_at_ms,
                     &judgewait_timer_key(contest, match_id, current_index),
@@ -660,28 +675,7 @@ fn step(
             Ok(())
         }
         XiaojuOutcome::Decided { .. } => {
-            for sub in &subs {
-                host.timer.cancel(&effective_timer_key(
-                    contest,
-                    match_id,
-                    current_index,
-                    sub.submission_id,
-                ))?;
-            }
-            // The 小局 that just concluded (or was already concluded by an
-            // earlier, successful `step` -- see the module doc comment)
-            // must have its deadline cancelled BEFORE anything opens next,
-            // so a stale redelivery of THIS timer cannot land on the next
-            // 小局.
-            host.timer
-                .cancel(&xiaoju_timer_key(contest, match_id, current_index))?;
-
             if m.state == MatchPhase::AwaitingJudge {
-                // The block just resolved (the blocking submission's
-                // verdict landed) -- the escalation timer must not fire
-                // later and clobber whatever `decide_match` below produces.
-                host.timer
-                    .cancel(&judgewait_timer_key(contest, match_id, current_index))?;
                 m.awaiting_submission_id = None;
                 // `AwaitingJudge` erased whether this 小局 was regular or
                 // an 附加赛 attempt (see `current_problem`'s doc comment on
@@ -707,7 +701,8 @@ fn step(
                 }
                 MatchOutcome::Decided { winner } => {
                     m.decided_at_ms = now;
-                    write_next_round_slot(host, contest, setup, m, winner)
+                    debug_assert_eq!(m.winner, Some(winner));
+                    Ok(())
                 }
                 MatchOutcome::NeedsAdjudication => Ok(()),
             }
@@ -753,9 +748,48 @@ pub fn advance(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkError> 
     let updated = storage::update_match(host, contest, match_id, |m| {
         step(host, contest, match_id, &setup, m)
     })?;
-    crate::feedback::publish(host, contest, match_id, &updated)?;
-    if updated.state == MatchPhase::Decided {
+    finish_transition(host, contest, match_id, &setup, &updated)
+}
+
+/// Complete post-commit work before acknowledging any game wakeup. On failure
+/// the old deadline/effective timer remains durable, even for a decided match.
+/// Re-delivery republishes feedback and repairs feeder slots idempotently.
+fn finish_transition(
+    host: &Host,
+    contest: i32,
+    match_id: u8,
+    setup: &Setup,
+    updated: &MatchState,
+) -> Result<(), SdkError> {
+    let effective_timers = crate::feedback::publish(host, contest, match_id, updated)?;
+    if let Some(winner) = updated
+        .winner
+        .filter(|_| updated.state == MatchPhase::Decided)
+    {
+        write_next_round_slot(host, contest, setup, updated, winner)?;
         try_open_stage(host, contest, updated.round + 1)?;
+    }
+    for key in effective_timers {
+        host.timer.cancel(&key)?;
+    }
+    if updated.state == MatchPhase::Decided && updated.xiaoju.is_empty() {
+        host.timer.cancel(&xiaoju_timer_key(contest, match_id, 0))?;
+    }
+    for game in &updated.xiaoju {
+        if game.decided
+            || matches!(
+                updated.state,
+                MatchPhase::Decided | MatchPhase::NeedsAdjudication
+            )
+        {
+            host.timer
+                .cancel(&xiaoju_timer_key(contest, match_id, game.index))?;
+            host.timer
+                .cancel(&judgewait_timer_key(contest, match_id, game.index))?;
+        } else if updated.state == MatchPhase::AwaitingJudge {
+            host.timer
+                .cancel(&xiaoju_timer_key(contest, match_id, game.index))?;
+        }
     }
     Ok(())
 }
@@ -896,21 +930,17 @@ pub fn force_decide(host: &Host, contest: i32, match_id: u8, winner: i32) -> Res
     }
 
     let updated = storage::update_match(host, contest, match_id, |m| {
-        if let Some(current) = m.xiaoju.last() {
-            let index = current.index;
-            host.timer
-                .cancel(&xiaoju_timer_key(contest, match_id, index))?;
-            if m.state == MatchPhase::AwaitingJudge {
-                host.timer
-                    .cancel(&judgewait_timer_key(contest, match_id, index))?;
-            }
-        }
         let now = now_ms(host)?;
-        apply_force_decide(m, winner, now).map_err(SdkError::Other)
+        apply_force_decide(m, winner, now).map_err(SdkError::Other)?;
+        // Staff can decide an ordering/adjudication match with no live game
+        // timer. Arm a recovery wakeup before committing that decision too.
+        host.timer.schedule(
+            now.saturating_add(1_000),
+            &xiaoju_timer_key(contest, match_id, m.xiaoju.last().map_or(0, |g| g.index)),
+            "",
+        )
     })?;
-    crate::feedback::publish(host, contest, match_id, &updated)?;
-    write_next_round_slot(host, contest, &setup, &updated, winner)?;
-    try_open_stage(host, contest, updated.round + 1)
+    finish_transition(host, contest, match_id, &setup, &updated)
 }
 
 /// Bracket judging policy for the shared detached-evaluate driver: binary
@@ -1144,53 +1174,44 @@ pub fn on_codelink_bracket_eval_result(input: String) -> FnResult<String> {
     Ok(serde_json::to_string(&output)?)
 }
 
-/// `[[server.timers]] function = "on_timer"` entry point (see `lib.rs`).
-/// Parses `(contest, match_id)` out of the fired timer's key and calls
-/// [`advance`] -- never trusts the timer to still describe the CURRENT
-/// state (see the module doc comment on stale-timer cancellation).
+/// Dispatch a timer using current persisted state. Failed delivery rearms the
+/// same key so repeated publication failures do not exhaust delivery attempts.
+/// Scheduling clears the claim; host cleanup cannot delete this replacement.
+pub fn handle_timer(host: &Host, key: &str, fire_at_ms: i64) -> Result<(), SdkError> {
+    let result = if let Some((contest, match_id)) = parse_xiaoju_timer_key(key) {
+        advance(host, contest, match_id)
+    } else if let Some((contest, match_id)) = parse_start_timer_key(key) {
+        try_autostart(host, contest, match_id)
+    } else if let Some((contest, round)) = parse_stage_timer_key(key) {
+        try_open_stage(host, contest, round)
+    } else if let Some((contest, match_id)) = parse_judgewait_timer_key(key) {
+        escalate(host, contest, match_id)
+    } else {
+        return host
+            .log
+            .info(&format!("codelink-bracket: unparseable timer key: {key}"));
+    };
+    if let Err(error) = result {
+        host.timer
+            .schedule(fire_at_ms.saturating_add(1_000), key, "")?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// `[[server.timers]] function = "on_timer"` entry point. Errors must reach the
+/// dispatcher rather than acknowledging a partially completed transition.
 #[cfg(target_arch = "wasm32")]
 #[extism_pdk::plugin_fn]
 pub fn on_timer(input: String) -> extism_pdk::FnResult<String> {
     #[derive(Deserialize)]
     struct TimerCallbackInput {
         key: String,
+        fire_at_ms: i64,
     }
     let host = Host::new();
     let input: TimerCallbackInput = serde_json::from_str(&input)?;
-    if let Some((contest, match_id)) = parse_xiaoju_timer_key(&input.key) {
-        if let Err(e) = advance(&host, contest, match_id) {
-            let _ = host.log.info(&format!(
-                "codelink-bracket: on_timer advance failed for key {}: {e:?}",
-                input.key
-            ));
-        }
-    } else if let Some((contest, match_id)) = parse_start_timer_key(&input.key) {
-        if let Err(e) = try_autostart(&host, contest, match_id) {
-            let _ = host.log.info(&format!(
-                "codelink-bracket: on_timer autostart failed for key {}: {e:?}",
-                input.key
-            ));
-        }
-    } else if let Some((contest, round)) = parse_stage_timer_key(&input.key) {
-        if let Err(e) = try_open_stage(&host, contest, round) {
-            let _ = host.log.info(&format!(
-                "codelink-bracket: on_timer stage open failed for key {}: {e:?}",
-                input.key
-            ));
-        }
-    } else if let Some((contest, match_id)) = parse_judgewait_timer_key(&input.key) {
-        if let Err(e) = escalate(&host, contest, match_id) {
-            let _ = host.log.info(&format!(
-                "codelink-bracket: on_timer escalate failed for key {}: {e:?}",
-                input.key
-            ));
-        }
-    } else {
-        let _ = host.log.info(&format!(
-            "codelink-bracket: on_timer got an unparseable key: {}",
-            input.key
-        ));
-    }
+    handle_timer(&host, &input.key, input.fire_at_ms)?;
     Ok("ok".into())
 }
 
@@ -1206,15 +1227,19 @@ mod tests {
                     group_a: [101, 102, 103],
                     group_b: [201, 202, 203],
                     tiebreak: vec![301, 302],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 0,
                 },
                 RoundDef {
                     group_a: [401, 402, 403],
                     group_b: [501, 502, 503],
                     tiebreak: vec![601],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 600,
                 },
             ],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         }
@@ -1308,11 +1333,171 @@ mod tests {
         seed(&host, 7, &setup, 0, &original);
         queue_now(&host, 30_001);
         queue_subs(&host, vec![first, later]);
+        let mut feedback = feedback_record(0);
+        feedback.metadata["effective_at_us"] = serde_json::json!(30_000_001);
+        host.submission.set_feedback(vec![feedback]);
         advance(&host, 7, 0).unwrap();
         let decided = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(decided.score_a, 1);
         assert_eq!(decided.xiaoju.len(), 2);
         assert!(host.timer.was_cancelled(&key));
+    }
+
+    fn feedback_record(index: u8) -> SubmissionFeedbackRecord {
+        SubmissionFeedbackRecord {
+            submission_id: 10,
+            contest_id: 7,
+            user_id: 10,
+            problem_id: 103,
+            submitted_at_us: 10_000_000,
+            status: "Judged".into(),
+            verdict: Some(Verdict::Accepted),
+            key: storage::match_key(7, 0),
+            metadata: serde_json::json!({"scope_key":crate::feedback::game_scope(7,0,index),"delay_seconds":0,"effective_at_us":30_000_000}),
+            withheld: true,
+            slot_held: true,
+            slot_key: Some(crate::feedback::player_slot(7, 10)),
+            result: None,
+        }
+    }
+
+    #[test]
+    fn failed_timer_publication_retries_a_committed_decision_and_opens_the_next_stage() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[1].break_before_seconds = 0;
+        let mut m = match_in_progress();
+        m.score_a = 1;
+        m.xiaoju = (0..3)
+            .map(|index| XiaojuState {
+                index,
+                decided: index < 2,
+                winner: (index == 0).then_some(10),
+                ..m.xiaoju[0].clone()
+            })
+            .collect();
+        seed(&host, 7, &setup, 0, &m);
+        for id in 1..8 {
+            let mut other = m.clone();
+            other.pos = id;
+            other.player_a = 100 + i32::from(id) * 2;
+            other.player_b = other.player_a + 1;
+            other.state = MatchPhase::Decided;
+            other.winner = Some(other.player_a);
+            other.decided_at_ms = 20_000;
+            seed(&host, 7, &setup, id, &other);
+            write_next_round_slot(&host, 7, &setup, &other, other.player_a).unwrap();
+        }
+        let deadline = xiaoju_timer_key(7, 0, 2);
+        let effective = effective_timer_key(7, 0, 2, 10);
+        host.timer.schedule(1_000_000, &deadline, "").unwrap();
+        host.timer.schedule(30_000, &effective, "").unwrap();
+        queue_now(&host, 30_000);
+        queue_subs(&host, vec![ac_row(10, 10_000)]);
+        host.submission.queue_feedback_query_success();
+        host.submission
+            .queue_feedback_query_error(SdkError::Other("publication unavailable".into()));
+        assert!(handle_timer(&host, &effective, 30_000).is_err());
+        let committed = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(committed.state, MatchPhase::Decided);
+        assert_eq!(committed.winner, Some(10));
+        assert!(host.timer.is_scheduled(&deadline));
+        assert_eq!(host.timer.scheduled_at(&effective), Some(31_000));
+        assert!(
+            host.storage
+                .get_one(&storage::slot_key(7, 2, 0))
+                .unwrap()
+                .is_none()
+        );
+        assert!(storage::load_match(&host, 7, 8).unwrap().is_none());
+
+        // Exceed the dispatcher's usual attempt limit without losing the key.
+        for attempt in 1..=10 {
+            host.submission
+                .queue_feedback_query_error(SdkError::Other("still unavailable".into()));
+            assert!(handle_timer(&host, &effective, 30_000 + attempt * 1_000).is_err());
+            assert!(host.timer.is_scheduled(&deadline));
+            assert_eq!(
+                host.timer.scheduled_at(&effective),
+                Some(31_000 + attempt * 1_000)
+            );
+        }
+        host.submission.set_feedback(vec![feedback_record(2)]);
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": 0.0 }]));
+        queue_now(&host, 41_000);
+        handle_timer(&host, &effective, 41_000).unwrap();
+        assert!(!host.timer.is_scheduled(&effective));
+        assert!(!host.timer.is_scheduled(&deadline));
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap(),
+            committed
+        );
+        assert_eq!(host.submission.feedback_publications().len(), 1);
+        let next = storage::load_match(&host, 7, 8).unwrap().unwrap();
+        assert_eq!(next.player_a, 10);
+        assert_eq!(next.player_b, 102);
+    }
+
+    #[test]
+    fn staff_decision_without_a_live_game_timer_can_retry_publication() {
+        let host = Host::mock();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::Ordering;
+        m.xiaoju.clear();
+        seed(&host, 7, &setup_two_rounds(), 0, &m);
+        queue_now(&host, 30_000);
+        host.submission
+            .queue_feedback_query_error(SdkError::Other("publication failed".into()));
+        assert!(force_decide(&host, 7, 0, 10).is_err());
+        let key = xiaoju_timer_key(7, 0, 0);
+        assert_eq!(host.timer.scheduled_at(&key), Some(31_000));
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().state,
+            MatchPhase::Decided
+        );
+        handle_timer(&host, &key, 31_000).unwrap();
+        assert!(!host.timer.is_scheduled(&key));
+        assert_eq!(
+            host.storage
+                .get_one(&storage::slot_key(7, 2, 0))
+                .unwrap()
+                .as_deref(),
+            Some("10")
+        );
+    }
+
+    #[test]
+    fn failed_feedback_update_keeps_the_effective_wakeup_and_does_not_double_score() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        let effective = effective_timer_key(7, 0, 0, 10);
+        host.timer.schedule(30_000, &effective, "").unwrap();
+        host.timer
+            .schedule(1_000_000, &xiaoju_timer_key(7, 0, 0), "")
+            .unwrap();
+        queue_now(&host, 30_000);
+        queue_subs(&host, vec![ac_row(10, 10_000)]);
+        host.submission.set_feedback(vec![feedback_record(0)]);
+        host.submission
+            .queue_feedback_error(SdkError::Other("feedback update failed".into()));
+        assert!(handle_timer(&host, &effective, 30_000).is_err());
+        let committed = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(committed.score_a, 1);
+        assert_eq!(committed.xiaoju.len(), 2);
+        assert!(host.timer.is_scheduled(&effective));
+        assert!(host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 0)));
+        queue_now(&host, 31_000);
+        queue_subs(&host, vec![]);
+        host.submission.set_feedback(vec![feedback_record(0)]);
+        handle_timer(&host, &effective, 31_000).unwrap();
+        assert!(!host.timer.is_scheduled(&effective));
+        assert!(!host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 0)));
+        assert!(host.timer.is_scheduled(&xiaoju_timer_key(7, 0, 1)));
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap(),
+            committed
+        );
     }
 
     fn ac_row(user_id: i32, submitted_at_ms: i64) -> serde_json::Value {
@@ -1513,62 +1698,43 @@ mod tests {
     }
 
     #[test]
-    fn open_xiaoju_pins_xiaoju_seconds_on_first_open_and_ignores_a_later_setup_change() {
-        // Defect 3 fix: the FIRST open_xiaoju call for a match snapshots the
-        // live setup.xiaoju_seconds into m.xiaoju_seconds, and every LATER
-        // call for the SAME match keeps using that pinned value even if the
-        // caller passes in a `Setup` whose xiaoju_seconds has since changed
-        // -- exactly what a second `/setup` call mid-contest would do.
+    fn stage_durations_are_selected_and_pinned_for_regular_games_and_tiebreaks() {
         let host = Host::mock();
         let mut setup = setup_two_rounds();
-        setup.xiaoju_seconds = 3;
-        let mut m = match_in_progress();
-        m.xiaoju.clear();
-        m.xiaoju_seconds = 0; // sentinel: not yet pinned
-
-        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
-        assert_eq!(
-            m.xiaoju_seconds, 3,
-            "the first open should pin the then-live setup value"
-        );
-        assert_eq!(m.xiaoju[0].deadline_ms, 1_000 + 3_000);
-
-        // A second /setup call rewrites the shared Setup document...
-        let mut reconfigured = setup.clone();
-        reconfigured.xiaoju_seconds = 300;
-
-        // ...but opening this match's NEXT 小局 must still use the 3s it
-        // actually started under, not the new 300s.
-        open_xiaoju(&host, 7, 0, &reconfigured, Clock::at(2_000), &mut m).unwrap();
-        assert_eq!(
-            m.xiaoju_seconds, 3,
-            "a pinned value must not change on later opens"
-        );
-        assert_eq!(m.xiaoju[1].deadline_ms, 2_000 + 3_000);
+        setup.rounds[0].xiaoju_seconds = 3;
+        setup.rounds[0].tiebreak_seconds = 7;
+        setup.rounds[1].xiaoju_seconds = 11;
+        setup.rounds[1].tiebreak_seconds = 19;
+        for (round, regular, tiebreak) in [(1, 3, 7), (2, 11, 19)] {
+            let mut m = match_in_progress();
+            m.round = round;
+            m.xiaoju.clear();
+            m.game_durations = None;
+            open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
+            assert_eq!(m.xiaoju[0].deadline_ms, 1_000 + regular * 1_000);
+            let mut corrected = setup.clone();
+            corrected.rounds[usize::from(round - 1)].xiaoju_seconds = 300;
+            corrected.rounds[usize::from(round - 1)].tiebreak_seconds = 600;
+            for index in 1..5 {
+                open_xiaoju(&host, 7, 0, &corrected, Clock::at(2_000), &mut m).unwrap();
+                let seconds = if index < 3 { regular } else { tiebreak };
+                assert_eq!(m.xiaoju[index].deadline_ms, 2_000 + seconds * 1_000);
+            }
+        }
     }
 
     #[test]
-    fn open_xiaoju_negative_control_an_unstarted_match_still_picks_up_a_setup_correction() {
-        // Negative control for the pin above: a match with xiaoju_seconds
-        // still 0 (never opened a 小局) must pick up whatever the CURRENT
-        // `Setup` says, including a value corrected by a second `/setup`
-        // call that ran before this match started -- the "still allowed to
-        // correct a bracket nobody has started playing yet" half of the
-        // rule documented on `setup::handle_setup`.
+    fn an_unstarted_match_uses_the_corrected_stage_durations() {
         let host = Host::mock();
-        let mut corrected_setup = setup_two_rounds();
-        corrected_setup.xiaoju_seconds = 120; // staff's corrected value
-
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].xiaoju_seconds = 120;
+        setup.rounds[0].tiebreak_seconds = 240;
         let mut m = match_in_progress();
         m.xiaoju.clear();
-        m.xiaoju_seconds = 0; // sentinel: never opened a 小局 yet
-
-        open_xiaoju(&host, 7, 0, &corrected_setup, Clock::at(1_000), &mut m).unwrap();
-        assert_eq!(
-            m.xiaoju_seconds, 120,
-            "an unstarted match must pick up the corrected setup value"
-        );
-        assert_eq!(m.xiaoju[0].deadline_ms, 1_000 + 120_000);
+        m.game_durations = None;
+        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
+        assert_eq!(m.game_durations, Some(setup.rounds[0].game_durations()));
+        assert_eq!(m.xiaoju[0].deadline_ms, 121_000);
     }
 
     // -- advance / step: guards --
@@ -1642,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn deciding_a_xiaoju_early_cancels_its_timer_before_scheduling_the_next() {
+    fn deciding_a_xiaoju_cancels_its_timer_after_publication_and_keeps_the_next_timer() {
         let host = Host::mock();
         let setup = setup_two_rounds();
         seed(&host, 7, &setup, 0, &match_in_progress());
@@ -2365,7 +2531,6 @@ mod tests {
         })
         .unwrap();
         queue_now(&host, 200_000);
-        host.db.queue_query_result(serde_json::json!([]));
         queue_contest_start(&host, 0);
         queue_now(&host, 200_000);
         force_decide(&host, 7, id, 107).unwrap();

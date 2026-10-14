@@ -26,7 +26,7 @@ function = "decide_visibility"
 [[server.hooks]]
 topic = "before_submission"
 function = "check_submission"
-scope = "resource"
+scope = "global"
 
 [[server.timers]]
 function = "on_timer"

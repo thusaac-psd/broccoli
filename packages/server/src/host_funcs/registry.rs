@@ -15,7 +15,7 @@ struct RegisterContestTypeInput {
     submission_handler: String,
     code_run_handler: String,
     #[serde(default)]
-    delayed_feedback: bool,
+    submission_admission: bool,
 }
 
 #[derive(Deserialize)]
@@ -186,7 +186,7 @@ fn register_contest_type_fn(
                 plugin_id: plugin_id.to_string(),
                 submission_fn: input.submission_handler.clone(),
                 code_run_fn: input.code_run_handler.clone(),
-                delayed_feedback: input.delayed_feedback,
+                submission_admission: input.submission_admission,
             },
         );
         tracing::info!(

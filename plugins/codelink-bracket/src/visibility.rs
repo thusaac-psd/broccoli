@@ -667,6 +667,9 @@ mod tests {
             group_a: [101, 102, 103],
             group_b: [201, 202, 203],
             tiebreak: vec![319],
+            xiaoju_seconds: 1_800,
+            tiebreak_seconds: 1_800,
+            break_before_seconds: 0,
         }
     }
 
@@ -676,8 +679,6 @@ mod tests {
         ]));
         let setup = crate::model::Setup {
             rounds: vec![round_def()],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         };
@@ -739,8 +740,6 @@ mod tests {
     fn seed_setup_and_match(host: &Host, contest_id: i32, m: &MatchState) {
         let setup = crate::model::Setup {
             rounds: vec![round_def()],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         };

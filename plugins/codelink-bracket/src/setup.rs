@@ -32,11 +32,13 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
         ));
     }
 
-    if setup.xiaoju_seconds <= 0 {
-        return Err("xiaoju_seconds must be greater than 0".to_string());
-    }
     if setup.penalty_seconds < 0 {
         return Err("penalty_seconds must be greater than or equal to 0".to_string());
+    }
+    if setup.escalation_grace_seconds < 0 || setup.escalation_grace_seconds > i64::MAX / 1_000 {
+        return Err(
+            "escalation_grace_seconds must be nonnegative seconds within the timer range".into(),
+        );
     }
 
     // A problem belongs to exactly one group of one round. Tracked globally
@@ -47,6 +49,26 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
     // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
     for (round_idx, round) in setup.rounds.iter().enumerate() {
+        for (name, seconds) in [
+            ("xiaoju_seconds", round.xiaoju_seconds),
+            ("tiebreak_seconds", round.tiebreak_seconds),
+        ] {
+            if seconds <= 0 || seconds > i64::MAX / 1_000 {
+                return Err(format!(
+                    "round {round_idx}'s {name} must be positive seconds within the timer range"
+                ));
+            }
+        }
+        if round.break_before_seconds < 0 || round.break_before_seconds > i64::MAX / 1_000 {
+            return Err(format!(
+                "round {round_idx}'s break_before_seconds must be nonnegative seconds within the timer range"
+            ));
+        }
+        if round_idx == 0 && round.break_before_seconds != 0 {
+            return Err(
+                "round 0's break_before_seconds must be 0; round one opens with the contest".into(),
+            );
+        }
         let mut group_a_set: Vec<i32> = round.group_a.to_vec();
         group_a_set.sort_unstable();
         group_a_set.dedup();
@@ -90,10 +112,9 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
 
 /// Wire body for `POST /contests/{contest_id}/setup`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetupRequest {
     rounds: Vec<RoundDef>,
-    xiaoju_seconds: i64,
-    round_intermission_seconds: i64,
     #[serde(default = "crate::model::default_penalty_seconds")]
     penalty_seconds: i64,
     /// Optional: a request that omits this falls back to
@@ -115,42 +136,11 @@ struct SetupRequest {
 ///
 /// # A second `/setup` call is accepted, not rejected
 ///
-/// This handler has no guard against being called again after matches
-/// already exist or are in progress: it always unconditionally overwrites
-/// the shared `Setup` document (`xiaoju_seconds`, `round_intermission_seconds`,
-/// `escalation_grace_seconds`, every round's tiebreak list) and re-seeds
-/// round 1's slots. This is a deliberate choice, not an oversight, for two
-/// reasons:
-///
-/// 1. Staff need a way to correct a fat-fingered bracket (wrong problem id,
-///    wrong seed order, wrong timing) before or even after play has begun,
-///    without restarting the whole contest. Rejecting outright would leave
-///    no recovery path.
-/// 2. A pacing value (`xiaoju_seconds`) rewritten here can no longer
-///    silently reconfigure an ALREADY-RUNNING match: `judge::open_xiaoju`
-///    snapshots the live `setup.xiaoju_seconds` into that match's own
-///    `MatchState::xiaoju_seconds` the moment its first 小局 actually opens,
-///    and uses that pinned per-match value for every subsequent 小局,
-///    ignoring later changes to the shared `Setup` document. A match that
-///    has NOT opened its first 小局 yet (still `Pending`/`Ordering`) has
-///    nothing pinned yet, so it correctly picks up a corrected value. See
-///    `MatchState::xiaoju_seconds`'s doc comment and the QA regression test
-///    `defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing`.
-///
-/// This pinning is deliberately scoped to `xiaoju_seconds` only, the one
-/// field the QA suite concretely exercises. `escalation_grace_seconds` and
-/// each round's `tiebreak` list are still read LIVE from the shared `Setup`
-/// document by `judge.rs` on every call and share the same theoretical
-/// exposure to a corrective second `/setup` call reaching a match already
-/// past the point that value started mattering (e.g. a re-ordered tiebreak
-/// list reshuffling which problem an in-progress 附加赛 advances to next).
-/// That is a known, out-of-scope residual, not a defect fixed here -- see
-/// the QA sweep report.
-///
-/// Round 1's MATCH documents themselves are unaffected by a second call in
-/// a different way: `storage::create_match_if_both_slots_filled` uses a
-/// create-only compare-and-set, so re-seeding slots for a round that
-/// already has matches created is a no-op for those matches.
+/// Staff may correct the stage setup before or during a contest. Regular and
+/// tiebreak durations are pinned when a match opens its first game, so a setup
+/// correction affects only matches that have not started. Breaks and tiebreak
+/// problem lists remain live. Existing match documents are create-only, so
+/// re-seeding does not rewrite matches that have already been created.
 pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
     let contest_id: i32 = req.param("contest_id")?;
     let info = contest::check_access(host, req, contest_id)?;
@@ -172,8 +162,6 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let setup = Setup {
         rounds: body.rounds,
-        xiaoju_seconds: body.xiaoju_seconds,
-        round_intermission_seconds: body.round_intermission_seconds,
         penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
     };
@@ -230,25 +218,35 @@ mod tests {
                     group_a: [101, 102, 103],
                     group_b: [111, 112, 113],
                     tiebreak: vec![119],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 0,
                 },
                 RoundDef {
                     group_a: [201, 202, 203],
                     group_b: [211, 212, 213],
                     tiebreak: vec![219],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 600,
                 },
                 RoundDef {
                     group_a: [301, 302, 303],
                     group_b: [311, 312, 313],
                     tiebreak: vec![319],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 600,
                 },
                 RoundDef {
                     group_a: [401, 402, 403],
                     group_b: [411, 412, 413],
                     tiebreak: vec![419],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 600,
                 },
             ],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         }
@@ -306,9 +304,94 @@ mod tests {
     #[test]
     fn rejects_a_non_positive_xiaoju_duration() {
         let mut setup = valid_setup();
-        setup.xiaoju_seconds = 0;
+        setup.rounds[0].xiaoju_seconds = 0;
         let err = validate_setup(&setup, &valid_seeds()).unwrap_err();
         assert!(err.contains("xiaoju_seconds"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_invalid_judge_wait_and_allows_immediate_escalation() {
+        let mut setup = valid_setup();
+        for seconds in [-1, i64::MAX] {
+            setup.escalation_grace_seconds = seconds;
+            assert!(
+                validate_setup(&setup, &valid_seeds())
+                    .unwrap_err()
+                    .contains("escalation_grace_seconds")
+            );
+        }
+        setup.escalation_grace_seconds = 0;
+        assert!(validate_setup(&setup, &valid_seeds()).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_stage_durations_and_breaks() {
+        for stage in 0..4 {
+            for seconds in [0, -1, i64::MAX] {
+                let mut setup = valid_setup();
+                setup.rounds[stage].tiebreak_seconds = seconds;
+                assert!(
+                    validate_setup(&setup, &valid_seeds())
+                        .unwrap_err()
+                        .contains("tiebreak_seconds")
+                );
+                setup.rounds[stage].tiebreak_seconds = 60;
+                setup.rounds[stage].xiaoju_seconds = seconds;
+                assert!(
+                    validate_setup(&setup, &valid_seeds())
+                        .unwrap_err()
+                        .contains("xiaoju_seconds")
+                );
+            }
+            for seconds in [-1, i64::MAX] {
+                let mut setup = valid_setup();
+                setup.rounds[stage].break_before_seconds = seconds;
+                assert!(
+                    validate_setup(&setup, &valid_seeds())
+                        .unwrap_err()
+                        .contains("break_before_seconds")
+                );
+            }
+        }
+        let mut setup = valid_setup();
+        setup.rounds[0].break_before_seconds = 1;
+        assert!(validate_setup(&setup, &valid_seeds()).is_err());
+        for (i, stage) in setup.rounds.iter_mut().enumerate() {
+            stage.xiaoju_seconds = 60 + i as i64 * 30;
+            stage.tiebreak_seconds = 120 + i as i64 * 30;
+            stage.break_before_seconds = i as i64 * 60;
+        }
+        assert!(validate_setup(&setup, &valid_seeds()).is_ok());
+    }
+
+    #[test]
+    fn setup_requires_stage_timings_and_rejects_removed_global_settings() {
+        let request = manage_request(7).body.unwrap();
+        for field in ["xiaoju_seconds", "tiebreak_seconds", "break_before_seconds"] {
+            for stage in 0..4 {
+                let mut missing = request.clone();
+                missing["rounds"][stage]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+                assert!(
+                    serde_json::from_value::<SetupRequest>(missing)
+                        .unwrap_err()
+                        .to_string()
+                        .contains(field)
+                );
+            }
+        }
+        for field in ["xiaoju_seconds", "round_intermission_seconds"] {
+            let mut obsolete = request.clone();
+            obsolete[field] = serde_json::json!(600);
+            assert!(
+                serde_json::from_value::<SetupRequest>(obsolete)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unknown field")
+            );
+        }
     }
 
     #[test]
@@ -346,8 +429,6 @@ mod tests {
             headers: HashMap::new(),
             body: Some(serde_json::json!({
                 "rounds": setup.rounds,
-                "xiaoju_seconds": setup.xiaoju_seconds,
-                "round_intermission_seconds": setup.round_intermission_seconds,
                 "seeds": valid_seeds(),
             })),
             auth: Some(PluginHttpAuth {

@@ -1,6 +1,14 @@
 use broccoli_server_sdk::types::sanitize_text_field;
 use serde_json::{Map, Value};
 
+/// Read the opaque text exposed by plugin storage, including existing JSON values.
+pub fn plugin_storage_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
 pub fn sanitize_db_text(value: impl AsRef<str>) -> String {
     sanitize_text_field(value.as_ref()).into_owned()
 }

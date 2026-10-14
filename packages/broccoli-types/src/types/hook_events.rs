@@ -12,6 +12,7 @@ pub struct BeforeSubmissionEvent {
     pub contest_id: Option<i32>,
     pub language: String,
     pub file_count: usize,
+    pub contest_type: String,
 }
 
 impl HookEvent for BeforeSubmissionEvent {
@@ -59,6 +60,7 @@ mod tests {
             problem_id: 12,
             contest_id: Some(3),
             language: "cpp".into(),
+            contest_type: "example".into(),
             file_count: 1,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -76,6 +78,7 @@ mod tests {
             problem_id: 2,
             contest_id: None,
             language: "py".into(),
+            contest_type: "example".into(),
             file_count: 2,
         };
         let json = serde_json::to_value(&event).unwrap();

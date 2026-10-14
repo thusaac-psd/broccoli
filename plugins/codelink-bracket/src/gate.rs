@@ -1,4 +1,4 @@
-//! `[[server.hooks]] topic = "before_submission" scope = "resource"` --
+//! `[[server.hooks]] topic = "before_submission" scope = "global"` --
 //! reject a submission unless it targets the submitter's OWN current 小局
 //! problem (or the active 附加赛 problem) in a live match.
 //!
@@ -18,22 +18,14 @@
 //! problem id directly, bypassing whatever the UI shows. This gate is the
 //! enforcement point, independent of visibility.
 //!
-//! The host runs this hook for every submission to a contest of this
-//! plugin's own type, with no per-contest switch (see
-//! `hooks::resource_enablements` in the server). It is never asked about
-//! practice submissions or other formats' contests.
+//! The global hook passes unrelated submissions and protects bracket problems
+//! from submissions through practice or a different contest format. All of
+//! those restrictions are owned here, rather than inferred by the host.
 
 use crate::model::MatchPhase;
 
-// See `visibility.rs`'s identical comment: these imports are used only by
-// the host wiring below, which is gated `#[cfg(any(target_arch = "wasm32",
-// test))]` -- an ungated import here would be flagged unused by a plain
-// (non-wasm32, non-test) `cargo build`/`clippy` pass.
-#[cfg(any(target_arch = "wasm32", test))]
 use crate::model::{MatchState, RoundDef};
-#[cfg(any(target_arch = "wasm32", test))]
 use crate::storage;
-#[cfg(any(target_arch = "wasm32", test))]
 use broccoli_server_sdk::prelude::*;
 
 /// Everything [`check`] needs about ONE match to decide whether `viewer` may
@@ -101,7 +93,6 @@ impl Rejection {
     /// the problem is not part of this bracket, or it belongs to a round the
     /// viewer never played -- e.g. an eliminated player probing a later
     /// round's problem id directly).
-    #[cfg(any(target_arch = "wasm32", test))]
     fn not_in_match() -> Self {
         Self::new(
             "NOT_IN_MATCH",
@@ -116,7 +107,6 @@ impl Rejection {
     /// wording ("has not started") only names the former, but the latter is
     /// just as much "not open for submission right now" and the plan does
     /// not allocate it a fifth code.
-    #[cfg(any(target_arch = "wasm32", test))]
     fn match_not_started() -> Self {
         Self::new(
             "MATCH_NOT_STARTED",
@@ -170,7 +160,6 @@ pub fn check(ctx: &GateCtx, viewer: i32, problem_id: i32) -> Result<(), Rejectio
 
 /// Build a [`GateCtx`] from a real match and the `RoundDef` that owns it.
 /// Mirrors `visibility.rs`'s `ctx_from_match`.
-#[cfg(any(target_arch = "wasm32", test))]
 fn gate_ctx_from_match(m: &MatchState, round_def: &RoundDef) -> GateCtx {
     let current = m.xiaoju.last();
     GateCtx {
@@ -197,7 +186,6 @@ fn gate_ctx_from_match(m: &MatchState, round_def: &RoundDef) -> GateCtx {
 /// case for a submission gate, unlike visibility's "no opinion" `Allow`
 /// default: a gate that cannot positively confirm the four conditions must
 /// not let the submission through.
-#[cfg(any(target_arch = "wasm32", test))]
 fn resolve_rejection(
     host: &Host,
     event: &BeforeSubmissionEvent,
@@ -271,19 +259,28 @@ fn resolve_rejection(
         )));
     }
     Ok(Ok(SubmissionAdmission {
-        state_key,
-        scope_key: crate::feedback::game_scope(
-            contest_id,
-            storage::match_id_for(m.round, m.pos),
-            game.index,
-        ),
-        expected_state,
-        delay_seconds,
-        deadline_ms,
+        guard: SubmissionStorageGuard {
+            key: state_key.clone(),
+            expected_value: expected_state,
+        },
+        feedback_key: state_key,
+        metadata: serde_json::to_value(crate::feedback::AdmissionMetadata {
+            scope_key: crate::feedback::game_scope(
+                contest_id,
+                storage::match_id_for(m.round, m.pos),
+                game.index,
+            ),
+            delay_seconds,
+            effective_at_us: None,
+        })?,
+        slot: Some(SubmissionSlot {
+            key: crate::feedback::player_slot(contest_id, event.user_id),
+            generation: feedback.slot_generation,
+        }),
+        latest_arrival_ms: Some(deadline_ms.saturating_sub(delay_seconds.saturating_mul(1000))),
     }))
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
 fn check_submission_response(
     host: &Host,
     event: &BeforeSubmissionEvent,
@@ -303,12 +300,42 @@ fn check_submission_response(
     }
 }
 
+pub fn dispatch_submission_gate(
+    host: &Host,
+    event: &BeforeSubmissionEvent,
+) -> Result<HookResponse, SdkError> {
+    if event.contest_id.is_some() && event.contest_type == "codelink-bracket" {
+        return check_submission_response(host, event);
+    }
+    let blocked = if event.contest_type == "codelink-bracket" {
+        true
+    } else {
+        let mut p = Params::new();
+        let sql = format!("SELECT c.id FROM contest c JOIN contest_problem cp ON cp.contest_id = c.id
+            WHERE cp.problem_id = {} AND c.contest_type = 'codelink-bracket'
+            AND c.deleted_at IS NULL AND (c.end_time IS NULL OR c.end_time > clock_timestamp()) LIMIT 1", p.bind(event.problem_id));
+        host.db
+            .query_one_with_args::<serde_json::Value>(&sql, &p.into_args())?
+            .is_some()
+    };
+    Ok(if blocked {
+        HookResponse::reject(
+            "CONTEST_SUBMISSION_REQUIRED",
+            "Submit this problem through its bracket contest.",
+            400,
+            None,
+        )
+    } else {
+        HookResponse::pass()
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 #[extism_pdk::plugin_fn]
 pub fn check_submission(input: String) -> extism_pdk::FnResult<String> {
     let host = Host::new();
     let event: BeforeSubmissionEvent = serde_json::from_str(&input)?;
-    let response = check_submission_response(&host, &event)?;
+    let response = dispatch_submission_gate(&host, &event)?;
     Ok(serde_json::to_string(&response)?)
 }
 
@@ -340,6 +367,29 @@ mod tests {
             current_xiaoju_decided: true,
             tiebreak_problem: None,
         }
+    }
+
+    #[test]
+    fn global_gate_passes_unrelated_formats_and_blocks_alternate_submission_contexts() {
+        let host = Host::mock();
+        let mut request = event(10, 101, Some(9));
+        request.contest_type = "other-format".into();
+        assert!(matches!(
+            dispatch_submission_gate(&host, &request).unwrap(),
+            HookResponse::Pass
+        ));
+        for contest_id in [None, Some(9)] {
+            request.contest_id = contest_id;
+            host.db.queue_query_result(serde_json::json!([{"id":7}]));
+            assert!(
+                matches!(dispatch_submission_gate(&host,&request).unwrap(),HookResponse::Reject {code,..} if code == "CONTEST_SUBMISSION_REQUIRED")
+            );
+        }
+        request.contest_type = "codelink-bracket".into();
+        request.contest_id = None;
+        assert!(
+            matches!(dispatch_submission_gate(&host,&request).unwrap(),HookResponse::Reject {code,..} if code == "CONTEST_SUBMISSION_REQUIRED")
+        );
     }
 
     #[test]
@@ -378,9 +428,10 @@ mod tests {
                 group_a: [101, 102, 103],
                 group_b: [201, 202, 203],
                 tiebreak: vec![319],
+                xiaoju_seconds: 1_800,
+                tiebreak_seconds: 1_800,
+                break_before_seconds: 0,
             }],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         }
@@ -436,6 +487,7 @@ mod tests {
             problem_id,
             contest_id,
             language: "cpp".to_string(),
+            contest_type: "codelink-bracket".into(),
             file_count: 1,
         }
     }
@@ -526,7 +578,7 @@ mod tests {
             let admission = resolve_rejection(&host, &event(10, 103, Some(7)))
                 .unwrap()
                 .unwrap();
-            assert_eq!(admission.delay_seconds, seconds);
+            assert_eq!(admission.metadata["delay_seconds"], seconds);
         }
     }
 

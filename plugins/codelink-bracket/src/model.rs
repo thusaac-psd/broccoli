@@ -18,8 +18,6 @@ pub fn default_penalty_seconds() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Setup {
     pub rounds: Vec<RoundDef>,
-    pub xiaoju_seconds: i64,
-    pub round_intermission_seconds: i64,
     /// Delay added to subsequent submissions for each WA/TLE/MLE/RE in a
     /// game. Zero disables penalties; older setups retain the 20s default.
     #[serde(default = "default_penalty_seconds")]
@@ -39,8 +37,6 @@ impl Default for Setup {
     fn default() -> Self {
         Self {
             rounds: Vec::new(),
-            xiaoju_seconds: 0,
-            round_intermission_seconds: 0,
             penalty_seconds: default_penalty_seconds(),
             escalation_grace_seconds: default_escalation_grace_seconds(),
         }
@@ -60,6 +56,26 @@ pub struct RoundDef {
     pub group_a: [i32; 3],
     pub group_b: [i32; 3],
     pub tiebreak: Vec<i32>,
+    pub xiaoju_seconds: i64,
+    pub tiebreak_seconds: i64,
+    /// Wait after the last match of the preceding stage. Zero in round one.
+    pub break_before_seconds: i64,
+}
+
+/// Durations pinned when a match starts, including its later tiebreaks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameDurations {
+    pub xiaoju_seconds: i64,
+    pub tiebreak_seconds: i64,
+}
+
+impl RoundDef {
+    pub fn game_durations(&self) -> GameDurations {
+        GameDurations {
+            xiaoju_seconds: self.xiaoju_seconds,
+            tiebreak_seconds: self.tiebreak_seconds,
+        }
+    }
 }
 
 /// State of one bracket match between `player_a` and `player_b`.
@@ -78,12 +94,6 @@ pub struct RoundDef {
 /// the test that asserts the direction explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct MatchState {
-    /// Bumped by atomic host admission so concurrent decisions retry their CAS.
-    #[serde(default)]
-    pub admission_revision: u64,
-    /// Reject stale hooks from this player even after their pending slot clears.
-    #[serde(default)]
-    pub admission_by_user: std::collections::BTreeMap<i32, u64>,
     pub round: u8,
     pub pos: u8,
     pub player_a: i32,
@@ -128,23 +138,9 @@ pub struct MatchState {
     /// field existed (`#[serde(default)]`).
     #[serde(default)]
     pub adjudication_reason: Option<AdjudicationReason>,
-    /// The 小局 duration (seconds) this match's FIRST 小局 opened under,
-    /// pinned once by `judge::open_xiaoju` the moment it actually opens (see
-    /// that function's doc comment) so a LATER `/setup` call rewriting the
-    /// shared `Setup` document's `xiaoju_seconds` cannot silently
-    /// reconfigure an already-running match's remaining 小局.
-    ///
-    /// `0` means "not yet pinned": both a match still in `MatchPhase::
-    /// Ordering`/`Pending` (which has never called `open_xiaoju`) and any
-    /// older persisted document / test fixture built without this field set
-    /// fall back to reading `Setup::xiaoju_seconds` live, exactly the
-    /// pre-fix behaviour -- see `setup::handle_setup`'s doc comment for why
-    /// a second `/setup` call is accepted rather than rejected outright.
-    /// `#[serde(default)]` so an older persisted `MatchState` document
-    /// (written before this field existed) deserializes with `0`, i.e. the
-    /// same "not yet pinned" fallback, rather than failing to deserialize.
-    #[serde(default)]
-    pub xiaoju_seconds: i64,
+    /// None until the first game opens. Both durations then remain fixed for
+    /// this match, even if staff correct the stage setup during play.
+    pub game_durations: Option<GameDurations>,
 }
 
 /// State of one 小局 (the best-of-one sub-match on a single problem).

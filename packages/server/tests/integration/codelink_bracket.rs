@@ -242,9 +242,10 @@ pub(crate) fn setup_body(rounds: &[RoundProblems], seeds: &[i32]) -> Value {
             "group_a": r.group_a,
             "group_b": r.group_b,
             "tiebreak": [r.tiebreak],
+            "xiaoju_seconds": XIAOJU_SECONDS,
+            "tiebreak_seconds": XIAOJU_SECONDS,
+            "break_before_seconds": 0,
         })).collect::<Vec<_>>(),
-        "xiaoju_seconds": XIAOJU_SECONDS,
-        "round_intermission_seconds": 0,
         "seeds": seeds,
     })
 }

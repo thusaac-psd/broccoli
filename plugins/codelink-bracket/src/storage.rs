@@ -257,10 +257,7 @@ mod tests {
     #[test]
     fn load_setup_returns_the_persisted_document() {
         let host = Host::mock();
-        let setup = Setup {
-            xiaoju_seconds: 1_800,
-            ..Default::default()
-        };
+        let setup = setup_with_round_1();
         host.storage
             .set(&[(
                 setup_key(7).as_str(),
@@ -313,13 +310,14 @@ mod tests {
                     group_a: [1, 2, 3],
                     group_b: [4, 5, 6],
                     tiebreak: vec![7],
+                    xiaoju_seconds: 1_800,
+                    tiebreak_seconds: 1_800,
+                    break_before_seconds: 0,
                 },
                 crate::model::RoundDef::default(),
                 crate::model::RoundDef::default(),
                 crate::model::RoundDef::default(),
             ],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 600,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         }

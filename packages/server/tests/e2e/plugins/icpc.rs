@@ -62,6 +62,7 @@ async fn seed_accepted_icpc_submission(
     plugin_storage::ActiveModel {
         plugin_id: Set("icpc".into()),
         collection: Set("default".into()),
+        revision: Set(0),
         key: Set(format!(
             "standings:{contest_id}:{}:{problem_id}",
             user_model.id
@@ -155,6 +156,7 @@ async fn seed_icpc_standings_state(
     plugin_storage::ActiveModel {
         plugin_id: Set("icpc".into()),
         collection: Set("default".into()),
+        revision: Set(0),
         key: Set(format!("standings:{contest_id}:{user_id}:{problem_id}")),
         data: Set(json!(
             serde_json::to_string(&json!({

@@ -11,7 +11,7 @@
 //! (not importable from `codelink_bracket_qa.rs` -- that one is private to
 //! its module) with one difference that matters for this file's scenarios:
 //! `setup_fixture_with_timing` lets each test pick its own
-//! `xiaoju_seconds` / `round_intermission_seconds` / `escalation_grace_seconds`
+//! `xiaoju_seconds` / `break_before_seconds` / `escalation_grace_seconds`
 //! rather than hard-coding them, since several scenarios here specifically
 //! need those knobs (a short escalation grace period so the AwaitingJudge
 //! test does not take 120s; a non-zero intermission to probe the round-2
@@ -57,17 +57,18 @@ fn full_setup_body(
     rounds: &[RoundProblems],
     seeds: &[i32],
     xiaoju_seconds: i64,
-    round_intermission_seconds: i64,
+    break_before_seconds: i64,
     escalation_grace_seconds: i64,
 ) -> Value {
     json!({
-        "rounds": rounds.iter().map(|r| json!({
+        "rounds": rounds.iter().enumerate().map(|(i, r)| json!({
             "group_a": r.group_a,
             "group_b": r.group_b,
             "tiebreak": [r.tiebreak],
+            "xiaoju_seconds": xiaoju_seconds,
+            "tiebreak_seconds": xiaoju_seconds,
+            "break_before_seconds": if i == 0 { 0 } else { break_before_seconds },
         })).collect::<Vec<_>>(),
-        "xiaoju_seconds": xiaoju_seconds,
-        "round_intermission_seconds": round_intermission_seconds,
         "escalation_grace_seconds": escalation_grace_seconds,
         "seeds": seeds,
     })
@@ -75,7 +76,7 @@ fn full_setup_body(
 
 async fn setup_fixture_with_timing(
     xiaoju_seconds: i64,
-    round_intermission_seconds: i64,
+    break_before_seconds: i64,
     escalation_grace_seconds: i64,
 ) -> Fixture {
     let (app, plugins_tmp) = spawn_bracket_app().await;
@@ -134,7 +135,7 @@ async fn setup_fixture_with_timing(
                 &rounds,
                 &seeds,
                 xiaoju_seconds,
-                round_intermission_seconds,
+                break_before_seconds,
                 escalation_grace_seconds,
             ),
             &staff_token,
@@ -872,10 +873,21 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 #[tokio::test]
 async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
     let fx = setup_fixture_with_timing(3, 0, 120).await;
+    let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
+    let mut initial = full_setup_body(&fx.rounds, &seeds, 3, 0, 120);
+    initial["rounds"][0]["tiebreak_seconds"] = json!(7);
+    let configured = fx
+        .app
+        .post_with_token(
+            &bracket_route(fx.contest_id, "/setup"),
+            &initial,
+            &fx.staff_token,
+        )
+        .await;
+    assert_eq!(configured.status, 200, "{}", configured.text);
     order_match_0(&fx).await;
     start_match_0(&fx).await;
 
-    let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
     let res = fx
         .app
         .post_with_token(
@@ -890,7 +902,7 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
     let prob_a = fx.rounds[0].group_a[0];
     let res = submit(&fx.app, fx.contest_id, prob_a, &a.token, "ACCEPT").await;
     assert_eq!(res.status, 201, "A's submission failed: {}", res.text);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_published(&fx, res.id(), &a.token).await;
 
     let view = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
     assert_eq!(
@@ -912,6 +924,31 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
          meaning the second /setup call's xiaoju_seconds=300 silently applied to a live \
          match mid-play (view: {view})",
         deadline - opened_at
+    );
+
+    let b = &fx.players[1];
+    let reply = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_b[1],
+        &b.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(reply.status, 201, "{}", reply.text);
+    wait_published(&fx, reply.id(), &b.token).await;
+    let third = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(third["current_xiaoju_index"], 2);
+    sleep_until_ms(third["current_xiaoju_deadline_ms"].as_i64().unwrap() + 150).await;
+    assert_eq!(force_decide(&fx, 0, None).await.status, 200);
+    let tiebreak = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(tiebreak["state"], "tiebreak", "{tiebreak}");
+    assert_eq!(tiebreak["current_xiaoju_index"], 3);
+    assert_eq!(
+        tiebreak["current_xiaoju_deadline_ms"].as_i64().unwrap()
+            - tiebreak["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+        7_000,
+        "the tiebreak duration is pinned when the match starts, before the setup correction",
     );
 }
 
@@ -1077,16 +1114,7 @@ async fn setup_rejects_fewer_than_16_seeds() {
     let res = app
         .post_with_token(
             &bracket_route(contest_id, "/setup"),
-            &json!({
-                "rounds": rounds.iter().map(|r| json!({
-                    "group_a": r.group_a,
-                    "group_b": r.group_b,
-                    "tiebreak": [r.tiebreak],
-                })).collect::<Vec<_>>(),
-                "xiaoju_seconds": 3,
-                "round_intermission_seconds": 0,
-                "seeds": seeds,
-            }),
+            &full_setup_body(&rounds, &seeds, 3, 0, 120),
             &staff_token,
         )
         .await;
@@ -1153,22 +1181,10 @@ async fn setup_rejects_an_empty_tiebreak_list() {
     let (app, _tmp, staff_token, contest_id, rounds, players) =
         contest_and_rounds_for_setup_probe("Empty Tiebreak QA").await;
     let seeds: Vec<i32> = players.iter().map(|p| p.id).collect();
-    let mut rounds_json: Vec<Value> = rounds
-        .iter()
-        .map(|r| json!({"group_a": r.group_a, "group_b": r.group_b, "tiebreak": [r.tiebreak]}))
-        .collect();
-    rounds_json[0]["tiebreak"] = json!([]);
+    let mut body = full_setup_body(&rounds, &seeds, 3, 0, 120);
+    body["rounds"][0]["tiebreak"] = json!([]);
     let res = app
-        .post_with_token(
-            &bracket_route(contest_id, "/setup"),
-            &json!({
-                "rounds": rounds_json,
-                "xiaoju_seconds": 3,
-                "round_intermission_seconds": 0,
-                "seeds": seeds,
-            }),
-            &staff_token,
-        )
+        .post_with_token(&bracket_route(contest_id, "/setup"), &body, &staff_token)
         .await;
     assert_eq!(
         res.status, 400,
@@ -1187,6 +1203,28 @@ async fn setup_rejects_an_empty_tiebreak_list() {
 #[tokio::test]
 async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
     let fx = setup_fixture_with_timing(3, 5, 120).await;
+    let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
+    let mut body = full_setup_body(&fx.rounds, &seeds, 3, 5, 120);
+    body["rounds"][1]["xiaoju_seconds"] = json!(11);
+    body["rounds"][1]["tiebreak_seconds"] = json!(19);
+    body["rounds"][2]["break_before_seconds"] = json!(60);
+    let updated = fx
+        .app
+        .post_with_token(
+            &bracket_route(fx.contest_id, "/setup"),
+            &body,
+            &fx.staff_token,
+        )
+        .await;
+    assert_eq!(updated.status, 200, "{}", updated.text);
+    order_match(&fx, 0, &fx.rounds[0], &fx.players[0], &fx.players[1]).await;
+    let first = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(
+        first["current_xiaoju_deadline_ms"].as_i64().unwrap()
+            - first["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+        3_000
+    );
+
     for pos in 0u8..2 {
         let res = force_decide(&fx, pos, Some(fx.players[usize::from(pos) * 2].id)).await;
         assert_eq!(res.status, 200, "{}", res.text);
@@ -1225,6 +1263,12 @@ async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
     }
     order_match(&fx, 8, &fx.rounds[1], &fx.players[0], &fx.players[2]).await;
     expect_auto_started(&fx, 8).await;
+    let second = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
+    assert_eq!(
+        second["current_xiaoju_deadline_ms"].as_i64().unwrap()
+            - second["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+        11_000
+    );
 }
 
 // Penalties and feedback use real HTTP submissions and the real WASM plugin.
@@ -1314,6 +1358,19 @@ async fn configured_penalties_control_admission_and_player_feedback_including_ze
         let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
         let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
         body["penalty_seconds"] = json!(seconds);
+        for invalid_grace in [-1, i64::MAX] {
+            body["escalation_grace_seconds"] = json!(invalid_grace);
+            let invalid = fx
+                .app
+                .post_with_token(
+                    &bracket_route(fx.contest_id, "/setup"),
+                    &body,
+                    &fx.staff_token,
+                )
+                .await;
+            assert_eq!(invalid.status, 400, "{}", invalid.text);
+        }
+        body["escalation_grace_seconds"] = json!(120);
         let configured = fx
             .app
             .post_with_token(
@@ -1354,7 +1411,9 @@ async fn configured_penalties_control_admission_and_player_feedback_including_ze
         let raw = wait_raw_judgement(&fx, accepted.id()).await;
         let feedback = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
-            "SELECT delay_seconds, effective_at_us FROM submission_feedback WHERE submission_id = $1",
+            "SELECT (f.metadata->>'delay_seconds')::bigint AS delay_seconds,
+            COALESCE((f.metadata->>'effective_at_us')::bigint, (EXTRACT(EPOCH FROM s.created_at)*1000000)::bigint + (f.metadata->>'delay_seconds')::bigint*1000000) AS effective_at_us
+            FROM submission_feedback f JOIN submission s ON s.id=f.submission_id WHERE submission_id = $1",
             [accepted.id().into()],
         )).await.unwrap().unwrap();
         assert_eq!(
@@ -1411,7 +1470,9 @@ async fn penalty_delays_ac_allows_opponent_to_win_and_resets_next_game() {
     assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
     let feedback = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
         sea_orm::DbBackend::Postgres,
-        "SELECT delay_seconds, effective_at_us FROM submission_feedback WHERE submission_id = $1",
+        "SELECT (f.metadata->>'delay_seconds')::bigint AS delay_seconds,
+            COALESCE((f.metadata->>'effective_at_us')::bigint, (EXTRACT(EPOCH FROM s.created_at)*1000000)::bigint + (f.metadata->>'delay_seconds')::bigint*1000000) AS effective_at_us
+            FROM submission_feedback f JOIN submission s ON s.id=f.submission_id WHERE submission_id = $1",
         [accepted.id().into()],
     )).await.unwrap().unwrap();
     assert_eq!(feedback.try_get::<i64>("", "delay_seconds").unwrap(), 20);
@@ -1510,7 +1571,7 @@ async fn slow_earlier_judge_withholds_only_correct_opponent_results() {
         wait_raw_judgement(&fx, accepted.id()).await;
         // Remove B's test-induced penalty while keeping A as an earlier blocker.
         fx.app.db.execute_raw(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
-            "UPDATE submission_feedback SET effective_at_us = (SELECT (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint FROM submission WHERE id = $1) WHERE submission_id = $1",
+            "UPDATE submission_feedback SET metadata = jsonb_set(metadata,'{effective_at_us}',to_jsonb((SELECT (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint FROM submission WHERE id = $1))) WHERE submission_id = $1",
             [accepted.id().into()],
         )).await.unwrap();
         assert_eq!(force_decide(&fx, 0, None).await.status, 200);
@@ -1593,7 +1654,7 @@ async fn four_errors_accumulate_and_compile_errors_do_not_add_penalty() {
         .db
         .query_one_raw(sea_orm::Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
-            "SELECT delay_seconds FROM submission_feedback WHERE submission_id = $1",
+            "SELECT (metadata->>'delay_seconds')::bigint AS delay_seconds FROM submission_feedback WHERE submission_id = $1",
             [accepted.id().into()],
         ))
         .await
@@ -1620,11 +1681,17 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
     .unwrap()
     .unwrap();
     let admission = SubmissionAdmission {
-        state_key,
-        scope_key: format!("game:{}:0:0", fx.contest_id),
-        expected_state: guard.data.as_str().unwrap().to_string(),
-        delay_seconds: 0,
-        deadline_ms: Utc::now().timestamp_millis() + 120_000,
+        guard: broccoli_server_sdk::types::SubmissionStorageGuard {
+            key: state_key.clone(),
+            expected_value: guard.data.as_str().unwrap().to_string(),
+        },
+        feedback_key: state_key,
+        metadata: json!({"scope_key":format!("game:{}:0:0",fx.contest_id),"delay_seconds":0,"effective_at_us":null}),
+        slot: Some(broccoli_server_sdk::types::SubmissionSlot {
+            key: format!("{}:{}", fx.contest_id, fx.players[0].id),
+            generation: None,
+        }),
+        latest_arrival_ms: Some(Utc::now().timestamp_millis() + 120_000),
     };
     let new = submission::ActiveModel {
         user_id: Set(fx.players[0].id),
@@ -1638,8 +1705,7 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
         ..Default::default()
     };
     let mut too_late = admission.clone();
-    too_late.delay_seconds = 20;
-    too_late.deadline_ms = Utc::now().timestamp_millis() + 10_000;
+    too_late.latest_arrival_ms = Some(Utc::now().timestamp_millis() - 10_000);
     let rejected = server::services::submission_feedback::insert_admitted(
         &fx.app.state,
         new.clone(),
@@ -1824,4 +1890,222 @@ async fn staff_force_decision_retires_stuck_admissions_and_unblocks_the_next_sta
     );
     let closed = get_match(&fx.app, fx.contest_id, 0, &a.token).await;
     assert_eq!(closed["winner"], a.id);
+}
+
+#[tokio::test]
+async fn feedback_publication_failure_retries_after_committing_the_match() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    let a = &fx.players[0];
+    let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
+    let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
+    body["penalty_seconds"] = json!(3);
+    assert_eq!(
+        fx.app
+            .post_with_token(
+                &bracket_route(fx.contest_id, "/setup"),
+                &body,
+                &fx.staff_token
+            )
+            .await
+            .status,
+        200
+    );
+    order_match_0(&fx).await;
+    for index in 0..2 {
+        let accepted = submit(
+            &fx.app,
+            fx.contest_id,
+            fx.rounds[0].group_a[index],
+            &a.token,
+            "ACCEPT",
+        )
+        .await;
+        assert_eq!(accepted.status, 201, "{}", accepted.text);
+        wait_published(&fx, accepted.id(), &a.token).await;
+    }
+    finish_first_stage(&fx.app, fx.contest_id, &fx.staff_token, &fx.players, 1).await;
+    let wrong = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[2],
+        &a.token,
+        "WRONG",
+    )
+    .await;
+    assert_eq!(wrong.status, 201, "{}", wrong.text);
+    wait_published(&fx, wrong.id(), &a.token).await;
+    let accepted = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[2],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(accepted.status, 201, "{}", accepted.text);
+    let raw = wait_raw_judgement(&fx, accepted.id()).await;
+    assert_eq!(raw.verdict, Some(Verdict::Accepted));
+    let effective_at_ms = raw.created_at.timestamp_millis() + 3_000;
+    fx.app
+        .db
+        .execute_unprepared(&format!(
+            "CREATE FUNCTION reject_feedback_publication() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.submission_id = {} AND NEW.outcome <> 'pending' THEN
+             RAISE EXCEPTION 'injected publication failure';
+         END IF; RETURN NEW; END $$;
+         CREATE TRIGGER reject_feedback_publication BEFORE UPDATE OF outcome ON submission_feedback
+         FOR EACH ROW EXECUTE FUNCTION reject_feedback_publication()",
+            accepted.id()
+        ))
+        .await
+        .unwrap();
+    // A single failure would exhaust this dispatcher's delivery budget without
+    // the replacement wakeup and claim-aware cleanup.
+    let config = TimerConfig {
+        max_attempts: 1,
+        ..Default::default()
+    };
+    let key = format!("xiaoju:{}:0:2:effective:{}", fx.contest_id, accepted.id());
+    for attempt in 0..2 {
+        sleep_until_ms(effective_at_ms + attempt * 1_000 + 150).await;
+        tick_once(&fx.app.state, &config).await.unwrap();
+        let committed = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+        assert_eq!(committed["state"], "decided", "{committed}");
+        assert_eq!(committed["winner"], a.id);
+        assert_eq!(committed["score_a"], 3);
+        let public = fx
+            .app
+            .get_with_token(&routes::submission(accepted.id()), &a.token)
+            .await;
+        assert_eq!(public.body["status"], "Running", "{}", public.text);
+        let retry = fx.app.db.query_one_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            "SELECT attempts, claimed_at FROM plugin_timer WHERE plugin_id = 'codelink-bracket' AND key = $1",
+            [key.clone().into()],
+        )).await.unwrap().expect("publication retry must remain durable");
+        assert_eq!(retry.try_get::<i32>("", "attempts").unwrap(), 0);
+        assert!(
+            retry
+                .try_get::<Option<chrono::DateTime<Utc>>>("", "claimed_at")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            fx.app
+                .get_with_token(&bracket_route(fx.contest_id, "/matches/8"), &fx.staff_token)
+                .await
+                .status,
+            404
+        );
+    }
+    fx.app.db.execute_unprepared(
+        "DROP TRIGGER reject_feedback_publication ON submission_feedback; DROP FUNCTION reject_feedback_publication()"
+    ).await.unwrap();
+    sleep_until_ms(effective_at_ms + 2_150).await;
+    tick_once(&fx.app.state, &config).await.unwrap();
+    assert_eq!(
+        wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
+        "Accepted"
+    );
+    let next = get_match(&fx.app, fx.contest_id, 8, &fx.staff_token).await;
+    assert_eq!(next["state"], "ordering", "{next}");
+    order_match(&fx, 8, &fx.rounds[1], a, &fx.players[2]).await;
+    let next_submission = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[1].group_a[0],
+        &a.token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(
+        next_submission.status, 201,
+        "publication retry must release admission: {}",
+        next_submission.text
+    );
+}
+
+#[tokio::test]
+async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migration() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::plugin_storage;
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    let setup_key = format!("setup:{}", fx.contest_id);
+    let match_key = format!("match:{}:0", fx.contest_id);
+    for key in [&setup_key, &match_key] {
+        let row = plugin_storage::Entity::find_by_id((
+            "codelink-bracket".to_string(),
+            "default".to_string(),
+            key.clone(),
+        ))
+        .one(&fx.app.db)
+        .await
+        .unwrap()
+        .unwrap();
+        let mut document: Value = serde_json::from_str(row.data.as_str().unwrap()).unwrap();
+        if key == &setup_key {
+            document["xiaoju_seconds"] = json!(120);
+            document["round_intermission_seconds"] = json!(45);
+            for stage in document["rounds"].as_array_mut().unwrap() {
+                for field in ["xiaoju_seconds", "tiebreak_seconds", "break_before_seconds"] {
+                    stage.as_object_mut().unwrap().remove(field);
+                }
+            }
+        } else {
+            document.as_object_mut().unwrap().remove("game_durations");
+            document["xiaoju_seconds"] = json!(0);
+            document["admission_revision"] = json!(3);
+            document["admission_by_user"] = json!({});
+        }
+        let mut old: plugin_storage::ActiveModel = row.into();
+        // Both representations supported by the storage host API must migrate.
+        old.data = Set(if key == &setup_key {
+            json!(document.to_string())
+        } else {
+            document
+        });
+        old.update(&fx.app.db).await.unwrap();
+    }
+    plugin_storage::Entity::delete_many()
+        .filter(plugin_storage::Column::PluginId.eq("codelink-bracket"))
+        .filter(plugin_storage::Column::Key.eq("schema_version"))
+        .exec(&fx.app.db)
+        .await
+        .unwrap();
+    let admin = fx
+        .app
+        .create_user_with_role("migration_admin", "pass1234", "admin")
+        .await;
+    let reloaded = fx
+        .app
+        .post_with_token(
+            &format!(
+                "{}/reload",
+                routes::admin_plugin_details("codelink-bracket")
+            ),
+            &json!({}),
+            &admin,
+        )
+        .await;
+    assert_eq!(reloaded.status, 200, "{}", reloaded.text);
+    let setup = plugin_storage::Entity::find_by_id((
+        "codelink-bracket".to_string(),
+        "default".to_string(),
+        setup_key,
+    ))
+    .one(&fx.app.db)
+    .await
+    .unwrap()
+    .unwrap();
+    let setup: Value = serde_json::from_str(setup.data.as_str().unwrap()).unwrap();
+    assert_eq!(setup["rounds"][0]["break_before_seconds"], 0);
+    assert_eq!(setup["rounds"][1]["break_before_seconds"], 45);
+    assert_eq!(setup["rounds"][0]["xiaoju_seconds"], 120);
+    let migrated = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(migrated["state"], "ordering");
+    order_match_0(&fx).await;
+    assert_eq!(
+        get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await["state"],
+        "in_progress"
+    );
 }

@@ -541,6 +541,7 @@ pub async fn backfill_large_test_case_bodies(
     }
 
     plugin_storage::Entity::insert(plugin_storage::ActiveModel {
+        revision: Set(0),
         plugin_id: Set(SERVER_MIGRATION_PLUGIN_ID.to_string()),
         collection: Set(SERVER_MIGRATION_COLLECTION.to_string()),
         key: Set(LARGE_TEST_CASE_BODY_BACKFILL_KEY.to_string()),

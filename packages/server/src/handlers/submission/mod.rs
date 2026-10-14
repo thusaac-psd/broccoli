@@ -171,12 +171,6 @@ pub async fn create_submission(
         }
         None => problem.default_contest_type.clone(),
     };
-    crate::services::submission_feedback::require_standalone_allowed(
-        &state,
-        problem_id,
-        &contest_type,
-    )
-    .await?;
 
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
@@ -184,6 +178,7 @@ pub async fn create_submission(
         contest_id: None,
         language: payload.language.trim().to_string(),
         file_count: payload.files.len(),
+        contest_type: contest_type.clone(),
     };
     let enabled_plugins = hooks::resource_enablements(
         &state.db,
@@ -798,18 +793,19 @@ pub async fn create_contest_submission(
         Some(contest_id),
     )
     .await?;
+    let contest_type = required_contest_type(&contest_model)?;
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
         problem_id,
         contest_id: Some(contest_id),
         language: payload.language.trim().to_string(),
         file_count: payload.files.len(),
+        contest_type: contest_type.clone(),
     };
     let admission =
         dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins)).await?;
 
     let language = payload.language.trim().to_string();
-    let contest_type = required_contest_type(&contest_model)?;
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language.clone()),
@@ -833,7 +829,7 @@ pub async fn create_contest_submission(
         .get(&new_submission.contest_type.clone().unwrap())
         .cloned();
     let model = match (handler, admission) {
-        (Some(handler), Some(admission)) if handler.delayed_feedback => {
+        (Some(handler), Some(admission)) if handler.submission_admission => {
             crate::services::submission_feedback::insert_admitted(
                 &state,
                 new_submission,
@@ -842,7 +838,7 @@ pub async fn create_contest_submission(
             )
             .await?
         }
-        (Some(handler), None) if handler.delayed_feedback => {
+        (Some(handler), None) if handler.submission_admission => {
             return Err(AppError::Internal(
                 "Contest plugin did not provide submission admission".into(),
             ));

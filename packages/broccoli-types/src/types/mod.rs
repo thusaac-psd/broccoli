@@ -48,7 +48,7 @@ pub use persistence::{
 };
 pub use query::{ProblemCheckerInfo, TestCaseData, TestCaseRow};
 pub use submission::{OnSubmissionInput, OnSubmissionOutput, SourceFile};
-pub use submission_admission::SubmissionAdmission;
+pub use submission_admission::*;
 pub use verdict::Verdict;
 pub use visibility::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,

@@ -15,6 +15,9 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub data: Json,
 
+    #[sea_orm(default_value = 0)]
+    pub revision: i64,
+
     pub created_at: DateTimeUtc,
 }
 

@@ -21,7 +21,7 @@ fn registry_owning(contest_type: &str, plugin_id: &str) -> ContestTypeRegistry {
             plugin_id: plugin_id.to_string(),
             submission_fn: "handle_submission".into(),
             code_run_fn: "handle_code_run".into(),
-            delayed_feedback: false,
+            submission_admission: false,
         },
     );
     Arc::new(RwLock::new(map))

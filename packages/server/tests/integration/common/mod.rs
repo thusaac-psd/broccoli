@@ -789,7 +789,7 @@ impl TestApp {
                     plugin_id: "__test__".into(),
                     submission_fn: "noop".into(),
                     code_run_fn: "noop".into(),
-                    delayed_feedback: false,
+                    submission_admission: false,
                 },
             );
             let mut languages = language_resolver_registry.write().await;
@@ -883,7 +883,7 @@ impl TestApp {
                         plugin_id: "__test__".into(),
                         submission_fn: "noop".into(),
                         code_run_fn: "noop".into(),
-                        delayed_feedback: false,
+                        submission_admission: false,
                     },
                 );
             }

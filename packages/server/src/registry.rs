@@ -18,7 +18,7 @@ pub struct ContestTypeHandlers {
     pub plugin_id: String,
     pub submission_fn: String,
     pub code_run_fn: String,
-    pub delayed_feedback: bool,
+    pub submission_admission: bool,
 }
 
 pub struct BatchState<T> {
