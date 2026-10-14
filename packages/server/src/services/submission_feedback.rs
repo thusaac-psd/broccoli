@@ -1,20 +1,19 @@
-//! Durable contest feedback, separate from the judge/dispatcher lifecycle.
-use std::collections::HashMap;
-
-use broccoli_server_sdk::types::SubmissionAdmission;
-use chrono::{DateTime, Utc};
-use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DbBackend, EntityTrait, QuerySelect, Set, Statement,
-    TransactionTrait,
-};
-use serde_json::{Value, json};
-
+//! Atomic admission and durable, plugin-owned public feedback.
 use crate::entity::{plugin_storage, submission};
 use crate::error::AppError;
 use crate::state::AppState;
+use broccoli_server_sdk::types::{
+    SubmissionAdmission, SubmissionFeedbackPublication, SubmissionFeedbackQuery,
+    SubmissionFeedbackRecord, SubmissionFeedbackResult,
+};
+use chrono::{DateTime, Utc};
+use sea_orm::{
+    ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
+    QuerySelect, Set, Statement, TransactionTrait,
+};
+use serde_json::{Value, json};
+use std::collections::HashMap;
 
-/// Filtering and sorting must use the same public status as the response;
-/// otherwise `?status=Judged` reveals an AC that is still withheld.
 pub fn public_status(can_view_all: bool) -> sea_orm::sea_query::Expr {
     sea_orm::sea_query::Expr::cust(if can_view_all {
         "submission.status"
@@ -32,123 +31,40 @@ fn rejected(code: &str, message: &str) -> AppError {
     }
 }
 
-/// A context-free submission cannot participate in atomic contest admission.
-/// Also check linked contests: choosing a different contest type must not let
-/// a contestant use the judge to avoid penalties during a live match.
-pub async fn require_standalone_allowed(
-    state: &AppState,
-    problem_id: i32,
-    contest_type: &str,
-) -> Result<(), AppError> {
-    let types: Vec<String> = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .iter()
-        .filter(|(_, handler)| handler.delayed_feedback)
-        .map(|(name, _)| name.clone())
-        .collect();
-    if types.is_empty() {
-        return Ok(());
-    }
-    let selected_delayed_type = types.iter().any(|name| name == contest_type);
-    let placeholders = (2..=types.len() + 1)
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut args = vec![problem_id.into()];
-    args.extend(types.into_iter().map(Into::into));
-    let linked = state
-        .db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!(
-                "SELECT c.id FROM contest c JOIN contest_problem cp ON cp.contest_id = c.id
-            WHERE cp.problem_id = $1 AND c.deleted_at IS NULL
-              AND (c.end_time IS NULL OR c.end_time > clock_timestamp())
-              AND c.contest_type IN ({placeholders}) LIMIT 1"
-            ),
-            args,
-        ))
-        .await?
-        .is_some();
-    if selected_delayed_type || linked {
-        return Err(AppError::PluginRejection {
-            code: "CONTEST_SUBMISSION_REQUIRED".into(),
-            message:
-                "Submit this problem through its contest so the contest's submission rules apply."
-                    .into(),
-            status_code: 400,
-            details: None,
-        });
-    }
-    Ok(())
-}
-
-/// Opponent admissions may change the guard without changing the game. A
-/// second request from the same player must rerun its hooks even if the first
-/// submission has already finished and freed the pending-feedback slot.
-fn guarded_state(current_raw: &str, expected_raw: &str, user_id: i32) -> Result<Value, AppError> {
-    let mut current: Value =
-        serde_json::from_str(current_raw).map_err(|e| AppError::Internal(e.to_string()))?;
-    let mut expected: Value =
-        serde_json::from_str(expected_raw).map_err(|e| AppError::Internal(e.to_string()))?;
-    let user_key = user_id.to_string();
-    let user_revision = current["admission_by_user"][&user_key]
-        .as_u64()
-        .unwrap_or(0);
-    if user_revision
-        != expected["admission_by_user"][&user_key]
-            .as_u64()
-            .unwrap_or(0)
-    {
-        return Err(rejected(
-            "SUBMISSION_IN_FLIGHT",
-            "Another submission was admitted; refresh and retry after its result.",
-        ));
-    }
-    let revision = current["admission_revision"].as_u64().unwrap_or(0);
-    let mut users = current["admission_by_user"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    for state in [&mut current, &mut expected] {
-        let obj = state
-            .as_object_mut()
-            .ok_or_else(|| AppError::Internal("Invalid admission state".into()))?;
-        obj.remove("admission_revision");
-        obj.remove("admission_by_user");
-    }
-    if current != expected {
-        return Err(rejected(
-            "SUBMISSION_STATE_CHANGED",
-            "The game has changed; refresh and retry.",
-        ));
-    }
-    users.insert(user_key, json!(user_revision.saturating_add(1)));
-    current["admission_revision"] = json!(revision.saturating_add(1));
-    current["admission_by_user"] = json!(users);
-    Ok(current)
-}
-
-/// All hooks have finished before this short transaction starts. Lock and bump
-/// the plugin's guarded state so a deciding CAS cannot overlook this submission.
-/// The pending-feedback unique index also serializes requests from one player.
+/// No connection spans a guest call. The host compares opaque storage bytes,
+/// advances its own revision, inserts the submission and holds feedback atomically.
 pub async fn insert_admitted(
     state: &AppState,
     mut new: submission::ActiveModel,
     admission: &SubmissionAdmission,
     plugin_id: &str,
 ) -> Result<submission::Model, AppError> {
-    if admission.delay_seconds < 0 || admission.delay_seconds > i64::MAX / 1_000_000 {
-        return Err(AppError::Internal("Invalid submission delay".into()));
-    }
     let txn = state.db.begin().await?;
+    if let Some(slot) = &admission.slot {
+        // Namespaces are chosen by plugins. Lock before checking the generation,
+        // including when two admissions guard different storage keys.
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [format!("submission-slot:{plugin_id}:{}", slot.key).into()],
+        ))
+        .await?;
+        let row = txn.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT MAX(submission_id) AS generation, BOOL_OR(outcome = 'pending') AS occupied FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2",
+            [plugin_id.into(), slot.key.clone().into()])).await?.unwrap();
+        let generation: Option<i32> = row.try_get("", "generation")?;
+        let occupied: Option<bool> = row.try_get("", "occupied")?;
+        if generation != slot.generation || occupied == Some(true) {
+            return Err(rejected(
+                "SUBMISSION_IN_FLIGHT",
+                "Submission slot changed; refresh and retry.",
+            ));
+        }
+    }
     let row = plugin_storage::Entity::find_by_id((
         plugin_id.to_owned(),
         "default".to_owned(),
-        admission.state_key.clone(),
+        admission.guard.key.clone(),
     ))
     .lock_exclusive()
     .one(&txn)
@@ -156,24 +72,21 @@ pub async fn insert_admitted(
     .ok_or_else(|| {
         rejected(
             "SUBMISSION_STATE_CHANGED",
-            "The game has changed; refresh and retry.",
+            "Admission state changed; refresh and retry.",
         )
     })?;
-    let current_raw = row
-        .data
-        .as_str()
-        .ok_or_else(|| AppError::Internal("Invalid admission state".into()))?;
-    let current = guarded_state(
-        current_raw,
-        &admission.expected_state,
-        new.user_id.clone().unwrap(),
-    )?;
-    let mut guarded: plugin_storage::ActiveModel = row.into();
-    guarded.data = Set(json!(current.to_string()));
+    if crate::utils::text::plugin_storage_text(&row.data) != admission.guard.expected_value {
+        return Err(rejected(
+            "SUBMISSION_STATE_CHANGED",
+            "Admission state changed; refresh and retry.",
+        ));
+    }
+    let mut guarded: plugin_storage::ActiveModel = row.clone().into();
+    guarded.revision = Set(row
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| AppError::Internal("Storage revision overflow".into()))?);
     guarded.update(&txn).await?;
-
-    // Use database arrival time AFTER acquiring the guard, never a timestamp
-    // captured before slow hooks. A winning CAS cannot miss an older arrival.
     let clock = txn
         .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -182,151 +95,210 @@ pub async fn insert_admitted(
         .await?
         .ok_or_else(|| AppError::Internal("Missing database clock".into()))?;
     let now: DateTime<Utc> = clock.try_get("", "now")?;
-    let effective_at_us = now
-        .timestamp_micros()
-        .checked_add(admission.delay_seconds * 1_000_000)
-        .ok_or_else(|| AppError::Internal("Submission time overflow".into()))?;
-    if effective_at_us > admission.deadline_ms.saturating_mul(1_000) {
+    if admission
+        .latest_arrival_ms
+        .is_some_and(|end| now.timestamp_micros() > end.saturating_mul(1000))
+    {
         return Err(rejected(
             "SUBMISSION_TOO_LATE",
-            "The effective submission time is past this game's deadline.",
+            "Submission admission window has closed.",
         ));
     }
     new.created_at = Set(now);
     let model = new.insert(&txn).await?;
-    let inserted = txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO submission_feedback (submission_id, contest_id, user_id, plugin_id, state_key, scope_key, effective_at_us, delay_seconds)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+    txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO submission_feedback (submission_id, contest_id, user_id, plugin_id, state_key, metadata, slot_key) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         [model.id.into(), model.contest_id.into(), model.user_id.into(), plugin_id.into(),
-         admission.state_key.clone().into(), admission.scope_key.clone().into(), effective_at_us.into(), admission.delay_seconds.into()],
-    )).await?;
-    if inserted.rows_affected() == 0 {
-        return Err(rejected(
-            "SUBMISSION_IN_FLIGHT",
-            "Wait for your previous submission's result before submitting again.",
-        ));
-    }
+         admission.feedback_key.clone().into(), admission.metadata.clone().into(), admission.slot.as_ref().map(|s| s.key.clone()).into()])).await?;
     txn.commit().await?;
     Ok(model)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The capability is scoped to its caller; plugins cannot read another owner's records.
+pub async fn query(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    query: &SubmissionFeedbackQuery,
+) -> Result<Vec<SubmissionFeedbackRecord>, DbErr> {
+    let rows = db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT f.submission_id, f.contest_id, f.user_id, s.problem_id,
+        (EXTRACT(EPOCH FROM s.created_at)*1000000)::bigint AS submitted_at_us,
+        s.status::text AS status, s.verdict, f.state_key, f.metadata, f.outcome, f.public_result, f.slot_key
+        FROM submission_feedback f JOIN submission s ON s.id = f.submission_id
+        WHERE f.plugin_id = $1 AND ($2::text IS NULL OR f.state_key = $2)
+        AND ($3::text IS NULL OR f.slot_key = $3)
+        AND ($4::boolean = false OR f.outcome IN ('pending','retired'))
+        AND f.submission_id > $5
+        AND ($7::jsonb IS NULL OR f.submission_id IN (SELECT value::int FROM jsonb_array_elements_text($7)))
+        ORDER BY f.submission_id LIMIT $6",
+        [plugin_id.into(), query.key.clone().into(), query.slot_key.clone().into(), query.unpublished_only.into(),
+         query.after_id.into(), i64::from(if query.limit == 0 {1000} else {query.limit.min(1000)}).into(),
+         query.submission_ids.as_ref().map(serde_json::to_value).transpose().map_err(|e| DbErr::Custom(e.to_string()))?.into()])).await?;
+    let mut records = Vec::new();
+    for row in rows {
+        let submission_id = row.try_get("", "submission_id")?;
+        let status: String = row.try_get("", "status")?;
+        let verdict: Option<String> = row.try_get("", "verdict")?;
+        let public_result: Option<Value> = row.try_get("", "public_result")?;
+        let outcome: String = row.try_get("", "outcome")?;
+        let slot_key: Option<String> = row.try_get("", "slot_key")?;
+        records.push(SubmissionFeedbackRecord {
+            submission_id,
+            contest_id: row.try_get("", "contest_id")?,
+            user_id: row.try_get("", "user_id")?,
+            problem_id: row.try_get("", "problem_id")?,
+            submitted_at_us: row.try_get("", "submitted_at_us")?,
+            status,
+            verdict: verdict
+                .map(|v| serde_json::from_value(json!(v)))
+                .transpose()
+                .map_err(|e| DbErr::Custom(e.to_string()))?,
+            key: row.try_get("", "state_key")?,
+            metadata: row.try_get("", "metadata")?,
+            withheld: outcome != "released",
+            slot_held: outcome == "pending" && slot_key.is_some(),
+            slot_key,
+            result: public_result
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| DbErr::Custom(e.to_string()))?,
+        });
+    }
+    Ok(records)
+}
+
+pub async fn publish(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    id: i32,
+    publication: &SubmissionFeedbackPublication,
+) -> Result<(), DbErr> {
+    if publication.withheld && publication.result.is_some() {
+        return Err(DbErr::Custom(
+            "Withheld feedback cannot include a public result".into(),
+        ));
+    }
+    if publication
+        .result
+        .as_ref()
+        .is_some_and(|r| !r.score.is_finite())
+    {
+        return Err(DbErr::Custom("Invalid feedback score".into()));
+    }
+    let outcome = if !publication.withheld {
+        "released"
+    } else if publication.release_slot {
+        "retired"
+    } else {
+        "pending"
+    };
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE submission_feedback SET outcome = $1, public_result = $2
+         WHERE plugin_id = $3 AND submission_id = $4 AND outcome IN ('pending', 'retired')
+         AND NOT (outcome = 'retired' AND $1 = 'pending')",
+        [
+            outcome.into(),
+            publication
+                .result
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| DbErr::Custom(e.to_string()))?
+                .into(),
+            plugin_id.into(),
+            id.into(),
+        ],
+    ))
+    .await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
 pub enum Feedback {
-    /// Includes retired admissions: their results are still withheld, but
-    /// staff have closed the match and freed their submission slot.
     Pending,
-    TooLate,
+    Published(SubmissionFeedbackResult),
 }
 
 pub async fn load(state: &AppState, ids: &[i32]) -> Result<HashMap<i32, Feedback>, AppError> {
+    let mut feedback = HashMap::new();
     if ids.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(feedback);
     }
     let placeholders = (1..=ids.len())
         .map(|n| format!("${n}"))
         .collect::<Vec<_>>()
         .join(",");
     let rows = state.db.query_all_raw(Statement::from_sql_and_values(DbBackend::Postgres,
-        format!("SELECT submission_id, outcome FROM submission_feedback WHERE submission_id IN ({placeholders}) AND outcome <> 'released'"),
-        ids.iter().copied().map(Into::into),
-    )).await?;
-    let mut feedback = HashMap::new();
+        format!("SELECT submission_id, outcome, public_result FROM submission_feedback WHERE submission_id IN ({placeholders}) AND (outcome <> 'released' OR public_result IS NOT NULL)"),
+        ids.iter().copied().map(Into::into))).await?;
     for row in rows {
-        let id: i32 = row.try_get("", "submission_id")?;
+        let id = row.try_get("", "submission_id")?;
         let outcome: String = row.try_get("", "outcome")?;
-        feedback.insert(
-            id,
-            if outcome == "too_late" {
-                Feedback::TooLate
-            } else {
-                Feedback::Pending
-            },
-        );
+        let value = if outcome != "released" {
+            Feedback::Pending
+        } else {
+            let result: Value = row.try_get("", "public_result")?;
+            Feedback::Published(
+                serde_json::from_value(result).map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        };
+        feedback.insert(id, value);
     }
     Ok(feedback)
 }
 
-/// Project only contest feedback; the real stored verdict remains available to
-/// staff and to the retry/lease machinery. Visibility masks run AFTER this.
+/// Presentation overlays use submission API fields, never contest-specific verdicts.
 pub fn project(value: &mut Value, feedback: Feedback) {
-    if feedback == Feedback::Pending {
-        value["status"] = json!("Running");
-        if value.get("result").is_some() {
-            value["result"] = Value::Null;
-        }
-        for key in ["verdict", "score", "time_used", "memory_used", "judged_at"] {
-            if value.get(key).is_some() {
-                value[key] = Value::Null;
+    match feedback {
+        Feedback::Pending => {
+            value["status"] = json!("Running");
+            if value.get("result").is_some() {
+                value["result"] = Value::Null;
+            }
+            for key in ["verdict", "score", "time_used", "memory_used", "judged_at"] {
+                if value.get(key).is_some() {
+                    value[key] = Value::Null;
+                }
             }
         }
-    } else {
-        if value.get("verdict").is_some() {
-            value["verdict"] = json!("TooLate");
+        Feedback::Published(result) => {
+            apply_public_result(value, &result);
+            if value["result"].is_object() {
+                apply_public_result(&mut value["result"], &result);
+            }
         }
-        if value.get("score").is_some() {
-            value["score"] = json!(0.0);
-        }
-        if value["result"].is_object() {
-            value["result"]["verdict"] = json!("TooLate");
-            value["result"]["score"] = json!(0.0);
-        }
+    }
+}
+fn apply_public_result(value: &mut Value, result: &SubmissionFeedbackResult) {
+    if value.get("verdict").is_some() {
+        value["verdict"] = json!(result.verdict);
+    }
+    if value.get("score").is_some() {
+        value["score"] = json!(result.score);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn admission_guard_supports_old_documents_and_concurrent_opponents() {
-        let original = json!({"state": "in_progress"}).to_string();
-        let first = guarded_state(&original, &original, 10).unwrap();
-        assert_eq!(first["admission_by_user"]["10"], 1);
-        let opponent = guarded_state(&first.to_string(), &original, 20).unwrap();
-        assert_eq!(opponent["admission_revision"], 2);
-        assert_eq!(opponent["admission_by_user"]["10"], 1);
-        assert_eq!(opponent["admission_by_user"]["20"], 1);
-    }
-
-    #[test]
-    fn admission_guard_rejects_stale_player_even_after_pending_slot_is_released() {
-        let original = json!({"state": "in_progress"}).to_string();
-        let first = guarded_state(&original, &original, 10).unwrap();
-        let error = guarded_state(&first.to_string(), &original, 10).unwrap_err();
-        assert!(
-            matches!(error, AppError::PluginRejection { code, .. } if code == "SUBMISSION_IN_FLIGHT")
-        );
-    }
-
-    #[test]
-    fn admission_guard_rejects_a_game_changed_after_hooks() {
-        let error = guarded_state(r#"{"game":1}"#, r#"{"game":0}"#, 10).unwrap_err();
-        assert!(
-            matches!(error, AppError::PluginRejection { code, .. } if code == "SUBMISSION_STATE_CHANGED")
-        );
-    }
-
-    #[test]
-    fn pending_feedback_hides_details_and_keeps_polling() {
-        let mut value = json!({"id": 7, "status": "Judged", "result": {
-            "verdict": "Accepted", "score": 1, "test_case_results": [{"verdict": "Accepted"}]
-        }});
+    fn withholding_hides_details_and_keeps_polling() {
+        let mut value = json!({"id":7,"status":"Judged","result":{"verdict":"Accepted","test_case_results":[{}]}});
         project(&mut value, Feedback::Pending);
-        assert_eq!(value, json!({"id": 7, "status": "Running", "result": null}));
-        let mut list =
-            json!({"status": "Judged", "verdict": "Accepted", "score": 1, "time_used": 1});
-        project(&mut list, Feedback::Pending);
-        assert_eq!(list["status"], "Running");
-        assert!(
-            list["verdict"].is_null() && list["score"].is_null() && list["time_used"].is_null()
-        );
+        assert_eq!(value, json!({"id":7,"status":"Running","result":null}));
     }
-
     #[test]
-    fn losing_correct_submission_has_a_distinct_public_result() {
-        let mut value = json!({"status": "Judged", "result": {"verdict": "Accepted", "score": 1}});
-        project(&mut value, Feedback::TooLate);
-        assert_eq!(value["result"]["verdict"], "TooLate");
-        assert_eq!(value["result"]["score"], 0.0);
+    fn public_results_support_arbitrary_plugin_verdicts() {
+        let mut value = json!({"status":"Judged","result":{"verdict":"Accepted","score":1}});
+        project(
+            &mut value,
+            Feedback::Published(SubmissionFeedbackResult {
+                verdict: broccoli_server_sdk::types::Verdict::Other("ExampleResult".into()),
+                score: 7.0,
+            }),
+        );
+        assert_eq!(value["result"]["verdict"], "ExampleResult");
+        assert_eq!(value["result"]["score"], 7.0);
     }
 }

@@ -65,6 +65,7 @@ async fn seed_accepted_ioi_submission(
     plugin_storage::ActiveModel {
         plugin_id: Set("ioi".into()),
         collection: Set("default".into()),
+        revision: Set(0),
         key: Set(format!(
             "task_score:{contest_id}:{problem_id}:{}",
             user_model.id
@@ -700,6 +701,7 @@ async fn ioi_scoreboard_visibility_config_can_show_all_viewers_during_contest() 
         plugin_storage::ActiveModel {
             plugin_id: Set("ioi".into()),
             collection: Set("default".into()),
+            revision: Set(0),
             key: Set(format!("task_score:{contest_id}:{problem_id}:{user_id}")),
             data: Set(json!("10")),
             created_at: Set(created_at),
@@ -915,6 +917,7 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
         plugin_storage::ActiveModel {
             plugin_id: Set("ioi".into()),
             collection: Set("default".into()),
+            revision: Set(0),
             key: Set(format!("task_score:{contest_id}:{problem_id}:{user_id}")),
             data: Set(json!("10")),
             created_at: Set(created_at),

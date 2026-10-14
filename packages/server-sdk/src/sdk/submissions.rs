@@ -1,3 +1,6 @@
+use crate::types::{
+    SubmissionFeedbackPublication, SubmissionFeedbackQuery, SubmissionFeedbackRecord,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 #[cfg(not(target_arch = "wasm32"))]
@@ -114,6 +117,10 @@ impl Submissions {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct SubmissionsMock {
+    feedback: RefCell<Vec<SubmissionFeedbackRecord>>,
+    feedback_publications: RefCell<Vec<(i32, SubmissionFeedbackPublication)>>,
+    feedback_errors: RefCell<VecDeque<SdkError>>,
+    feedback_query_errors: RefCell<VecDeque<Option<SdkError>>>,
     test_cases: RefCell<Vec<TestCaseRow>>,
     update_results: RefCell<VecDeque<Result<u64, SdkError>>>,
     query_errors: RefCell<VecDeque<SdkError>>,
@@ -132,6 +139,10 @@ impl SubmissionsMock {
     pub fn new() -> Self {
         Self {
             test_cases: RefCell::new(Vec::new()),
+            feedback: RefCell::new(Vec::new()),
+            feedback_publications: RefCell::new(Vec::new()),
+            feedback_errors: RefCell::new(VecDeque::new()),
+            feedback_query_errors: RefCell::new(VecDeque::new()),
             update_results: RefCell::new(VecDeque::new()),
             query_errors: RefCell::new(VecDeque::new()),
             insert_errors: RefCell::new(VecDeque::new()),
@@ -249,6 +260,131 @@ impl Submissions {
     /// regression tests.
     pub fn insert_call_count(&self) -> usize {
         *self.inner.insert_call_count.borrow()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Submissions {
+    pub fn feedback(
+        &self,
+        query: &SubmissionFeedbackQuery,
+    ) -> Result<Vec<SubmissionFeedbackRecord>, SdkError> {
+        let maximum = query.limit as usize;
+        let mut query = query.clone();
+        query.limit = if maximum == 0 {
+            1000
+        } else {
+            maximum.min(1000) as u32
+        };
+        let mut records = Vec::new();
+        loop {
+            let json = unsafe {
+                crate::host::raw::submission_feedback_query(serde_json::to_string(&query)?)?
+            };
+            let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
+            let page: Vec<SubmissionFeedbackRecord> =
+                super::shared::parse_rows(response.into_result()?)?;
+            let full = page.len() == query.limit as usize;
+            if let Some(last) = page.last() {
+                query.after_id = last.submission_id;
+            }
+            records.extend(page);
+            if !full || (maximum > 0 && records.len() >= maximum) {
+                return Ok(records);
+            }
+            if maximum > 0 {
+                query.limit = (maximum - records.len()).min(1000) as u32;
+            }
+        }
+    }
+    pub fn publish_feedback(
+        &self,
+        submission_id: i32,
+        publication: &SubmissionFeedbackPublication,
+    ) -> Result<(), SdkError> {
+        let input = serde_json::json!({"submission_id":submission_id,"publication":publication});
+        let json = unsafe { crate::host::raw::submission_feedback_publish(input.to_string())? };
+        let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
+        response.into_result()?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Submissions {
+    pub fn feedback(
+        &self,
+        query: &SubmissionFeedbackQuery,
+    ) -> Result<Vec<SubmissionFeedbackRecord>, SdkError> {
+        if let Some(error) = self
+            .inner
+            .feedback_query_errors
+            .borrow_mut()
+            .pop_front()
+            .flatten()
+        {
+            return Err(error);
+        }
+        Ok(self
+            .inner
+            .feedback
+            .borrow()
+            .iter()
+            .filter(|r| {
+                r.submission_id > query.after_id
+                    && query.key.as_ref().is_none_or(|key| key == &r.key)
+                    && query
+                        .slot_key
+                        .as_ref()
+                        .is_none_or(|key| Some(key) == r.slot_key.as_ref())
+                    && query
+                        .submission_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&r.submission_id))
+                    && (!query.unpublished_only || r.withheld)
+            })
+            .take(if query.limit == 0 {
+                usize::MAX
+            } else {
+                query.limit as usize
+            })
+            .cloned()
+            .collect())
+    }
+    pub fn publish_feedback(
+        &self,
+        submission_id: i32,
+        publication: &SubmissionFeedbackPublication,
+    ) -> Result<(), SdkError> {
+        if let Some(error) = self.inner.feedback_errors.borrow_mut().pop_front() {
+            return Err(error);
+        }
+        self.inner
+            .feedback_publications
+            .borrow_mut()
+            .push((submission_id, publication.clone()));
+        Ok(())
+    }
+    pub fn set_feedback(&self, records: Vec<SubmissionFeedbackRecord>) {
+        *self.inner.feedback.borrow_mut() = records;
+    }
+    pub fn queue_feedback_query_success(&self) {
+        self.inner
+            .feedback_query_errors
+            .borrow_mut()
+            .push_back(None);
+    }
+    pub fn queue_feedback_query_error(&self, error: SdkError) {
+        self.inner
+            .feedback_query_errors
+            .borrow_mut()
+            .push_back(Some(error));
+    }
+    pub fn queue_feedback_error(&self, error: SdkError) {
+        self.inner.feedback_errors.borrow_mut().push_back(error);
+    }
+    pub fn feedback_publications(&self) -> Vec<(i32, SubmissionFeedbackPublication)> {
+        self.inner.feedback_publications.borrow().clone()
     }
 }
 

@@ -34,8 +34,6 @@ export function SetupPanel({ contestId }: { contestId: number }) {
 
   const [seeds, setSeeds] = useState<number[] | null>(null);
   const [rounds, setRounds] = useState<RoundDraft[] | null>(null);
-  const [gameMinutes, setGameMinutes] = useState(30);
-  const [breakMinutes, setBreakMinutes] = useState(10);
   const [graceSeconds, setGraceSeconds] = useState(120);
   const [penaltySeconds, setPenaltySeconds] = useState(20);
   const [saving, setSaving] = useState(false);
@@ -55,13 +53,13 @@ export function SetupPanel({ contestId }: { contestId: number }) {
     rounds ??
     (problemList.length > 0
       ? autoFillRounds(problemList.map((p) => p.problem_id))
-      : Array.from({ length: 4 }, emptyRound));
+      : Array.from({ length: 4 }, (_, i) => emptyRound(i)));
   const bench = people.filter((p) => !seedList.includes(p.user_id));
   const issues = validateSetup(
     seedList,
     roundList,
-    gameMinutes,
     penaltySeconds,
+    graceSeconds,
   );
 
   const setRound = (i: number, next: RoundDraft) =>
@@ -77,9 +75,10 @@ export function SetupPanel({ contestId }: { contestId: number }) {
           group_a: r.groupA as [number, number, number],
           group_b: r.groupB as [number, number, number],
           tiebreak: r.tiebreak.filter((id): id is number => id !== null),
+          xiaoju_seconds: Math.round(r.gameMinutes * 60),
+          tiebreak_seconds: Math.round(r.tiebreakMinutes * 60),
+          break_before_seconds: Math.round(r.breakMinutes * 60),
         })),
-        xiaoju_seconds: Math.round(gameMinutes * 60),
-        round_intermission_seconds: Math.round(breakMinutes * 60),
         escalation_grace_seconds: Math.round(graceSeconds),
         penalty_seconds: penaltySeconds,
       });
@@ -200,7 +199,10 @@ export function SetupPanel({ contestId }: { contestId: number }) {
                   confirmLabel={t('codelink-bracket.setup.autofill')}
                   onConfirm={() =>
                     setRounds(
-                      autoFillRounds(problemList.map((p) => p.problem_id)),
+                      autoFillRounds(
+                        problemList.map((p) => p.problem_id),
+                        roundList,
+                      ),
                     )
                   }
                 >
@@ -242,6 +244,34 @@ export function SetupPanel({ contestId }: { contestId: number }) {
                       }
                     />
                   </div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    <NumberField
+                      id={`bracket-game-minutes-${i}`}
+                      label={t('codelink-bracket.setup.gameMinutes')}
+                      value={r.gameMinutes}
+                      onChange={(gameMinutes) =>
+                        setRound(i, { ...r, gameMinutes })
+                      }
+                    />
+                    <NumberField
+                      id={`bracket-tiebreak-minutes-${i}`}
+                      label={t('codelink-bracket.setup.tiebreakMinutes')}
+                      value={r.tiebreakMinutes}
+                      onChange={(tiebreakMinutes) =>
+                        setRound(i, { ...r, tiebreakMinutes })
+                      }
+                    />
+                    {i > 0 && (
+                      <NumberField
+                        id={`bracket-break-minutes-${i}`}
+                        label={t('codelink-bracket.setup.breakMinutes')}
+                        value={r.breakMinutes}
+                        onChange={(breakMinutes) =>
+                          setRound(i, { ...r, breakMinutes })
+                        }
+                      />
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -249,18 +279,6 @@ export function SetupPanel({ contestId }: { contestId: number }) {
 
           <Panel title={t('codelink-bracket.setup.timing')}>
             <div className="grid gap-3 sm:grid-cols-2">
-              <NumberField
-                id="bracket-game-minutes"
-                label={t('codelink-bracket.setup.gameMinutes')}
-                value={gameMinutes}
-                onChange={setGameMinutes}
-              />
-              <NumberField
-                id="bracket-break-minutes"
-                label={t('codelink-bracket.setup.breakMinutes')}
-                value={breakMinutes}
-                onChange={setBreakMinutes}
-              />
               <NumberField
                 id="bracket-grace-seconds"
                 label={t('codelink-bracket.setup.graceSeconds')}
@@ -326,9 +344,13 @@ function describeIssue(
         label: problems.get(issue.problemId)?.label ?? `#${issue.problemId}`,
       });
     case 'badTiming':
-      return t('codelink-bracket.setup.issue.badTiming');
+      return t('codelink-bracket.setup.issue.badTiming', {
+        round: t(roundNameKey(issue.round)),
+      });
     case 'badPenalty':
       return t('codelink-bracket.setup.issue.badPenalty');
+    case 'badGrace':
+      return t('codelink-bracket.setup.issue.badGrace');
   }
 }
 

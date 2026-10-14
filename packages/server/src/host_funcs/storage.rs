@@ -11,16 +11,9 @@ use serde_json::Value;
 use tracing::error;
 
 use crate::entity::plugin_storage;
-use crate::utils::text::sanitize_db_text;
+use crate::utils::text::{plugin_storage_text as extract_str, sanitize_db_text};
 
 const DEFAULT_COLLECTION: &str = "default";
-
-fn extract_str(data: &Value) -> String {
-    match data {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
 
 #[derive(Deserialize)]
 struct StoreGetInput {
@@ -61,7 +54,8 @@ host_fn!(pub store_get(user_data: (String, DatabaseConnection); input: String) -
         .map(|r| (r.key.as_str(), extract_str(&r.data)))
         .collect();
 
-    Ok(serde_json::json!({ "values": values }).to_string())
+    let versions: HashMap<&str, i64> = results.iter().map(|r| (r.key.as_str(), r.revision)).collect();
+    Ok(serde_json::json!({ "values": values, "versions": versions }).to_string())
 });
 
 #[derive(Deserialize)]
@@ -103,6 +97,7 @@ host_fn!(pub store_set(user_data: (String, DatabaseConnection); input: String) -
                     collection: Set(DEFAULT_COLLECTION.to_string()),
                     key: Set(entry.key),
                     data: Set(Value::String(entry.value)),
+                    revision: Set(0),
                     created_at: Set(chrono::Utc::now()),
                 };
 
@@ -114,6 +109,7 @@ host_fn!(pub store_set(user_data: (String, DatabaseConnection); input: String) -
                             plugin_storage::Column::Key,
                         ])
                         .update_columns([plugin_storage::Column::Data])
+                        .value(plugin_storage::Column::Revision, sea_orm::sea_query::Expr::cust("plugin_storage.revision + 1"))
                         .to_owned(),
                     )
                     .exec(&txn)
@@ -173,6 +169,7 @@ struct StoreCasInput {
     key: String,
     expected: Option<String>,
     new: String,
+    expected_revision: Option<i64>,
 }
 
 host_fn!(pub store_compare_and_set(user_data: (String, DatabaseConnection); input: String) -> String {
@@ -189,51 +186,41 @@ host_fn!(pub store_compare_and_set(user_data: (String, DatabaseConnection); inpu
     parsed.new = sanitize_db_text(&parsed.new);
 
     let swapped = tokio::runtime::Handle::current()
-        .block_on(async {
-            match parsed.expected {
-                None => {
-                    let model = plugin_storage::ActiveModel {
-                        plugin_id: Set(plugin_id.clone()),
-                        collection: Set(DEFAULT_COLLECTION.to_string()),
-                        key: Set(parsed.key),
-                        data: Set(Value::String(parsed.new)),
-                        created_at: Set(chrono::Utc::now()),
-                    };
-                    let result = plugin_storage::Entity::insert(model)
-                        .on_conflict(
-                            OnConflict::columns([
-                                plugin_storage::Column::PluginId,
-                                plugin_storage::Column::Collection,
-                                plugin_storage::Column::Key,
-                            ])
-                            .do_nothing()
-                            .to_owned(),
-                        )
-                        .exec_without_returning(db)
-                        .await?;
-                    Ok::<bool, sea_orm::DbErr>(result > 0)
-                }
-                Some(expected_val) => {
-                    let result = db.execute_raw(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        "UPDATE plugin_storage SET data = $1 \
-                         WHERE plugin_id = $2 AND collection = $3 AND key = $4 AND data = $5",
-                        [
-                            Value::String(parsed.new).into(),
-                            plugin_id.clone().into(),
-                            DEFAULT_COLLECTION.into(),
-                            parsed.key.into(),
-                            Value::String(expected_val).into(),
-                        ],
-                    )).await?;
-                    Ok(result.rows_affected() == 1)
-                }
-            }
-        })
+        .block_on(crate::services::plugin_storage::compare_and_set(
+            db, plugin_id, &parsed.key, parsed.expected.as_deref(),
+            &parsed.new, parsed.expected_revision,
+        ))
         .map_err(|e| {
             error!("DB store_compare_and_set error: {e}");
             extism::Error::msg("Database error")
         })?;
 
     Ok(serde_json::json!({ "swapped": swapped }).to_string())
+});
+
+#[derive(Deserialize)]
+struct StoreScanInput {
+    prefix: String,
+    after: Option<String>,
+}
+
+host_fn!(pub store_scan(user_data: (String, DatabaseConnection); input: String) -> String {
+    let (plugin_id, db) = {
+        let guard = user_data.get()?;
+        let data = super::lock_or_poison(&guard)?;
+        data.clone()
+    };
+    let input: StoreScanInput = serde_json::from_str(&input)?;
+    let rows = tokio::runtime::Handle::current().block_on(db.query_all_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT key, data FROM plugin_storage WHERE plugin_id = $1 AND collection = $2
+         AND starts_with(key, $3) AND ($4::text IS NULL OR key > $4) ORDER BY key LIMIT 100",
+        [plugin_id.into(), DEFAULT_COLLECTION.into(), input.prefix.into(), input.after.into()])))?;
+    let mut entries = HashMap::new();
+    for row in rows {
+        let key: String = row.try_get("", "key")?;
+        let value: Value = row.try_get("", "data")?;
+        entries.insert(key, extract_str(&value));
+    }
+    Ok(serde_json::to_string(&entries)?)
 });

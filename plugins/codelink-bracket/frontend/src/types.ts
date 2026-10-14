@@ -89,7 +89,7 @@ export interface MatchView {
   games: GameView[];
   /**
    * While ranking: when the match starts by itself (contest start or the
-   * end of a player's break); null while a ranking is still missing. Null
+   * opening of the stage); null while a ranking is still missing. Null
    * once the match has started.
    */
   starts_at_ms: number | null;
@@ -151,19 +151,20 @@ export interface ForceDecideResponse {
   winner: number | null;
 }
 
-/** One round's problems for `POST /setup` (see `RoundDef` in src/model.rs). */
+/** One round's problems and timings for `POST /setup` (see `RoundDef` in src/model.rs). */
 export interface RoundSetup {
   group_a: [number, number, number];
   group_b: [number, number, number];
   tiebreak: number[];
+  xiaoju_seconds: number;
+  tiebreak_seconds: number;
+  break_before_seconds: number;
 }
 
 /** `POST /setup` body. Seeds pair up adjacently in round 1. */
 export interface SetupRequest {
   seeds: number[];
   rounds: RoundSetup[];
-  xiaoju_seconds: number;
-  round_intermission_seconds: number;
   penalty_seconds: number;
   escalation_grace_seconds: number;
 }

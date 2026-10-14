@@ -330,7 +330,7 @@ async fn standalone_submission_cannot_bypass_bracket_admission() {
                 plugin_id: "codelink-bracket-judge-fixture".into(),
                 submission_fn: "unused".into(),
                 code_run_fn: "unused".into(),
-                delayed_feedback: false,
+                submission_admission: false,
             },
         );
     order_match_0(&fx).await;

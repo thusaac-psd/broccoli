@@ -26,6 +26,7 @@ mod regression_guards;
 mod rejudge_visibility;
 mod scaling;
 mod submission;
+mod submission_admission;
 mod system;
 mod user;
 mod visibility_clarification_contents;

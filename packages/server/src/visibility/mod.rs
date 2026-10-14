@@ -402,7 +402,7 @@ impl<'a> VisibilityKernel<'a> {
         Ok(match decision {
             Decision::Deny => None,
             d => Some(Visible::new(entity, d).with_feedback(match resource {
-                Resource::Submission(id) => feedback.get(&id).copied(),
+                Resource::Submission(id) => feedback.get(&id).cloned(),
                 _ => None,
             })),
         })
@@ -430,7 +430,7 @@ impl<'a> VisibilityKernel<'a> {
             .map(|((resource, entity), d)| match d {
                 Decision::Deny => None,
                 d => Some(Visible::new(entity, d).with_feedback(match resource {
-                    Resource::Submission(id) => feedback.get(&id).copied(),
+                    Resource::Submission(id) => feedback.get(&id).cloned(),
                     _ => None,
                 })),
             })

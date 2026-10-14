@@ -854,9 +854,10 @@ mod tests {
                 group_a: [101, 102, 103],
                 group_b: [201, 202, 203],
                 tiebreak: vec![301, 302],
+                xiaoju_seconds: 1_800,
+                tiebreak_seconds: 1_800,
+                break_before_seconds: 0,
             }],
-            xiaoju_seconds: 1_800,
-            round_intermission_seconds: 300,
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
         }
@@ -905,9 +906,7 @@ mod tests {
             decided_at_ms: 0,
             awaiting_submission_id: None,
             adjudication_reason: None,
-            xiaoju_seconds: 0,
-            admission_revision: 0,
-            admission_by_user: Default::default(),
+            game_durations: None,
         }
     }
 
@@ -962,9 +961,7 @@ mod tests {
             decided_at_ms: 0,
             awaiting_submission_id: None,
             adjudication_reason: None,
-            xiaoju_seconds: 0,
-            admission_revision: 0,
-            admission_by_user: Default::default(),
+            game_durations: None,
         }
     }
 

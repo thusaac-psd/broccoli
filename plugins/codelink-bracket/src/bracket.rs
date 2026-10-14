@@ -9,28 +9,6 @@
 
 use crate::model::{MatchPhase, MatchState, Setup};
 
-/// When `player` is free to play in `round`: immediately in round 1,
-/// otherwise the moment their previous-round match was decided plus the
-/// break. `i64::MAX` if that match is not decided yet (the player cannot be
-/// in a later match before winning it, so this only guards odd states).
-pub fn player_free_at_ms(
-    setup: &Setup,
-    matches: &[(u8, MatchState)],
-    player: i32,
-    round: u8,
-) -> i64 {
-    if round <= 1 {
-        return 0;
-    }
-    matches
-        .iter()
-        .map(|(_, m)| m)
-        .find(|m| m.round == round - 1 && m.winner == Some(player))
-        .filter(|m| m.state == MatchPhase::Decided)
-        .map(|m| m.decided_at_ms + setup.round_intermission_seconds * 1_000)
-        .unwrap_or(i64::MAX)
-}
-
 /// When a stage opens. Round one opens with the contest; every later stage
 /// opens after *all* matches in the immediately preceding stage are decided,
 /// followed by the configured intermission. `None` means the preceding stage
@@ -44,6 +22,7 @@ pub fn stage_open_at_ms(
     if round <= 1 {
         return Some(contest_start_ms);
     }
+    let stage = setup.rounds.get(usize::from(round - 1))?;
 
     let previous_round = round - 1;
     let expected = crate::storage::matches_in_round(previous_round) as usize;
@@ -60,12 +39,11 @@ pub fn stage_open_at_ms(
         .iter()
         .map(|m| m.decided_at_ms)
         .max()
-        .map(|last| last + setup.round_intermission_seconds * 1_000)
+        .and_then(|last| last.checked_add(stage.break_before_seconds.checked_mul(1_000)?))
 }
 
 /// When match `m` may start by itself: `None` while it is not in `Ordering`
-/// or a ranking is still missing; otherwise the latest of the stage opening
-/// and both players' [`player_free_at_ms`].
+/// or a ranking is still missing; otherwise the stage opening time.
 pub fn start_at_ms(
     setup: &Setup,
     matches: &[(u8, MatchState)],
@@ -75,11 +53,7 @@ pub fn start_at_ms(
     if m.state != MatchPhase::Ordering || m.order_a.is_none() || m.order_b.is_none() {
         return None;
     }
-    Some(
-        stage_open_at_ms(setup, matches, m.round, contest_start_ms)?
-            .max(player_free_at_ms(setup, matches, m.player_a, m.round))
-            .max(player_free_at_ms(setup, matches, m.player_b, m.round)),
-    )
+    stage_open_at_ms(setup, matches, m.round, contest_start_ms)
 }
 
 /// Staff override for a match stuck waiting on a ranking: any missing order
@@ -100,7 +74,12 @@ mod tests {
 
     fn setup(break_seconds: i64) -> Setup {
         Setup {
-            round_intermission_seconds: break_seconds,
+            rounds: (0..4)
+                .map(|i| crate::model::RoundDef {
+                    break_before_seconds: if i == 0 { 0 } else { break_seconds },
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         }
     }
@@ -179,9 +158,27 @@ mod tests {
     }
 
     #[test]
-    fn a_player_whose_previous_match_is_not_decided_is_never_free() {
-        let matches = vec![(0, ranked(1, 10, 11))];
-        assert_eq!(player_free_at_ms(&setup(0), &matches, 10, 2), i64::MAX);
+    fn each_stage_uses_its_own_break_after_the_last_preceding_match() {
+        let mut config = setup(0);
+        for (i, stage) in config.rounds.iter_mut().enumerate() {
+            stage.break_before_seconds = i as i64 * 15;
+        }
+        assert_eq!(stage_open_at_ms(&config, &[], 1, 8_000), Some(8_000));
+        for round in 2..=4 {
+            let previous: Vec<_> = (0..crate::storage::matches_in_round(round - 1))
+                .map(|pos| decided(round - 1, pos, pos as i32, 1_000 + i64::from(pos)))
+                .collect();
+            let last = previous.last().unwrap().1.decided_at_ms;
+            assert_eq!(
+                stage_open_at_ms(&config, &previous, round, 0),
+                Some(last + i64::from(round - 1) * 15_000),
+            );
+            let mut incomplete = previous.clone();
+            incomplete.last_mut().unwrap().1.state = MatchPhase::NeedsAdjudication;
+            assert_eq!(stage_open_at_ms(&config, &incomplete, round, 0), None);
+            incomplete.pop();
+            assert_eq!(stage_open_at_ms(&config, &incomplete, round, 0), None);
+        }
     }
 
     #[test]

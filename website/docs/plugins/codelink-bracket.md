@@ -59,13 +59,17 @@ setup screen there.
    player of each match, three for the second, and at least one tiebreak
    problem. The slots start out filled in the contest's problem order. A
    problem can appear only once in the whole bracket.
-3. **Timing.** Set the length of a game, the break each player gets between
-   their own matches, and how long a game waits for a stuck judge before staff
-   have to decide the match. The defaults are 30 minutes, 10 minutes, and 120
-   seconds.
+3. **Timing per stage.** Set the regular game duration, tiebreak duration,
+   and break before each stage. The form starts with 30 minutes for both game
+   types and 10 minutes for later stage breaks. Round one opens with the
+   contest and has no preceding break. Penalty seconds and the wait for a stuck
+   judge apply to the whole contest, with defaults of 20 and 120 seconds.
 
-**Create bracket** checks all of this and lists anything missing. Seeding and
-problems cannot be changed once the bracket exists.
+**Create bracket** checks all of this and lists anything missing. The setup
+screen closes after creation. Staff can submit a corrected setup through the
+API. A match keeps both game durations from when its first game opened.
+Corrections to durations apply to matches that have not started. Stage breaks
+remain live. Existing matches keep their players and assigned problem groups.
 
 To script the setup instead, send the same data to the setup route as a user
 with `contest:manage`.
@@ -77,13 +81,16 @@ curl -X POST \
   -d '{
     "seeds": [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
     "rounds": [
-      { "group_a": [101, 102, 103], "group_b": [104, 105, 106], "tiebreak": [107, 108] },
-      { "group_a": [111, 112, 113], "group_b": [114, 115, 116], "tiebreak": [117] },
-      { "group_a": [121, 122, 123], "group_b": [124, 125, 126], "tiebreak": [127] },
-      { "group_a": [131, 132, 133], "group_b": [134, 135, 136], "tiebreak": [137] }
+      { "group_a": [101, 102, 103], "group_b": [104, 105, 106], "tiebreak": [107, 108],
+        "xiaoju_seconds": 1200, "tiebreak_seconds": 1200, "break_before_seconds": 0 },
+      { "group_a": [111, 112, 113], "group_b": [114, 115, 116], "tiebreak": [117],
+        "xiaoju_seconds": 1800, "tiebreak_seconds": 2100, "break_before_seconds": 600 },
+      { "group_a": [121, 122, 123], "group_b": [124, 125, 126], "tiebreak": [127],
+        "xiaoju_seconds": 2400, "tiebreak_seconds": 2700, "break_before_seconds": 600 },
+      { "group_a": [131, 132, 133], "group_b": [134, 135, 136], "tiebreak": [137],
+        "xiaoju_seconds": 3000, "tiebreak_seconds": 3600, "break_before_seconds": 900 }
     ],
-    "xiaoju_seconds": 1800,
-    "round_intermission_seconds": 600,
+    "penalty_seconds": 20,
     "escalation_grace_seconds": 120
   }'
 ```
@@ -92,8 +99,10 @@ curl -X POST \
 | --- | --- |
 | `seeds` | Sixteen distinct user ids in seed order. The first plays the second in round 1, the third plays the fourth, and so on. |
 | `rounds` | Exactly four rounds. In every match of a round, the first player gets `group_a` and the second gets `group_b`. |
-| `xiaoju_seconds` | Length of each game. Must be more than 0. |
-| `round_intermission_seconds` | Break each player gets after their own match before their next one can start. |
+| `rounds[].xiaoju_seconds` | Required positive duration for each of the stage's three regular games, in seconds. |
+| `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
+| `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
+| `penalty_seconds` | Delay added by each wrong submission within a game. Defaults to 20. Set to 0 to disable the delay. |
 | `escalation_grace_seconds` | How long a game waits for a stuck judge before staff must decide. Defaults to 120. |
 
 ## How a match is won
@@ -101,14 +110,15 @@ curl -X POST \
 1. **Ranking.** Each player drags the opponent's three problems into the order
    the opponent must solve them in. A ranking can be changed until the match
    starts.
-2. **Start.** The match starts by itself once both players have ranked, the
-   contest has started, and each player has had their break since their
-   previous match. There is no ranking deadline, so a match waits until both
-   rankings are in.
+2. **Start.** Round one opens with the contest. Later stages open after all
+   matches of the preceding stage finish and the next stage's break elapses.
+   Players can rank only after their stage opens. Each match then starts as
+   soon as both rankings are in. There is no ranking deadline.
 3. **Games.** In each of the three games, both players work on their next
    problem at the same time. The first accepted submission wins the game.
-   Submission time decides, not the order in which the judge finishes, and the
-   smaller submission id breaks an exact tie. If neither player solves their
+   Effective submission time includes accumulated penalties for that game.
+   Judge completion order does not determine the winner. The smaller
+   submission id breaks an exact tie. If neither player solves their
    problem before the game ends, nobody scores. The next game opens as soon as
    one is decided.
 4. **Result.** After three games the player with more wins advances. On a
@@ -116,11 +126,10 @@ curl -X POST \
    first tiebreak problem. A scoreless tiebreak moves on to the next tiebreak
    problem.
 
-The winner moves into the next round straight away. Matches do not wait for
-the rest of their round, so a quick winner can start the next round while other
-matches are still running. Every match in a round uses the same problems, so a
-pair that starts later faces problems earlier pairs have already seen. Run the
-round in a supervised room.
+Winners wait together for the next stage to open. Every match in a stage uses
+that stage's problems and durations. A tiebreak without a winner uses the next
+problem with the same tiebreak duration. Matches can progress at different
+speeds within an open stage, so run the contest in a supervised room.
 
 ## During the contest
 
@@ -142,7 +151,7 @@ Staff can act from the match panel. Every action asks for confirmation first.
 
 | Control | When it appears | What it does |
 | --- | --- | --- |
-| **Start now** | The match is waiting for rankings | Starts the match at once. A missing ranking becomes the listed order and any remaining break is skipped. |
+| **Start now** | The match is waiting for rankings | Starts the match within an open stage. A missing ranking becomes the listed order. It cannot bypass the stage opening. |
 | **Force expiry** | A game is live or waiting on judging | Checks the current game again right away, for example after a rejudge. It never ends a game before its time is up. |
 | **Award to** | A game is live, waiting on judging, or the match needs a staff decision | Gives the match to that player, who moves into the next round. This cannot be undone. |
 

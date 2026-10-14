@@ -24,7 +24,7 @@ impl Registry {
         Ok(())
     }
 
-    pub fn register_contest_type_with_delayed_feedback(
+    pub fn register_contest_type_with_admission(
         &self,
         contest_type: &str,
         submission_handler: &str,
@@ -34,7 +34,7 @@ impl Registry {
             "type": contest_type,
             "submission_handler": submission_handler,
             "code_run_handler": code_run_handler,
-            "delayed_feedback": true,
+            "submission_admission": true,
         });
         unsafe { crate::host::raw::register_contest_type(serde_json::to_string(&input)?)? };
         Ok(())
@@ -100,7 +100,7 @@ impl Registry {
         Ok(())
     }
 
-    pub fn register_contest_type_with_delayed_feedback(
+    pub fn register_contest_type_with_admission(
         &self,
         contest_type: &str,
         submission_handler: &str,
