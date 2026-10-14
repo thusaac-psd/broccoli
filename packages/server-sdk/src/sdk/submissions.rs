@@ -263,28 +263,6 @@ impl Submissions {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::sdk::Host;
-    use crate::types::SubmissionStatus;
-
-    #[test]
-    fn status_helpers_write_compiling_and_running_updates() {
-        let host = Host::mock();
-
-        assert_eq!(host.submission.set_compiling(10, 20, 30).unwrap(), 1);
-        assert_eq!(host.submission.set_running(10, 20, 30).unwrap(), 1);
-
-        let updates = host.submission.updates();
-        assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0].submission_id, 10);
-        assert_eq!(updates[0].judgement_id, 20);
-        assert_eq!(updates[0].judge_epoch, 30);
-        assert_eq!(updates[0].status, Some(SubmissionStatus::Compiling));
-        assert_eq!(updates[1].status, Some(SubmissionStatus::Running));
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 impl Submissions {
     pub fn feedback(
@@ -407,5 +385,27 @@ impl Submissions {
     }
     pub fn feedback_publications(&self) -> Vec<(i32, SubmissionFeedbackPublication)> {
         self.inner.feedback_publications.borrow().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sdk::Host;
+    use crate::types::SubmissionStatus;
+
+    #[test]
+    fn status_helpers_write_compiling_and_running_updates() {
+        let host = Host::mock();
+
+        assert_eq!(host.submission.set_compiling(10, 20, 30).unwrap(), 1);
+        assert_eq!(host.submission.set_running(10, 20, 30).unwrap(), 1);
+
+        let updates = host.submission.updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].submission_id, 10);
+        assert_eq!(updates[0].judgement_id, 20);
+        assert_eq!(updates[0].judge_epoch, 30);
+        assert_eq!(updates[0].status, Some(SubmissionStatus::Compiling));
+        assert_eq!(updates[1].status, Some(SubmissionStatus::Running));
     }
 }
