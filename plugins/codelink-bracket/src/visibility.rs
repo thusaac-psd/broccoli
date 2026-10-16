@@ -68,14 +68,14 @@ use crate::storage;
 pub struct VisibilityCtx {
     pub player_a: i32,
     pub player_b: i32,
-    /// Player A's own 3 problems this round.
-    pub group_a: [i32; 3],
-    /// Player B's own 3 problems this round.
-    pub group_b: [i32; 3],
+    /// Player A's own problems this round.
+    pub group_a: Vec<i32>,
+    /// Player B's own problems this round.
+    pub group_b: Vec<i32>,
     /// The order player A must solve their own group in, as ranked by B.
-    pub order_a: Option<[i32; 3]>,
+    pub order_a: Option<Vec<i32>>,
     /// The order player B must solve their own group in, as ranked by A.
-    pub order_b: Option<[i32; 3]>,
+    pub order_b: Option<Vec<i32>>,
     pub state: MatchPhase,
     /// Index of the most recently OPENED 小局, if any has opened yet.
     /// `None` before the first 小局 opens (e.g. during `Ordering`).
@@ -106,9 +106,9 @@ pub fn decide_problem(
     }
 
     let (owner, opponent, owners_order) = if ctx.group_a.contains(&problem_id) {
-        (ctx.player_a, ctx.player_b, ctx.order_a)
+        (ctx.player_a, ctx.player_b, ctx.order_a.as_ref())
     } else if ctx.group_b.contains(&problem_id) {
-        (ctx.player_b, ctx.player_a, ctx.order_b)
+        (ctx.player_b, ctx.player_a, ctx.order_b.as_ref())
     } else {
         // Not in either player's group: only the active 附加赛 problem can
         // still be Allow, and then to both players.
@@ -159,10 +159,10 @@ fn ctx_from_match(m: &MatchState, round_def: &RoundDef) -> VisibilityCtx {
     VisibilityCtx {
         player_a: m.player_a,
         player_b: m.player_b,
-        group_a: m.group_a,
-        group_b: m.group_b,
-        order_a: m.order_a,
-        order_b: m.order_b,
+        group_a: m.group_a.clone(),
+        group_b: m.group_b.clone(),
+        order_a: m.order_a.clone(),
+        order_b: m.order_b.clone(),
         state: m.state,
         current_xiaoju_index: m.xiaoju.last().map(|x| x.index),
         tiebreak_problem: round_def.tiebreak.get(m.tiebreak_index).copied(),
@@ -491,8 +491,8 @@ mod tests {
         VisibilityCtx {
             player_a: a,
             player_b: b,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
             order_a: None,
             order_b: None,
             state: MatchPhase::Ordering,
@@ -501,14 +501,14 @@ mod tests {
         }
     }
 
-    fn ctx_in_progress_at_xiaoju(index: u8, order_a: [i32; 3]) -> VisibilityCtx {
+    fn ctx_in_progress_at_xiaoju(index: u8, order_a: Vec<i32>) -> VisibilityCtx {
         VisibilityCtx {
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
             order_a: Some(order_a),
-            order_b: Some([203, 201, 202]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             current_xiaoju_index: Some(index),
             tiebreak_problem: None,
@@ -519,10 +519,10 @@ mod tests {
         VisibilityCtx {
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([101, 102, 103]),
-            order_b: Some([201, 202, 203]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
+            order_b: Some(vec![201, 202, 203]),
             state: MatchPhase::Tiebreak,
             current_xiaoju_index: Some(2),
             tiebreak_problem: Some(tiebreak_problem),
@@ -563,7 +563,7 @@ mod tests {
     fn a_player_cannot_see_their_own_later_problems() {
         // 无法提前看到自己组后面的题目 - the rule that makes the imposed order
         // meaningful. Without it a player could plan all three in advance.
-        let ctx = ctx_in_progress_at_xiaoju(0, /* order imposed on A */ [103, 101, 102]);
+        let ctx = ctx_in_progress_at_xiaoju(0, /* order imposed on A */ vec![103, 101, 102]);
         assert_eq!(
             decide_problem(&ctx, 103, 10, false),
             WireDecision::Allow {},
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn a_players_earlier_problems_stay_visible() {
         // Position <= current, not == current: a solved problem should not vanish.
-        let ctx = ctx_in_progress_at_xiaoju(1, [103, 101, 102]);
+        let ctx = ctx_in_progress_at_xiaoju(1, vec![103, 101, 102]);
         assert_eq!(decide_problem(&ctx, 103, 10, false), WireDecision::Allow {});
         assert_eq!(decide_problem(&ctx, 101, 10, false), WireDecision::Allow {});
         assert_eq!(decide_problem(&ctx, 102, 10, false), WireDecision::Deny {});
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn an_uninvolved_player_sees_nothing_from_this_match() {
-        let ctx = ctx_in_progress_at_xiaoju(0, [103, 101, 102]);
+        let ctx = ctx_in_progress_at_xiaoju(0, vec![103, 101, 102]);
         for p in [101, 102, 103, 201, 202, 203] {
             assert_eq!(decide_problem(&ctx, p, 555, false), WireDecision::Deny {});
         }
@@ -614,7 +614,7 @@ mod tests {
     fn an_eliminated_player_sees_no_ongoing_match() {
         // Falls out of the rules above with no elimination branch: an eliminated
         // player has no current 小局 anywhere, so every problem query reaches Deny.
-        let ctx = ctx_in_progress_at_xiaoju(0, [103, 101, 102]);
+        let ctx = ctx_in_progress_at_xiaoju(0, vec![103, 101, 102]);
         assert_eq!(
             decide_problem(&ctx, 101, eliminated_player(), false),
             WireDecision::Deny {}
@@ -664,8 +664,8 @@ mod tests {
 
     fn round_def() -> RoundDef {
         RoundDef {
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
             tiebreak: vec![319],
             xiaoju_seconds: 1_800,
             tiebreak_seconds: 1_800,
@@ -678,6 +678,7 @@ mod tests {
             { "contest_id": contest_id, "contest_type": "codelink-bracket" }
         ]));
         let setup = crate::model::Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
@@ -697,9 +698,9 @@ mod tests {
                     pos: 0,
                     player_a: 10,
                     player_b: 20,
-                    group_a: [101, 102, 103],
-                    group_b: [201, 202, 203],
-                    order_a: Some([101, 102, 103]),
+                    group_a: vec![101, 102, 103],
+                    group_b: vec![201, 202, 203],
+                    order_a: Some(vec![101, 102, 103]),
                     state: MatchPhase::Ordering,
                     ..Default::default()
                 })
@@ -740,6 +741,7 @@ mod tests {
     /// built `MatchState` instead of hardcoding one.
     fn seed_setup_and_match(host: &Host, contest_id: i32, m: &MatchState) {
         let setup = crate::model::Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
             penalty_seconds: crate::model::default_penalty_seconds(),
@@ -882,10 +884,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             xiaoju: vec![crate::model::XiaojuState {
                 index: 0,
@@ -952,9 +954,9 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([101, 102, 103]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
             state: MatchPhase::Ordering,
             ..Default::default()
         };
@@ -1028,10 +1030,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([101, 102, 103]),
-            order_b: Some([201, 202, 203]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
+            order_b: Some(vec![201, 202, 203]),
             state: MatchPhase::Decided,
             winner: Some(10),
             xiaoju: vec![crate::model::XiaojuState {
@@ -1073,9 +1075,9 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([101, 102, 103]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
             state: MatchPhase::Ordering, // owner 10 denied their own group
             ..Default::default()
         };
@@ -1084,10 +1086,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 30,
-            group_a: [101, 102, 103],
-            group_b: [401, 402, 403],
-            order_a: Some([101, 102, 103]),
-            order_b: Some([401, 402, 403]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![401, 402, 403],
+            order_a: Some(vec![101, 102, 103]),
+            order_b: Some(vec![401, 402, 403]),
             state: MatchPhase::Decided, // owner 10 allowed: match is over
             winner: Some(10),
             xiaoju: vec![crate::model::XiaojuState {
@@ -1132,10 +1134,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([101, 102, 103]),
-            order_b: Some([201, 202, 203]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![101, 102, 103]),
+            order_b: Some(vec![201, 202, 203]),
             state: MatchPhase::Ordering,
             ..Default::default()
         };

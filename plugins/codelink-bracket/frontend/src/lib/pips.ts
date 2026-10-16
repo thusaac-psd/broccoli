@@ -6,13 +6,16 @@ import type { MatchView } from '../types.ts';
 export type Pip = 'won' | 'lost' | 'void' | 'live' | 'upcoming';
 
 /**
- * The three regular games, then any tiebreaks that have opened. `void` is a
+ * The regular games, then any tiebreaks that have opened. `void` is a
  * decided game nobody won; `live` is the open game; `upcoming` has not
  * opened yet (never shown once the match is decided).
  */
 export function gamePips(match: MatchView, playerId: number): Pip[] {
   const byIndex = new Map(match.games.map((g) => [g.index, g]));
-  const lastIndex = Math.max(2, ...match.games.map((g) => g.index));
+  const lastIndex = Math.max(
+    match.group_a.length - 1,
+    ...match.games.map((g) => g.index),
+  );
   const pips: Pip[] = [];
   for (let i = 0; i <= lastIndex; i++) {
     const g = byIndex.get(i);

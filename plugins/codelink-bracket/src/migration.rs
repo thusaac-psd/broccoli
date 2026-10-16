@@ -3,7 +3,7 @@ use broccoli_server_sdk::prelude::*;
 use serde_json::{Value, json};
 
 const VERSION_KEY: &str = "schema_version";
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 
 pub fn run(host: &Host) -> Result<(), SdkError> {
     let version = host
@@ -21,39 +21,29 @@ pub fn run(host: &Host) -> Result<(), SdkError> {
         return Ok(());
     }
     for prefix in ["setup:", "match:"] {
-        let mut after: Option<String> = None;
-        loop {
-            let entries = host.storage.scan(prefix, after.as_deref())?;
-            if entries.is_empty() {
-                break;
-            }
-            after = entries.keys().max().cloned();
-            for key in entries.keys() {
-                let mut upgraded = false;
-                for _ in 0..100 {
-                    let Some(snapshot) = host.storage.snapshot(key)? else {
-                        upgraded = true;
-                        break;
-                    };
-                    let mut document: Value = serde_json::from_str(&snapshot.value)?;
-                    upgrade_document(prefix, &mut document)?;
-                    let new = serde_json::to_string(&document)?;
-                    if new == snapshot.value
-                        || host
-                            .storage
-                            .compare_and_set_snapshot(key, Some(&snapshot), &new)?
-                    {
-                        upgraded = true;
-                        break;
-                    }
+        crate::storage::scan_documents(host, prefix, |key, _| {
+            for _ in 0..100 {
+                let Some(snapshot) = host.storage.snapshot(key)? else {
+                    return Ok(());
+                };
+                let mut document: Value = serde_json::from_str(&snapshot.value)?;
+                upgrade_document(prefix, &mut document)?;
+                if prefix == "setup:" {
+                    upgrade_stage_rules(host, key, &mut document)?;
                 }
-                if !upgraded {
-                    return Err(SdkError::Other(
-                        "Bracket migration CAS retry limit exceeded".into(),
-                    ));
+                let new = serde_json::to_string(&document)?;
+                if new == snapshot.value
+                    || host
+                        .storage
+                        .compare_and_set_snapshot(key, Some(&snapshot), &new)?
+                {
+                    return Ok(());
                 }
             }
-        }
+            Err(SdkError::Other(
+                "Bracket migration CAS retry limit exceeded".into(),
+            ))
+        })?;
     }
     // The old host feedback protocol carried an enum-specific result. Restore
     // this plugin's public verdict before marking the upgrade complete.
@@ -78,6 +68,50 @@ pub fn run(host: &Host) -> Result<(), SdkError> {
         }
     }
     host.storage.set(&[(VERSION_KEY, &VERSION.to_string())])?;
+    Ok(())
+}
+
+/// v3 moves the original 16 seed slots into the setup document. Matches keep
+/// their ids and all progress; every created stage is frozen on upgrade.
+fn upgrade_stage_rules(host: &Host, key: &str, document: &mut Value) -> Result<(), SdkError> {
+    let contest: i32 = key
+        .strip_prefix("setup:")
+        .unwrap()
+        .parse()
+        .map_err(|_| SdkError::Other("Invalid setup key".into()))?;
+    let object = document.as_object_mut().unwrap();
+    if !object.contains_key("seeds") {
+        let keys: Vec<_> = (0..16)
+            .map(|pos| crate::storage::slot_key(contest, 1, pos))
+            .collect();
+        let slots = host
+            .storage
+            .get(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let seeds = keys
+            .iter()
+            .map(|key| {
+                slots
+                    .get(key)
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .ok_or_else(|| SdkError::Other(format!("Missing or invalid stored seed {key}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        object.insert("seeds".into(), json!(seeds));
+    }
+    if !object.contains_key("opened_rounds") {
+        let prefix = format!("match:{contest}:");
+        let mut opened = 0;
+        crate::storage::scan_documents(host, &prefix, |_, raw| {
+            let state: Value = serde_json::from_str(raw)?;
+            let round = state
+                .get("round")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| SdkError::Other("Missing stored match round".into()))?;
+            opened = opened.max(round);
+            Ok(())
+        })?;
+        object.insert("opened_rounds".into(), json!(opened));
+    }
     Ok(())
 }
 
@@ -147,12 +181,59 @@ fn upgrade_document(prefix: &str, document: &mut Value) -> Result<(), SdkError> 
 mod tests {
     use super::*;
     #[test]
+    fn version_two_preserves_match_progress_and_freezes_partial_stage_openings() {
+        let host = Host::mock();
+        let mut old = serde_json::to_value(crate::model::Setup {
+            rounds: vec![crate::model::RoundDef::default(); 4],
+            seeds: (10..26).collect(),
+            ..Default::default()
+        })
+        .unwrap();
+        old.as_object_mut().unwrap().remove("seeds");
+        old.as_object_mut().unwrap().remove("opened_rounds");
+        host.storage
+            .set(&[("schema_version", "2"), ("setup:7", &old.to_string())])
+            .unwrap();
+        for pos in 0..16 {
+            host.storage
+                .set(&[(
+                    &crate::storage::slot_key(7, 1, pos),
+                    &(10 + i32::from(pos)).to_string(),
+                )])
+                .unwrap();
+        }
+        let state = crate::model::MatchState {
+            round: 2,
+            score_a: 2,
+            extra_time_remaining_ms: 17000,
+            game_durations: Some(crate::model::GameDurations {
+                xiaoju_seconds: 70,
+                tiebreak_seconds: 90,
+            }),
+            ..Default::default()
+        };
+        let raw = serde_json::to_string(&state).unwrap();
+        host.storage.set(&[("match:7:8", &raw)]).unwrap();
+        run(&host).unwrap();
+        let setup = crate::storage::load_setup(&host, 7).unwrap().unwrap();
+        assert_eq!(setup.seeds, (10..26).collect::<Vec<_>>());
+        assert_eq!(setup.opened_rounds, 2);
+        assert_eq!(
+            crate::storage::load_match(&host, 7, 8).unwrap().unwrap(),
+            state
+        );
+        let saved = host.storage.data();
+        run(&host).unwrap();
+        assert_eq!(host.storage.data(), saved);
+    }
+
+    #[test]
     fn upgrades_private_documents_once_and_keeps_current_settings() {
         let host = Host::mock();
-        let setup = json!({"rounds":[{"group_a":[1,2,3],"group_b":[4,5,6],"tiebreak":[7]},
-            {"xiaoju_seconds":900,"group_a":[8,9,10],"group_b":[11,12,13],"tiebreak":[14]}],
+        let setup = json!({"rounds":[{"group_a":vec![1,2,3],"group_b":vec![4,5,6],"tiebreak":[7]},
+            {"xiaoju_seconds":900,"group_a":vec![8,9,10],"group_b":vec![11,12,13],"tiebreak":[14]}],
             "xiaoju_seconds":300,"round_intermission_seconds":40});
-        let game = json!({"xiaoju_seconds":0,"admission_revision":9,"admission_by_user":{"1":3},
+        let game = json!({"round":1,"xiaoju_seconds":0,"admission_revision":9,"admission_by_user":{"1":3},
             "xiaoju":[{"opened_at_ms":1000,"deadline_ms":91000}],"winner":1});
         host.storage
             .set(&[
@@ -160,6 +241,14 @@ mod tests {
                 ("match:1:0", &game.to_string()),
             ])
             .unwrap();
+        for pos in 0..16 {
+            host.storage
+                .set(&[(
+                    &crate::storage::slot_key(1, 1, pos),
+                    &(i32::from(pos) + 1).to_string(),
+                )])
+                .unwrap();
+        }
         run(&host).unwrap();
         let stored: Value =
             serde_json::from_str(&host.storage.get_one("setup:1").unwrap().unwrap()).unwrap();
@@ -203,7 +292,7 @@ mod tests {
         );
         assert_eq!(
             host.storage.get_one(VERSION_KEY).unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
     }
 

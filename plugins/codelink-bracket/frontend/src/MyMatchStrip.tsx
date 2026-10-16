@@ -1,3 +1,4 @@
+import { gameLabel } from './lib/stage';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -34,11 +35,9 @@ export function MyMatchStrip({
       : playerLabel(match.player_a_name, match.player_a);
   const status =
     stage.kind === 'play'
-      ? `${
-          stage.game >= 3
-            ? t('codelink-bracket.game.tiebreak', { n: stage.game - 2 })
-            : t('codelink-bracket.game.regular', { n: stage.game + 1 })
-        }${clock ? ` · ${clock.text}` : ''}`
+      ? `${t(
+          ...gameLabel(match, stage.game),
+        )}${clock ? ` · ${clock.text}` : ''}`
       : stage.kind === 'waiting_start' && startsIn !== null
         ? startsIn === 'now'
           ? t('codelink-bracket.card.starting')
@@ -55,7 +54,7 @@ export function MyMatchStrip({
       <Swords className="h-4 w-4 text-primary" />
       <span className="font-medium">{t('codelink-bracket.my.title')}</span>
       <span className="text-muted-foreground">
-        {t(roundNameKey(match.round))} ·{' '}
+        {t(roundNameKey(match.round, match.stage_count))} ·{' '}
         {t('codelink-bracket.my.vs', { name: opponent })}
       </span>
       <span className={cn('font-medium', urgent && 'text-primary')}>

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { makeMatch } from './fixtures.test-util.ts';
-import { matchSteps, playerStage, sideOf } from './stage.ts';
+import { gameLabel, matchSteps, playerStage, sideOf } from './stage.ts';
 
 const match = makeMatch;
 
@@ -129,4 +129,21 @@ test('once both have ranked, the waiting player learns when the match starts', (
     kind: 'waiting_start',
     startsAtMs: 90_000,
   });
+});
+
+test('five-game stages show game five before tiebreak one', () => {
+  const m = makeMatch({ group_a: [1, 2, 3, 4, 5], group_b: [6, 7, 8, 9, 10] });
+  assert.equal(matchSteps(m, 'a').filter((s) => s.key === 'game').length, 5);
+  assert.deepEqual(gameLabel(m, 4), [
+    'codelink-bracket.game.regular',
+    { n: 5 },
+  ]);
+  assert.deepEqual(gameLabel(m, 5), [
+    'codelink-bracket.game.tiebreak',
+    { n: 1 },
+  ]);
+  assert.deepEqual(gameLabel(m, 6, true), [
+    'codelink-bracket.game.shortTiebreak',
+    { n: 2 },
+  ]);
 });

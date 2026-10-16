@@ -39,9 +39,9 @@ pub struct GateCtx {
     pub player_b: i32,
     /// The order player A must solve their own group in, as ranked by B.
     /// `None` before B has ranked it (still `Ordering`).
-    pub order_a: Option<[i32; 3]>,
+    pub order_a: Option<Vec<i32>>,
     /// The order player B must solve their own group in, as ranked by A.
-    pub order_b: Option<[i32; 3]>,
+    pub order_b: Option<Vec<i32>>,
     pub state: MatchPhase,
     /// Index of the currently open 小局 (regular or 附加赛 -- both live in
     /// the same `xiaoju` log, see [`crate::model::MatchState::xiaoju`]).
@@ -133,9 +133,9 @@ pub fn check(ctx: &GateCtx, viewer: i32, problem_id: i32) -> Result<(), Rejectio
         MatchPhase::Tiebreak => ctx.tiebreak_problem,
         MatchPhase::InProgress => {
             let order = if viewer == ctx.player_a {
-                ctx.order_a
+                ctx.order_a.as_ref()
             } else if viewer == ctx.player_b {
-                ctx.order_b
+                ctx.order_b.as_ref()
             } else {
                 None
             };
@@ -165,8 +165,8 @@ fn gate_ctx_from_match(m: &MatchState, round_def: &RoundDef) -> GateCtx {
     GateCtx {
         player_a: m.player_a,
         player_b: m.player_b,
-        order_a: m.order_a,
-        order_b: m.order_b,
+        order_a: m.order_a.clone(),
+        order_b: m.order_b.clone(),
         state: m.state,
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_decided: current.map(|x| x.decided).unwrap_or(false),
@@ -213,7 +213,10 @@ fn resolve_rejection(
         return Ok(Err(Rejection::not_in_match()));
     };
 
-    let state_key = storage::match_key(contest_id, storage::match_id_for(m.round, m.pos));
+    let state_key = storage::match_key(
+        contest_id,
+        storage::match_id_for(setup.player_count(), m.round, m.pos),
+    );
     let snapshot = host
         .storage
         .snapshot(&state_key)?
@@ -263,7 +266,7 @@ fn resolve_rejection(
         metadata: serde_json::to_value(crate::feedback::AdmissionMetadata {
             scope_key: crate::feedback::game_scope(
                 contest_id,
-                storage::match_id_for(m.round, m.pos),
+                storage::match_id_for(setup.player_count(), m.round, m.pos),
                 game.index,
             ),
             delay_seconds,
@@ -332,12 +335,12 @@ pub fn check_submission(input: String) -> extism_pdk::FnResult<String> {
 mod tests {
     use super::*;
 
-    fn gate_in_progress_at_xiaoju(index: u8, order_a: [i32; 3]) -> GateCtx {
+    fn gate_in_progress_at_xiaoju(index: u8, order_a: Vec<i32>) -> GateCtx {
         GateCtx {
             player_a: 10,
             player_b: 20,
             order_a: Some(order_a),
-            order_b: Some([203, 201, 202]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             current_xiaoju_index: Some(index),
             current_xiaoju_decided: false,
@@ -349,8 +352,8 @@ mod tests {
         GateCtx {
             player_a: 10,
             player_b: 20,
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             current_xiaoju_index: Some(index),
             current_xiaoju_decided: true,
@@ -383,7 +386,7 @@ mod tests {
 
     #[test]
     fn rejects_a_submission_to_a_problem_that_is_not_the_current_xiaoju_problem() {
-        let ctx = gate_in_progress_at_xiaoju(0, [103, 101, 102]);
+        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
         assert_eq!(check(&ctx, 10, 101).unwrap_err().code, "NOT_YOUR_PROBLEM");
     }
 
@@ -391,7 +394,7 @@ mod tests {
     fn rejects_a_submission_to_the_opponents_problem() {
         // Visibility already denies reading it, but the gate must not rely
         // on that: a player could still POST the id directly.
-        let ctx = gate_in_progress_at_xiaoju(0, [103, 101, 102]);
+        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
         assert_eq!(check(&ctx, 10, 201).unwrap_err().code, "NOT_YOUR_PROBLEM");
     }
 
@@ -404,7 +407,7 @@ mod tests {
     #[test]
     fn accepts_the_current_problem_from_the_right_player() {
         // Negative control for the three rejections above.
-        let ctx = gate_in_progress_at_xiaoju(0, [103, 101, 102]);
+        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
         assert!(check(&ctx, 10, 103).is_ok());
     }
 
@@ -413,9 +416,10 @@ mod tests {
 
     fn seeded_setup() -> crate::model::Setup {
         crate::model::Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![RoundDef {
-                group_a: [101, 102, 103],
-                group_b: [201, 202, 203],
+                group_a: vec![101, 102, 103],
+                group_b: vec![201, 202, 203],
                 tiebreak: vec![319],
                 xiaoju_seconds: 1_800,
                 tiebreak_seconds: 1_800,
@@ -447,10 +451,10 @@ mod tests {
                     pos: 0,
                     player_a: 10,
                     player_b: 20,
-                    group_a: [101, 102, 103],
-                    group_b: [201, 202, 203],
-                    order_a: Some([103, 101, 102]),
-                    order_b: Some([203, 201, 202]),
+                    group_a: vec![101, 102, 103],
+                    group_b: vec![201, 202, 203],
+                    order_a: Some(vec![103, 101, 102]),
+                    order_b: Some(vec![203, 201, 202]),
                     xiaoju,
                     state,
                     ..Default::default()

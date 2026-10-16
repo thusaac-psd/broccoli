@@ -1,6 +1,6 @@
 name = "codelink-bracket"
 version = "0.1.0"
-description = "Codelink afternoon knockout: 16-player single elimination with opponent-ordered problem sets"
+description = "Codelink afternoon knockout: single elimination with opponent-ordered problem sets"
 
 [translations]
 en = "i18n/en.toml"
@@ -92,3 +92,8 @@ contest_type = "codelink-bracket"
 [bundle]
 # Event-specific format: shipped with releases but loaded only once enabled.
 mode = "optional"
+
+[[server.routes]]
+method = "GET"
+path = "/api/plugins/codelink-bracket/contests/{contest_id}/setup"
+handler = "api_get_setup"

@@ -16,20 +16,6 @@ use broccoli_server_sdk::prelude::Verdict;
 
 use crate::model::{AdjudicationReason, MatchPhase, MatchState, Setup};
 
-/// The 3 regular 小局 (index 0..3); 附加赛 (tiebreak) attempts are appended
-/// only once `m.state` becomes `Tiebreak`. Shared with `judge.rs`, which
-/// needs the same boundary both to classify `current_problem` during
-/// `MatchPhase::AwaitingJudge` (see that variant's doc comment for why
-/// `m.state` alone no longer distinguishes regular from tiebreak there) and
-/// to restore `m.state` once a blocked 小局 resolves.
-pub(crate) const REGULAR_XIAOJU_COUNT: usize = 3;
-
-/// Whether xiaoju `index` belongs to the 3 regular 小局 (vs. an 附加赛
-/// attempt). See [`REGULAR_XIAOJU_COUNT`].
-pub(crate) fn is_regular_xiaoju_index(index: u8) -> bool {
-    (index as usize) < REGULAR_XIAOJU_COUNT
-}
-
 pub use broccoli_server_sdk::types::SubmissionLifecycle;
 
 /// Whether a submission in this status is still IN FLIGHT (could yet
@@ -189,7 +175,7 @@ pub(crate) fn decide_game_at_cutoff(
     // `current` is a shared borrow of `m.xiaoju`'s last element.
     let deadline_ms = current.deadline_ms;
     let base_deadline_ms = current.base_deadline_ms();
-    let regular = is_regular_xiaoju_index(current.index);
+    let regular = m.is_regular_game(current.index);
     let eligible = subs.iter().filter(|s| {
         current.contains_submission_at_us(s.submitted_at_us)
             && i128::from(s.submitted_at_us) < i128::from(cutoff_ms) * 1_000
@@ -285,7 +271,7 @@ pub(crate) fn decide_game_at_cutoff(
     XiaojuOutcome::Decided { winner }
 }
 
-/// Outcome of deciding a whole match: the 3 regular 小局, and any 附加赛
+/// Outcome of deciding a whole match: the regular 小局, and any 附加赛
 /// (tiebreak) that follows a level score.
 ///
 /// `Decided { winner: i32 }` is deliberately a DIFFERENT shape from
@@ -304,7 +290,7 @@ pub enum MatchOutcome {
 
 /// Decide a match from its accumulated 小局 state.
 ///
-/// After the 3 regular 小局, higher `score_a`/`score_b` wins. A LEVEL score
+/// After the regular 小局, higher `score_a`/`score_b` wins. A LEVEL score
 /// -- **including 0-0** -- opens the round's first 附加赛 problem:
 /// `if score_a == score_b && score_a > 0` is a real bug shape here, not a
 /// hypothetical one, because it silently leaves a 0-0 match undecided
@@ -374,11 +360,11 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
         };
     }
 
-    // Regular phase: waiting on the 3 regular 小局 (index 0..3; 附加赛
+    // Regular phase: waiting on every configured regular 小局. 附加赛
     // attempts are appended only once `m.state` becomes `Tiebreak`, so
-    // nothing here needs to filter them out).
+    // nothing here needs to filter them out.
     let all_regular_decided =
-        m.xiaoju.len() == REGULAR_XIAOJU_COUNT && m.xiaoju.iter().all(|x| x.decided);
+        m.xiaoju.len() == m.group_a.len() && m.xiaoju.iter().all(|x| x.decided);
     if !all_regular_decided {
         return MatchOutcome::NotYet;
     }
@@ -420,10 +406,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             xiaoju: vec![XiaojuState {
                 index,
                 opened_at_ms: 0,
@@ -988,9 +974,10 @@ mod tests {
 
     fn setup() -> Setup {
         Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![RoundDef {
-                group_a: [101, 102, 103],
-                group_b: [201, 202, 203],
+                group_a: vec![101, 102, 103],
+                group_b: vec![201, 202, 203],
                 tiebreak: vec![301, 302],
                 xiaoju_seconds: 1_800,
                 tiebreak_seconds: 1_800,
@@ -1006,7 +993,7 @@ mod tests {
     /// (`None` = that 小局 scored nobody), still in `InProgress` -- exactly
     /// the state `decide_match` is called in right after the 3rd 小局's
     /// `decide_xiaoju` call returns `Decided`.
-    fn match_after_xiaoju(winners: &[Option<i32>; 3]) -> MatchState {
+    fn match_after_xiaoju(winners: &[Option<i32>]) -> MatchState {
         let mut score_a = 0u8;
         let mut score_b = 0u8;
         let xiaoju = winners
@@ -1033,10 +1020,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             xiaoju,
             score_a,
             score_b,
@@ -1060,10 +1047,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             xiaoju: vec![
                 XiaojuState {
                     index: 0,
@@ -1109,6 +1096,34 @@ mod tests {
             game_durations: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn five_regular_games_are_all_played_before_scoring_and_tiebreaking() {
+        let mut m = match_after_xiaoju(&[Some(10), Some(10), Some(10)]);
+        m.group_a.extend([104, 105]);
+        m.group_b.extend([204, 205]);
+        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
+        for index in [3, 4] {
+            m.xiaoju.push(XiaojuState {
+                index,
+                decided: true,
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            decide_match(&mut m, &setup()),
+            MatchOutcome::Decided { winner: 10 }
+        );
+        m.state = MatchPhase::InProgress;
+        m.winner = None;
+        m.score_a = 0;
+        m.score_b = 0;
+        assert!(matches!(
+            decide_match(&mut m, &setup()),
+            MatchOutcome::OpenTiebreak { .. }
+        ));
+        assert!(!m.is_regular_game(5));
     }
 
     #[test]

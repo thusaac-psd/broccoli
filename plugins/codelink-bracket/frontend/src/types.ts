@@ -1,4 +1,4 @@
-// Wire types for the codelink-bracket plugin's 6 HTTP routes. Kept in
+// Wire types for the codelink-bracket plugin's HTTP routes. Kept in
 // lockstep with the Rust source of truth:
 //   - `MatchPhase`              -- plugins/codelink-bracket/src/model.rs
 //   - `MatchView` (GET routes)  -- plugins/codelink-bracket/src/routes.rs
@@ -23,12 +23,12 @@ export type MatchPhase =
   | 'needs_adjudication';
 
 /**
- * A group/order triple as returned by `GET /bracket` / `GET /matches/{id}`:
+ * A problem group/order as returned by `GET /bracket` / `GET /matches/{id}`:
  * fixed-position, per-entry visibility masking. A masked entry is `null` but
  * KEEPS its array position -- it does not collapse or reorder. See
  * `mask_group` in `plugins/codelink-bracket/src/routes.rs`.
  */
-export type MaskedTriple = [number | null, number | null, number | null];
+export type MaskedGroup = (number | null)[];
 
 /** One match, visibility-filtered for the requesting viewer. */
 export interface MatchView {
@@ -41,16 +41,17 @@ export interface MatchView {
   };
   id: number;
   round: number;
+  stage_count: number;
   pos: number;
   player_a: number;
   player_b: number;
   /** Usernames for `player_a`/`player_b`; null only if the server's lookup failed. */
   player_a_name: string | null;
   player_b_name: string | null;
-  group_a: MaskedTriple;
-  group_b: MaskedTriple;
-  order_a: MaskedTriple | null;
-  order_b: MaskedTriple | null;
+  group_a: MaskedGroup;
+  group_b: MaskedGroup;
+  order_a: MaskedGroup | null;
+  order_b: MaskedGroup | null;
   tiebreak_problem: number | null;
   score_a: number;
   score_b: number;
@@ -100,7 +101,7 @@ export interface MatchView {
   starts_at_ms: number | null;
 }
 
-/** One opened game (小局). Index 0-2 are regular games, 3+ are tiebreaks. */
+/** One opened game (小局). The tiebreak flag distinguishes regular games from tiebreaks. */
 export interface GameView {
   index: number;
   tiebreak: boolean;
@@ -115,6 +116,7 @@ export interface GameView {
 }
 
 export interface BracketResponse {
+  player_count: number;
   matches: MatchView[];
   /** The contest's end time; null (or absent) if the server could not read it. */
   contest_end_ms?: number | null;
@@ -135,13 +137,13 @@ export type AdjudicationReason =
  * submitted yet", not "masked".
  */
 export interface OrderResponse {
-  order_a: [number, number, number] | null;
-  order_b: [number, number, number] | null;
+  order_a: number[] | null;
+  order_b: number[] | null;
 }
 
 /** `POST /matches/{id}/order` request body. */
 export interface OrderRequest {
-  order: [number, number, number];
+  order: number[];
 }
 
 export interface StartResponse {
@@ -160,8 +162,8 @@ export interface ForceDecideResponse {
 
 /** One round's problems and timings for `POST /setup` (see `RoundDef` in src/model.rs). */
 export interface RoundSetup {
-  group_a: [number, number, number];
-  group_b: [number, number, number];
+  group_a: number[];
+  group_b: number[];
   tiebreak: number[];
   xiaoju_seconds: number;
   tiebreak_seconds: number;
@@ -175,4 +177,10 @@ export interface SetupRequest {
   match_extra_time_seconds: number;
   penalty_seconds: number;
   escalation_grace_seconds: number;
+}
+
+/** Staff-only full setup, including the immutable prefix of opened stages. */
+export interface SetupResponse {
+  setup: (SetupRequest & { opened_rounds: number }) | null;
+  started: boolean;
 }

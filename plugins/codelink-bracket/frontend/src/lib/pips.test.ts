@@ -75,3 +75,8 @@ test('a game left open when staff decided the match is not shown as live', () =>
   assert.deepEqual(gamePips(m, 10), ['void', 'void']);
   assert.deepEqual(gamePips(m, 20), ['void', 'void']);
 });
+
+test('five regular games have five pending pips', () => {
+  const m = makeMatch({ group_a: [1, 2, 3, 4, 5], group_b: [6, 7, 8, 9, 10] });
+  assert.equal(gamePips(m, m.player_a).length, 5);
+});

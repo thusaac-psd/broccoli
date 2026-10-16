@@ -6,6 +6,7 @@ export function makeMatch(overrides: Partial<MatchView> = {}): MatchView {
   return {
     id: 0,
     round: 1,
+    stage_count: 4,
     pos: 0,
     player_a: 10,
     player_b: 20,

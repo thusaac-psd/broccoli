@@ -5,7 +5,6 @@ import { makeMatch } from './fixtures.test-util.ts';
 import {
   adjudicationMessage,
   contestEndWarning,
-  MATCH_COUNT,
   roundsInPlay,
 } from './summary.ts';
 
@@ -25,7 +24,7 @@ test('with every created match decided, the next round is in play', () => {
 });
 
 test('no round is in play once the tournament is over', () => {
-  const all = Array.from({ length: MATCH_COUNT }, () => decided(1));
+  const all = Array.from({ length: 15 }, () => decided(1));
   assert.deepEqual(roundsInPlay(all), []);
 });
 
@@ -85,8 +84,16 @@ test('after the contest end every unfinished match counts', () => {
   const matches = [decided(1), decided(1)];
   assert.deepEqual(contestEndWarning(matches, 5_000, 5_000), {
     kind: 'ended',
-    unfinished: MATCH_COUNT - 2,
+    unfinished: 15 - 2,
   });
-  const all = Array.from({ length: MATCH_COUNT }, () => decided(1));
+  const all = Array.from({ length: 15 }, () => decided(1));
   assert.equal(contestEndWarning(all, 5_000, 9_000), null);
+});
+
+test('an eight-player final completes seven matches', () => {
+  const all = Array.from({ length: 7 }, () =>
+    makeMatch({ stage_count: 3, state: 'decided' }),
+  );
+  assert.deepEqual(roundsInPlay(all), []);
+  assert.equal(contestEndWarning(all, 5000, 9000), null);
 });

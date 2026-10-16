@@ -184,6 +184,11 @@ pub fn parse_stage_timer_key(key: &str) -> Option<(i32, u8)> {
     }
     let contest: i32 = parts.next()?.parse().ok()?;
     let round: u8 = parts.next()?.parse().ok()?;
+    // Earlier releases used the unsuffixed key. Wake times distinguish edits:
+    // a stale callback cannot replace a newly scheduled, earlier opening.
+    if let Some(at) = parts.next() {
+        at.parse::<i64>().ok()?;
+    }
     parts.next().is_none().then_some((contest, round))
 }
 
@@ -259,39 +264,68 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
 /// stage's match documents are created together at this point, so rankings
 /// cannot be submitted before the official stage opening.
 pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkError> {
-    let Some(setup) = storage::load_setup(host, contest)? else {
-        return Ok(());
-    };
-    if round == 0 {
+    let key = storage::setup_key(contest);
+    for _ in 0..100 {
+        let Some(snapshot) = host.storage.snapshot(&key)? else {
+            return Ok(());
+        };
+        let mut setup: Setup = serde_json::from_str(&snapshot.value)?;
+        if round == 0
+            || round as usize > setup.rounds.len()
+            || round as usize > setup.opened_rounds + 1
+        {
+            return Ok(());
+        }
+        let matches = storage::load_all_matches(host, contest)?;
+        if round > 1 && bracket::stage_open_at_ms(&setup, &matches, round, 0).is_none() {
+            return Ok(());
+        }
+        let times = contest_times(host, contest)?;
+        let Some(at) = bracket::stage_open_at_ms(&setup, &matches, round, times.start_ms) else {
+            return Ok(());
+        };
+        let now = now_ms(host)?;
+        if times.end_ms.is_some_and(|end| now >= end || at >= end) {
+            return Ok(());
+        }
+        let wake = if now < at {
+            at
+        } else {
+            now.saturating_add(1_000)
+        };
+        let timer_key = format!("{}:{wake}", stage_timer_key(contest, round));
+        // Install recovery before freezing rules: partial creation can be retried.
+        host.timer.schedule(wake, &timer_key, "")?;
+        if now < at {
+            return Ok(());
+        }
+        if setup.opened_rounds < round as usize {
+            setup.opened_rounds = round as usize;
+            if !host.storage.compare_and_set_snapshot(
+                &key,
+                Some(&snapshot),
+                &serde_json::to_string(&setup)?,
+            )? {
+                continue;
+            }
+        }
+        for pos in 0..storage::matches_in_round(setup.player_count(), round) {
+            storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
+        }
+        let created = storage::load_all_matches(host, contest)?;
+        if created.iter().filter(|(_, m)| m.round == round).count()
+            != usize::from(storage::matches_in_round(setup.player_count(), round))
+        {
+            return Err(SdkError::Other(
+                "Stage is waiting for winner slots; retry opening".into(),
+            ));
+        }
+        host.timer.cancel(&timer_key)?;
         return Ok(());
     }
-    if round as usize > setup.rounds.len() {
-        return Ok(());
-    }
-    let matches = storage::load_all_matches(host, contest)?;
-    if round > 1 && bracket::stage_open_at_ms(&setup, &matches, round, 0).is_none() {
-        return Ok(());
-    }
-    let times = contest_times(host, contest)?;
-    let Some(at) = bracket::stage_open_at_ms(&setup, &matches, round, times.start_ms) else {
-        return Ok(());
-    };
-    let now = now_ms(host)?;
-    if times.end_ms.is_some_and(|end| now >= end || at >= end) {
-        host.timer.cancel(&stage_timer_key(contest, round))?;
-        return Ok(());
-    }
-    if now < at {
-        return host
-            .timer
-            .schedule(at, &stage_timer_key(contest, round), "");
-    }
-
-    for pos in 0..storage::matches_in_round(round) {
-        storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
-    }
-    host.timer.cancel(&stage_timer_key(contest, round))?;
-    Ok(())
+    Err(SdkError::Other(
+        "Stage opening CAS retry limit exceeded".into(),
+    ))
 }
 
 /// The problem `player` should currently be submitting to in match `m`,
@@ -308,13 +342,13 @@ pub(crate) fn current_problem(m: &MatchState, round_def: &RoundDef, player: i32)
         // they were when the block began -- only `m.state` moved to
         // `AwaitingJudge`, which erases whether the blocked 小局 was
         // regular or an 附加赛 attempt. Recover that from the blocked
-        // 小局's own INDEX instead (`decide::is_regular_xiaoju_index`), not
+        // 小局's own INDEX instead (`MatchState::is_regular_game`), not
         // from `m.state`, since both `step` (re-deciding it) and
         // `fetch_subs` (re-querying its submissions) must keep resolving
         // to the SAME problem the block is actually about.
         MatchPhase::AwaitingJudge => {
             let index = m.xiaoju.last()?.index;
-            if decide::is_regular_xiaoju_index(index) {
+            if m.is_regular_game(index) {
                 current_regular_problem(m, player)
             } else {
                 round_def.tiebreak.get(m.tiebreak_index).copied()
@@ -330,9 +364,9 @@ pub(crate) fn current_problem(m: &MatchState, round_def: &RoundDef, player: i32)
 /// `AwaitingJudge` arm when the blocked 小局 turns out to be a regular one.
 fn current_regular_problem(m: &MatchState, player: i32) -> Option<i32> {
     let order = if player == m.player_a {
-        m.order_a
+        m.order_a.as_ref()
     } else if player == m.player_b {
-        m.order_b
+        m.order_b.as_ref()
     } else {
         return None;
     };
@@ -542,9 +576,9 @@ pub(crate) fn open_xiaoju(
         .rounds
         .get(m.round.saturating_sub(1) as usize)
         .ok_or_else(|| SdkError::Other("round setup missing".into()))?;
-    let durations = m.game_durations.get_or_insert(round.game_durations());
+    let durations = *m.game_durations.get_or_insert(round.game_durations());
     let index = m.xiaoju.len() as u8;
-    let seconds = if decide::is_regular_xiaoju_index(index) {
+    let seconds = if m.is_regular_game(index) {
         durations.xiaoju_seconds
     } else {
         durations.tiebreak_seconds
@@ -556,7 +590,7 @@ pub(crate) fn open_xiaoju(
                 .ok_or_else(|| SdkError::Other("game duration overflow".into()))?,
         )
         .ok_or_else(|| SdkError::Other("game deadline overflow".into()))?;
-    let extra_ms = if decide::is_regular_xiaoju_index(index) {
+    let extra_ms = if m.is_regular_game(index) {
         m.extra_time_remaining_ms
     } else {
         0
@@ -708,7 +742,7 @@ fn step(
                 // BEFORE it runs, since it branches on `m.state ==
                 // Tiebreak` vs. everything else, and `AwaitingJudge` is
                 // neither.
-                m.state = if decide::is_regular_xiaoju_index(current_index) {
+                m.state = if m.is_regular_game(current_index) {
                     MatchPhase::InProgress
                 } else {
                     MatchPhase::Tiebreak
@@ -892,7 +926,11 @@ fn resolve_and_advance(
     let Some(m) = storage::find_players_match(&matches, round, user_id) else {
         return Ok(());
     };
-    advance(host, contest_id, storage::match_id_for(m.round, m.pos))
+    advance(
+        host,
+        contest_id,
+        storage::match_id_for(setup.player_count(), m.round, m.pos),
+    )
 }
 
 /// The rejection message [`apply_force_decide`] returns once a match is
@@ -1247,18 +1285,20 @@ mod tests {
 
     fn setup_two_rounds() -> Setup {
         Setup {
+            opened_rounds: 1,
+            seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
-                    group_a: [101, 102, 103],
-                    group_b: [201, 202, 203],
+                    group_a: vec![101, 102, 103],
+                    group_b: vec![201, 202, 203],
                     tiebreak: vec![301, 302],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
                     break_before_seconds: 0,
                 },
                 RoundDef {
-                    group_a: [401, 402, 403],
-                    group_b: [501, 502, 503],
+                    group_a: vec![401, 402, 403],
+                    group_b: vec![501, 502, 503],
                     tiebreak: vec![601],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
@@ -1277,10 +1317,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             xiaoju: vec![XiaojuState {
                 index: 0,
@@ -1840,7 +1880,7 @@ mod tests {
         // `m.state` alone can no longer distinguish "blocked mid-regular"
         // from "blocked mid-tiebreak" once both collapse to
         // `AwaitingJudge` -- this must fall back to the blocked 小局's own
-        // INDEX (`decide::is_regular_xiaoju_index`), not `m.state`.
+        // INDEX (`MatchState::is_regular_game`), not `m.state`.
         let round_def = &setup_two_rounds().rounds[0];
         let mut m = match_in_progress();
         m.state = MatchPhase::AwaitingJudge;
@@ -2632,10 +2672,10 @@ mod tests {
             round,
             player_a: a,
             player_b: b,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::Ordering,
             ..Default::default()
         }
@@ -2647,13 +2687,13 @@ mod tests {
     }
 
     fn seed_completed_first_stage(host: &Host, setup: &Setup) {
-        for pos in 0..storage::matches_in_round(1) {
+        for pos in 0..storage::matches_in_round(16, 1) {
             let winner = 100 + i32::from(pos);
             seed(
                 host,
                 7,
                 setup,
-                storage::match_id_for(1, pos),
+                storage::match_id_for(16, 1, pos),
                 &MatchState {
                     round: 1,
                     pos,
@@ -2673,6 +2713,65 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_stage_creation_keeps_a_retry_until_every_winner_slot_is_ready() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        host.storage.delete(&[&storage::slot_key(7, 2, 1)]).unwrap();
+        queue_contest_start(&host, 0);
+        queue_now(&host, 700_000);
+        assert!(try_open_stage(&host, 7, 2).is_err());
+        assert_eq!(
+            storage::load_setup(&host, 7)
+                .unwrap()
+                .unwrap()
+                .opened_rounds,
+            2
+        );
+        assert_eq!(host.timer.scheduled_at("stage:7:2:701000"), Some(701_000));
+        host.storage
+            .set(&[(&storage::slot_key(7, 2, 1), "101")])
+            .unwrap();
+        queue_contest_start(&host, 0);
+        queue_now(&host, 701_000);
+        handle_timer(&host, "stage:7:2:701000", 701_000).unwrap();
+        assert_eq!(storage::load_all_matches(&host, 7).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn stale_stage_wakeup_uses_edited_break_and_cannot_replace_an_earlier_timer() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        seed_completed_first_stage(&host, &setup);
+        queue_contest_start(&host, 0);
+        queue_now(&host, 100_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        setup.rounds[1].break_before_seconds = 10;
+        host.storage
+            .set(&[(
+                &storage::setup_key(7),
+                &serde_json::to_string(&setup).unwrap(),
+            )])
+            .unwrap();
+        queue_contest_start(&host, 0);
+        queue_now(&host, 100_000);
+        try_open_stage(&host, 7, 2).unwrap();
+        assert_eq!(host.timer.scheduled_at("stage:7:2:110000"), Some(110_000));
+        assert_eq!(host.timer.scheduled_at("stage:7:2:700000"), Some(700_000));
+        queue_contest_start(&host, 0);
+        queue_now(&host, 110_000);
+        handle_timer(&host, "stage:7:2:110000", 110_000).unwrap();
+        assert_eq!(
+            storage::load_setup(&host, 7)
+                .unwrap()
+                .unwrap()
+                .opened_rounds,
+            2
+        );
+        assert!(storage::load_match(&host, 7, 8).unwrap().is_some());
+    }
+
+    #[test]
     fn stage_opening_waits_for_intermission_then_creates_every_match_once() {
         let host = Host::mock();
         let setup = setup_two_rounds();
@@ -2681,11 +2780,12 @@ mod tests {
         queue_now(&host, 100_000);
         try_open_stage(&host, 7, 2).unwrap();
         assert_eq!(
-            host.timer.scheduled_at(&stage_timer_key(7, 2)),
+            host.timer
+                .scheduled_at(&format!("{}:700000", stage_timer_key(7, 2))),
             Some(700_000)
         );
         assert!(
-            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+            storage::load_match(&host, 7, storage::match_id_for(16, 2, 0))
                 .unwrap()
                 .is_none()
         );
@@ -2693,8 +2793,8 @@ mod tests {
         queue_contest_start(&host, 0);
         queue_now(&host, 700_000);
         try_open_stage(&host, 7, 2).unwrap();
-        for pos in 0..storage::matches_in_round(2) {
-            let m = storage::load_match(&host, 7, storage::match_id_for(2, pos))
+        for pos in 0..storage::matches_in_round(16, 2) {
+            let m = storage::load_match(&host, 7, storage::match_id_for(16, 2, pos))
                 .unwrap()
                 .unwrap();
             assert_eq!(m.state, MatchPhase::Ordering);
@@ -2702,9 +2802,9 @@ mod tests {
             assert_eq!(m.player_b, 101 + i32::from(pos) * 2);
         }
         assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
-        let id = storage::match_id_for(2, 0);
+        let id = storage::match_id_for(16, 2, 0);
         storage::update_match(&host, 7, id, |m| {
-            m.order_a = Some([401, 402, 403]);
+            m.order_a = Some(vec![401, 402, 403]);
             Ok(())
         })
         .unwrap();
@@ -2713,7 +2813,7 @@ mod tests {
         try_open_stage(&host, 7, 2).unwrap();
         assert_eq!(
             storage::load_match(&host, 7, id).unwrap().unwrap().order_a,
-            Some([401, 402, 403])
+            Some(vec![401, 402, 403])
         );
     }
 
@@ -2722,7 +2822,7 @@ mod tests {
         let host = Host::mock();
         let setup = setup_two_rounds();
         seed_completed_first_stage(&host, &setup);
-        let id = storage::match_id_for(1, 7);
+        let id = storage::match_id_for(16, 1, 7);
         storage::update_match(&host, 7, id, |m| {
             m.state = MatchPhase::NeedsAdjudication;
             m.player_a = 107;
@@ -2736,11 +2836,12 @@ mod tests {
         queue_now(&host, 200_000);
         force_decide(&host, 7, id, 107).unwrap();
         assert_eq!(
-            host.timer.scheduled_at(&stage_timer_key(7, 2)),
+            host.timer
+                .scheduled_at(&format!("{}:800000", stage_timer_key(7, 2))),
             Some(800_000)
         );
         assert!(
-            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+            storage::load_match(&host, 7, storage::match_id_for(16, 2, 0))
                 .unwrap()
                 .is_none()
         );
@@ -2751,7 +2852,7 @@ mod tests {
         let host = Host::mock();
         let setup = setup_two_rounds();
         seed_completed_first_stage(&host, &setup);
-        storage::update_match(&host, 7, storage::match_id_for(1, 7), |m| {
+        storage::update_match(&host, 7, storage::match_id_for(16, 1, 7), |m| {
             m.state = MatchPhase::NeedsAdjudication;
             Ok(())
         })
@@ -2759,7 +2860,7 @@ mod tests {
         try_open_stage(&host, 7, 2).unwrap();
         assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
         assert!(
-            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+            storage::load_match(&host, 7, storage::match_id_for(16, 2, 0))
                 .unwrap()
                 .is_none()
         );
@@ -2776,7 +2877,7 @@ mod tests {
         try_open_stage(&host, 7, 2).unwrap();
         assert!(!host.timer.is_scheduled(&stage_timer_key(7, 2)));
         assert!(
-            storage::load_match(&host, 7, storage::match_id_for(2, 0))
+            storage::load_match(&host, 7, storage::match_id_for(16, 2, 0))
                 .unwrap()
                 .is_none()
         );
@@ -2805,7 +2906,8 @@ mod tests {
         try_open_stage(&host, 7, 1).unwrap();
         assert!(storage::load_all_matches(&host, 7).unwrap().is_empty());
         assert_eq!(
-            host.timer.scheduled_at(&stage_timer_key(7, 1)),
+            host.timer
+                .scheduled_at(&format!("{}:60000", stage_timer_key(7, 1))),
             Some(60_000)
         );
         queue_contest_start(&host, 60_000);
@@ -2860,12 +2962,12 @@ mod tests {
             state: MatchPhase::Decided,
             ..Default::default()
         };
-        for pos in 0..storage::matches_in_round(1) {
+        for pos in 0..storage::matches_in_round(16, 1) {
             seed(
                 &host,
                 7,
                 &setup,
-                storage::match_id_for(1, pos),
+                storage::match_id_for(16, 1, pos),
                 &won(
                     pos,
                     if pos == 0 {
@@ -2879,7 +2981,7 @@ mod tests {
                 ),
             );
         }
-        let next = storage::match_id_for(2, 0);
+        let next = storage::match_id_for(16, 2, 0);
         seed(&host, 7, &setup, next, &ranked_match(2, 10, 20));
         queue_contest_start(&host, 0);
         queue_now(&host, 400_000);

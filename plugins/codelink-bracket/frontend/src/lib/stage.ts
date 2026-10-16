@@ -47,7 +47,7 @@ export function playerStage(match: MatchView, side: Side): PlayerStage {
     case 'tiebreak':
       return {
         kind: 'play',
-        game: match.current_xiaoju_index ?? 3,
+        game: match.current_xiaoju_index ?? match.group_a.length,
         problemId: match.tiebreak_problem,
       };
     case 'awaiting_judge':
@@ -72,7 +72,7 @@ export interface Step {
 }
 
 /**
- * The stepper shown above the player's current task: rank, start, three
+ * The stepper shown above the player's current task: rank, start, the configured regular
  * games, a tiebreak step only once one has opened, then the result.
  */
 export function matchSteps(match: MatchView, side: Side): Step[] {
@@ -108,7 +108,7 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
     match.state === 'in_progress' ||
     match.state === 'tiebreak' ||
     match.state === 'awaiting_judge';
-  for (let game = 0; game < 3; game++) {
+  for (let game = 0; game < match.group_a.length; game++) {
     steps.push({
       key: 'game',
       game,
@@ -124,9 +124,9 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
     steps.push({
       key: 'tiebreak',
       status:
-        live && (current ?? 0) >= 3
+        live && (current ?? 0) >= match.group_a.length
           ? 'current'
-          : opened > 3
+          : opened > match.group_a.length
             ? 'done'
             : 'upcoming',
     });
@@ -141,4 +141,24 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
           : 'upcoming',
   });
   return steps;
+}
+
+/** Use the configured group length for regular-game and tiebreak numbering. */
+export function gameLabel(
+  match: MatchView,
+  index: number,
+  short = false,
+): [string, { n: number }] {
+  const tiebreak = index >= match.group_a.length;
+  const key = tiebreak
+    ? short
+      ? 'shortTiebreak'
+      : 'tiebreak'
+    : short
+      ? 'short'
+      : 'regular';
+  return [
+    `codelink-bracket.game.${key}`,
+    { n: tiebreak ? index - match.group_a.length + 1 : index + 1 },
+  ];
 }
