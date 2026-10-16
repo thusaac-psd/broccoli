@@ -286,6 +286,25 @@ mod tests {
     }
 
     #[test]
+    fn game_count_bounds_leave_room_for_a_tiebreak_and_fit_the_game_index() {
+        for count in [1, 2, 5, 255, 256] {
+            let setup = Setup {
+                seeds: vec![1, 2],
+                rounds: vec![RoundDef {
+                    group_a: (1..=count).collect(),
+                    group_b: (1001..1001 + count).collect(),
+                    tiebreak: vec![2000],
+                    xiaoju_seconds: 60,
+                    tiebreak_seconds: 90,
+                    break_before_seconds: 0,
+                }],
+                ..Default::default()
+            };
+            assert_eq!(validate_setup(&setup, &setup.seeds).is_ok(), count < 256);
+        }
+    }
+
+    #[test]
     fn future_stage_edits_are_allowed_but_opened_stages_and_shared_settings_are_frozen() {
         let mut previous = valid_setup();
         previous.opened_rounds = 1;

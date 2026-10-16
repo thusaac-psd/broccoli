@@ -13,8 +13,8 @@ pub fn default_penalty_seconds() -> i64 {
     20
 }
 
-/// Round-level problem assignment and timing, submitted once via `/setup`
-/// before the bracket begins. Stored under [`crate::storage::setup_key`].
+/// Bracket seeding and stage rules, stored under [`crate::storage::setup_key`].
+/// Unopened stages remain editable after the bracket begins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Setup {
     pub rounds: Vec<RoundDef>,

@@ -17,7 +17,7 @@ interface OrderingPanelProps {
   /** This viewer's earlier ranking, if they already sent one. */
   submittedOrder: MaskedGroup | null;
   problems: ReadonlyMap<number, ProblemInfo>;
-  onSubmit: (order: [number, number, number]) => void;
+  onSubmit: (order: number[]) => void;
   submitting: boolean;
 }
 
@@ -99,17 +99,7 @@ export function OrderingPanel({
         <Button
           type="button"
           disabled={!canSubmit}
-          onClick={() => {
-            const [first, second, third] = order;
-            if (
-              first === undefined ||
-              second === undefined ||
-              third === undefined
-            ) {
-              return;
-            }
-            onSubmit([first, second, third]);
-          }}
+          onClick={() => onSubmit(order)}
         >
           <Lock className="mr-1.5 h-3.5 w-3.5" />
           {submitting

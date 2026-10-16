@@ -279,9 +279,9 @@ struct MatchView {
     starts_at_ms: Option<i64>,
 }
 
-/// One opened 小局 as seen by the requesting viewer. Regular games (index
-/// 0-2) give each player their own problem from the opponent-chosen order;
-/// a tiebreak (index 3+) gives both players the same problem.
+/// One opened 小局 as seen by the requesting viewer. Regular games give
+/// each player their own problem from the opponent-chosen order; subsequent
+/// tiebreak games give both players the same problem.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct GameView {
     index: u8,

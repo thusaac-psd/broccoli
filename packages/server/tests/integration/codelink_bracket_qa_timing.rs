@@ -2584,3 +2584,88 @@ async fn future_stage_edit_racing_with_opening_keeps_every_match_on_the_frozen_r
         );
     }
 }
+
+#[tokio::test]
+async fn smallest_and_largest_brackets_complete_through_every_stage() {
+    use sea_orm::{DbBackend, Statement};
+    for player_count in [2u32, 128] {
+        let (app, _plugins, staff, contest_id, rounds, players) =
+            contest_and_rounds_for_setup_probe("Bracket size boundaries").await;
+        let mut seeds: Vec<_> = players.iter().map(|p| p.id).collect();
+        if player_count > 16 {
+            // Seed the large fixture in one DB write; password hashing and
+            // authenticating 112 unused accounts does not exercise the bracket.
+            let rows = app
+                .db
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r#"INSERT INTO "user" (username, password, created_at, credentials_changed_at)
+                   SELECT 'boundary_player_' || n, password, now(), now()
+                   FROM "user" CROSS JOIN generate_series(1, 112) AS n WHERE id = $1
+                   RETURNING id"#,
+                    [players[0].id.into()],
+                ))
+                .await
+                .unwrap();
+            seeds.extend(rows.iter().map(|r| r.try_get::<i32>("", "id").unwrap()));
+            app.db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO contest_user (contest_id, user_id, registered_at) SELECT $1, id, now() FROM \"user\" WHERE username LIKE 'boundary_player_%'",
+                [contest_id.into()],
+            )).await.unwrap();
+        }
+        seeds.truncate(player_count as usize);
+        let stage_count = player_count.ilog2() as usize;
+        let problems: Vec<_> = rounds
+            .iter()
+            .flat_map(|r| r.group_a.into_iter().chain(r.group_b).chain([r.tiebreak]))
+            .collect();
+        let rules: Vec<_> = problems
+            .chunks_exact(3)
+            .take(stage_count)
+            .map(|p| {
+                json!({"group_a":[p[0]], "group_b":[p[1]], "tiebreak":[p[2]],
+                "xiaoju_seconds":60, "tiebreak_seconds":90, "break_before_seconds":0})
+            })
+            .collect();
+        let response = app
+            .post_with_token(
+                &bracket_route(contest_id, "/setup"),
+                &json!({"seeds":seeds,"rounds":rules}),
+                &staff,
+            )
+            .await;
+        assert_eq!(response.status, 200, "{}", response.text);
+        let mut expected_matches = player_count / 2;
+        for round in 1..=stage_count {
+            let view = app
+                .get_with_token(&bracket_route(contest_id, "/bracket"), &staff)
+                .await;
+            assert_eq!(view.status, 200, "{}", view.text);
+            let matches = view.body["matches"].as_array().unwrap();
+            assert_eq!(matches.len(), expected_matches as usize);
+            let active: Vec<_> = matches.iter().filter(|m| m["round"] == round).collect();
+            assert_eq!(active.len(), (player_count >> round) as usize);
+            for m in active {
+                assert_eq!(m["stage_count"], stage_count);
+                assert_eq!(m["state"], "ordering");
+                let response = app
+                    .post_with_token(
+                        &bracket_route(contest_id, &format!("/matches/{}/force-decide", m["id"])),
+                        &json!({"winner":m["player_a"]}),
+                        &staff,
+                    )
+                    .await;
+                assert_eq!(response.status, 200, "{}", response.text);
+            }
+            expected_matches += player_count >> (round + 1);
+        }
+        let final_match = get_match(&app, contest_id, (player_count - 2) as u8, &staff).await;
+        assert_eq!(final_match["state"], "decided");
+        assert_eq!(final_match["winner"], seeds[0]);
+        let saved = app
+            .get_with_token(&bracket_route(contest_id, "/setup"), &staff)
+            .await;
+        assert_eq!(saved.body["setup"]["opened_rounds"], stage_count);
+    }
+}

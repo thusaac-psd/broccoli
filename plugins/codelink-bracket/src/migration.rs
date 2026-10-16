@@ -228,6 +228,35 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_seed_upgrade_retains_version_and_resumes_idempotently() {
+        let host = Host::mock();
+        let mut setup = serde_json::to_value(crate::model::Setup::default()).unwrap();
+        setup.as_object_mut().unwrap().remove("seeds");
+        setup.as_object_mut().unwrap().remove("opened_rounds");
+        host.storage
+            .set(&[("schema_version", "2"), ("setup:7", &setup.to_string())])
+            .unwrap();
+        for pos in 0..15 {
+            host.storage
+                .set(&[(&crate::storage::slot_key(7, 1, pos), &pos.to_string())])
+                .unwrap();
+        }
+        assert!(run(&host).is_err());
+        assert_eq!(
+            host.storage.get_one(VERSION_KEY).unwrap().as_deref(),
+            Some("2")
+        );
+        host.storage.set(&[("slot:7:1:15", "15")]).unwrap();
+        run(&host).unwrap();
+        let migrated = crate::storage::load_setup(&host, 7).unwrap().unwrap();
+        assert_eq!(migrated.seeds, (0..16).collect::<Vec<_>>());
+        assert_eq!(migrated.opened_rounds, 0);
+        let saved = host.storage.data();
+        run(&host).unwrap();
+        assert_eq!(host.storage.data(), saved);
+    }
+
+    #[test]
     fn upgrades_private_documents_once_and_keeps_current_settings() {
         let host = Host::mock();
         let setup = json!({"rounds":[{"group_a":vec![1,2,3],"group_b":vec![4,5,6],"tiebreak":[7]},
