@@ -982,8 +982,6 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 // Area 4 -- setup and ordering abuse
 // =====================================================================
 
-/// DEFECT: `/setup` called a second time, mid-contest, silently
-/// reconfigures an already-in-progress match's pacing.
 #[tokio::test]
 async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
     let fx = setup_fixture_with_timing(3, 0, 120).await;
@@ -1795,16 +1793,25 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
     .unwrap()
     .unwrap();
     let admission = SubmissionAdmission {
-        guard: broccoli_server_sdk::types::SubmissionStorageGuard {
-            key: state_key.clone(),
-            expected_value: guard.data.as_str().unwrap().to_string(),
-        },
+        guard: broccoli_server_sdk::types::SubmissionStorageGuard::from_snapshot(
+            state_key.clone(),
+            broccoli_server_sdk::types::StorageSnapshot {
+                value: guard.data.as_str().unwrap().to_string(),
+                revision: guard.revision,
+            },
+        ),
         feedback_key: state_key,
         metadata: json!({"scope_key":format!("game:{}:0:0",fx.contest_id),"delay_seconds":240,"effective_at_us":null}),
-        slot: Some(broccoli_server_sdk::types::SubmissionSlot {
-            key: format!("{}:{}", fx.contest_id, fx.players[0].id),
-            generation: None,
-        }),
+        slot: Some(
+            server::services::submission_feedback::observe_slot(
+                &fx.app.db,
+                "codelink-bracket",
+                &format!("{}:{}", fx.contest_id, fx.players[0].id),
+            )
+            .await
+            .unwrap()
+            .token,
+        ),
         latest_arrival_ms: Some(Utc::now().timestamp_millis() + 120_000),
     };
     let new = submission::ActiveModel {

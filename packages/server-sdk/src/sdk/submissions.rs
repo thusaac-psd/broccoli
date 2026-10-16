@@ -1,5 +1,8 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::types::SubmissionSlotToken;
 use crate::types::{
-    SubmissionFeedbackPublication, SubmissionFeedbackQuery, SubmissionFeedbackRecord,
+    FeedbackUpdateOutcome, ReleaseResult, SubmissionFeedbackAction, SubmissionFeedbackQuery,
+    SubmissionFeedbackRecord, SubmissionSlotObservation,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
@@ -118,7 +121,7 @@ impl Submissions {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct SubmissionsMock {
     feedback: RefCell<Vec<SubmissionFeedbackRecord>>,
-    feedback_publications: RefCell<Vec<(i32, SubmissionFeedbackPublication)>>,
+    feedback_actions: RefCell<Vec<(i32, SubmissionFeedbackAction)>>,
     feedback_errors: RefCell<VecDeque<SdkError>>,
     feedback_query_errors: RefCell<VecDeque<Option<SdkError>>>,
     test_cases: RefCell<Vec<TestCaseRow>>,
@@ -140,7 +143,7 @@ impl SubmissionsMock {
         Self {
             test_cases: RefCell::new(Vec::new()),
             feedback: RefCell::new(Vec::new()),
-            feedback_publications: RefCell::new(Vec::new()),
+            feedback_actions: RefCell::new(Vec::new()),
             feedback_errors: RefCell::new(VecDeque::new()),
             feedback_query_errors: RefCell::new(VecDeque::new()),
             update_results: RefCell::new(VecDeque::new()),
@@ -263,50 +266,92 @@ impl Submissions {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 impl Submissions {
-    pub fn feedback(
+    /// Explicitly read every page matching a query. `feedback` reads one bounded
+    /// page; its limit is the page size here, not a total result limit.
+    /// Pages are read independently; concurrent changes are not a snapshot.
+    pub fn feedback_all(
         &self,
         query: &SubmissionFeedbackQuery,
     ) -> Result<Vec<SubmissionFeedbackRecord>, SdkError> {
-        let maximum = query.limit as usize;
         let mut query = query.clone();
-        query.limit = if maximum == 0 {
-            1000
-        } else {
-            maximum.min(1000) as u32
-        };
         let mut records = Vec::new();
         loop {
-            let json = unsafe {
-                crate::host::raw::submission_feedback_query(serde_json::to_string(&query)?)?
-            };
-            let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
-            let page: Vec<SubmissionFeedbackRecord> =
-                super::shared::parse_rows(response.into_result()?)?;
-            let full = page.len() == query.limit as usize;
+            let page = self.feedback(&query)?;
+            let full = page.len() == query.page_size() as usize;
             if let Some(last) = page.last() {
                 query.after_id = last.submission_id;
             }
             records.extend(page);
-            if !full || (maximum > 0 && records.len() >= maximum) {
+            if !full {
                 return Ok(records);
-            }
-            if maximum > 0 {
-                query.limit = (maximum - records.len()).min(1000) as u32;
             }
         }
     }
-    pub fn publish_feedback(
+
+    /// Reveal the raw judgement or a plugin-selected public verdict and score.
+    /// This also releases the slot. Identical retries succeed; conflicts error.
+    /// Original follows the raw judgement, including later rejudges. An override
+    /// fixes verdict and score when results are present; lifecycle and testcase
+    /// data still follow raw rejudges. Rejudging does not reacquire the slot or
+    /// withhold released feedback again.
+    pub fn release_feedback(
         &self,
         submission_id: i32,
-        publication: &SubmissionFeedbackPublication,
-    ) -> Result<(), SdkError> {
-        let input = serde_json::json!({"submission_id":submission_id,"publication":publication});
-        let json = unsafe { crate::host::raw::submission_feedback_publish(input.to_string())? };
+        result: ReleaseResult,
+    ) -> Result<FeedbackUpdateOutcome, SdkError> {
+        // JSON encodes non-finite floats as null. Reject them before crossing
+        // WASM so the host cannot trap while decoding the typed score.
+        result
+            .validate()
+            .map_err(|e| SdkError::Database(e.into()))?;
+        self.update_feedback(submission_id, &SubmissionFeedbackAction::Release(result))
+    }
+
+    /// Unblock further submissions without revealing the withheld result.
+    pub fn release_slot(&self, submission_id: i32) -> Result<FeedbackUpdateOutcome, SdkError> {
+        self.update_feedback(submission_id, &SubmissionFeedbackAction::ReleaseSlot)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Submissions {
+    /// Read one bounded page of this plugin's feedback records, ordered by ID.
+    pub fn feedback(
+        &self,
+        query: &SubmissionFeedbackQuery,
+    ) -> Result<Vec<SubmissionFeedbackRecord>, SdkError> {
+        let json =
+            unsafe { crate::host::raw::submission_feedback_query(serde_json::to_string(query)?)? };
         let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
-        response.into_result()?;
-        Ok(())
+        super::shared::parse_rows(response.into_result()?)
+    }
+
+    /// Observe before reading policy inputs; admission checks the token again.
+    pub fn observe_slot(&self, key: &str) -> Result<SubmissionSlotObservation, SdkError> {
+        let json =
+            unsafe { crate::host::raw::submission_slot_observe(serde_json::to_string(key)?)? };
+        let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
+        Ok(serde_json::from_value(
+            response
+                .into_result()?
+                .ok_or_else(|| SdkError::Other("Missing slot observation".into()))?,
+        )?)
+    }
+
+    fn update_feedback(
+        &self,
+        submission_id: i32,
+        action: &SubmissionFeedbackAction,
+    ) -> Result<FeedbackUpdateOutcome, SdkError> {
+        let input = serde_json::json!({"submission_id":submission_id,"action":action});
+        let json = unsafe { crate::host::raw::submission_feedback_update(input.to_string())? };
+        let response: super::shared::HostDbResponse = serde_json::from_str(&json)?;
+        Ok(serde_json::from_value(
+            response
+                .into_result()?
+                .ok_or_else(|| SdkError::Other("Missing feedback update outcome".into()))?,
+        )?)
     }
 }
 
@@ -343,29 +388,54 @@ impl Submissions {
                         .is_none_or(|ids| ids.contains(&r.submission_id))
                     && (!query.unpublished_only || r.withheld)
             })
-            .take(if query.limit == 0 {
-                usize::MAX
-            } else {
-                query.limit as usize
-            })
+            .take(query.page_size() as usize)
             .cloned()
             .collect())
     }
-    pub fn publish_feedback(
+
+    pub fn observe_slot(&self, key: &str) -> Result<SubmissionSlotObservation, SdkError> {
+        let records = self.inner.feedback.borrow();
+        let matching = || {
+            records
+                .iter()
+                .filter(|r| r.slot_key.as_deref() == Some(key))
+        };
+        Ok(SubmissionSlotObservation {
+            token: SubmissionSlotToken::new(
+                key.to_owned(),
+                matching().map(|r| r.submission_id).max(),
+            ),
+            pending: matching().find(|r| r.slot_held).cloned(),
+        })
+    }
+
+    fn update_feedback(
         &self,
         submission_id: i32,
-        publication: &SubmissionFeedbackPublication,
-    ) -> Result<(), SdkError> {
+        action: &SubmissionFeedbackAction,
+    ) -> Result<FeedbackUpdateOutcome, SdkError> {
         if let Some(error) = self.inner.feedback_errors.borrow_mut().pop_front() {
             return Err(error);
         }
+        let mut records = self.inner.feedback.borrow_mut();
+        let record = records
+            .iter_mut()
+            .find(|r| r.submission_id == submission_id)
+            .ok_or_else(|| {
+                SdkError::Database("Feedback record not found for this plugin".into())
+            })?;
+        let outcome = record
+            .apply_action(action)
+            .map_err(|e| SdkError::Database(e.into()))?;
         self.inner
-            .feedback_publications
+            .feedback_actions
             .borrow_mut()
-            .push((submission_id, publication.clone()));
-        Ok(())
+            .push((submission_id, action.clone()));
+        Ok(outcome)
     }
-    pub fn set_feedback(&self, records: Vec<SubmissionFeedbackRecord>) {
+
+    pub fn set_feedback(&self, mut records: Vec<SubmissionFeedbackRecord>) {
+        records.sort_by_key(|r| r.submission_id);
         *self.inner.feedback.borrow_mut() = records;
     }
     pub fn queue_feedback_query_success(&self) {
@@ -383,8 +453,8 @@ impl Submissions {
     pub fn queue_feedback_error(&self, error: SdkError) {
         self.inner.feedback_errors.borrow_mut().push_back(error);
     }
-    pub fn feedback_publications(&self) -> Vec<(i32, SubmissionFeedbackPublication)> {
-        self.inner.feedback_publications.borrow().clone()
+    pub fn feedback_actions(&self) -> Vec<(i32, SubmissionFeedbackAction)> {
+        self.inner.feedback_actions.borrow().clone()
     }
 }
 
@@ -392,6 +462,134 @@ impl Submissions {
 mod tests {
     use crate::sdk::Host;
     use crate::types::SubmissionStatus;
+
+    #[test]
+    fn feedback_releases_are_idempotent_final_and_release_slots_independently() {
+        use crate::types::*;
+        let host = Host::mock();
+        host.submission.set_feedback(vec![SubmissionFeedbackRecord {
+            submission_id: 7,
+            withheld: true,
+            slot_held: true,
+            slot_key: Some("player".into()),
+            ..Default::default()
+        }]);
+        assert!(
+            host.submission
+                .observe_slot("player")
+                .unwrap()
+                .pending
+                .is_some()
+        );
+        host.submission
+            .queue_feedback_error(crate::error::SdkError::Database(
+                "transport unavailable".into(),
+            ));
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = host
+                .submission
+                .release_feedback(
+                    7,
+                    ReleaseResult::Override {
+                        verdict: Verdict::Accepted,
+                        score,
+                    },
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("Invalid feedback score"));
+        }
+        // Invalid requests must fail before the transport on both targets.
+        assert!(
+            host.submission
+                .release_slot(7)
+                .unwrap_err()
+                .to_string()
+                .contains("transport unavailable")
+        );
+        assert!(
+            host.submission
+                .observe_slot("player")
+                .unwrap()
+                .pending
+                .is_some()
+        );
+        assert_eq!(
+            host.submission.release_slot(7).unwrap(),
+            FeedbackUpdateOutcome::Applied
+        );
+        assert_eq!(
+            host.submission.release_slot(7).unwrap(),
+            FeedbackUpdateOutcome::AlreadyApplied
+        );
+        let slot = host.submission.observe_slot("player").unwrap();
+        assert!(slot.pending.is_none());
+        assert_eq!(slot.token.generation(), Some(7));
+        assert!(
+            host.submission
+                .feedback(&SubmissionFeedbackQuery::default())
+                .unwrap()[0]
+                .withheld
+        );
+        let result = ReleaseResult::Override {
+            verdict: Verdict::Other("Custom".into()),
+            score: 1.0,
+        };
+        assert_eq!(
+            host.submission.release_feedback(7, result.clone()).unwrap(),
+            FeedbackUpdateOutcome::Applied
+        );
+        assert_eq!(
+            host.submission.release_feedback(7, result).unwrap(),
+            FeedbackUpdateOutcome::AlreadyApplied
+        );
+        assert!(
+            host.submission
+                .release_feedback(7, ReleaseResult::Original)
+                .is_err()
+        );
+        assert!(host.submission.release_slot(99).is_err());
+        let record = host
+            .submission
+            .feedback(&SubmissionFeedbackQuery::default())
+            .unwrap()
+            .remove(0);
+        assert!(!record.withheld && !record.slot_held);
+        assert_eq!(
+            record.result.unwrap().verdict,
+            Verdict::Other("Custom".into())
+        );
+    }
+
+    #[test]
+    fn feedback_queries_are_bounded_and_all_pages_are_explicit() {
+        use crate::types::*;
+        let host = Host::mock();
+        host.submission.set_feedback(
+            (1..=205)
+                .rev()
+                .map(|id| SubmissionFeedbackRecord {
+                    submission_id: id,
+                    key: "match".into(),
+                    withheld: true,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let mut query = SubmissionFeedbackQuery::default();
+        let page = host.submission.feedback(&query).unwrap();
+        assert_eq!(page.len(), 100);
+        assert_eq!(page[0].submission_id, 1);
+        let all = host.submission.feedback_all(&query).unwrap();
+        assert_eq!(all.len(), 205);
+        assert_eq!(all.last().unwrap().submission_id, 205);
+        query.after_id = 100;
+        query.limit = 0;
+        assert_eq!(host.submission.feedback(&query).unwrap().len(), 1);
+        query.limit = u32::MAX;
+        assert_eq!(query.page_size(), 1000);
+        query.key = Some("another-match".into());
+        assert!(host.submission.feedback_all(&query).unwrap().is_empty());
+    }
 
     #[test]
     fn status_helpers_write_compiling_and_running_updates() {

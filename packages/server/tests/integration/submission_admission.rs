@@ -39,16 +39,21 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
     .await
     .unwrap();
     let admission = SubmissionAdmission {
-        guard: SubmissionStorageGuard {
-            key: key.into(),
-            expected_value: original.into(),
-        },
+        guard: SubmissionStorageGuard::from_snapshot(
+            key,
+            StorageSnapshot {
+                value: original.into(),
+                revision: 0,
+            },
+        ),
         feedback_key: "attempt-group".into(),
         metadata: json!({"format_owned": [1, "anything"]}),
-        slot: Some(SubmissionSlot {
-            key: "custom-slot".into(),
-            generation: None,
-        }),
+        slot: Some(
+            submission_feedback::observe_slot(&app.db, owner, "custom-slot")
+                .await
+                .unwrap()
+                .token,
+        ),
         latest_arrival_ms: None,
     };
     let new = submission::ActiveModel {
@@ -88,26 +93,82 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
             .unwrap()
             .is_empty()
     );
-    let public = SubmissionFeedbackPublication {
-        withheld: false,
-        release_slot: true,
-        result: Some(SubmissionFeedbackResult {
-            verdict: Verdict::Other("CustomOutcome".into()),
-            score: 17.0,
-        }),
-    };
-    submission_feedback::publish(&app.db, "other-owner", admitted.id, &public)
+    let public = SubmissionFeedbackAction::Release(ReleaseResult::Override {
+        verdict: Verdict::Other("CustomOutcome".into()),
+        score: 17.0,
+    });
+    assert!(
+        submission_feedback::update(&app.db, "other-owner", admitted.id, &public)
+            .await
+            .is_err(),
+        "foreign records must not be silent successes"
+    );
+    assert!(
+        submission_feedback::update(&app.db, owner, -1, &public)
+            .await
+            .is_err()
+    );
+    let observed = submission_feedback::observe_slot(&app.db, owner, "custom-slot")
         .await
         .unwrap();
+    assert_eq!(observed.pending.unwrap().submission_id, admitted.id);
+    for expected in [
+        FeedbackUpdateOutcome::Applied,
+        FeedbackUpdateOutcome::AlreadyApplied,
+    ] {
+        assert_eq!(
+            submission_feedback::update(
+                &app.db,
+                owner,
+                admitted.id,
+                &SubmissionFeedbackAction::ReleaseSlot
+            )
+            .await
+            .unwrap(),
+            expected
+        );
+    }
     assert!(
         submission_feedback::query(&app.db, owner, &SubmissionFeedbackQuery::default())
             .await
             .unwrap()[0]
             .withheld
     );
-    submission_feedback::publish(&app.db, owner, admitted.id, &public)
+    let releases = futures::future::join_all(
+        (0..8).map(|_| submission_feedback::update(&app.db, owner, admitted.id, &public)),
+    )
+    .await;
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|r| matches!(r, Ok(FeedbackUpdateOutcome::Applied)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        releases
+            .iter()
+            .filter(|r| matches!(r, Ok(FeedbackUpdateOutcome::AlreadyApplied)))
+            .count(),
+        7
+    );
+    assert!(
+        submission_feedback::update(
+            &app.db,
+            owner,
+            admitted.id,
+            &SubmissionFeedbackAction::Release(ReleaseResult::Original)
+        )
         .await
-        .unwrap();
+        .is_err()
+    );
+    assert!(
+        submission_feedback::observe_slot(&app.db, owner, "custom-slot")
+            .await
+            .unwrap()
+            .pending
+            .is_none()
+    );
     let feedback = submission_feedback::load(&app.state, &[admitted.id])
         .await
         .unwrap()
@@ -124,22 +185,53 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         "released slots must still reject stale admission hooks"
     );
     let mut next = admission.clone();
-    next.slot.as_mut().unwrap().generation = Some(admitted.id);
+    next.slot = Some(
+        submission_feedback::observe_slot(&app.db, owner, "custom-slot")
+            .await
+            .unwrap()
+            .token,
+    );
     submission_feedback::insert_admitted(&app.state, new.clone(), &next, owner)
         .await
         .unwrap();
     // The same contestant may hold another slot when their format requests it.
-    next.slot.as_mut().unwrap().key = "independent-slot".into();
-    next.slot.as_mut().unwrap().generation = None;
+    next.slot = Some(
+        submission_feedback::observe_slot(&app.db, owner, "independent-slot")
+            .await
+            .unwrap()
+            .token,
+    );
     submission_feedback::insert_admitted(&app.state, new.clone(), &next, owner)
         .await
         .unwrap();
-    // Two callers can share a guard when their slot namespaces differ.
+    // Independent slots may use the same document observation; admissions
+    // invalidate state writers, not other players' unchanged decisions.
     let mut opponent = next.clone();
-    opponent.slot.as_mut().unwrap().key = "opponent-slot".into();
+    opponent.slot = Some(
+        submission_feedback::observe_slot(&app.db, owner, "opponent-slot")
+            .await
+            .unwrap()
+            .token,
+    );
     submission_feedback::insert_admitted(&app.state, new.clone(), &opponent, owner)
         .await
         .unwrap();
+    let mut page_query = SubmissionFeedbackQuery {
+        limit: 1,
+        ..Default::default()
+    };
+    let first_page = submission_feedback::query(&app.db, owner, &page_query)
+        .await
+        .unwrap();
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0].submission_id, admitted.id);
+    page_query.after_id = admitted.id;
+    page_query.limit = 0;
+    let next_page = submission_feedback::query(&app.db, owner, &page_query)
+        .await
+        .unwrap();
+    assert_eq!(next_page.len(), 1, "zero must remain a bounded query");
+    assert!(next_page[0].submission_id > admitted.id);
     let mut expired = next.clone();
     expired.slot = None;
     expired.latest_arrival_ms = Some(0);

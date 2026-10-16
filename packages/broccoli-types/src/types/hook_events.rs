@@ -4,7 +4,10 @@ pub trait HookEvent: Serialize + for<'de> Deserialize<'de> {
     const TOPIC: &'static str;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The host fixes these attributes before dispatch. Hooks may gate submission
+/// and the contest owner may attach admission effects, but cannot rewrite the
+/// request that will be inserted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeforeSubmissionEvent {
     pub user_id: i32,
     pub problem_id: i32,

@@ -187,7 +187,7 @@ pub async fn create_submission(
         None,
     )
     .await?;
-    dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins)).await?;
+    dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins), None).await?;
 
     let now = Utc::now();
     let language = payload.language.trim().to_string();
@@ -794,6 +794,18 @@ pub async fn create_contest_submission(
     )
     .await?;
     let contest_type = required_contest_type(&contest_model)?;
+    // Pin the owner used to authorize hook effects through admission commit.
+    let handler = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .get(&contest_type)
+        .cloned();
+    let admission_owner = handler
+        .as_ref()
+        .filter(|h| h.submission_admission)
+        .map(|h| h.plugin_id.as_str());
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
         problem_id,
@@ -802,8 +814,13 @@ pub async fn create_contest_submission(
         file_count: payload.files.len(),
         contest_type: contest_type.clone(),
     };
-    let admission =
-        dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins)).await?;
+    let admission = dispatch_before_submission_hooks(
+        &state,
+        &hook_event,
+        Some(&enabled_plugins),
+        admission_owner,
+    )
+    .await?;
 
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
@@ -821,13 +838,6 @@ pub async fn create_contest_submission(
         ..Default::default()
     };
 
-    let handler = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .get(&new_submission.contest_type.clone().unwrap())
-        .cloned();
     let model = match (handler, admission) {
         (Some(handler), Some(admission)) if handler.submission_admission => {
             crate::services::submission_feedback::insert_admitted(

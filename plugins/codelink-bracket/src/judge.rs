@@ -482,7 +482,7 @@ fn fetch_subs(
         p.bind(m.xiaoju.last().map(|g| g.opened_at_ms).unwrap_or(0))
     );
     let rows: Vec<SubRow> = host.db.query_with_args(&sql, &p.into_args())?;
-    let feedback = host.submission.feedback(&SubmissionFeedbackQuery {
+    let feedback = host.submission.feedback_all(&SubmissionFeedbackQuery {
         submission_ids: Some(rows.iter().map(|r| r.id).collect()),
         ..Default::default()
     })?;
@@ -1539,7 +1539,7 @@ mod tests {
             user_id: 10,
             problem_id: 103,
             submitted_at_us: 10_000_000,
-            status: "Judged".into(),
+            status: SubmissionLifecycle::Judged,
             verdict: Some(Verdict::Accepted),
             key: storage::match_key(7, 0),
             metadata: serde_json::json!({"scope_key":crate::feedback::game_scope(7,0,index),"delay_seconds":0,"effective_at_us":30_000_000}),
@@ -1622,7 +1622,7 @@ mod tests {
             storage::load_match(&host, 7, 0).unwrap().unwrap(),
             committed
         );
-        assert_eq!(host.submission.feedback_publications().len(), 1);
+        assert_eq!(host.submission.feedback_actions().len(), 1);
         let next = storage::load_match(&host, 7, 8).unwrap().unwrap();
         assert_eq!(next.player_a, 10);
         assert_eq!(next.player_b, 102);

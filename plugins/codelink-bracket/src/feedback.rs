@@ -1,7 +1,6 @@
 //! Per-game penalties and public feedback. Judge results stay unchanged.
 use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::decide::{SubmissionRecord, submission_in_flight};
 use crate::model::{MatchPhase, MatchState};
@@ -19,7 +18,7 @@ pub struct PlayerFeedback {
     pub pending_submission_id: Option<i32>,
     pub effective_at_us: Option<i64>,
     #[serde(skip)]
-    pub slot_generation: Option<i32>,
+    pub slot_token: Option<SubmissionSlotToken>,
 }
 
 /// Only WA/TLE/MLE/RE count. Count submissions, rather than callbacks, so
@@ -38,10 +37,7 @@ pub fn player_feedback(
     // Observe the slot before reading verdicts. If it has been released, the
     // prior verdict is already committed and the following count includes it.
     // Reading verdicts first could admit a request with a stale penalty count.
-    let records = host.submission.feedback(&SubmissionFeedbackQuery {
-        slot_key: Some(player_slot(contest, user)),
-        ..Default::default()
-    })?;
+    let slot = host.submission.observe_slot(&player_slot(contest, user))?;
     let mut p = Params::new();
     let contest_param = p.bind(contest);
     let user_param = p.bind(user);
@@ -60,10 +56,10 @@ pub fn player_feedback(
         .db
         .query_one_with_args(&sql, &p.into_args())?
         .unwrap_or_default();
-    feedback.slot_generation = records.iter().map(|r| r.submission_id).max();
-    if let Some(pending) = records.iter().find(|r| r.slot_held) {
+    feedback.slot_token = Some(slot.token);
+    if let Some(pending) = slot.pending {
         feedback.pending_submission_id = Some(pending.submission_id);
-        feedback.effective_at_us = Some(effective_time(pending)?);
+        feedback.effective_at_us = Some(effective_time(&pending)?);
     }
     feedback.delay_seconds = feedback.penalty_count.saturating_mul(penalty_seconds);
     Ok(feedback)
@@ -99,7 +95,7 @@ pub fn publish(
     match_id: u8,
     m: &MatchState,
 ) -> Result<Vec<String>, SdkError> {
-    let rows = host.submission.feedback(&SubmissionFeedbackQuery {
+    let rows = host.submission.feedback_all(&SubmissionFeedbackQuery {
         key: Some(storage::match_key(contest, match_id)),
         unpublished_only: true,
         ..Default::default()
@@ -127,17 +123,13 @@ pub fn publish(
             submitted_at_us: row.submitted_at_us,
             effective_at_us,
             verdict: row.verdict,
-            status: serde_json::from_value(json!(row.status))?,
+            status: row.status,
         };
-        let publication = if submission_in_flight(&record) {
+        if submission_in_flight(&record) {
             if m.state != MatchPhase::Decided {
                 continue;
             }
-            SubmissionFeedbackPublication {
-                withheld: true,
-                release_slot: true,
-                result: None,
-            }
+            host.submission.release_slot(record.submission_id)?;
         } else {
             let losing_ac = if !record.verdict.as_ref().is_some_and(Verdict::is_accepted) {
                 false
@@ -148,17 +140,17 @@ pub fn publish(
                     _ => continue,
                 }
             };
-            SubmissionFeedbackPublication {
-                withheld: false,
-                release_slot: true,
-                result: losing_ac.then(|| SubmissionFeedbackResult {
+            let release = if losing_ac {
+                ReleaseResult::Override {
                     verdict: Verdict::Other("TooLate".into()),
                     score: 0.0,
-                }),
-            }
-        };
-        host.submission
-            .publish_feedback(record.submission_id, &publication)?;
+                }
+            } else {
+                ReleaseResult::Original
+            };
+            host.submission
+                .release_feedback(record.submission_id, release)?;
+        }
     }
     Ok(completed_timers)
 }

@@ -327,7 +327,15 @@ pub async fn dispatch_hooks(
     enabled_plugins: Option<&ResourceEnablements>,
     hook_registry: &SharedHookRegistry,
 ) -> Result<HookOutcome, AppError> {
-    dispatch_hooks_inner(topic, event_payload, enabled_plugins, hook_registry, 0).await
+    dispatch_hooks_inner(
+        topic,
+        event_payload,
+        enabled_plugins,
+        hook_registry,
+        0,
+        None,
+    )
+    .await
 }
 
 pub async fn dispatch_hooks_typed<E: HookEvent>(
@@ -338,6 +346,28 @@ pub async fn dispatch_hooks_typed<E: HookEvent>(
     let payload = serde_json::to_value(event)
         .map_err(|e| AppError::Internal(format!("Failed to serialize hook event: {e}")))?;
     dispatch_hooks(E::TOPIC, payload, enabled_plugins, hook_registry).await
+}
+
+/// Admission effects are reserved to the registered contest owner. Other
+/// gates may reject or preserve the payload, but cannot inject, replace, or
+/// remove the owner's effects.
+pub(crate) async fn dispatch_submission_hooks(
+    event: &broccoli_server_sdk::types::BeforeSubmissionEvent,
+    enabled_plugins: Option<&ResourceEnablements>,
+    hook_registry: &SharedHookRegistry,
+    admission_owner: Option<&str>,
+) -> Result<HookOutcome, AppError> {
+    let payload = serde_json::to_value(event)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize hook event: {e}")))?;
+    dispatch_hooks_inner(
+        "before_submission",
+        payload,
+        enabled_plugins,
+        hook_registry,
+        0,
+        admission_owner,
+    )
+    .await
 }
 
 pub fn dispatch_hooks_background(
@@ -412,6 +442,7 @@ async fn dispatch_hooks_inner(
     enabled_plugins: Option<&ResourceEnablements>,
     hook_registry: &SharedHookRegistry,
     depth: u8,
+    admission_owner: Option<&str>,
 ) -> Result<HookOutcome, AppError> {
     if depth >= MAX_CHAIN_DEPTH {
         tracing::warn!(
@@ -423,6 +454,7 @@ async fn dispatch_hooks_inner(
     }
 
     struct DispatchEntry {
+        plugin_id: String,
         position: i32,
         is_global: bool,
         mode: HookMode,
@@ -442,6 +474,7 @@ async fn dispatch_hooks_inner(
             match entry.scope {
                 HookScope::Global => {
                     list.push(DispatchEntry {
+                        plugin_id: entry.plugin_id.clone(),
                         position: i32::MIN,
                         is_global: true,
                         mode: entry.mode,
@@ -453,6 +486,7 @@ async fn dispatch_hooks_inner(
                         && let Some(&pos) = enabled.get(&entry.plugin_id)
                     {
                         list.push(DispatchEntry {
+                            plugin_id: entry.plugin_id.clone(),
                             position: pos,
                             is_global: false,
                             mode: entry.mode,
@@ -500,10 +534,54 @@ async fn dispatch_hooks_inner(
 
                 match action {
                     HookAction::Pass => {}
-                    HookAction::Modified(new_event) => {
+                    HookAction::Modified(mut new_event) => {
+                        if topic == "before_submission" {
+                            // Admission must describe the same request that the
+                            // handler inserts, including for subsequent gates.
+                            let decode = |payload| {
+                                serde_json::from_value::<
+                                    broccoli_server_sdk::types::BeforeSubmissionEvent,
+                                >(payload)
+                                .map_err(|_| {
+                                    AppError::Internal("Invalid before-submission event".into())
+                                })
+                            };
+                            if decode(event_payload.clone())? != decode(new_event.payload.clone())?
+                            {
+                                return Err(AppError::Internal(
+                                    "Submission hooks cannot rewrite request attributes".into(),
+                                ));
+                            }
+                        }
+                        if topic == "before_submission"
+                            && admission_owner != Some(entry.plugin_id.as_str())
+                        {
+                            let effects = event_payload.get("submission_admission");
+                            let modified = new_event.payload.as_object_mut().ok_or_else(|| {
+                                AppError::Internal("Invalid before-submission event".into())
+                            })?;
+                            if modified
+                                .get("submission_admission")
+                                .is_some_and(|value| Some(value) != effects)
+                            {
+                                return Err(AppError::Internal(
+                                    "Only the contest owner may change submission admission".into(),
+                                ));
+                            }
+                            // Ordinary typed hooks may omit unknown fields; their
+                            // rewrites must preserve the owner's admission effects.
+                            if let Some(effects) = effects {
+                                modified.insert("submission_admission".into(), effects.clone());
+                            }
+                        }
                         event_payload = new_event.payload;
                     }
                     HookAction::Stop => {
+                        if topic == "before_submission" {
+                            // Stop accepts the current event. Retain any owner
+                            // admission already supplied by an earlier hook.
+                            return Ok(HookOutcome::Allowed(event_payload));
+                        }
                         return Ok(HookOutcome::Stopped);
                     }
                     HookAction::Reject(reason) => {
@@ -527,6 +605,7 @@ async fn dispatch_hooks_inner(
                                 enabled_plugins,
                                 hook_registry,
                                 depth + 1,
+                                admission_owner,
                             ))
                             .await?;
                             if let HookOutcome::Rejected { .. } | HookOutcome::Stopped = result {
@@ -691,6 +770,118 @@ mod tests {
         payload: serde_json::Value,
     ) -> Result<HookOutcome, AppError> {
         dispatch_hooks(topic, payload, None, registry).await
+    }
+
+    #[tokio::test]
+    async fn admission_effects_can_only_be_created_or_changed_by_the_contest_owner() {
+        let event = broccoli_server_sdk::types::BeforeSubmissionEvent {
+            user_id: 1,
+            problem_id: 2,
+            contest_id: Some(3),
+            contest_type: "example".into(),
+            language: "cpp".into(),
+            file_count: 1,
+        };
+        let payload = serde_json::to_value(&event).unwrap();
+        let mut admitted = payload.clone();
+        admitted["submission_admission"] = serde_json::json!({"opaque":true});
+        let mut cases = vec![
+            (Some("owner"), "other", admitted.clone(), true),
+            (Some("owner"), "other", payload.clone(), true),
+            (
+                Some("owner"),
+                "other",
+                serde_json::json!("invalid event"),
+                false,
+            ),
+            (
+                Some("owner"),
+                "other",
+                serde_json::json!({"submission_admission":null}),
+                false,
+            ),
+            (None, "owner", admitted.clone(), false),
+        ];
+        for (field, replacement) in [
+            ("user_id", serde_json::json!(99)),
+            ("problem_id", serde_json::json!(99)),
+            ("contest_id", serde_json::Value::Null),
+            ("contest_type", serde_json::json!("another-format")),
+            ("language", serde_json::json!("python")),
+            ("file_count", serde_json::json!(99)),
+        ] {
+            for plugin in ["owner", "other"] {
+                let mut rewritten = admitted.clone();
+                rewritten[field] = replacement.clone();
+                cases.push((Some("owner"), plugin, rewritten, false));
+            }
+        }
+        let cases = cases
+            .into_iter()
+            .map(|(owner, plugin, payload, succeeds)| {
+                (
+                    owner,
+                    plugin,
+                    HookAction::Modified(GenericEvent {
+                        topic: "before_submission".into(),
+                        payload,
+                    }),
+                    succeeds,
+                )
+            })
+            .chain([(Some("owner"), "other", HookAction::Stop, true)]);
+        for (owner, second_plugin, second_action, succeeds) in cases {
+            let registry = new_shared_registry();
+            let mut hooks = registry.write().await;
+            for (id, action) in [
+                (
+                    "owner",
+                    HookAction::Modified(GenericEvent {
+                        topic: "before_submission".into(),
+                        payload: admitted.clone(),
+                    }),
+                ),
+                (second_plugin, second_action),
+            ] {
+                register_direct(
+                    &mut hooks,
+                    Arc::new(MockHook::new(id, "before_submission", action)),
+                    HookScope::Global,
+                    HookMode::Blocking,
+                );
+            }
+            drop(hooks);
+            let result = dispatch_submission_hooks(&event, None, &registry, owner).await;
+            assert_eq!(result.is_ok(), succeeds);
+            if succeeds {
+                let HookOutcome::Allowed(payload) = result.unwrap() else {
+                    panic!("expected admission")
+                };
+                assert_eq!(
+                    payload["submission_admission"],
+                    serde_json::json!({"opaque":true})
+                );
+            }
+        }
+        let registry = new_shared_registry();
+        register_direct(
+            &mut *registry.write().await,
+            Arc::new(MockHook::new(
+                "other",
+                "before_submission",
+                HookAction::Modified(GenericEvent {
+                    topic: "before_submission".into(),
+                    payload: admitted,
+                }),
+            )),
+            HookScope::Global,
+            HookMode::Blocking,
+        );
+        assert!(
+            dispatch_submission_hooks(&event, None, &registry, Some("owner"))
+                .await
+                .is_err()
+        );
     }
 
     #[test]

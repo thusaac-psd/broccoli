@@ -214,11 +214,11 @@ fn resolve_rejection(
     };
 
     let state_key = storage::match_key(contest_id, storage::match_id_for(m.round, m.pos));
-    let expected_state = host
+    let snapshot = host
         .storage
-        .get_one(&state_key)?
+        .snapshot(&state_key)?
         .ok_or_else(|| SdkError::Other("match disappeared during submission".into()))?;
-    let m: MatchState = serde_json::from_str(&expected_state)?;
+    let m: MatchState = serde_json::from_str(&snapshot.value)?;
     if m.state != MatchPhase::InProgress && m.state != MatchPhase::Tiebreak {
         return Ok(Err(Rejection::match_not_started()));
     }
@@ -258,10 +258,7 @@ fn resolve_rejection(
         )));
     }
     Ok(Ok(SubmissionAdmission {
-        guard: SubmissionStorageGuard {
-            key: state_key.clone(),
-            expected_value: expected_state,
-        },
+        guard: SubmissionStorageGuard::from_snapshot(state_key.clone(), snapshot),
         feedback_key: state_key,
         metadata: serde_json::to_value(crate::feedback::AdmissionMetadata {
             scope_key: crate::feedback::game_scope(
@@ -272,10 +269,7 @@ fn resolve_rejection(
             delay_seconds,
             effective_at_us: None,
         })?,
-        slot: Some(SubmissionSlot {
-            key: crate::feedback::player_slot(contest_id, event.user_id),
-            generation: feedback.slot_generation,
-        }),
+        slot: feedback.slot_token,
         latest_arrival_ms: Some(deadline_ms),
     }))
 }
@@ -285,11 +279,7 @@ fn check_submission_response(
     event: &BeforeSubmissionEvent,
 ) -> Result<HookResponse, SdkError> {
     match resolve_rejection(host, event)? {
-        Ok(admission) => {
-            let mut payload = serde_json::to_value(event)?;
-            payload["submission_admission"] = serde_json::to_value(admission)?;
-            Ok(HookResponse::modified(payload))
-        }
+        Ok(admission) => Ok(HookResponse::admit(event, admission)?),
         Err(rejection) => Ok(HookResponse::reject(
             rejection.code,
             rejection.message,

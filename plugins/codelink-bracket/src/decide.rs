@@ -13,7 +13,6 @@
 //! each other, they are re-driven.
 
 use broccoli_server_sdk::prelude::Verdict;
-use serde::{Deserialize, Serialize};
 
 use crate::model::{AdjudicationReason, MatchPhase, MatchState, Setup};
 
@@ -31,30 +30,7 @@ pub(crate) fn is_regular_xiaoju_index(index: u8) -> bool {
     (index as usize) < REGULAR_XIAOJU_COUNT
 }
 
-/// A submission's host-wide lifecycle status, as read back from the raw
-/// `submission.status` column (see `judge.rs::fetch_subs`).
-///
-/// This is a PLUGIN-LOCAL mirror of `packages/common::SubmissionStatus`, not
-/// a re-export of it: this WASM guest crate depends only on
-/// `broccoli-server-sdk`, which exposes a DIFFERENT, narrower type under the
-/// same name (`broccoli_types::persistence::SubmissionStatus`, with only
-/// `Compiling`/`Running`/`Judged`/`CompilationError` -- the subset a plugin
-/// may WRITE via `host.submission.update`), not the full 7-variant
-/// host-lifecycle enum a submission can be READ back as. Variant spellings
-/// must stay in exact sync with `packages/common::SubmissionStatus`
-/// (`#[serde(rename_all = "PascalCase")]` there too) since both sides
-/// serialize the same underlying Postgres enum column as text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum SubmissionLifecycle {
-    Queued,
-    Pending,
-    Compiling,
-    Running,
-    Judged,
-    CompilationError,
-    SystemError,
-}
+pub use broccoli_server_sdk::types::SubmissionLifecycle;
 
 /// Whether a submission in this status is still IN FLIGHT (could yet
 /// receive a different verdict) as far as the bracket's scoring policy is

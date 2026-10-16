@@ -3,8 +3,9 @@ use crate::entity::{plugin_storage, submission};
 use crate::error::AppError;
 use crate::state::AppState;
 use broccoli_server_sdk::types::{
-    SubmissionAdmission, SubmissionFeedbackPublication, SubmissionFeedbackQuery,
-    SubmissionFeedbackRecord, SubmissionFeedbackResult,
+    FeedbackUpdateOutcome, SubmissionAdmission, SubmissionFeedbackAction, SubmissionFeedbackQuery,
+    SubmissionFeedbackRecord, SubmissionFeedbackResult, SubmissionSlotObservation,
+    SubmissionSlotToken,
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -46,15 +47,11 @@ pub async fn insert_admitted(
         txn.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            [format!("submission-slot:{plugin_id}:{}", slot.key).into()],
+            [format!("submission-slot:{plugin_id}:{}", slot.key()).into()],
         ))
         .await?;
-        let row = txn.query_one_raw(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT MAX(submission_id) AS generation, BOOL_OR(outcome = 'pending') AS occupied FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2",
-            [plugin_id.into(), slot.key.clone().into()])).await?.unwrap();
-        let generation: Option<i32> = row.try_get("", "generation")?;
-        let occupied: Option<bool> = row.try_get("", "occupied")?;
-        if generation != slot.generation || occupied == Some(true) {
+        let (generation, pending) = slot_state(&txn, plugin_id, slot.key()).await?;
+        if generation != slot.generation() || pending.is_some() {
             return Err(rejected(
                 "SUBMISSION_IN_FLIGHT",
                 "Submission slot changed; refresh and retry.",
@@ -64,7 +61,7 @@ pub async fn insert_admitted(
     let row = plugin_storage::Entity::find_by_id((
         plugin_id.to_owned(),
         "default".to_owned(),
-        admission.guard.key.clone(),
+        admission.guard.key().to_owned(),
     ))
     .lock_exclusive()
     .one(&txn)
@@ -75,7 +72,7 @@ pub async fn insert_admitted(
             "Admission state changed; refresh and retry.",
         )
     })?;
-    if crate::utils::text::plugin_storage_text(&row.data) != admission.guard.expected_value {
+    if crate::utils::text::plugin_storage_text(&row.data) != admission.guard.expected_value() {
         return Err(rejected(
             "SUBMISSION_STATE_CHANGED",
             "Admission state changed; refresh and retry.",
@@ -109,14 +106,14 @@ pub async fn insert_admitted(
     txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO submission_feedback (submission_id, contest_id, user_id, plugin_id, state_key, metadata, slot_key) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         [model.id.into(), model.contest_id.into(), model.user_id.into(), plugin_id.into(),
-         admission.feedback_key.clone().into(), admission.metadata.clone().into(), admission.slot.as_ref().map(|s| s.key.clone()).into()])).await?;
+         admission.feedback_key.clone().into(), admission.metadata.clone().into(), admission.slot.as_ref().map(|s| s.key().to_owned()).into()])).await?;
     txn.commit().await?;
     Ok(model)
 }
 
 /// The capability is scoped to its caller; plugins cannot read another owner's records.
 pub async fn query(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     plugin_id: &str,
     query: &SubmissionFeedbackQuery,
 ) -> Result<Vec<SubmissionFeedbackRecord>, DbErr> {
@@ -132,7 +129,7 @@ pub async fn query(
         AND ($7::jsonb IS NULL OR f.submission_id IN (SELECT value::int FROM jsonb_array_elements_text($7)))
         ORDER BY f.submission_id LIMIT $6",
         [plugin_id.into(), query.key.clone().into(), query.slot_key.clone().into(), query.unpublished_only.into(),
-         query.after_id.into(), i64::from(if query.limit == 0 {1000} else {query.limit.min(1000)}).into(),
+         query.after_id.into(), i64::from(query.page_size()).into(),
          query.submission_ids.as_ref().map(serde_json::to_value).transpose().map_err(|e| DbErr::Custom(e.to_string()))?.into()])).await?;
     let mut records = Vec::new();
     for row in rows {
@@ -148,7 +145,8 @@ pub async fn query(
             user_id: row.try_get("", "user_id")?,
             problem_id: row.try_get("", "problem_id")?,
             submitted_at_us: row.try_get("", "submitted_at_us")?,
-            status,
+            status: serde_json::from_value(json!(status))
+                .map_err(|e| DbErr::Custom(e.to_string()))?,
             verdict: verdict
                 .map(|v| serde_json::from_value(json!(v)))
                 .transpose()
@@ -167,51 +165,119 @@ pub async fn query(
     Ok(records)
 }
 
-pub async fn publish(
+/// Read only the generation and outstanding record, regardless of slot history.
+async fn slot_state(
+    db: &impl ConnectionTrait,
+    plugin_id: &str,
+    key: &str,
+) -> Result<(Option<i32>, Option<i32>), DbErr> {
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT
+         (SELECT submission_id FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2
+          ORDER BY submission_id DESC LIMIT 1) AS generation,
+         (SELECT submission_id FROM submission_feedback WHERE plugin_id = $1 AND slot_key = $2
+          AND outcome = 'pending' LIMIT 1) AS pending",
+            [plugin_id.into(), key.into()],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("Missing slot observation".into()))?;
+    Ok((row.try_get("", "generation")?, row.try_get("", "pending")?))
+}
+
+pub async fn observe_slot(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    key: &str,
+) -> Result<SubmissionSlotObservation, DbErr> {
+    let (generation, pending) = slot_state(db, plugin_id, key).await?;
+    let pending = if let Some(id) = pending {
+        query(
+            db,
+            plugin_id,
+            &SubmissionFeedbackQuery {
+                submission_ids: Some(vec![id]),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .find(|r| r.slot_held)
+    } else {
+        None
+    };
+    Ok(SubmissionSlotObservation {
+        token: SubmissionSlotToken::new(key.to_owned(), generation),
+        pending,
+    })
+}
+
+/// Serialize competing releases on the feedback row. Raw judgements are never
+/// modified. Missing/foreign rows and conflicting final releases are errors.
+pub async fn update(
     db: &DatabaseConnection,
     plugin_id: &str,
     id: i32,
-    publication: &SubmissionFeedbackPublication,
-) -> Result<(), DbErr> {
-    if publication.withheld && publication.result.is_some() {
+    action: &SubmissionFeedbackAction,
+) -> Result<FeedbackUpdateOutcome, DbErr> {
+    let txn = db.begin().await?;
+    let locked = txn
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT submission_id FROM submission_feedback WHERE plugin_id = $1
+         AND submission_id = $2 FOR UPDATE",
+            [plugin_id.into(), id.into()],
+        ))
+        .await?;
+    if locked.is_none() {
         return Err(DbErr::Custom(
-            "Withheld feedback cannot include a public result".into(),
+            "Feedback record not found for this plugin".into(),
         ));
     }
-    if publication
-        .result
-        .as_ref()
-        .is_some_and(|r| !r.score.is_finite())
-    {
-        return Err(DbErr::Custom("Invalid feedback score".into()));
+    let mut record = query(
+        &txn,
+        plugin_id,
+        &SubmissionFeedbackQuery {
+            submission_ids: Some(vec![id]),
+            limit: 1,
+            ..Default::default()
+        },
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| DbErr::Custom("Feedback record not found".into()))?;
+    let result = record
+        .apply_action(action)
+        .map_err(|e| DbErr::Custom(e.into()))?;
+    if result == FeedbackUpdateOutcome::Applied {
+        let outcome = if !record.withheld {
+            "released"
+        } else {
+            "retired"
+        };
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE submission_feedback SET outcome = $1, public_result = $2
+             WHERE plugin_id = $3 AND submission_id = $4",
+            [
+                outcome.into(),
+                record
+                    .result
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|e| DbErr::Custom(e.to_string()))?
+                    .into(),
+                plugin_id.into(),
+                id.into(),
+            ],
+        ))
+        .await?;
     }
-    let outcome = if !publication.withheld {
-        "released"
-    } else if publication.release_slot {
-        "retired"
-    } else {
-        "pending"
-    };
-    db.execute_raw(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE submission_feedback SET outcome = $1, public_result = $2
-         WHERE plugin_id = $3 AND submission_id = $4 AND outcome IN ('pending', 'retired')
-         AND NOT (outcome = 'retired' AND $1 = 'pending')",
-        [
-            outcome.into(),
-            publication
-                .result
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|e| DbErr::Custom(e.to_string()))?
-                .into(),
-            plugin_id.into(),
-            id.into(),
-        ],
-    ))
-    .await?;
-    Ok(())
+    txn.commit().await?;
+    Ok(result)
 }
 
 #[derive(Clone, Debug)]
