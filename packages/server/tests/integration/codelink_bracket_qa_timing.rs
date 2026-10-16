@@ -983,6 +983,73 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 // =====================================================================
 
 #[tokio::test]
+async fn setup_freezes_problem_assignments_and_seeds_but_keeps_timing_editable() {
+    let fx = setup_fixture().await;
+    let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
+    let original = full_setup_body(&fx.rounds, &seeds, XIAOJU_SECONDS, 0, 120);
+    let before = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    for field in ["group_a", "group_b", "tiebreak", "seeds"] {
+        let mut edited = original.clone();
+        if field == "seeds" {
+            edited[field].as_array_mut().unwrap().swap(0, 1);
+        } else {
+            let first = edited["rounds"][0][field].clone();
+            edited["rounds"][0][field] = edited["rounds"][3][field].clone();
+            edited["rounds"][3][field] = first;
+        }
+        let response = fx
+            .app
+            .post_with_token(
+                &bracket_route(fx.contest_id, "/setup"),
+                &edited,
+                &fx.staff_token,
+            )
+            .await;
+        assert_eq!(response.status, 409, "{field}: {}", response.text);
+        assert_eq!(
+            get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await,
+            before
+        );
+    }
+
+    let mut timing = original;
+    timing["rounds"][0]["xiaoju_seconds"] = json!(300);
+    timing["rounds"][0]["tiebreak_seconds"] = json!(600);
+    timing["rounds"][1]["break_before_seconds"] = json!(30);
+    timing["penalty_seconds"] = json!(7);
+    timing["escalation_grace_seconds"] = json!(60);
+    let response = fx
+        .app
+        .post_with_token(
+            &bracket_route(fx.contest_id, "/setup"),
+            &timing,
+            &fx.staff_token,
+        )
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text);
+    order_match_0(&fx).await;
+    let started = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    assert_eq!(
+        started["current_xiaoju_deadline_ms"].as_i64().unwrap()
+            - started["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+        300_000,
+    );
+    let accepted = submit(
+        &fx.app,
+        fx.contest_id,
+        fx.rounds[0].group_a[0],
+        &fx.players[0].token,
+        "ACCEPT",
+    )
+    .await;
+    assert_eq!(accepted.status, 201, "{}", accepted.text);
+    assert_eq!(
+        wait_published(&fx, accepted.id(), &fx.players[0].token).await["result"]["verdict"],
+        "Accepted"
+    );
+}
+
+#[tokio::test]
 async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
     let fx = setup_fixture_with_timing(3, 0, 120).await;
     let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();

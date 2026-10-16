@@ -149,13 +149,10 @@ struct SetupRequest {
 /// Nothing is written unless `validate_setup` accepts the whole document --
 /// see the module doc comment for why a half-applied setup is unrecoverable.
 ///
-/// # A second `/setup` call is accepted, not rejected
-///
-/// Staff may correct the stage setup before or during a contest. Regular and
-/// tiebreak durations and shared extra time are pinned when a match opens its first game, so a setup
-/// correction affects only matches that have not started. Breaks and tiebreak
-/// problem lists remain live. Existing match documents are create-only, so
-/// re-seeding does not rewrite matches that have already been created.
+/// Staff may correct timing before or during a contest. Regular and tiebreak
+/// durations and shared extra time are pinned when a match opens its first game,
+/// so a correction affects only matches that have not started. Problem assignments
+/// and seeds are fixed once the contest starts or any match has been created.
 pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
     let contest_id: i32 = req.param("contest_id")?;
     let info = contest::check_access(host, req, contest_id)?;
@@ -183,13 +180,45 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     };
     validate_setup(&setup, &body.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
-    let setup_json = serde_json::to_string(&setup)?;
-    host.storage
-        .set(&[(storage::setup_key(contest_id).as_str(), setup_json.as_str())])?;
+    let matches = storage::load_all_matches(host, contest_id)?;
+    if (info.phase != "before" || !matches.is_empty())
+        && let Some(previous) = storage::load_setup(host, contest_id)?
+    {
+        if previous.rounds.len() != setup.rounds.len()
+            || previous.rounds.iter().zip(&setup.rounds).any(|(old, new)| {
+                old.group_a != new.group_a
+                    || old.group_b != new.group_b
+                    || old.tiebreak != new.tiebreak
+            })
+        {
+            return Err(PluginHttpResponse::error(
+                409,
+                "Problem assignments are fixed once the contest starts",
+            )
+            .into());
+        }
+        let keys: Vec<_> = (0..16)
+            .map(|pos| storage::slot_key(contest_id, 1, pos))
+            .collect();
+        let slots = host
+            .storage
+            .get(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
+        if keys.iter().zip(body.seeds).any(|(key, seed)| {
+            slots.get(key).and_then(|value| value.parse::<i32>().ok()) != Some(seed)
+        }) {
+            return Err(PluginHttpResponse::error(
+                409,
+                "Player seeding is fixed once the contest starts",
+            )
+            .into());
+        }
+    }
 
+    let setup_json = serde_json::to_string(&setup)?;
     // Round 1's slots are seeded directly from the submitted order; later
-    // rounds' slots are filled by match results, not by `/setup`.
-    let seed_entries: Vec<(String, String)> = body
+    // rounds' slots are filled by match results, not by `/setup`. Persist setup
+    // and seeds together so the stage opener cannot read a partial update.
+    let mut entries: Vec<(String, String)> = body
         .seeds
         .iter()
         .enumerate()
@@ -200,11 +229,12 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             )
         })
         .collect();
-    let seed_entries_ref: Vec<(&str, &str)> = seed_entries
+    entries.push((storage::setup_key(contest_id), setup_json));
+    let entries_ref: Vec<(&str, &str)> = entries
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    host.storage.set(&seed_entries_ref)?;
+    host.storage.set(&entries_ref)?;
 
     // Round one is opened by the same stage barrier as every later round:
     // immediately if the contest is already running, or by a timer at the
@@ -485,11 +515,15 @@ mod tests {
     }
 
     fn queue_bracket_contest_info(host: &Host) {
+        queue_bracket_contest_phase(host, "during");
+    }
+
+    fn queue_bracket_contest_phase(host: &Host, phase: &str) {
         host.db.queue_query_result(serde_json::json!([{
             "contest_type": "codelink-bracket",
             "is_public": true,
             "is_active": true,
-            "phase": "during",
+            "phase": phase,
         }]));
     }
 
@@ -522,12 +556,76 @@ mod tests {
     }
 
     #[test]
-    fn handle_setup_still_accepts_a_second_call_correcting_an_unstarted_bracket() {
-        // Documents the "accept, don't reject" rule from `handle_setup`'s doc
-        // comment: staff must be able to fix a fat-fingered bracket that
-        // nobody has started playing yet. Round 1's matches exist after the
-        // first call (create-only CAS), but none has left `Ordering`, so a
-        // second call correcting e.g. the timing must still succeed.
+    fn structural_edits_are_rejected_without_writes_once_the_contest_starts() {
+        // Existing matches also keep the bracket frozen if staff move the start time.
+        for (phase, opened) in [
+            ("before", true),
+            ("during", false),
+            ("during", true),
+            ("after", false),
+            ("after", true),
+        ] {
+            for field in ["group_a", "group_b", "tiebreak", "seeds"] {
+                let host = Host::mock();
+                queue_bracket_contest_phase(&host, if opened { "during" } else { "before" });
+                host.db.queue_query_result(serde_json::json!([{
+                    "start_ms": if opened { 0.0 } else { 10_000.0 },
+                }]));
+                host.db
+                    .queue_query_result(serde_json::json!([{ "now_ms": 1_000.0 }]));
+                handle_setup(&host, &manage_request(7)).unwrap();
+                let original = host.storage.data();
+                let mut request = manage_request(7);
+                let body = request.body.as_mut().unwrap();
+                if field == "seeds" {
+                    body[field].as_array_mut().unwrap().swap(0, 1);
+                } else {
+                    // Swapping across stages also verifies that future stages
+                    // cannot replace problems required by existing matches.
+                    let first = body["rounds"][0][field].clone();
+                    body["rounds"][0][field] = body["rounds"][3][field].clone();
+                    body["rounds"][3][field] = first;
+                }
+                body["rounds"][0]["xiaoju_seconds"] = serde_json::json!(600);
+                queue_bracket_contest_phase(&host, phase);
+                let response = handle_setup(&host, &request).unwrap_err().into_response();
+                assert_eq!(response.status, 409, "{phase}/{field}");
+                assert_eq!(host.storage.data(), original, "{phase}/{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn assignments_and_seeds_can_be_corrected_before_the_contest_opens() {
+        let host = Host::mock();
+        let mut request = manage_request(7);
+        for update in [false, true] {
+            if update {
+                let body = request.body.as_mut().unwrap();
+                body["seeds"].as_array_mut().unwrap().swap(0, 1);
+                body["rounds"].as_array_mut().unwrap().swap(1, 2);
+            }
+            queue_bracket_contest_phase(&host, "before");
+            host.db
+                .queue_query_result(serde_json::json!([{ "start_ms": 10_000.0 }]));
+            host.db
+                .queue_query_result(serde_json::json!([{ "now_ms": 1_000.0 }]));
+            assert_eq!(handle_setup(&host, &request).unwrap().status, 200);
+        }
+        let setup = storage::load_setup(&host, 7).unwrap().unwrap();
+        assert_eq!(setup.rounds[1].group_a, valid_setup().rounds[2].group_a);
+        assert_eq!(
+            host.storage.get_one(&storage::slot_key(7, 1, 0)).unwrap(),
+            Some("2".into())
+        );
+        assert!(storage::load_all_matches(&host, 7).unwrap().is_empty());
+    }
+
+    #[test]
+    fn handle_setup_accepts_timing_edits_for_an_ordering_bracket() {
+        // Round 1's matches exist after the first call, but none has left
+        // Ordering. Saving timing settings with the same assignments and
+        // seeds must still succeed.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);
