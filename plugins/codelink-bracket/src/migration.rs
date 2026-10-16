@@ -59,7 +59,7 @@ pub fn run(host: &Host) -> Result<(), SdkError> {
     // this plugin's public verdict before marking the upgrade complete.
     for record in host
         .submission
-        .feedback(&SubmissionFeedbackQuery::default())?
+        .feedback_all(&SubmissionFeedbackQuery::default())?
     {
         if record
             .metadata
@@ -68,15 +68,11 @@ pub fn run(host: &Host) -> Result<(), SdkError> {
             == Some("too_late")
             && record.withheld
         {
-            host.submission.publish_feedback(
+            host.submission.release_feedback(
                 record.submission_id,
-                &SubmissionFeedbackPublication {
-                    withheld: false,
-                    release_slot: true,
-                    result: Some(SubmissionFeedbackResult {
-                        verdict: Verdict::Other("TooLate".into()),
-                        score: 0.0,
-                    }),
+                ReleaseResult::Override {
+                    verdict: Verdict::Other("TooLate".into()),
+                    score: 0.0,
                 },
             )?;
         }
@@ -195,11 +191,15 @@ mod tests {
         assert!(run(&host).is_err());
         assert!(host.storage.get_one(VERSION_KEY).unwrap().is_none());
         run(&host).unwrap();
-        let publications = host.submission.feedback_publications();
+        let publications = host.submission.feedback_actions();
         assert_eq!(publications.len(), 1);
         assert_eq!(
-            publications[0].1.result.as_ref().unwrap().verdict,
-            Verdict::Other("TooLate".into())
+            match &publications[0].1 {
+                SubmissionFeedbackAction::Release(ReleaseResult::Override { verdict, .. }) =>
+                    verdict,
+                _ => panic!("expected override"),
+            },
+            &Verdict::Other("TooLate".into())
         );
         assert_eq!(
             host.storage.get_one(VERSION_KEY).unwrap().as_deref(),

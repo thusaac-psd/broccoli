@@ -361,6 +361,16 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_statuses_match_the_sdk_for_every_host_state() {
+        for status in SubmissionStatus::ALL {
+            let wire = serde_json::to_value(status).unwrap();
+            let sdk: broccoli_types::types::SubmissionLifecycle =
+                serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(sdk).unwrap(), wire);
+        }
+    }
+
+    #[test]
     fn severity_matches_canonical_sdk_table_for_all_variants() {
         // Drift pin: every host variant must rank exactly as its SDK
         // counterpart. If this fails, someone forked the severity table

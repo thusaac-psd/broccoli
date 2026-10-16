@@ -90,11 +90,22 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     let feedback_db = privileged_db.clone();
     hr.register("submission", move |plugin_id| {
         Function::new(
-            "submission_feedback_publish",
+            "submission_feedback_update",
             [ValType::I64],
             [ValType::I64],
             UserData::new((plugin_id.to_string(), feedback_db.clone())),
-            feedback::submission_feedback_publish,
+            feedback::submission_feedback_update,
+        )
+    });
+
+    let slot_db = privileged_db.clone();
+    hr.register("submission", move |plugin_id| {
+        Function::new(
+            "submission_slot_observe",
+            [ValType::I64],
+            [ValType::I64],
+            UserData::new((plugin_id.to_string(), slot_db.clone())),
+            feedback::submission_slot_observe,
         )
     });
 

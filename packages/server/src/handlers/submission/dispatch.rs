@@ -20,10 +20,15 @@ pub(super) async fn dispatch_before_submission_hooks(
     state: &AppState,
     event: &BeforeSubmissionEvent,
     enabled_plugins: Option<&hooks::ResourceEnablements>,
+    admission_owner: Option<&str>,
 ) -> Result<Option<SubmissionAdmission>, AppError> {
-    let outcome =
-        hooks::dispatch_hooks_typed(event, enabled_plugins, &state.registries.hook_registry)
-            .await?;
+    let outcome = hooks::dispatch_submission_hooks(
+        event,
+        enabled_plugins,
+        &state.registries.hook_registry,
+        admission_owner,
+    )
+    .await?;
 
     match outcome {
         HookOutcome::Allowed(payload) => payload

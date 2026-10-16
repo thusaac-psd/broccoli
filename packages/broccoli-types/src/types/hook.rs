@@ -38,6 +38,18 @@ fn default_reject_status() -> u16 {
 }
 
 impl HookResponse {
+    /// Return atomic admission effects from a before-submission hook without
+    /// constructing the reserved wire payload by hand. The calling plugin must
+    /// own this contest's type and have registered it with admission enabled.
+    pub fn admit(
+        event: &super::BeforeSubmissionEvent,
+        admission: super::SubmissionAdmission,
+    ) -> Result<Self, serde_json::Error> {
+        let mut event = serde_json::to_value(event)?;
+        event["submission_admission"] = serde_json::to_value(admission)?;
+        Ok(Self::Modified { event })
+    }
+
     pub fn pass() -> Self {
         HookResponse::Pass
     }
@@ -68,6 +80,41 @@ impl HookResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_response_preserves_the_event_and_encodes_typed_effects() {
+        use super::super::*;
+        let event = BeforeSubmissionEvent {
+            user_id: 1,
+            problem_id: 2,
+            contest_id: Some(3),
+            contest_type: "example".into(),
+            language: "cpp".into(),
+            file_count: 1,
+        };
+        let admission = SubmissionAdmission {
+            guard: SubmissionStorageGuard::from_snapshot(
+                "state",
+                StorageSnapshot {
+                    value: "opaque".into(),
+                    revision: 7,
+                },
+            ),
+            feedback_key: "attempts".into(),
+            metadata: serde_json::json!({"own":true}),
+            slot: None,
+            latest_arrival_ms: None,
+        };
+        let response = HookResponse::admit(&event, admission).unwrap();
+        let wire = serde_json::to_value(response).unwrap();
+        let decoded: BeforeSubmissionEvent = serde_json::from_value(wire["event"].clone()).unwrap();
+        assert_eq!(decoded.user_id, event.user_id);
+        assert_eq!(decoded.contest_type, event.contest_type);
+        let admission: SubmissionAdmission =
+            serde_json::from_value(wire["event"]["submission_admission"].clone()).unwrap();
+        assert_eq!(admission.guard.expected_value(), "opaque");
+        assert_eq!(admission.guard.key(), "state");
+    }
 
     #[test]
     fn pass_serializes_to_legacy_wire_format() {
