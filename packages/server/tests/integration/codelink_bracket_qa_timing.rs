@@ -2621,7 +2621,9 @@ async fn smallest_and_largest_brackets_complete_through_every_stage() {
             .flat_map(|r| r.group_a.into_iter().chain(r.group_b).chain([r.tiebreak]))
             .collect();
         let rules: Vec<_> = problems
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .take(stage_count)
             .map(|p| {
                 json!({"group_a":[p[0]], "group_b":[p[1]], "tiebreak":[p[2]],
