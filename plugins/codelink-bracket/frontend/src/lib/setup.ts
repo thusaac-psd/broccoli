@@ -2,9 +2,9 @@
 // `validate_setup` (src/setup.rs) so the form can say what is wrong before
 // submitting; the server stays the authority.
 
-import { ROUND_COUNT } from './rounds.ts';
+import { DEFAULT_PLAYER_COUNT } from './rounds.ts';
 
-export const PLAYER_COUNT = 16;
+export const PLAYER_COUNT = DEFAULT_PLAYER_COUNT;
 
 /** A round's timing and problem slots while editing; `null` is an empty slot. */
 export interface RoundDraft {
@@ -26,22 +26,32 @@ export const emptyRound = (index = 0): RoundDraft => ({
 });
 
 /**
- * Fill every round from the contest's problem order: three for the first
- * player, three for the second, one tiebreak, round after round. Slots past
- * the end of the list stay empty.
+ * Fill the configured slots in each unopened stage from the contest's
+ * problem order. Slots past the end of the list stay empty.
  */
 export function autoFillRounds(
   problemIds: number[],
   currentRounds?: RoundDraft[],
+  stageCount = Math.log2(DEFAULT_PLAYER_COUNT),
+  openedRounds = 0,
 ): RoundDraft[] {
-  const queue = [...problemIds];
+  const frozen = new Set(
+    currentRounds
+      ?.slice(0, openedRounds)
+      .flatMap((r) => [...r.groupA, ...r.groupB, ...r.tiebreak]),
+  );
+  const queue = problemIds.filter((id) => !frozen.has(id));
   const take = () => queue.shift() ?? null;
-  return Array.from({ length: ROUND_COUNT }, (_, i) => ({
-    ...(currentRounds?.[i] ?? emptyRound(i)),
-    groupA: [take(), take(), take()],
-    groupB: [take(), take(), take()],
-    tiebreak: [take()],
-  }));
+  return Array.from({ length: stageCount }, (_, i) => {
+    const round = currentRounds?.[i] ?? emptyRound(i);
+    if (i < openedRounds) return round;
+    return {
+      ...round,
+      groupA: round.groupA.map(take),
+      groupB: round.groupB.map(take),
+      tiebreak: round.tiebreak.map(take),
+    };
+  });
 }
 
 export type SetupIssue =
@@ -59,9 +69,17 @@ export function validateSetup(
   penaltySeconds: number,
   graceSeconds: number,
   extraMinutes = 0,
+  playerCount = DEFAULT_PLAYER_COUNT,
 ): SetupIssue[] {
   const issues: SetupIssue[] = [];
-  if (new Set(seeds).size !== PLAYER_COUNT || seeds.length !== PLAYER_COUNT) {
+  if (
+    new Set(seeds).size !== playerCount ||
+    seeds.length !== playerCount ||
+    playerCount < 2 ||
+    playerCount > 128 ||
+    !Number.isInteger(Math.log2(playerCount)) ||
+    rounds.length !== Math.log2(playerCount)
+  ) {
     issues.push({ kind: 'players', count: new Set(seeds).size });
   }
   const seen = new Set<number>();
@@ -82,7 +100,13 @@ export function validateSetup(
     }
     const regular = [...r.groupA, ...r.groupB];
     const tiebreaks = r.tiebreak.filter((id): id is number => id !== null);
-    if (regular.some((id) => id === null) || tiebreaks.length === 0) {
+    if (
+      !r.groupA.length ||
+      r.groupA.length !== r.groupB.length ||
+      r.groupA.length + r.tiebreak.length > 256 ||
+      regular.some((id) => id === null) ||
+      tiebreaks.length === 0
+    ) {
       issues.push({ kind: 'emptySlot', round: i + 1 });
     }
     for (const id of [...regular, ...tiebreaks]) {

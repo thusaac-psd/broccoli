@@ -143,3 +143,25 @@ test('judge wait accepts zero and whole seconds and rejects invalid values', () 
     ]);
   }
 });
+
+test('eight-player setup uses three stages and can assign five games per stage', () => {
+  const initial = autoFillRounds(problems, undefined, 3);
+  initial[1].groupA = [null, null, null, null, null];
+  initial[1].groupB = [null, null, null, null, null];
+  const filled = autoFillRounds(
+    Array.from({ length: 40 }, (_, i) => i + 1),
+    initial,
+    3,
+  );
+  assert.equal(filled.length, 3);
+  assert.equal(filled[1].groupA.length, 5);
+  assert.deepEqual(validateSetup(seeds.slice(0, 8), filled, 20, 120, 0, 8), []);
+});
+
+test('auto-fill preserves opened stages and excludes their problems from future stages', () => {
+  const before = autoFillRounds(problems);
+  const after = autoFillRounds([...problems].reverse(), before, 4, 1);
+  assert.deepEqual(after[0], before[0]);
+  assert.deepEqual(validateSetup(seeds, after, 20, 120), []);
+  assert.notDeepEqual(after[1], before[1]);
+});

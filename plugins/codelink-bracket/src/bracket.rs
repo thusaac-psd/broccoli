@@ -25,7 +25,7 @@ pub fn stage_open_at_ms(
     let stage = setup.rounds.get(usize::from(round - 1))?;
 
     let previous_round = round - 1;
-    let expected = crate::storage::matches_in_round(previous_round) as usize;
+    let expected = crate::storage::matches_in_round(setup.player_count(), previous_round) as usize;
     let previous: Vec<&MatchState> = matches
         .iter()
         .map(|(_, m)| m)
@@ -61,10 +61,10 @@ pub fn start_at_ms(
 /// `order_a` is the order player A must follow, i.e. A's own group.
 pub fn fill_missing_orders(m: &mut MatchState) {
     if m.order_a.is_none() {
-        m.order_a = Some(m.group_a);
+        m.order_a = Some(m.group_a.clone());
     }
     if m.order_b.is_none() {
-        m.order_b = Some(m.group_b);
+        m.order_b = Some(m.group_b.clone());
     }
 }
 
@@ -74,6 +74,7 @@ mod tests {
 
     fn setup(break_seconds: i64) -> Setup {
         Setup {
+            seeds: (1..=16).collect(),
             rounds: (0..4)
                 .map(|i| crate::model::RoundDef {
                     break_before_seconds: if i == 0 { 0 } else { break_seconds },
@@ -89,10 +90,10 @@ mod tests {
             round,
             player_a: a,
             player_b: b,
-            group_a: [1, 2, 3],
-            group_b: [4, 5, 6],
-            order_a: Some([2, 1, 3]),
-            order_b: Some([6, 5, 4]),
+            group_a: vec![1, 2, 3],
+            group_b: vec![4, 5, 6],
+            order_a: Some(vec![2, 1, 3]),
+            order_b: Some(vec![6, 5, 4]),
             state: MatchPhase::Ordering,
             ..Default::default()
         }
@@ -165,7 +166,7 @@ mod tests {
         }
         assert_eq!(stage_open_at_ms(&config, &[], 1, 8_000), Some(8_000));
         for round in 2..=4 {
-            let previous: Vec<_> = (0..crate::storage::matches_in_round(round - 1))
+            let previous: Vec<_> = (0..crate::storage::matches_in_round(16, round - 1))
                 .map(|pos| decided(round - 1, pos, pos as i32, 1_000 + i64::from(pos)))
                 .collect();
             let last = previous.last().unwrap().1.decided_at_ms;
@@ -186,7 +187,7 @@ mod tests {
         let mut m = ranked(1, 10, 20);
         m.order_a = None;
         fill_missing_orders(&mut m);
-        assert_eq!(m.order_a, Some([1, 2, 3]));
-        assert_eq!(m.order_b, Some([6, 5, 4]));
+        assert_eq!(m.order_a, Some(vec![1, 2, 3]));
+        assert_eq!(m.order_b, Some(vec![6, 5, 4]));
     }
 }

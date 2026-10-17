@@ -1,6 +1,6 @@
 //! 下午场 (afternoon session) bracket plugin.
 //!
-//! Implements the 16-player single-elimination bracket format described in
+//! Implements the single-elimination bracket format described in
 //! `docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`. All
 //! bracket state, ordering, visibility and judging logic lives in this
 //! plugin; the host knows nothing about brackets, rounds, matches or 小局.
@@ -39,6 +39,12 @@ pub fn init() -> FnResult<String> {
     host.log
         .info("codelink-bracket contest plugin registered")?;
     Ok("ok".into())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn api_get_setup(input: String) -> FnResult<String> {
+    run_api_handler(&input, setup::handle_get_setup)
 }
 
 // -- API: POST /contests/{contest_id}/setup ------------------------------

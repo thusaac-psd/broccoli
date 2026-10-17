@@ -1,4 +1,4 @@
-//! `/matches/{match_id}/order` -- each player ranks the OPPONENT's 3
+//! `/matches/{match_id}/order` -- each player ranks the OPPONENT's
 //! problems before a match starts.
 //!
 //! # The direction is the single most likely bug in this plugin
@@ -29,17 +29,17 @@ use crate::storage;
 pub(crate) const LEFT_ORDERING_PHASE_MSG: &str =
     "the match has left the ordering phase; rankings can no longer be changed";
 
-/// Whether `order` contains exactly the same 3 problem ids as `group`,
+/// Whether `order` contains exactly the same problem ids as `group`,
 /// each exactly once (order of `group` itself is irrelevant).
-fn is_permutation_of(order: &[i32; 3], group: &[i32; 3]) -> bool {
-    let mut sorted_order = *order;
-    let mut sorted_group = *group;
+fn is_permutation_of(order: &[i32], group: &[i32]) -> bool {
+    let mut sorted_order = order.to_vec();
+    let mut sorted_group = group.to_vec();
     sorted_order.sort_unstable();
     sorted_group.sort_unstable();
     sorted_order == sorted_group
 }
 
-/// Record `submitter`'s ranking of their OPPONENT's 3 problems.
+/// Record `submitter`'s ranking of their OPPONENT's problems.
 ///
 /// `submitter` must be one of `match_state.player_a` / `match_state.player_b`
 /// -- anyone else is rejected. If `submitter` is player B, `order` must be a
@@ -61,24 +61,20 @@ fn is_permutation_of(order: &[i32; 3], group: &[i32; 3]) -> bool {
 pub fn record_order(
     match_state: &mut MatchState,
     submitter: i32,
-    order: [i32; 3],
+    order: Vec<i32>,
 ) -> Result<(), String> {
     if match_state.state != MatchPhase::Ordering {
         return Err(LEFT_ORDERING_PHASE_MSG.to_string());
     }
     if submitter == match_state.player_b {
         if !is_permutation_of(&order, &match_state.group_a) {
-            return Err(
-                "order must be a permutation of the opponent's group of 3 problems".to_string(),
-            );
+            return Err("order must be a permutation of the opponent's problem group".to_string());
         }
         match_state.order_a = Some(order);
         Ok(())
     } else if submitter == match_state.player_a {
         if !is_permutation_of(&order, &match_state.group_b) {
-            return Err(
-                "order must be a permutation of the opponent's group of 3 problems".to_string(),
-            );
+            return Err("order must be a permutation of the opponent's problem group".to_string());
         }
         match_state.order_b = Some(order);
         Ok(())
@@ -92,7 +88,7 @@ pub fn record_order(
 /// Wire body for `POST /contests/{contest_id}/matches/{match_id}/order`.
 #[derive(Debug, Deserialize)]
 struct OrderRequest {
-    order: [i32; 3],
+    order: Vec<i32>,
 }
 
 /// Handle `POST /contests/{contest_id}/matches/{match_id}/order`. Kept off
@@ -142,11 +138,11 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // see the `map_err` below the CAS closure for how a same-race rejection
     // discovered INSIDE the closure is still kept off the generic 500 path.
     let mut probe = current.clone();
-    record_order(&mut probe, submitter, body.order)
+    record_order(&mut probe, submitter, body.order.clone())
         .map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let result = storage::update_match(host, contest_id, match_id, |m| {
-        record_order(m, submitter, body.order).map_err(SdkError::Other)
+        record_order(m, submitter, body.order.clone()).map_err(SdkError::Other)
     });
     let updated: MatchState = result.map_err(|e| match e {
         // The probe above passed (the match was still `Ordering` at that
@@ -189,15 +185,15 @@ mod tests {
     use super::*;
     use crate::model::MatchPhase;
 
-    fn group_a() -> [i32; 3] {
-        [101, 102, 103]
+    fn group_a() -> Vec<i32> {
+        vec![101, 102, 103]
     }
 
-    fn group_b() -> [i32; 3] {
-        [201, 202, 203]
+    fn group_b() -> Vec<i32> {
+        vec![201, 202, 203]
     }
 
-    fn match_in_ordering(a: i32, b: i32, group_a: [i32; 3], group_b: [i32; 3]) -> MatchState {
+    fn match_in_ordering(a: i32, b: i32, group_a: Vec<i32>, group_b: Vec<i32>) -> MatchState {
         MatchState {
             round: 1,
             pos: 0,
@@ -214,10 +210,10 @@ mod tests {
     fn player_b_submitting_sets_the_order_imposed_on_player_a() {
         // The direction that is easy to get backwards: B ranks A's problems.
         let mut m = match_in_ordering(/* a */ 10, /* b */ 20, group_a(), group_b());
-        record_order(&mut m, 20, [103, 101, 102]).unwrap();
+        record_order(&mut m, 20, vec![103, 101, 102]).unwrap();
         assert_eq!(
             m.order_a,
-            Some([103, 101, 102]),
+            Some(vec![103, 101, 102]),
             "B's ranking governs A's order"
         );
         assert_eq!(m.order_b, None, "B has not been ranked yet");
@@ -227,22 +223,22 @@ mod tests {
     fn rejects_an_order_that_is_not_a_permutation_of_the_opponents_group() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         // 999 is not in A's group at all.
-        let err = record_order(&mut m, 20, [101, 102, 999]).unwrap_err();
+        let err = record_order(&mut m, 20, vec![101, 102, 999]).unwrap_err();
         assert!(err.contains("permutation"), "got: {err}");
     }
 
     #[test]
     fn rejects_a_ranking_from_someone_who_is_not_in_the_match() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        assert!(record_order(&mut m, 77, [101, 102, 103]).is_err());
+        assert!(record_order(&mut m, 77, vec![101, 102, 103]).is_err());
     }
 
     #[test]
     fn resubmitting_before_the_match_starts_replaces_the_previous_ranking() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        record_order(&mut m, 20, [101, 102, 103]).unwrap();
-        record_order(&mut m, 20, [103, 102, 101]).unwrap();
-        assert_eq!(m.order_a, Some([103, 102, 101]));
+        record_order(&mut m, 20, vec![101, 102, 103]).unwrap();
+        record_order(&mut m, 20, vec![103, 102, 101]).unwrap();
+        assert_eq!(m.order_a, Some(vec![103, 102, 101]));
     }
 
     // -- state guard on record_order (DEFECT 2 fix) --
@@ -251,12 +247,12 @@ mod tests {
     fn rejects_a_resubmission_once_the_match_has_left_ordering() {
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.state = MatchPhase::InProgress;
-        m.order_a = Some([101, 102, 103]);
-        let err = record_order(&mut m, 20, [103, 102, 101]).unwrap_err();
+        m.order_a = Some(vec![101, 102, 103]);
+        let err = record_order(&mut m, 20, vec![103, 102, 101]).unwrap_err();
         assert!(err.contains("ordering phase"), "got: {err}");
         assert_eq!(
             m.order_a,
-            Some([101, 102, 103]),
+            Some(vec![101, 102, 103]),
             "a rejected resubmission must not mutate the existing order"
         );
     }
@@ -285,7 +281,7 @@ mod tests {
         contest_id: i32,
         match_id: u8,
         submitter: i32,
-        order: [i32; 3],
+        order: Vec<i32>,
     ) -> PluginHttpRequest {
         let mut params = HashMap::new();
         params.insert("contest_id".to_string(), contest_id.to_string());
@@ -334,7 +330,7 @@ mod tests {
             .queue_query_result(serde_json::json!([{ "start_ms": 60_000.0 }]));
         host.db
             .queue_query_result(serde_json::json!([{ "now_ms": 5_000.0 }]));
-        let err = handle_order(&host, &order_request(7, 0, 20, [103, 102, 101])).unwrap_err();
+        let err = handle_order(&host, &order_request(7, 0, 20, vec![103, 102, 101])).unwrap_err();
         assert_eq!(err.into_response().status, 409);
         assert_eq!(
             storage::load_match(&host, 7, 0).unwrap().unwrap().order_a,
@@ -351,13 +347,13 @@ mod tests {
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
-        m.order_a = Some([101, 102, 103]);
+        m.order_a = Some(vec![101, 102, 103]);
         seed_match(&host, 7, 0, &m);
 
-        let resp = handle_order(&host, &order_request(7, 0, 20, [103, 102, 101])).unwrap();
+        let resp = handle_order(&host, &order_request(7, 0, 20, vec![103, 102, 101])).unwrap();
         assert_eq!(resp.status, 200);
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
-        assert_eq!(reloaded.order_a, Some([103, 102, 101]));
+        assert_eq!(reloaded.order_a, Some(vec![103, 102, 101]));
     }
 
     #[test]
@@ -368,11 +364,11 @@ mod tests {
         queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.state = MatchPhase::InProgress;
-        m.order_a = Some([101, 102, 103]);
-        m.order_b = Some([201, 202, 203]);
+        m.order_a = Some(vec![101, 102, 103]);
+        m.order_b = Some(vec![201, 202, 203]);
         seed_match(&host, 7, 0, &m);
 
-        let err = handle_order(&host, &order_request(7, 0, 20, [103, 102, 101])).unwrap_err();
+        let err = handle_order(&host, &order_request(7, 0, 20, vec![103, 102, 101])).unwrap_err();
         let resp = err.into_response();
         assert!(
             resp.status < 500,
@@ -384,7 +380,7 @@ mod tests {
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
         assert_eq!(
             reloaded.order_a,
-            Some([101, 102, 103]),
+            Some(vec![101, 102, 103]),
             "a rejected resubmission must not mutate the live match"
         );
     }

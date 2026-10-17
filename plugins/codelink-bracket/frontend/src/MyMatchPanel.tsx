@@ -1,3 +1,4 @@
+import { gameLabel } from './lib/stage';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -58,7 +59,7 @@ export function MyMatchPanel({
           </span>
           <span className="text-muted-foreground">
             {' · '}
-            {t(roundNameKey(match.round))}
+            {t(roundNameKey(match.round, match.stage_count))}
             {' · '}
             {t('codelink-bracket.my.vs', { name: opponentName })}
           </span>
@@ -222,10 +223,7 @@ function CurrentTask({
     case 'play': {
       const p =
         stage.problemId === null ? undefined : problems.get(stage.problemId);
-      const gameName =
-        stage.game >= 3
-          ? t('codelink-bracket.game.tiebreak', { n: stage.game - 2 })
-          : t('codelink-bracket.game.regular', { n: stage.game + 1 });
+      const gameName = t(...gameLabel(match, stage.game));
       return (
         <div className="flex flex-wrap items-center gap-4 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
           <div className="min-w-0 flex-1">
@@ -275,10 +273,10 @@ function CurrentTask({
     case 'advanced':
       return note(
         <PartyPopper className="h-4 w-4 text-amber-500" />,
-        match.round >= 4
+        match.round >= match.stage_count
           ? t('codelink-bracket.my.champion')
           : t('codelink-bracket.my.advanced', {
-              round: t(roundNameKey(match.round + 1)),
+              round: t(roundNameKey(match.round + 1, match.stage_count)),
             }),
         'font-medium',
       );

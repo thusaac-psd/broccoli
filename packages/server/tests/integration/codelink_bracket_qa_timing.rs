@@ -94,6 +94,25 @@ async fn setup_fixture_with_extra_time(
     break_before_seconds: i64,
     escalation_grace_seconds: i64,
 ) -> Fixture {
+    setup_fixture_with_stage_timing(
+        xiaoju_seconds,
+        xiaoju_seconds,
+        match_extra_time_seconds,
+        break_before_seconds,
+        escalation_grace_seconds,
+        20,
+    )
+    .await
+}
+
+async fn setup_fixture_with_stage_timing(
+    xiaoju_seconds: i64,
+    tiebreak_seconds: i64,
+    match_extra_time_seconds: i64,
+    break_before_seconds: i64,
+    escalation_grace_seconds: i64,
+    penalty_seconds: i64,
+) -> Fixture {
     let (app, plugins_tmp) = spawn_bracket_app().await;
 
     let staff_token = app
@@ -151,6 +170,10 @@ async fn setup_fixture_with_extra_time(
         escalation_grace_seconds,
     );
     setup["match_extra_time_seconds"] = json!(match_extra_time_seconds);
+    setup["penalty_seconds"] = json!(penalty_seconds);
+    for stage in setup["rounds"].as_array_mut().unwrap() {
+        stage["tiebreak_seconds"] = json!(tiebreak_seconds);
+    }
     let res = app
         .post_with_token(&bracket_route(contest_id, "/setup"), &setup, &staff_token)
         .await;
@@ -983,7 +1006,7 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 // =====================================================================
 
 #[tokio::test]
-async fn setup_freezes_problem_assignments_and_seeds_but_keeps_timing_editable() {
+async fn setup_freezes_opened_stages_and_allows_future_stage_edits() {
     let fx = setup_fixture().await;
     let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
     let original = full_setup_body(&fx.rounds, &seeds, XIAOJU_SECONDS, 0, 120);
@@ -1012,12 +1035,23 @@ async fn setup_freezes_problem_assignments_and_seeds_but_keeps_timing_editable()
         );
     }
 
+    for field in ["xiaoju_seconds", "tiebreak_seconds"] {
+        let mut edited = original.clone();
+        edited["rounds"][0][field] = json!(600);
+        let response = fx
+            .app
+            .post_with_token(
+                &bracket_route(fx.contest_id, "/setup"),
+                &edited,
+                &fx.staff_token,
+            )
+            .await;
+        assert_eq!(response.status, 409, "{}", response.text);
+    }
     let mut timing = original;
-    timing["rounds"][0]["xiaoju_seconds"] = json!(300);
-    timing["rounds"][0]["tiebreak_seconds"] = json!(600);
+    timing["rounds"][1]["xiaoju_seconds"] = json!(300);
+    timing["rounds"][1]["tiebreak_seconds"] = json!(600);
     timing["rounds"][1]["break_before_seconds"] = json!(30);
-    timing["penalty_seconds"] = json!(7);
-    timing["escalation_grace_seconds"] = json!(60);
     let response = fx
         .app
         .post_with_token(
@@ -1032,7 +1066,7 @@ async fn setup_freezes_problem_assignments_and_seeds_but_keeps_timing_editable()
     assert_eq!(
         started["current_xiaoju_deadline_ms"].as_i64().unwrap()
             - started["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
-        300_000,
+        XIAOJU_SECONDS * 1000,
     );
     let accepted = submit(
         &fx.app,
@@ -1051,19 +1085,8 @@ async fn setup_freezes_problem_assignments_and_seeds_but_keeps_timing_editable()
 
 #[tokio::test]
 async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
-    let fx = setup_fixture_with_timing(3, 0, 120).await;
+    let fx = setup_fixture_with_stage_timing(3, 7, 0, 0, 120, 20).await;
     let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
-    let mut initial = full_setup_body(&fx.rounds, &seeds, 3, 0, 120);
-    initial["rounds"][0]["tiebreak_seconds"] = json!(7);
-    let configured = fx
-        .app
-        .post_with_token(
-            &bracket_route(fx.contest_id, "/setup"),
-            &initial,
-            &fx.staff_token,
-        )
-        .await;
-    assert_eq!(configured.status, 200, "{}", configured.text);
     order_match_0(&fx).await;
     start_match_0(&fx).await;
 
@@ -1075,7 +1098,11 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
             &fx.staff_token,
         )
         .await;
-    assert_eq!(res.status, 200, "second /setup call failed: {}", res.text);
+    assert_eq!(
+        res.status, 409,
+        "an opened stage must be immutable: {}",
+        res.text
+    );
 
     let a = &fx.players[0];
     let prob_a = fx.rounds[0].group_a[0];
@@ -1533,7 +1560,7 @@ async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
 #[tokio::test]
 async fn configured_penalties_control_admission_and_player_feedback_including_zero() {
     for seconds in [30, 0] {
-        let fx = setup_fixture_with_timing(120, 0, 120).await;
+        let fx = setup_fixture_with_stage_timing(120, 120, 0, 0, 120, seconds).await;
         let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
         let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
         body["penalty_seconds"] = json!(seconds);
@@ -2135,22 +2162,8 @@ async fn staff_force_decision_retires_stuck_admissions_and_unblocks_the_next_sta
 
 #[tokio::test]
 async fn feedback_publication_failure_retries_after_committing_the_match() {
-    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    let fx = setup_fixture_with_stage_timing(120, 120, 0, 0, 120, 3).await;
     let a = &fx.players[0];
-    let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
-    let mut body = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
-    body["penalty_seconds"] = json!(3);
-    assert_eq!(
-        fx.app
-            .post_with_token(
-                &bracket_route(fx.contest_id, "/setup"),
-                &body,
-                &fx.staff_token
-            )
-            .await
-            .status,
-        200
-    );
     order_match_0(&fx).await;
     for index in 0..2 {
         let accepted = submit(
@@ -2273,6 +2286,19 @@ async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migratio
     let fx = setup_fixture_with_timing(120, 0, 120).await;
     let setup_key = format!("setup:{}", fx.contest_id);
     let match_key = format!("match:{}:0", fx.contest_id);
+    for (pos, player) in fx.players.iter().enumerate() {
+        plugin_storage::ActiveModel {
+            plugin_id: Set("codelink-bracket".into()),
+            collection: Set("default".into()),
+            key: Set(format!("slot:{}:1:{pos}", fx.contest_id)),
+            created_at: Set(Utc::now()),
+            data: Set(json!(player.id.to_string())),
+            ..Default::default()
+        }
+        .insert(&fx.app.db)
+        .await
+        .unwrap();
+    }
     for key in [&setup_key, &match_key] {
         let row = plugin_storage::Entity::find_by_id((
             "codelink-bracket".to_string(),
@@ -2285,6 +2311,8 @@ async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migratio
         .unwrap();
         let mut document: Value = serde_json::from_str(row.data.as_str().unwrap()).unwrap();
         if key == &setup_key {
+            document.as_object_mut().unwrap().remove("seeds");
+            document.as_object_mut().unwrap().remove("opened_rounds");
             document["xiaoju_seconds"] = json!(120);
             document["round_intermission_seconds"] = json!(45);
             for stage in document["rounds"].as_array_mut().unwrap() {
@@ -2339,6 +2367,11 @@ async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migratio
     .unwrap()
     .unwrap();
     let setup: Value = serde_json::from_str(setup.data.as_str().unwrap()).unwrap();
+    assert_eq!(
+        setup["seeds"],
+        json!(fx.players.iter().map(|p| p.id).collect::<Vec<_>>())
+    );
+    assert_eq!(setup["opened_rounds"], 1);
     assert_eq!(setup["rounds"][0]["break_before_seconds"], 0);
     assert_eq!(setup["rounds"][1]["break_before_seconds"], 45);
     assert_eq!(setup["rounds"][0]["xiaoju_seconds"], 120);
@@ -2349,4 +2382,292 @@ async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migratio
         get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await["state"],
         "in_progress"
     );
+}
+
+#[tokio::test]
+async fn variable_bracket_size_and_five_game_stage_run_through_the_real_host() {
+    use sea_orm::{EntityTrait, IntoActiveModel};
+    use server::entity::contest;
+    let (app, _plugins, staff, contest_id, rounds, players) =
+        contest_and_rounds_for_setup_probe("Variable stages").await;
+    let row = contest::Entity::find_by_id(contest_id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut row = row.into_active_model();
+    row.start_time = Set(Utc::now() + ChronoDuration::hours(1));
+    row.update(&app.db).await.unwrap();
+    let seeds: Vec<_> = players.iter().map(|p| p.id).collect();
+    let original = full_setup_body(&rounds, &seeds, 60, 0, 120);
+    assert_eq!(
+        app.post_with_token(&bracket_route(contest_id, "/setup"), &original, &staff)
+            .await
+            .status,
+        200
+    );
+    let mut smaller = full_setup_body(&rounds[..3], &seeds[..8], 60, 0, 120);
+    for group in ["group_a", "group_b"] {
+        smaller["rounds"][0][group].as_array_mut().unwrap().extend(
+            original["rounds"][3][group].as_array().unwrap()[..2]
+                .iter()
+                .cloned(),
+        );
+    }
+    assert_eq!(
+        app.post_with_token(&bracket_route(contest_id, "/setup"), &smaller, &staff)
+            .await
+            .status,
+        200
+    );
+    let row = contest::Entity::find_by_id(contest_id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut row = row.into_active_model();
+    row.start_time = Set(Utc::now() - ChronoDuration::seconds(1));
+    row.update(&app.db).await.unwrap();
+    assert_eq!(
+        app.post_with_token(&bracket_route(contest_id, "/setup"), &smaller, &staff)
+            .await
+            .status,
+        200
+    );
+    let bracket = app
+        .get_with_token(&bracket_route(contest_id, "/bracket"), &staff)
+        .await;
+    assert_eq!(bracket.body["player_count"], 8);
+    assert_eq!(bracket.body["matches"].as_array().unwrap().len(), 4);
+    assert_eq!(bracket.body["matches"][0]["stage_count"], 3);
+    assert_eq!(
+        app.get_with_token(&bracket_route(contest_id, "/setup"), &players[0].token)
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        app.post_with_token(&bracket_route(contest_id, "/setup"), &original, &staff)
+            .await
+            .status,
+        409
+    );
+    let bad = app
+        .post_with_token(
+            &bracket_route(contest_id, "/matches/0/order"),
+            &json!({"order": rounds[0].group_b}),
+            &players[0].token,
+        )
+        .await;
+    assert_eq!(bad.status, 400);
+    assert_eq!(
+        app.post_with_token(
+            &bracket_route(contest_id, "/matches/0/start"),
+            &json!({}),
+            &staff
+        )
+        .await
+        .status,
+        200
+    );
+    for (index, problem) in smaller["rounds"][0]["group_a"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let submitted = submit(
+            &app,
+            contest_id,
+            problem.as_i64().unwrap() as i32,
+            &players[0].token,
+            "ACCEPT",
+        )
+        .await;
+        assert_eq!(submitted.status, 201, "{}", submitted.text);
+        let mut next = Value::Null;
+        for _ in 0..100 {
+            next = get_match(&app, contest_id, 0, &staff).await;
+            if next["state"] == "decided"
+                || next["current_xiaoju_index"].as_u64().unwrap() > index as u64
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if index < 4 {
+            assert_eq!(next["state"], "in_progress", "{next}");
+        } else {
+            assert_eq!(next["state"], "decided", "{next}");
+            assert_eq!(next["score_a"], 5);
+        }
+    }
+    assert_eq!(
+        app.get_with_token(&bracket_route(contest_id, "/matches/4"), &staff)
+            .await
+            .status,
+        404
+    );
+    for id in 1..4 {
+        assert_eq!(
+            app.post_with_token(
+                &bracket_route(contest_id, &format!("/matches/{id}/force-decide")),
+                &json!({"winner":players[id as usize * 2].id}),
+                &staff
+            )
+            .await
+            .status,
+            200
+        );
+    }
+    let next = get_match(&app, contest_id, 4, &staff).await;
+    assert_eq!(next["round"], 2);
+    assert_eq!(next["group_a"].as_array().unwrap().len(), 3);
+    // Future-stage rules lock as soon as ordering opens.
+    smaller["rounds"][1]["xiaoju_seconds"] = json!(120);
+    assert_eq!(
+        app.post_with_token(&bracket_route(contest_id, "/setup"), &smaller, &staff)
+            .await
+            .status,
+        409
+    );
+}
+
+#[tokio::test]
+async fn future_stage_edit_racing_with_opening_keeps_every_match_on_the_frozen_rules() {
+    let fx = setup_fixture_with_timing(120, 0, 120).await;
+    finish_first_stage(&fx.app, fx.contest_id, &fx.staff_token, &fx.players, 1).await;
+    let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
+    let mut edited = full_setup_body(&fx.rounds, &seeds, 120, 0, 120);
+    for group in ["group_a", "group_b"] {
+        let extra = edited["rounds"][3][group]
+            .as_array_mut()
+            .unwrap()
+            .drain(..2)
+            .collect::<Vec<_>>();
+        edited["rounds"][1][group]
+            .as_array_mut()
+            .unwrap()
+            .extend(extra);
+    }
+    edited["rounds"][1]["xiaoju_seconds"] = json!(300);
+    let setup_route = bracket_route(fx.contest_id, "/setup");
+    let (changed, finished) = tokio::join!(
+        fx.app
+            .post_with_token(&setup_route, &edited, &fx.staff_token),
+        force_decide(&fx, 0, Some(fx.players[0].id)),
+    );
+    assert_eq!(finished.status, 200, "{}", finished.text);
+    assert!([200, 409].contains(&changed.status), "{}", changed.text);
+    let saved = fx
+        .app
+        .get_with_token(&bracket_route(fx.contest_id, "/setup"), &fx.staff_token)
+        .await;
+    assert_eq!(saved.body["setup"]["opened_rounds"], 2);
+    let stage = &saved.body["setup"]["rounds"][1];
+    assert_eq!(
+        stage["group_a"].as_array().unwrap().len(),
+        if changed.status == 200 { 5 } else { 3 }
+    );
+    for id in 8..12 {
+        let view = get_match(&fx.app, fx.contest_id, id, &fx.staff_token).await;
+        assert_eq!(
+            view["group_a"].as_array().unwrap().len(),
+            stage["group_a"].as_array().unwrap().len()
+        );
+        assert_eq!(start_match(&fx, id).await.status, 200);
+        let playing = get_match(&fx.app, fx.contest_id, id, &fx.staff_token).await;
+        assert_eq!(
+            playing["current_xiaoju_deadline_ms"].as_i64().unwrap()
+                - playing["current_xiaoju_opened_at_ms"].as_i64().unwrap(),
+            stage["xiaoju_seconds"].as_i64().unwrap() * 1000
+        );
+    }
+}
+
+#[tokio::test]
+async fn smallest_and_largest_brackets_complete_through_every_stage() {
+    use sea_orm::{DbBackend, Statement};
+    for player_count in [2u32, 128] {
+        let (app, _plugins, staff, contest_id, rounds, players) =
+            contest_and_rounds_for_setup_probe("Bracket size boundaries").await;
+        let mut seeds: Vec<_> = players.iter().map(|p| p.id).collect();
+        if player_count > 16 {
+            // Seed the large fixture in one DB write; password hashing and
+            // authenticating 112 unused accounts does not exercise the bracket.
+            let rows = app
+                .db
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r#"INSERT INTO "user" (username, password, created_at, credentials_changed_at)
+                   SELECT 'boundary_player_' || n, password, now(), now()
+                   FROM "user" CROSS JOIN generate_series(1, 112) AS n WHERE id = $1
+                   RETURNING id"#,
+                    [players[0].id.into()],
+                ))
+                .await
+                .unwrap();
+            seeds.extend(rows.iter().map(|r| r.try_get::<i32>("", "id").unwrap()));
+            app.db.execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO contest_user (contest_id, user_id, registered_at) SELECT $1, id, now() FROM \"user\" WHERE username LIKE 'boundary_player_%'",
+                [contest_id.into()],
+            )).await.unwrap();
+        }
+        seeds.truncate(player_count as usize);
+        let stage_count = player_count.ilog2() as usize;
+        let problems: Vec<_> = rounds
+            .iter()
+            .flat_map(|r| r.group_a.into_iter().chain(r.group_b).chain([r.tiebreak]))
+            .collect();
+        let rules: Vec<_> = problems
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .take(stage_count)
+            .map(|p| {
+                json!({"group_a":[p[0]], "group_b":[p[1]], "tiebreak":[p[2]],
+                "xiaoju_seconds":60, "tiebreak_seconds":90, "break_before_seconds":0})
+            })
+            .collect();
+        let response = app
+            .post_with_token(
+                &bracket_route(contest_id, "/setup"),
+                &json!({"seeds":seeds,"rounds":rules}),
+                &staff,
+            )
+            .await;
+        assert_eq!(response.status, 200, "{}", response.text);
+        let mut expected_matches = player_count / 2;
+        for round in 1..=stage_count {
+            let view = app
+                .get_with_token(&bracket_route(contest_id, "/bracket"), &staff)
+                .await;
+            assert_eq!(view.status, 200, "{}", view.text);
+            let matches = view.body["matches"].as_array().unwrap();
+            assert_eq!(matches.len(), expected_matches as usize);
+            let active: Vec<_> = matches.iter().filter(|m| m["round"] == round).collect();
+            assert_eq!(active.len(), (player_count >> round) as usize);
+            for m in active {
+                assert_eq!(m["stage_count"], stage_count);
+                assert_eq!(m["state"], "ordering");
+                let response = app
+                    .post_with_token(
+                        &bracket_route(contest_id, &format!("/matches/{}/force-decide", m["id"])),
+                        &json!({"winner":m["player_a"]}),
+                        &staff,
+                    )
+                    .await;
+                assert_eq!(response.status, 200, "{}", response.text);
+            }
+            expected_matches += player_count >> (round + 1);
+        }
+        let final_match = get_match(&app, contest_id, (player_count - 2) as u8, &staff).await;
+        assert_eq!(final_match["state"], "decided");
+        assert_eq!(final_match["winner"], seeds[0]);
+        let saved = app
+            .get_with_token(&bracket_route(contest_id, "/setup"), &staff)
+            .await;
+        assert_eq!(saved.body["setup"]["opened_rounds"], stage_count);
+    }
 }

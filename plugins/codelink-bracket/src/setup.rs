@@ -1,10 +1,4 @@
-//! `/setup` -- round definitions and manual seeding.
-//!
-//! Staff submit the whole bracket's problem assignment (4 rounds x 2 groups
-//! of 3, plus a per-round 附加赛 list) and the 16-player seeding in one call.
-//! Validation rejects rather than warns: an invalid setup left half-applied
-//! would leave the bracket in a state nothing else in this plugin can
-//! recover from.
+//! Staff configuration of bracket seeding and unopened stages.
 
 use std::collections::HashMap;
 
@@ -17,17 +11,21 @@ use crate::storage;
 
 /// Validate a full bracket setup before it is persisted. Every failure here
 /// is a rejection, not a warning -- see the module doc comment for why.
-pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
+pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
+    if !(2..=128).contains(&seeds.len()) || !seeds.len().is_power_of_two() {
+        return Err("seeds must contain a power of two players between 2 and 128".into());
+    }
     let mut seed_set: Vec<i32> = seeds.to_vec();
     seed_set.sort_unstable();
     seed_set.dedup();
     if seed_set.len() != seeds.len() {
-        return Err("seeds must contain 16 distinct player ids".to_string());
+        return Err("seeds must contain distinct player ids".to_string());
     }
 
-    if setup.rounds.len() != 4 {
+    if setup.rounds.len() != seeds.len().ilog2() as usize {
         return Err(format!(
-            "setup must define exactly 4 rounds, got {}",
+            "setup must define exactly {} rounds, got {}",
+            seeds.len().ilog2(),
             setup.rounds.len()
         ));
     }
@@ -52,6 +50,14 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
     // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
     for (round_idx, round) in setup.rounds.iter().enumerate() {
+        if round.group_a.is_empty()
+            || round.group_a.len() != round.group_b.len()
+            || round.group_a.len() + round.tiebreak.len() > 256
+        {
+            return Err(format!(
+                "round {round_idx} needs equally sized nonempty problem groups and at most 256 games including tiebreaks"
+            ));
+        }
         if round
             .xiaoju_seconds
             .checked_add(setup.match_extra_time_seconds)
@@ -87,7 +93,7 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
         group_a_set.dedup();
         if group_a_set.len() != round.group_a.len() {
             return Err(format!(
-                "round {round_idx}'s group_a must contain 3 distinct problem ids"
+                "round {round_idx}'s group_a must contain distinct problem ids"
             ));
         }
 
@@ -96,7 +102,7 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32; 16]) -> Result<(), String> {
         group_b_set.dedup();
         if group_b_set.len() != round.group_b.len() {
             return Err(format!(
-                "round {round_idx}'s group_b must contain 3 distinct problem ids"
+                "round {round_idx}'s group_b must contain distinct problem ids"
             ));
         }
 
@@ -137,22 +143,11 @@ struct SetupRequest {
     /// persisted `Setup` document written before this field existed.
     #[serde(default = "crate::model::default_escalation_grace_seconds")]
     escalation_grace_seconds: i64,
-    seeds: [i32; 16],
+    seeds: Vec<i32>,
 }
 
-/// Handle `POST /contests/{contest_id}/setup`: validate, then persist the
-/// round definitions and seed round 1's bracket slots. Organizer-only
-/// (`contest:manage`). Kept off the WASM ABI (the `api_setup` wrapper in
-/// `lib.rs` adapts this) so it unit-tests on the host, matching the
-/// `plugins/print/src/handlers.rs` convention.
-///
-/// Nothing is written unless `validate_setup` accepts the whole document --
-/// see the module doc comment for why a half-applied setup is unrecoverable.
-///
-/// Staff may correct timing before or during a contest. Regular and tiebreak
-/// durations and shared extra time are pinned when a match opens its first game,
-/// so a correction affects only matches that have not started. Problem assignments
-/// and seeds are fixed once the contest starts or any match has been created.
+/// Save a complete configuration. Opening a stage and editing its rules CAS
+/// the same setup document, so an edit cannot race past the frozen prefix.
 pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpResponse, ApiError> {
     let contest_id: i32 = req.param("contest_id")?;
     let info = contest::check_access(host, req, contest_id)?;
@@ -172,80 +167,90 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let body: SetupRequest = serde_json::from_value(body)
         .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")))?;
 
-    let setup = Setup {
+    let mut setup = Setup {
         rounds: body.rounds,
+        seeds: body.seeds,
+        opened_rounds: 0,
         match_extra_time_seconds: body.match_extra_time_seconds,
         penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
     };
-    validate_setup(&setup, &body.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
+    validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
-    let matches = storage::load_all_matches(host, contest_id)?;
-    if (info.phase != "before" || !matches.is_empty())
-        && let Some(previous) = storage::load_setup(host, contest_id)?
-    {
-        if previous.rounds.len() != setup.rounds.len()
-            || previous.rounds.iter().zip(&setup.rounds).any(|(old, new)| {
-                old.group_a != new.group_a
-                    || old.group_b != new.group_b
-                    || old.tiebreak != new.tiebreak
-            })
-        {
-            return Err(PluginHttpResponse::error(
-                409,
-                "Problem assignments are fixed once the contest starts",
-            )
-            .into());
+    let key = storage::setup_key(contest_id);
+    let mut saved = false;
+    for _ in 0..100 {
+        let snapshot = host.storage.snapshot(&key)?;
+        if let Some(previous) = snapshot.as_ref() {
+            let previous: Setup = serde_json::from_str(&previous.value)?;
+            validate_edit(&previous, &setup, info.phase != "before")
+                .map_err(|msg| PluginHttpResponse::error(409, msg))?;
+            setup.opened_rounds = previous.opened_rounds;
         }
-        let keys: Vec<_> = (0..16)
-            .map(|pos| storage::slot_key(contest_id, 1, pos))
-            .collect();
-        let slots = host
-            .storage
-            .get(&keys.iter().map(String::as_str).collect::<Vec<_>>())?;
-        if keys.iter().zip(body.seeds).any(|(key, seed)| {
-            slots.get(key).and_then(|value| value.parse::<i32>().ok()) != Some(seed)
-        }) {
-            return Err(PluginHttpResponse::error(
-                409,
-                "Player seeding is fixed once the contest starts",
-            )
-            .into());
+        if host.storage.compare_and_set_snapshot(
+            &key,
+            snapshot.as_ref(),
+            &serde_json::to_string(&setup)?,
+        )? {
+            saved = true;
+            break;
         }
     }
-
-    let setup_json = serde_json::to_string(&setup)?;
-    // Round 1's slots are seeded directly from the submitted order; later
-    // rounds' slots are filled by match results, not by `/setup`. Persist setup
-    // and seeds together so the stage opener cannot read a partial update.
-    let mut entries: Vec<(String, String)> = body
-        .seeds
-        .iter()
-        .enumerate()
-        .map(|(pos, player_id)| {
-            (
-                storage::slot_key(contest_id, 1, pos as u8),
-                player_id.to_string(),
-            )
-        })
-        .collect();
-    entries.push((storage::setup_key(contest_id), setup_json));
-    let entries_ref: Vec<(&str, &str)> = entries
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    host.storage.set(&entries_ref)?;
-
-    // Round one is opened by the same stage barrier as every later round:
-    // immediately if the contest is already running, or by a timer at the
-    // contest start. This keeps the ordering phase inside the official stage
-    // window rather than exposing it during setup.
-    crate::judge::try_open_stage(host, contest_id, 1)?;
+    if !saved {
+        return Err(
+            PluginHttpResponse::error(409, "Setup changed concurrently; retry the edit").into(),
+        );
+    }
+    // Also recover an interrupted opening of the most recently frozen stage.
+    for round in setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()) {
+        crate::judge::try_open_stage(host, contest_id, round as u8)?;
+    }
 
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
         body: Some(serde_json::json!({ "ok": true })),
+    })
+}
+
+fn validate_edit(previous: &Setup, next: &Setup, started: bool) -> Result<(), String> {
+    if (started || previous.opened_rounds > 0)
+        && (previous.seeds != next.seeds || previous.rounds.len() != next.rounds.len())
+    {
+        return Err("Bracket size and player seeding are fixed once the contest starts".into());
+    }
+    if previous.rounds[..previous.opened_rounds] != next.rounds[..previous.opened_rounds] {
+        return Err("Opened stages cannot be edited, including matches still ranking".into());
+    }
+    if (started || previous.opened_rounds > 0)
+        && (previous.penalty_seconds != next.penalty_seconds
+            || previous.match_extra_time_seconds != next.match_extra_time_seconds
+            || previous.escalation_grace_seconds != next.escalation_grace_seconds)
+    {
+        return Err("Shared settings are fixed once the contest starts".into());
+    }
+    Ok(())
+}
+
+/// Staff-only configuration; problem assignments must not leak to contestants.
+pub fn handle_get_setup(
+    host: &Host,
+    req: &PluginHttpRequest,
+) -> Result<PluginHttpResponse, ApiError> {
+    let contest_id: i32 = req.param("contest_id")?;
+    let info = contest::check_access(host, req, contest_id)?;
+    info.require_type("codelink-bracket")?;
+    if !req.has_permission(perm::CONTEST_MANAGE) {
+        return Err(
+            PluginHttpResponse::error(403, "Editing the bracket requires contest:manage").into(),
+        );
+    }
+    Ok(PluginHttpResponse {
+        status: 200,
+        headers: None,
+        body: Some(
+            serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase != "before"}),
+        ),
     })
 }
 
@@ -255,6 +260,71 @@ mod tests {
 
     fn valid_seeds() -> [i32; 16] {
         std::array::from_fn(|i| (i as i32) + 1)
+    }
+
+    #[test]
+    fn bracket_size_determines_stage_count_and_groups_determine_game_count() {
+        for players in [2, 8, 16, 32, 128] {
+            let mut setup = valid_setup();
+            setup.seeds = (1..=players).collect();
+            setup.rounds = (0..(players as u32).ilog2())
+                .map(|i| RoundDef {
+                    group_a: (100 + i as i32 * 20..105 + i as i32 * 20).collect(),
+                    group_b: (110 + i as i32 * 20..115 + i as i32 * 20).collect(),
+                    tiebreak: vec![119 + i as i32 * 20],
+                    ..setup.rounds[0].clone()
+                })
+                .collect();
+            assert!(validate_setup(&setup, &setup.seeds).is_ok());
+            setup.rounds[0].group_b.pop();
+            assert!(validate_setup(&setup, &setup.seeds).is_err());
+        }
+        for players in [0, 1, 3, 6, 129, 256] {
+            let setup = valid_setup();
+            assert!(validate_setup(&setup, &(1..=players).collect::<Vec<_>>()).is_err());
+        }
+    }
+
+    #[test]
+    fn game_count_bounds_leave_room_for_a_tiebreak_and_fit_the_game_index() {
+        for count in [1, 2, 5, 255, 256] {
+            let setup = Setup {
+                seeds: vec![1, 2],
+                rounds: vec![RoundDef {
+                    group_a: (1..=count).collect(),
+                    group_b: (1001..1001 + count).collect(),
+                    tiebreak: vec![2000],
+                    xiaoju_seconds: 60,
+                    tiebreak_seconds: 90,
+                    break_before_seconds: 0,
+                }],
+                ..Default::default()
+            };
+            assert_eq!(validate_setup(&setup, &setup.seeds).is_ok(), count < 256);
+        }
+    }
+
+    #[test]
+    fn future_stage_edits_are_allowed_but_opened_stages_and_shared_settings_are_frozen() {
+        let mut previous = valid_setup();
+        previous.opened_rounds = 1;
+        let mut next = previous.clone();
+        next.rounds[1].group_a.extend([290, 291]);
+        next.rounds[1].group_b.extend([292, 293]);
+        next.rounds[1].xiaoju_seconds = 3600;
+        next.rounds[1].break_before_seconds = 1200;
+        assert!(validate_setup(&next, &next.seeds).is_ok());
+        assert!(validate_edit(&previous, &next, true).is_ok());
+        next.rounds[0].xiaoju_seconds += 1;
+        assert!(validate_edit(&previous, &next, true).is_err());
+        next = previous.clone();
+        next.penalty_seconds += 1;
+        assert!(validate_edit(&previous, &next, true).is_err());
+        next = previous.clone();
+        next.seeds.swap(0, 1);
+        assert!(validate_edit(&previous, &next, false).is_err());
+        previous.opened_rounds = 0;
+        assert!(validate_edit(&previous, &next, false).is_ok());
     }
 
     #[test]
@@ -286,34 +356,35 @@ mod tests {
 
     fn valid_setup() -> Setup {
         Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
-                    group_a: [101, 102, 103],
-                    group_b: [111, 112, 113],
+                    group_a: vec![101, 102, 103],
+                    group_b: vec![111, 112, 113],
                     tiebreak: vec![119],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
                     break_before_seconds: 0,
                 },
                 RoundDef {
-                    group_a: [201, 202, 203],
-                    group_b: [211, 212, 213],
+                    group_a: vec![201, 202, 203],
+                    group_b: vec![211, 212, 213],
                     tiebreak: vec![219],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
                     break_before_seconds: 600,
                 },
                 RoundDef {
-                    group_a: [301, 302, 303],
-                    group_b: [311, 312, 313],
+                    group_a: vec![301, 302, 303],
+                    group_b: vec![311, 312, 313],
                     tiebreak: vec![319],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
                     break_before_seconds: 600,
                 },
                 RoundDef {
-                    group_a: [401, 402, 403],
-                    group_b: [411, 412, 413],
+                    group_a: vec![401, 402, 403],
+                    group_b: vec![411, 412, 413],
                     tiebreak: vec![419],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
@@ -558,13 +629,7 @@ mod tests {
     #[test]
     fn structural_edits_are_rejected_without_writes_once_the_contest_starts() {
         // Existing matches also keep the bracket frozen if staff move the start time.
-        for (phase, opened) in [
-            ("before", true),
-            ("during", false),
-            ("during", true),
-            ("after", false),
-            ("after", true),
-        ] {
+        for (phase, opened) in [("before", true), ("during", true), ("after", true)] {
             for field in ["group_a", "group_b", "tiebreak", "seeds"] {
                 let host = Host::mock();
                 queue_bracket_contest_phase(&host, if opened { "during" } else { "before" });
@@ -614,15 +679,12 @@ mod tests {
         }
         let setup = storage::load_setup(&host, 7).unwrap().unwrap();
         assert_eq!(setup.rounds[1].group_a, valid_setup().rounds[2].group_a);
-        assert_eq!(
-            host.storage.get_one(&storage::slot_key(7, 1, 0)).unwrap(),
-            Some("2".into())
-        );
+        assert_eq!(setup.seeds[0], 2);
         assert!(storage::load_all_matches(&host, 7).unwrap().is_empty());
     }
 
     #[test]
-    fn handle_setup_accepts_timing_edits_for_an_ordering_bracket() {
+    fn handle_setup_accepts_an_unchanged_ordering_bracket() {
         // Round 1's matches exist after the first call, but none has left
         // Ordering. Saving timing settings with the same assignments and
         // seeds must still succeed.
@@ -656,8 +718,8 @@ mod tests {
         let resp = handle_setup(&host, &manage_request(7)).unwrap();
         assert_eq!(resp.status, 200);
 
-        for pos in 0..storage::matches_in_round(1) {
-            let match_id = storage::match_id_for(1, pos);
+        for pos in 0..storage::matches_in_round(16, 1) {
+            let match_id = storage::match_id_for(16, 1, pos);
             assert!(
                 storage::load_match(&host, 7, match_id).unwrap().is_some(),
                 "round 1 match at pos {pos} (id {match_id}) should have been created"

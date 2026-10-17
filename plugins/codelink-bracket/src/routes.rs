@@ -16,7 +16,6 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::bracket;
-use crate::decide;
 use crate::judge;
 use crate::model::{AdjudicationReason, MatchPhase, MatchState, RoundDef, Setup};
 use crate::storage;
@@ -202,6 +201,7 @@ struct MatchView {
     own_feedback: Option<crate::feedback::PlayerFeedback>,
     id: u8,
     round: u8,
+    stage_count: usize,
     pos: u8,
     player_a: i32,
     player_b: i32,
@@ -211,10 +211,10 @@ struct MatchView {
     /// `None` only if the lookup failed; the frontend falls back to the id.
     player_a_name: Option<String>,
     player_b_name: Option<String>,
-    group_a: [Option<i32>; 3],
-    group_b: [Option<i32>; 3],
-    order_a: Option<[Option<i32>; 3]>,
-    order_b: Option<[Option<i32>; 3]>,
+    group_a: Vec<Option<i32>>,
+    group_b: Vec<Option<i32>>,
+    order_a: Option<Vec<Option<i32>>>,
+    order_b: Option<Vec<Option<i32>>>,
     tiebreak_problem: Option<i32>,
     score_a: u8,
     score_b: u8,
@@ -279,9 +279,9 @@ struct MatchView {
     starts_at_ms: Option<i64>,
 }
 
-/// One opened 小局 as seen by the requesting viewer. Regular games (index
-/// 0-2) give each player their own problem from the opponent-chosen order;
-/// a tiebreak (index 3+) gives both players the same problem.
+/// One opened 小局 as seen by the requesting viewer. Regular games give
+/// each player their own problem from the opponent-chosen order; subsequent
+/// tiebreak games give both players the same problem.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct GameView {
     index: u8,
@@ -326,14 +326,17 @@ fn mask_problem(
     }
 }
 
-/// Apply [`mask_problem`] to each entry of a group/order triple.
+/// Apply [`mask_problem`] to each entry of a problem group/order.
 fn mask_group(
     ctx: &VisibilityCtx,
-    group: [i32; 3],
+    group: &[i32],
     viewer: Option<i32>,
     can_view_all: bool,
-) -> [Option<i32>; 3] {
-    group.map(|pid| mask_problem(ctx, pid, viewer, can_view_all))
+) -> Vec<Option<i32>> {
+    group
+        .iter()
+        .map(|&pid| mask_problem(ctx, pid, viewer, can_view_all))
+        .collect()
 }
 
 /// Build one match's visibility-filtered view. `round_def` must be the
@@ -345,6 +348,7 @@ fn match_view(
     round_def: &RoundDef,
     viewer: Option<i32>,
     can_view_all: bool,
+    stage_count: usize,
 ) -> MatchView {
     // The open 小局, if any: `None` before the first opens and after the
     // match is decided. Read once here so the three timing fields below
@@ -353,10 +357,10 @@ fn match_view(
     let ctx = VisibilityCtx {
         player_a: m.player_a,
         player_b: m.player_b,
-        group_a: m.group_a,
-        group_b: m.group_b,
-        order_a: m.order_a,
-        order_b: m.order_b,
+        group_a: m.group_a.clone(),
+        group_b: m.group_b.clone(),
+        order_a: m.order_a.clone(),
+        order_b: m.order_b.clone(),
         state: m.state,
         current_xiaoju_index: m.xiaoju.last().map(|x| x.index),
         tiebreak_problem: round_def.tiebreak.get(m.tiebreak_index).copied(),
@@ -365,16 +369,23 @@ fn match_view(
     MatchView {
         own_feedback: None,
         id,
+        stage_count,
         round: m.round,
         pos: m.pos,
         player_a: m.player_a,
         player_b: m.player_b,
         player_a_name: None,
         player_b_name: None,
-        group_a: mask_group(&ctx, m.group_a, viewer, can_view_all),
-        group_b: mask_group(&ctx, m.group_b, viewer, can_view_all),
-        order_a: m.order_a.map(|o| mask_group(&ctx, o, viewer, can_view_all)),
-        order_b: m.order_b.map(|o| mask_group(&ctx, o, viewer, can_view_all)),
+        group_a: mask_group(&ctx, &m.group_a, viewer, can_view_all),
+        group_b: mask_group(&ctx, &m.group_b, viewer, can_view_all),
+        order_a: m
+            .order_a
+            .as_ref()
+            .map(|o| mask_group(&ctx, o, viewer, can_view_all)),
+        order_b: m
+            .order_b
+            .as_ref()
+            .map(|o| mask_group(&ctx, o, viewer, can_view_all)),
         tiebreak_problem: ctx
             .tiebreak_problem
             .and_then(|pid| mask_problem(&ctx, pid, viewer, can_view_all)),
@@ -401,7 +412,7 @@ fn match_view(
                 };
                 GameView {
                     index: x.index,
-                    tiebreak: !decide::is_regular_xiaoju_index(x.index),
+                    tiebreak: !m.is_regular_game(x.index),
                     problem_a: mask(a),
                     problem_b: mask(b),
                     opened_at_ms: x.opened_at_ms,
@@ -437,17 +448,17 @@ fn attach_start_times(
 }
 
 /// The problems each player faces in 小局 `index`: position `index` of the
-/// order imposed on them for a regular game, the round's `index - 3`th
+/// order imposed on them for a regular game, the round's remaining indexed
 /// tiebreak problem (the same for both) for a tiebreak.
 fn game_problems(m: &MatchState, round_def: &RoundDef, index: u8) -> (Option<i32>, Option<i32>) {
     let i = index as usize;
-    if decide::is_regular_xiaoju_index(index) {
-        (m.order_a.map(|o| o[i]), m.order_b.map(|o| o[i]))
+    if m.is_regular_game(index) {
+        (
+            m.order_a.as_ref().map(|o| o[i]),
+            m.order_b.as_ref().map(|o| o[i]),
+        )
     } else {
-        let t = round_def
-            .tiebreak
-            .get(i - decide::REGULAR_XIAOJU_COUNT)
-            .copied();
+        let t = round_def.tiebreak.get(i - m.group_a.len()).copied();
         (t, t)
     }
 }
@@ -517,7 +528,7 @@ pub fn handle_get_bracket(
         return Ok(PluginHttpResponse {
             status: 200,
             headers: None,
-            body: Some(serde_json::json!({ "matches": [] })),
+            body: Some(serde_json::json!({ "matches": [], "player_count": 0 })),
         });
     };
     let matches = storage::load_all_matches(host, contest_id)?;
@@ -528,7 +539,14 @@ pub fn handle_get_bracket(
         .iter()
         .filter_map(|(id, m)| {
             let round_def = setup.rounds.get(m.round.saturating_sub(1) as usize)?;
-            Some(match_view(*id, m, round_def, viewer, can_view_all))
+            Some(match_view(
+                *id,
+                m,
+                round_def,
+                viewer,
+                can_view_all,
+                setup.rounds.len(),
+            ))
         })
         .collect();
     attach_player_names(host, &mut views);
@@ -538,7 +556,9 @@ pub fn handle_get_bracket(
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
-        body: Some(serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms })),
+        body: Some(
+            serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms, "player_count": setup.player_count() }),
+        ),
     })
 }
 
@@ -565,7 +585,14 @@ pub fn handle_get_match(
 
     let viewer = req.user_id();
     let can_view_all = req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    let mut view = [match_view(match_id, &m, round_def, viewer, can_view_all)];
+    let mut view = [match_view(
+        match_id,
+        &m,
+        round_def,
+        viewer,
+        can_view_all,
+        setup.rounds.len(),
+    )];
     attach_player_names(host, &mut view);
     attach_own_feedback(
         host,
@@ -639,18 +666,19 @@ mod tests {
 
     fn setup_two_rounds() -> Setup {
         Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
-                    group_a: [101, 102, 103],
-                    group_b: [201, 202, 203],
+                    group_a: vec![101, 102, 103],
+                    group_b: vec![201, 202, 203],
                     tiebreak: vec![301, 302],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
                     break_before_seconds: 0,
                 },
                 RoundDef {
-                    group_a: [401, 402, 403],
-                    group_b: [501, 502, 503],
+                    group_a: vec![401, 402, 403],
+                    group_b: vec![501, 502, 503],
                     tiebreak: vec![601],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
@@ -669,8 +697,8 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
             state: MatchPhase::Ordering,
             ..Default::default()
         }
@@ -712,11 +740,15 @@ mod tests {
         // A player who never ranks must not stall the bracket forever: the
         // override fills the missing order with the listed group.
         let mut m = match_in_ordering();
-        m.order_a = Some([103, 101, 102]);
+        m.order_a = Some(vec![103, 101, 102]);
         force_start(&mut m).unwrap();
         assert_eq!(m.state, MatchPhase::InProgress);
-        assert_eq!(m.order_b, Some(m.group_b));
-        assert_eq!(m.order_a, Some([103, 101, 102]), "a real ranking is kept");
+        assert_eq!(m.order_b, Some(m.group_b.clone()));
+        assert_eq!(
+            m.order_a,
+            Some(vec![103, 101, 102]),
+            "a real ranking is kept"
+        );
     }
 
     #[test]
@@ -767,15 +799,15 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
-        seed(&host, 7, &setup, storage::match_id_for(1, 0), &m);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
+        seed(&host, 7, &setup, storage::match_id_for(16, 1, 0), &m);
 
         // Non-staff rejections come back as `Err(ApiError::Response(..))`, not
         // `Ok(..)` -- see `ordering::handle_order`'s staff-check convention.
         let err = handle_start(
             &host,
-            &request(7, storage::match_id_for(1, 0), Some(player_auth(10))),
+            &request(7, storage::match_id_for(16, 1, 0), Some(player_auth(10))),
         )
         .unwrap_err();
         assert_eq!(err.into_response().status, 403);
@@ -787,7 +819,7 @@ mod tests {
         queue_bracket_contest_info(&host);
         let mut m = match_in_ordering();
         m.round = 2;
-        let id = storage::match_id_for(2, 0);
+        let id = storage::match_id_for(16, 2, 0);
         seed(&host, 7, &setup_two_rounds(), id, &m);
         let err = handle_start(&host, &request(7, id, Some(staff_auth()))).unwrap_err();
         assert_eq!(err.into_response().status, 409);
@@ -803,9 +835,9 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.order_a = Some([103, 101, 102]);
+        m.order_a = Some(vec![103, 101, 102]);
         // order_b missing: player A never ranked B's problems.
-        let match_id = storage::match_id_for(1, 0);
+        let match_id = storage::match_id_for(16, 1, 0);
         seed(&host, 7, &setup, match_id, &m);
         queue_now(&host, 1_000);
 
@@ -815,7 +847,7 @@ mod tests {
         let reloaded = storage::load_match(&host, 7, match_id).unwrap().unwrap();
         assert_eq!(reloaded.state, MatchPhase::InProgress);
         assert_eq!(reloaded.order_b, Some(reloaded.group_b));
-        assert_eq!(reloaded.order_a, Some([103, 101, 102]));
+        assert_eq!(reloaded.order_a, Some(vec![103, 101, 102]));
     }
 
     #[test]
@@ -824,9 +856,9 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
-        let match_id = storage::match_id_for(1, 0);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
+        let match_id = storage::match_id_for(16, 1, 0);
         seed(&host, 7, &setup, match_id, &m);
 
         // `handle_start` reads the clock once, inside the CAS closure.
@@ -930,8 +962,8 @@ mod tests {
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
         m.state = MatchPhase::InProgress;
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
             index: 0,
             opened_at_ms: 0,
@@ -959,8 +991,8 @@ mod tests {
     fn games_list_each_opened_game_and_mask_it_like_the_rest_of_the_view() {
         let mut m = match_in_ordering();
         m.state = MatchPhase::InProgress;
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![
             XiaojuState {
                 index: 0,
@@ -984,7 +1016,7 @@ mod tests {
 
         // Staff see both players' problems for every opened game, and no
         // entry at all for the game that has not opened.
-        let staff = match_view(0, &m, round_def, None, true);
+        let staff = match_view(0, &m, round_def, None, true, setup.rounds.len());
         assert_eq!(staff.games.len(), 2);
         assert_eq!(
             (staff.games[0].problem_a, staff.games[0].problem_b),
@@ -999,17 +1031,17 @@ mod tests {
 
         // Each game's problems obey exactly the same masking as the orders.
         for viewer in [Some(10), Some(20), Some(99), None] {
-            let v = match_view(0, &m, round_def, viewer, false);
+            let v = match_view(0, &m, round_def, viewer, false, setup.rounds.len());
             for g in &v.games {
                 let i = g.index as usize;
                 assert_eq!(
                     g.problem_a,
-                    v.order_a.unwrap()[i],
+                    v.order_a.as_ref().unwrap()[i],
                     "viewer {viewer:?} game {i} a"
                 );
                 assert_eq!(
                     g.problem_b,
-                    v.order_b.unwrap()[i],
+                    v.order_b.as_ref().unwrap()[i],
                     "viewer {viewer:?} game {i} b"
                 );
             }
@@ -1025,8 +1057,8 @@ mod tests {
         // disables the countdown for a live, spectated match.
         let mut m = match_in_ordering();
         m.state = MatchPhase::InProgress;
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
             index: 1,
             opened_at_ms: 5_000,
@@ -1037,7 +1069,14 @@ mod tests {
         }];
         let setup = setup_two_rounds();
 
-        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+        let view = match_view(
+            0,
+            &m,
+            &setup.rounds[0],
+            Some(m.player_a),
+            false,
+            setup.rounds.len(),
+        );
 
         assert_eq!(view.current_xiaoju_index, Some(1));
         assert_eq!(view.current_xiaoju_opened_at_ms, Some(5_000));
@@ -1052,7 +1091,14 @@ mod tests {
         let m = match_in_ordering();
         let setup = setup_two_rounds();
 
-        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+        let view = match_view(
+            0,
+            &m,
+            &setup.rounds[0],
+            Some(m.player_a),
+            false,
+            setup.rounds.len(),
+        );
 
         assert_eq!(view.current_xiaoju_index, None);
         assert_eq!(view.current_xiaoju_opened_at_ms, None);
@@ -1074,7 +1120,14 @@ mod tests {
             ..Default::default()
         });
         let setup = setup_two_rounds();
-        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+        let view = match_view(
+            0,
+            &m,
+            &setup.rounds[0],
+            Some(m.player_a),
+            false,
+            setup.rounds.len(),
+        );
         assert_eq!(view.current_game_base_deadline_ms, Some(11_000));
         assert_eq!(view.current_xiaoju_deadline_ms, Some(14_000));
         assert_eq!(view.extra_time_remaining_ms, 3_000);
@@ -1100,8 +1153,8 @@ mod tests {
         let mut m = match_in_ordering();
         m.state = MatchPhase::Decided;
         m.winner = Some(m.player_a);
-        m.order_a = Some([103, 101, 102]);
-        m.order_b = Some([203, 201, 202]);
+        m.order_a = Some(vec![103, 101, 102]);
+        m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
             index: 2,
             opened_at_ms: 10_000,
@@ -1112,7 +1165,14 @@ mod tests {
         }];
         let setup = setup_two_rounds();
 
-        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false);
+        let view = match_view(
+            0,
+            &m,
+            &setup.rounds[0],
+            Some(m.player_a),
+            false,
+            setup.rounds.len(),
+        );
 
         assert_eq!(view.state, MatchPhase::Decided);
         assert_eq!(
@@ -1132,10 +1192,10 @@ mod tests {
             pos: 0,
             player_a: 10,
             player_b: 20,
-            group_a: [101, 102, 103],
-            group_b: [201, 202, 203],
-            order_a: Some([103, 101, 102]),
-            order_b: Some([203, 201, 202]),
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
             state: MatchPhase::InProgress,
             xiaoju: vec![XiaojuState {
                 index: 0,
@@ -1197,7 +1257,7 @@ mod tests {
 
         let resp = handle_get_match(&host, &get_request(7, 0, Some(player_auth(20)))).unwrap();
         let body = resp.body.unwrap();
-        assert_eq!(body["group_a"], serde_json::json!([101, 102, 103]));
+        assert_eq!(body["group_a"], serde_json::json!(vec![101, 102, 103]));
     }
 
     #[test]
@@ -1225,8 +1285,8 @@ mod tests {
         auth.permissions = vec![perm::SUBMISSION_VIEW_ALL.to_string()];
         let resp = handle_get_match(&host, &get_request(7, 0, Some(auth))).unwrap();
         let body = resp.body.unwrap();
-        assert_eq!(body["group_a"], serde_json::json!([101, 102, 103]));
-        assert_eq!(body["group_b"], serde_json::json!([201, 202, 203]));
+        assert_eq!(body["group_a"], serde_json::json!(vec![101, 102, 103]));
+        assert_eq!(body["group_b"], serde_json::json!(vec![201, 202, 203]));
     }
 
     #[test]

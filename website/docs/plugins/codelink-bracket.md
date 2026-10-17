@@ -6,11 +6,12 @@ sidebar_position: 3
 
 # Codelink bracket
 
-The `codelink-bracket` contest type runs the Codelink afternoon round. Sixteen
-players, usually the qualifiers from the
-[Codelink qualifier](./codelink-qualifier.md), meet in a single elimination
-bracket of four rounds. A match is three games, each won by whoever solves
-their problem first, plus tiebreak games if the score is level.
+The `codelink-bracket` contest type runs a single elimination bracket for
+contestants, usually the qualifiers from the
+[Codelink qualifier](./codelink-qualifier.md). Choose a bracket size from 2 to
+128 players in powers of two. Each stage sets its own number of regular games
+and durations. All regular games are played, then the higher score advances.
+A level score goes to tiebreak games.
 
 ## Enable the plugins
 
@@ -40,25 +41,27 @@ just build-plugin plugins/codelink-bracket --install
 ## Create the contest
 
 1. In the contest editor, choose `codelink-bracket` as the contest type and
-   set the start and end of the afternoon round. Leave enough time for four
-   rounds, since no match can be played after the end.
-2. Add every problem the bracket uses. Each round needs seven or more, as the
-   next section explains.
-3. Enroll the sixteen players.
+   set the start and end of the afternoon round. Leave enough time for all
+   stages, since no match can be played after the end.
+2. Add every problem the bracket uses. Each stage needs two equally sized problem
+   groups and at least one tiebreak problem.
+3. Enroll the players you plan to seed.
 
 ## Configure the rules
 
 Open the contest's **Rankings** page. Until the bracket exists, staff see the
 setup screen there.
 
-1. **Players and seeding.** The first sixteen enrolled players are listed in
-   registration order. Drag them into seed order, or use **Shuffle**. Seed 1
-   plays seed 2 in round 1, seed 3 plays seed 4, and so on. Remove a player to
-   bring in someone from the other enrolled players.
-2. **Problems per round.** Every round needs three problems for the first
-   player of each match, three for the second, and at least one tiebreak
-   problem. The slots start out filled in the contest's problem order. A
-   problem can appear only once in the whole bracket.
+1. **Players and seeding.** Choose the bracket size, initially 16. The stage
+   count follows the size. The selected players start in registration order.
+   Drag them into seed order, or use **Shuffle**. Seed 1 plays seed 2 in round
+   one, seed 3 plays seed 4, and so on. Remove a player to bring in someone
+   from the other enrolled players.
+2. **Problems per stage.** Set the regular game count, initially three. Each
+   player needs that many problems, plus at least one shared tiebreak problem.
+   The two groups must have equal lengths. A stage may have at most 256 games
+   including its tiebreak list. The slots start out filled in the contest's
+   problem order. A problem can appear only once in the whole bracket.
 3. **Timing per stage.** Set the regular game duration, tiebreak duration,
    and break before each stage. The form starts with 30 minutes for both game
    types and 10 minutes for later stage breaks. Round one opens with the
@@ -66,11 +69,11 @@ setup screen there.
    judge apply to the whole contest, with defaults of 20 and 120 seconds.
    Set shared extra time per match separately. It defaults to 0 minutes.
 
-**Create bracket** checks all of this and lists anything missing. The setup
-screen closes after creation. Staff can submit a corrected setup through the
-API. A match keeps both game durations and its extra allowance from when its first game opened.
-Corrections to durations apply to matches that have not started. Stage breaks
-remain live. Existing matches keep their players and assigned problem groups.
+**Create bracket** checks the configuration and lists anything missing. Before
+the contest starts, you can change its size, seeding and stage rules. Once the
+contest starts, size, seeding and shared settings are fixed. Each stage's
+problems, regular game count and timing are fixed when that stage opens,
+including while its contestants are still ranking.
 
 To script the setup instead, send the same data to the setup route as a user
 with `contest:manage`.
@@ -84,7 +87,7 @@ curl -X POST \
     "rounds": [
       { "group_a": [101, 102, 103], "group_b": [104, 105, 106], "tiebreak": [107, 108],
         "xiaoju_seconds": 1200, "tiebreak_seconds": 1200, "break_before_seconds": 0 },
-      { "group_a": [111, 112, 113], "group_b": [114, 115, 116], "tiebreak": [117],
+      { "group_a": [111, 112, 113, 114, 115], "group_b": [116, 117, 118, 119, 120], "tiebreak": [129],
         "xiaoju_seconds": 1800, "tiebreak_seconds": 2100, "break_before_seconds": 600 },
       { "group_a": [121, 122, 123], "group_b": [124, 125, 126], "tiebreak": [127],
         "xiaoju_seconds": 2400, "tiebreak_seconds": 2700, "break_before_seconds": 600 },
@@ -99,19 +102,37 @@ curl -X POST \
 
 | Field | Effect |
 | --- | --- |
-| `seeds` | Sixteen distinct user ids in seed order. The first plays the second in round 1, the third plays the fourth, and so on. |
-| `rounds` | Exactly four rounds. In every match of a round, the first player gets `group_a` and the second gets `group_b`. |
-| `rounds[].xiaoju_seconds` | Required positive base duration for each of the stage's three regular games, in seconds. |
+| `seeds` | A power of two from 2 to 128 distinct user ids in seed order. The first plays the second in round 1, the third plays the fourth, and so on. |
+| `rounds` | One round per elimination stage, so eight players need three rounds and sixteen need four. In every match of a round, the first player gets `group_a` and the second gets `group_b`. |
+| `rounds[].group_a`, `rounds[].group_b` | Equally sized nonempty problem lists. Their length is the regular game count for the stage. |
+| `rounds[].xiaoju_seconds` | Required positive base duration for each of the stage's regular games, in seconds. |
 | `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
 | `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
 | `match_extra_time_seconds` | Extra time shared by the regular games of each match. Must be nonnegative. Defaults to 0. |
 | `penalty_seconds` | Score penalty added by each wrong submission within a game. Defaults to 20. Set to 0 to disable. |
 | `escalation_grace_seconds` | How long a game waits for a stuck judge before staff must decide. Defaults to 120. |
 
+### Edit future stages
+
+Select **Edit future stages** on **Rankings** to change any stage that has not
+opened. You can change its regular game count, problem lists, game durations
+and break. Select **Save changes** to apply the edit. A shortened break can
+open a ready stage immediately. Opened stages stay disabled in the editor.
+If a stage opens while you are editing, the server rejects changes to it.
+
+The setup API accepts the same edits through the complete setup request. Use
+`GET` on the setup route with `contest:manage` to read the current configuration
+and its `opened_rounds` count. Bracket size can change only before the contest
+starts. During play you cannot add or remove elimination stages.
+
+Existing configured brackets are upgraded when the plugin reloads. Their
+seeding, games, scores and clocks are preserved, and stages with existing
+matches become fixed.
+
 ### Shared extra time
 
 Set **Shared extra time per match** to give each match an allowance shared by
-both contestants across its three regular games. When base time runs out,
+both contestants across its regular games. When base time runs out,
 extra time starts automatically and continues until someone wins or the
 allowance runs out. Contestants cannot skip extra time to save it for later.
 If neither contestant solves the game, it uses all remaining extra time and
@@ -127,27 +148,25 @@ Extra time is settled using the winning submission's actual submission time.
 Neither score penalties nor waiting for its judge result consume extra time.
 A submission must arrive before the final deadline. It remains eligible even
 if adding its penalty puts its score time beyond that deadline.
-Game durations and extra time are fixed
-when the first game opens, so later setup changes do not alter a running match.
-Matches already running when this feature is installed keep their old timing.
+Opened stages and running matches keep their timing when future stages change.
 
 ## How a match is won
 
-1. **Ranking.** Each player drags the opponent's three problems into the order
+1. **Ranking.** Each player drags the opponent's problems into the order
    the opponent must solve them in. A ranking can be changed until the match
    starts.
 2. **Start.** Round one opens with the contest. Later stages open after all
    matches of the preceding stage finish and the next stage's break elapses.
    Players can rank only after their stage opens. Each match then starts as
    soon as both rankings are in. There is no ranking deadline.
-3. **Games.** In each of the three games, both players work on their next
+3. **Games.** In each regular game, both players work on their next
    problem at the same time. Accepted submissions are compared using actual
    submission time plus accumulated penalties. The lowest score time wins.
    Judge completion order does not determine the winner. The smaller
    submission id breaks an exact tie. If neither player solves their
    problem before the game ends, nobody scores. The next game opens as soon as
    one is decided.
-4. **Result.** After three games the player with more wins advances. On a
+4. **Result.** After all regular games the player with more wins advances. On a
    level score, including when nobody scored, both players get the round's
    first tiebreak problem. A scoreless tiebreak moves on to the next tiebreak
    problem.

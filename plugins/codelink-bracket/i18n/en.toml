@@ -2,7 +2,7 @@
 'codelink-bracket.title' = 'Afternoon bracket'
 
 'codelink-bracket.rules.title' = 'Afternoon knockout round'
-'codelink-bracket.rules.description' = "Single elimination. Before each match, both players rank the other player's three problems. The match is three games. In each game, each player works on the next problem in the order their opponent chose, and the first accepted submission wins the game. If neither player solves their problem before the deadline, nobody scores. After three games, the player with more wins advances. A level score goes to tiebreak problems."
+'codelink-bracket.rules.description' = "Single elimination. Before each match, both players rank the other player's problems. Each stage sets its number of regular games; all of them are played. In each game, each player works on the next problem in the order their opponent chose, and the first accepted submission wins the game. If neither player solves their problem before the deadline, nobody scores. After the regular games, the player with more wins advances. A level score goes to tiebreak problems."
 'codelink-bracket.rules.order' = 'Games compare actual submission time plus accumulated score penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured penalty to subsequent submissions in the same game; the count resets each game. Penalties do not shorten the submission window or consume shared extra time. Wait for your previous result before submitting again. Correct results wait for submissions that could beat their score to finish judging. Staff decide the match if judging cannot finish in time.'
 
 'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
@@ -43,7 +43,7 @@
 
 'codelink-bracket.ordering.hidden' = "Waiting to see the opponent's problems before you can rank them."
 'codelink-bracket.ordering.resubmit' = 'You have ranked. You can change it until your opponent ranks too; then the match starts.'
-'codelink-bracket.ordering.instructions' = "Drag your opponent's 3 problems into the order they must solve them."
+'codelink-bracket.ordering.instructions' = "Drag your opponent's problems into the order they must solve them."
 'codelink-bracket.ordering.submit' = 'Submit ranking'
 'codelink-bracket.ordering.submitting' = 'Submitting…'
 
@@ -99,10 +99,10 @@
 'codelink-bracket.setup.autofill' = 'Fill from problem order'
 'codelink-bracket.setup.bench' = 'Other enrolled players ({count})'
 'codelink-bracket.setup.breakMinutes' = 'Break before stage (minutes)'
-'codelink-bracket.setup.confirmDescription' = 'The seeding and problem assignment cannot be changed once matches exist.'
+'codelink-bracket.setup.confirmDescription' = 'Seeding is fixed when the contest starts. Each stage is fixed when it opens.'
 'codelink-bracket.setup.confirmTitle' = 'Create the bracket?'
 'codelink-bracket.setup.create' = 'Create bracket'
-'codelink-bracket.setup.creating' = 'Creating…'
+'codelink-bracket.setup.creating' = 'Saving…'
 'codelink-bracket.setup.failed' = 'Could not create the bracket.'
 'codelink-bracket.setup.firstPlayer' = 'First player'
 'codelink-bracket.setup.gameMinutes' = 'Regular game base time (minutes)'
@@ -116,18 +116,18 @@
 'codelink-bracket.setup.extraHint' = 'Regular games share this allowance. Extra time starts automatically when base time runs out; players cannot skip it to save time for later games. Tiebreaks use their stage duration without shared extra time.'
 'codelink-bracket.setup.issue.duplicate' = '{label} is used more than once. Each problem can appear only once.'
 'codelink-bracket.setup.issue.emptySlot' = '{round} still has empty problem slots.'
-'codelink-bracket.setup.issue.players' = 'Choose exactly 16 players ({count} chosen).'
+'codelink-bracket.setup.issue.players' = 'Choose exactly {total} players ({count} chosen).'
 'codelink-bracket.setup.participantsFailed' = 'Could not load the enrolled players.'
 'codelink-bracket.setup.pick' = 'Pick…'
 'codelink-bracket.setup.players' = 'Players and seeding ({count}/{total})'
 'codelink-bracket.setup.problems' = 'Problems per round'
-'codelink-bracket.setup.problemsHint' = 'Each player solves their own three problems in the order their opponent picks. Tiebreak problems are shared and used in order.'
-'codelink-bracket.setup.ready' = 'Everything is set. The bracket is ready to create.'
+'codelink-bracket.setup.problemsHint' = 'Each player solves their own problems in the order their opponent picks. Tiebreak problems are shared and used in order.'
+'codelink-bracket.setup.ready' = 'The configuration is valid.'
 'codelink-bracket.setup.remove' = 'Remove player'
 'codelink-bracket.setup.secondPlayer' = 'Second player'
 'codelink-bracket.setup.seedHint' = 'Drag to reorder. Neighbours meet in the first round: 1 plays 2, 3 plays 4, and so on.'
 'codelink-bracket.setup.shuffle' = 'Shuffle'
-'codelink-bracket.setup.subtitle' = "Choose the sixteen players, assign each round's problems, then create the bracket."
+'codelink-bracket.setup.subtitle' = "Choose the bracket size and players, then configure each stage."
 'codelink-bracket.setup.tiebreak' = 'Tiebreak'
 'codelink-bracket.setup.tiebreakMinutes' = 'Tiebreak length (minutes)'
 'codelink-bracket.setup.timing' = 'Contest settings'
@@ -192,3 +192,16 @@
 'codelink-bracket.live.penalty' = 'Errors this game: {count} · score penalty: {seconds}s'
 'codelink-bracket.live.waitPrevious' = 'Wait for your previous submission’s result before submitting again.'
 'codelink-bracket.live.closed' = 'This problem is not open for submissions in your current game.'
+
+'codelink-bracket.setup.edit' = 'Edit future stages'
+'codelink-bracket.setup.size' = 'Bracket size'
+'codelink-bracket.setup.games' = 'Regular games (all are played)'
+'codelink-bracket.setup.locked' = 'Seeding and shared settings are fixed. Opened stages cannot be edited.'
+'codelink-bracket.setup.save' = 'Save changes'
+'codelink-bracket.setup.cancel' = 'Back to bracket'
+'codelink-bracket.round.of32' = 'Round of 32'
+'codelink-bracket.round.short.of32' = 'R32'
+'codelink-bracket.round.of64' = 'Round of 64'
+'codelink-bracket.round.short.of64' = 'R64'
+'codelink-bracket.round.of128' = 'Round of 128'
+'codelink-bracket.round.short.of128' = 'R128'

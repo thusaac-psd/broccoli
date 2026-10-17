@@ -9,6 +9,7 @@ import type {
   OrderRequest,
   OrderResponse,
   SetupRequest,
+  SetupResponse,
   StartResponse,
 } from '../types.ts';
 
@@ -90,6 +91,9 @@ export function useBracketApi() {
             body: JSON.stringify({ winner } satisfies ForceDecideRequest),
           },
         ),
+
+      getSetup: (contestId: number) =>
+        fetchJson<SetupResponse>(`${PLUGIN_BASE}/contests/${contestId}/setup`),
 
       setup: (contestId: number, body: SetupRequest) =>
         fetchJson<unknown>(`${PLUGIN_BASE}/contests/${contestId}/setup`, {

@@ -24,14 +24,9 @@ import { useBracketApi } from './hooks/useBracketApi';
 import { useNow } from './hooks/useNow';
 import { gamePips, type Pip, seedsFrom } from './lib/pips';
 import { playerLabel } from './lib/player';
-import {
-  matchesInRound,
-  ROUND_COUNT,
-  roundNameKey,
-  roundShortKey,
-} from './lib/rounds';
-import { sideOf } from './lib/stage';
-import { contestEndWarning, MATCH_COUNT, roundsInPlay } from './lib/summary';
+import { matchesInRound, roundNameKey, roundShortKey } from './lib/rounds';
+import { gameLabel, sideOf } from './lib/stage';
+import { contestEndWarning, roundsInPlay } from './lib/summary';
 import { MatchSheet } from './MatchSheet';
 import { MyMatchStrip } from './MyMatchStrip';
 import { StatusPill, useGameClock, useStartsIn } from './parts';
@@ -61,6 +56,7 @@ export function BracketScoreboard({
   const { t } = useTranslation();
   const api = useBracketApi();
   const auth = useAuth();
+  const [editing, setEditing] = useState(false);
   const [openMatch, setOpenMatch] = useState<number | null>(null);
   const presentRef = useRef<HTMLDivElement>(null);
   const presenting = useFullscreen(presentRef);
@@ -94,9 +90,9 @@ export function BracketScoreboard({
   const viewerId = auth.user?.id ?? null;
   const isStaff = (auth.user?.permissions ?? []).includes(CONTEST_MANAGE);
 
-  if (data.matches.length === 0) {
+  if (data.matches.length === 0 || editing) {
     return isStaff ? (
-      <SetupPanel contestId={contestId} />
+      <SetupPanel contestId={contestId} onClose={() => setEditing(false)} />
     ) : (
       <div className="rounded-xl border border-dashed border-border py-16 text-center text-muted-foreground">
         {t('codelink-bracket.bracket.empty')}
@@ -112,6 +108,11 @@ export function BracketScoreboard({
 
   return (
     <div className="space-y-6">
+      {isStaff && (
+        <Button variant="outline" onClick={() => setEditing(true)}>
+          {t('codelink-bracket.setup.edit')}
+        </Button>
+      )}
       {mine && mySide && (
         <MyMatchStrip contestId={contestId} match={mine} side={mySide} />
       )}
@@ -175,6 +176,7 @@ function SummaryBar({
   const { t } = useTranslation();
   const now = useNow(15_000);
   const decided = matches.filter((m) => m.state === 'decided').length;
+  const stageCount = matches[0].stage_count;
   const inPlay = roundsInPlay(matches);
   const endWarning = contestEndWarning(matches, contestEndMs, now);
   const stat = (value: number, label: string, tone?: string) => (
@@ -197,7 +199,7 @@ function SummaryBar({
         <div className="font-semibold">
           {inPlay.length === 0
             ? t('codelink-bracket.summary.finished')
-            : inPlay.map((r) => t(roundNameKey(r))).join(' · ')}
+            : inPlay.map((r) => t(roundNameKey(r, stageCount))).join(' · ')}
         </div>
       </div>
       {stat(
@@ -207,7 +209,7 @@ function SummaryBar({
       )}
       {stat(
         decided,
-        t('codelink-bracket.summary.decided', { total: MATCH_COUNT }),
+        t('codelink-bracket.summary.decided', { total: 2 ** stageCount - 1 }),
       )}
       <div className="ml-auto flex items-center gap-3">
         {isStaff && !presenting && endWarning && (
@@ -254,9 +256,10 @@ function BracketTree({
   onOpen: (id: number) => void;
 }) {
   const { t } = useTranslation();
+  const stageCount = matches[0].stage_count;
   const at = new Map(matches.map((m) => [`${m.round}:${m.pos}`, m]));
   const seeds = seedsFrom(matches);
-  const final = at.get(`${ROUND_COUNT}:0`);
+  const final = at.get(`${stageCount}:0`);
   const champion =
     final?.state === 'decided' && final.winner !== null
       ? final.winner === final.player_a
@@ -266,14 +269,19 @@ function BracketTree({
 
   return (
     <div className="overflow-x-auto pb-2">
-      <div className="min-w-[980px]">
-        <div className="mb-2 grid grid-cols-[repeat(4,minmax(0,1fr))_9rem] gap-x-8">
-          {Array.from({ length: ROUND_COUNT }, (_, i) => (
+      <div style={{ minWidth: stageCount * 220 + 160 }}>
+        <div
+          className="mb-2 grid gap-x-8"
+          style={{
+            gridTemplateColumns: `repeat(${stageCount}, minmax(0,1fr)) 9rem`,
+          }}
+        >
+          {Array.from({ length: stageCount }, (_, i) => (
             <div
               key={i}
               className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
             >
-              {t(roundNameKey(i + 1))}
+              {t(roundNameKey(i + 1, stageCount))}
             </div>
           ))}
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -281,47 +289,60 @@ function BracketTree({
           </div>
         </div>
         <div
-          className="grid grid-cols-[repeat(4,minmax(0,1fr))_9rem] gap-x-8"
-          style={{ gridTemplateRows: 'repeat(8, minmax(4.75rem, auto))' }}
+          className="grid gap-x-8"
+          style={{
+            gridTemplateColumns: `repeat(${stageCount}, minmax(0,1fr)) 9rem`,
+            gridTemplateRows: `repeat(${2 ** (stageCount - 1)}, minmax(4.75rem, auto))`,
+          }}
         >
-          {Array.from({ length: ROUND_COUNT }, (_, r) => r + 1).flatMap(
+          {Array.from({ length: stageCount }, (_, r) => r + 1).flatMap(
             (round) =>
-              Array.from({ length: matchesInRound(round) }, (_, pos) => {
-                const span = 1 << (round - 1);
-                const match = at.get(`${round}:${pos}`);
-                return (
-                  <div
-                    key={`${round}:${pos}`}
-                    className="relative flex items-center py-1.5"
-                    style={{
-                      gridColumn: round,
-                      gridRow: `${pos * span + 1} / span ${span}`,
-                    }}
-                  >
-                    {round > 1 && (
-                      <span className="absolute -left-4 top-1/2 h-px w-4 bg-border" />
-                    )}
-                    <span className="absolute -right-4 top-1/2 h-px w-4 bg-border" />
-                    {round < ROUND_COUNT && pos % 2 === 0 && (
-                      <span className="absolute -right-4 top-1/2 h-full w-px bg-border" />
-                    )}
-                    {match ? (
-                      <MatchCard
-                        match={match}
-                        seeds={seeds}
-                        isMine={sideOf(match, viewerId) !== null}
-                        onOpen={() => onOpen(match.id)}
-                      />
-                    ) : (
-                      <PendingSlot round={round} pos={pos} />
-                    )}
-                  </div>
-                );
-              }),
+              Array.from(
+                { length: matchesInRound(round, stageCount) },
+                (_, pos) => {
+                  const span = 1 << (round - 1);
+                  const match = at.get(`${round}:${pos}`);
+                  return (
+                    <div
+                      key={`${round}:${pos}`}
+                      className="relative flex items-center py-1.5"
+                      style={{
+                        gridColumn: round,
+                        gridRow: `${pos * span + 1} / span ${span}`,
+                      }}
+                    >
+                      {round > 1 && (
+                        <span className="absolute -left-4 top-1/2 h-px w-4 bg-border" />
+                      )}
+                      <span className="absolute -right-4 top-1/2 h-px w-4 bg-border" />
+                      {round < stageCount && pos % 2 === 0 && (
+                        <span className="absolute -right-4 top-1/2 h-full w-px bg-border" />
+                      )}
+                      {match ? (
+                        <MatchCard
+                          match={match}
+                          seeds={seeds}
+                          isMine={sideOf(match, viewerId) !== null}
+                          onOpen={() => onOpen(match.id)}
+                        />
+                      ) : (
+                        <PendingSlot
+                          round={round}
+                          pos={pos}
+                          stageCount={stageCount}
+                        />
+                      )}
+                    </div>
+                  );
+                },
+              ),
           )}
           <div
             className="relative flex items-center py-1.5"
-            style={{ gridColumn: 5, gridRow: '1 / span 8' }}
+            style={{
+              gridColumn: stageCount + 1,
+              gridRow: `1 / span ${2 ** (stageCount - 1)}`,
+            }}
           >
             <span className="absolute -left-4 top-1/2 h-px w-4 bg-border" />
             <div
@@ -349,12 +370,20 @@ function BracketTree({
   );
 }
 
-function PendingSlot({ round, pos }: { round: number; pos: number }) {
+function PendingSlot({
+  round,
+  pos,
+  stageCount,
+}: {
+  round: number;
+  pos: number;
+  stageCount: number;
+}) {
   const { t } = useTranslation();
   // Feeders are the two matches of the previous round at 2*pos and 2*pos+1.
   const feeder = (i: number) =>
     t('codelink-bracket.slot.winnerOf', {
-      match: `${t(roundShortKey(round - 1))} ${2 * pos + i + 1}`,
+      match: `${t(roundShortKey(round - 1, stageCount))} ${2 * pos + i + 1}`,
     });
   return (
     <div className="w-full rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
@@ -376,13 +405,17 @@ const PIP: Record<Pip, string> = {
   upcoming: 'border border-dashed border-muted-foreground/30',
 };
 
-function Pips({ pips }: { pips: Pip[] }) {
+function Pips({ pips, regularCount }: { pips: Pip[]; regularCount: number }) {
   return (
     <span aria-hidden className="flex shrink-0 items-center gap-1">
       {pips.map((p, i) => (
         <span
           key={i}
-          className={cn('h-2 w-2 rounded-full', PIP[p], i === 3 && 'ml-1')}
+          className={cn(
+            'h-2 w-2 rounded-full',
+            PIP[p],
+            i === regularCount && 'ml-1',
+          )}
         />
       ))}
     </span>
@@ -405,11 +438,7 @@ function MatchCard({
   const startsIn = useStartsIn(match.starts_at_ms);
   const game = match.current_xiaoju_index;
   const liveTag =
-    clock && game !== null
-      ? game >= 3
-        ? t('codelink-bracket.game.shortTiebreak', { n: game - 2 })
-        : t('codelink-bracket.game.short', { n: game + 1 })
-      : null;
+    clock && game !== null ? t(...gameLabel(match, game, true)) : null;
   const row = (name: string, id: number, score: number) => {
     const won = match.winner === id;
     const lost = match.winner !== null && !won;
@@ -437,7 +466,10 @@ function MatchCard({
         </span>
         {won && <Trophy className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
         {match.state !== 'pending' && match.state !== 'ordering' && (
-          <Pips pips={gamePips(match, id)} />
+          <Pips
+            pips={gamePips(match, id)}
+            regularCount={match.group_a.length}
+          />
         )}
         <span
           className={cn(
@@ -479,7 +511,7 @@ function MatchCard({
       </div>
       <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-3 py-1">
         <span className="font-mono text-[10px] text-muted-foreground">
-          {t(roundShortKey(match.round))} {match.pos + 1}
+          {t(roundShortKey(match.round, match.stage_count))} {match.pos + 1}
         </span>
         <StatusPill short state={match.state} className="px-1.5 text-[10px]" />
         {isMine && (

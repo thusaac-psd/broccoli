@@ -9,16 +9,10 @@ use broccoli_server_sdk::prelude::*;
 
 use crate::model::{MatchPhase, MatchState, Setup};
 
-/// A single-elimination bracket of 16 players has exactly 15 matches
-/// (8 + 4 + 2 + 1), independent of whatever match-id numbering scheme
-/// round-advancement assigns. Used to bound the scan in
-/// [`load_all_matches`] instead of guessing a range.
-pub const MATCH_COUNT: u8 = 15;
-
-/// How many matches round `round` (1-based) contains, for a 16-player
-/// single-elimination bracket: round 1 has 8, halving each round after.
-pub fn matches_in_round(round: u8) -> u8 {
-    16u8 >> round
+/// Match ids fit in a byte; supported brackets contain at most 128 players.
+/// Number of matches in a one-based elimination stage.
+pub fn matches_in_round(players: u8, round: u8) -> u8 {
+    players.checked_shr(u32::from(round)).unwrap_or(0)
 }
 
 /// How many match ids are used up by every round strictly before `round`.
@@ -29,15 +23,15 @@ pub fn matches_in_round(round: u8) -> u8 {
 /// `round - 1` subtraction here would underflow for round 1 (and panic in
 /// debug builds); summing the OPEN range `1..round` instead is naturally 0
 /// when `round <= 1`.
-pub fn round_offset(round: u8) -> u8 {
-    (1..round).map(matches_in_round).sum()
+pub fn round_offset(players: u8, round: u8) -> u8 {
+    (1..round).map(|r| matches_in_round(players, r)).sum()
 }
 
-/// The unique match id for `(round, pos)`, in `0..MATCH_COUNT`. Ids are
+/// The unique match id for `(round, pos)`, in `0..players-1`. Ids are
 /// assigned round-major (all of round 1, then all of round 2, ...) so a
 /// match's id never changes shape as later rounds are created.
-pub fn match_id_for(round: u8, pos: u8) -> u8 {
-    round_offset(round) + pos
+pub fn match_id_for(players: u8, round: u8, pos: u8) -> u8 {
+    round_offset(players, round) + pos
 }
 
 /// Storage key for a contest's `/setup` round definitions.
@@ -88,23 +82,40 @@ pub fn load_setup(host: &Host, contest: i32) -> Result<Option<Setup>, SdkError> 
     }
 }
 
-/// Load every match that has been created for `contest`, in ONE batched
-/// `host.storage.get` call across all [`MATCH_COUNT`] possible match ids
-/// -- never one `get_one` per id, which would be one host-fn crossing per
-/// match instead of one for the whole bracket. Matches that have not been
-/// created yet (no round-advancement has written them) are simply absent
-/// from the result, not an error.
-pub fn load_all_matches(host: &Host, contest: i32) -> Result<Vec<(u8, MatchState)>, SdkError> {
-    let keys: Vec<String> = (0..MATCH_COUNT).map(|id| match_key(contest, id)).collect();
-    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-    let raw = host.storage.get(&key_refs)?;
-
-    let mut matches = Vec::new();
-    for (id, key) in (0..MATCH_COUNT).zip(keys.iter()) {
-        if let Some(value) = raw.get(key) {
-            matches.push((id, serde_json::from_str(value)?));
+/// Visit persisted documents in bounded pages. The visitor may update a
+/// document; scanning is not a transactional snapshot.
+pub fn scan_documents(
+    host: &Host,
+    prefix: &str,
+    mut visit: impl FnMut(&str, &str) -> Result<(), SdkError>,
+) -> Result<(), SdkError> {
+    let mut after: Option<String> = None;
+    loop {
+        let page = host.storage.scan(prefix, after.as_deref())?;
+        if page.is_empty() {
+            return Ok(());
+        }
+        after = page.keys().max().cloned();
+        for (key, value) in page {
+            visit(&key, &value)?;
         }
     }
+}
+
+/// Read created matches, independent of the configured bracket size.
+pub fn load_all_matches(host: &Host, contest: i32) -> Result<Vec<(u8, MatchState)>, SdkError> {
+    let prefix = format!("match:{contest}:");
+    let mut matches = Vec::new();
+    scan_documents(host, &prefix, |key, value| {
+        let id = key
+            .strip_prefix(&prefix)
+            .unwrap()
+            .parse()
+            .map_err(|_| SdkError::Other("Invalid match key".into()))?;
+        matches.push((id, serde_json::from_str(value)?));
+        Ok(())
+    })?;
+    matches.sort_by_key(|(id, _)| *id);
     Ok(matches)
 }
 
@@ -138,9 +149,9 @@ where
     host.storage.modify(&key, f)
 }
 
-/// Create the match at `(round, pos)`, but ONLY once both of its feeder
-/// slots (`slot_key(contest, round, pos*2)` and `..pos*2+1`) have been
-/// filled. A no-op, not an error, while either slot is still empty -- the
+/// First-stage participants come from the canonical setup seeds. Later
+/// matches at `(round, pos)` wait until both feeder slots
+/// (`slot_key(contest, round, pos*2)` and `..pos*2+1`) have been filled. A no-op, not an error, while either slot is still empty -- the
 /// caller (round 1: `setup::handle_setup`; later rounds: the synchronized
 /// stage opener in `judge`) calls this for every position only after the
 /// stage's opening barrier has passed.
@@ -159,18 +170,27 @@ pub fn create_match_if_both_slots_filled(
     round: u8,
     pos: u8,
 ) -> Result<(), SdkError> {
-    let key_a = slot_key(contest, round, pos * 2);
-    let key_b = slot_key(contest, round, pos * 2 + 1);
-    let raw = host.storage.get(&[key_a.as_str(), key_b.as_str()])?;
-    let (Some(a), Some(b)) = (raw.get(&key_a), raw.get(&key_b)) else {
-        return Ok(());
+    let (player_a, player_b) = if round == 1 {
+        let Some(pair) = setup.seeds.get(pos as usize * 2..pos as usize * 2 + 2) else {
+            return Err(SdkError::Other("Invalid first-stage position".into()));
+        };
+        (pair[0], pair[1])
+    } else {
+        let key_a = slot_key(contest, round, pos * 2);
+        let key_b = slot_key(contest, round, pos * 2 + 1);
+        let raw = host.storage.get(&[key_a.as_str(), key_b.as_str()])?;
+        let (Some(a), Some(b)) = (raw.get(&key_a), raw.get(&key_b)) else {
+            return Ok(());
+        };
+        let player_a: i32 = a
+            .parse()
+            .map_err(|_| SdkError::Other(format!("slot {key_a} holds a non-integer player id")))?;
+        let player_b: i32 = b
+            .parse()
+            .map_err(|_| SdkError::Other(format!("slot {key_b} holds a non-integer player id")))?;
+
+        (player_a, player_b)
     };
-    let player_a: i32 = a
-        .parse()
-        .map_err(|_| SdkError::Other(format!("slot {key_a} holds a non-integer player id")))?;
-    let player_b: i32 = b
-        .parse()
-        .map_err(|_| SdkError::Other(format!("slot {key_b} holds a non-integer player id")))?;
 
     let Some(round_def) = setup.rounds.get(round.saturating_sub(1) as usize) else {
         return Err(SdkError::Other(format!(
@@ -183,12 +203,12 @@ pub fn create_match_if_both_slots_filled(
         pos,
         player_a,
         player_b,
-        group_a: round_def.group_a,
-        group_b: round_def.group_b,
+        group_a: round_def.group_a.clone(),
+        group_b: round_def.group_b.clone(),
         state: MatchPhase::Ordering,
         ..Default::default()
     };
-    let id = match_id_for(round, pos);
+    let id = match_id_for(setup.player_count(), round, pos);
     let _ =
         host.storage
             .compare_and_set(&match_key(contest, id), None, &serde_json::to_string(&m)?)?;
@@ -269,46 +289,47 @@ mod tests {
 
     #[test]
     fn matches_in_round_halves_each_round() {
-        assert_eq!(matches_in_round(1), 8);
-        assert_eq!(matches_in_round(2), 4);
-        assert_eq!(matches_in_round(3), 2);
-        assert_eq!(matches_in_round(4), 1);
+        assert_eq!(matches_in_round(16, 1), 8);
+        assert_eq!(matches_in_round(16, 2), 4);
+        assert_eq!(matches_in_round(16, 3), 2);
+        assert_eq!(matches_in_round(16, 4), 1);
     }
 
     #[test]
     fn round_offset_sums_every_earlier_rounds_match_count() {
-        assert_eq!(round_offset(1), 0);
-        assert_eq!(round_offset(2), 8);
-        assert_eq!(round_offset(3), 12);
-        assert_eq!(round_offset(4), 14);
+        assert_eq!(round_offset(16, 1), 0);
+        assert_eq!(round_offset(16, 2), 8);
+        assert_eq!(round_offset(16, 3), 12);
+        assert_eq!(round_offset(16, 4), 14);
     }
 
     #[test]
     fn round_offset_does_not_underflow_at_round_one() {
         // Round 1 has no earlier round to sum; a naive `round - 1` on a `u8`
         // would underflow instead of returning 0.
-        assert_eq!(round_offset(0), 0);
+        assert_eq!(round_offset(16, 0), 0);
     }
 
     #[test]
     fn match_id_for_covers_every_id_exactly_once() {
-        let mut ids = Vec::new();
-        for round in 1..=4u8 {
-            for pos in 0..matches_in_round(round) {
-                ids.push(match_id_for(round, pos));
-            }
+        for players in [2u8, 8, 16, 32, 128] {
+            let ids: Vec<_> = (1..=players.ilog2() as u8)
+                .flat_map(|round| {
+                    (0..matches_in_round(players, round))
+                        .map(move |pos| match_id_for(players, round, pos))
+                })
+                .collect();
+            assert_eq!(ids, (0..players - 1).collect::<Vec<_>>());
         }
-        ids.sort_unstable();
-        let expected: Vec<u8> = (0..MATCH_COUNT).collect();
-        assert_eq!(ids, expected);
     }
 
     fn setup_with_round_1() -> Setup {
         Setup {
+            seeds: (1..=16).collect(),
             rounds: vec![
                 crate::model::RoundDef {
-                    group_a: [1, 2, 3],
-                    group_b: [4, 5, 6],
+                    group_a: vec![1, 2, 3],
+                    group_b: vec![4, 5, 6],
                     tiebreak: vec![7],
                     xiaoju_seconds: 1_800,
                     tiebreak_seconds: 1_800,
@@ -325,20 +346,26 @@ mod tests {
     }
 
     #[test]
-    fn create_match_if_both_slots_filled_does_nothing_until_both_slots_are_set() {
+    fn later_stage_waits_until_both_feeder_slots_are_set() {
         let host = Host::mock();
         let setup = setup_with_round_1();
         host.storage
-            .set(&[(slot_key(7, 1, 0).as_str(), "10")])
+            .set(&[(slot_key(7, 2, 0).as_str(), "10")])
             .unwrap();
-        create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
-        assert!(load_match(&host, 7, match_id_for(1, 0)).unwrap().is_none());
+        create_match_if_both_slots_filled(&host, 7, &setup, 2, 0).unwrap();
+        assert!(
+            load_match(&host, 7, match_id_for(16, 2, 0))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn create_match_if_both_slots_filled_creates_the_match_once_both_slots_are_set() {
         let host = Host::mock();
-        let setup = setup_with_round_1();
+        let mut setup = setup_with_round_1();
+        setup.seeds[0] = 10;
+        setup.seeds[1] = 20;
         host.storage
             .set(&[
                 (slot_key(7, 1, 0).as_str(), "10"),
@@ -346,20 +373,24 @@ mod tests {
             ])
             .unwrap();
         create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
-        let m = load_match(&host, 7, match_id_for(1, 0)).unwrap().unwrap();
+        let m = load_match(&host, 7, match_id_for(16, 1, 0))
+            .unwrap()
+            .unwrap();
         assert_eq!(m.player_a, 10);
         assert_eq!(m.player_b, 20);
         assert_eq!(m.round, 1);
         assert_eq!(m.pos, 0);
         assert_eq!(m.state, MatchPhase::Ordering);
-        assert_eq!(m.group_a, [1, 2, 3]);
-        assert_eq!(m.group_b, [4, 5, 6]);
+        assert_eq!(m.group_a, vec![1, 2, 3]);
+        assert_eq!(m.group_b, vec![4, 5, 6]);
     }
 
     #[test]
     fn create_match_if_both_slots_filled_does_not_clobber_an_already_created_match() {
         let host = Host::mock();
-        let setup = setup_with_round_1();
+        let mut setup = setup_with_round_1();
+        setup.seeds[0] = 10;
+        setup.seeds[1] = 20;
         host.storage
             .set(&[
                 (slot_key(7, 1, 0).as_str(), "10"),
@@ -367,7 +398,7 @@ mod tests {
             ])
             .unwrap();
         create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
-        update_match(&host, 7, match_id_for(1, 0), |m| {
+        update_match(&host, 7, match_id_for(16, 1, 0), |m| {
             m.state = MatchPhase::InProgress;
             Ok(())
         })
@@ -377,12 +408,34 @@ mod tests {
         // a match that has already progressed past `Ordering`.
         create_match_if_both_slots_filled(&host, 7, &setup, 1, 0).unwrap();
 
-        let m = load_match(&host, 7, match_id_for(1, 0)).unwrap().unwrap();
+        let m = load_match(&host, 7, match_id_for(16, 1, 0))
+            .unwrap()
+            .unwrap();
         assert_eq!(m.state, MatchPhase::InProgress);
     }
 
     #[test]
-    fn load_all_matches_skips_uncreated_ids_and_reads_the_bracket_in_one_call() {
+    fn loads_every_match_in_a_128_player_bracket_across_scan_pages() {
+        let host = Host::mock();
+        for id in 0..127u8 {
+            let state = MatchState {
+                player_a: i32::from(id),
+                ..Default::default()
+            };
+            host.storage
+                .set(&[(&match_key(7, id), &serde_json::to_string(&state).unwrap())])
+                .unwrap();
+        }
+        let matches = load_all_matches(&host, 7).unwrap();
+        assert_eq!(
+            matches.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            (0..127).collect::<Vec<_>>()
+        );
+        assert_eq!(matches[126].1.player_a, 126);
+    }
+
+    #[test]
+    fn load_all_matches_skips_uncreated_ids_and_scans_the_bracket_in_pages() {
         let host = Host::mock();
         host.storage
             .set(&[
@@ -427,8 +480,8 @@ mod tests {
         let matches = load_all_matches(&host, 7).unwrap();
         assert_eq!(
             host.storage.get_call_count(),
-            before + 1,
-            "the whole bracket must be one batched read"
+            before + 2,
+            "one populated page plus the end-of-scan read"
         );
 
         let ids: Vec<u8> = matches.iter().map(|(id, _)| *id).collect();

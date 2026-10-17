@@ -13,11 +13,14 @@ pub fn default_penalty_seconds() -> i64 {
     20
 }
 
-/// Round-level problem assignment and timing, submitted once via `/setup`
-/// before the bracket begins. Stored under [`crate::storage::setup_key`].
+/// Bracket seeding and stage rules, stored under [`crate::storage::setup_key`].
+/// Unopened stages remain editable after the bracket begins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Setup {
     pub rounds: Vec<RoundDef>,
+    pub seeds: Vec<i32>,
+    /// Prefix of stages whose rules are frozen, including interrupted openings.
+    pub opened_rounds: usize,
     /// Shared by both players across this match's regular games only.
     #[serde(default)]
     pub match_extra_time_seconds: i64,
@@ -41,6 +44,8 @@ impl Default for Setup {
     fn default() -> Self {
         Self {
             rounds: Vec::new(),
+            seeds: Vec::new(),
+            opened_rounds: 0,
             match_extra_time_seconds: 0,
             penalty_seconds: default_penalty_seconds(),
             escalation_grace_seconds: default_escalation_grace_seconds(),
@@ -48,7 +53,7 @@ impl Default for Setup {
     }
 }
 
-/// One round's problem split: two groups of 3 (one per player of a match),
+/// One round's problem split: two equally sized groups (one per player of a match),
 /// plus an ORDERED list of 附加赛 (tiebreak) problems.
 ///
 /// `tiebreak` is a list, not a single problem, because a scoreless 附加赛
@@ -58,8 +63,8 @@ impl Default for Setup {
 /// the next tiebreak problem in this list rather than replay the same one.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct RoundDef {
-    pub group_a: [i32; 3],
-    pub group_b: [i32; 3],
+    pub group_a: Vec<i32>,
+    pub group_b: Vec<i32>,
     pub tiebreak: Vec<i32>,
     pub xiaoju_seconds: i64,
     pub tiebreak_seconds: i64,
@@ -72,6 +77,18 @@ pub struct RoundDef {
 pub struct GameDurations {
     pub xiaoju_seconds: i64,
     pub tiebreak_seconds: i64,
+}
+
+impl Setup {
+    pub fn player_count(&self) -> u8 {
+        self.seeds.len() as u8
+    }
+}
+
+impl MatchState {
+    pub fn is_regular_game(&self, index: u8) -> bool {
+        (index as usize) < self.group_a.len()
+    }
 }
 
 impl RoundDef {
@@ -103,18 +120,18 @@ pub struct MatchState {
     pub pos: u8,
     pub player_a: i32,
     pub player_b: i32,
-    /// Player A's own 3 problems for this round (from `RoundDef::group_a`).
+    /// Player A's own problems for this round (from `RoundDef::group_a`).
     /// Player B ranks THESE to produce `order_a`.
-    pub group_a: [i32; 3],
-    /// Player B's own 3 problems for this round (from `RoundDef::group_b`).
+    pub group_a: Vec<i32>,
+    /// Player B's own problems for this round (from `RoundDef::group_b`).
     /// Player A ranks THESE to produce `order_b`.
-    pub group_b: [i32; 3],
+    pub group_b: Vec<i32>,
     /// The order player A must solve THEIR OWN group's problems in, as
     /// ranked by player B (A's opponent). `None` until B submits a ranking.
-    pub order_a: Option<[i32; 3]>,
+    pub order_a: Option<Vec<i32>>,
     /// The order player B must solve THEIR OWN group's problems in, as
     /// ranked by player A (B's opponent). `None` until A submits a ranking.
-    pub order_b: Option<[i32; 3]>,
+    pub order_b: Option<Vec<i32>>,
     pub xiaoju: Vec<XiaojuState>,
     pub score_a: u8,
     pub score_b: u8,
@@ -217,9 +234,9 @@ pub enum MatchPhase {
     Pending,
     /// Both players may read each other's group and submit a ranking.
     Ordering,
-    /// The 3 regular 小局 are running.
+    /// The regular 小局 are running.
     InProgress,
-    /// Scores were level after 3 小局; an 附加赛 is running.
+    /// Scores were level after the regular 小局; an 附加赛 is running.
     Tiebreak,
     /// A 小局's deadline passed while an older submission was still IN
     /// FLIGHT (queued, pending, compiling, running, or a `SystemError`

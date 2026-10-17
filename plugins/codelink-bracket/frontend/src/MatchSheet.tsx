@@ -1,3 +1,4 @@
+import { gameLabel } from './lib/stage';
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -141,7 +142,7 @@ function MatchDetail({
     <div className="flex flex-col">
       <SheetHeader className="border-b border-border px-6 pb-4 pt-6 text-left">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {t(roundNameKey(match.round))}
+          {t(roundNameKey(match.round, match.stage_count))}
           <span aria-hidden>·</span>
           {t('codelink-bracket.match.number', { n: match.pos + 1 })}
         </div>
@@ -487,17 +488,14 @@ function GamesTable({
   nameB: string;
 }) {
   const { t } = useTranslation();
-  const gameName = (g: GameView) =>
-    g.tiebreak
-      ? t('codelink-bracket.game.tiebreak', { n: g.index - 2 })
-      : t('codelink-bracket.game.regular', { n: g.index + 1 });
+  const gameName = (g: GameView) => t(...gameLabel(match, g.index));
   // Regular games that have not opened yet, from the orders -- masked for
   // players exactly like the orders themselves, so staff see what is coming
   // and players see nothing new.
   const upcoming: GameView[] =
     match.state === 'decided' || match.state === 'needs_adjudication'
       ? []
-      : Array.from({ length: 3 }, (_, index) => index)
+      : Array.from({ length: match.group_a.length }, (_, index) => index)
           .filter((index) => !match.games.some((g) => g.index === index))
           .map((index) => ({
             index,

@@ -12,9 +12,7 @@
 
 /**
  * Whether `order` contains exactly the same values as `group`, each exactly
- * once. Both arrays are expected to have the same fixed length (3, for this
- * plugin's problem groups), but the check itself does not assume that --  a
- * length mismatch alone is enough to fail.
+ * once. A length mismatch alone is enough to fail.
  */
 export function isPermutationOf(
   order: readonly number[],
@@ -31,8 +29,7 @@ export function isPermutationOf(
 /**
  * Whether a ranking-in-progress is complete and valid enough to submit: it
  * must be a full-length permutation of the opponent's group. A partial
- * ranking (the player has picked 1 or 2 of the 3 problems so far) is never
- * submittable -- only "all 3, no repeats, no omissions" is.
+ * ranking cannot be submitted. Every problem must appear exactly once.
  */
 export function canSubmitOrder(
   order: readonly number[],

@@ -8,21 +8,21 @@ import type { ProblemInfo } from './hooks/useContestData';
 import { problemPath } from './lib/links';
 import { canSubmitOrder } from './lib/ordering';
 import { SortableList } from './SortableList';
-import type { MaskedTriple } from './types';
+import type { MaskedGroup } from './types';
 
 interface OrderingPanelProps {
   contestId: number;
-  /** The OPPONENT's group of 3 problems, as this viewer sees it (masked). */
-  opponentGroup: MaskedTriple;
+  /** The OPPONENT's problem group, as this viewer sees it (masked). */
+  opponentGroup: MaskedGroup;
   /** This viewer's earlier ranking, if they already sent one. */
-  submittedOrder: MaskedTriple | null;
+  submittedOrder: MaskedGroup | null;
   problems: ReadonlyMap<number, ProblemInfo>;
-  onSubmit: (order: [number, number, number]) => void;
+  onSubmit: (order: number[]) => void;
   submitting: boolean;
 }
 
 /**
- * The player ranks the opponent's three problems by dragging them into the
+ * The player ranks the opponent's problems by dragging them into the
  * order the opponent must solve them. The list always holds exactly the
  * visible group, so any arrangement is a valid permutation; `canSubmitOrder`
  * is still checked, and also covers the one case dragging cannot: part of the
@@ -99,17 +99,7 @@ export function OrderingPanel({
         <Button
           type="button"
           disabled={!canSubmit}
-          onClick={() => {
-            const [first, second, third] = order;
-            if (
-              first === undefined ||
-              second === undefined ||
-              third === undefined
-            ) {
-              return;
-            }
-            onSubmit([first, second, third]);
-          }}
+          onClick={() => onSubmit(order)}
         >
           <Lock className="mr-1.5 h-3.5 w-3.5" />
           {submitting

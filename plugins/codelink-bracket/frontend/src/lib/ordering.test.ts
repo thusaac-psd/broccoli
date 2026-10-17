@@ -71,3 +71,16 @@ test('canSubmitOrder rejects when the opponent group is not fully visible', () =
 test('canSubmitOrder rejects a non-permutation even when the group is fully visible', () => {
   assert.equal(canSubmitOrder([101, 101, 103], [101, 102, 103]), false);
 });
+
+test('rankings cover the entire configured group for one, two, five and 255 games', () => {
+  for (const count of [1, 2, 5, 255]) {
+    const group = Array.from({ length: count }, (_, i) => i + 100);
+    const reversed = [...group].reverse();
+    assert.equal(canSubmitOrder(reversed, group), true);
+    assert.equal(canSubmitOrder(reversed.slice(1), group), false);
+    assert.equal(
+      canSubmitOrder(reversed, [...group.slice(0, -1), null]),
+      false,
+    );
+  }
+});

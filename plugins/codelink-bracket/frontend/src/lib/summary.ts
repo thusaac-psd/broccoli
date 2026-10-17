@@ -2,19 +2,16 @@
 // match needs staff, and whether the contest end will cut matches short.
 
 import type { MatchView } from '../types.ts';
-import { ROUND_COUNT } from './rounds.ts';
-
-export const MATCH_COUNT = 15;
 
 /**
- * The rounds with a match still to finish, lowest first. Matches start per
- * pair, so a quarterfinal can be live while round-of-16 games still run;
- * naming only the lowest round would hide that. Empty once every match is
- * decided.
+ * Stages with unfinished matches, lowest first. Between stages, report the
+ * next unopened stage. Empty once the tournament is decided.
  */
 export function roundsInPlay(matches: MatchView[]): number[] {
+  const roundCount = matches[0]?.stage_count ?? 0;
+  const total = 2 ** roundCount - 1;
   const decided = matches.filter((m) => m.state === 'decided').length;
-  if (decided === MATCH_COUNT) return [];
+  if (decided === total) return [];
   const rounds = new Set(
     matches.filter((m) => m.state !== 'decided').map((m) => m.round),
   );
@@ -22,7 +19,7 @@ export function roundsInPlay(matches: MatchView[]): number[] {
     // Every created match is decided but later ones do not exist yet: the
     // next round is the one in play.
     const highest = Math.max(0, ...matches.map((m) => m.round));
-    rounds.add(Math.min(highest + 1, ROUND_COUNT));
+    rounds.add(Math.min(highest + 1, roundCount));
   }
   return [...rounds].sort((a, b) => a - b);
 }
@@ -71,10 +68,12 @@ export function contestEndWarning(
   now: number,
 ): ContestEndWarning | null {
   if (contestEndMs == null) return null;
+  const roundCount = matches[0]?.stage_count ?? 0;
+  const total = 2 ** roundCount - 1;
   const decided = matches.filter((m) => m.state === 'decided').length;
-  if (decided === MATCH_COUNT) return null;
+  if (decided === total) return null;
   if (now >= contestEndMs) {
-    return { kind: 'ended', unfinished: MATCH_COUNT - decided };
+    return { kind: 'ended', unfinished: total - decided };
   }
   const count = matches.filter((m) => {
     if (m.state === 'in_progress' || m.state === 'tiebreak') {
