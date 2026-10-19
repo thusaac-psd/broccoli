@@ -8,9 +8,10 @@ sidebar_position: 2
 
 The `codelink-qualifier` contest type runs the Codelink morning round.
 Contestants pick any problems they like, and each problem gives scoring slots
-to the first few contestants who solve it. Earn slots on enough different
-problems and you qualify for the afternoon
-[Codelink bracket](./codelink-bracket.md).
+to the first few eligible contestants who solve it. Each slot earns the
+problem's points. Reach 3 points to qualify directly for the afternoon
+[Codelink bracket](./codelink-bracket.md). After the round, contestants with
+2 points, then 1 point, fill the remaining places up to 16.
 
 ## Enable the plugins
 
@@ -52,16 +53,26 @@ Open the contest's **Configure** dialog in the admin area and choose the
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| **Expected Problem Count** (`expected_problem_count`) | 16 | Shows a notice when the contest has a different number of problems. 0 turns the check off. |
+| **Expected Problem Count** (`expected_problem_count`) | 20 | Shows a notice when the contest has a different number of problems. 0 turns the check off. |
 | **Scoring Slots per Problem** (`slots_per_problem`) | 2 | How many different contestants can earn a slot on each problem. |
-| **Credited Problems to Qualify** (`solves_to_qualify`) | 2 | How many different problems a contestant needs a slot on to qualify. |
+| **Points to Qualify** (`solves_to_qualify`) | 3 | Points needed to qualify directly. The stored setting keeps its original name. |
+| **Advancement Places** (`advancement_slots`) | 16 | Total places for direct qualifiers and reserves. |
 | **Scoreboard Refresh Interval** (`scoreboard_refresh_seconds`) | 5 | Seconds between automatic refreshes. 0 means manual refresh only. |
 
-The defaults describe the usual morning round of 16 problems, two slots per
-problem, and two credited problems to qualify. The two scoring limits take
-whole numbers from 1 to 1000. The expected problem count takes 0 to 1000 and
-only drives the setup notice, since the rules always count the problems the
-contest actually has. The refresh interval takes 0 to 3600.
+Add 20 problems. In each contest problem's **Configure** dialog, choose the
+`codelink-qualifier` plugin's `problem` settings. **Points per Scoring Slot**
+(`points`) defaults to 1 and accepts only 1 or 2. Set four problems to 2 and
+leave the other sixteen at 1. Values belong to this contest, so the same problem
+can have a different value in another contest.
+
+The slot limit, point threshold, and advancement places take whole numbers
+from 1 to 1000. The expected problem count takes 0 to 1000 and only drives the
+setup notice. It does not enforce the problem count or the mix of point values.
+The refresh interval takes 0 to 3600.
+
+Existing saved settings keep their values. When reusing an older contest, set
+the expected problem count to 20 and the point threshold to 3, and check that
+the advancement places are 16.
 
 Set these before the round starts. A saved change takes effect on the next
 refresh and recalculates the standings, and it needs no rebuild.
@@ -76,9 +87,15 @@ Slots go to accepted submissions in the order they were submitted.
 2. Only a contestant's first accepted submission on each problem counts.
 3. That submission takes a free slot on the problem, unless the contestant has
    already qualified.
-4. A contestant qualifies once they hold slots on the required number of
-   problems. They keep those slots. Their later accepted submissions still show
-   on the board but take no slots and do not change their qualification time.
+4. A slot awards the problem's full point value. A contestant qualifies when
+   their total reaches or exceeds the point threshold. They keep those slots
+   and points. Later accepted submissions take no slots and do not change their
+   qualification time.
+
+With the default threshold, both 1 plus 2 points and three separate points
+qualify. Two problems worth 2 points each, or 1 plus 1 followed by 2, give a
+total of 4 points and also qualify. Direct qualifiers do not receive seed
+rankings from this calculation.
 
 An accepted submission that got no slot does not count toward qualifying.
 Because qualified contestants are skipped, a slot they would have taken goes to
@@ -87,7 +104,7 @@ follows.
 
 | Event | Result |
 | --- | --- |
-| Alice earns slots on A and B | Alice qualifies and keeps both slots |
+| Alice earns slots on A worth 1 point and B worth 2 points | Alice qualifies with 3 points and keeps both slots |
 | Alice later solves C | Her AC shows, and both C slots stay free |
 | Bob and Carol then solve C | Each takes one C slot |
 | Dave also solves C | His AC shows without a slot |
@@ -99,18 +116,20 @@ problem with no test cases, never produces an AC.
 
 ## During the contest
 
-Contestants see the rules, with your configured numbers, on the **Contest
-Homepage**. The **Rankings** page shows each problem's slots and who holds
-them, then one row per contestant with their credited problems and status.
+The current **Contest Homepage** and **Rankings** page have not yet been
+adapted for weighted scoring and reserves. The homepage still describes
+qualification by problem count. The board's **Credited** column counts
+problems, not points, and its qualification status covers direct qualifiers
+only. Use the rules on this page and the final API result below for this format.
 
 | Status | Meaning |
 | --- | --- |
 | **Qualified** | The contestant qualifies however the remaining judging turns out |
 | **Awaiting judging** | Unfinished judging could still decide whether the contestant qualifies |
 
-Everyone else has no status yet and can follow their progress in the
-**Credited** column. The qualifier count and the qualification times include
-**Qualified** contestants only.
+Everyone else has no direct qualification status. The qualifier count and
+qualification times include **Qualified** contestants only. They do not
+include reserves.
 
 The board refreshes at the configured interval, and keeps refreshing after the
 round ends while queued judging finishes. **Auto refresh** pauses it and
@@ -136,10 +155,36 @@ has not been applied yet does not change the official result.
 
 ## After the contest
 
-Wait until no submission is still being judged and every rejudge has been
-reviewed. The contestants marked **Qualified** are the qualifiers. The plugin
-does not enroll them anywhere, so enroll them in the
-[Codelink bracket](./codelink-bracket.md) contest yourself.
+Wait until the round ends, no submission is still being judged, and every
+rejudge has been reviewed. All direct qualifiers advance. Fill the remaining
+places from contestants with 2 points first, then those with 1 point.
+
+Within each score, the earlier last scoring submission wins the place. An
+exact submission time tie is broken by the smaller submission id. A repeated
+AC or an AC without a scoring slot does not change this time. Reserves are
+selected only after the round and all judging finish, so contestants can keep
+earning points during the round.
+
+Read the final selection from the `advancement` field of
+`GET /api/plugins/codelink-qualifier/contests/{contest_id}/standings`. It is
+`null` until the round ends and all official judging finishes.
+
+| Field | Meaning |
+| --- | --- |
+| `direct_user_ids` | Contestants who reached the point threshold, listed by user id without seed rankings |
+| `reserve_user_ids` | Reserves in selection order, stopping when all places are filled |
+| `unfilled_slots` | Places still vacant because too few contestants earned points |
+
+The same response includes each contestant's total in `rows[].score` and each
+problem's value in `problems[].points`. `credited` remains the number of
+credited problems, and `qualified_count` counts direct qualifiers only.
+
+If `unfilled_slots` is positive, volunteers must arrange a playoff or another
+announced selection method. Contestants with no points are not selected
+automatically. Applied rejudges recalculate both scores and reserves.
+
+The plugin does not enroll qualifiers anywhere. Enroll the selected contestants
+in the [Codelink bracket](./codelink-bracket.md) contest yourself.
 
 The score on an individual submission only says whether that solution passed.
-Qualification comes from this board alone.
+Qualification comes from scoring slots and the final selection above.

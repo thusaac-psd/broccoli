@@ -21,10 +21,34 @@ fn pending(id: i32, user: i32, problem: i32) -> Submission {
 }
 
 fn board(submissions: Vec<Submission>) -> Standings {
-    board_with_config(submissions, &ContestConfig::default())
+    board_with_config(submissions, &legacy_config())
+}
+
+fn legacy_config() -> ContestConfig {
+    ContestConfig {
+        expected_problem_count: 16,
+        solves_to_qualify: 2,
+        ..Default::default()
+    }
 }
 
 fn board_with_config(submissions: Vec<Submission>, config: &ContestConfig) -> Standings {
+    board_with_points(submissions, config, &[1; 16])
+}
+
+fn weighted_board(submissions: Vec<Submission>) -> Standings {
+    board_with_points(
+        submissions,
+        &ContestConfig::default(),
+        &[vec![1; 16], vec![2; 4]].concat(),
+    )
+}
+
+fn board_with_points(
+    submissions: Vec<Submission>,
+    config: &ContestConfig,
+    points: &[usize],
+) -> Standings {
     calculate(
         (1..=20)
             .map(|user_id| Participant {
@@ -32,10 +56,13 @@ fn board_with_config(submissions: Vec<Submission>, config: &ContestConfig) -> St
                 username: format!("user{user_id}"),
             })
             .collect(),
-        (1..=16)
-            .map(|problem_id| Problem {
-                problem_id,
+        points
+            .iter()
+            .enumerate()
+            .map(|(index, &points)| Problem {
+                problem_id: index as i32 + 1,
                 label: None,
+                points,
             })
             .collect(),
         submissions,
@@ -293,14 +320,16 @@ fn problem_ids_keep_duplicate_labels_independent_and_empty_contest_is_valid() {
             Problem {
                 problem_id: 1,
                 label: Some("same".into()),
+                points: 1,
             },
             Problem {
                 problem_id: 2,
                 label: Some("same".into()),
+                points: 1,
             },
         ],
         vec![ac(1, 1, 1), ac(2, 1, 2)],
-        &ContestConfig::default(),
+        &legacy_config(),
     )
     .unwrap();
     assert_eq!(
@@ -320,6 +349,7 @@ fn custom_slots_and_qualification_threshold_control_allocation() {
         slots_per_problem: 3,
         solves_to_qualify: 3,
         scoreboard_refresh_seconds: 12,
+        ..Default::default()
     };
     let submissions = vec![
         ac(1, 1, 1),
@@ -503,7 +533,7 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
     // checks the guarantee against completed scoreboards, including interactions
     // across problems and qualification thresholds, without duplicating replay.
     let mut seed = 0x5eed_u64;
-    for history in 0..512 {
+    for history in 0..1024 {
         let config = ContestConfig {
             slots_per_problem: 1 + history % 3,
             solves_to_qualify: 1 + (history / 3) % 3,
@@ -511,6 +541,9 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
         };
         let mut submissions = Vec::new();
         let mut pending_indices = Vec::new();
+        let points: Vec<_> = (0..16)
+            .map(|problem| 1 + ((history / 9) >> (problem % 4)) % 2)
+            .collect();
         for id in 1..=12 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let user = 1 + ((seed >> 32) % 4) as i32;
@@ -526,18 +559,18 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
             }
             submissions.push(submission);
         }
-        let initial = board_with_config(submissions.clone(), &config);
+        let initial = board_with_points(submissions.clone(), &config, &points);
         for mask in 0..(1 << pending_indices.len()) {
             let mut resolved = submissions.clone();
             for (bit, &index) in pending_indices.iter().enumerate() {
                 resolved[index].pending = false;
                 resolved[index].accepted = mask & (1 << bit) != 0;
             }
-            let final_board = board_with_config(resolved, &config);
+            let final_board = board_with_points(resolved, &config, &points);
             assert!(final_board.rows.iter().all(|r| {
                 r.qualification_verdict != Some(QualificationVerdict::Pending)
                     && (r.qualification_verdict == Some(QualificationVerdict::Qualified))
-                        == (r.credited == config.solves_to_qualify)
+                        == (r.score >= config.solves_to_qualify)
             }));
             for contestant in initial
                 .rows
@@ -573,8 +606,193 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
                 final_board
                     .rows
                     .iter()
-                    .all(|r| r.credited <= config.solves_to_qualify)
+                    .all(|r| r.score <= config.solves_to_qualify + 1)
+            );
+            assert_eq!(
+                final_board.rows.iter().map(|r| r.score).sum::<usize>(),
+                final_board
+                    .problems
+                    .iter()
+                    .map(|p| p.points * p.awards.len())
+                    .sum::<usize>()
             );
         }
     }
+}
+
+#[test]
+fn mixed_problem_values_qualify_by_points_instead_of_problem_count() {
+    let result = weighted_board(vec![
+        ac(1, 1, 1),
+        ac(2, 1, 17),
+        ac(3, 1, 2),
+        ac(4, 2, 2),
+        ac(5, 2, 3),
+        ac(6, 2, 4),
+        ac(7, 3, 18),
+        ac(8, 4, 5),
+        ac(9, 4, 6),
+    ]);
+    assert_eq!(result.qualified_count, 2);
+    for user in [1, 2] {
+        assert_eq!(row(&result, user).score, 3);
+        assert_eq!(
+            row(&result, user).qualification_verdict,
+            Some(QualificationVerdict::Qualified)
+        );
+    }
+    assert_eq!(row(&result, 1).credited, 2);
+    assert_eq!(row(&result, 2).credited, 3);
+    assert_eq!(row(&result, 1).qualified_at_seconds, Some(2));
+    assert_eq!(
+        row(&result, 1).problems[&2].status,
+        CreditStatus::AfterQualification
+    );
+    assert_eq!(result.problems[1].awards[0].user_id, 2);
+    for user in [3, 4] {
+        assert_eq!(row(&result, user).score, 2);
+        assert_eq!(row(&result, user).qualification_verdict, None);
+    }
+}
+
+#[test]
+fn both_two_plus_two_and_one_plus_one_plus_two_keep_all_four_points() {
+    let result = weighted_board(vec![
+        ac(1, 1, 17),
+        ac(2, 1, 18),
+        ac(3, 2, 1),
+        ac(4, 2, 2),
+        ac(5, 2, 19),
+        ac(6, 1, 3),
+        ac(7, 2, 20),
+        ac(8, 3, 3),
+        ac(9, 3, 20),
+    ]);
+    for (user, time) in [(1, 2), (2, 5)] {
+        assert_eq!(row(&result, user).score, 4);
+        assert_eq!(row(&result, user).qualified_at_seconds, Some(time));
+    }
+    assert_eq!(
+        row(&result, 1).problems[&3].status,
+        CreditStatus::AfterQualification
+    );
+    assert_eq!(
+        row(&result, 2).problems[&20].status,
+        CreditStatus::AfterQualification
+    );
+    assert_eq!(row(&result, 3).score, 3);
+    assert_eq!(result.problems[19].awards[0].user_id, 3);
+    assert_eq!(result.qualified_count, 3);
+}
+
+#[test]
+fn reserves_are_selected_by_score_then_last_scoring_submission() {
+    let mut result = weighted_board(vec![
+        ac(1, 2, 2),
+        ac(2, 4, 4),
+        ac(3, 1, 1),
+        ac(4, 1, 17),
+        ac(10, 3, 18),
+        ac(20, 2, 3),
+    ]);
+    result.config.advancement_slots = 3;
+    assert!(result.advancement(false).unwrap().is_none());
+    assert_eq!(
+        result.advancement(true).unwrap().unwrap(),
+        Advancement {
+            direct_user_ids: vec![1],
+            reserve_user_ids: vec![3, 2],
+            unfilled_slots: 0,
+        }
+    );
+    // Selection never changes the scoring snapshot or turns reserves into
+    // direct qualifiers; the next replay can still credit their later solves.
+    assert_eq!(row(&result, 3).qualification_verdict, None);
+    assert_eq!(result.qualified_count, 1);
+}
+
+#[test]
+fn reserve_ties_use_microseconds_then_id_and_ignore_non_scoring_submissions() {
+    let mut earlier = ac(100, 1, 17);
+    earlier.submitted_at_us = 1_000_001;
+    let mut later = ac(2, 2, 17);
+    later.submitted_at_us = 1_000_002;
+    let mut tied = ac(1, 3, 18);
+    tied.submitted_at_us = later.submitted_at_us;
+    let mut result = weighted_board(vec![later, tied, earlier, ac(101, 1, 17), ac(102, 3, 17)]);
+    result.config.advancement_slots = 2;
+    assert_eq!(
+        row(&result, 3).problems[&17].status,
+        CreditStatus::SlotsFull
+    );
+    assert_eq!(
+        result.advancement(true).unwrap().unwrap().reserve_user_ids,
+        vec![1, 3]
+    );
+}
+
+#[test]
+fn all_forty_slots_can_require_one_point_reserves_to_fill_sixteen_places() {
+    let mut submissions = Vec::new();
+    for (problem, users) in [(17, [1, 2]), (18, [2, 3]), (19, [3, 4]), (20, [4, 1])] {
+        for user in users {
+            submissions.push(ac(submissions.len() as i32 + 1, user, problem));
+        }
+    }
+    let one_point_users: Vec<_> = (5..=14).cycle().take(30).chain([15, 16]).collect();
+    for (index, users) in one_point_users.as_chunks::<2>().0.iter().enumerate() {
+        for &user in users {
+            submissions.push(ac(submissions.len() as i32 + 1, user, index as i32 + 1));
+        }
+    }
+    let result = weighted_board(submissions);
+    assert_eq!(result.qualified_count, 14);
+    assert_eq!(result.rows.iter().map(|r| r.score).sum::<usize>(), 48);
+    assert!(result.problems.iter().all(|p| p.awards.len() == 2));
+    assert_eq!(
+        result.advancement(true).unwrap().unwrap(),
+        Advancement {
+            direct_user_ids: (1..=14).collect(),
+            reserve_user_ids: vec![15, 16],
+            unfilled_slots: 0,
+        }
+    );
+}
+
+#[test]
+fn unfinished_judging_blocks_reserve_selection_until_replayed() {
+    let submissions = vec![pending(1, 1, 17), ac(2, 2, 17), ac(3, 3, 17)];
+    let waiting = weighted_board(submissions.clone());
+    assert!(waiting.advancement(true).unwrap().is_none());
+
+    for accepted in [false, true] {
+        let mut resolved = submissions.clone();
+        resolved[0].pending = false;
+        resolved[0].accepted = accepted;
+        let result = weighted_board(resolved);
+        assert_eq!(
+            result.advancement(true).unwrap().unwrap().reserve_user_ids,
+            if accepted { vec![1, 2] } else { vec![2, 3] }
+        );
+    }
+}
+
+#[test]
+fn insufficient_scorers_leave_places_for_organizers_instead_of_selecting_zero_scores() {
+    let result = weighted_board(vec![ac(1, 1, 17), ac(2, 2, 1)]);
+    assert_eq!(
+        result.advancement(true).unwrap().unwrap(),
+        Advancement {
+            direct_user_ids: vec![],
+            reserve_user_ids: vec![1, 2],
+            unfilled_slots: 14,
+        }
+    );
+}
+
+#[test]
+fn invalid_capacity_never_silently_excludes_a_direct_qualifier() {
+    let mut result = weighted_board(vec![ac(1, 1, 17), ac(2, 1, 1), ac(3, 2, 18), ac(4, 2, 2)]);
+    result.config.advancement_slots = 1;
+    assert!(result.advancement(true).is_err());
 }

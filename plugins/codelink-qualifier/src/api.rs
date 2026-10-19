@@ -1,7 +1,7 @@
 use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
-use crate::config::ContestConfig;
+use crate::config::{ContestConfig, ProblemConfig};
 use crate::standings::{Participant, Problem, Submission, calculate};
 
 pub fn handle_contest_info(
@@ -58,7 +58,10 @@ pub fn handle_standings(
          WHERE contest_id = {} ORDER BY position, problem_id",
         p.bind(contest_id)
     );
-    let problems: Vec<Problem> = host.db.query_with_args(&sql, &p.into_args())?;
+    let mut problems: Vec<Problem> = host.db.query_with_args(&sql, &p.into_args())?;
+    for problem in &mut problems {
+        problem.points = ProblemConfig::load(host, contest_id, problem.problem_id)?.points;
+    }
 
     let mut p = Params::new();
     let sql = format!(
@@ -73,8 +76,10 @@ pub fn handle_standings(
         .db
         .query_with_args(include_str!("submissions.sql"), &[contest_id])?;
     let standings = calculate(participants, problems, submissions, &config)?;
+    let advancement = standings.advancement(info.phase == "after")?;
     let mut body = serde_json::to_value(standings)?;
     body["phase"] = serde_json::json!(info.phase);
+    body["advancement"] = serde_json::to_value(advancement)?;
 
     Ok(PluginHttpResponse {
         status: 200,

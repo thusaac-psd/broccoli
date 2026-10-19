@@ -28,7 +28,7 @@ scopes = ["contest"]
 type = "integer"
 title = "Expected Problem Count"
 description = "Show a setup notice when the actual problem count differs. Set to 0 to disable this check."
-default = 16
+default = 20
 min = 0
 max = 1000
 
@@ -42,9 +42,17 @@ max = 1000
 
 [config.contest.properties.solves_to_qualify]
 type = "integer"
-title = "Credited Problems to Qualify"
-description = "Number of different problems on which a contestant must earn a slot to qualify"
-default = 2
+title = "Points to Qualify"
+description = "Total points from credited problems needed to qualify directly. Qualified contestants keep their slots but stop earning points."
+default = 3
+min = 1
+max = 1000
+
+[config.contest.properties.advancement_slots]
+type = "integer"
+title = "Advancement Places"
+description = "Total places, including direct qualifiers and end-of-contest reserves. Reserves are selected by points, then earliest last scoring submission."
+default = 16
 min = 1
 max = 1000
 
@@ -55,6 +63,18 @@ description = "Automatic refresh interval in seconds. Set to 0 for manual refres
 default = 5
 min = 0
 max = 3600
+
+[config.problem]
+description = "Points awarded for a scoring slot on this contest problem. Set four of the twenty problems to 2 points."
+scopes = ["contest_problem"]
+
+[config.problem.properties.points]
+type = "integer"
+title = "Points per Scoring Slot"
+description = "Each eligible solver who earns a scoring slot receives this many points."
+default = 1
+min = 1
+max = 2
 
 [web]
 root = "frontend/dist"

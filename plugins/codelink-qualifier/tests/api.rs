@@ -55,6 +55,8 @@ fn route_rejects_other_contest_types_and_malformed_ids() {
 #[test]
 fn standings_show_global_slot_competition_and_unfinished_judgements() {
     let host = Host::mock();
+    host.config
+        .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
     host.db.queue_query_result(json!([{
         "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
     }]));
@@ -76,21 +78,28 @@ fn standings_show_global_slot_competition_and_unfinished_judgements() {
     assert_eq!(response.status, 200);
     let body = response.body.unwrap();
     assert_eq!(body["phase"], "during");
-    assert_eq!(body["expected_problem_count"], 16);
+    assert_eq!(body["expected_problem_count"], 20);
+    assert_eq!(body["solves_to_qualify"], 3);
+    assert_eq!(body["advancement_slots"], 16);
     assert_eq!(body["problem_count"], 2);
     assert_eq!(body["scoreboard_refresh_seconds"], 5);
     assert_eq!(body["qualified_count"], 1);
     assert_eq!(body["pending_submissions"], 1);
     assert_eq!(body["rows"][0]["user_id"], 1);
     assert_eq!(body["rows"][0]["credited"], 2);
+    assert_eq!(body["rows"][0]["score"], 3);
     assert_eq!(body["rows"][0]["qualification_verdict"], "qualified");
     assert_eq!(body["rows"][2]["problems"]["1"]["status"], "slots_full");
     assert_eq!(body["problems"][1]["remaining"], 1);
+    assert_eq!(body["problems"][1]["points"], 2);
+    assert!(body["advancement"].is_null());
 }
 
 #[test]
 fn standings_expose_only_pending_or_confirmed_verdicts_and_no_tentative_qualification() {
     let host = Host::mock();
+    host.config
+        .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
     host.db.queue_query_result(json!([{
         "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
     }]));
@@ -175,6 +184,7 @@ fn rules_and_standings_use_the_same_contest_config_and_actual_problem_count() {
         "expected_problem_count",
         "slots_per_problem",
         "solves_to_qualify",
+        "advancement_slots",
         "scoreboard_refresh_seconds",
         "problem_count",
     ] {
@@ -189,6 +199,68 @@ fn rules_and_standings_use_the_same_contest_config_and_actual_problem_count() {
         3
     );
     assert_eq!(standings["rows"][3]["credited"], 0);
+}
+
+#[test]
+fn final_advancement_is_available_only_after_the_contest_and_all_judging_finish() {
+    for (phase, pending) in [
+        ("before", false),
+        ("during", false),
+        ("after", true),
+        ("after", false),
+    ] {
+        let host = Host::mock();
+        host.config
+            .seed("contest_problem", "7:2", "problem", json!({"points": 2}));
+        host.db.queue_query_result(json!([{
+            "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": phase
+        }]));
+        host.db.queue_query_result(json!([
+            {"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}
+        ]));
+        host.db.queue_query_result(json!([
+            {"user_id": 1, "username": "one"}, {"user_id": 2, "username": "two"},
+            {"user_id": 3, "username": "three"}, {"user_id": 4, "username": "four"}
+        ]));
+        host.db.queue_query_result(json!([
+            {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "accepted": true, "pending": false},
+            {"submission_id": 2, "user_id": 1, "problem_id": 2, "submitted_at_us": 2000000, "accepted": true, "pending": false},
+            {"submission_id": 3, "user_id": 2, "problem_id": 2, "submitted_at_us": 3000000, "accepted": true, "pending": false},
+            {"submission_id": 4, "user_id": 3, "problem_id": 1, "submitted_at_us": 4000000, "accepted": !pending, "pending": pending}
+        ]));
+        let body = handle_standings(&host, &request()).unwrap().body.unwrap();
+        if phase != "after" || pending {
+            assert!(body["advancement"].is_null());
+        } else {
+            assert_eq!(
+                body["advancement"],
+                json!({
+                    "direct_user_ids": [1], "reserve_user_ids": [2, 3], "unfilled_slots": 13
+                })
+            );
+            assert_eq!(body["qualified_count"], 1);
+        }
+    }
+}
+
+#[test]
+fn invalid_problem_configuration_is_not_treated_as_a_one_point_problem() {
+    let host = Host::mock();
+    host.config
+        .seed("contest_problem", "7:1", "problem", json!({"points": 3}));
+    host.db.queue_query_result(json!([{
+        "contest_type": "codelink-qualifier", "is_public": true, "is_active": true, "phase": "during"
+    }]));
+    host.db
+        .queue_query_result(json!([{"problem_id": 1, "label": "A"}]));
+    assert_eq!(
+        handle_standings(&host, &request())
+            .unwrap_err()
+            .into_response()
+            .status,
+        500
+    );
+    assert_eq!(host.db.queries().len(), 2);
 }
 
 #[test]
