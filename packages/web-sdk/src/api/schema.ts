@@ -692,6 +692,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/contests/{id}/notifications': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Stream the current user's plugin notifications
+     * @description SSE with a ready cursor followed by notification events. Reconnect with after to replay. Connections close at token expiry or after one minute for reauthorization.
+     */
+    get: operations['streamContestNotifications'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/contests/{id}/participants': {
     parameters: {
       query?: never;
@@ -6372,6 +6392,60 @@ export interface operations {
         };
       };
       /** @description Contest not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  streamContestNotifications: {
+    parameters: {
+      query: {
+        plugin_id: string;
+        /** @description Omit on first connection to start at the present, without historical alerts. */
+        after?: string;
+      };
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description SSE ready and notification events */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'text/event-stream': string;
+        };
+      };
+      /** @description Invalid cursor or plugin */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Contest not found */
       404: {
         headers: {
           [name: string]: unknown;

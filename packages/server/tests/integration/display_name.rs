@@ -1,5 +1,5 @@
 use sea_orm::ConnectionTrait;
-use sea_orm_migration::MigratorTrait;
+use sea_orm_migration::{MigratorTrait, SchemaManager};
 use serde_json::json;
 
 use crate::common::{TestApp, routes};
@@ -223,9 +223,22 @@ async fn invalid_names_reject_the_whole_write() {
 async fn legacy_database_upgrade_and_restarts_preserve_account_names() {
     let app = TestApp::spawn().await;
     let token = app.create_authenticated_user("legacy", "securepass").await;
-    server::migration::Migrator::down(&app.db, Some(1))
+    // Roll back through this migration even when newer features append others.
+    let rollback_steps = server::migration::Migrator::migrations()
+        .iter()
+        .rev()
+        .position(|migration| migration.name() == "m0011_user_display_name")
+        .expect("display-name migration is registered")
+        + 1;
+    server::migration::Migrator::down(&app.db, Some(rollback_steps as u32))
         .await
         .unwrap();
+    assert!(
+        !SchemaManager::new(&app.db)
+            .has_column("user", "display_name")
+            .await
+            .unwrap()
+    );
     let upgraded = server::database::init_db(&app.state.config.database.url)
         .await
         .unwrap();

@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use axum::extract::{FromRef, FromRequestParts, OptionalFromRequestParts};
+use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
 
@@ -41,9 +42,8 @@ impl AuthUser {
 
 /// Decode and verify the `Bearer` access token from the request into its
 /// claims. Shared by [`AuthUser`] (stateless) and [`FreshAuthUser`].
-fn bearer_claims(parts: &Parts, secret: &str) -> Result<jwt::Claims, AppError> {
-    let auth_header = parts
-        .headers
+pub(crate) fn bearer_claims(headers: &HeaderMap, secret: &str) -> Result<jwt::Claims, AppError> {
+    let auth_header = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or(AppError::TokenMissing)?;
@@ -73,7 +73,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
-        let claims = bearer_claims(parts, &app_state.config.auth.jwt_secret)?;
+        let claims = bearer_claims(&parts.headers, &app_state.config.auth.jwt_secret)?;
         Ok(AuthUser::from(claims))
     }
 }
@@ -102,7 +102,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
-        let claims = bearer_claims(parts, &app_state.config.auth.jwt_secret)?;
+        let claims = bearer_claims(&parts.headers, &app_state.config.auth.jwt_secret)?;
 
         // One indexed read of the active user's credential-change stamp. A
         // missing row means the user was soft-deleted/deactivated -> reject.

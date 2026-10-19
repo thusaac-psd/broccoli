@@ -17,6 +17,7 @@ permissions = [
     "evaluator:evaluate",
     "config:read",
     "timer",
+    "notifications",
 ]
 
 [[server.queries]]
@@ -70,6 +71,13 @@ css = ["styles.css"]
 BracketScoreboard = "BracketScoreboard"
 BracketLiveXiaoju = "BracketLiveXiaoju"
 BracketContestInfo = "BracketContestInfo"
+BracketNotifications = "BracketNotifications"
+
+[[web.slots]]
+name = "contest.layout"
+position = "prepend"
+component = "BracketNotifications"
+contest_type = "codelink-bracket"
 
 [[web.slots]]
 name = "ranking.content"

@@ -734,6 +734,7 @@ fn step(
             Ok(())
         }
         XiaojuOutcome::Decided { .. } => {
+            m.notifications_from_game.get_or_insert(current_index);
             if m.state == MatchPhase::AwaitingJudge {
                 m.awaiting_submission_id = None;
                 // `AwaitingJudge` erased whether this 小局 was regular or
@@ -828,6 +829,9 @@ fn finish_transition(
         write_next_round_slot(host, contest, setup, updated, winner)?;
         try_open_stage(host, contest, updated.round + 1)?;
     }
+    // Persist notifications before acknowledging the recovery timers. A failed
+    // publish leaves the committed game intact and is repaired on redelivery.
+    crate::notifications::publish_games(host, contest, match_id, updated)?;
     for key in effective_timers {
         host.timer.cancel(&key)?;
     }
@@ -1337,6 +1341,117 @@ mod tests {
     fn queue_now(host: &Host, now: i64) {
         host.db
             .queue_query_result(serde_json::json!([{ "now_ms": now as f64 }]));
+    }
+
+    #[test]
+    fn each_small_game_notifies_both_players_before_the_match_ends() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        queue_now(&host, 30_000);
+        queue_subs(&host, vec![ac_row(10, 10_000)]);
+        advance(&host, 7, 0).unwrap();
+        let first = host.notifications.published();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].user_ids, vec![10, 20]);
+        assert_eq!(first[0].payload["winner"], 10);
+        assert_eq!(first[0].payload["game_index"], 0);
+        let running = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(running.state, MatchPhase::InProgress);
+        queue_now(&host, running.xiaoju.last().unwrap().deadline_ms);
+        queue_subs(&host, vec![]);
+        advance(&host, 7, 0).unwrap();
+        let second = host.notifications.published();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0], first[0]);
+        assert_eq!(second[1].payload["game_index"], 1);
+        assert!(second[1].payload["winner"].is_null());
+        assert_eq!(second[1].payload["score_a"], 1);
+    }
+
+    #[test]
+    fn notification_failure_retries_after_commit_without_rescoring() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        let timer = effective_timer_key(7, 0, 0, 10);
+        host.notifications.fail_next_publish();
+        queue_now(&host, 30_000);
+        queue_subs(&host, vec![ac_row(10, 10_000)]);
+        assert!(handle_timer(&host, &timer, 30_000).is_err());
+        let committed = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert!(committed.xiaoju[0].decided);
+        assert_eq!(committed.score_a, 1);
+        assert_eq!(host.timer.scheduled_at(&timer), Some(31_000));
+        queue_now(&host, 31_000);
+        queue_subs(&host, vec![]);
+        handle_timer(&host, &timer, 31_000).unwrap();
+        assert_eq!(host.notifications.published().len(), 1);
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().score_a,
+            1
+        );
+        crate::notifications::publish_games(&host, 7, 0, &committed).unwrap();
+        assert_eq!(host.notifications.published().len(), 1);
+    }
+
+    #[test]
+    fn only_decided_games_notify_including_tiebreaks_and_the_final_game() {
+        let host = Host::mock();
+        let mut m = match_in_progress();
+        m.notifications_from_game = Some(0);
+        for phase in [
+            MatchPhase::InProgress,
+            MatchPhase::AwaitingJudge,
+            MatchPhase::NeedsAdjudication,
+            MatchPhase::Decided,
+        ] {
+            m.state = phase;
+            crate::notifications::publish_games(&host, 7, 0, &m).unwrap();
+        }
+        assert!(host.notifications.published().is_empty());
+        m.xiaoju[0].decided = true;
+        // A legacy settled match has no notification baseline and stays quiet.
+        m.notifications_from_game = None;
+        crate::notifications::publish_games(&host, 7, 0, &m).unwrap();
+        assert!(host.notifications.published().is_empty());
+        m.notifications_from_game = Some(3);
+        m.xiaoju[0].index = 3;
+        m.xiaoju[0].winner = Some(20);
+        crate::notifications::publish_games(&host, 7, 0, &m).unwrap();
+        let messages = host.notifications.published();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload["tiebreak"], true);
+        assert_eq!(messages[0].payload["game_number"], 1);
+        assert_eq!(messages[0].payload["winner"], 20);
+        // A restarted setup may reuse match/game ids, but not its opening time.
+        m.xiaoju[0].opened_at_ms = 42_000;
+        crate::notifications::publish_games(&host, 7, 0, &m).unwrap();
+        assert_eq!(host.notifications.published().len(), 2);
+    }
+
+    #[test]
+    fn upgrading_a_running_match_only_notifies_games_settled_after_the_upgrade() {
+        let host = Host::mock();
+        let mut m = match_in_progress();
+        m.xiaoju[0].decided = true;
+        m.xiaoju[0].winner = Some(20);
+        m.score_b = 1;
+        let mut current = m.xiaoju[0].clone();
+        current.index = 1;
+        current.opened_at_ms = 30_000;
+        current.decided = false;
+        current.winner = None;
+        m.xiaoju.push(current);
+        seed(&host, 7, &setup_two_rounds(), 0, &m);
+        queue_now(&host, 60_000);
+        let mut submission = ac_row(10, 40_000);
+        submission["problem_id"] = serde_json::json!(101);
+        queue_subs(&host, vec![submission]);
+        advance(&host, 7, 0).unwrap();
+        let messages = host.notifications.published();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].payload["game_index"], 1);
+        assert_eq!(messages[0].payload["score_a"], 1);
+        assert_eq!(messages[0].payload["score_b"], 1);
     }
 
     #[test]

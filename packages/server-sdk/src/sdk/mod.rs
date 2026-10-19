@@ -5,6 +5,7 @@ mod db;
 mod eval;
 mod language;
 mod logger;
+mod notifications;
 mod operations;
 mod registry;
 mod shared;
@@ -19,6 +20,7 @@ pub use db::{Db, Transaction};
 pub use eval::Eval;
 pub use language::Language;
 pub use logger::Logger;
+pub use notifications::Notifications;
 pub use operations::Operations;
 pub use registry::Registry;
 pub use storage::Storage;
@@ -41,6 +43,7 @@ pub struct Host {
     pub language: Language,
     pub registry: Registry,
     pub timer: Timer,
+    pub notifications: Notifications,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -59,6 +62,7 @@ impl Host {
             language: Language {},
             registry: Registry {},
             timer: Timer {},
+            notifications: Notifications::default(),
         }
     }
 }
@@ -97,6 +101,7 @@ impl Host {
             timer: Timer {
                 inner: timer::TimerMock::new(),
             },
+            notifications: Notifications::default(),
         }
     }
 }

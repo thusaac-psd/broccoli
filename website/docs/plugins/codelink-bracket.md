@@ -38,6 +38,27 @@ just build-plugin plugins/codelink-qualifier --install
 just build-plugin plugins/codelink-bracket --install
 ```
 
+## Receive game reminders
+
+Select **Enable desktop notifications** on an afternoon contest page and allow
+notifications in your browser. Select **Test notification** before playing to
+check your desktop notification settings. The site must use HTTPS or localhost.
+
+Both players receive a result when each regular game or tiebreak game ends.
+The message says whether you won, your opponent won, or time expired without
+either player scoring. It also shows the score after that game.
+
+Game results stay on the page until you dismiss them. When the contest tab is
+hidden or its window is out of focus, an enabled desktop notification also
+appears. Click it to return to the contest. Keep a contest page open while
+working in another application. Changing contest pages keeps the reminders
+connected, and a brief disconnection resumes from the last received event.
+Opening a contest for the first time does not replay its previous results.
+
+If you denied notification permission, allow it in the browser's site settings.
+If the test does not appear, check the desktop's notification and do not disturb
+settings. A closed or suspended browser page cannot receive these reminders.
+
 ## Create the contest
 
 1. In the contest editor, choose `codelink-bracket` as the contest type and

@@ -27,6 +27,7 @@ mod m0008_submission_feedback;
 mod m0009_retired_submission_feedback;
 mod m0010_plugin_submission_feedback;
 mod m0011_user_display_name;
+mod m0012_plugin_notifications;
 
 pub(crate) use m0011_user_display_name::prepare_column as prepare_user_display_name;
 
@@ -47,6 +48,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0009_retired_submission_feedback::Migration),
             Box::new(m0010_plugin_submission_feedback::Migration),
             Box::new(m0011_user_display_name::Migration),
+            Box::new(m0012_plugin_notifications::Migration),
         ]
     }
 }
