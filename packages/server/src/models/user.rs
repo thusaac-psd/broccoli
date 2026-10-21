@@ -7,6 +7,7 @@ pub struct UserResponse {
     pub id: i32,
     #[schema(example = "alice")]
     pub username: String,
+    pub display_name: String,
     #[schema(example = json!(["contestant"]))]
     pub roles: Vec<String>,
     #[schema(example = "2026-03-05T10:00:00Z")]
@@ -18,6 +19,7 @@ impl From<crate::entity::user::ModelEx> for UserResponse {
         Self {
             id: user.id,
             username: user.username,
+            display_name: user.display_name,
             roles: user.roles.into_iter().map(|r| r.name).collect(),
             created_at: user.created_at,
         }
@@ -27,6 +29,8 @@ impl From<crate::entity::user::ModelEx> for UserResponse {
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
+    /// Omit to keep the current name. Updates require user:manage.
+    pub display_name: Option<String>,
     pub password: Option<String>,
 }
 
@@ -52,6 +56,8 @@ pub struct RoleResponse {
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateUserRequest {
     pub username: String,
+    /// Defaults to the initial username when omitted or blank.
+    pub display_name: Option<String>,
     pub password: Option<String>,
 }
 
@@ -65,9 +71,20 @@ pub struct BulkCreateUsersRequest {
 pub struct CreatedUserResponse {
     pub id: i32,
     pub username: String,
+    pub display_name: String,
     pub roles: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub password: String,
+}
+
+pub fn normalize_display_name(name: &str) -> Result<String, crate::error::AppError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err(crate::error::AppError::Validation(
+            "Display name must be 1-64 characters without control characters".into(),
+        ));
+    }
+    Ok(name.to_owned())
 }
 
 pub fn validate_account_credentials(
@@ -117,4 +134,18 @@ pub fn validate_create_users(users: &[CreateUserRequest]) -> Result<(), crate::e
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_display_name;
+
+    #[test]
+    fn display_names_trim_whitespace_and_count_unicode_characters() {
+        assert_eq!(normalize_display_name(" 第一队 🌱 ").unwrap(), "第一队 🌱");
+        assert!(normalize_display_name(&"🌱".repeat(64)).is_ok());
+        for name in [" ".to_owned(), "🌱".repeat(65), "bad\nname".to_owned()] {
+            assert!(normalize_display_name(&name).is_err());
+        }
+    }
 }

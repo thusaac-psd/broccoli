@@ -389,7 +389,7 @@ export function Sidebar() {
                 <SidebarMenuButton>
                   <User className="h-4 w-4" />
                   <span className="flex-1">
-                    {user ? user.username : t('sidebar.guest')}
+                    {user ? user.display_name : t('sidebar.guest')}
                   </span>
                   <ChevronUp className="ml-auto h-4 w-4" />
                 </SidebarMenuButton>

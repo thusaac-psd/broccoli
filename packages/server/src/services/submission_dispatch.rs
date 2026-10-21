@@ -1079,6 +1079,7 @@ mod tests {
         let old = Utc::now() - chrono::Duration::seconds(3600);
         let u = user::ActiveModel {
             username: Set("dispatch-test-user".to_string()),
+            display_name: Set("dispatch-test-user".to_string()),
             password: Set("x".to_string()),
             created_at: Set(old),
             ..Default::default()

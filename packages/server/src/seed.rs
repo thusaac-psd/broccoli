@@ -133,6 +133,7 @@ pub async fn ensure_bootstrap_admin(
     let txn = db.begin().await?;
     let created = user::ActiveModel {
         username: Set(username.to_string()),
+        display_name: Set(username.to_string()),
         password: Set(password_hash),
         created_at: Set(chrono::Utc::now()),
         ..Default::default()

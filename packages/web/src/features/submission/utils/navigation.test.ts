@@ -20,6 +20,7 @@ import {
 const setter: User = {
   id: 7,
   username: 'setter',
+  display_name: 'Setter',
   roles: ['setter'],
   permissions: [SUBMISSION_VIEW_ALL, PROBLEM_CREATE],
 };

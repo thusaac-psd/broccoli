@@ -230,6 +230,7 @@ mod tests {
         let now = chrono::Utc::now();
         let u = user::ActiveModel {
             username: Set("reaper-user".to_string()),
+            display_name: Set("reaper-user".to_string()),
             password: Set("x".to_string()),
             created_at: Set(now),
             ..Default::default()

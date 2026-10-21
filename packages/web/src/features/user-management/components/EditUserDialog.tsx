@@ -1,4 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -16,6 +17,7 @@ import { Loader2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
+import { DisplayNameField } from '@/components/DisplayNameField';
 import type { ManagedUserRow } from '@/features/user-management/types';
 
 interface EditUserDialogProps {
@@ -32,14 +34,17 @@ export function EditUserDialog({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const { user: signedInUser, refresh } = useAuth();
 
   const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open || !user) return;
     setUsername(user.username);
+    setDisplayName(user.display_name);
     setPassword('');
   }, [open, user]);
 
@@ -49,7 +54,15 @@ export function EditUserDialog({
 
     const nextUsername = username.trim();
     const nextPassword = password.trim();
-    const body: { username?: string; password?: string } = {};
+    const body: {
+      username?: string;
+      display_name?: string;
+      password?: string;
+    } = {};
+
+    if (displayName.trim() !== user.display_name) {
+      body.display_name = displayName.trim();
+    }
 
     if (nextUsername && nextUsername !== user.username) {
       body.username = nextUsername;
@@ -79,6 +92,9 @@ export function EditUserDialog({
     toast.success(t('users.users.updateUserSuccess'));
     queryClient.invalidateQueries({ queryKey: ['admin-users'] });
     queryClient.invalidateQueries({ queryKey: ['admin-user-detail', user.id] });
+    queryClient.invalidateQueries({ queryKey: ['all-users-for-participants'] });
+    queryClient.invalidateQueries({ queryKey: ['contest-participants'] });
+    if (signedInUser?.id === user.id) await refresh();
     onOpenChange(false);
   }
 
@@ -109,6 +125,14 @@ export function EditUserDialog({
               disabled={isSubmitting}
             />
           </div>
+
+          <DisplayNameField
+            id="edit-user-display-name"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            required
+            disabled={isSubmitting}
+          />
 
           <div className="space-y-2">
             <Label htmlFor="edit-user-password">

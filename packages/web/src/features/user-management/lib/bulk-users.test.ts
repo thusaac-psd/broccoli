@@ -11,11 +11,41 @@ test('normalizes usernames while preserving supplied passwords exactly', () => {
       { username: 'carol', password: null },
     ]),
     [
-      { username: 'alice', password: undefined },
-      { username: 'bob', password: ' supplied_pass ' },
-      { username: 'carol', password: undefined },
+      { username: 'alice', display_name: 'alice', password: undefined },
+      { username: 'bob', display_name: 'bob', password: ' supplied_pass ' },
+      { username: 'carol', display_name: 'carol', password: undefined },
     ],
   );
+});
+
+test('preserves independent Unicode names and defaults blank names for legacy imports', () => {
+  const users = normalizeBulkUsers([
+    { username: 'a', display_name: ' 第一队 🌱 ' },
+    { username: 'b', display_name: '第一队 🌱' },
+    { username: 'c', display_name: '  ' },
+    { username: 'd', display_name: null },
+    { username: 'e', display_name: '🌱'.repeat(64) },
+  ]);
+  assert.deepEqual(
+    users.map((u) => u.display_name),
+    ['第一队 🌱', '第一队 🌱', 'c', 'd', '🌱'.repeat(64)],
+  );
+});
+
+test('rejects malformed display names before sending an import', () => {
+  for (const display_name of [
+    123,
+    false,
+    {},
+    '张'.repeat(65),
+    'bad\nname',
+    'bad\0name',
+  ]) {
+    assert.throws(
+      () => normalizeBulkUsers([{ username: 'a', display_name }]),
+      /InvalidDisplayName/,
+    );
+  }
 });
 
 test('rejects invalid and duplicate usernames before an import', () => {

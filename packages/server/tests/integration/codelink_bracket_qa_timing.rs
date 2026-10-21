@@ -2599,8 +2599,8 @@ async fn smallest_and_largest_brackets_complete_through_every_stage() {
                 .db
                 .query_all_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    r#"INSERT INTO "user" (username, password, created_at, credentials_changed_at)
-                   SELECT 'boundary_player_' || n, password, now(), now()
+                    r#"INSERT INTO "user" (username, display_name, password, created_at, credentials_changed_at)
+                   SELECT 'boundary_player_' || n, 'boundary_player_' || n, password, now(), now()
                    FROM "user" CROSS JOIN generate_series(1, 112) AS n WHERE id = $1
                    RETURNING id"#,
                     [players[0].id.into()],

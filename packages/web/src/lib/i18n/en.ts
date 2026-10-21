@@ -345,6 +345,11 @@ export const en: Record<string, string> = {
   'auth.loginTitle': 'Sign In',
   'auth.registerTitle': 'Create Account',
   'auth.username': 'Username',
+  'auth.displayName': 'Display name',
+  'auth.displayNameHint':
+    'Shown to other users. Leave blank to use the username. Only administrators can change it later.',
+  'auth.displayNameEditHint':
+    '1–64 characters. Changing this name does not change the login username.',
   'auth.password': 'Password',
   'auth.confirmPassword': 'Confirm Password',
   'auth.login': 'Sign In',
@@ -429,7 +434,7 @@ export const en: Record<string, string> = {
   'users.create.passwordHint':
     'Leave blank to generate a password, or enter 8–128 bytes.',
   'users.create.bulkHint':
-    'Import 1–100 usernames or objects with username and optional password. Existing usernames reject the entire import.',
+    'Import 1–100 usernames or objects with username, optional display_name and password. Existing usernames reject the entire import.',
   'users.create.preview': '{count} users will be created.',
   'users.create.suppliedPassword': 'Supplied password',
   'users.create.confirm': 'Create all users',
@@ -543,7 +548,7 @@ export const en: Record<string, string> = {
   'admin.participants.removeConfirm': 'Remove {username} from this contest?',
   'admin.bulkParticipantsJsonLabel': 'JSON File or JSON Content',
   'admin.bulkParticipantsJsonPlaceholder':
-    '["alice", "bob", { "username": "charlie", "password": "custom_pass123" }]',
+    '["alice", { "username": "team001", "display_name": "Team One", "password": "custom_pass123" }]',
   'admin.bulkParticipantsPreview': 'Preview',
   'admin.bulkParticipantsConfirm': 'Confirm Enrollment',
   'admin.bulkParticipantsPreviewTitle': 'Preview',
@@ -555,6 +560,8 @@ export const en: Record<string, string> = {
   'admin.bulkParticipantsInvalidUsername':
     'Invalid username format. Use letters, digits, and underscores (1-32 chars).',
   'admin.bulkParticipantsInvalidPassword': 'Password must be 8-128 characters.',
+  'admin.bulkParticipantsInvalidDisplayName':
+    'Display name must be a string of 1–64 characters without control characters.',
   'admin.bulkParticipantsExistingWithPassword':
     'Existing users must not include password in preview input.',
   'admin.bulkParticipantsExistingWithPasswordList':

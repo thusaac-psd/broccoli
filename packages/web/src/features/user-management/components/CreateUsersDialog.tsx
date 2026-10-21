@@ -23,10 +23,12 @@ import { Download, Loader2 } from 'lucide-react';
 import { useId, useState } from 'react';
 import { toast } from 'sonner';
 
+import { DisplayNameField } from '@/components/DisplayNameField';
 import {
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
+import { downloadUserCredentials } from '@/features/user-management/lib/user-credentials';
 
 export function CreateUsersDialog({
   onOpenChange,
@@ -40,6 +42,7 @@ export function CreateUsersDialog({
   const formId = useId();
   const [tab, setTab] = useState('single');
   const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [jsonText, setJsonText] = useState('');
   const [preview, setPreview] = useState<ParsedBulkUser[] | null>(null);
@@ -123,25 +126,6 @@ export function CreateUsersDialog({
     }
   }
 
-  function downloadCredentials() {
-    if (!created) return;
-    const text = JSON.stringify(
-      created.map(({ username, password }) => ({ username, password })),
-      null,
-      2,
-    );
-    const url = URL.createObjectURL(
-      new Blob([text], { type: 'application/json' }),
-    );
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'user-credentials.json';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }
-
   return (
     <Dialog
       open
@@ -170,6 +154,7 @@ export function CreateUsersDialog({
                 <thead>
                   <tr className="border-b bg-muted/40">
                     <th className="p-2 text-start">{t('auth.username')}</th>
+                    <th className="p-2 text-start">{t('auth.displayName')}</th>
                     <th className="p-2 text-start">
                       {t('admin.field.password')}
                     </th>
@@ -179,6 +164,7 @@ export function CreateUsersDialog({
                   {created.map((user) => (
                     <tr key={user.id} className="border-b last:border-0">
                       <td className="p-2">{user.username}</td>
+                      <td className="p-2">{user.display_name}</td>
                       <td className="p-2 font-mono select-all">
                         {user.password}
                       </td>
@@ -188,7 +174,10 @@ export function CreateUsersDialog({
               </table>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={downloadCredentials}>
+              <Button
+                variant="outline"
+                onClick={() => downloadUserCredentials(created)}
+              >
                 <Download className="h-4 w-4 mr-2" />
                 {t('users.create.download')}
               </Button>
@@ -223,7 +212,11 @@ export function CreateUsersDialog({
                   try {
                     void submit(
                       parseUsers([
-                        { username, password: password || undefined },
+                        {
+                          username,
+                          display_name: displayName,
+                          password: password || undefined,
+                        },
                       ]),
                     );
                   } catch (error) {
@@ -249,6 +242,15 @@ export function CreateUsersDialog({
                     }}
                   />
                 </div>
+                <DisplayNameField
+                  id={`${formId}-display-name`}
+                  value={displayName}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setDisplayName(e.target.value);
+                    clearRequest();
+                  }}
+                />
                 <div className="space-y-2">
                   <Label htmlFor={`${formId}-password`}>
                     {t('users.users.passwordOptional')}
@@ -338,7 +340,12 @@ export function CreateUsersDialog({
                         key={entry.username}
                         className="flex justify-between gap-4 py-1"
                       >
-                        <span>{entry.username}</span>
+                        <span>
+                          {entry.display_name}{' '}
+                          <span className="text-muted-foreground">
+                            ({entry.username})
+                          </span>
+                        </span>
                         <span className="text-muted-foreground">
                           {t(
                             entry.password

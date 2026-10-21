@@ -79,6 +79,7 @@ export function AuthProvider({
       setUser({
         id: data.id,
         username: data.username,
+        display_name: data.display_name,
         roles: data.roles,
         permissions: data.permissions,
       });
@@ -99,6 +100,7 @@ export function AuthProvider({
       setUser({
         id: resData.id,
         username: resData.username,
+        display_name: resData.display_name,
         roles: resData.roles,
         permissions: resData.permissions,
       });

@@ -1,5 +1,6 @@
 export type ParsedBulkUser = {
   username: string;
+  display_name: string;
   password?: string;
 };
 
@@ -13,14 +14,20 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
 
   for (const item of input) {
     let username = '';
+    let displayName: unknown;
     let password: string | undefined;
 
     if (typeof item === 'string') {
       username = item.trim();
     } else if (item && typeof item === 'object') {
-      const record = item as { username?: unknown; password?: unknown };
+      const record = item as {
+        username?: unknown;
+        display_name?: unknown;
+        password?: unknown;
+      };
       username =
         typeof record.username === 'string' ? record.username.trim() : '';
+      displayName = record.display_name;
       if (record.password != null && typeof record.password !== 'string') {
         throw new Error('admin.bulkParticipantsInvalidPassword');
       }
@@ -45,13 +52,22 @@ export function normalizeBulkUsers(input: unknown): ParsedBulkUser[] {
       throw new Error('admin.bulkParticipantsInvalidPassword');
     }
 
+    if (displayName != null && typeof displayName !== 'string') {
+      throw new Error('admin.bulkParticipantsInvalidDisplayName');
+    }
+    const name =
+      (typeof displayName === 'string' ? displayName.trim() : '') || username;
+    if ([...name].length > 64 || /\p{Cc}/u.test(name)) {
+      throw new Error('admin.bulkParticipantsInvalidDisplayName');
+    }
+
     const key = username.toLowerCase();
     if (seen.has(key)) {
       throw new Error('admin.bulkParticipantsDuplicate');
     }
     seen.add(key);
 
-    users.push({ username, password });
+    users.push({ username, display_name: name, password });
   }
 
   if (users.length === 0) {
