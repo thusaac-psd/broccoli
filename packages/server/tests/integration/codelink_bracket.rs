@@ -525,16 +525,26 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     );
 
     // === Phase 3: 小局 0 - current-not-future, and the submission gate ===
-    let notification_path =
-        format!("/api/v1/contests/{contest_id}/notifications?plugin_id=codelink-bracket");
-    let mut notification_stream = app.download_raw(&notification_path, &a.token).await;
-    assert_eq!(notification_stream.status(), 200);
-    let mut notification_buffer = String::new();
-    assert!(
-        crate::notifications::next_frame(&mut notification_stream, &mut notification_buffer)
-            .await
-            .contains("event: ready")
+    let stream_url = format!(
+        "http://{}{}",
+        app.addr,
+        bracket_route(contest_id, "/bracket")
     );
+    let mut streams = Vec::new();
+    for token in [&a.token, &b.token] {
+        let mut response = app
+            .client
+            .get(&stream_url)
+            .bearer_auth(token)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut buffer = Vec::new();
+        crate::common::sse_snapshot(&mut response, &mut buffer, |_| true).await;
+        streams.push((response, buffer));
+    }
     let ids_for_a = visible_problem_ids(&app, contest_id, &a.token).await;
     assert!(
         ids_for_a.contains(&(rounds[0].group_a[0] as i64)),
@@ -605,12 +615,15 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     .await;
     assert_eq!(view["score_b"].as_i64(), Some(0));
 
-    // Real WASM -> gated host function -> durable record -> authenticated SSE.
-    // The first alert must arrive while the whole match is still in progress.
-    assert_eq!(view["state"], "in_progress");
-    let first_notice =
-        crate::notifications::next_frame(&mut notification_stream, &mut notification_buffer).await;
-    assert!(first_notice.contains("\"game_index\":0"), "{first_notice}");
+    // Both players see game zero settled while the whole match is still live.
+    for (response, buffer) in &mut streams {
+        let snapshot = crate::common::sse_snapshot(response, buffer, |v| {
+            v["matches"][0]["games"][0]["decided"] == true
+        })
+        .await;
+        assert_eq!(snapshot["matches"][0]["state"], "in_progress");
+        assert_eq!(snapshot["matches"][0]["games"][0]["winner"], a.id);
+    }
 
     // === Submission-read assertions ======================================
     let res = app
@@ -674,12 +687,6 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     assert_eq!(view["score_b"].as_i64(), Some(0));
 
     // === Phase 5: 小局 2 - nobody submits; the real plugin timer decides =
-    let second_notice =
-        crate::notifications::next_frame(&mut notification_stream, &mut notification_buffer).await;
-    assert!(
-        second_notice.contains("\"game_index\":1"),
-        "{second_notice}"
-    );
     let view = poll_match(
         &app,
         contest_id,
@@ -696,20 +703,18 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     );
     assert_eq!(view["score_a"].as_i64(), Some(2));
     assert_eq!(view["score_b"].as_i64(), Some(0));
-    let third_notice =
-        crate::notifications::next_frame(&mut notification_stream, &mut notification_buffer).await;
-    assert!(third_notice.contains("\"game_index\":2"), "{third_notice}");
-    assert!(third_notice.contains("\"winner\":null"), "{third_notice}");
-    drop(notification_stream);
-    let opponent_notices =
-        server::services::notifications::after(&app.db, contest_id, b.id, "codelink-bracket", 0)
-            .await
-            .unwrap();
-    assert_eq!(
-        opponent_notices.len(),
-        3,
-        "both players receive every small-game result exactly once"
-    );
+    for (response, buffer) in &mut streams {
+        let snapshot = crate::common::sse_snapshot(response, buffer, |v| {
+            v["matches"][0]["state"] == "decided"
+        })
+        .await;
+        let games = snapshot["matches"][0]["games"].as_array().unwrap();
+        assert_eq!(games.len(), 3);
+        assert!(games.iter().all(|game| game["decided"] == true));
+        assert_eq!(games[1]["winner"], a.id);
+        assert!(games[2]["winner"].is_null());
+    }
+    drop(streams);
 
     // === Phase 6: force-decide match 1, then check the next-round slot ===
     let res = app

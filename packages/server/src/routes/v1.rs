@@ -406,7 +406,6 @@ fn additional_file_routes() -> OpenApiRouter<AppState> {
 
 fn contest_routes(submission_max_size: usize) -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
-        .routes(routes!(handlers::notifications::stream_notifications))
         .routes(routes!(
             handlers::contest::list_contests,
             handlers::contest::create_contest,

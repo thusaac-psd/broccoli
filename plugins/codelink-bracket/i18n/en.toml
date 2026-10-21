@@ -221,5 +221,4 @@
 'codelink-bracket.notifications.unsupported' = 'Desktop notifications require a supported browser and a secure connection. Game results will still appear on this page.'
 'codelink-bracket.notifications.reconnecting' = 'Connecting to game reminders…'
 'codelink-bracket.notifications.error' = 'The desktop notification could not be shown. Check your browser and system notification settings.'
-'codelink-bracket.notifications.dismiss' = 'Dismiss game result'
 'codelink-bracket.notifications.view' = 'View my match'

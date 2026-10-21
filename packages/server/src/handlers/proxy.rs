@@ -1,11 +1,16 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::http::header::AUTHORIZATION;
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Query, State},
     http::{HeaderMap, Method, Response},
-    response::IntoResponse,
+    response::{
+        IntoResponse, Sse,
+        sse::{Event, KeepAlive},
+    },
 };
 use plugin_core::http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
 use plugin_core::traits::PluginInvokerExt;
@@ -251,6 +256,75 @@ async fn handle_plugin_request_impl(
         .map_err(|e| AppError::Internal(format!("Failed to build plugin response: {}", e)))
 }
 
+/// Stream changed snapshots of an existing GET route. Every read goes through
+/// the ordinary proxy, including its authentication and plugin access checks.
+async fn stream_plugin_request(
+    state: AppState,
+    plugin_id: String,
+    sub_path: String,
+    headers: HeaderMap,
+    query: HashMap<String, String>,
+    body: String,
+) -> Result<Response<Body>, AppError> {
+    let read = move || {
+        handle_plugin_request_impl(
+            state.clone(),
+            plugin_id.clone(),
+            sub_path.clone(),
+            Method::GET,
+            headers.clone(),
+            query.clone(),
+            body.clone(),
+        )
+    };
+    let first = read().await?;
+    if !first.status().is_success() {
+        return Ok(first);
+    }
+    let until = tokio::time::Instant::now() + Duration::from_secs(60);
+    let stream =
+        futures::stream::unfold((Some(first), None), move |(mut pending, mut previous)| {
+            let read = read.clone();
+            async move {
+                loop {
+                    let response = match pending.take() {
+                        Some(first) => first,
+                        None => {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if tokio::time::Instant::now() >= until {
+                                return None;
+                            }
+                            match read().await {
+                                Ok(response) if response.status().is_success() => response,
+                                _ => return None, // Reconnect through the normal HTTP auth flow.
+                            }
+                        }
+                    };
+                    // This is the finite JSON body produced by the proxy above,
+                    // not an unbounded request or upstream network stream.
+                    let bytes = to_bytes(response.into_body(), usize::MAX).await.ok()?;
+                    if previous.as_ref() == Some(&bytes) {
+                        continue;
+                    }
+                    let snapshot = std::str::from_utf8(&bytes).ok()?;
+                    let event = Event::default().event("snapshot").data(snapshot);
+                    previous = Some(bytes);
+                    return Some((Ok::<_, Infallible>(event), (None, previous)));
+                }
+            }
+        });
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response();
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", "no".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("cache-control", "no-cache, no-transform".parse().unwrap());
+    Ok(response)
+}
+
 macro_rules! proxy_handler {
     ($fn_name:ident, $method:ident, $op_id:expr, $summary:expr, request_body = $body_type:ty) => {
         #[utoipa::path(
@@ -317,6 +391,11 @@ macro_rules! proxy_handler {
             Query(query): Query<HashMap<String, String>>,
             body: String,
         ) -> Result<impl IntoResponse, AppError> {
+            if method == Method::GET
+                && headers.get("accept").is_some_and(|value| value == "text/event-stream")
+            {
+                return stream_plugin_request(state, plugin_id, sub_path, headers, query, body).await;
+            }
             handle_plugin_request_impl(state, plugin_id, sub_path, method, headers, query, body).await
         }
     };

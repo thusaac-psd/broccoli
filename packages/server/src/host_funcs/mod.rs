@@ -7,7 +7,6 @@ pub mod evaluate_ops_registry;
 pub mod feedback;
 pub mod language;
 pub mod logger;
-pub mod notifications;
 pub mod registry;
 pub mod sql;
 pub mod storage;
@@ -76,17 +75,6 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     // which build plugin-scoped SQL the server controls and run outside the
     // plugin role's boundary (core DDL, `plugin_login_secret`).
     let privileged_db = deps.system.privileged_db.clone();
-
-    let notifications_db = privileged_db.clone();
-    hr.register("notifications", move |plugin_id| {
-        Function::new(
-            "notification_publish",
-            [ValType::I64],
-            [ValType::I64],
-            UserData::new((plugin_id.to_string(), notifications_db.clone())),
-            notifications::notification_publish,
-        )
-    });
 
     let feedback_db = privileged_db.clone();
     hr.register("submission", move |plugin_id| {

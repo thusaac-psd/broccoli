@@ -541,6 +541,38 @@ pub struct TestResponse {
     pub body: Value,
 }
 
+/// Read a matching JSON snapshot without losing frames split across HTTP chunks.
+pub(crate) async fn sse_snapshot(
+    response: &mut reqwest::Response,
+    buffer: &mut Vec<u8>,
+    matches: impl Fn(&Value) -> bool,
+) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(end) = buffer.windows(2).position(|bytes| bytes == b"\n\n") {
+                let frame: Vec<_> = buffer.drain(..end + 2).collect();
+                let frame = std::str::from_utf8(&frame).unwrap();
+                if let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) {
+                    let snapshot = serde_json::from_str(data).unwrap();
+                    if matches(&snapshot) {
+                        return snapshot;
+                    }
+                }
+            } else {
+                buffer.extend(
+                    response
+                        .chunk()
+                        .await
+                        .unwrap()
+                        .expect("SSE ended before the expected snapshot"),
+                );
+            }
+        }
+    })
+    .await
+    .expect("snapshot should arrive promptly")
+}
+
 /// Per-test config knobs that diverge from the default fixture in
 /// `Self::spawn_internal`. Add a field here when a test needs to
 /// observe a non-default `ServerConfig` value rather than copy-pasting

@@ -1,15 +1,14 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button } from '@broccoli/web-sdk/ui';
-import { Bell, BellRing, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Button, toast } from '@broccoli/web-sdk/ui';
+import { Bell } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 
 import { useGameNotifications } from './hooks/useGameNotifications';
 import { useMyMatch } from './hooks/useMyMatch';
 import {
   claimDesktopNotification,
-  type GameNotification,
   gameNotificationText,
   readStorage,
   writeStorage,
@@ -55,10 +54,11 @@ function NotificationCenter({
   const [enabled, setEnabled] = useState(
     () => readStorage('localStorage', preferenceKey) === 'true',
   );
-  const [messages, setMessages] = useState<GameNotification[]>([]);
+  const shown = useRef(new Set<string>());
   const [error, setError] = useState(false);
 
   useEffect(() => {
+    const ids = shown.current;
     const refresh = () => {
       setPermission(notificationPermission());
       const saved = readStorage('localStorage', preferenceKey);
@@ -69,6 +69,7 @@ function NotificationCenter({
     return () => {
       window.removeEventListener('focus', refresh);
       window.removeEventListener('storage', refresh);
+      ids.forEach((id) => toast.dismiss(id));
     };
   }, [preferenceKey]);
 
@@ -90,25 +91,26 @@ function NotificationCenter({
   const connected = useGameNotifications(
     contestId,
     viewerId,
-    true,
     async (message, signal) => {
-      setMessages((previous) =>
-        previous.some((m) => m.key === message.key)
-          ? previous
-          : [...previous, message],
-      );
+      const key = `codelink:${viewerId}:${contestId}:${message.key}`;
+      const { title, body } = gameNotificationText(message, t);
+      shown.current.add(key);
+      toast.info(title, {
+        id: key,
+        description: body,
+        duration: Infinity,
+        closeButton: true,
+        style: { borderColor: 'var(--primary)', borderWidth: 2 },
+        action: {
+          label: t('codelink-bracket.notifications.view'),
+          onClick: () => navigate(`/contests/${contestId}`),
+        },
+      });
       if (!enabled || notificationPermission() !== 'granted') return;
       if (document.visibilityState === 'visible' && document.hasFocus()) return;
-      const key = `codelink:${viewerId}:${contestId}:${message.key}`;
       try {
-        if ((await claimDesktopNotification(key)) && !signal.aborted) {
-          const { title, body } = gameNotificationText(
-            message.game,
-            viewerId,
-            t,
-          );
+        if ((await claimDesktopNotification(key)) && !signal.aborted)
           showDesktop(title, body, key);
-        }
       } catch {
         setError(true);
       }
@@ -144,89 +146,42 @@ function NotificationCenter({
           : 'hint';
 
   return (
-    <>
-      <aside className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-4 py-2 text-sm">
-        <Bell className="h-4 w-4 shrink-0 text-primary" />
-        <span className="text-muted-foreground">
-          {t(`codelink-bracket.notifications.${status}`)}
+    <aside className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-4 py-2 text-sm">
+      <Bell className="h-4 w-4 shrink-0 text-primary" />
+      <span className="text-muted-foreground">
+        {t(`codelink-bracket.notifications.${status}`)}
+      </span>
+      {permission !== 'unsupported' && permission !== 'denied' && (
+        <Button size="sm" variant="outline" onClick={() => void toggle()}>
+          {t(`codelink-bracket.notifications.${active ? 'disable' : 'enable'}`)}
+        </Button>
+      )}
+      {active && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setError(false);
+            showDesktop(
+              t('codelink-bracket.notifications.testTitle'),
+              t('codelink-bracket.notifications.testBody'),
+              `codelink:test:${viewerId}`,
+            );
+          }}
+        >
+          {t('codelink-bracket.notifications.test')}
+        </Button>
+      )}
+      {!connected && (
+        <span className="text-amber-700 dark:text-amber-300">
+          {t('codelink-bracket.notifications.reconnecting')}
         </span>
-        {permission !== 'unsupported' && permission !== 'denied' && (
-          <Button size="sm" variant="outline" onClick={() => void toggle()}>
-            {t(
-              `codelink-bracket.notifications.${active ? 'disable' : 'enable'}`,
-            )}
-          </Button>
-        )}
-        {active && (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setError(false);
-              showDesktop(
-                t('codelink-bracket.notifications.testTitle'),
-                t('codelink-bracket.notifications.testBody'),
-                `codelink:test:${viewerId}`,
-              );
-            }}
-          >
-            {t('codelink-bracket.notifications.test')}
-          </Button>
-        )}
-        {!connected && (
-          <span className="text-amber-700 dark:text-amber-300">
-            {t('codelink-bracket.notifications.reconnecting')}
-          </span>
-        )}
-        {error && (
-          <span role="status" className="text-destructive">
-            {t('codelink-bracket.notifications.error')}
-          </span>
-        )}
-      </aside>
-      <div
-        aria-live="polite"
-        aria-relevant="additions"
-        className="fixed bottom-4 right-4 z-50 max-h-[50vh] w-[calc(100%-2rem)] max-w-md space-y-3 overflow-y-auto"
-      >
-        {messages.map((message) => {
-          const { title, body } = gameNotificationText(
-            message.game,
-            viewerId,
-            t,
-          );
-          return (
-            <section
-              key={message.key}
-              className="rounded-xl border-2 border-primary bg-card p-4 text-card-foreground shadow-xl"
-            >
-              <div className="flex items-start gap-2">
-                <BellRing className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-                <p className="flex-1 font-semibold">{title}</p>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-6 w-6 shrink-0"
-                  aria-label={t('codelink-bracket.notifications.dismiss')}
-                  onClick={() =>
-                    setMessages((previous) =>
-                      previous.filter((m) => m.key !== message.key),
-                    )
-                  }
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-              <p className="mt-2 text-sm">{body}</p>
-              <Button asChild size="sm" variant="outline" className="mt-3">
-                <Link to={`/contests/${contestId}`}>
-                  {t('codelink-bracket.notifications.view')}
-                </Link>
-              </Button>
-            </section>
-          );
-        })}
-      </div>
-    </>
+      )}
+      {error && (
+        <span role="status" className="text-destructive">
+          {t('codelink-bracket.notifications.error')}
+        </span>
+      )}
+    </aside>
   );
 }

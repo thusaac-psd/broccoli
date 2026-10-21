@@ -147,6 +147,119 @@ mod plugin_management {
 mod plugin_routing {
     use super::*;
 
+    #[tokio::test]
+    async fn get_route_streams_changed_snapshots_and_reconnects_at_current_state() {
+        use crate::common::sse_snapshot;
+        use std::time::Duration;
+        let app = TestApp::spawn_with_plugins().await;
+        let path = routes::plugin_proxy("server-plugin", "kv/stream");
+        assert_eq!(
+            app.post_without_token(&path, &json!({"value": "first"}))
+                .await
+                .status,
+            200
+        );
+        let url = format!("http://{}{}", app.addr, path);
+        let mut response = app
+            .client
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+        assert!(response.headers().get("content-encoding").is_none());
+        let mut buffer = Vec::new();
+        assert_eq!(
+            sse_snapshot(&mut response, &mut buffer, |_| true).await["value"],
+            "first"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(1200),
+                sse_snapshot(&mut response, &mut buffer, |_| true)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            app.post_without_token(&path, &json!({"value": "second"}))
+                .await
+                .status,
+            200
+        );
+        assert_eq!(
+            sse_snapshot(&mut response, &mut buffer, |_| true).await["value"],
+            "second"
+        );
+        drop(response);
+        let mut resumed = app
+            .client
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            sse_snapshot(&mut resumed, &mut Vec::new(), |_| true).await["value"],
+            "second"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_get_keeps_permission_checks_and_stops_when_identity_is_revoked() {
+        use crate::common::sse_snapshot;
+        use sea_orm::ConnectionTrait;
+        use std::time::Duration;
+        let app = TestApp::spawn_with_plugins().await;
+        let url = format!(
+            "http://{}{}",
+            app.addr,
+            routes::plugin_proxy("server-plugin", "protected/123")
+        );
+        let missing = app
+            .client
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), 401);
+        let token = app
+            .create_user_with_role("stream_admin", "securepass", "admin")
+            .await;
+        let mut response = app
+            .client
+            .get(&url)
+            .bearer_auth(&token)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let first = sse_snapshot(&mut response, &mut Vec::new(), |_| true).await;
+        assert!(first["auth_user_id"].is_number());
+        app.db.execute_unprepared(r#"UPDATE "user" SET credentials_changed_at = now() + interval '2 seconds' WHERE username = 'stream_admin'"#).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), response.chunk())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        let revoked = app
+            .client
+            .get(&url)
+            .bearer_auth(&token)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), 401);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn public_route_returns_correct_response() {
         let app = TestApp::spawn_with_plugins().await;

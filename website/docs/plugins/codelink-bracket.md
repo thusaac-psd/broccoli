@@ -52,7 +52,7 @@ Game results stay on the page until you dismiss them. When the contest tab is
 hidden or its window is out of focus, an enabled desktop notification also
 appears. Click it to return to the contest. Keep a contest page open while
 working in another application. Changing contest pages keeps the reminders
-connected, and a brief disconnection resumes from the last received event.
+connected, and a brief disconnection recovers missed results from the game history.
 Opening a contest for the first time does not replay its previous results.
 
 If you denied notification permission, allow it in the browser's site settings.

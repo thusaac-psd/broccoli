@@ -12,7 +12,6 @@ pub mod gate;
 pub mod judge;
 pub mod migration;
 pub mod model;
-pub mod notifications;
 pub mod ordering;
 pub mod routes;
 pub mod setup;

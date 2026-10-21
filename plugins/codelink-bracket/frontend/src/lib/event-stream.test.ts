@@ -11,19 +11,18 @@ test('SSE handles one-byte chunks, CRLF, multiline data and keepalives', () => {
   assert.deepEqual(events, [
     {
       event: 'notification',
-      id: '9007199254740993',
       data: 'first\nsecond:part',
     },
   ]);
 });
 
-test('SSE preserves the last event id and ignores incomplete events', () => {
+test('SSE ignores incomplete events', () => {
   const parser = new EventStreamParser();
   assert.deepEqual(
     parser.push('id: 1\ndata: a\n\ndata: b\n\nid: 2\ndata: unfinished'),
     [
-      { event: 'message', id: '1', data: 'a' },
-      { event: 'message', id: '1', data: 'b' },
+      { event: 'message', data: 'a' },
+      { event: 'message', data: 'b' },
     ],
   );
 });

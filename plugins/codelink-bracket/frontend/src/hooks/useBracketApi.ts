@@ -13,7 +13,8 @@ import type {
   StartResponse,
 } from '../types.ts';
 
-const PLUGIN_BASE = '/api/v1/p/codelink-bracket/api/plugins/codelink-bracket';
+export const PLUGIN_BASE =
+  '/api/v1/p/codelink-bracket/api/plugins/codelink-bracket';
 
 export class ApiError extends Error {
   status: number;

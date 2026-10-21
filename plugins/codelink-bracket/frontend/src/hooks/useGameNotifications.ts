@@ -1,19 +1,20 @@
-import { readEventStream, useApiFetch } from '@broccoli/web-sdk/api';
+import { useApiFetch } from '@broccoli/web-sdk/api';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
+import { readEventStream } from '../lib/event-stream';
 import {
   type GameNotification,
-  isCursor,
-  parseGameNotification,
+  gameUpdates,
   readStorage,
   writeStorage,
 } from '../lib/notifications';
+import type { BracketResponse } from '../types';
+import { PLUGIN_BASE } from './useBracketApi';
 
 export function useGameNotifications(
   contestId: number | undefined,
   viewerId: number | undefined,
-  enabled: boolean,
   onNotification: (
     notification: GameNotification,
     signal: AbortSignal,
@@ -28,23 +29,29 @@ export function useGameNotifications(
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    if (!enabled || !contestId || !viewerId) return;
+    if (!contestId || !viewerId) return;
     const controller = new AbortController();
     const { signal } = controller;
-    const cursorKey = `codelink:cursor:${viewerId}:${contestId}`;
-    const stored = readStorage('sessionStorage', cursorKey);
-    let cursor = isCursor(stored) ? stored : undefined;
+    const seenKey = `codelink:seen-games:${viewerId}:${contestId}`;
+    let seen: string[] | null = null;
+    try {
+      const saved: unknown = JSON.parse(
+        readStorage('sessionStorage', seenKey) ?? 'null',
+      );
+      if (Array.isArray(saved) && saved.every((key) => typeof key === 'string'))
+        seen = saved;
+    } catch {
+      /* A missing/invalid baseline starts with the current games. */
+    }
     let retryMs = 1_000;
 
     const run = async () => {
       while (!signal.aborted) {
         const started = Date.now();
         try {
-          const query = new URLSearchParams({ plugin_id: 'codelink-bracket' });
-          if (cursor !== undefined) query.set('after', cursor);
           const response = await apiFetch(
-            `/api/v1/contests/${contestId}/notifications?${query}`,
-            { signal },
+            `${PLUGIN_BASE}/contests/${contestId}/bracket`,
+            { signal, headers: { Accept: 'text/event-stream' } },
           );
           if ([401, 403, 404].includes(response.status)) return;
           if (
@@ -58,26 +65,20 @@ export function useGameNotifications(
           }
           setConnected(true);
           await readEventStream(response.body, async (event) => {
-            if (signal.aborted || !isCursor(event.id)) return;
-            if (event.event === 'ready') {
-              cursor = event.id;
-              writeStorage('sessionStorage', cursorKey, cursor);
-              return;
-            }
-            if (
-              event.event !== 'notification' ||
-              (cursor !== undefined && BigInt(event.id) <= BigInt(cursor))
-            )
-              return;
-            const notification = parseGameNotification(event.data, viewerId);
-            if (notification) {
+            if (signal.aborted || event.event !== 'snapshot') return;
+            const snapshot = JSON.parse(event.data) as BracketResponse;
+            const update = gameUpdates(snapshot.matches, viewerId, seen);
+            for (const notification of update.notifications) {
+              if (signal.aborted) return;
               await callback.current(notification, signal);
+            }
+            seen = update.seen;
+            writeStorage('sessionStorage', seenKey, JSON.stringify(seen));
+            if (update.notifications.length) {
               void queryClient.invalidateQueries({
                 queryKey: ['codelink-bracket-bracket', contestId],
               });
             }
-            cursor = event.id;
-            writeStorage('sessionStorage', cursorKey, cursor);
           });
           // The server regularly closes healthy streams for reauthorization.
           // Reconnect directly: a background setTimeout can be throttled for a minute.
@@ -107,7 +108,7 @@ export function useGameNotifications(
     };
     void run();
     return () => controller.abort();
-  }, [apiFetch, contestId, enabled, queryClient, viewerId]);
+  }, [apiFetch, contestId, queryClient, viewerId]);
 
-  return enabled && connected;
+  return connected;
 }

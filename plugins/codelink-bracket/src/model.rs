@@ -133,10 +133,6 @@ pub struct MatchState {
     /// ranked by player A (B's opponent). `None` until A submits a ranking.
     pub order_b: Option<Vec<i32>>,
     pub xiaoju: Vec<XiaojuState>,
-    /// First game settled with notification support. Pinned in the same CAS as
-    /// that result, so upgrading a running match never alerts for older games.
-    #[serde(default)]
-    pub notifications_from_game: Option<u8>,
     pub score_a: u8,
     pub score_b: u8,
     pub state: MatchPhase,

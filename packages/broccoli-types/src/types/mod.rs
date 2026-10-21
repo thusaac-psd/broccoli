@@ -5,7 +5,6 @@ mod evaluate;
 mod hook;
 pub mod hook_events;
 mod http;
-mod notification;
 mod operation;
 mod persistence;
 mod query;
@@ -34,7 +33,6 @@ pub use evaluate::{
 pub use hook::HookResponse;
 pub use hook_events::{AfterJudgingEvent, AfterSubmissionEvent, BeforeSubmissionEvent, HookEvent};
 pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse};
-pub use notification::PublishNotification;
 pub use operation::{
     Channel, DEFAULT_OPERATION_RESULT_TIMEOUT_MS, DetachedOperationCallbackAction,
     DetachedOperationCallbackEvent, DetachedOperationCallbackInput,

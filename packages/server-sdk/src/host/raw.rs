@@ -117,5 +117,4 @@ str_host_fns! {
     submission_query_test_cases(input),
     timer_schedule(input),
     timer_cancel(input),
-    notification_publish(input),
 }

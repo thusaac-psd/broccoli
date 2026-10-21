@@ -1,88 +1,61 @@
-export interface GameEnded {
-  match_id: number;
-  round: number;
-  game_index: number;
-  game_number: number;
-  tiebreak: boolean;
-  winner: number | null;
-  player_a: number;
-  player_b: number;
-  score_a: number;
-  score_b: number;
-}
+import type { MatchView } from '../types.ts';
+import { gameLabel } from './stage.ts';
 
 export interface GameNotification {
-  id: string;
   key: string;
-  game: GameEnded;
+  label: ReturnType<typeof gameLabel>;
+  result: 'won' | 'lost' | 'timeout';
+  score: [number, number];
 }
 
-export function isCursor(value: unknown): value is string {
-  return typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value);
-}
-
-export function parseGameNotification(
-  data: string,
+/** Compare settled games, including earlier rounds retained in the bracket. */
+export function gameUpdates(
+  matches: MatchView[],
   viewerId: number,
-): GameNotification | null {
-  let wire: { id?: unknown; key?: unknown; kind?: unknown; payload?: unknown };
-  try {
-    wire = JSON.parse(data);
-  } catch {
-    return null;
+  seen: string[] | null,
+): { notifications: GameNotification[]; seen: string[] } {
+  const known = new Set(seen ?? []);
+  const notifications: GameNotification[] = [];
+  for (const match of matches
+    .filter((m) => m.player_a === viewerId || m.player_b === viewerId)
+    .sort((a, b) => a.round - b.round)) {
+    let scoreA = 0;
+    let scoreB = 0;
+    for (const game of match.games) {
+      if (!game.decided) continue;
+      scoreA += Number(game.winner === match.player_a);
+      scoreB += Number(game.winner === match.player_b);
+      const key = `game:${match.id}:${game.index}:${game.opened_at_ms}`;
+      // The first snapshot establishes a baseline, not a batch of old alerts.
+      if (seen !== null && !known.has(key)) {
+        notifications.push({
+          key,
+          label: gameLabel(match, game.index),
+          result:
+            game.winner === null
+              ? 'timeout'
+              : game.winner === viewerId
+                ? 'won'
+                : 'lost',
+          score:
+            viewerId === match.player_a ? [scoreA, scoreB] : [scoreB, scoreA],
+        });
+      }
+      known.add(key);
+    }
   }
-  if (
-    !wire ||
-    !isCursor(wire.id) ||
-    typeof wire.key !== 'string' ||
-    !wire.key ||
-    wire.kind !== 'game-ended'
-  )
-    return null;
-  const g = wire.payload as GameEnded | undefined;
-  if (
-    !g ||
-    ![
-      g.match_id,
-      g.round,
-      g.game_index,
-      g.game_number,
-      g.player_a,
-      g.player_b,
-      g.score_a,
-      g.score_b,
-    ].every((n) => Number.isSafeInteger(n) && n >= 0) ||
-    g.round < 1 ||
-    g.game_number < 1 ||
-    typeof g.tiebreak !== 'boolean' ||
-    (g.player_a !== viewerId && g.player_b !== viewerId) ||
-    (g.winner !== null && g.winner !== g.player_a && g.winner !== g.player_b)
-  ) {
-    return null;
-  }
-  return { id: wire.id, key: wire.key, game: g };
+  return { notifications, seen: [...known] };
 }
 
 export function gameNotificationText(
-  game: GameEnded,
-  viewerId: number,
+  notification: GameNotification,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): { title: string; body: string } {
-  const label = t(
-    `codelink-bracket.game.${game.tiebreak ? 'tiebreak' : 'regular'}`,
-    { n: game.game_number },
-  );
-  const result =
-    game.winner === null
-      ? 'timeout'
-      : game.winner === viewerId
-        ? 'won'
-        : 'lost';
-  const ownScore = viewerId === game.player_a ? game.score_a : game.score_b;
-  const theirScore = viewerId === game.player_a ? game.score_b : game.score_a;
   return {
-    title: t('codelink-bracket.notifications.title', { game: label }),
-    body: `${t(`codelink-bracket.notifications.${result}`)} ${t('codelink-bracket.notifications.score', { own: ownScore, opponent: theirScore })}`,
+    title: t('codelink-bracket.notifications.title', {
+      game: t(...notification.label),
+    }),
+    body: `${t(`codelink-bracket.notifications.${notification.result}`)} ${t('codelink-bracket.notifications.score', { own: notification.score[0], opponent: notification.score[1] })}`,
   };
 }
 

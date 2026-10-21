@@ -11,7 +11,6 @@ pub mod dlq;
 pub mod health;
 pub mod i18n;
 pub mod meta;
-pub mod notifications;
 pub mod plugin;
 pub mod plugin_config;
 pub mod problem;

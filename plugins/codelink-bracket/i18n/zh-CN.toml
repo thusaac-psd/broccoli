@@ -221,5 +221,4 @@
 'codelink-bracket.notifications.unsupported' = '桌面通知需要支持的浏览器和安全连接，小局结果仍会在页面内显示。'
 'codelink-bracket.notifications.reconnecting' = '正在连接小局提醒…'
 'codelink-bracket.notifications.error' = '无法显示桌面通知，请检查浏览器和系统的通知设置。'
-'codelink-bracket.notifications.dismiss' = '关闭小局结果提示'
 'codelink-bracket.notifications.view' = '查看我的对局'

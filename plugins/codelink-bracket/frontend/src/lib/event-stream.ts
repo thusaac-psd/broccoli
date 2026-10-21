@@ -1,6 +1,5 @@
 export interface ServerEvent {
   event: string;
-  id: string;
   data: string;
 }
 
@@ -8,7 +7,6 @@ export interface ServerEvent {
 export class EventStreamParser {
   private buffer = '';
   private event = '';
-  private id = '';
   private data: string[] = [];
 
   push(chunk: string): ServerEvent[] {
@@ -27,7 +25,6 @@ export class EventStreamParser {
         if (this.data.length) {
           events.push({
             event: this.event || 'message',
-            id: this.id,
             data: this.data.join('\n'),
           });
         }
@@ -41,7 +38,6 @@ export class EventStreamParser {
       const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
       if (field === 'data') this.data.push(value);
       if (field === 'event') this.event = value;
-      if (field === 'id' && !value.includes('\0')) this.id = value;
     }
     return events;
   }

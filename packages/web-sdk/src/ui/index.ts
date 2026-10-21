@@ -25,3 +25,4 @@ export * from '@/ui/tabs';
 export * from '@/ui/text-preview';
 export * from '@/ui/textarea';
 export * from '@/ui/tooltip';
+export { toast } from 'sonner';

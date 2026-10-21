@@ -18,7 +18,6 @@ mod downloads_slim;
 mod health;
 mod hook_enablement;
 mod meta;
-mod notifications;
 mod permission_fixture;
 mod plugin;
 mod plugin_config;
