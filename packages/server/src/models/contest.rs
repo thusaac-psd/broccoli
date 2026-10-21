@@ -201,6 +201,7 @@ pub struct ContestParticipantResponse {
     pub user_id: i32,
     #[schema(example = "alice_wonder")]
     pub username: String,
+    pub display_name: String,
     pub is_deleted: bool,
     #[schema(example = "2025-09-30T12:00:00Z")]
     pub registered_at: DateTime<Utc>,
@@ -333,6 +334,7 @@ pub fn validate_bulk_delete_contest_problems(
 pub struct CreateUserEntry {
     #[schema(example = "charlie")]
     pub username: String,
+    pub display_name: Option<String>,
     #[schema(example = "custom_pass123")]
     pub password: Option<String>,
 }
@@ -345,12 +347,23 @@ pub struct BulkAddParticipantsRequest {
     pub create_users: Vec<CreateUserEntry>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct BulkParticipantAdded {
     #[schema(example = 5)]
     pub user_id: i32,
     #[schema(example = "alice")]
     pub username: String,
+    pub display_name: String,
+}
+
+impl From<crate::entity::user::Model> for BulkParticipantAdded {
+    fn from(user: crate::entity::user::Model) -> Self {
+        Self {
+            user_id: user.id,
+            username: user.username,
+            display_name: user.display_name,
+        }
+    }
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -359,6 +372,7 @@ pub struct BulkParticipantCreated {
     pub user_id: i32,
     #[schema(example = "charlie")]
     pub username: String,
+    pub display_name: String,
     #[schema(example = "aB3$kLm9xQ2z")]
     pub password: String,
 }

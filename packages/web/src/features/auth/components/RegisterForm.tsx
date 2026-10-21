@@ -14,12 +14,15 @@ import {
 import { type FormEvent, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 
+import { DisplayNameField } from '@/components/DisplayNameField';
+
 export default function RegisterForm() {
   const { t } = useTranslation();
   const { login } = useAuth();
   const navigate = useNavigate();
 
   const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
@@ -53,7 +56,7 @@ export default function RegisterForm() {
 
     try {
       const { error: regError } = await apiClient.POST('/auth/register', {
-        body: { username, password },
+        body: { username, display_name: displayName, password },
       });
 
       if (regError) {
@@ -93,6 +96,12 @@ export default function RegisterForm() {
               required
             />
           </div>
+          <DisplayNameField
+            id="register-display-name"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            disabled={isSubmitting}
+          />
           <div className="space-y-2">
             <Label htmlFor="password">{t('auth.password')}</Label>
             <Input

@@ -25,7 +25,14 @@ import {
 } from '@broccoli/web-sdk/ui';
 import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Search, Upload, UserMinus, UserPlus, Users } from 'lucide-react';
+import {
+  Download,
+  Search,
+  Upload,
+  UserMinus,
+  UserPlus,
+  Users,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -33,22 +40,25 @@ import {
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
+import { downloadUserCredentials } from '@/features/user-management/lib/user-credentials';
+import type { ManagedUserRow } from '@/features/user-management/types';
 
 // -- Types --
 
-type UserPreviewItem = {
-  id: number;
-  username: string;
-  roles: string[];
-  created_at: string;
-};
+type UserPreviewItem = ManagedUserRow;
 
 type ParticipantItem = {
   user_id: number;
   username: string;
+  display_name: string;
   is_deleted: boolean;
   registered_at: string;
 };
+
+type ParticipantIdentity = Pick<
+  ParticipantItem,
+  'user_id' | 'username' | 'display_name'
+>;
 
 // -- Helpers --
 
@@ -88,7 +98,9 @@ function EnrolledTab({
     const q = search.toLowerCase();
     return participants.filter(
       (p) =>
-        p.username.toLowerCase().includes(q) || String(p.user_id).includes(q),
+        p.username.toLowerCase().includes(q) ||
+        p.display_name.toLowerCase().includes(q) ||
+        String(p.user_id).includes(q),
     );
   }, [participants, search]);
 
@@ -158,6 +170,9 @@ function EnrolledTab({
                   {t('auth.username')}
                 </th>
                 <th className="px-3 py-2 text-left font-medium text-foreground/80">
+                  {t('auth.displayName')}
+                </th>
+                <th className="px-3 py-2 text-left font-medium text-foreground/80">
                   {t('admin.participants.registeredAt')}
                 </th>
                 <th className="px-3 py-2 text-right font-medium text-foreground/80 w-20" />
@@ -180,6 +195,9 @@ function EnrolledTab({
                     ) : (
                       p.username
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-muted-foreground">
+                    {p.is_deleted ? '—' : p.display_name}
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">
                     {formatDateTime(p.registered_at, locale)}
@@ -239,7 +257,10 @@ function AddParticipantsTab({
     if (!search) return unenrolledUsers;
     const q = search.toLowerCase();
     return unenrolledUsers.filter(
-      (u) => u.username.toLowerCase().includes(q) || String(u.id).includes(q),
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        u.display_name.toLowerCase().includes(q) ||
+        String(u.id).includes(q),
     );
   }, [unenrolledUsers, search]);
 
@@ -307,6 +328,9 @@ function AddParticipantsTab({
                   {t('auth.username')}
                 </th>
                 <th className="px-3 py-2 text-left font-medium text-foreground/80">
+                  {t('auth.displayName')}
+                </th>
+                <th className="px-3 py-2 text-left font-medium text-foreground/80">
                   {t('admin.field.role')}
                 </th>
                 <th className="px-3 py-2 text-right font-medium text-foreground/80 w-20" />
@@ -320,6 +344,7 @@ function AddParticipantsTab({
                 >
                   <td className="px-3 py-2 text-muted-foreground">{u.id}</td>
                   <td className="px-3 py-2 font-medium">{u.username}</td>
+                  <td className="px-3 py-2">{u.display_name}</td>
                   <td className="px-3 py-2 text-muted-foreground">
                     {u.roles.join(', ')}
                   </td>
@@ -373,6 +398,9 @@ function PreviewUserTable({
               {t('auth.username')}
             </th>
             <th className="px-3 py-2 text-left font-medium text-foreground/80">
+              {t('auth.displayName')}
+            </th>
+            <th className="px-3 py-2 text-left font-medium text-foreground/80">
               {t('admin.field.role')}
             </th>
           </tr>
@@ -385,6 +413,7 @@ function PreviewUserTable({
             >
               <td className="px-3 py-2">{user.id}</td>
               <td className="px-3 py-2">{user.username}</td>
+              <td className="px-3 py-2">{user.display_name}</td>
               <td className="px-3 py-2">{user.roles.join(', ')}</td>
             </tr>
           ))}
@@ -410,9 +439,9 @@ function BulkImportTab({
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState<{
-    added: { user_id: number; username: string }[];
-    created: { user_id: number; username: string; password: string }[];
-    already_enrolled: { user_id: number; username: string }[];
+    added: ParticipantIdentity[];
+    created: (ParticipantIdentity & { password: string })[];
+    already_enrolled: ParticipantIdentity[];
     not_found: string[];
   } | null>(null);
   const [preview, setPreview] = useState<{
@@ -450,6 +479,7 @@ function BulkImportTab({
         allUsersMap.set(user.username.toLowerCase(), {
           id: user.id,
           username: user.username,
+          display_name: user.display_name,
           roles: user.roles,
           created_at: user.created_at,
         });
@@ -520,6 +550,9 @@ function BulkImportTab({
           case 'admin.bulkParticipantsInvalidPassword':
             setErrorMsg(t('admin.bulkParticipantsInvalidPassword'));
             break;
+          case 'admin.bulkParticipantsInvalidDisplayName':
+            setErrorMsg(t('admin.bulkParticipantsInvalidDisplayName'));
+            break;
           default:
             setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
             break;
@@ -552,6 +585,7 @@ function BulkImportTab({
           usernames: preview.willAdd.map((user) => user.username),
           create_users: preview.willCreate.map((entry) => ({
             username: entry.username,
+            display_name: entry.display_name,
             password: entry.password,
           })),
         },
@@ -572,6 +606,8 @@ function BulkImportTab({
     queryClient.invalidateQueries({
       queryKey: ['contest-participants', contest.id],
     });
+    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+    queryClient.invalidateQueries({ queryKey: ['all-users-for-participants'] });
   }
 
   return (
@@ -667,6 +703,9 @@ function BulkImportTab({
                       {t('auth.username')}
                     </th>
                     <th className="px-3 py-2 text-left font-medium text-foreground/80">
+                      {t('auth.displayName')}
+                    </th>
+                    <th className="px-3 py-2 text-left font-medium text-foreground/80">
                       {t('admin.field.password')}
                     </th>
                   </tr>
@@ -678,6 +717,7 @@ function BulkImportTab({
                       className="border-b last:border-0"
                     >
                       <td className="px-3 py-2">{entry.username}</td>
+                      <td className="px-3 py-2">{entry.display_name}</td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
                         {entry.password ??
                           t('admin.bulkParticipantsAutoPassword')}
@@ -755,11 +795,28 @@ function BulkImportTab({
 
           {result.created.length > 0 && (
             <div className="rounded-md border overflow-hidden">
+              <div className="p-2">
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    downloadUserCredentials(
+                      result.created,
+                      `contest-${contest.id}-user-credentials.json`,
+                    )
+                  }
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  {t('users.create.download')}
+                </Button>
+              </div>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40">
                     <th className="px-3 py-2 text-left font-medium text-foreground/80">
                       {t('auth.username')}
+                    </th>
+                    <th className="px-3 py-2 text-left font-medium text-foreground/80">
+                      {t('auth.displayName')}
                     </th>
                     <th className="px-3 py-2 text-left font-medium text-foreground/80">
                       {t('admin.field.password')}
@@ -770,6 +827,7 @@ function BulkImportTab({
                   {result.created.map((entry) => (
                     <tr key={entry.user_id} className="border-b last:border-0">
                       <td className="px-3 py-2">{entry.username}</td>
+                      <td className="px-3 py-2">{entry.display_name}</td>
                       <td className="px-3 py-2 font-mono text-xs">
                         {entry.password}
                       </td>
@@ -794,6 +852,9 @@ function BulkImportTab({
                     <th className="px-3 py-2 text-left font-medium text-foreground/80">
                       {t('auth.username')}
                     </th>
+                    <th className="px-3 py-2 text-left font-medium text-foreground/80">
+                      {t('auth.displayName')}
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -801,6 +862,7 @@ function BulkImportTab({
                     <tr key={entry.user_id} className="border-b last:border-0">
                       <td className="px-3 py-2">{entry.user_id}</td>
                       <td className="px-3 py-2">{entry.username}</td>
+                      <td className="px-3 py-2">{entry.display_name}</td>
                     </tr>
                   ))}
                 </tbody>

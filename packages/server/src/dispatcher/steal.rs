@@ -1298,6 +1298,7 @@ mod deferred_steal_db_tests {
         let now = chrono::Utc::now();
         let u = user::ActiveModel {
             username: Set("steal-test-user".to_string()),
+            display_name: Set("steal-test-user".to_string()),
             password: Set("x".to_string()),
             created_at: Set(now),
             ..Default::default()

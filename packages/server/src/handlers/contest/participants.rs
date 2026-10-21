@@ -96,6 +96,7 @@ pub async fn add_participant(
                     contest_id: model.contest_id,
                     user_id: model.user_id,
                     username: target_user.username,
+                    display_name: target_user.display_name,
                     is_deleted: target_user.deleted_at.is_some(),
                     registered_at: model.registered_at,
                 }),
@@ -158,6 +159,10 @@ pub async fn list_participants(
             contest_id: cu.contest_id,
             user_id: cu.user_id,
             username: usr.as_ref().map(|u| u.username.clone()).unwrap_or_default(),
+            display_name: usr
+                .as_ref()
+                .map(|u| u.display_name.clone())
+                .unwrap_or_default(),
             is_deleted: usr.as_ref().is_some_and(|u| u.deleted_at.is_some()),
             registered_at: cu.registered_at,
         })
@@ -325,7 +330,11 @@ pub async fn bulk_add_participants(
         payload
             .create_users
             .iter()
-            .map(|e| (e.username.clone(), e.password.clone()))
+            .map(|e| crate::models::user::CreateUserRequest {
+                username: e.username.clone(),
+                display_name: e.display_name.clone(),
+                password: e.password.clone(),
+            })
             .collect(),
     )
     .await?;
@@ -338,7 +347,7 @@ pub async fn bulk_add_participants(
     let mut already_enrolled = Vec::new();
     let mut not_found = Vec::new();
 
-    let mut users_to_enroll: Vec<(i32, String)> = Vec::new();
+    let mut users_to_enroll: Vec<BulkParticipantAdded> = Vec::new();
 
     let existing_created_user_map = if hashed_entries.is_empty() {
         std::collections::HashMap::new()
@@ -352,31 +361,26 @@ pub async fn bulk_add_participants(
             .all(&txn)
             .await?
             .into_iter()
-            .map(|user| (user.username.clone(), user.id))
+            .map(|user| (user.username.clone(), BulkParticipantAdded::from(user)))
             .collect::<std::collections::HashMap<_, _>>()
     };
 
     for entry in hashed_entries {
-        let username = entry.username;
-        if let Some(&existing_user_id) = existing_created_user_map.get(&username) {
-            users_to_enroll.push((existing_user_id, username));
+        let username = &entry.username;
+        if let Some(existing_user) = existing_created_user_map.get(username) {
+            users_to_enroll.push(existing_user.clone());
             continue;
         }
 
-        match crate::services::user_accounts::insert_account(
-            &txn,
-            username.clone(),
-            entry.password_hash,
-        )
-        .await
-        {
+        match crate::services::user_accounts::insert_account(&txn, &entry).await {
             Ok(user) => {
                 created_response.push(BulkParticipantCreated {
                     user_id: user.id,
                     username: username.clone(),
+                    display_name: user.display_name.clone(),
                     password: entry.password,
                 });
-                users_to_enroll.push((user.id, username));
+                users_to_enroll.push(user.into());
             }
             Err(AppError::UsernameTaken) => {
                 return Err(AppError::Validation(format!(
@@ -399,14 +403,14 @@ pub async fn bulk_add_participants(
             .all(&txn)
             .await?;
 
-        let found_map: std::collections::HashMap<String, i32> = found_users
-            .iter()
-            .map(|u| (u.username.clone(), u.id))
+        let found_map: std::collections::HashMap<String, BulkParticipantAdded> = found_users
+            .into_iter()
+            .map(|u| (u.username.clone(), u.into()))
             .collect();
 
         for name in &trimmed_usernames {
-            if let Some(&uid) = found_map.get(name) {
-                users_to_enroll.push((uid, name.clone()));
+            if let Some(user) = found_map.get(name) {
+                users_to_enroll.push(user.clone());
             } else {
                 not_found.push(name.clone());
             }
@@ -419,9 +423,9 @@ pub async fn bulk_add_participants(
     // (contest_id, user_id) would raise a unique violation which, caught inside
     // this transaction, would abort the whole batch (see the enrol loop below).
     let mut seen_enroll_uids = std::collections::HashSet::new();
-    users_to_enroll.retain(|(uid, _)| seen_enroll_uids.insert(*uid));
+    users_to_enroll.retain(|user| seen_enroll_uids.insert(user.user_id));
 
-    let user_ids_to_check: Vec<i32> = users_to_enroll.iter().map(|(id, _)| *id).collect();
+    let user_ids_to_check: Vec<i32> = users_to_enroll.iter().map(|user| user.user_id).collect();
     let already_enrolled_ids: std::collections::HashSet<i32> = if !user_ids_to_check.is_empty() {
         contest_user::Entity::find()
             .filter(contest_user::Column::ContestId.eq(contest_id))
@@ -441,13 +445,11 @@ pub async fn bulk_add_participants(
     let created_user_ids: std::collections::HashSet<i32> =
         created_response.iter().map(|c| c.user_id).collect();
 
-    for (uid, name) in users_to_enroll {
+    for user in users_to_enroll {
+        let uid = user.user_id;
         if already_enrolled_ids.contains(&uid) {
             if !created_user_ids.contains(&uid) {
-                already_enrolled.push(BulkParticipantAdded {
-                    user_id: uid,
-                    username: name,
-                });
+                already_enrolled.push(user);
             }
             continue;
         }
@@ -479,15 +481,9 @@ pub async fn bulk_add_participants(
             continue;
         }
         if inserted == 0 {
-            already_enrolled.push(BulkParticipantAdded {
-                user_id: uid,
-                username: name,
-            });
+            already_enrolled.push(user);
         } else {
-            added.push(BulkParticipantAdded {
-                user_id: uid,
-                username: name,
-            });
+            added.push(user);
         }
     }
 

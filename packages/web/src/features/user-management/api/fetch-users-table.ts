@@ -32,6 +32,8 @@ function sortUsers(
       result = compareNumbers(left.id, right.id);
     } else if (sortBy === 'username') {
       result = compareStrings(left.username, right.username);
+    } else if (sortBy === 'display_name') {
+      result = compareStrings(left.display_name, right.display_name);
     } else if (sortBy === 'roles') {
       result = compareStrings(left.roles.join(', '), right.roles.join(', '));
     } else {
@@ -75,6 +77,7 @@ export async function fetchUsersTable(
   const users: ManagedUserRow[] = data.map((item) => ({
     id: item.id,
     username: item.username,
+    display_name: item.display_name,
     roles: item.roles,
     created_at: item.created_at,
   }));
@@ -83,6 +86,7 @@ export async function fetchUsersTable(
   const filtered = keyword
     ? users.filter((user) => {
         if (user.username.toLowerCase().includes(keyword)) return true;
+        if (user.display_name.toLowerCase().includes(keyword)) return true;
         if (String(user.id).includes(keyword)) return true;
         return user.roles.some((role) => role.toLowerCase().includes(keyword));
       })

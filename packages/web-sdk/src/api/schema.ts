@@ -1984,7 +1984,7 @@ export interface paths {
     head?: never;
     /**
      * Update user information
-     * @description Updates user information such as username and password. Requires `user:manage` permission.
+     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.
      */
     patch: operations['updateUser'];
     trace?: never;
@@ -2240,6 +2240,7 @@ export interface components {
       deleted: number;
     };
     BulkParticipantAdded: {
+      display_name: string;
       /**
        * Format: int32
        * @example 5
@@ -2249,6 +2250,7 @@ export interface components {
       username: string;
     };
     BulkParticipantCreated: {
+      display_name: string;
       /** @example aB3$kLm9xQ2z */
       password: string;
       /**
@@ -2588,6 +2590,7 @@ export interface components {
        * @example 1
        */
       contest_id: number;
+      display_name: string;
       is_deleted: boolean;
       /**
        * Format: date-time
@@ -2862,6 +2865,7 @@ export interface components {
       score: number;
     };
     CreateUserEntry: {
+      display_name?: string | null;
       /** @example custom_pass123 */
       password?: string | null;
       /** @example charlie */
@@ -2869,6 +2873,8 @@ export interface components {
     };
     /** @description Omit password to generate a random password. Accounts receive the default roles. */
     CreateUserRequest: {
+      /** @description Defaults to the initial username when omitted or blank. */
+      display_name?: string | null;
       password?: string | null;
       username: string;
     };
@@ -2876,6 +2882,7 @@ export interface components {
     CreatedUserResponse: {
       /** Format: date-time */
       created_at: string;
+      display_name: string;
       /** Format: int32 */
       id: number;
       password: string;
@@ -3156,6 +3163,7 @@ export interface components {
       username: string;
     };
     LoginResponse: {
+      display_name: string;
       /**
        * Format: int32
        * @example 42
@@ -3179,6 +3187,7 @@ export interface components {
       username: string;
     };
     MeResponse: {
+      display_name: string;
       /**
        * Format: int32
        * @example 42
@@ -3449,12 +3458,15 @@ export interface components {
       queues: components['schemas']['QueueInfo'][];
     };
     RegisterRequest: {
+      /** @description Defaults to the initial username when omitted or blank. */
+      display_name?: string | null;
       /** @example s3cure_P@ss! */
       password: string;
       /** @example alice_wonder */
       username: string;
     };
     RegisterResponse: {
+      display_name: string;
       /**
        * Format: int32
        * @example 42
@@ -4121,6 +4133,8 @@ export interface components {
       score?: number | null;
     };
     UpdateUserRequest: {
+      /** @description Omit to keep the current name. Updates require user:manage. */
+      display_name?: string | null;
       password?: string | null;
       username?: string | null;
     };
@@ -4157,6 +4171,7 @@ export interface components {
        * @example 2026-03-05T10:00:00Z
        */
       created_at: string;
+      display_name: string;
       /**
        * Format: int32
        * @example 1

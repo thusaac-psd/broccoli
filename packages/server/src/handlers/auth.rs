@@ -95,19 +95,20 @@ pub async fn register(
 ) -> Result<impl IntoResponse, AppError> {
     validate_register_request(&payload)?;
 
-    let prepared = crate::services::user_accounts::prepare_accounts(vec![(
-        payload.username,
-        Some(payload.password),
-    )])
+    let prepared = crate::services::user_accounts::prepare_accounts(vec![
+        crate::models::user::CreateUserRequest {
+            username: payload.username,
+            display_name: payload.display_name,
+            password: Some(payload.password),
+        },
+    ])
     .await?;
     let entry = prepared
         .into_iter()
         .next()
         .ok_or_else(|| AppError::Internal("Missing prepared account".into()))?;
     let txn = state.db.begin().await?;
-    let user =
-        crate::services::user_accounts::insert_account(&txn, entry.username, entry.password_hash)
-            .await?;
+    let user = crate::services::user_accounts::insert_account(&txn, &entry).await?;
 
     txn.commit().await?;
     Ok((StatusCode::CREATED, Json(RegisterResponse::from(user))))
@@ -223,6 +224,7 @@ pub async fn login(
             token: access_token,
             id: user.id,
             username: user.username,
+            display_name: user.display_name,
             roles,
             permissions,
         }),
@@ -367,6 +369,7 @@ pub async fn refresh(
             token: new_access_token,
             id: user.id,
             username: user.username,
+            display_name: user.display_name,
             roles,
             permissions,
         }),
@@ -427,14 +430,22 @@ pub async fn logout(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(auth_user), fields(user_id = auth_user.user_id))]
-pub async fn me(auth_user: AuthUser) -> Json<MeResponse> {
-    Json(MeResponse {
+#[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
+pub async fn me(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<MeResponse>, AppError> {
+    let user = user::Entity::find_active_by_id(auth_user.user_id)
+        .one(&state.db)
+        .await?
+        .ok_or(AppError::TokenInvalid)?;
+    Ok(Json(MeResponse {
         id: auth_user.user_id,
-        username: auth_user.username,
+        username: user.username,
+        display_name: user.display_name,
         roles: auth_user.roles,
         permissions: auth_user.permissions,
-    })
+    }))
 }
 
 const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";

@@ -11,6 +11,7 @@ pub struct Model {
     pub id: i32,
 
     pub username: String,
+    pub display_name: String,
     pub password: String,
 
     #[sea_orm(has_many, via = "user_role")]

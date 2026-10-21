@@ -22,7 +22,8 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::{
-    BulkCreateUsersRequest, CreateUserRequest, CreatedUserResponse, validate_create_users,
+    BulkCreateUsersRequest, CreateUserRequest, CreatedUserResponse, normalize_display_name,
+    validate_create_users,
 };
 use crate::models::user::{RoleAssignmentRequest, UpdateUserRequest, UserResponse};
 use crate::state::AppState;
@@ -102,7 +103,7 @@ pub async fn get_user(
     tag = "Users",
     operation_id = "updateUser",
     summary = "Update user information",
-    description = "Updates user information such as username and password. Requires `user:manage` permission.",
+    description = "Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.",
     params(("id" = i32, Path, description = "User ID")),
     request_body = UpdateUserRequest,
     responses(
@@ -118,9 +119,15 @@ pub async fn update_user(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-    Json(payload): Json<UpdateUserRequest>,
+    AppJson(payload): AppJson<UpdateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
+
+    let display_name = payload
+        .display_name
+        .as_deref()
+        .map(normalize_display_name)
+        .transpose()?;
 
     let user_model = user::Entity::find_active_by_id(id)
         .one(&state.db)
@@ -132,6 +139,9 @@ pub async fn update_user(
     let mut active: user::ActiveModel = user_model.into();
     if let Some(username) = payload.username {
         active.username = Set(username);
+    }
+    if let Some(display_name) = display_name {
+        active.display_name = Set(display_name);
     }
     if let Some(password) = payload.password {
         let password_hash = hash::hash_password(&password)
@@ -442,25 +452,15 @@ async fn create_accounts(
     {
         return Err(AppError::UsernameTaken);
     }
-    let prepared = crate::services::user_accounts::prepare_accounts(
-        users
-            .into_iter()
-            .map(|u| (u.username, u.password))
-            .collect(),
-    )
-    .await?;
+    let prepared = crate::services::user_accounts::prepare_accounts(users).await?;
     let txn = state.db.begin().await?;
     let mut created = Vec::with_capacity(prepared.len());
     for entry in prepared {
-        let user = crate::services::user_accounts::insert_account(
-            &txn,
-            entry.username,
-            entry.password_hash,
-        )
-        .await?;
+        let user = crate::services::user_accounts::insert_account(&txn, &entry).await?;
         created.push(CreatedUserResponse {
             id: user.id,
             username: user.username,
+            display_name: user.display_name,
             created_at: user.created_at,
             roles: role::DEFAULT_ROLES
                 .iter()

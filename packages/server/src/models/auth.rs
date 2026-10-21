@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct RegisterRequest {
     #[schema(example = "alice_wonder")]
     pub username: String,
+    /// Defaults to the initial username when omitted or blank.
+    pub display_name: Option<String>,
     #[schema(example = "s3cure_P@ss!")]
     pub password: String,
 }
@@ -38,6 +40,7 @@ pub struct RegisterResponse {
     pub id: i32,
     #[schema(example = "alice_wonder")]
     pub username: String,
+    pub display_name: String,
 }
 
 impl From<crate::entity::user::Model> for RegisterResponse {
@@ -45,6 +48,7 @@ impl From<crate::entity::user::Model> for RegisterResponse {
         Self {
             id: user.id,
             username: user.username,
+            display_name: user.display_name,
         }
     }
 }
@@ -57,6 +61,7 @@ pub struct LoginResponse {
     pub id: i32,
     #[schema(example = "alice_wonder")]
     pub username: String,
+    pub display_name: String,
     #[schema(example = json!(["contestant"]))]
     pub roles: Vec<String>,
     #[schema(example = json!([perm::SUBMISSION_SUBMIT]))]
@@ -69,6 +74,7 @@ pub struct MeResponse {
     pub id: i32,
     #[schema(example = "alice_wonder")]
     pub username: String,
+    pub display_name: String,
     #[schema(example = json!(["contestant"]))]
     pub roles: Vec<String>,
     #[schema(example = json!([perm::SUBMISSION_SUBMIT]))]

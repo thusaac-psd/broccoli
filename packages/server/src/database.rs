@@ -455,6 +455,8 @@ pub async fn init_db_with_max_connections(
 
     let db = Database::connect(opt).await?;
 
+    crate::migration::prepare_user_display_name(&db).await?;
+
     // Create/update the core tables from the entity definitions.
     db.get_schema_registry("server::entity::*")
         .sync(&db)

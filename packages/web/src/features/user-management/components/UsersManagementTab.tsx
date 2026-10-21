@@ -62,6 +62,12 @@ function useUserColumns({
         ),
       },
       {
+        accessorKey: 'display_name',
+        header: t('auth.displayName'),
+        sortKey: 'display_name',
+        cell: ({ row }) => row.original.display_name,
+      },
+      {
         accessorKey: 'roles',
         header: t('users.users.roles'),
         sortKey: 'roles',

@@ -9,6 +9,7 @@ mod codelink_bracket_qa;
 mod codelink_bracket_qa_timing;
 mod common;
 mod contest;
+mod display_name;
 mod dlq;
 #[cfg(feature = "bundled-stress-test")]
 mod downloads;
