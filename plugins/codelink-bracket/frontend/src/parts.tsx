@@ -1,5 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
+  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -24,6 +25,8 @@ import type { MatchPhase, MatchView } from './types';
 const PILL: Record<MatchStatusKind, string> = {
   not_started: 'bg-muted text-muted-foreground',
   ordering: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+  preparing: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+  intermission: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
   playing: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
   awaiting_judge: 'bg-amber-500/15 text-amber-800 dark:text-amber-300',
   needs_adjudication: 'bg-red-500/10 text-red-700 dark:text-red-300',
@@ -43,21 +46,16 @@ export function StatusPill({
   const { t } = useTranslation();
   const status = describeMatchPhase(state);
   return (
-    <span
+    <Badge
+      variant="outline"
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium',
+        'px-2 py-0.5 text-xs font-medium',
         PILL[status.kind],
         className,
       )}
     >
-      {status.kind === 'playing' && (
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
-          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        </span>
-      )}
       {t(short ? status.shortKey : status.labelKey)}
-    </span>
+    </Badge>
   );
 }
 

@@ -2,6 +2,7 @@ import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
+import { Slot } from '@broccoli/web-sdk/slot';
 import { Button } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Flame, List, Pencil, Trash2, Users } from 'lucide-react';
@@ -62,6 +63,7 @@ export function ContestAdminActions() {
       <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground mb-2">
         {t('admin.actions')}
       </p>
+      <Slot name="contest.admin.actions" />
       <Button
         variant="ghost"
         size="sm"

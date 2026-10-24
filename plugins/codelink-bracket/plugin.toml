@@ -71,6 +71,33 @@ BracketScoreboard = "BracketScoreboard"
 BracketLiveXiaoju = "BracketLiveXiaoju"
 BracketContestInfo = "BracketContestInfo"
 BracketNotifications = "BracketNotifications"
+BracketPresentation = "BracketPresentation"
+BracketManageAction = "BracketManageAction"
+BracketManagementPage = "BracketManagementPage"
+
+[[web.routes]]
+path = "/contests/:contestId/bracket-management"
+component = "BracketManagementPage"
+
+[[web.slots]]
+name = "contest.admin.actions"
+position = "append"
+component = "BracketManageAction"
+permission = "contest:manage"
+contest_type = "codelink-bracket"
+
+[[web.slots]]
+name = "contest.admin.menu"
+position = "append"
+component = "BracketManageAction"
+permission = "contest:manage"
+contest_type = "codelink-bracket"
+
+[[web.slots]]
+name = "contest.layout"
+position = "prepend"
+component = "BracketPresentation"
+contest_type = "codelink-bracket"
 
 [[web.slots]]
 name = "contest.layout"

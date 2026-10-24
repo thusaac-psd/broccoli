@@ -6,3 +6,7 @@ export const problemPath = (contestId: number, problemId: number) =>
 
 export const submissionPath = (contestId: number, submissionId: number) =>
   `/contests/${contestId}/submissions/${submissionId}`;
+
+export const MANAGEMENT_ROUTE = '/contests/:contestId/bracket-management';
+export const managementPath = (contestId: number) =>
+  MANAGEMENT_ROUTE.replace(':contestId', String(contestId));

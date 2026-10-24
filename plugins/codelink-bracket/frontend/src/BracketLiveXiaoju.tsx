@@ -2,9 +2,8 @@ import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { type Submission, useSubmitGate } from '@broccoli/web-sdk/submission';
 import { cn } from '@broccoli/web-sdk/utils';
-import { useQuery } from '@tanstack/react-query';
 
-import { useBracketApi } from './hooks/useBracketApi';
+import { useBracket } from './hooks/useBracket';
 import { useMyMatch } from './hooks/useMyMatch';
 import { useNow } from './hooks/useNow';
 import {
@@ -71,14 +70,11 @@ export function BracketLiveXiaoju({
   // Keeps the problem lists fresh as the viewer's match moves on (see
   // `useRevealRefresh`); the result itself is not needed here.
   useMyMatch(contestId);
-  const api = useBracketApi();
   const auth = useAuth();
   const viewerId = auth.user?.id ?? null;
 
-  const { data } = useQuery({
-    queryKey: ['codelink-bracket-bracket', contestId],
-    enabled: !!contestId && viewerId !== null,
-    queryFn: () => api.getBracket(contestId as number),
+  const { data } = useBracket(contestId, {
+    enabled: viewerId !== null,
     refetchInterval: 1_000,
   });
 

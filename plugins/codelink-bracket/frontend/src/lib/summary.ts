@@ -3,13 +3,33 @@
 
 import type { MatchView } from '../types.ts';
 
+/** Count only the current stage, including pairings not created yet. */
+export function currentRoundProgress(
+  matches: MatchView[],
+  roundCount: number,
+  thirdPlace: boolean,
+) {
+  for (let round = 1; round <= roundCount; round++) {
+    const planned =
+      2 ** (roundCount - round) + Number(thirdPlace && round === roundCount);
+    const finished = matches.filter(
+      (match) => match.round === round && match.state === 'decided',
+    ).length;
+    if (finished < planned) return { round, remaining: planned - finished };
+  }
+  return null;
+}
+
 /**
  * Stages with unfinished matches, lowest first. Between stages, report the
  * next unopened stage. Empty once the tournament is decided.
  */
-export function roundsInPlay(matches: MatchView[]): number[] {
-  const roundCount = matches[0]?.stage_count ?? 0;
-  const total = 2 ** roundCount - 1;
+export function roundsInPlay(
+  matches: MatchView[],
+  roundCount = matches[0]?.stage_count ?? 0,
+  thirdPlace = matches[0]?.third_place_enabled ?? false,
+): number[] {
+  const total = 2 ** roundCount - 1 + Number(thirdPlace);
   const decided = matches.filter((m) => m.state === 'decided').length;
   if (decided === total) return [];
   const rounds = new Set(
@@ -66,10 +86,11 @@ export function contestEndWarning(
   matches: MatchView[],
   contestEndMs: number | null | undefined,
   now: number,
+  roundCount = matches[0]?.stage_count ?? 0,
+  thirdPlace = matches[0]?.third_place_enabled ?? false,
 ): ContestEndWarning | null {
   if (contestEndMs == null) return null;
-  const roundCount = matches[0]?.stage_count ?? 0;
-  const total = 2 ** roundCount - 1;
+  const total = 2 ** roundCount - 1 + Number(thirdPlace);
   const decided = matches.filter((m) => m.state === 'decided').length;
   if (decided === total) return null;
   if (now >= contestEndMs) {

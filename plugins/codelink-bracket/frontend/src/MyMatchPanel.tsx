@@ -17,8 +17,9 @@ import { useBracketApi } from './hooks/useBracketApi';
 import { useContestProblems } from './hooks/useContestData';
 import { problemPath } from './lib/links';
 import { playerLabel } from './lib/player';
-import { roundNameKey } from './lib/rounds';
+import { matchNameKey, roundNameKey } from './lib/rounds';
 import {
+  finishingPlace,
   gameLabel,
   matchSteps,
   playerStage,
@@ -64,7 +65,7 @@ export function MyMatchPanel({
           </span>
           <span className="text-muted-foreground">
             {' · '}
-            {t(roundNameKey(match.round, match.stage_count))}
+            {t(matchNameKey(match))}
             {' · '}
             {t('codelink-bracket.my.vs', { name: opponentName })}
             {' · '}
@@ -175,6 +176,11 @@ function CurrentTask({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const stage = playerStage(match, side);
+  const until = useStartsIn(
+    match.state === 'intermission' ? match.next_game_at_ms : match.starts_at_ms,
+  );
+  const orderingLeft = useStartsIn(match.ordering_deadline_ms);
+  const place = finishingPlace(match, side);
 
   const note = (icon: ReactNode, text: string, tone = '') => (
     <div className={cn('flex items-center gap-3 text-sm', tone)}>
@@ -192,12 +198,20 @@ function CurrentTask({
     case 'rank':
       return (
         <div className="space-y-2">
+          {orderingLeft && (
+            <p className="font-mono text-sm">
+              {t('codelink-bracket.ordering.remaining', {
+                time: orderingLeft === 'now' ? '0:00' : orderingLeft,
+              })}
+            </p>
+          )}
           <OrderingPanel
             contestId={contestId}
             opponentGroup={side === 'a' ? match.group_b : match.group_a}
-            submittedOrder={null}
+            submittedOrder={side === 'a' ? match.order_b : match.order_a}
             problems={problems}
             submitting={submitting}
+            disabled={orderingLeft === 'now'}
             onSubmit={async (order) => {
               setError(null);
               setSubmitting(true);
@@ -227,6 +241,19 @@ function CurrentTask({
           opponent={opponentName(match, side)}
         />
       );
+    case 'preparing':
+    case 'intermission':
+      return note(
+        <Hourglass className="h-4 w-4 text-sky-600" />,
+        t(`codelink-bracket.my.${stage.kind}`, {
+          time: until === 'now' ? '0:00' : (until ?? '—'),
+        }),
+      );
+    case 'third_place_pending':
+      return note(
+        <Swords className="h-4 w-4 text-amber-500" />,
+        t('codelink-bracket.my.thirdPlacePending'),
+      );
     case 'play': {
       const p =
         stage.problemId === null ? undefined : problems.get(stage.problemId);
@@ -238,9 +265,7 @@ function CurrentTask({
               {gameName}
             </div>
             <div className="mt-0.5 truncate text-base font-semibold">
-              {p
-                ? `${p.label} · ${p.title}`
-                : t('codelink-bracket.my.problemHidden')}
+              {p ? p.title : t('codelink-bracket.my.problemHidden')}
             </div>
           </div>
           {clock && (
@@ -280,17 +305,21 @@ function CurrentTask({
     case 'advanced':
       return note(
         <PartyPopper className="h-4 w-4 text-amber-500" />,
-        match.round >= match.stage_count
-          ? t('codelink-bracket.my.champion')
-          : t('codelink-bracket.my.advanced', {
-              round: t(roundNameKey(match.round + 1, match.stage_count)),
-            }),
+        place === 3
+          ? t('codelink-bracket.my.placement', { place })
+          : match.round >= match.stage_count
+            ? t('codelink-bracket.my.champion')
+            : t('codelink-bracket.my.advanced', {
+                round: t(roundNameKey(match.round + 1, match.stage_count)),
+              }),
         'font-medium',
       );
     case 'eliminated':
       return note(
         <span className="h-4 w-4" />,
-        t('codelink-bracket.my.eliminated'),
+        place
+          ? t('codelink-bracket.my.placement', { place })
+          : t('codelink-bracket.my.eliminated'),
         'text-muted-foreground',
       );
   }

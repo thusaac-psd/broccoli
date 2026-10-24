@@ -16,11 +16,15 @@
 export type MatchPhase =
   | 'pending'
   | 'ordering'
+  | 'preparing'
+  | 'intermission'
   | 'in_progress'
   | 'tiebreak'
   | 'awaiting_judge'
   | 'decided'
   | 'needs_adjudication';
+
+export type MatchKind = 'elimination' | 'final' | 'third_place';
 
 /**
  * A problem group/order as returned by `GET /bracket` / `GET /matches/{id}`:
@@ -42,6 +46,11 @@ export interface MatchView {
   id: number;
   round: number;
   stage_count: number;
+  kind: MatchKind;
+  third_place_enabled: boolean;
+  stage_start_at_ms: number | null;
+  ordering_deadline_ms: number | null;
+  next_game_at_ms: number | null;
   pos: number;
   player_a: number;
   player_b: number;
@@ -119,9 +128,28 @@ export interface GameView {
 
 export interface BracketResponse {
   player_count: number;
+  third_place_enabled?: boolean;
+  total_matches?: number;
+  stages?: StageView[];
   matches: MatchView[];
   /** The contest's end time; null (or absent) if the server could not read it. */
   contest_end_ms?: number | null;
+}
+
+export interface StageView {
+  round: number;
+  phase:
+    | 'scheduled'
+    | 'awaiting_reschedule'
+    | 'ordering'
+    | 'preparing'
+    | 'playing'
+    | 'complete';
+  start_at_ms: number | null;
+  ordering_deadline_ms: number | null;
+  starts_at_ms: number | null;
+  match_count: number;
+  decided_count: number;
 }
 
 export type AdjudicationReason =
@@ -169,6 +197,10 @@ export interface RoundSetup {
   tiebreak: number[];
   /** Omission or null uses a majority of the regular game count. */
   wins_to_advance?: number | null;
+  start_at_ms?: number | null;
+  post_order_wait_seconds?: number | null;
+  game_break_seconds?: number | null;
+  match_extra_time_seconds?: number | null;
   xiaoju_seconds: number;
   tiebreak_seconds: number;
   break_before_seconds: number;
@@ -178,6 +210,13 @@ export interface RoundSetup {
 export interface SetupRequest {
   seeds: number[];
   rounds: RoundSetup[];
+  third_place?:
+    | { mode: 'shared' }
+    | ({ mode: 'custom' } & Pick<
+        RoundSetup,
+        'group_a' | 'group_b' | 'tiebreak'
+      >)
+    | null;
   match_extra_time_seconds: number;
   penalty_seconds: number;
   escalation_grace_seconds: number;
@@ -187,4 +226,6 @@ export interface SetupRequest {
 export interface SetupResponse {
   setup: (SetupRequest & { opened_rounds: number }) | null;
   started: boolean;
+  contest_start_ms?: number | null;
+  contest_end_ms?: number | null;
 }

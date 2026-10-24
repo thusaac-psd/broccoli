@@ -11,6 +11,9 @@ export type PlayerStage =
   | { kind: 'rank' }
   /** Ranked; `startsAtMs` null means the opponent has not ranked yet. */
   | { kind: 'waiting_start'; startsAtMs: number | null }
+  | { kind: 'preparing'; untilMs: number | null }
+  | { kind: 'intermission'; untilMs: number | null }
+  | { kind: 'third_place_pending' }
   | { kind: 'play'; game: number; problemId: number | null }
   | { kind: 'judging' }
   | { kind: 'staff' }
@@ -37,9 +40,14 @@ export function playerStage(match: MatchView, side: Side): PlayerStage {
     case 'pending':
       return { kind: 'waiting_opponent' };
     case 'ordering':
+      if (match.ordering_deadline_ms != null) return { kind: 'rank' };
       return submittedRanking === null
         ? { kind: 'rank' }
         : { kind: 'waiting_start', startsAtMs: match.starts_at_ms };
+    case 'preparing':
+      return { kind: 'preparing', untilMs: match.starts_at_ms };
+    case 'intermission':
+      return { kind: 'intermission', untilMs: match.next_game_at_ms };
     case 'in_progress': {
       const game = match.current_xiaoju_index ?? 0;
       return { kind: 'play', game, problemId: ownOrder?.[game] ?? null };
@@ -56,11 +64,25 @@ export function playerStage(match: MatchView, side: Side): PlayerStage {
       return { kind: 'staff' };
     case 'decided': {
       const me = side === 'a' ? match.player_a : match.player_b;
+      if (
+        match.winner !== me &&
+        match.third_place_enabled &&
+        match.round === match.stage_count - 1
+      ) {
+        return { kind: 'third_place_pending' };
+      }
       return match.winner === me
         ? { kind: 'advanced' }
         : { kind: 'eliminated' };
     }
   }
+}
+
+export function finishingPlace(match: MatchView, side: Side): number | null {
+  if (match.state !== 'decided' || match.round !== match.stage_count)
+    return null;
+  const won = match.winner === (side === 'a' ? match.player_a : match.player_b);
+  return match.kind === 'third_place' ? (won ? 3 : 4) : won ? 1 : 2;
 }
 
 export type StepStatus = 'done' | 'current' | 'upcoming';
@@ -83,7 +105,8 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
   const beforePlay =
     stage.kind === 'waiting_opponent' ||
     stage.kind === 'rank' ||
-    stage.kind === 'waiting_start';
+    stage.kind === 'waiting_start' ||
+    stage.kind === 'preparing';
 
   const steps: Step[] = [
     {
@@ -96,7 +119,7 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
     {
       key: 'start',
       status:
-        stage.kind === 'waiting_start'
+        stage.kind === 'waiting_start' || stage.kind === 'preparing'
           ? 'current'
           : beforePlay
             ? 'upcoming'

@@ -1,4 +1,3 @@
-import { gameLabel } from './lib/stage';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -6,8 +5,9 @@ import { ArrowRight, Swords } from 'lucide-react';
 import { Link } from 'react-router';
 
 import { playerLabel } from './lib/player';
-import { roundNameKey } from './lib/rounds';
-import { playerStage, type Side } from './lib/stage';
+import { matchNameKey } from './lib/rounds';
+import { gameLabel } from './lib/stage';
+import { finishingPlace, playerStage, type Side } from './lib/stage';
 import { useGameClock, useStartsIn } from './parts';
 import type { MatchView } from './types';
 
@@ -29,12 +29,14 @@ export function MyMatchStrip({
   const clock = useGameClock(match);
   const startsIn = useStartsIn(match.starts_at_ms);
   const stage = playerStage(match, side);
+  const place = finishingPlace(match, side);
   const opponent =
     side === 'a'
       ? playerLabel(match.player_b_name, match.player_b)
       : playerLabel(match.player_a_name, match.player_a);
-  const status =
-    stage.kind === 'play'
+  const status = place
+    ? t('codelink-bracket.my.placement', { place })
+    : stage.kind === 'play'
       ? `${t(
           ...gameLabel(match, stage.game),
         )}${clock ? ` · ${clock.text}` : ''}`
@@ -54,7 +56,7 @@ export function MyMatchStrip({
       <Swords className="h-4 w-4 text-primary" />
       <span className="font-medium">{t('codelink-bracket.my.title')}</span>
       <span className="text-muted-foreground">
-        {t(roundNameKey(match.round, match.stage_count))} ·{' '}
+        {t(matchNameKey(match))} ·{' '}
         {t('codelink-bracket.my.vs', { name: opponent })}
       </span>
       <span className={cn('font-medium', urgent && 'text-primary')}>

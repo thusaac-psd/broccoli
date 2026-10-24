@@ -19,6 +19,7 @@ interface OrderingPanelProps {
   problems: ReadonlyMap<number, ProblemInfo>;
   onSubmit: (order: number[]) => void;
   submitting: boolean;
+  disabled?: boolean;
 }
 
 /**
@@ -35,6 +36,7 @@ export function OrderingPanel({
   problems,
   onSubmit,
   submitting,
+  disabled = false,
 }: OrderingPanelProps) {
   const { t } = useTranslation();
   const visible = opponentGroup.filter((id): id is number => id !== null);
@@ -53,7 +55,8 @@ export function OrderingPanel({
   }
 
   const alreadySubmitted = submittedOrder !== null;
-  const canSubmit = canSubmitOrder(order, opponentGroup) && !submitting;
+  const canSubmit =
+    canSubmitOrder(order, opponentGroup) && !submitting && !disabled;
 
   return (
     <div className="space-y-3">
@@ -64,7 +67,7 @@ export function OrderingPanel({
         items={order}
         getKey={(id) => id}
         onChange={setOrder}
-        disabled={submitting}
+        disabled={submitting || disabled}
         renderItem={(id) => {
           const p = problems.get(id);
           return (

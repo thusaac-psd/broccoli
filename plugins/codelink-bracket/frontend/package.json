@@ -37,6 +37,7 @@
         "@broccoli/web-sdk/auth",
         "@broccoli/web-sdk/i18n",
         "@broccoli/web-sdk/permissions",
+        "@broccoli/web-sdk/problem",
         "@broccoli/web-sdk/slot",
         "@broccoli/web-sdk/submission",
         "@broccoli/web-sdk/ui",

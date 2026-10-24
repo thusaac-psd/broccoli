@@ -24,3 +24,12 @@ export function roundShortKey(round: number, stageCount: number): string {
     'codelink-bracket.round.short.',
   );
 }
+import type { MatchView } from '../types.ts';
+
+export function matchNameKey(
+  match: Pick<MatchView, 'kind' | 'round' | 'stage_count'>,
+): string {
+  return match.kind === 'third_place'
+    ? 'codelink-bracket.round.thirdPlace'
+    : roundNameKey(match.round, match.stage_count);
+}

@@ -1,4 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { useQuery } from '@tanstack/react-query';
 
 export interface ProblemInfo {
@@ -13,8 +15,10 @@ export interface ProblemInfo {
  */
 export function useContestProblems(contestId: number | undefined) {
   const apiClient = useApiClient();
+  const { user } = useAuth();
+  const { allowedProblemIds } = useProblemPresentation(contestId, user?.id);
   const { data } = useQuery({
-    queryKey: ['codelink-bracket-problems', contestId],
+    queryKey: ['codelink-bracket-problems', contestId, viewerCacheKey(user)],
     enabled: !!contestId,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/contests/{id}/problems', {
@@ -24,7 +28,11 @@ export function useContestProblems(contestId: number | undefined) {
       return data;
     },
   });
-  const list = data ?? [];
+  const list = (data ?? []).filter(
+    (problem) =>
+      allowedProblemIds === null ||
+      allowedProblemIds.includes(problem.problem_id),
+  );
   const byId = new Map<number, ProblemInfo>(
     list.map((p) => [p.problem_id, { label: p.label, title: p.problem_title }]),
   );
@@ -34,8 +42,13 @@ export function useContestProblems(contestId: number | undefined) {
 /** Enrolled contestants, for seeding. Staff only (the host enforces it). */
 export function useParticipants(contestId: number, enabled: boolean) {
   const apiClient = useApiClient();
+  const { user } = useAuth();
   return useQuery({
-    queryKey: ['codelink-bracket-participants', contestId],
+    queryKey: [
+      'codelink-bracket-participants',
+      contestId,
+      viewerCacheKey(user),
+    ],
     enabled,
     queryFn: async () => {
       const { data, error } = await apiClient.GET(
@@ -55,8 +68,14 @@ export function usePlayerSubmissions(
   enabled: boolean,
 ) {
   const apiClient = useApiClient();
+  const { user } = useAuth();
   return useQuery({
-    queryKey: ['codelink-bracket-submissions', contestId, userId],
+    queryKey: [
+      'codelink-bracket-submissions',
+      contestId,
+      userId,
+      viewerCacheKey(user),
+    ],
     enabled,
     refetchInterval: 5_000,
     queryFn: async () => {

@@ -11,6 +11,7 @@ import {
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
+import { Slot } from '@broccoli/web-sdk/slot';
 import {
   Badge,
   Button,
@@ -56,6 +57,7 @@ import { Markdown } from '@/components/Markdown';
 import { MarkdownEditor } from '@/components/MarkdownEditor';
 import { ManageParticipantsDialog } from '@/features/admin/components/ManageParticipantsDialog';
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 
@@ -857,6 +859,9 @@ function useContestColumns({
               <Settings className="h-4 w-4" />
               {t('admin.configure')}
             </DropdownMenuItem>
+            <ContestSlotProvider contestId={row.original.id}>
+              <Slot name="contest.admin.menu" slotProps={{ variant: 'menu' }} />
+            </ContestSlotProvider>
             <DropdownMenuItem onClick={() => onEdit(row.original)}>
               <Pencil className="h-4 w-4" />
               {t('admin.edit')}

@@ -12,6 +12,10 @@ export interface RoundDraft {
   groupB: (number | null)[];
   tiebreak: (number | null)[];
   winsToAdvance: number;
+  startAt: string;
+  postOrderWaitSeconds: number;
+  gameBreakSeconds: number;
+  extraMinutes: number;
   gameMinutes: number;
   tiebreakMinutes: number;
   breakMinutes: number;
@@ -22,10 +26,34 @@ export const emptyRound = (index = 0): RoundDraft => ({
   groupB: [null, null, null],
   tiebreak: [null],
   winsToAdvance: 2,
+  startAt: '',
+  postOrderWaitSeconds: 30,
+  gameBreakSeconds: 60,
+  extraMinutes: 0,
   gameMinutes: 30,
   tiebreakMinutes: 30,
   breakMinutes: index === 0 ? 0 : 10,
 });
+
+export type ThirdPlaceDraft =
+  | { mode: 'shared' }
+  | ({ mode: 'custom' } & Pick<RoundDraft, 'groupA' | 'groupB' | 'tiebreak'>)
+  | null;
+
+export function localDateTime(at: number | null | undefined): string {
+  if (at == null || !Number.isFinite(at)) return '';
+  const date = new Date(at);
+  return new Date(at - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, -1);
+}
+
+export function resizeSlots(
+  slots: (number | null)[],
+  count: number,
+): (number | null)[] {
+  return Array.from({ length: count }, (_, i) => slots[i] ?? null);
+}
 
 /**
  * Fill the configured slots in each unopened stage from the contest's
@@ -62,6 +90,8 @@ export type SetupIssue =
   | { kind: 'duplicate'; problemId: number }
   | { kind: 'badTiming'; round: number }
   | { kind: 'badWinTarget'; round: number }
+  | { kind: 'badSchedule'; round: number }
+  | { kind: 'badThirdPlace' }
   | { kind: 'badPenalty' }
   | { kind: 'badExtra' }
   | { kind: 'badGrace' };
@@ -73,6 +103,7 @@ export function validateSetup(
   graceSeconds: number,
   extraMinutes = 0,
   playerCount = DEFAULT_PLAYER_COUNT,
+  options: { scheduleFrom?: number; thirdPlace?: ThirdPlaceDraft } = {},
 ): SetupIssue[] {
   const issues: SetupIssue[] = [];
   if (
@@ -87,7 +118,23 @@ export function validateSetup(
   }
   const seen = new Set<number>();
   const dupes = new Set<number>();
+  let previousStart: number | null = null;
   rounds.forEach((r, i) => {
+    if (r.startAt) {
+      const at = Date.parse(r.startAt);
+      if (
+        !Number.isFinite(at) ||
+        (previousStart !== null && at <= previousStart)
+      ) {
+        issues.push({ kind: 'badSchedule', round: i + 1 });
+      }
+      previousStart = at;
+    } else if (
+      options.scheduleFrom !== undefined &&
+      i >= options.scheduleFrom
+    ) {
+      issues.push({ kind: 'badSchedule', round: i + 1 });
+    }
     if (
       !Number.isSafeInteger(r.winsToAdvance) ||
       r.winsToAdvance < 1 ||
@@ -103,6 +150,11 @@ export function validateSetup(
       !validSeconds(r.gameMinutes, 1) ||
       !validSeconds(r.tiebreakMinutes, 1) ||
       !validSeconds(r.breakMinutes, 0) ||
+      !validSeconds(r.extraMinutes, 0) ||
+      !Number.isSafeInteger(r.postOrderWaitSeconds) ||
+      r.postOrderWaitSeconds < 0 ||
+      !Number.isSafeInteger(r.gameBreakSeconds) ||
+      r.gameBreakSeconds < 0 ||
       r.breakMinutes < 0 ||
       (i === 0 && r.breakMinutes !== 0)
     ) {
@@ -125,6 +177,32 @@ export function validateSetup(
       seen.add(id);
     }
   });
+  if (options.thirdPlace && playerCount < 4)
+    issues.push({ kind: 'badThirdPlace' });
+  if (options.thirdPlace?.mode === 'custom') {
+    const third = options.thirdPlace;
+    const count = rounds.at(-1)?.groupA.length ?? 0;
+    const ids = [
+      ...third.groupA,
+      ...third.groupB,
+      ...third.tiebreak.filter((id): id is number => id !== null),
+    ];
+    if (
+      third.groupA.length !== count ||
+      third.groupB.length !== count ||
+      third.groupA.some((id) => id === null) ||
+      third.groupB.some((id) => id === null) ||
+      !third.tiebreak.some((id) => id !== null) ||
+      count + third.tiebreak.length > 256
+    ) {
+      issues.push({ kind: 'badThirdPlace' });
+    }
+    for (const id of ids) {
+      if (id === null) continue;
+      if (seen.has(id)) dupes.add(id);
+      seen.add(id);
+    }
+  }
   for (const problemId of dupes) issues.push({ kind: 'duplicate', problemId });
   if (!Number.isSafeInteger(penaltySeconds) || penaltySeconds < 0) {
     issues.push({ kind: 'badPenalty' });

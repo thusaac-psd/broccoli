@@ -1,10 +1,10 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 
 import { type Side, sideOf } from '../lib/stage';
 import type { MatchView } from '../types';
-import { useBracketApi } from './useBracketApi';
+import { useBracket } from './useBracket';
 
 /**
  * The viewer's own current match (their latest round), from the same cached
@@ -14,15 +14,9 @@ import { useBracketApi } from './useBracketApi';
 export function useMyMatch(
   contestId: number | undefined,
 ): { match: MatchView; side: Side } | null {
-  const api = useBracketApi();
   const auth = useAuth();
   const viewerId = auth.user?.id ?? null;
-  const { data } = useQuery({
-    queryKey: ['codelink-bracket-bracket', contestId],
-    enabled: !!contestId && viewerId !== null,
-    queryFn: () => api.getBracket(contestId as number),
-    refetchInterval: 5_000,
-  });
+  const { data } = useBracket(contestId, { enabled: viewerId !== null });
   const match = (data?.matches ?? [])
     .filter((m) => sideOf(m, viewerId) !== null)
     .sort((a, b) => b.round - a.round)[0];

@@ -18,6 +18,8 @@ import type { MatchPhase } from '../types.ts';
 export type MatchStatusKind =
   | 'not_started'
   | 'ordering'
+  | 'preparing'
+  | 'intermission'
   | 'playing'
   | 'awaiting_judge'
   | 'decided'
@@ -50,6 +52,18 @@ export function describeMatchPhase(phase: MatchPhase): MatchStatusDescription {
         kind: 'playing',
         labelKey: 'codelink-bracket.phase.inProgress',
         shortKey: 'codelink-bracket.phase.short.live',
+      };
+    case 'preparing':
+      return {
+        kind: 'preparing',
+        labelKey: 'codelink-bracket.phase.preparing',
+        shortKey: 'codelink-bracket.phase.short.preparing',
+      };
+    case 'intermission':
+      return {
+        kind: 'intermission',
+        labelKey: 'codelink-bracket.phase.intermission',
+        shortKey: 'codelink-bracket.phase.short.intermission',
       };
     case 'tiebreak':
       return {

@@ -1,10 +1,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { autoFillRounds, validateSetup } from './setup.ts';
+import { autoFillRounds, localDateTime, validateSetup } from './setup.ts';
 
 const seeds = Array.from({ length: 16 }, (_, i) => i + 1);
 const problems = Array.from({ length: 28 }, (_, i) => 100 + i);
+
+test('scheduled stages require increasing local times and preserve UTC milliseconds', () => {
+  const rounds = autoFillRounds(problems);
+  const options = { scheduleFrom: 0, thirdPlace: { mode: 'shared' as const } };
+  assert.equal(validateSetup(seeds, rounds, 20, 120, 0, 16, options).length, 4);
+  rounds.forEach((round, index) => {
+    const time = 1_900_000_000_123 + index * 3_600_000;
+    round.startAt = localDateTime(time);
+    assert.equal(Date.parse(round.startAt), time);
+  });
+  assert.deepEqual(validateSetup(seeds, rounds, 20, 120, 0, 16, options), []);
+  rounds[1].startAt = rounds[0].startAt;
+  assert.deepEqual(validateSetup(seeds, rounds, 20, 120, 0, 16, options), [
+    { kind: 'badSchedule', round: 2 },
+  ]);
+});
 
 test('shared extra time is independent of stage timings, penalties and judge grace', () => {
   const rounds = autoFillRounds(problems);
@@ -34,6 +50,10 @@ test('auto-fill assigns 3 + 3 + 1 problems per round in contest order', () => {
     groupB: [103, 104, 105],
     tiebreak: [106],
     winsToAdvance: 2,
+    startAt: '',
+    postOrderWaitSeconds: 30,
+    gameBreakSeconds: 60,
+    extraMinutes: 0,
     gameMinutes: 30,
     tiebreakMinutes: 30,
     breakMinutes: 0,

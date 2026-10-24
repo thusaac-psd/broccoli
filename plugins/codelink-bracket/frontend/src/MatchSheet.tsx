@@ -1,11 +1,13 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
   SUBMISSION_VIEW_ALL,
 } from '@broccoli/web-sdk/permissions';
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import {
+  Badge,
   Button,
   Sheet,
   SheetContent,
@@ -37,7 +39,7 @@ import {
 } from './hooks/useContestData';
 import { problemPath, submissionPath } from './lib/links';
 import { playerLabel } from './lib/player';
-import { roundNameKey } from './lib/rounds';
+import { matchNameKey } from './lib/rounds';
 import { gameLabel, sideOf } from './lib/stage';
 import { adjudicationMessage } from './lib/summary';
 import { OrderingPanel } from './OrderingPanel';
@@ -54,20 +56,36 @@ interface MatchSheetProps {
   contestId: number;
   matchId: number | null;
   onClose: () => void;
+  container?: HTMLElement | null;
+  presentation?: boolean;
 }
 
-export function MatchSheet({ contestId, matchId, onClose }: MatchSheetProps) {
+export function MatchSheet({
+  contestId,
+  matchId,
+  onClose,
+  container,
+  presentation = false,
+}: MatchSheetProps) {
   const { t } = useTranslation();
   return (
     <Sheet open={matchId !== null} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent size="2xl" className="w-full overflow-y-auto p-0 sm:w-3/4">
+      <SheetContent
+        container={container}
+        size="2xl"
+        className="w-full overflow-y-auto p-0 sm:w-3/4"
+      >
         {/* Always present, even while the match loads: a dialog without a
             title is unnamed for screen readers (Radix warns about it). */}
         <SheetTitle className="sr-only">
           {t('codelink-bracket.my.details')}
         </SheetTitle>
         {matchId !== null && (
-          <MatchDetail contestId={contestId} matchId={matchId} />
+          <MatchDetail
+            contestId={contestId}
+            matchId={matchId}
+            presentation={presentation}
+          />
         )}
       </SheetContent>
     </Sheet>
@@ -77,9 +95,11 @@ export function MatchSheet({ contestId, matchId, onClose }: MatchSheetProps) {
 function MatchDetail({
   contestId,
   matchId,
+  presentation,
 }: {
   contestId: number;
   matchId: number;
+  presentation: boolean;
 }) {
   const { t } = useTranslation();
   const api = useBracketApi();
@@ -91,7 +111,12 @@ function MatchDetail({
   const [busy, setBusy] = useState(false);
 
   const { data: match } = useQuery({
-    queryKey: ['codelink-bracket-match', contestId, matchId],
+    queryKey: [
+      'codelink-bracket-match',
+      contestId,
+      matchId,
+      viewerCacheKey(auth.user),
+    ],
     queryFn: () => api.getMatch(contestId, matchId),
     refetchInterval: (q) =>
       (q.state.data as MatchView | undefined)?.state === 'decided'
@@ -102,6 +127,7 @@ function MatchDetail({
   const permissions = auth.user?.permissions ?? [];
   const isStaff = permissions.includes(CONTEST_MANAGE);
   const canViewAll = permissions.includes(SUBMISSION_VIEW_ALL);
+  const orderingLeft = useStartsIn(match?.ordering_deadline_ms ?? null);
 
   if (!match) {
     return (
@@ -140,13 +166,13 @@ function MatchDetail({
   return (
     <div className="flex flex-col">
       <SheetHeader className="border-b border-border px-6 pb-4 pt-6 text-left">
-        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {t(roundNameKey(match.round, match.stage_count))}
-          <span aria-hidden>·</span>
-          {t('codelink-bracket.match.number', { n: match.pos + 1 })}
-          <span aria-hidden>·</span>
+        <h2 className="text-lg font-semibold">{t(matchNameKey(match))}</h2>
+        <p className="text-sm text-muted-foreground">
+          {match.kind === 'elimination' && (
+            <>{t('codelink-bracket.match.number', { n: match.pos + 1 })} · </>
+          )}
           BO{match.group_a.length} / FT{match.wins_to_advance}
-        </div>
+        </p>
         <SheetDescription asChild>
           <div className="pt-3">
             <Scoreline match={match} nameA={nameA} nameB={nameB} />
@@ -176,6 +202,7 @@ function MatchDetail({
               submittedOrder={side === 'a' ? match.order_b : match.order_a}
               problems={problems}
               submitting={busy}
+              disabled={orderingLeft === 'now'}
               onSubmit={(order) =>
                 run(
                   () => api.submitOrder(contestId, matchId, order),
@@ -210,7 +237,7 @@ function MatchDetail({
           </Section>
         )}
 
-        {canViewAll && (
+        {canViewAll && !presentation && (
           <Section title={t('codelink-bracket.section.submissions')}>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <SubmissionFeed
@@ -229,7 +256,7 @@ function MatchDetail({
           </Section>
         )}
 
-        {isStaff && (
+        {isStaff && !presentation && (
           <StaffControls
             match={match}
             nameA={nameA}
@@ -274,9 +301,7 @@ async function rejudgeWith(
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-2.5">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
-      </h3>
+      <h3 className="text-sm font-medium">{title}</h3>
       {children}
     </section>
   );
@@ -421,6 +446,16 @@ function AttentionBanner({
 function StartNote({ match }: { match: MatchView }) {
   const { t } = useTranslation();
   const startsIn = useStartsIn(match.starts_at_ms);
+  const orderingLeft = useStartsIn(match.ordering_deadline_ms);
+  if (match.stage_start_at_ms != null) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        {t('codelink-bracket.ordering.remaining', {
+          time: orderingLeft === 'now' ? '0:00' : (orderingLeft ?? '…'),
+        })}
+      </p>
+    );
+  }
   return (
     <p className="text-sm text-muted-foreground">
       {startsIn === null
@@ -460,6 +495,8 @@ function ProblemLink({
   problemId: number | null;
   problems: ReadonlyMap<number, ProblemInfo>;
 }) {
+  const { user } = useAuth();
+  const { hideLabels } = useProblemPresentation(contestId, user?.id);
   if (problemId === null) {
     return <span className="text-muted-foreground">—</span>;
   }
@@ -470,7 +507,7 @@ function ProblemLink({
       className="font-mono font-medium text-primary hover:underline"
       title={p?.title}
     >
-      {p?.label ?? `#${problemId}`}
+      {hideLabels ? (p?.title ?? '…') : (p?.label ?? `#${problemId}`)}
     </Link>
   );
 }
@@ -510,47 +547,57 @@ function GamesTable({
           }));
   const rows = [...match.games, ...upcoming];
   const isUpcoming = (g: GameView) => upcoming.includes(g);
-  const result = (g: GameView) => {
+  const result = (g: GameView, player: number) => {
     if (isUpcoming(g)) {
       return (
-        <span className="text-muted-foreground">
+        <Badge variant="secondary" className="font-normal">
           {t('codelink-bracket.game.upcoming')}
-        </span>
+        </Badge>
       );
     }
     if (!g.decided && match.state === 'awaiting_judge') {
       return (
-        <span className="text-amber-700 dark:text-amber-300">
+        <Badge
+          variant="outline"
+          className="font-normal text-amber-700 dark:text-amber-300"
+        >
           {t('codelink-bracket.game.judging')}
-        </span>
+        </Badge>
       );
     }
     if (!g.decided && match.state === 'needs_adjudication') {
       return (
-        <span className="text-red-700 dark:text-red-300">
+        <Badge
+          variant="outline"
+          className="font-normal text-red-700 dark:text-red-300"
+        >
           {t('codelink-bracket.game.halted')}
-        </span>
+        </Badge>
       );
     }
     if (!g.decided) {
       return (
-        <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
+        <Badge variant="outline" className="gap-1 font-normal">
           <Play className="h-3 w-3" />
           {t('codelink-bracket.game.live')}
-        </span>
+        </Badge>
       );
     }
     if (g.winner === null) {
       return (
-        <span className="text-muted-foreground">
+        <Badge variant="secondary" className="font-normal">
           {t('codelink-bracket.game.noWinner')}
-        </span>
+        </Badge>
       );
     }
     return (
-      <span className="font-medium">
-        {g.winner === match.player_a ? nameA : nameB}
-      </span>
+      <Badge variant={g.winner === player ? 'accepted' : 'wronganswer'}>
+        {t(
+          g.winner === player
+            ? 'codelink-bracket.game.won'
+            : 'codelink-bracket.game.lost',
+        )}
+      </Badge>
     );
   };
   return (
@@ -563,30 +610,32 @@ function GamesTable({
             </th>
             <th className="px-3 py-2 text-left font-medium">{nameA}</th>
             <th className="px-3 py-2 text-left font-medium">{nameB}</th>
-            <th className="px-3 py-2 text-left font-medium">
-              {t('codelink-bracket.game.winner')}
-            </th>
           </tr>
         </thead>
         <tbody>
           {rows.map((g) => (
             <tr key={g.index} className="border-t border-border">
               <td className="px-3 py-2 text-muted-foreground">{gameName(g)}</td>
-              <td className="px-3 py-2">
-                <ProblemLink
-                  contestId={contestId}
-                  problemId={g.problem_a}
-                  problems={problems}
-                />
+              <td className="px-3 py-3">
+                <div className="flex flex-col items-start gap-1.5">
+                  {result(g, match.player_a)}
+                  <ProblemLink
+                    contestId={contestId}
+                    problemId={g.problem_a}
+                    problems={problems}
+                  />
+                </div>
               </td>
-              <td className="px-3 py-2">
-                <ProblemLink
-                  contestId={contestId}
-                  problemId={g.problem_b}
-                  problems={problems}
-                />
+              <td className="px-3 py-3">
+                <div className="flex flex-col items-start gap-1.5">
+                  {result(g, match.player_b)}
+                  <ProblemLink
+                    contestId={contestId}
+                    problemId={g.problem_b}
+                    problems={problems}
+                  />
+                </div>
               </td>
-              <td className="px-3 py-2">{result(g)}</td>
             </tr>
           ))}
         </tbody>
@@ -700,7 +749,7 @@ function StaffControls({
   return (
     <Section title={t('codelink-bracket.staff.title')}>
       <div className="flex flex-wrap gap-2 rounded-lg border border-dashed border-border p-3">
-        {match.state === 'ordering' && (
+        {match.state === 'ordering' && match.stage_start_at_ms == null && (
           <ConfirmButton
             size="sm"
             variant="outline"

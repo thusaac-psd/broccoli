@@ -37,6 +37,9 @@ export function BracketContestInfo({ contestId }: { contestId?: number }) {
           {t('codelink-bracket.rules.description')}
         </p>
         <p className="mt-2 text-sm text-muted-foreground">
+          {t('codelink-bracket.rules.schedule')}
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
           {t('codelink-bracket.rules.order')}
         </p>
       </section>

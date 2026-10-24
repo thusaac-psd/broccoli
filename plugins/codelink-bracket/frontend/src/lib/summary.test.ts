@@ -5,10 +5,63 @@ import { makeMatch } from './fixtures.test-util.ts';
 import {
   adjudicationMessage,
   contestEndWarning,
+  currentRoundProgress,
   roundsInPlay,
 } from './summary.ts';
 
 const decided = (round: number) => makeMatch({ round, state: 'decided' });
+const completedThrough = (last: number) =>
+  Array.from({ length: last }, (_, index) => {
+    const round = index + 1;
+    return Array.from(
+      { length: 2 ** (4 - round) + Number(round === 4) },
+      (_, pos) => makeMatch({ round, pos, state: 'decided' }),
+    );
+  }).flat();
+
+test('current-stage count ignores completed earlier rounds and includes breaks and judge waits', () => {
+  const matches = [
+    ...completedThrough(2),
+    decided(3),
+    makeMatch({ round: 3, state: 'intermission' }),
+  ];
+  assert.deepEqual(currentRoundProgress(matches, 4, true), {
+    round: 3,
+    remaining: 1,
+  });
+  matches.at(-1)!.state = 'awaiting_judge';
+  assert.deepEqual(currentRoundProgress(matches, 4, true), {
+    round: 3,
+    remaining: 1,
+  });
+});
+
+test('an unopened next stage counts its pending pairings and final stage includes bronze', () => {
+  assert.deepEqual(currentRoundProgress(completedThrough(1), 4, true), {
+    round: 2,
+    remaining: 4,
+  });
+  assert.deepEqual(
+    currentRoundProgress(
+      [
+        ...completedThrough(3),
+        decided(4),
+        makeMatch({ round: 4, pos: 1, kind: 'third_place', state: 'tiebreak' }),
+      ],
+      4,
+      true,
+    ),
+    { round: 4, remaining: 1 },
+  );
+  assert.equal(currentRoundProgress(completedThrough(4), 4, true), null);
+});
+
+test('partially created stages keep uncreated matches in their remaining count', () => {
+  assert.deepEqual(currentRoundProgress([decided(1), decided(1)], 4, true), {
+    round: 1,
+    remaining: 6,
+  });
+});
 
 test('rounds in play lists every round with an unfinished match', () => {
   const matches = [
