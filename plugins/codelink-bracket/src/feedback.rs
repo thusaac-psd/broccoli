@@ -21,8 +21,9 @@ pub struct PlayerFeedback {
     pub slot_token: Option<SubmissionSlotToken>,
 }
 
-/// Only WA/TLE/MLE/RE count. Count submissions, rather than callbacks, so
-/// retries cannot apply a penalty twice. CE and infrastructure failures do not.
+/// Only WA/TLE/MLE/RE in regular games add score penalties. Tiebreaks keep
+/// their error count for display but never add a delay. Count submissions,
+/// rather than callbacks, so retries cannot apply a penalty twice.
 pub fn player_feedback(
     host: &Host,
     contest: i32,
@@ -61,7 +62,11 @@ pub fn player_feedback(
         feedback.pending_submission_id = Some(pending.submission_id);
         feedback.effective_at_us = Some(effective_time(&pending)?);
     }
-    feedback.delay_seconds = feedback.penalty_count.saturating_mul(penalty_seconds);
+    feedback.delay_seconds = if m.is_regular_game(game.index) {
+        feedback.penalty_count.saturating_mul(penalty_seconds)
+    } else {
+        0
+    };
     Ok(feedback)
 }
 
@@ -153,4 +158,30 @@ pub fn publish(
         }
     }
     Ok(completed_timers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiebreak_feedback_has_no_penalty_even_while_awaiting_judging() {
+        for state in [MatchPhase::Tiebreak, MatchPhase::AwaitingJudge] {
+            let host = Host::mock();
+            let m = MatchState {
+                state,
+                group_a: vec![101, 102, 103],
+                xiaoju: vec![crate::model::XiaojuState {
+                    index: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            host.db
+                .queue_query_result(serde_json::json!([{ "penalty_count": 4 }]));
+            let feedback = player_feedback(&host, 7, &m, 10, 319, 20).unwrap();
+            assert_eq!(feedback.penalty_count, 4);
+            assert_eq!(feedback.delay_seconds, 0);
+        }
+    }
 }

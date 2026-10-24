@@ -25,8 +25,9 @@ pub struct Setup {
     #[serde(default)]
     pub match_extra_time_seconds: i64,
     /// Score penalty added to subsequent submissions for each WA/TLE/MLE/RE
-    /// in a game, without shortening the submission window or spending extra
-    /// time. Zero disables penalties; older setups retain the 20s default.
+    /// in a regular game, without shortening the submission window or spending
+    /// extra time. Tiebreaks never apply penalties. Zero disables penalties;
+    /// older setups retain the 20s default.
     #[serde(default = "default_penalty_seconds")]
     pub penalty_seconds: i64,
     /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on

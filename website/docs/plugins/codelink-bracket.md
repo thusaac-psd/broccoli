@@ -89,8 +89,9 @@ setup screen there.
 3. **Timing per stage.** Set the regular game duration, tiebreak duration,
    and break before each stage. The form starts with 30 minutes for both game
    types and 10 minutes for later stage breaks. Round one opens with the
-   contest and has no preceding break. Penalty seconds and the wait for a stuck
-   judge apply to the whole contest, with defaults of 20 and 120 seconds.
+   contest and has no preceding break. The wrong submission penalty applies to regular games only and defaults
+   to 20 seconds. Tiebreaks have no error penalties. The wait for a stuck judge
+   applies to the whole contest and defaults to 120 seconds.
    Set shared extra time per match separately. It defaults to 0 minutes.
 
 **Create bracket** checks the configuration and lists anything missing. Before
@@ -134,7 +135,7 @@ curl -X POST \
 | `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
 | `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
 | `match_extra_time_seconds` | Extra time shared by the regular games of each match. Must be nonnegative. Defaults to 0. |
-| `penalty_seconds` | Score penalty added by each wrong submission within a game. Defaults to 20. Set to 0 to disable. |
+| `penalty_seconds` | Score penalty added by each wrong submission within a regular game. Defaults to 20. Set to 0 to disable. Tiebreaks have no error penalties. |
 | `escalation_grace_seconds` | How long a game waits for a stuck judge before staff must decide. Defaults to 120. |
 
 ### Edit future stages
@@ -203,6 +204,10 @@ For BO3 and FT2, scores of 2 to 0 and 2 to 1 end the match. A scoreless game
 uses one of the three games without adding a win. After three games, 1 to 0
 advances and 1 to 1 or 0 to 0 enters a tiebreak. BO and FT can be set
 independently, such as BO5 and FT3. Tiebreak games do not count toward BO.
+
+Tiebreaks compare the actual submission times of accepted solutions. Wrong
+submissions add no penalty, regardless of the regular game penalty setting.
+The smaller submission id breaks an exact tie.
 
 Once an accepted submission exists, the game waits until no future submission
 can beat its score, or until the real deadline. It then waits for any pending

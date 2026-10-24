@@ -3,7 +3,7 @@
 
 'codelink-bracket.rules.title' = 'Afternoon knockout round'
 'codelink-bracket.rules.description' = "Single elimination. Before each match, players rank the opponent's problems. Each stage sets a regular game cap (BO) and a win target (FT). Reaching FT ends the match immediately. Otherwise, after BO games, the higher score advances and a level score goes to a shared tiebreak. A game nobody solves awards no win."
-'codelink-bracket.rules.order' = 'Games compare actual submission time plus accumulated score penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured penalty to subsequent submissions in the same game; the count resets each game. Penalties do not shorten the submission window or consume shared extra time. Wait for your previous result before submitting again. Correct results wait for submissions that could beat their score to finish judging. Staff decide the match if judging cannot finish in time.'
+'codelink-bracket.rules.order' = "Regular games compare actual submission time plus accumulated score penalties, with submission ID breaking exact ties. WA, TLE, MLE, and RE add the configured penalty to subsequent submissions in the same regular game; the count resets each game. Tiebreaks compare actual submission times without error penalties. Penalties do not shorten the submission window or consume shared extra time. Wait for your previous result before submitting again. Correct results wait for submissions that could beat their score to finish judging. Staff decide the match if judging cannot finish in time."
 
 'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
 'codelink-bracket.bracket.empty' = 'The bracket has not been set up yet.'
@@ -107,7 +107,7 @@
 'codelink-bracket.setup.firstPlayer' = 'First player'
 'codelink-bracket.setup.gameMinutes' = 'Regular game base time (minutes)'
 'codelink-bracket.setup.graceSeconds' = 'Judge wait before staff step in (seconds)'
-'codelink-bracket.setup.penaltySeconds' = 'Penalty per wrong submission (seconds, 0 to disable)'
+'codelink-bracket.setup.penaltySeconds' = "Penalty per wrong submission in regular games (seconds, 0 to disable)"
 'codelink-bracket.setup.issue.badPenalty' = 'Penalty must be a nonnegative whole number of seconds.'
 'codelink-bracket.setup.issue.badExtra' = 'Shared extra time must be a finite, nonnegative duration.'
 'codelink-bracket.setup.issue.badGrace' = 'Judge wait must be a nonnegative whole number of seconds.'
