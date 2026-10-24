@@ -75,7 +75,11 @@ function NotificationCenter({
 
   const showDesktop = (title: string, body: string, tag: string) => {
     try {
-      const notification = new Notification(title, { body, tag });
+      const notification = new Notification(title, {
+        body,
+        tag,
+        requireInteraction: true,
+      });
       notification.onclick = () => {
         window.focus();
         navigate(`/contests/${contestId}`);

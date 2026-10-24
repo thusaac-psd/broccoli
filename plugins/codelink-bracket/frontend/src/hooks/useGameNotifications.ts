@@ -1,4 +1,5 @@
 import { useApiFetch } from '@broccoli/web-sdk/api';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
@@ -22,6 +23,8 @@ export function useGameNotifications(
 ): boolean {
   const apiFetch = useApiFetch();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const viewerKey = viewerCacheKey(user);
   const callback = useRef(onNotification);
   useEffect(() => {
     callback.current = onNotification;
@@ -67,6 +70,16 @@ export function useGameNotifications(
           await readEventStream(response.body, async (event) => {
             if (signal.aborted || event.event !== 'snapshot') return;
             const snapshot = JSON.parse(event.data) as BracketResponse;
+            queryClient.setQueryData(
+              ['codelink-bracket-bracket', contestId, viewerKey],
+              snapshot,
+            );
+            for (const match of snapshot.matches) {
+              queryClient.setQueryData(
+                ['codelink-bracket-match', contestId, match.id, viewerKey],
+                match,
+              );
+            }
             const update = gameUpdates(snapshot.matches, viewerId, seen);
             for (const notification of update.notifications) {
               if (signal.aborted) return;
@@ -74,11 +87,6 @@ export function useGameNotifications(
             }
             seen = update.seen;
             writeStorage('sessionStorage', seenKey, JSON.stringify(seen));
-            if (update.notifications.length) {
-              void queryClient.invalidateQueries({
-                queryKey: ['codelink-bracket-bracket', contestId],
-              });
-            }
           });
           // The server regularly closes healthy streams for reauthorization.
           // Reconnect directly: a background setTimeout can be throttled for a minute.
@@ -108,7 +116,7 @@ export function useGameNotifications(
     };
     void run();
     return () => controller.abort();
-  }, [apiFetch, contestId, queryClient, viewerId]);
+  }, [apiFetch, contestId, queryClient, viewerId, viewerKey]);
 
   return connected;
 }
