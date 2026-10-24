@@ -10,6 +10,7 @@ mod persistence;
 mod query;
 mod submission;
 mod submission_admission;
+mod user;
 mod verdict;
 mod visibility;
 
@@ -49,6 +50,7 @@ pub use persistence::{
 pub use query::{ProblemCheckerInfo, TestCaseData, TestCaseRow};
 pub use submission::{OnSubmissionInput, OnSubmissionOutput, SourceFile};
 pub use submission_admission::*;
+pub use user::UserIdentity;
 pub use verdict::Verdict;
 pub use visibility::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,

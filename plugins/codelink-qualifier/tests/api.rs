@@ -64,8 +64,9 @@ fn standings_show_global_slot_competition_and_unfinished_judgements() {
         {"problem_id": 1, "label": "A"}, {"problem_id": 2, "label": "B"}
     ]));
     host.db.queue_query_result(json!([
-        {"user_id": 1, "username": "one"}, {"user_id": 2, "username": "two"},
-        {"user_id": 3, "username": "three"}
+        {"user_id": 1, "username": "one", "display_name": "  第一位选手  "},
+        {"user_id": 2, "username": "two", "display_name": " \t"},
+        {"user_id": 3, "username": "three", "display_name": null}
     ]));
     host.db.queue_query_result(json!([
         {"submission_id": 1, "user_id": 1, "problem_id": 1, "submitted_at_us": 1000000, "accepted": true, "pending": false},
@@ -86,6 +87,16 @@ fn standings_show_global_slot_competition_and_unfinished_judgements() {
     assert_eq!(body["qualified_count"], 1);
     assert_eq!(body["pending_submissions"], 1);
     assert_eq!(body["rows"][0]["user_id"], 1);
+    assert_eq!(body["rows"][0]["username"], "one");
+    assert_eq!(body["rows"][0]["display_name"], "第一位选手");
+    assert_eq!(body["rows"][1]["display_name"], "two");
+    assert_eq!(body["rows"][2]["display_name"], "three");
+    assert_eq!(body["problems"][0]["awards"][0]["username"], "one");
+    assert_eq!(
+        body["problems"][0]["awards"][0]["display_name"],
+        "第一位选手"
+    );
+    assert_eq!(body["problems"][0]["awards"][1]["display_name"], "two");
     assert_eq!(body["rows"][0]["credited"], 2);
     assert_eq!(body["rows"][0]["score"], 3);
     assert_eq!(body["rows"][0]["qualification_verdict"], "qualified");

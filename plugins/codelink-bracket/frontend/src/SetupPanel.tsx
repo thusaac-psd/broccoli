@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Shuffle, Sparkles, X } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
@@ -116,7 +116,7 @@ function SetupForm({
   const opened = initial.setup?.opened_rounds ?? 0;
   const structureLocked = initial.started || opened > 0;
   const people = participants.data ?? [];
-  const nameOf = new Map(people.map((p) => [p.user_id, p.username]));
+  const nameOf = new Map(people.map((p) => [p.user_id, getUserDisplayName(p)]));
   // Until staff touch them, seeds follow registration order and problems
   // follow the contest's problem order.
   const seedList =
@@ -308,13 +308,14 @@ function SetupForm({
                   {bench.map((p) => (
                     <button
                       key={p.user_id}
+                      title={p.username}
                       type="button"
                       disabled={seedList.length >= playerCount}
                       onClick={() => setSeeds([...seedList, p.user_id])}
                       className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs hover:border-primary/50 hover:bg-accent disabled:opacity-40"
                     >
                       <Plus className="h-3 w-3" />
-                      {p.username}
+                      {getUserDisplayName(p)}
                     </button>
                   ))}
                 </div>

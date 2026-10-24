@@ -1535,11 +1535,6 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     // Fetch participants (during before/during phase, only fetch the requesting user
     // unless they have contest:manage so organizers can supervise live scoring).
-    #[derive(Deserialize)]
-    struct Participant {
-        user_id: i32,
-        username: String,
-    }
     let phase = &info.phase;
     let can_view_all = req.has_permission(perm::CONTEST_MANAGE);
     let restricted_user_id =
@@ -1599,14 +1594,14 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         String::new()
     };
     let sql = format!(
-        "SELECT cu.user_id, u.username \
+        "SELECT cu.user_id, u.username, u.display_name \
          FROM contest_user cu \
          JOIN \"user\" u ON u.id = cu.user_id \
          WHERE cu.contest_id = {}{user_filter} \
          ORDER BY cu.registered_at ASC",
         p.bind(contest_id)
     );
-    let participants: Vec<Participant> = host.db.query_with_args(&sql, &p.into_args())?;
+    let participants: Vec<UserIdentity> = host.db.query_with_args(&sql, &p.into_args())?;
 
     #[derive(Deserialize)]
     struct CurrentSubmission {
@@ -1677,6 +1672,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         rank: usize,
         user_id: i32,
         username: String,
+        display_name: String,
         solved: i32,
         penalty: i32,
         problems: HashMap<String, ProblemCell>,
@@ -1737,6 +1733,7 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             rank: 0,
             user_id: participant.user_id,
             username: participant.username.clone(),
+            display_name: participant.display_label().to_owned(),
             solved,
             penalty: total_penalty,
             problems: problem_cells,

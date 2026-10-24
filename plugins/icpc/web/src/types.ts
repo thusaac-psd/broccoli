@@ -1,3 +1,5 @@
+import type { UserDisplayIdentity } from '@broccoli/web-sdk/utils';
+
 export interface IcpcContestInfoResponse {
   penalty_minutes: number;
   count_compile_error: boolean;
@@ -14,10 +16,9 @@ export interface ProblemCell {
   pending?: number;
 }
 
-export interface StandingsEntry {
+export interface StandingsEntry extends UserDisplayIdentity {
   rank: number;
   user_id: number;
-  username: string;
   solved: number;
   penalty: number;
   problems: Record<string, ProblemCell>;

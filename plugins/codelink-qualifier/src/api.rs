@@ -65,7 +65,7 @@ pub fn handle_standings(
 
     let mut p = Params::new();
     let sql = format!(
-        "SELECT cu.user_id, u.username FROM contest_user cu \
+        "SELECT cu.user_id, u.username, u.display_name FROM contest_user cu \
          JOIN \"user\" u ON u.id = cu.user_id \
          WHERE cu.contest_id = {} ORDER BY cu.user_id",
         p.bind(contest_id)

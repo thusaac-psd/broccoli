@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useState } from 'react';
 
@@ -351,8 +351,11 @@ function RankRow({
       >
         <MedalBadge rank={entry.rank} />
       </td>
-      <td className="py-1.5 px-3 border-b border-border text-[13px] font-medium">
-        {entry.username}
+      <td
+        className="py-1.5 px-3 border-b border-border text-[13px] font-medium"
+        title={entry.username}
+      >
+        {getUserDisplayName(entry)}
       </td>
       <td
         className="py-1.5 px-3 border-b border-border text-center font-bold font-mono tabular-nums text-[14px]"

@@ -493,21 +493,16 @@ pub(crate) fn handle_scoreboard(
         max_scores.insert(pid, max);
     }
 
-    #[derive(Deserialize)]
-    struct Participant {
-        user_id: i32,
-        username: String,
-    }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT cu.user_id, u.username \
+        "SELECT cu.user_id, u.username, u.display_name \
          FROM contest_user cu \
          JOIN \"user\" u ON u.id = cu.user_id \
          WHERE cu.contest_id = {} \
          ORDER BY cu.registered_at ASC",
         p.bind(contest_id)
     );
-    let participants: Vec<Participant> = host.db.query_with_args(&sql, &p.into_args())?;
+    let participants: Vec<UserIdentity> = host.db.query_with_args(&sql, &p.into_args())?;
 
     // Build rankings
     #[derive(Serialize)]
@@ -521,6 +516,7 @@ pub(crate) fn handle_scoreboard(
         rank: usize,
         user_id: i32,
         username: String,
+        display_name: String,
         total_score: f64,
         total_time_seconds: i64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -537,7 +533,7 @@ pub(crate) fn handle_scoreboard(
         can_view_all,
         contest_config.scoreboard_visibility,
     );
-    let visible_participants: Vec<&Participant> = participants
+    let visible_participants: Vec<&UserIdentity> = participants
         .iter()
         .filter(|p| full_scoreboard_visible || req.user_id() == Some(p.user_id))
         .collect();
@@ -581,6 +577,7 @@ pub(crate) fn handle_scoreboard(
             rank: 0,
             user_id: participant.user_id,
             username: participant.username.clone(),
+            display_name: participant.display_label().to_owned(),
             total_score: round_score(total),
             total_time_seconds,
             problems,

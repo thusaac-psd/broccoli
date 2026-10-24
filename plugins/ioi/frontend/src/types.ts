@@ -1,3 +1,5 @@
+import type { UserDisplayIdentity } from '@broccoli/web-sdk/utils';
+
 export interface ContestInfoResponse {
   scoring_mode: ScoringMode;
   feedback_level: FeedbackLevel;
@@ -54,10 +56,9 @@ export interface ScoreboardProblemScore {
   score: number;
 }
 
-export interface ScoreboardEntry {
+export interface ScoreboardEntry extends UserDisplayIdentity {
   rank: number;
   user_id: number;
-  username: string;
   total_score: number;
   total_time_seconds: number;
   problems?: ScoreboardProblemScore[];

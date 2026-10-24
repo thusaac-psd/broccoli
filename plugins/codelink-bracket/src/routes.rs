@@ -496,12 +496,6 @@ fn game_problems(m: &MatchState, round_def: &RoundDef, index: u8) -> (Option<i32
     }
 }
 
-#[derive(Deserialize)]
-struct PlayerNameRow {
-    id: i32,
-    username: String,
-}
-
 /// Fill in `player_{a,b}_name` for every view with ONE query - the same
 /// `"user"` lookup the morning round (codelink-qualifier) uses for its standings, so
 /// both halves of the event show contestants the same way. Best-effort: names
@@ -520,10 +514,10 @@ fn attach_player_names(host: &Host, views: &mut [MatchView]) {
     let mut p = Params::new();
     let placeholders: Vec<String> = ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
-        "SELECT id, username FROM \"user\" WHERE id IN ({})",
+        "SELECT id AS user_id, username, display_name FROM \"user\" WHERE id IN ({})",
         placeholders.join(",")
     );
-    let rows: Vec<PlayerNameRow> = match host.db.query_with_args(&sql, &p.into_args()) {
+    let rows: Vec<UserIdentity> = match host.db.query_with_args(&sql, &p.into_args()) {
         Ok(rows) => rows,
         Err(e) => {
             let _ = host.log.info(&format!(
@@ -532,8 +526,10 @@ fn attach_player_names(host: &Host, views: &mut [MatchView]) {
             return;
         }
     };
-    let names: std::collections::HashMap<i32, String> =
-        rows.into_iter().map(|r| (r.id, r.username)).collect();
+    let names: std::collections::HashMap<i32, String> = rows
+        .into_iter()
+        .map(|r| (r.user_id, r.display_label().to_owned()))
+        .collect();
     for v in views.iter_mut() {
         v.player_a_name = names.get(&v.player_a).cloned();
         v.player_b_name = names.get(&v.player_b).cloned();
@@ -1352,19 +1348,28 @@ mod tests {
         assert_eq!(matches[0]["group_a"], serde_json::json!([null, null, 103]));
     }
     #[test]
-    fn get_bracket_shows_player_usernames() {
-        let host = Host::mock();
-        queue_bracket_contest_info(&host);
-        seed_match_in_progress(&host, 7);
-        host.db.queue_query_result(serde_json::json!([
-            { "id": 10, "username": "alice" },
-            { "id": 20, "username": "bob" },
-        ]));
+    fn get_bracket_prefers_display_names_and_keeps_username_fallback() {
+        for (display_name, expected) in [
+            (None, "bob"),
+            (Some(" \t"), "bob"),
+            (Some("同名选手"), "同名选手"),
+        ] {
+            let host = Host::mock();
+            queue_bracket_contest_info(&host);
+            seed_match_in_progress(&host, 7);
+            host.db.queue_query_result(serde_json::json!([
+                { "user_id": 10, "username": "alice", "display_name": " 同名选手 " },
+                { "user_id": 20, "username": "bob", "display_name": display_name },
+            ]));
 
-        let resp = handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
-        let m = resp.body.unwrap()["matches"][0].clone();
-        assert_eq!(m["player_a_name"], "alice");
-        assert_eq!(m["player_b_name"], "bob");
+            let resp =
+                handle_get_bracket(&host, &bracket_request(7, Some(player_auth(10)))).unwrap();
+            let m = resp.body.unwrap()["matches"][0].clone();
+            assert_eq!(m["player_a"], 10);
+            assert_eq!(m["player_b"], 20);
+            assert_eq!(m["player_a_name"], "同名选手");
+            assert_eq!(m["player_b_name"], expected);
+        }
     }
 
     #[test]

@@ -1,15 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use broccoli_server_sdk::error::SdkError;
+pub use broccoli_server_sdk::types::UserIdentity as Participant;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ContestConfig, ProblemConfig};
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Participant {
-    pub user_id: i32,
-    pub username: String,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Problem {
@@ -63,6 +58,7 @@ pub struct ProblemCell {
 pub struct Standing {
     pub user_id: i32,
     pub username: String,
+    pub display_name: String,
     /// Number of distinct credited problems, independent of their point values.
     pub credited: usize,
     pub score: usize,
@@ -81,6 +77,7 @@ pub struct Standing {
 pub struct SlotAward {
     pub user_id: i32,
     pub username: String,
+    pub display_name: String,
     pub submission_id: i32,
     pub time_seconds: i64,
 }
@@ -244,6 +241,7 @@ pub fn calculate(
         .into_iter()
         .map(|p| Standing {
             user_id: p.user_id,
+            display_name: p.display_label().to_owned(),
             username: p.username,
             credited: 0,
             score: 0,
@@ -331,6 +329,7 @@ pub fn calculate(
             problem.awards.push(SlotAward {
                 user_id: row.user_id,
                 username: row.username.clone(),
+                display_name: row.display_name.clone(),
                 submission_id: submission.submission_id,
                 time_seconds,
             });

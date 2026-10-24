@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 
@@ -395,8 +395,9 @@ function RankRow({
       <td
         className="py-1.5 px-3 border-b border-border text-[13px] font-medium sticky z-[1] bg-inherit"
         style={{ left: 50 }}
+        title={entry.username}
       >
-        {entry.username}
+        {getUserDisplayName(entry)}
       </td>
       {problemIds.map((pid) => {
         const score = problemScoreMap[pid] ?? 0;

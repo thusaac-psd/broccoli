@@ -1,3 +1,5 @@
+import type { UserDisplayIdentity } from '@broccoli/web-sdk/utils';
+
 export type QualificationVerdict = 'pending' | 'qualified';
 
 export type ProblemCell = {
@@ -10,9 +12,8 @@ export type ProblemCell = {
 
 export type CreditStatus = ProblemCell['status'];
 
-export interface Standing {
+export interface Standing extends UserDisplayIdentity {
   user_id: number;
-  username: string;
   /** Number of credited problems, independent of their point values. */
   credited: number;
   score: number;
@@ -27,12 +28,11 @@ export interface ProblemSlots {
   label: string;
   points: number;
   remaining: number;
-  awards: {
+  awards: (UserDisplayIdentity & {
     user_id: number;
-    username: string;
     submission_id: number;
     time_seconds: number;
-  }[];
+  })[];
 }
 
 export interface ContestInfoResponse {

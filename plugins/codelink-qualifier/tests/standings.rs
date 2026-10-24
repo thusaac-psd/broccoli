@@ -54,6 +54,7 @@ fn board_with_points(
             .map(|user_id| Participant {
                 user_id,
                 username: format!("user{user_id}"),
+                display_name: None,
             })
             .collect(),
         points
@@ -315,6 +316,7 @@ fn problem_ids_keep_duplicate_labels_independent_and_empty_contest_is_valid() {
         vec![Participant {
             user_id: 1,
             username: "one".into(),
+            display_name: None,
         }],
         vec![
             Problem {

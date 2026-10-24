@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge, Button, Label, Switch } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 
@@ -165,12 +165,18 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                   <div
                     key={slot}
                     className="truncate text-xs leading-6"
-                    title={award?.username}
+                    title={
+                      award
+                        ? `${getUserDisplayName(award)} (${award.username})`
+                        : undefined
+                    }
                   >
                     <span className="mr-1 text-muted-foreground">
                       {slot + 1}.
                     </span>
-                    {award?.username ?? t('codelink-qualifier.slots.available')}
+                    {award
+                      ? getUserDisplayName(award)
+                      : t('codelink-qualifier.slots.available')}
                   </div>
                 );
               })}
@@ -224,9 +230,10 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                 <tr key={row.user_id}>
                   <th
                     scope="row"
+                    title={row.username}
                     className="whitespace-nowrap border-b border-border px-3 py-3 text-left font-medium"
                   >
-                    {row.username}
+                    {getUserDisplayName(row)}
                   </th>
                   <td className="whitespace-nowrap border-b border-border px-3 py-3 text-center">
                     {row.qualification_verdict ? (
