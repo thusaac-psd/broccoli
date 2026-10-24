@@ -56,6 +56,27 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     if info.phase == "after" {
         return Err(PluginHttpResponse::error(400, "The contest has ended").into());
     }
+    if setup
+        .rounds
+        .get(usize::from(current.round.saturating_sub(1)))
+        .is_some_and(|r| r.start_at_ms.is_some())
+    {
+        let now = judge::now_ms(host)?;
+        let ready = setup
+            .stage_clocks
+            .get(&current.round)
+            .is_some_and(|clock| !clock.awaiting_reschedule && now >= clock.starts_at_ms);
+        if !ready {
+            return Err(PluginHttpResponse::error(409, "This match follows its shared stage schedule; reschedule the unopened stage instead").into());
+        }
+        judge::try_autostart(host, contest_id, match_id)?;
+        let updated = storage::load_match(host, contest_id, match_id)?.unwrap();
+        return Ok(PluginHttpResponse {
+            status: 200,
+            headers: None,
+            body: Some(serde_json::json!({"state": updated.state})),
+        });
+    }
     if current.round > 1 {
         let matches = storage::load_all_matches(host, contest_id)?;
         let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0) else {
@@ -76,11 +97,8 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         force_start(m).map_err(|e| SdkError::Other(e.to_string()))?;
         judge::open_xiaoju(host, contest_id, match_id, &setup, clock, m)
     })?;
-    // A start timer may still be pending; it will find the match started
-    // and do nothing, but cancel it rather than leave it to fire.
-    let _ = host
-        .timer
-        .cancel(&judge::start_timer_key(contest_id, match_id));
+    // A pending start delivery rechecks stored state. Do not cancel its key:
+    // a fast concurrent game settlement may already have reused it for a break.
 
     Ok(PluginHttpResponse {
         status: 200,
@@ -202,6 +220,11 @@ struct MatchView {
     id: u8,
     round: u8,
     stage_count: usize,
+    kind: crate::model::MatchKind,
+    third_place_enabled: bool,
+    stage_start_at_ms: Option<i64>,
+    ordering_deadline_ms: Option<i64>,
+    next_game_at_ms: Option<i64>,
     pos: u8,
     player_a: i32,
     player_b: i32,
@@ -349,7 +372,7 @@ fn match_view(
     round_def: &RoundDef,
     viewer: Option<i32>,
     can_view_all: bool,
-    stage_count: usize,
+    setup: &Setup,
 ) -> MatchView {
     // The open 小局, if any: `None` before the first opens and after the
     // match is decided. Read once here so the three timing fields below
@@ -370,7 +393,15 @@ fn match_view(
     MatchView {
         own_feedback: None,
         id,
-        stage_count,
+        stage_count: setup.rounds.len(),
+        kind: setup.match_kind(m.round, m.pos),
+        third_place_enabled: setup.third_place.is_some(),
+        stage_start_at_ms: setup.stage_clocks.get(&m.round).map(|s| s.start_at_ms),
+        ordering_deadline_ms: setup
+            .stage_clocks
+            .get(&m.round)
+            .map(|s| s.ordering_deadline_ms),
+        next_game_at_ms: m.next_game_at_ms,
         round: m.round,
         pos: m.pos,
         player_a: m.player_a,
@@ -540,26 +571,21 @@ pub fn handle_get_bracket(
     let mut views: Vec<MatchView> = matches
         .iter()
         .filter_map(|(id, m)| {
-            let round_def = setup.rounds.get(m.round.saturating_sub(1) as usize)?;
-            Some(match_view(
-                *id,
-                m,
-                round_def,
-                viewer,
-                can_view_all,
-                setup.rounds.len(),
-            ))
+            let round_def = setup.round_for_match(m.round, m.pos)?;
+            Some(match_view(*id, m, &round_def, viewer, can_view_all, &setup))
         })
         .collect();
     attach_player_names(host, &mut views);
     attach_own_feedback(host, contest_id, &setup, &matches, &mut views, viewer)?;
     let contest_end_ms = attach_start_times(host, contest_id, &setup, &matches, &mut views);
+    let server_now_ms = judge::now_ms(host).ok();
+    let stages = crate::stages::views(&setup, &matches, server_now_ms.unwrap_or(0));
 
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
         body: Some(
-            serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms, "player_count": setup.player_count() }),
+            serde_json::json!({ "matches": views, "contest_end_ms": contest_end_ms, "player_count": setup.player_count(), "third_place_enabled": setup.third_place.is_some(), "total_matches": setup.total_matches(), "stages": stages }),
         ),
     })
 }
@@ -581,8 +607,7 @@ pub fn handle_get_match(
     let m = storage::load_match(host, contest_id, match_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
     let round_def = setup
-        .rounds
-        .get(m.round.saturating_sub(1) as usize)
+        .round_for_match(m.round, m.pos)
         .ok_or_else(|| PluginHttpResponse::error(500, "Match references an undefined round"))?;
 
     let viewer = req.user_id();
@@ -590,10 +615,10 @@ pub fn handle_get_match(
     let mut view = [match_view(
         match_id,
         &m,
-        round_def,
+        &round_def,
         viewer,
         can_view_all,
-        setup.rounds.len(),
+        &setup,
     )];
     attach_player_names(host, &mut view);
     attach_own_feedback(
@@ -604,7 +629,7 @@ pub fn handle_get_match(
         &mut view,
         viewer,
     )?;
-    if m.state == MatchPhase::Ordering {
+    if matches!(m.state, MatchPhase::Ordering | MatchPhase::Preparing) {
         let matches = storage::load_all_matches(host, contest_id)?;
         attach_start_times(host, contest_id, &setup, &matches, &mut view);
     }
@@ -641,10 +666,10 @@ fn attach_own_feedback(
         ) {
             continue;
         }
-        let Some(round) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
+        let Some(round) = setup.round_for_match(m.round, m.pos) else {
             continue;
         };
-        let Some(problem) = judge::current_problem(m, round, viewer) else {
+        let Some(problem) = judge::current_problem(m, &round, viewer) else {
             continue;
         };
         view.own_feedback = Some(crate::feedback::player_feedback(
@@ -668,9 +693,15 @@ mod tests {
 
     fn setup_two_rounds() -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![201, 202, 203],
@@ -680,6 +711,10 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![501, 502, 503],
@@ -1020,7 +1055,7 @@ mod tests {
 
         // Staff see both players' problems for every opened game, and no
         // entry at all for the game that has not opened.
-        let staff = match_view(0, &m, round_def, None, true, setup.rounds.len());
+        let staff = match_view(0, &m, round_def, None, true, &setup);
         assert_eq!(staff.games.len(), 2);
         assert_eq!(
             (staff.games[0].problem_a, staff.games[0].problem_b),
@@ -1035,7 +1070,7 @@ mod tests {
 
         // Each game's problems obey exactly the same masking as the orders.
         for viewer in [Some(10), Some(20), Some(99), None] {
-            let v = match_view(0, &m, round_def, viewer, false, setup.rounds.len());
+            let v = match_view(0, &m, round_def, viewer, false, &setup);
             for g in &v.games {
                 let i = g.index as usize;
                 assert_eq!(
@@ -1073,14 +1108,7 @@ mod tests {
         }];
         let setup = setup_two_rounds();
 
-        let view = match_view(
-            0,
-            &m,
-            &setup.rounds[0],
-            Some(m.player_a),
-            false,
-            setup.rounds.len(),
-        );
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false, &setup);
 
         assert_eq!(view.current_xiaoju_index, Some(1));
         assert_eq!(view.current_xiaoju_opened_at_ms, Some(5_000));
@@ -1095,14 +1123,7 @@ mod tests {
         let m = match_in_ordering();
         let setup = setup_two_rounds();
 
-        let view = match_view(
-            0,
-            &m,
-            &setup.rounds[0],
-            Some(m.player_a),
-            false,
-            setup.rounds.len(),
-        );
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false, &setup);
 
         assert_eq!(view.current_xiaoju_index, None);
         assert_eq!(view.current_xiaoju_opened_at_ms, None);
@@ -1124,14 +1145,7 @@ mod tests {
             ..Default::default()
         });
         let setup = setup_two_rounds();
-        let view = match_view(
-            0,
-            &m,
-            &setup.rounds[0],
-            Some(m.player_a),
-            false,
-            setup.rounds.len(),
-        );
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false, &setup);
         assert_eq!(view.current_game_base_deadline_ms, Some(11_000));
         assert_eq!(view.current_xiaoju_deadline_ms, Some(14_000));
         assert_eq!(view.extra_time_remaining_ms, 3_000);
@@ -1169,14 +1183,7 @@ mod tests {
         }];
         let setup = setup_two_rounds();
 
-        let view = match_view(
-            0,
-            &m,
-            &setup.rounds[0],
-            Some(m.player_a),
-            false,
-            setup.rounds.len(),
-        );
+        let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false, &setup);
 
         assert_eq!(view.state, MatchPhase::Decided);
         assert_eq!(
@@ -1254,14 +1261,14 @@ mod tests {
     }
 
     #[test]
-    fn get_match_shows_the_opponents_group_in_full() {
+    fn get_match_hides_the_opponents_group_after_ordering() {
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         seed_match_in_progress(&host, 7);
 
         let resp = handle_get_match(&host, &get_request(7, 0, Some(player_auth(20)))).unwrap();
         let body = resp.body.unwrap();
-        assert_eq!(body["group_a"], serde_json::json!(vec![101, 102, 103]));
+        assert_eq!(body["group_a"], serde_json::json!([null, null, null]));
     }
 
     #[test]

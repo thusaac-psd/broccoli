@@ -196,22 +196,19 @@ fn resolve_rejection(
     let Some(setup) = storage::load_setup(host, contest_id)? else {
         return Ok(Err(Rejection::not_in_match()));
     };
-    let Some(round_index) = setup.rounds.iter().position(|r| {
-        r.group_a.contains(&event.problem_id)
-            || r.group_b.contains(&event.problem_id)
-            || r.tiebreak.contains(&event.problem_id)
-    }) else {
+    let Some(round) = setup.problem_round(event.problem_id) else {
         // Not part of this bracket at all this round -- certainly not
         // "yours" to submit to.
         return Ok(Err(Rejection::not_your_problem()));
     };
-    let round_def = &setup.rounds[round_index];
-    let round = (round_index + 1) as u8;
 
     let matches = storage::load_all_matches(host, contest_id)?;
     let Some(m) = storage::find_players_match(&matches, round, event.user_id) else {
         return Ok(Err(Rejection::not_in_match()));
     };
+    let round_def = setup
+        .round_for_match(m.round, m.pos)
+        .ok_or_else(|| SdkError::Other("Missing match problem groups".into()))?;
 
     let state_key = storage::match_key(
         contest_id,
@@ -226,7 +223,7 @@ fn resolve_rejection(
         return Ok(Err(Rejection::match_not_started()));
     }
 
-    let ctx = gate_ctx_from_match(&m, round_def);
+    let ctx = gate_ctx_from_match(&m, &round_def);
     if let Err(rejection) = check(&ctx, event.user_id, event.problem_id) {
         return Ok(Err(rejection));
     }
@@ -416,8 +413,14 @@ mod tests {
 
     fn seeded_setup() -> crate::model::Setup {
         crate::model::Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![RoundDef {
+                start_at_ms: None,
+                post_order_wait_seconds: None,
+                game_break_seconds: None,
+                match_extra_time_seconds: None,
                 wins_to_advance: None,
                 group_a: vec![101, 102, 103],
                 group_b: vec![201, 202, 203],

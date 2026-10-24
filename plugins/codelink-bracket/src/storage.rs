@@ -192,7 +192,7 @@ pub fn create_match_if_both_slots_filled(
         (player_a, player_b)
     };
 
-    let Some(round_def) = setup.rounds.get(round.saturating_sub(1) as usize) else {
+    let Some(round_def) = setup.round_for_match(round, pos) else {
         return Err(SdkError::Other(format!(
             "setup has no RoundDef for round {round}"
         )));
@@ -325,9 +325,15 @@ mod tests {
 
     fn setup_with_round_1() -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![
                 crate::model::RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![1, 2, 3],
                     group_b: vec![4, 5, 6],

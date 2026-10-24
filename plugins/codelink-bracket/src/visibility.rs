@@ -11,8 +11,7 @@
 //! `the_same_problem_is_allowed_to_the_opponent_and_denied_to_its_owner`
 //! below.
 //!
-//! Rules, in order (quoted from
-//! `docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`):
+//! Current tournament visibility rules, in order:
 //!
 //! > Let G be the group containing the problem, O the player who owns G, and
 //! > V the viewer.
@@ -20,12 +19,12 @@
 //! > | Condition | Decision |
 //! > |---|---|
 //! > | V holds `submission:view_all` | `Allow` |
-//! > | V is O's opponent, and the match has reached the ordering phase |
+//! > | V is O's opponent, and the match is in the ordering phase |
 //! >   `Allow` -- V must read it to rank it |
-//! > | V is O, and the problem's position in V's imposed order <= current
-//! >   小局 index, and the 小局 has opened | `Allow` |
+//! > | V is O, and the problem is V's current open 小局 | `Allow` |
 //! > | Problem is the round's active 附加赛 problem and 附加赛 has started |
 //! >   `Allow` to both players |
+//! > | During preparation, game breaks, or after a match ends | `Deny` |
 //! > | otherwise | `Deny` |
 //!
 //! `Resource::Submission`: `Allow` iff the viewer owns it or holds
@@ -112,29 +111,34 @@ pub fn decide_problem(
     } else {
         // Not in either player's group: only the active 附加赛 problem can
         // still be Allow, and then to both players.
-        let is_active_tiebreak_problem =
-            ctx.state == MatchPhase::Tiebreak && ctx.tiebreak_problem == Some(problem_id);
+        let is_active_tiebreak_problem = (ctx.state == MatchPhase::Tiebreak
+            || (ctx.state == MatchPhase::AwaitingJudge
+                && ctx
+                    .current_xiaoju_index
+                    .is_some_and(|index| usize::from(index) >= ctx.group_a.len())))
+            && ctx.tiebreak_problem == Some(problem_id);
         if is_active_tiebreak_problem && (viewer == ctx.player_a || viewer == ctx.player_b) {
             return WireDecision::Allow {};
         }
         return WireDecision::Deny {};
     };
 
-    // The opponent must read the group to rank it, and (assumption #2 in the
-    // spec) keeps that access for the rest of the match once granted -- so
-    // this checks "reached ordering or later", not "currently in ordering".
-    if viewer == opponent && ctx.state != MatchPhase::Pending {
+    // Opponent statements are available only while choosing their order.
+    if viewer == opponent && ctx.state == MatchPhase::Ordering {
         return WireDecision::Allow {};
     }
 
-    // The owner sees their own problems up to (not just at) the current 小局
-    // index -- a solved problem must not vanish -- but never ahead of it
-    // (assumption #3: ordering is private until each 小局 opens).
+    // During play, reveal only this player's current game. Previous games,
+    // the opponent's group and the next game stay hidden during buffers too.
     if viewer == owner
+        && matches!(
+            ctx.state,
+            MatchPhase::InProgress | MatchPhase::AwaitingJudge
+        )
         && let Some(current_index) = ctx.current_xiaoju_index
         && let Some(order) = owners_order
         && let Some(pos) = order.iter().position(|&p| p == problem_id)
-        && pos as u8 <= current_index
+        && pos as u8 == current_index
     {
         return WireDecision::Allow {};
     }
@@ -224,22 +228,19 @@ fn decide_problem_for_contest(
     let Some(setup) = setups.get(&contest_id) else {
         return WireDecision::Deny {};
     };
-    let Some(round_index) = setup.rounds.iter().position(|r| {
-        r.group_a.contains(&problem_id)
-            || r.group_b.contains(&problem_id)
-            || r.tiebreak.contains(&problem_id)
-    }) else {
+    let Some(round) = setup.problem_round(problem_id) else {
         return WireDecision::Deny {};
     };
-    let round_def = &setup.rounds[round_index];
-    let round = (round_index + 1) as u8;
     let Some(contest_matches) = matches.get(&contest_id) else {
         return WireDecision::Deny {};
     };
     let Some(m) = storage::find_players_match(contest_matches, round, viewer) else {
         return WireDecision::Deny {};
     };
-    let ctx = ctx_from_match(m, round_def);
+    let Some(round_def) = setup.round_for_match(m.round, m.pos) else {
+        return WireDecision::Deny {};
+    };
+    let ctx = ctx_from_match(m, &round_def);
     decide_problem(&ctx, problem_id, viewer, false)
 }
 
@@ -582,10 +583,10 @@ mod tests {
     }
 
     #[test]
-    fn a_players_earlier_problems_stay_visible() {
-        // Position <= current, not == current: a solved problem should not vanish.
+    fn only_the_current_problem_remains_visible_during_play() {
+        // Old problems are withdrawn as soon as the next game opens.
         let ctx = ctx_in_progress_at_xiaoju(1, vec![103, 101, 102]);
-        assert_eq!(decide_problem(&ctx, 103, 10, false), WireDecision::Allow {});
+        assert_eq!(decide_problem(&ctx, 103, 10, false), WireDecision::Deny {});
         assert_eq!(decide_problem(&ctx, 101, 10, false), WireDecision::Allow {});
         assert_eq!(decide_problem(&ctx, 102, 10, false), WireDecision::Deny {});
     }
@@ -664,6 +665,10 @@ mod tests {
 
     fn round_def() -> RoundDef {
         RoundDef {
+            start_at_ms: None,
+            post_order_wait_seconds: None,
+            game_break_seconds: None,
+            match_extra_time_seconds: None,
             wins_to_advance: None,
             group_a: vec![101, 102, 103],
             group_b: vec![201, 202, 203],
@@ -679,6 +684,8 @@ mod tests {
             { "contest_id": contest_id, "contest_type": "codelink-bracket" }
         ]));
         let setup = crate::model::Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
@@ -742,6 +749,8 @@ mod tests {
     /// built `MatchState` instead of hardcoding one.
     fn seed_setup_and_match(host: &Host, contest_id: i32, m: &MatchState) {
         let setup = crate::model::Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![round_def()],
             escalation_grace_seconds: 120,
@@ -760,6 +769,69 @@ mod tests {
                 serde_json::to_string(m).unwrap().as_str(),
             )])
             .unwrap();
+    }
+
+    #[test]
+    fn shared_final_problems_resolve_against_the_viewers_own_match_and_phase() {
+        let setup = crate::model::Setup {
+            seeds: vec![10, 20, 30, 40],
+            rounds: vec![RoundDef::default(), round_def()],
+            third_place: Some(crate::model::ThirdPlaceConfig::Shared),
+            ..Default::default()
+        };
+        let config = setup.rounds[1].clone();
+        let mut final_match = MatchState {
+            round: 2,
+            pos: 0,
+            player_a: 10,
+            player_b: 20,
+            group_a: config.group_a.clone(),
+            group_b: config.group_b.clone(),
+            order_a: Some(config.group_a.clone()),
+            order_b: Some(config.group_b.clone()),
+            state: MatchPhase::InProgress,
+            xiaoju: vec![crate::model::XiaojuState {
+                index: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bronze = MatchState {
+            pos: 1,
+            player_a: 30,
+            player_b: 40,
+            state: MatchPhase::Intermission,
+            ..final_match.clone()
+        };
+        let setups = HashMap::from([(7, setup)]);
+        let mut matches = HashMap::from([(7, vec![(2, final_match.clone()), (3, bronze.clone())])]);
+        let problem = config.group_a[0];
+        assert_eq!(
+            decide_problem_for_contest(7, problem, 10, &setups, &matches),
+            WireDecision::Allow {}
+        );
+        assert_eq!(
+            decide_problem_for_contest(7, problem, 20, &setups, &matches),
+            WireDecision::Deny {}
+        );
+        assert_eq!(
+            decide_problem_for_contest(7, problem, 30, &setups, &matches),
+            WireDecision::Deny {}
+        );
+        final_match.state = MatchPhase::Decided;
+        let bronze = MatchState {
+            state: MatchPhase::InProgress,
+            ..bronze
+        };
+        matches.insert(7, vec![(2, final_match), (3, bronze)]);
+        assert_eq!(
+            decide_problem_for_contest(7, problem, 10, &setups, &matches),
+            WireDecision::Deny {}
+        );
+        assert_eq!(
+            decide_problem_for_contest(7, problem, 30, &setups, &matches),
+            WireDecision::Allow {}
+        );
     }
 
     #[test]
@@ -1017,15 +1089,8 @@ mod tests {
     }
 
     #[test]
-    fn decide_visibility_standalone_problem_in_a_decided_match_is_allowed_practice_restored() {
-        // Negative control: once a match reaches `MatchPhase::Decided`, this
-        // plugin's OWN rules already stop hiding the owner's group (their
-        // `current_xiaoju_index` now covers every position they reached) --
-        // so "the contest has ended" needs no special case in the new
-        // branch; `decide_problem_for_contest` already answers `Allow`
-        // through the existing rule table. This pins that "practice
-        // restored" falls out naturally rather than requiring new logic
-        // that could itself over-reach.
+    fn decided_match_problems_remain_hidden_on_standalone_reads() {
+        // A finished match has no current problem, including standalone reads.
         let m = MatchState {
             round: 1,
             pos: 0,
@@ -1058,8 +1123,8 @@ mod tests {
         };
         let decisions = decide_visibility_decisions(&host, &req).unwrap();
         assert!(
-            matches!(decisions[0], WireDecision::Allow {}),
-            "a decided match's own problems must be readable again (practice), got {:?}",
+            matches!(decisions[0], WireDecision::Deny {}),
+            "old problems must stay hidden after a match, got {:?}",
             decisions[0]
         );
     }

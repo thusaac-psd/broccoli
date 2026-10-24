@@ -15,6 +15,7 @@ pub mod model;
 pub mod ordering;
 pub mod routes;
 pub mod setup;
+pub mod stages;
 pub mod storage;
 pub mod visibility;
 

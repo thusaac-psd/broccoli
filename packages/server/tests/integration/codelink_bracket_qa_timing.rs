@@ -1407,6 +1407,105 @@ async fn setup_rejects_an_empty_tiebreak_list() {
 /// Round 2 opens only after every first-stage match and the intermission.
 /// Ordering and staff starts remain unavailable until the opening timer fires.
 #[tokio::test]
+async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_through_the_host() {
+    let (app, plugins, staff_token, contest_id, rounds, players) =
+        contest_and_rounds_for_setup_probe("Scheduled championship and bronze").await;
+    let fx = Fixture {
+        app,
+        _plugins_tmp: plugins,
+        staff_token,
+        contest_id,
+        rounds,
+        players,
+    };
+    let seeds: Vec<_> = fx.players[..4].iter().map(|player| player.id).collect();
+    let mut body = full_setup_body(&fx.rounds[..2], &seeds, 60, 0, 120);
+    let first_at = Utc::now().timestamp_millis() + 1_000;
+    let missed_at = first_at + 2_000;
+    body["third_place"] = json!({"mode":"shared"});
+    for (index, at) in [first_at, missed_at].into_iter().enumerate() {
+        body["rounds"][index]["start_at_ms"] = json!(at);
+        body["rounds"][index]["post_order_wait_seconds"] = json!(30);
+        body["rounds"][index]["game_break_seconds"] = json!(60);
+    }
+    let setup_route = bracket_route(contest_id, "/setup");
+    let saved = fx
+        .app
+        .post_with_token(&setup_route, &body, &fx.staff_token)
+        .await;
+    assert_eq!(saved.status, 200, "{}", saved.text);
+    crate::codelink_bracket::poll_match(
+        &fx.app,
+        contest_id,
+        0,
+        &fx.staff_token,
+        Duration::from_secs(10),
+        |view| view["state"] == "ordering",
+    )
+    .await;
+    order_match_0(&fx).await;
+    let ordering = get_match(&fx.app, contest_id, 0, &fx.staff_token).await;
+    assert_eq!(ordering["state"], "ordering");
+    assert_eq!(ordering["ordering_deadline_ms"], first_at + 180_000);
+    assert_eq!(ordering["starts_at_ms"], first_at + 210_000);
+    assert_eq!(start_match(&fx, 0).await.status, 409);
+
+    sleep_until_ms(missed_at + 100).await;
+    // An ordinary setup retry also recovers a delayed stage timer.
+    let retried = fx
+        .app
+        .post_with_token(&setup_route, &body, &fx.staff_token)
+        .await;
+    assert_eq!(retried.status, 200, "{}", retried.text);
+    let bracket = fx
+        .app
+        .get_with_token(&bracket_route(contest_id, "/bracket"), &fx.staff_token)
+        .await;
+    assert_eq!(bracket.body["stages"][1]["phase"], "awaiting_reschedule");
+    for id in 0..2 {
+        assert_eq!(
+            force_decide(&fx, id, Some(seeds[usize::from(id) * 2]))
+                .await
+                .status,
+            200
+        );
+    }
+    assert_eq!(
+        fx.app
+            .get_with_token(&bracket_route(contest_id, "/matches/2"), &fx.staff_token)
+            .await
+            .status,
+        404
+    );
+    let rescheduled_at = Utc::now().timestamp_millis() + 1_000;
+    body["rounds"][1]["start_at_ms"] = json!(rescheduled_at);
+    let saved = fx
+        .app
+        .post_with_token(&setup_route, &body, &fx.staff_token)
+        .await;
+    assert_eq!(saved.status, 200, "{}", saved.text);
+    for (id, a, b, kind) in [
+        (2, seeds[0], seeds[2], "final"),
+        (3, seeds[1], seeds[3], "third_place"),
+    ] {
+        let view = crate::codelink_bracket::poll_match(
+            &fx.app,
+            contest_id,
+            id,
+            &fx.staff_token,
+            Duration::from_secs(10),
+            |view| view["state"] == "ordering",
+        )
+        .await;
+        assert_eq!(view["kind"], kind);
+        assert_eq!(view["player_a"], a);
+        assert_eq!(view["player_b"], b);
+        assert_eq!(view["stage_start_at_ms"], rescheduled_at);
+        assert_eq!(view["starts_at_ms"], rescheduled_at + 210_000);
+    }
+}
+
+#[tokio::test]
 async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
     let fx = setup_fixture_with_timing(3, 5, 120).await;
     let seeds: Vec<_> = fx.players.iter().map(|p| p.id).collect();
@@ -1464,7 +1563,15 @@ async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
         .await
         .expect("stage timer failed");
     for id in 8..12 {
-        let view = get_match(&fx.app, fx.contest_id, id, &fx.staff_token).await;
+        let view = crate::codelink_bracket::poll_match(
+            &fx.app,
+            fx.contest_id,
+            id,
+            &fx.staff_token,
+            Duration::from_secs(10),
+            |view| view["state"] == "ordering",
+        )
+        .await;
         assert_eq!(view["state"], "ordering", "stage match {id}: {view}");
     }
     order_match(&fx, 8, &fx.rounds[1], &fx.players[0], &fx.players[2]).await;
@@ -2165,7 +2272,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
     let fx = setup_fixture_with_stage_timing(120, 120, 0, 0, 120, 3).await;
     let a = &fx.players[0];
     order_match_0(&fx).await;
-    for index in 0..2 {
+    for index in 0..1 {
         let accepted = submit(
             &fx.app,
             fx.contest_id,
@@ -2181,7 +2288,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
     let wrong = submit(
         &fx.app,
         fx.contest_id,
-        fx.rounds[0].group_a[2],
+        fx.rounds[0].group_a[1],
         &a.token,
         "WRONG",
     )
@@ -2191,7 +2298,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
     let accepted = submit(
         &fx.app,
         fx.contest_id,
-        fx.rounds[0].group_a[2],
+        fx.rounds[0].group_a[1],
         &a.token,
         "ACCEPT",
     )
@@ -2219,14 +2326,14 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
         max_attempts: 1,
         ..Default::default()
     };
-    let key = format!("xiaoju:{}:0:2:effective:{}", fx.contest_id, accepted.id());
+    let key = format!("xiaoju:{}:0:1:effective:{}", fx.contest_id, accepted.id());
     for attempt in 0..2 {
         sleep_until_ms(effective_at_ms + attempt * 1_000 + 150).await;
         tick_once(&fx.app.state, &config).await.unwrap();
         let committed = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
         assert_eq!(committed["state"], "decided", "{committed}");
         assert_eq!(committed["winner"], a.id);
-        assert_eq!(committed["score_a"], 3);
+        assert_eq!(committed["score_a"], 2);
         let public = fx
             .app
             .get_with_token(&routes::submission(accepted.id()), &a.token)
@@ -2407,6 +2514,8 @@ async fn variable_bracket_size_and_five_game_stage_run_through_the_real_host() {
         200
     );
     let mut smaller = full_setup_body(&rounds[..3], &seeds[..8], 60, 0, 120);
+    // This scenario intentionally exercises every configured game, using FT5.
+    smaller["rounds"][0]["wins_to_advance"] = json!(5);
     for group in ["group_a", "group_b"] {
         smaller["rounds"][0][group].as_array_mut().unwrap().extend(
             original["rounds"][3][group].as_array().unwrap()[..2]

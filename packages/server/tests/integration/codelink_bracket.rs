@@ -23,14 +23,14 @@
 //! used here to stand in for a kernel round trip.
 //!
 //! Flow: staff seed 16 players across a 4-round bracket, both players order
-//! each other's problems, staff start match 0, players submit through 3
-//! 小局 (one AC each, then a scoreless timer-driven timeout), the match
+//! each other's problems, match 0 starts, players submit through 2
+//! 小局 (one AC each), the match
 //! resolves 2-0, and the winner lands in round 2's slot. Along the way:
 //! opponent-can-see / owner-cannot-see-yet during ordering, current-not-
 //! future during play, `submission:view_all` sees everything, a player can
 //! never read the opponent's submission, an eliminated player can't read a
 //! live match's problems, and a submission to the wrong problem is rejected
-//! with the plugin's OWN distinct error code, not a generic one.
+//! by the visibility kernel before the submission hook.
 //!
 //! Requires `start_dispatcher: true` (background judging + timer delivery)
 //! and a merged `plugins_dir` combining the real `codelink-bracket`
@@ -300,7 +300,7 @@ pub(crate) async fn get_match(app: &TestApp, contest_id: i32, match_id: u8, toke
 /// Mirrors `plugin_timer.rs`'s `await_deliveries` polling pattern - the
 /// background dispatcher ticks roughly every second, so this drives both
 /// real judging progression and real timer-driven advancement.
-async fn poll_match(
+pub(crate) async fn poll_match(
     app: &TestApp,
     contest_id: i32,
     match_id: u8,
@@ -310,8 +310,15 @@ async fn poll_match(
 ) -> Value {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let view = get_match(app, contest_id, match_id, token).await;
-        if predicate(&view) {
+        let response = app
+            .get_with_token(
+                &bracket_route(contest_id, &format!("/matches/{match_id}")),
+                token,
+            )
+            .await;
+        assert!(matches!(response.status, 200 | 404), "{}", response.text);
+        let view = response.body;
+        if response.status == 200 && predicate(&view) {
             return view;
         }
         assert!(
@@ -559,30 +566,20 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
         "A must NOT see 小局 2's not-yet-open problem while 小局 0 is open"
     );
 
-    // Gate probe (a): A submits to B's current problem (the OPPONENT's
-    // problem, not A's own). The kernel's OWN base decision allows this
-    // read (viewer == opponent, state != Pending), so the request reaches
-    // the plugin's `before_submission` hook, which rejects it with its own
-    // distinct code.
+    // Once ordering ends, opponent problems are hidden by the kernel itself.
     let res = submit(&app, contest_id, rounds[0].group_b[0], &a.token, "ACCEPT").await;
     assert_eq!(
-        res.status, 400,
+        res.status, 404,
         "submitting to the opponent's current problem should be rejected: {}",
         res.text
     );
     assert_eq!(
-        res.body["code"], "NOT_YOUR_PROBLEM",
-        "opponent-problem submission must be rejected with the plugin's distinct code, got: {}",
+        res.body["code"], "NOT_FOUND",
+        "opponent-problem submission must be rejected by the visibility kernel, got: {}",
         res.text
     );
 
-    // Gate probe (b): A submits to A's OWN 小局-2 (index 2) problem while
-    // 小局 0 is open. Unlike probe (a), the kernel's OWN visibility check on
-    // this problem denies it outright (owner rule: position > current
-    // index) BEFORE the hook is ever reached - a structurally different
-    // rejection (generic 404, not the plugin's code) from probe (a) above.
-    // This asymmetry is a genuine architectural finding, reported as such,
-    // not normalized away.
+    // A future own problem is hidden by the same visibility check.
     let res = submit(&app, contest_id, rounds[0].group_a[2], &a.token, "ACCEPT").await;
     assert_eq!(
         res.status, 404,
@@ -656,8 +653,8 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     // === Phase 4: 小局 1 - current-not-future again ======================
     let ids_for_a = visible_problem_ids(&app, contest_id, &a.token).await;
     assert!(
-        ids_for_a.contains(&(rounds[0].group_a[0] as i64)),
-        "A should still see the already-decided 小局 0 problem"
+        !ids_for_a.contains(&(rounds[0].group_a[0] as i64)),
+        "A must no longer see the already-decided 小局 0 problem"
     );
     assert!(
         ids_for_a.contains(&(rounds[0].group_a[1] as i64)),
@@ -686,7 +683,7 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     .await;
     assert_eq!(view["score_b"].as_i64(), Some(0));
 
-    // === Phase 5: 小局 2 - nobody submits; the real plugin timer decides =
+    // === Phase 5: FT2 finishes the match without opening a third game ===
     let view = poll_match(
         &app,
         contest_id,
@@ -699,7 +696,7 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     assert_eq!(
         view["winner"].as_i64(),
         Some(a.id as i64),
-        "match 0 should resolve to A (2-0) once 小局 2 times out scoreless"
+        "match 0 should resolve to A immediately at 2-0"
     );
     assert_eq!(view["score_a"].as_i64(), Some(2));
     assert_eq!(view["score_b"].as_i64(), Some(0));
@@ -709,10 +706,9 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
         })
         .await;
         let games = snapshot["matches"][0]["games"].as_array().unwrap();
-        assert_eq!(games.len(), 3);
+        assert_eq!(games.len(), 2);
         assert!(games.iter().all(|game| game["decided"] == true));
         assert_eq!(games[1]["winner"], a.id);
-        assert!(games[2]["winner"].is_null());
     }
     drop(streams);
 

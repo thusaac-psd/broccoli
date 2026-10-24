@@ -6,7 +6,7 @@ use broccoli_server_sdk::permissions as perm;
 use broccoli_server_sdk::prelude::*;
 use serde::Deserialize;
 
-use crate::model::{RoundDef, Setup};
+use crate::model::{RoundDef, Setup, ThirdPlaceConfig};
 use crate::storage;
 
 /// Validate a full bracket setup before it is persisted. Every failure here
@@ -42,6 +42,52 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
         );
     }
 
+    let mut last_start = None;
+    for (index, round) in setup.rounds.iter().enumerate() {
+        for (name, seconds) in [
+            ("post_order_wait_seconds", round.post_order_wait()),
+            ("game_break_seconds", round.game_break()),
+            (
+                "match_extra_time_seconds",
+                round
+                    .match_extra_time_seconds
+                    .unwrap_or(setup.match_extra_time_seconds),
+            ),
+        ] {
+            if !(0..=i64::MAX / 1_000).contains(&seconds) {
+                return Err(format!(
+                    "round {index}'s {name} must be nonnegative seconds within the timer range"
+                ));
+            }
+        }
+        if let Some(at) = round.start_at_ms {
+            if at < 0 || last_start.is_some_and(|last| at <= last) {
+                return Err("Stage start times must increase in round order".into());
+            }
+            crate::stages::planned_clock(setup, index as u8 + 1).map_err(|e| e.to_string())?;
+            last_start = Some(at);
+        }
+    }
+
+    if setup.third_place.is_some() && seeds.len() < 4 {
+        return Err("A third-place match needs at least four players".into());
+    }
+    if let Some(ThirdPlaceConfig::Custom(third_place)) = &setup.third_place {
+        let final_games = setup.rounds.last().unwrap().group_a.len();
+        if third_place.group_a.len() != final_games || third_place.group_b.len() != final_games {
+            return Err("Third-place problem groups must match the final's BO game count".into());
+        }
+    }
+    let third_place_round = setup
+        .third_place
+        .as_ref()
+        .filter(|p| matches!(p, ThirdPlaceConfig::Custom(_)))
+        .and_then(|_| {
+            setup
+                .round_for_match(setup.rounds.len() as u8, 1)
+                .map(|r| r.into_owned())
+        });
+
     // A problem belongs to exactly one group of one round. Tracked globally
     // (not per-round) because the visibility kernel's opponent-ranking
     // branch would otherwise grant a player `Allow` on a problem that is
@@ -49,7 +95,12 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
     // doc comment on this file's caller in `docs/superpowers/plans/
     // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
-    for (round_idx, round) in setup.rounds.iter().enumerate() {
+    for (round_idx, round) in setup
+        .rounds
+        .iter()
+        .chain(third_place_round.iter())
+        .enumerate()
+    {
         if round.group_a.is_empty()
             || round.group_a.len() != round.group_b.len()
             || round.group_a.len() + round.tiebreak.len() > 256
@@ -65,7 +116,11 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
         }
         if round
             .xiaoju_seconds
-            .checked_add(setup.match_extra_time_seconds)
+            .checked_add(
+                round
+                    .match_extra_time_seconds
+                    .unwrap_or(setup.match_extra_time_seconds),
+            )
             .and_then(|seconds| seconds.checked_mul(1_000))
             .is_none()
         {
@@ -140,6 +195,8 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
 struct SetupRequest {
     rounds: Vec<RoundDef>,
     #[serde(default)]
+    third_place: Option<ThirdPlaceConfig>,
+    #[serde(default)]
     match_extra_time_seconds: i64,
     #[serde(default = "crate::model::default_penalty_seconds")]
     penalty_seconds: i64,
@@ -175,7 +232,9 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     let mut setup = Setup {
         rounds: body.rounds,
         seeds: body.seeds,
+        third_place: body.third_place,
         opened_rounds: 0,
+        stage_clocks: Default::default(),
         match_extra_time_seconds: body.match_extra_time_seconds,
         penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
@@ -186,6 +245,20 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         round.wins_to_advance = Some(round.win_target());
     }
     validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
+    if setup.rounds.iter().any(|r| r.start_at_ms.is_some()) {
+        let times = crate::judge::contest_times(host, contest_id)?;
+        for round in &setup.rounds {
+            if let Some(at) = round.start_at_ms
+                && (at < times.start_ms || times.end_ms.is_some_and(|end| at >= end))
+            {
+                return Err(PluginHttpResponse::error(
+                    400,
+                    "Stage starts must be within the contest window",
+                )
+                .into());
+            }
+        }
+    }
 
     let key = storage::setup_key(contest_id);
     let mut saved = false;
@@ -196,6 +269,43 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             validate_edit(&previous, &setup, info.phase != "before")
                 .map_err(|msg| PluginHttpResponse::error(409, msg))?;
             setup.opened_rounds = previous.opened_rounds;
+            setup.stage_clocks = previous
+                .stage_clocks
+                .into_iter()
+                .filter(|(round, clock)| {
+                    setup
+                        .rounds
+                        .get(usize::from(round.saturating_sub(1)))
+                        .is_some_and(|config| config.start_at_ms == Some(clock.start_at_ms))
+                })
+                .collect();
+        }
+        let previous: Option<Setup> = snapshot
+            .as_ref()
+            .map(|s| serde_json::from_str(&s.value))
+            .transpose()?;
+        let changed_starts: Vec<_> = setup
+            .rounds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, round)| {
+                let at = round.start_at_ms?;
+                let old = previous
+                    .as_ref()
+                    .and_then(|p| p.rounds.get(index))
+                    .and_then(|r| r.start_at_ms);
+                (old != Some(at)).then_some(at)
+            })
+            .collect();
+        if !changed_starts.is_empty() {
+            let now = crate::judge::now_ms(host)?;
+            if changed_starts.iter().any(|at| *at <= now) {
+                return Err(PluginHttpResponse::error(
+                    400,
+                    "New stage start times must be in the future",
+                )
+                .into());
+            }
         }
         if host.storage.compare_and_set_snapshot(
             &key,
@@ -212,8 +322,13 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         );
     }
     // Also recover an interrupted opening of the most recently frozen stage.
-    for round in setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()) {
-        crate::judge::try_open_stage(host, contest_id, round as u8)?;
+    for round in 1..=setup.rounds.len() {
+        if setup.rounds[round - 1].start_at_ms.is_some()
+            || (setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()))
+                .contains(&round)
+        {
+            crate::judge::try_open_stage(host, contest_id, round as u8)?;
+        }
     }
 
     Ok(PluginHttpResponse {
@@ -231,6 +346,14 @@ fn validate_edit(previous: &Setup, next: &Setup, started: bool) -> Result<(), St
     }
     if previous.rounds[..previous.opened_rounds] != next.rounds[..previous.opened_rounds] {
         return Err("Opened stages cannot be edited, including matches still ranking".into());
+    }
+    if (started || previous.opened_rounds > 0)
+        && previous.third_place.is_some() != next.third_place.is_some()
+    {
+        return Err("The third-place match must be enabled before the contest starts".into());
+    }
+    if previous.opened_rounds == previous.rounds.len() && previous.third_place != next.third_place {
+        return Err("Opened final-stage problems cannot be edited".into());
     }
     if (started || previous.opened_rounds > 0)
         && (previous.penalty_seconds != next.penalty_seconds
@@ -255,11 +378,13 @@ pub fn handle_get_setup(
             PluginHttpResponse::error(403, "Editing the bracket requires contest:manage").into(),
         );
     }
+    let times = crate::judge::contest_times(host, contest_id).ok();
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
         body: Some(
-            serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase != "before"}),
+            serde_json::json!({"setup": storage::load_setup(host, contest_id)?, "started": info.phase != "before",
+                "contest_start_ms": times.as_ref().map(|t| t.start_ms), "contest_end_ms": times.and_then(|t| t.end_ms)}),
         ),
     })
 }
@@ -279,6 +404,10 @@ mod tests {
             setup.seeds = (1..=players).collect();
             setup.rounds = (0..(players as u32).ilog2())
                 .map(|i| RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: (100 + i as i32 * 20..105 + i as i32 * 20).collect(),
                     group_b: (110 + i as i32 * 20..115 + i as i32 * 20).collect(),
@@ -300,8 +429,14 @@ mod tests {
     fn game_count_bounds_leave_room_for_a_tiebreak_and_fit_the_game_index() {
         for count in [1, 2, 5, 255, 256] {
             let setup = Setup {
+                stage_clocks: Default::default(),
+                third_place: None,
                 seeds: vec![1, 2],
                 rounds: vec![RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: (1..=count).collect(),
                     group_b: (1001..1001 + count).collect(),
@@ -314,6 +449,30 @@ mod tests {
             };
             assert_eq!(validate_setup(&setup, &setup.seeds).is_ok(), count < 256);
         }
+    }
+
+    #[test]
+    fn third_place_reuses_the_final_or_requires_distinct_custom_problems() {
+        let mut setup = valid_setup();
+        setup.third_place = Some(ThirdPlaceConfig::Shared);
+        assert!(validate_setup(&setup, &setup.seeds).is_ok());
+        let final_round = setup.rounds.last().unwrap();
+        setup.third_place = Some(ThirdPlaceConfig::Custom(crate::model::ThirdPlaceProblems {
+            group_a: final_round.group_a.clone(),
+            group_b: final_round.group_b.clone(),
+            tiebreak: final_round.tiebreak.clone(),
+        }));
+        assert!(validate_setup(&setup, &setup.seeds).is_err());
+        setup.third_place = Some(ThirdPlaceConfig::Custom(crate::model::ThirdPlaceProblems {
+            group_a: vec![901, 902, 903],
+            group_b: vec![904, 905, 906],
+            tiebreak: vec![907],
+        }));
+        assert!(validate_setup(&setup, &setup.seeds).is_ok());
+        assert_eq!(setup.problem_round(907), Some(4));
+        assert_eq!(setup.round_for_match(4, 1).unwrap().tiebreak, vec![907]);
+        assert_eq!(setup.match_count(4), 2);
+        assert_eq!(setup.total_matches(), 16);
     }
 
     #[test]
@@ -386,9 +545,15 @@ mod tests {
 
     fn valid_setup() -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![111, 112, 113],
@@ -398,6 +563,10 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![201, 202, 203],
                     group_b: vec![211, 212, 213],
@@ -407,6 +576,10 @@ mod tests {
                     break_before_seconds: 600,
                 },
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![301, 302, 303],
                     group_b: vec![311, 312, 313],
@@ -416,6 +589,10 @@ mod tests {
                     break_before_seconds: 600,
                 },
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![411, 412, 413],

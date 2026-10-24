@@ -339,9 +339,7 @@ async fn standalone_submission_cannot_bypass_bracket_admission() {
     let a = &fx.players[0];
     let opponents_current_problem = fx.rounds[0].group_b[0];
 
-    // Sanity: the CORRECT, contest-scoped route rejects this submission with
-    // the plugin's own distinct code -- matches
-    // `codelink_bracket.rs`'s "Gate probe (a)".
+    // The contest-scoped route hides opponent problems once ordering ends.
     let res = submit(
         &fx.app,
         fx.contest_id,
@@ -351,15 +349,15 @@ async fn standalone_submission_cannot_bypass_bracket_admission() {
     )
     .await;
     assert_eq!(
-        res.status, 400,
+        res.status, 404,
         "sanity check failed: the contest-scoped submit should reject A submitting to B's \
          current problem: {}",
         res.text
     );
-    assert_eq!(res.body["code"], "NOT_YOUR_PROBLEM");
+    assert_eq!(res.body["code"], "NOT_FOUND");
 
-    // Both a readable opponent problem and the player's own current problem
-    // require contest context, including an explicitly selected other type.
+    // Hidden opponent problems stay hidden on standalone submission routes;
+    // the readable current problem still requires its contest context.
     for problem in [opponents_current_problem, fx.rounds[0].group_a[0]] {
         for contest_type in [None, Some("practice")] {
             let mut body = json!({
@@ -373,9 +371,15 @@ async fn standalone_submission_cannot_bypass_bracket_admission() {
                 .app
                 .post_with_token(&routes::problem_submissions(problem), &body, &a.token)
                 .await;
-            assert_eq!(res.status, 400, "{}", res.text);
+            let hidden = problem == opponents_current_problem;
+            assert_eq!(res.status, if hidden { 404 } else { 400 }, "{}", res.text);
             assert_eq!(
-                res.body["code"], "CONTEST_SUBMISSION_REQUIRED",
+                res.body["code"],
+                if hidden {
+                    "NOT_FOUND"
+                } else {
+                    "CONTEST_SUBMISSION_REQUIRED"
+                },
                 "{}",
                 res.text
             );

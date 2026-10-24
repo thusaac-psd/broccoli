@@ -234,6 +234,16 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
     let Some(current) = storage::load_match(host, contest, match_id)? else {
         return Ok(());
     };
+    if current.state == MatchPhase::Intermission {
+        return advance(host, contest, match_id);
+    }
+    if setup
+        .rounds
+        .get(usize::from(current.round.saturating_sub(1)))
+        .is_some_and(|r| r.start_at_ms.is_some())
+    {
+        return advance_preparation(host, contest, match_id, &setup, &current);
+    }
     let matches = storage::load_all_matches(host, contest)?;
     let contest_start = contest_times(host, contest)?.start_ms;
     let Some(at) = bracket::start_at_ms(&setup, &matches, &current, contest_start) else {
@@ -260,10 +270,65 @@ pub fn try_autostart(host: &Host, contest: i32, match_id: u8) -> Result<(), SdkE
     Ok(())
 }
 
+fn advance_preparation(
+    host: &Host,
+    contest: i32,
+    match_id: u8,
+    setup: &Setup,
+    current: &MatchState,
+) -> Result<(), SdkError> {
+    if !matches!(current.state, MatchPhase::Ordering | MatchPhase::Preparing) {
+        return Ok(());
+    }
+    let Some(stage) = setup
+        .stage_clocks
+        .get(&current.round)
+        .filter(|s| !s.awaiting_reschedule)
+    else {
+        return Ok(());
+    };
+    let clock = clock(host, contest)?;
+    let updated = storage::update_match(host, contest, match_id, |m| {
+        if !matches!(m.state, MatchPhase::Ordering | MatchPhase::Preparing) {
+            return Ok(());
+        }
+        if clock.contest_ended() {
+            m.state = MatchPhase::NeedsAdjudication;
+            m.adjudication_reason = Some(AdjudicationReason::ContestEnded);
+            return Ok(());
+        }
+        if clock.now >= stage.ordering_deadline_ms && m.state == MatchPhase::Ordering {
+            bracket::fill_missing_orders(m);
+            m.state = MatchPhase::Preparing;
+        }
+        if clock.now >= stage.starts_at_ms && m.state == MatchPhase::Preparing {
+            m.state = MatchPhase::InProgress;
+            open_xiaoju_at(host, contest, match_id, setup, clock, stage.starts_at_ms, m)?;
+        }
+        Ok(())
+    })?;
+    let wake = match updated.state {
+        MatchPhase::Ordering => Some(stage.ordering_deadline_ms),
+        MatchPhase::Preparing => Some(stage.starts_at_ms),
+        _ => None,
+    };
+    let key = start_timer_key(contest, match_id);
+    if let Some(at) = wake {
+        host.timer.schedule(at, &key, "")?;
+    }
+    // The same key may already hold the next game's break after a concurrent
+    // settlement. A stale preparation callback must never cancel that timer.
+    // The dispatcher acknowledges this delivery with its claim-aware cleanup.
+    Ok(())
+}
+
 /// Open a later stage once every match in the previous stage is decided. The
 /// stage's match documents are created together at this point, so rankings
 /// cannot be submitted before the official stage opening.
 pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkError> {
+    if crate::stages::try_open_scheduled(host, contest, round)? {
+        return Ok(());
+    }
     let key = storage::setup_key(contest);
     for _ in 0..100 {
         let Some(snapshot) = host.storage.snapshot(&key)? else {
@@ -309,12 +374,12 @@ pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkErr
                 continue;
             }
         }
-        for pos in 0..storage::matches_in_round(setup.player_count(), round) {
+        for pos in 0..setup.match_count(round) {
             storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
         }
         let created = storage::load_all_matches(host, contest)?;
         if created.iter().filter(|(_, m)| m.round == round).count()
-            != usize::from(storage::matches_in_round(setup.player_count(), round))
+            != usize::from(setup.match_count(round))
         {
             return Err(SdkError::Other(
                 "Stage is waiting for winner slots; retry opening".into(),
@@ -562,20 +627,33 @@ pub(crate) fn open_xiaoju(
     clock: Clock,
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
-    let now = clock.now;
+    open_xiaoju_at(host, contest, match_id, setup, clock, clock.now, m)
+}
+
+fn open_xiaoju_at(
+    host: &Host,
+    contest: i32,
+    match_id: u8,
+    setup: &Setup,
+    clock: Clock,
+    opened_at_ms: i64,
+    m: &mut MatchState,
+) -> Result<(), SdkError> {
+    let now = opened_at_ms;
+    let round = setup
+        .round_for_match(m.round, m.pos)
+        .ok_or_else(|| SdkError::Other("round setup missing".into()))?;
     // A zero balance may mean exhausted, not uninitialized. Only a match
     // with no opened games receives an allowance; old running matches do not.
     if m.xiaoju.is_empty() {
-        m.match_extra_time_seconds = setup.match_extra_time_seconds;
-        m.extra_time_remaining_ms = setup
+        m.match_extra_time_seconds = round
+            .match_extra_time_seconds
+            .unwrap_or(setup.match_extra_time_seconds);
+        m.extra_time_remaining_ms = m
             .match_extra_time_seconds
             .checked_mul(1_000)
             .ok_or_else(|| SdkError::Other("Extra time is too large".into()))?;
     }
-    let round = setup
-        .rounds
-        .get(m.round.saturating_sub(1) as usize)
-        .ok_or_else(|| SdkError::Other("round setup missing".into()))?;
     let durations = *m.game_durations.get_or_insert(round.game_durations());
     let index = m.xiaoju.len() as u8;
     let seconds = if m.is_regular_game(index) {
@@ -617,7 +695,7 @@ pub(crate) fn open_xiaoju(
 /// Write a decided match's winner into its next-round feeder slot, and try
 /// to create the next-round match if that was the second of its two
 /// feeders. A no-op for a final-round match (no next round to feed).
-fn write_next_round_slot(
+fn write_next_round_slots(
     host: &Host,
     contest: i32,
     setup: &Setup,
@@ -632,6 +710,17 @@ fn write_next_round_slot(
         storage::slot_key(contest, next_round, m.pos).as_str(),
         winner.to_string().as_str(),
     )])?;
+    if setup.third_place.is_some() && usize::from(next_round) == setup.rounds.len() {
+        let loser = if winner == m.player_a {
+            m.player_b
+        } else {
+            m.player_a
+        };
+        host.storage.set(&[(
+            storage::slot_key(contest, next_round, m.pos + 2).as_str(),
+            loser.to_string().as_str(),
+        )])?;
+    }
     // The next stage is opened as a whole only after every match in this
     // stage is decided. The caller invokes `try_open_stage` after this
     // match's CAS update has been persisted, so the final predecessor is
@@ -651,6 +740,30 @@ fn step(
     setup: &Setup,
     m: &mut MatchState,
 ) -> Result<(), SdkError> {
+    if m.state == MatchPhase::Intermission {
+        let clock = clock(host, contest)?;
+        if clock.contest_ended() {
+            m.state = MatchPhase::NeedsAdjudication;
+            m.adjudication_reason = Some(AdjudicationReason::ContestEnded);
+            m.next_game_at_ms = None;
+            return Ok(());
+        }
+        let at = m
+            .next_game_at_ms
+            .ok_or_else(|| SdkError::Other("Missing intermission deadline".into()))?;
+        if clock.now < at {
+            return host
+                .timer
+                .schedule(at, &start_timer_key(contest, match_id), "");
+        }
+        m.state = if m.is_regular_game(m.xiaoju.len() as u8) {
+            MatchPhase::InProgress
+        } else {
+            MatchPhase::Tiebreak
+        };
+        m.next_game_at_ms = None;
+        return open_xiaoju_at(host, contest, match_id, setup, clock, at, m);
+    }
     if m.state != MatchPhase::InProgress
         && m.state != MatchPhase::Tiebreak
         && m.state != MatchPhase::AwaitingJudge
@@ -662,7 +775,7 @@ fn step(
     };
     let current_index = current.index;
 
-    let Some(round_def) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
+    let Some(round_def) = setup.round_for_match(m.round, m.pos) else {
         // No round definition to resolve a current problem in -- cannot
         // safely proceed. `decide_match` independently makes the same
         // lookup and self-escalates to `NeedsAdjudication`.
@@ -672,7 +785,7 @@ fn step(
 
     let clock = clock(host, contest)?;
     let now = clock.now;
-    let subs = fetch_subs(host, contest, m, round_def)?;
+    let subs = fetch_subs(host, contest, m, &round_def)?;
     let cutoff_ms = clock.cutoff(m.xiaoju.last().unwrap().deadline_ms);
     let mut outcome = decide::decide_game_at_cutoff(m, &subs, now, cutoff_ms);
 
@@ -756,7 +869,21 @@ fn step(
                     escalate_contest_ended(host, contest, match_id, current_index, m)
                 }
                 MatchOutcome::NotYet | MatchOutcome::OpenTiebreak { .. } => {
-                    open_xiaoju(host, contest, match_id, setup, clock, m)
+                    let seconds = round_def.game_break();
+                    if seconds == 0 {
+                        open_xiaoju(host, contest, match_id, setup, clock, m)
+                    } else {
+                        let at = seconds
+                            .checked_mul(1_000)
+                            .and_then(|duration| now.checked_add(duration))
+                            .ok_or_else(|| {
+                                SdkError::Other("Intermission deadline overflow".into())
+                            })?;
+                        m.state = MatchPhase::Intermission;
+                        m.next_game_at_ms = Some(at);
+                        host.timer
+                            .schedule(at, &start_timer_key(contest, match_id), "")
+                    }
                 }
                 MatchOutcome::Decided { winner } => {
                     m.decided_at_ms = now;
@@ -820,12 +947,18 @@ fn finish_transition(
     setup: &Setup,
     updated: &MatchState,
 ) -> Result<(), SdkError> {
+    if matches!(
+        updated.state,
+        MatchPhase::Decided | MatchPhase::NeedsAdjudication
+    ) {
+        host.timer.cancel(&start_timer_key(contest, match_id))?;
+    }
     let effective_timers = crate::feedback::publish(host, contest, match_id, updated)?;
     if let Some(winner) = updated
         .winner
         .filter(|_| updated.state == MatchPhase::Decided)
     {
-        write_next_round_slot(host, contest, setup, updated, winner)?;
+        write_next_round_slots(host, contest, setup, updated, winner)?;
         try_open_stage(host, contest, updated.round + 1)?;
     }
     for key in effective_timers {
@@ -913,14 +1046,9 @@ fn resolve_and_advance(
     let Some(setup) = storage::load_setup(host, contest_id)? else {
         return Ok(());
     };
-    let Some(round_index) = setup.rounds.iter().position(|r| {
-        r.group_a.contains(&problem_id)
-            || r.group_b.contains(&problem_id)
-            || r.tiebreak.contains(&problem_id)
-    }) else {
+    let Some(round) = setup.problem_round(problem_id) else {
         return Ok(());
     };
-    let round = (round_index + 1) as u8;
 
     let matches = storage::load_all_matches(host, contest_id)?;
     let Some(m) = storage::find_players_match(&matches, round, user_id) else {
@@ -961,6 +1089,7 @@ pub(crate) fn apply_force_decide(m: &mut MatchState, winner: i32, now: i64) -> R
     }
     m.state = MatchPhase::Decided;
     m.winner = Some(winner);
+    m.next_game_at_ms = None;
     m.decided_at_ms = now;
     // A decided match is not "awaiting" anything -- clear it even if the
     // match was forced out of `AwaitingJudge`, so `GET /matches/{id}`
@@ -1285,10 +1414,16 @@ mod tests {
 
     fn setup_two_rounds() -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             opened_rounds: 1,
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![201, 202, 203],
@@ -1298,6 +1433,10 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    start_at_ms: None,
+                    post_order_wait_seconds: None,
+                    game_break_seconds: None,
+                    match_extra_time_seconds: None,
                     wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![501, 502, 503],
@@ -1617,7 +1756,7 @@ mod tests {
             other.winner = Some(other.player_a);
             other.decided_at_ms = 20_000;
             seed(&host, 7, &setup, id, &other);
-            write_next_round_slot(&host, 7, &setup, &other, other.player_a).unwrap();
+            write_next_round_slots(&host, 7, &setup, &other, other.player_a).unwrap();
         }
         let deadline = xiaoju_timer_key(7, 0, 2);
         let effective = effective_timer_key(7, 0, 2, 10);
@@ -2088,6 +2227,197 @@ mod tests {
         let after_second = storage::load_match(&host, 7, 0).unwrap().unwrap();
 
         assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn semifinal_winners_and_losers_feed_distinct_final_matches() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.seeds = vec![10, 20, 30, 40];
+        setup.third_place = Some(crate::model::ThirdPlaceConfig::Shared);
+        for (pos, a, b, winner) in [(0, 10, 20, 10), (1, 30, 40, 40)] {
+            let m = MatchState {
+                round: 1,
+                pos,
+                player_a: a,
+                player_b: b,
+                ..Default::default()
+            };
+            write_next_round_slots(&host, 7, &setup, &m, winner).unwrap();
+        }
+        for pos in 0..2 {
+            storage::create_match_if_both_slots_filled(&host, 7, &setup, 2, pos).unwrap();
+        }
+        let final_match = storage::load_match(&host, 7, 2).unwrap().unwrap();
+        let bronze = storage::load_match(&host, 7, 3).unwrap().unwrap();
+        assert_eq!((final_match.player_a, final_match.player_b), (10, 40));
+        assert_eq!((bronze.player_a, bronze.player_b), (20, 30));
+        assert_eq!(final_match.group_a, bronze.group_a);
+        assert_eq!(final_match.group_b, bronze.group_b);
+    }
+
+    #[test]
+    fn scheduled_matches_wait_full_ordering_and_share_the_same_first_game_clock() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.seeds = vec![10, 20, 30, 40];
+        setup.third_place = Some(crate::model::ThirdPlaceConfig::Shared);
+        setup.opened_rounds = 2;
+        setup.rounds[1].start_at_ms = Some(1_000);
+        setup
+            .stage_clocks
+            .insert(2, crate::stages::planned_clock(&setup, 2).unwrap());
+        for (id, pos, a, b) in [(2, 0, 10, 20), (3, 1, 30, 40)] {
+            let m = MatchState {
+                round: 2,
+                pos,
+                player_a: a,
+                player_b: b,
+                group_a: setup.rounds[1].group_a.clone(),
+                group_b: setup.rounds[1].group_b.clone(),
+                order_a: Some(setup.rounds[1].group_a.clone()),
+                state: MatchPhase::Ordering,
+                ..Default::default()
+            };
+            seed(&host, 7, &setup, id, &m);
+            queue_now(&host, 180_999);
+            try_autostart(&host, 7, id).unwrap();
+            assert_eq!(
+                storage::load_match(&host, 7, id).unwrap().unwrap().state,
+                MatchPhase::Ordering
+            );
+            queue_now(&host, 181_000);
+            try_autostart(&host, 7, id).unwrap();
+            let prepared = storage::load_match(&host, 7, id).unwrap().unwrap();
+            assert_eq!(prepared.state, MatchPhase::Preparing);
+            assert_eq!(prepared.order_b, Some(setup.rounds[1].group_b.clone()));
+            queue_now(&host, 212_000);
+            try_autostart(&host, 7, id).unwrap();
+            let started = storage::load_match(&host, 7, id).unwrap().unwrap();
+            assert_eq!(started.state, MatchPhase::InProgress);
+            assert_eq!(started.xiaoju[0].opened_at_ms, 211_000);
+        }
+    }
+
+    #[test]
+    fn stale_preparation_does_not_cancel_a_concurrently_scheduled_game_break() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].start_at_ms = Some(1_000);
+        setup
+            .stage_clocks
+            .insert(1, crate::stages::planned_clock(&setup, 1).unwrap());
+        let stale = MatchState {
+            state: MatchPhase::Ordering,
+            ..match_in_progress()
+        };
+        let actual = MatchState {
+            state: MatchPhase::Intermission,
+            next_game_at_ms: Some(300_000),
+            ..stale.clone()
+        };
+        seed(&host, 7, &setup, 0, &actual);
+        let key = start_timer_key(7, 0);
+        host.timer.schedule(300_000, &key, "").unwrap();
+        queue_now(&host, 240_000);
+        advance_preparation(&host, 7, 0, &setup, &stale).unwrap();
+        assert_eq!(host.timer.scheduled_at(&key), Some(300_000));
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), actual);
+    }
+
+    #[test]
+    fn intermission_is_measured_from_settlement_and_does_not_open_or_charge_early() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].game_break_seconds = Some(60);
+        seed(&host, 7, &setup, 0, &match_in_progress());
+        queue_now(&host, 1_000);
+        queue_subs(&host, vec![ac_row(10, 500)]);
+        advance(&host, 7, 0).unwrap();
+        let settled = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(settled.state, MatchPhase::Intermission);
+        assert_eq!(settled.next_game_at_ms, Some(61_000));
+        assert_eq!(settled.xiaoju.len(), 1);
+        queue_now(&host, 60_999);
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), settled);
+        queue_now(&host, 61_000);
+        try_autostart(&host, 7, 0).unwrap();
+        let next = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(next.xiaoju.len(), 2);
+        assert_eq!(next.xiaoju[1].opened_at_ms, 61_000);
+        assert_eq!(next.score_a, 1);
+        assert_eq!(
+            next.extra_time_remaining_ms,
+            settled.extra_time_remaining_ms
+        );
+    }
+
+    #[test]
+    fn consecutive_tiebreaks_use_only_the_game_break_and_the_final_result_has_none() {
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].game_break_seconds = Some(60);
+        setup.rounds[0].tiebreak_seconds = 1;
+        // Keep this as the final stage so the win does not start another round.
+        setup.rounds.truncate(1);
+        let mut m = match_in_progress();
+        m.xiaoju = (0..3)
+            .map(|index| XiaojuState {
+                index,
+                opened_at_ms: 0,
+                deadline_ms: 1_000,
+                decided: index < 2,
+                ..Default::default()
+            })
+            .collect();
+        seed(&host, 7, &setup, 0, &m);
+        for (settled_at, next_index) in [(1_000, 3), (62_000, 4)] {
+            queue_now(&host, settled_at);
+            queue_subs(&host, vec![]);
+            advance(&host, 7, 0).unwrap();
+            let waiting = storage::load_match(&host, 7, 0).unwrap().unwrap();
+            assert_eq!(waiting.state, MatchPhase::Intermission);
+            assert_eq!(waiting.next_game_at_ms, Some(settled_at + 60_000));
+            queue_now(&host, settled_at + 60_000);
+            try_autostart(&host, 7, 0).unwrap();
+            let next = storage::load_match(&host, 7, 0).unwrap().unwrap();
+            assert_eq!(next.state, MatchPhase::Tiebreak);
+            assert_eq!(next.xiaoju.last().unwrap().index, next_index);
+            assert_eq!(
+                next.xiaoju.last().unwrap().opened_at_ms,
+                settled_at + 60_000
+            );
+        }
+        queue_now(&host, 122_500);
+        queue_subs(&host, vec![ac_row(10, 122_100)]);
+        advance(&host, 7, 0).unwrap();
+        let decided = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(decided.state, MatchPhase::Decided);
+        assert_eq!(decided.winner, Some(10));
+        assert_eq!(decided.next_game_at_ms, None);
+        assert!(!host.timer.is_scheduled(&start_timer_key(7, 0)));
+    }
+
+    #[test]
+    fn contest_end_during_intermission_requires_staff_without_opening_a_game() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.state = MatchPhase::Intermission;
+        m.next_game_at_ms = Some(90_000);
+        m.xiaoju[0].decided = true;
+        seed(&host, 7, &setup, 0, &m);
+        host.db
+            .queue_query_result(serde_json::json!([{ "now_ms": 80_000, "end_ms": 80_000 }]));
+        advance(&host, 7, 0).unwrap();
+        let after = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(after.state, MatchPhase::NeedsAdjudication);
+        assert_eq!(
+            after.adjudication_reason,
+            Some(AdjudicationReason::ContestEnded)
+        );
+        assert_eq!(after.xiaoju.len(), 1);
     }
 
     #[test]

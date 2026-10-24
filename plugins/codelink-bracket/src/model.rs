@@ -1,5 +1,8 @@
 //! Typed storage schema for the 下午场 bracket plugin.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Default grace period (seconds) between a match entering
@@ -19,8 +22,14 @@ pub fn default_penalty_seconds() -> i64 {
 pub struct Setup {
     pub rounds: Vec<RoundDef>,
     pub seeds: Vec<i32>,
+    /// Optional bronze match, played alongside the final using the final
+    /// stage's timing and BO/FT settings, with its own problem groups.
+    #[serde(default)]
+    pub third_place: Option<ThirdPlaceConfig>,
     /// Prefix of stages whose rules are frozen, including interrupted openings.
     pub opened_rounds: usize,
+    #[serde(default)]
+    pub stage_clocks: BTreeMap<u8, StageClock>,
     /// Shared by both players across this match's regular games only.
     #[serde(default)]
     pub match_extra_time_seconds: i64,
@@ -46,12 +55,36 @@ impl Default for Setup {
         Self {
             rounds: Vec::new(),
             seeds: Vec::new(),
+            third_place: None,
             opened_rounds: 0,
+            stage_clocks: BTreeMap::new(),
             match_extra_time_seconds: 0,
             penalty_seconds: default_penalty_seconds(),
             escalation_grace_seconds: default_escalation_grace_seconds(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThirdPlaceProblems {
+    pub group_a: Vec<i32>,
+    pub group_b: Vec<i32>,
+    pub tiebreak: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ThirdPlaceConfig {
+    Shared,
+    Custom(ThirdPlaceProblems),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    Elimination,
+    Final,
+    ThirdPlace,
 }
 
 /// One round's problem split: two equally sized groups (one per player of a match),
@@ -71,10 +104,28 @@ pub struct RoundDef {
     /// cap (BO). Omission uses a majority of the configured regular games.
     #[serde(default)]
     pub wins_to_advance: Option<usize>,
+    /// UTC time at which the whole stage starts its 180-second ordering phase.
+    /// Missing only on legacy stages, which retain their original pacing.
+    #[serde(default)]
+    pub start_at_ms: Option<i64>,
+    #[serde(default)]
+    pub post_order_wait_seconds: Option<i64>,
+    #[serde(default)]
+    pub game_break_seconds: Option<i64>,
+    #[serde(default)]
+    pub match_extra_time_seconds: Option<i64>,
     pub xiaoju_seconds: i64,
     pub tiebreak_seconds: i64,
     /// Wait after the last match of the preceding stage. Zero in round one.
     pub break_before_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageClock {
+    pub start_at_ms: i64,
+    pub ordering_deadline_ms: i64,
+    pub starts_at_ms: i64,
+    pub awaiting_reschedule: bool,
 }
 
 /// Durations pinned when a match starts, including its later tiebreaks.
@@ -88,6 +139,61 @@ impl Setup {
     pub fn player_count(&self) -> u8 {
         self.seeds.len() as u8
     }
+
+    pub fn match_count(&self, round: u8) -> u8 {
+        crate::storage::matches_in_round(self.player_count(), round)
+            + u8::from(self.third_place.is_some() && usize::from(round) == self.rounds.len())
+    }
+
+    pub fn total_matches(&self) -> usize {
+        self.seeds.len().saturating_sub(1) + usize::from(self.third_place.is_some())
+    }
+
+    pub fn match_kind(&self, round: u8, pos: u8) -> MatchKind {
+        if usize::from(round) != self.rounds.len() {
+            MatchKind::Elimination
+        } else if pos == 1 && self.third_place.is_some() {
+            MatchKind::ThirdPlace
+        } else {
+            MatchKind::Final
+        }
+    }
+
+    pub fn round_for_match(&self, round: u8, pos: u8) -> Option<Cow<'_, RoundDef>> {
+        let base = self.rounds.get(usize::from(round.checked_sub(1)?))?;
+        if pos >= self.match_count(round) {
+            return None;
+        }
+        if self.match_kind(round, pos) == MatchKind::ThirdPlace {
+            let ThirdPlaceConfig::Custom(problems) = self.third_place.as_ref()? else {
+                return Some(Cow::Borrowed(base));
+            };
+            let mut resolved = base.clone();
+            resolved.group_a = problems.group_a.clone();
+            resolved.group_b = problems.group_b.clone();
+            resolved.tiebreak = problems.tiebreak.clone();
+            Some(Cow::Owned(resolved))
+        } else {
+            Some(Cow::Borrowed(base))
+        }
+    }
+
+    pub fn problem_round(&self, problem: i32) -> Option<u8> {
+        self.rounds
+            .iter()
+            .position(|r| r.contains_problem(problem))
+            .map(|index| index as u8 + 1)
+            .or_else(|| match self.third_place.as_ref()? {
+                ThirdPlaceConfig::Custom(p)
+                    if p.group_a.contains(&problem)
+                        || p.group_b.contains(&problem)
+                        || p.tiebreak.contains(&problem) =>
+                {
+                    Some(self.rounds.len() as u8)
+                }
+                _ => None,
+            })
+    }
 }
 
 impl MatchState {
@@ -97,6 +203,20 @@ impl MatchState {
 }
 
 impl RoundDef {
+    pub fn post_order_wait(&self) -> i64 {
+        self.post_order_wait_seconds.unwrap_or(30)
+    }
+
+    pub fn game_break(&self) -> i64 {
+        self.game_break_seconds
+            .unwrap_or(if self.start_at_ms.is_some() { 60 } else { 0 })
+    }
+    pub fn contains_problem(&self, problem: i32) -> bool {
+        self.group_a.contains(&problem)
+            || self.group_b.contains(&problem)
+            || self.tiebreak.contains(&problem)
+    }
+
     pub fn win_target(&self) -> usize {
         self.wins_to_advance.unwrap_or(self.group_a.len() / 2 + 1)
     }
@@ -145,6 +265,8 @@ pub struct MatchState {
     pub score_a: u8,
     pub score_b: u8,
     pub state: MatchPhase,
+    #[serde(default)]
+    pub next_game_at_ms: Option<i64>,
     pub winner: Option<i32>,
     /// Index into this round's `RoundDef::tiebreak` list of the 附加赛
     /// problem currently (or most recently) in play.
@@ -243,6 +365,10 @@ pub enum MatchPhase {
     Pending,
     /// Both players may read each other's group and submit a ranking.
     Ordering,
+    /// Ordering has closed; the whole stage waits for its common game start.
+    Preparing,
+    /// A settled game is followed by a buffer before the next game opens.
+    Intermission,
     /// The regular 小局 are running.
     InProgress,
     /// Scores were level after the regular 小局; an 附加赛 is running.

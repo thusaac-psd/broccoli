@@ -210,6 +210,8 @@ mod tests {
     fn version_three_preserves_opened_rules_and_enables_ft_for_future_stages() {
         let host = Host::mock();
         let mut setup = crate::model::Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=8).collect(),
             opened_rounds: 1,
             rounds: vec![
@@ -255,6 +257,8 @@ mod tests {
     fn version_two_preserves_match_progress_and_freezes_partial_stage_openings() {
         let host = Host::mock();
         let mut old = serde_json::to_value(crate::model::Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             rounds: vec![crate::model::RoundDef::default(); 4],
             seeds: (10..26).collect(),
             ..Default::default()

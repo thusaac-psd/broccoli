@@ -28,6 +28,7 @@ use crate::storage;
 /// `routes::handle_force_decide`.
 pub(crate) const LEFT_ORDERING_PHASE_MSG: &str =
     "the match has left the ordering phase; rankings can no longer be changed";
+const ORDERING_CLOSED_MSG: &str = "The stage ordering window has closed";
 
 /// Whether `order` contains exactly the same problem ids as `group`,
 /// each exactly once (order of `group` itself is irrelevant).
@@ -110,6 +111,13 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let current = storage::load_match(host, contest_id, match_id)?
         .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+    let ordering_window = storage::load_setup(host, contest_id)?.and_then(|setup| {
+        setup
+            .stage_clocks
+            .get(&current.round)
+            .filter(|s| !s.awaiting_reschedule)
+            .map(|s| (s.start_at_ms, s.ordering_deadline_ms))
+    });
 
     // Ordering is part of the stage, so it cannot begin before the stage's
     // official opening. Round one opens with the contest; later rounds open
@@ -142,6 +150,12 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         .map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let result = storage::update_match(host, contest_id, match_id, |m| {
+        if let Some((start, end)) = ordering_window {
+            let now = crate::judge::now_ms(host)?;
+            if now < start || now >= end {
+                return Err(SdkError::Other(ORDERING_CLOSED_MSG.into()));
+            }
+        }
         record_order(m, submitter, body.order.clone()).map_err(SdkError::Other)
     });
     let updated: MatchState = result.map_err(|e| match e {
@@ -152,14 +166,16 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         // probe would have given it directly -- not `ApiError`'s generic
         // `SdkError` -> 500 conversion. Any OTHER `SdkError` still falls
         // through to that generic conversion unchanged.
-        SdkError::Other(ref msg) if msg == LEFT_ORDERING_PHASE_MSG => {
-            ApiError::from(PluginHttpResponse::error(409, LEFT_ORDERING_PHASE_MSG))
+        SdkError::Other(ref msg)
+            if msg == LEFT_ORDERING_PHASE_MSG || msg == ORDERING_CLOSED_MSG =>
+        {
+            ApiError::from(PluginHttpResponse::error(409, msg.clone()))
         }
         other => ApiError::from(other),
     })?;
 
-    // Matches start by themselves: if this was the second ranking, start now
-    // (or schedule the start for when the contest opens or a break ends).
+    // Scheduled matches keep their full shared ordering window. Only legacy
+    // matches may start early when the second ranking arrives.
     // The ranking is already saved, so a failure here is logged, not
     // returned; the start timer and the staff override still cover it.
     if let Err(e) = crate::judge::try_autostart(host, contest_id, match_id) {
@@ -336,6 +352,42 @@ mod tests {
             storage::load_match(&host, 7, 0).unwrap().unwrap().order_a,
             None
         );
+    }
+
+    #[test]
+    fn ordering_deadline_is_enforced_inside_the_write_even_if_timer_delivery_is_late() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        let m = match_in_ordering(10, 20, group_a(), group_b());
+        seed_match(&host, 7, 0, &m);
+        let mut setup = crate::model::Setup {
+            seeds: vec![10, 20],
+            opened_rounds: 1,
+            rounds: vec![crate::model::RoundDef {
+                start_at_ms: Some(1_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        setup
+            .stage_clocks
+            .insert(1, crate::stages::planned_clock(&setup, 1).unwrap());
+        host.storage
+            .set(&[(
+                &storage::setup_key(7),
+                &serde_json::to_string(&setup).unwrap(),
+            )])
+            .unwrap();
+        host.db
+            .queue_query_result(serde_json::json!([{ "start_ms": 0 }]));
+        // The opening probe sees a still-valid window, but the CAS write crosses its end.
+        host.db
+            .queue_query_result(serde_json::json!([{ "now_ms": 180_999 }]));
+        host.db
+            .queue_query_result(serde_json::json!([{ "now_ms": 181_000 }]));
+        let error = handle_order(&host, &order_request(7, 0, 20, vec![103, 102, 101])).unwrap_err();
+        assert_eq!(error.into_response().status, 409);
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), m);
     }
 
     #[test]

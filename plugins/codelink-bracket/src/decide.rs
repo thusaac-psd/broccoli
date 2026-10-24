@@ -322,7 +322,7 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
         _ => {}
     }
 
-    let Some(round_def) = setup.rounds.get(m.round.saturating_sub(1) as usize) else {
+    let Some(round_def) = setup.round_for_match(m.round, m.pos) else {
         // No round definition to find 附加赛 problems in -- cannot safely
         // proceed. Escalate rather than guess or panic.
         m.state = MatchPhase::NeedsAdjudication;
@@ -977,8 +977,14 @@ mod tests {
 
     fn setup() -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: vec![RoundDef {
+                start_at_ms: None,
+                post_order_wait_seconds: None,
+                game_break_seconds: None,
+                match_extra_time_seconds: None,
                 wins_to_advance: None,
                 group_a: vec![101, 102, 103],
                 group_b: vec![201, 202, 203],

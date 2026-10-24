@@ -1,19 +1,34 @@
 //! Match pacing: when a match may leave `Ordering` on its own.
 //!
-//! Matches start per pair once their stage has opened and both players are
-//! ready. Stages are synchronized: every match in the previous stage must be
-//! decided before the next stage's intermission can begin. There is no ranking
-//! deadline - once a stage opens, a match waits for its rankings indefinitely
-//! (staff can force it with `/start`, which fills a missing ranking with the
-//! listed order).
+//! Scheduled stages share a frozen ordering window and first-game clock.
+//! Every match in the previous stage must finish, followed by the next
+//! stage's minimum rest, before that clock may open. Unscheduled legacy
+//! stages retain per-pair starts once both rankings arrive.
 
 use crate::model::{MatchPhase, MatchState, Setup};
 
-/// When a stage opens. Round one opens with the contest; every later stage
-/// opens after *all* matches in the immediately preceding stage are decided,
-/// followed by the configured intermission. `None` means the preceding stage
-/// is not complete yet.
+/// The frozen shared start for scheduled stages, or the earliest permitted
+/// opening for legacy stages. `None` means the stage has not opened yet.
 pub fn stage_open_at_ms(
+    setup: &Setup,
+    matches: &[(u8, MatchState)],
+    round: u8,
+    contest_start_ms: i64,
+) -> Option<i64> {
+    if setup
+        .rounds
+        .get(usize::from(round.checked_sub(1)?))?
+        .start_at_ms
+        .is_some()
+    {
+        let clock = setup.stage_clocks.get(&round)?;
+        return (!clock.awaiting_reschedule).then_some(clock.start_at_ms);
+    }
+    prerequisites_ready_at_ms(setup, matches, round, contest_start_ms)
+}
+
+/// The earliest permitted ordering start, independent of an explicit schedule.
+pub fn prerequisites_ready_at_ms(
     setup: &Setup,
     matches: &[(u8, MatchState)],
     round: u8,
@@ -25,7 +40,7 @@ pub fn stage_open_at_ms(
     let stage = setup.rounds.get(usize::from(round - 1))?;
 
     let previous_round = round - 1;
-    let expected = crate::storage::matches_in_round(setup.player_count(), previous_round) as usize;
+    let expected = usize::from(setup.match_count(previous_round));
     let previous: Vec<&MatchState> = matches
         .iter()
         .map(|(_, m)| m)
@@ -42,14 +57,25 @@ pub fn stage_open_at_ms(
         .and_then(|last| last.checked_add(stage.break_before_seconds.checked_mul(1_000)?))
 }
 
-/// When match `m` may start by itself: `None` while it is not in `Ordering`
-/// or a ranking is still missing; otherwise the stage opening time.
+/// The shared first-game time for scheduled stages. Legacy stages additionally
+/// require both rankings and start at their earliest permitted opening.
 pub fn start_at_ms(
     setup: &Setup,
     matches: &[(u8, MatchState)],
     m: &MatchState,
     contest_start_ms: i64,
 ) -> Option<i64> {
+    if setup
+        .rounds
+        .get(usize::from(m.round.checked_sub(1)?))?
+        .start_at_ms
+        .is_some()
+    {
+        let stage = setup.stage_clocks.get(&m.round)?;
+        return (!stage.awaiting_reschedule
+            && matches!(m.state, MatchPhase::Ordering | MatchPhase::Preparing))
+        .then_some(stage.starts_at_ms);
+    }
     if m.state != MatchPhase::Ordering || m.order_a.is_none() || m.order_b.is_none() {
         return None;
     }
@@ -74,6 +100,8 @@ mod tests {
 
     fn setup(break_seconds: i64) -> Setup {
         Setup {
+            stage_clocks: Default::default(),
+            third_place: None,
             seeds: (1..=16).collect(),
             rounds: (0..4)
                 .map(|i| crate::model::RoundDef {
