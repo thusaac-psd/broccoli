@@ -58,6 +58,11 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
                 "round {round_idx} needs equally sized nonempty problem groups and at most 256 games including tiebreaks"
             ));
         }
+        if !(1..=round.group_a.len()).contains(&round.win_target()) {
+            return Err(format!(
+                "round {round_idx}'s wins_to_advance must be between 1 and its regular game count"
+            ));
+        }
         if round
             .xiaoju_seconds
             .checked_add(setup.match_extra_time_seconds)
@@ -175,6 +180,11 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         penalty_seconds: body.penalty_seconds,
         escalation_grace_seconds: body.escalation_grace_seconds,
     };
+    // Store the effective FT explicitly so an omitted default compares equal
+    // to the same explicit target when submitting edits to frozen stages.
+    for round in &mut setup.rounds {
+        round.wins_to_advance = Some(round.win_target());
+    }
     validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let key = storage::setup_key(contest_id);
@@ -269,6 +279,7 @@ mod tests {
             setup.seeds = (1..=players).collect();
             setup.rounds = (0..(players as u32).ilog2())
                 .map(|i| RoundDef {
+                    wins_to_advance: None,
                     group_a: (100 + i as i32 * 20..105 + i as i32 * 20).collect(),
                     group_b: (110 + i as i32 * 20..115 + i as i32 * 20).collect(),
                     tiebreak: vec![119 + i as i32 * 20],
@@ -291,6 +302,7 @@ mod tests {
             let setup = Setup {
                 seeds: vec![1, 2],
                 rounds: vec![RoundDef {
+                    wins_to_advance: None,
                     group_a: (1..=count).collect(),
                     group_b: (1001..1001 + count).collect(),
                     tiebreak: vec![2000],
@@ -305,6 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn ft_defaults_to_a_majority_and_accepts_only_targets_within_bo() {
+        let mut setup = valid_setup();
+        assert_eq!(setup.rounds[0].win_target(), 2);
+        for target in [1, 2, 3] {
+            setup.rounds[0].wins_to_advance = Some(target);
+            assert!(validate_setup(&setup, &setup.seeds).is_ok());
+        }
+        for target in [0, 4, usize::MAX] {
+            setup.rounds[0].wins_to_advance = Some(target);
+            assert!(validate_setup(&setup, &setup.seeds).is_err());
+        }
+    }
+
+    #[test]
     fn future_stage_edits_are_allowed_but_opened_stages_and_shared_settings_are_frozen() {
         let mut previous = valid_setup();
         previous.opened_rounds = 1;
@@ -313,8 +339,12 @@ mod tests {
         next.rounds[1].group_b.extend([292, 293]);
         next.rounds[1].xiaoju_seconds = 3600;
         next.rounds[1].break_before_seconds = 1200;
+        next.rounds[1].wins_to_advance = Some(3);
         assert!(validate_setup(&next, &next.seeds).is_ok());
         assert!(validate_edit(&previous, &next, true).is_ok());
+        next.rounds[0].wins_to_advance = Some(1);
+        assert!(validate_edit(&previous, &next, true).is_err());
+        next.rounds[0] = previous.rounds[0].clone();
         next.rounds[0].xiaoju_seconds += 1;
         assert!(validate_edit(&previous, &next, true).is_err());
         next = previous.clone();
@@ -359,6 +389,7 @@ mod tests {
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![111, 112, 113],
                     tiebreak: vec![119],
@@ -367,6 +398,7 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![201, 202, 203],
                     group_b: vec![211, 212, 213],
                     tiebreak: vec![219],
@@ -375,6 +407,7 @@ mod tests {
                     break_before_seconds: 600,
                 },
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![301, 302, 303],
                     group_b: vec![311, 312, 313],
                     tiebreak: vec![319],
@@ -383,6 +416,7 @@ mod tests {
                     break_before_seconds: 600,
                 },
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![411, 412, 413],
                     tiebreak: vec![419],

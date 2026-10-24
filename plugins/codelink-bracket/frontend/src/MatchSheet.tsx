@@ -1,4 +1,3 @@
-import { gameLabel } from './lib/stage';
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -39,7 +38,7 @@ import {
 import { problemPath, submissionPath } from './lib/links';
 import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
-import { sideOf } from './lib/stage';
+import { gameLabel, sideOf } from './lib/stage';
 import { adjudicationMessage } from './lib/summary';
 import { OrderingPanel } from './OrderingPanel';
 import {
@@ -145,6 +144,8 @@ function MatchDetail({
           {t(roundNameKey(match.round, match.stage_count))}
           <span aria-hidden>·</span>
           {t('codelink-bracket.match.number', { n: match.pos + 1 })}
+          <span aria-hidden>·</span>
+          BO{match.group_a.length} / FT{match.wins_to_advance}
         </div>
         <SheetDescription asChild>
           <div className="pt-3">

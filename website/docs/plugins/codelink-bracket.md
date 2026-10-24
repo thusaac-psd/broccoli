@@ -9,9 +9,10 @@ sidebar_position: 3
 The `codelink-bracket` contest type runs a single elimination bracket for
 contestants, usually the qualifiers from the
 [Codelink qualifier](./codelink-qualifier.md). Choose a bracket size from 2 to
-128 players in powers of two. Each stage sets its own number of regular games
-and durations. All regular games are played, then the higher score advances.
-A level score goes to tiebreak games.
+128 players in powers of two. Each stage sets a maximum number of regular
+games, called BO, and the wins needed to advance, called FT. A player who
+reaches FT wins the match immediately. At the BO game cap, the higher score
+advances and a level score goes to tiebreak games.
 
 ## Enable the plugins
 
@@ -78,8 +79,10 @@ setup screen there.
    Drag them into seed order, or use **Shuffle**. Seed 1 plays seed 2 in round
    one, seed 3 plays seed 4, and so on. Remove a player to bring in someone
    from the other enrolled players.
-2. **Problems per stage.** Set the regular game count, initially three. Each
-   player needs that many problems, plus at least one shared tiebreak problem.
+2. **Problems and win target per stage.** Set **Maximum regular games (BO)**
+   and **Wins to advance (FT)**. New stages start with BO3 and FT2, so a score
+   of 2 to 0 ends the match after two games. FT must be a whole number from
+   1 to BO. Each player needs BO problems, plus at least one shared tiebreak problem.
    The two groups must have equal lengths. A stage may have at most 256 games
    including its tiebreak list. The slots start out filled in the contest's
    problem order. A problem can appear only once in the whole bracket.
@@ -93,7 +96,7 @@ setup screen there.
 **Create bracket** checks the configuration and lists anything missing. Before
 the contest starts, you can change its size, seeding and stage rules. Once the
 contest starts, size, seeding and shared settings are fixed. Each stage's
-problems, regular game count and timing are fixed when that stage opens,
+problems, BO, FT and timing are fixed when that stage opens,
 including while its contestants are still ranking.
 
 To script the setup instead, send the same data to the setup route as a user
@@ -107,13 +110,13 @@ curl -X POST \
     "seeds": [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
     "rounds": [
       { "group_a": [101, 102, 103], "group_b": [104, 105, 106], "tiebreak": [107, 108],
-        "xiaoju_seconds": 1200, "tiebreak_seconds": 1200, "break_before_seconds": 0 },
+        "wins_to_advance": 2, "xiaoju_seconds": 1200, "tiebreak_seconds": 1200, "break_before_seconds": 0 },
       { "group_a": [111, 112, 113, 114, 115], "group_b": [116, 117, 118, 119, 120], "tiebreak": [129],
-        "xiaoju_seconds": 1800, "tiebreak_seconds": 2100, "break_before_seconds": 600 },
+        "wins_to_advance": 3, "xiaoju_seconds": 1800, "tiebreak_seconds": 2100, "break_before_seconds": 600 },
       { "group_a": [121, 122, 123], "group_b": [124, 125, 126], "tiebreak": [127],
-        "xiaoju_seconds": 2400, "tiebreak_seconds": 2700, "break_before_seconds": 600 },
+        "wins_to_advance": 2, "xiaoju_seconds": 2400, "tiebreak_seconds": 2700, "break_before_seconds": 600 },
       { "group_a": [131, 132, 133], "group_b": [134, 135, 136], "tiebreak": [137],
-        "xiaoju_seconds": 3000, "tiebreak_seconds": 3600, "break_before_seconds": 900 }
+        "wins_to_advance": 2, "xiaoju_seconds": 3000, "tiebreak_seconds": 3600, "break_before_seconds": 900 }
     ],
     "match_extra_time_seconds": 300,
     "penalty_seconds": 20,
@@ -125,7 +128,8 @@ curl -X POST \
 | --- | --- |
 | `seeds` | A power of two from 2 to 128 distinct user ids in seed order. The first plays the second in round 1, the third plays the fourth, and so on. |
 | `rounds` | One round per elimination stage, so eight players need three rounds and sixteen need four. In every match of a round, the first player gets `group_a` and the second gets `group_b`. |
-| `rounds[].group_a`, `rounds[].group_b` | Equally sized nonempty problem lists. Their length is the regular game count for the stage. |
+| `rounds[].group_a`, `rounds[].group_b` | Equally sized nonempty problem lists. Their length is the maximum regular game count BO for the stage. |
+| `rounds[].wins_to_advance` | FT target from 1 to BO. The first player to reach it advances immediately. Omission or `null` uses half the BO count rounded down, plus 1. |
 | `rounds[].xiaoju_seconds` | Required positive base duration for each of the stage's regular games, in seconds. |
 | `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
 | `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
@@ -136,7 +140,7 @@ curl -X POST \
 ### Edit future stages
 
 Select **Edit future stages** on **Rankings** to change any stage that has not
-opened. You can change its regular game count, problem lists, game durations
+opened. You can change its BO, FT, problem lists, game durations
 and break. Select **Save changes** to apply the edit. A shortened break can
 open a ready stage immediately. Opened stages stay disabled in the editor.
 If a stage opens while you are editing, the server rejects changes to it.
@@ -147,8 +151,9 @@ and its `opened_rounds` count. Bracket size can change only before the contest
 starts. During play you cannot add or remove elimination stages.
 
 Existing configured brackets are upgraded when the plugin reloads. Their
-seeding, games, scores and clocks are preserved, and stages with existing
-matches become fixed.
+seeding, games, scores and clocks are preserved. Opened stages keep their
+previous rule of playing all regular games. Unopened stages without an FT
+target receive the majority default and remain editable.
 
 ### Shared extra time
 
@@ -185,12 +190,19 @@ Opened stages and running matches keep their timing when future stages change.
    submission time plus accumulated penalties. The lowest score time wins.
    Judge completion order does not determine the winner. The smaller
    submission id breaks an exact tie. If neither player solves their
-   problem before the game ends, nobody scores. The next game opens as soon as
+   problem before the game ends, nobody scores. Unless the match has ended, the next game opens as soon as
    one is decided.
-4. **Result.** After all regular games the player with more wins advances. On a
-   level score, including when nobody scored, both players get the round's
-   first tiebreak problem. A scoreless tiebreak moves on to the next tiebreak
-   problem.
+4. **Result.** After each regular game, a player who has reached FT advances
+   immediately, and the remaining regular games are skipped. Otherwise play
+   continues up to BO games. At that cap, the player with more wins advances
+   even if neither reached FT. On a level score, including when nobody scored,
+   both players get the round's first tiebreak problem. A scoreless tiebreak
+   moves on to the next tiebreak problem.
+
+For BO3 and FT2, scores of 2 to 0 and 2 to 1 end the match. A scoreless game
+uses one of the three games without adding a win. After three games, 1 to 0
+advances and 1 to 1 or 0 to 0 enters a tiebreak. BO and FT can be set
+independently, such as BO5 and FT3. Tiebreak games do not count toward BO.
 
 Once an accepted submission exists, the game waits until no future submission
 can beat its score, or until the real deadline. It then waits for any pending

@@ -108,7 +108,13 @@ export function matchSteps(match: MatchView, side: Side): Step[] {
     match.state === 'in_progress' ||
     match.state === 'tiebreak' ||
     match.state === 'awaiting_judge';
-  for (let game = 0; game < match.group_a.length; game++) {
+  // An FT win can finish before the BO cap. Unplayed games are absent from
+  // the finished match, rather than appearing as upcoming forever.
+  const regularGames =
+    match.state === 'decided'
+      ? match.games.filter((g) => !g.tiebreak).length
+      : match.group_a.length;
+  for (let game = 0; game < regularGames; game++) {
     steps.push({
       key: 'game',
       game,

@@ -3,7 +3,7 @@ use broccoli_server_sdk::prelude::*;
 use serde_json::{Value, json};
 
 const VERSION_KEY: &str = "schema_version";
-const VERSION: u64 = 3;
+const VERSION: u64 = 4;
 
 pub fn run(host: &Host) -> Result<(), SdkError> {
     let version = host
@@ -112,6 +112,31 @@ fn upgrade_stage_rules(host: &Host, key: &str, document: &mut Value) -> Result<(
         })?;
         object.insert("opened_rounds".into(), json!(opened));
     }
+    // v4 enables majority FT for future stages. Opened stages retain the
+    // previous play-all rule by setting an FT equal to their BO cap.
+    let opened = object
+        .get("opened_rounds")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| SdkError::Other("Invalid stored opened stage count".into()))?
+        as usize;
+    let rounds = object
+        .get_mut("rounds")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| SdkError::Other("Invalid stored bracket stages".into()))?;
+    for (index, round) in rounds.iter_mut().enumerate() {
+        let stage = round
+            .as_object_mut()
+            .ok_or_else(|| SdkError::Other("Invalid stored bracket stage".into()))?;
+        if stage.get("wins_to_advance").is_none_or(Value::is_null) {
+            let games = stage
+                .get("group_a")
+                .and_then(Value::as_array)
+                .ok_or_else(|| SdkError::Other("Invalid stored bracket problem group".into()))?
+                .len();
+            let target = if index < opened { games } else { games / 2 + 1 };
+            stage.insert("wins_to_advance".into(), json!(target));
+        }
+    }
     Ok(())
 }
 
@@ -180,6 +205,52 @@ fn upgrade_document(prefix: &str, document: &mut Value) -> Result<(), SdkError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_three_preserves_opened_rules_and_enables_ft_for_future_stages() {
+        let host = Host::mock();
+        let mut setup = crate::model::Setup {
+            seeds: (1..=8).collect(),
+            opened_rounds: 1,
+            rounds: vec![
+                crate::model::RoundDef {
+                    group_a: vec![1, 2, 3],
+                    group_b: vec![4, 5, 6],
+                    tiebreak: vec![7],
+                    xiaoju_seconds: 60,
+                    tiebreak_seconds: 60,
+                    ..Default::default()
+                };
+                3
+            ],
+            ..Default::default()
+        };
+        setup.rounds[1].group_a.extend([8, 9]);
+        setup.rounds[2].wins_to_advance = Some(1);
+        let mut raw = serde_json::to_value(&setup).unwrap();
+        raw["rounds"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("wins_to_advance");
+        host.storage
+            .set(&[(VERSION_KEY, "3"), ("setup:7", &raw.to_string())])
+            .unwrap();
+        run(&host).unwrap();
+        let migrated = crate::storage::load_setup(&host, 7).unwrap().unwrap();
+        assert_eq!(
+            migrated
+                .rounds
+                .iter()
+                .map(|r| r.win_target())
+                .collect::<Vec<_>>(),
+            vec![3, 3, 1]
+        );
+        assert_eq!(migrated.opened_rounds, 1);
+        let saved = host.storage.data();
+        run(&host).unwrap();
+        assert_eq!(host.storage.data(), saved);
+    }
+
     #[test]
     fn version_two_preserves_match_progress_and_freezes_partial_stage_openings() {
         let host = Host::mock();
@@ -321,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             host.storage.get_one(VERSION_KEY).unwrap().as_deref(),
-            Some("3")
+            Some("4")
         );
     }
 

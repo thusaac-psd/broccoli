@@ -1,4 +1,3 @@
-import { gameLabel } from './lib/stage';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -19,7 +18,13 @@ import { useContestProblems } from './hooks/useContestData';
 import { problemPath } from './lib/links';
 import { playerLabel } from './lib/player';
 import { roundNameKey } from './lib/rounds';
-import { matchSteps, playerStage, type Side, type Step } from './lib/stage';
+import {
+  gameLabel,
+  matchSteps,
+  playerStage,
+  type Side,
+  type Step,
+} from './lib/stage';
 import { OrderingPanel } from './OrderingPanel';
 import { useGameClock, useStartsIn } from './parts';
 import type { MatchView } from './types';
@@ -62,6 +67,8 @@ export function MyMatchPanel({
             {t(roundNameKey(match.round, match.stage_count))}
             {' · '}
             {t('codelink-bracket.my.vs', { name: opponentName })}
+            {' · '}
+            BO{match.group_a.length} / FT{match.wins_to_advance}
           </span>
         </div>
         <div className="ml-auto flex items-center gap-3">

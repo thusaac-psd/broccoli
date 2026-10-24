@@ -1289,6 +1289,7 @@ mod tests {
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![201, 202, 203],
                     tiebreak: vec![301, 302],
@@ -1297,6 +1298,7 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![501, 502, 503],
                     tiebreak: vec![601],
@@ -2086,6 +2088,37 @@ mod tests {
         let after_second = storage::load_match(&host, 7, 0).unwrap().unwrap();
 
         assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn two_zero_advances_without_opening_game_three_and_is_idempotent() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let mut m = match_in_progress();
+        m.score_a = 1;
+        let mut first = m.xiaoju[0].clone();
+        first.winner = Some(10);
+        first.decided = true;
+        m.xiaoju[0].index = 1;
+        m.xiaoju.insert(0, first);
+        seed(&host, 7, &setup, 0, &m);
+        queue_now(&host, 500_000);
+        queue_subs(&host, vec![ac_row(10, 100)]);
+        advance(&host, 7, 0).unwrap();
+        let decided = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(decided.state, MatchPhase::Decided);
+        assert_eq!(decided.winner, Some(10));
+        assert_eq!((decided.score_a, decided.score_b), (2, 0));
+        assert_eq!(decided.xiaoju.len(), 2);
+        assert_eq!(
+            host.storage
+                .get_one(&storage::slot_key(7, 2, 0))
+                .unwrap()
+                .as_deref(),
+            Some("10")
+        );
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), decided);
     }
 
     #[test]

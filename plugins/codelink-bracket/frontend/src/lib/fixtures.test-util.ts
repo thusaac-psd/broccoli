@@ -17,6 +17,7 @@ export function makeMatch(overrides: Partial<MatchView> = {}): MatchView {
     order_a: null,
     order_b: null,
     tiebreak_problem: null,
+    wins_to_advance: 2,
     score_a: 0,
     score_b: 0,
     state: 'ordering',

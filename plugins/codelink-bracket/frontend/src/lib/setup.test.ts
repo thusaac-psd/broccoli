@@ -33,6 +33,7 @@ test('auto-fill assigns 3 + 3 + 1 problems per round in contest order', () => {
     groupA: [100, 101, 102],
     groupB: [103, 104, 105],
     tiebreak: [106],
+    winsToAdvance: 2,
     gameMinutes: 30,
     tiebreakMinutes: 30,
     breakMinutes: 0,
@@ -42,6 +43,20 @@ test('auto-fill assigns 3 + 3 + 1 problems per round in contest order', () => {
 
 test('a complete, distinct setup has no issues', () => {
   assert.deepEqual(validateSetup(seeds, autoFillRounds(problems), 20, 120), []);
+});
+
+test('FT accepts independent win targets from one through the BO cap', () => {
+  const rounds = autoFillRounds(problems);
+  for (const wins of [1, 2, 3]) {
+    rounds[0]!.winsToAdvance = wins;
+    assert.deepEqual(validateSetup(seeds, rounds, 20, 120), []);
+  }
+  for (const wins of [0, -1, 1.5, 4, NaN, Infinity]) {
+    rounds[0]!.winsToAdvance = wins;
+    assert.deepEqual(validateSetup(seeds, rounds, 20, 120), [
+      { kind: 'badWinTarget', round: 1 },
+    ]);
+  }
 });
 
 test('too few problems leaves empty slots in the later rounds', () => {
@@ -109,12 +124,14 @@ test('refilling problem slots preserves every stage timing choice', () => {
     r.gameMinutes = 10 + i * 10;
     r.tiebreakMinutes = 15 + i * 10;
     r.breakMinutes = i * 5;
+    r.winsToAdvance = (i % 2) + 1;
   });
   const refilled = autoFillRounds([...problems].reverse(), rounds);
   refilled.forEach((r, i) => {
     assert.equal(r.gameMinutes, rounds[i]!.gameMinutes);
     assert.equal(r.tiebreakMinutes, rounds[i]!.tiebreakMinutes);
     assert.equal(r.breakMinutes, rounds[i]!.breakMinutes);
+    assert.equal(r.winsToAdvance, rounds[i]!.winsToAdvance);
   });
   assert.deepEqual(refilled[0]!.groupA, [127, 126, 125]);
   assert.deepEqual(validateSetup(seeds, refilled, 20, 120), []);

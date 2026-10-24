@@ -216,6 +216,7 @@ struct MatchView {
     order_a: Option<Vec<Option<i32>>>,
     order_b: Option<Vec<Option<i32>>>,
     tiebreak_problem: Option<i32>,
+    wins_to_advance: usize,
     score_a: u8,
     score_b: u8,
     state: MatchPhase,
@@ -389,6 +390,7 @@ fn match_view(
         tiebreak_problem: ctx
             .tiebreak_problem
             .and_then(|pid| mask_problem(&ctx, pid, viewer, can_view_all)),
+        wins_to_advance: round_def.win_target(),
         score_a: m.score_a,
         score_b: m.score_b,
         state: m.state,
@@ -669,6 +671,7 @@ mod tests {
             seeds: (1..=16).collect(),
             rounds: vec![
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![101, 102, 103],
                     group_b: vec![201, 202, 203],
                     tiebreak: vec![301, 302],
@@ -677,6 +680,7 @@ mod tests {
                     break_before_seconds: 0,
                 },
                 RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![401, 402, 403],
                     group_b: vec![501, 502, 503],
                     tiebreak: vec![601],

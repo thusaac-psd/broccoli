@@ -53,6 +53,8 @@ export interface MatchView {
   order_a: MaskedGroup | null;
   order_b: MaskedGroup | null;
   tiebreak_problem: number | null;
+  /** First-to target for regular-game wins. Group length is the BO cap. */
+  wins_to_advance: number;
   score_a: number;
   score_b: number;
   state: MatchPhase;
@@ -165,6 +167,8 @@ export interface RoundSetup {
   group_a: number[];
   group_b: number[];
   tiebreak: number[];
+  /** Omission or null uses a majority of the regular game count. */
+  wins_to_advance?: number | null;
   xiaoju_seconds: number;
   tiebreak_seconds: number;
   break_before_seconds: number;

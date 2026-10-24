@@ -66,6 +66,10 @@ pub struct RoundDef {
     pub group_a: Vec<i32>,
     pub group_b: Vec<i32>,
     pub tiebreak: Vec<i32>,
+    /// First to this many regular-game wins (FT). Group length is the game
+    /// cap (BO). Omission uses a majority of the configured regular games.
+    #[serde(default)]
+    pub wins_to_advance: Option<usize>,
     pub xiaoju_seconds: i64,
     pub tiebreak_seconds: i64,
     /// Wait after the last match of the preceding stage. Zero in round one.
@@ -92,6 +96,10 @@ impl MatchState {
 }
 
 impl RoundDef {
+    pub fn win_target(&self) -> usize {
+        self.wins_to_advance.unwrap_or(self.group_a.len() / 2 + 1)
+    }
+
     pub fn game_durations(&self) -> GameDurations {
         GameDurations {
             xiaoju_seconds: self.xiaoju_seconds,

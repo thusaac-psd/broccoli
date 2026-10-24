@@ -328,6 +328,7 @@ mod tests {
             seeds: (1..=16).collect(),
             rounds: vec![
                 crate::model::RoundDef {
+                    wins_to_advance: None,
                     group_a: vec![1, 2, 3],
                     group_b: vec![4, 5, 6],
                     tiebreak: vec![7],

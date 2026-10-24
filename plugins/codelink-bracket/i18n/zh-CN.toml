@@ -2,7 +2,7 @@
 'codelink-bracket.title' = '下午场对阵'
 
 'codelink-bracket.rules.title' = '下午场淘汰赛'
-'codelink-bracket.rules.description' = '单败淘汰。每场比赛开始前，双方各自为对手的题目排定顺序。常规小局数由阶段配置决定，所有常规小局都会进行，每个小局中双方各做对手为自己排定的下一道题，先提交通过者赢得该小局；截止时双方都未通过则该小局无人得分。常规小局结束后胜局多者晋级，比分相同则进入附加赛。'
+'codelink-bracket.rules.description' = "单败淘汰。每场比赛开始前，双方各自为对手的题目排定顺序。每阶段分别设置常规小局上限 BO 和晋级所需胜局数 FT，先达到 FT 的选手立即获胜。打满 BO 局后胜局多者晋级，比分相同则进入双方同题的附加赛。小局截止时双方均未通过则无人得分。"
 'codelink-bracket.rules.order' = '小局胜负比较实际提交用时加累计计分罚时，完全相同时按提交 ID 排序。WA、TLE、MLE、RE 每次为本小局后续提交增加设置中的罚时，进入下一小局清零。罚时不缩短提交窗口，也不消耗共享加时。上一发结果返回前不能再次提交；正确提交需等待可能反超其成绩的提交完成评测。评测未能及时完成时，由工作人员裁定本场比赛。'
 
 'codelink-bracket.bracket.loadError' = '无法加载对阵表。'
@@ -195,7 +195,7 @@
 
 'codelink-bracket.setup.edit' = '编辑未开启阶段'
 'codelink-bracket.setup.size' = '对阵规模'
-'codelink-bracket.setup.games' = '常规小局数（全部进行）'
+'codelink-bracket.setup.games' = "常规小局上限（BO）"
 'codelink-bracket.setup.locked' = '选手种子及公共设置已锁定，已开启阶段不可编辑。'
 'codelink-bracket.setup.save' = '保存修改'
 'codelink-bracket.setup.cancel' = '返回对阵表'
@@ -221,3 +221,6 @@
 'codelink-bracket.notifications.reconnecting' = '正在连接小局提醒…'
 'codelink-bracket.notifications.error' = '无法显示桌面通知，请检查浏览器和系统的通知设置。'
 'codelink-bracket.notifications.view' = '查看我的对局'
+'codelink-bracket.setup.winsToAdvance' = "晋级所需胜局数（FT）"
+'codelink-bracket.setup.formatHint' = "BO{games} / FT{wins}，先取得 {wins} 胜立即晋级。打满常规小局后胜局多者晋级，平分进入附加赛。"
+'codelink-bracket.setup.issue.badWinTarget' = "{round} 的 FT 必须为 1 到 BO 小局上限之间的整数。"

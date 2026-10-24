@@ -664,6 +664,7 @@ mod tests {
 
     fn round_def() -> RoundDef {
         RoundDef {
+            wins_to_advance: None,
             group_a: vec![101, 102, 103],
             group_b: vec![201, 202, 203],
             tiebreak: vec![319],

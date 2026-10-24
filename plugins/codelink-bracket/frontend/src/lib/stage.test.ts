@@ -147,3 +147,27 @@ test('five-game stages show game five before tiebreak one', () => {
     { n: 2 },
   ]);
 });
+
+test('a two-zero FT win shows only the played games and the final result', () => {
+  const m = match({
+    state: 'decided',
+    winner: 10,
+    score_a: 2,
+    games: [0, 1].map((index) => ({
+      index,
+      tiebreak: false,
+      problem_a: null,
+      problem_b: null,
+      opened_at_ms: 0,
+      deadline_ms: 1,
+      winner: 10,
+      decided: true,
+    })),
+  });
+  const steps = matchSteps(m, 'a');
+  assert.deepEqual(
+    steps.map((s) => s.key),
+    ['rank', 'start', 'game', 'game', 'result'],
+  );
+  assert.ok(steps.every((s) => s.status === 'done'));
+});

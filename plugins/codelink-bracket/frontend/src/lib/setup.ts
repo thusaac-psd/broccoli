@@ -11,6 +11,7 @@ export interface RoundDraft {
   groupA: (number | null)[];
   groupB: (number | null)[];
   tiebreak: (number | null)[];
+  winsToAdvance: number;
   gameMinutes: number;
   tiebreakMinutes: number;
   breakMinutes: number;
@@ -20,6 +21,7 @@ export const emptyRound = (index = 0): RoundDraft => ({
   groupA: [null, null, null],
   groupB: [null, null, null],
   tiebreak: [null],
+  winsToAdvance: 2,
   gameMinutes: 30,
   tiebreakMinutes: 30,
   breakMinutes: index === 0 ? 0 : 10,
@@ -59,6 +61,7 @@ export type SetupIssue =
   | { kind: 'emptySlot'; round: number }
   | { kind: 'duplicate'; problemId: number }
   | { kind: 'badTiming'; round: number }
+  | { kind: 'badWinTarget'; round: number }
   | { kind: 'badPenalty' }
   | { kind: 'badExtra' }
   | { kind: 'badGrace' };
@@ -85,6 +88,13 @@ export function validateSetup(
   const seen = new Set<number>();
   const dupes = new Set<number>();
   rounds.forEach((r, i) => {
+    if (
+      !Number.isSafeInteger(r.winsToAdvance) ||
+      r.winsToAdvance < 1 ||
+      r.winsToAdvance > r.groupA.length
+    ) {
+      issues.push({ kind: 'badWinTarget', round: i + 1 });
+    }
     const validSeconds = (minutes: number, minimum: number) => {
       const seconds = Math.round(minutes * 60);
       return Number.isSafeInteger(seconds) && seconds >= minimum;

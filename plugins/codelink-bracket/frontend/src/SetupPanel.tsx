@@ -69,6 +69,7 @@ function SetupForm({
       groupA: r.group_a,
       groupB: r.group_b,
       tiebreak: r.tiebreak,
+      winsToAdvance: r.wins_to_advance ?? Math.floor(r.group_a.length / 2) + 1,
       gameMinutes: r.xiaoju_seconds / 60,
       tiebreakMinutes: r.tiebreak_seconds / 60,
       breakMinutes: r.break_before_seconds / 60,
@@ -134,6 +135,7 @@ function SetupForm({
           group_a: r.groupA as number[],
           group_b: r.groupB as number[],
           tiebreak: r.tiebreak.filter((id): id is number => id !== null),
+          wins_to_advance: r.winsToAdvance,
           xiaoju_seconds: Math.round(r.gameMinutes * 60),
           tiebreak_seconds: Math.round(r.tiebreakMinutes * 60),
           break_before_seconds: Math.round(r.breakMinutes * 60),
@@ -327,29 +329,50 @@ function SetupForm({
                   <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     {t(roundNameKey(i + 1, stageCount))}
                   </div>
-                  <NumberField
-                    id={`bracket-games-${i}`}
-                    label={t('codelink-bracket.setup.games')}
-                    value={r.groupA.length}
-                    onChange={(count) => {
-                      if (
-                        !Number.isInteger(count) ||
-                        count < 1 ||
-                        count + r.tiebreak.length > 256
-                      )
-                        return;
-                      const resize = (group: (number | null)[]) =>
-                        Array.from(
-                          { length: count },
-                          (_, j) => group[j] ?? null,
-                        );
-                      setRound(i, {
-                        ...r,
-                        groupA: resize(r.groupA),
-                        groupB: resize(r.groupB),
-                      });
-                    }}
-                  />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <NumberField
+                      id={`bracket-games-${i}`}
+                      label={t('codelink-bracket.setup.games')}
+                      value={r.groupA.length}
+                      min={1}
+                      max={256 - r.tiebreak.length}
+                      onChange={(count) => {
+                        if (
+                          !Number.isInteger(count) ||
+                          count < 1 ||
+                          count + r.tiebreak.length > 256
+                        )
+                          return;
+                        const resize = (group: (number | null)[]) =>
+                          Array.from(
+                            { length: count },
+                            (_, j) => group[j] ?? null,
+                          );
+                        setRound(i, {
+                          ...r,
+                          groupA: resize(r.groupA),
+                          groupB: resize(r.groupB),
+                          winsToAdvance: Math.min(r.winsToAdvance, count),
+                        });
+                      }}
+                    />
+                    <NumberField
+                      id={`bracket-wins-${i}`}
+                      label={t('codelink-bracket.setup.winsToAdvance')}
+                      value={r.winsToAdvance}
+                      min={1}
+                      max={r.groupA.length}
+                      onChange={(winsToAdvance) =>
+                        setRound(i, { ...r, winsToAdvance })
+                      }
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t('codelink-bracket.setup.formatHint', {
+                      games: r.groupA.length,
+                      wins: r.winsToAdvance,
+                    })}
+                  </p>
                   <div className="mt-3 grid gap-2 sm:grid-cols-[auto_1fr] sm:items-center">
                     <SlotRow
                       label={t('codelink-bracket.setup.firstPlayer')}
@@ -517,6 +540,10 @@ function describeIssue(
       return t('codelink-bracket.setup.issue.badTiming', {
         round: t(roundNameKey(issue.round, stageCount)),
       });
+    case 'badWinTarget':
+      return t('codelink-bracket.setup.issue.badWinTarget', {
+        round: t(roundNameKey(issue.round, stageCount)),
+      });
     case 'badPenalty':
       return t('codelink-bracket.setup.issue.badPenalty');
     case 'badExtra':
@@ -612,11 +639,15 @@ function NumberField({
   label,
   value,
   onChange,
+  min = 0,
+  max,
 }: {
   id: string;
   label: string;
   value: number;
   onChange: (value: number) => void;
+  min?: number;
+  max?: number;
 }) {
   return (
     <div className="space-y-1.5">
@@ -626,7 +657,8 @@ function NumberField({
       <Input
         id={id}
         type="number"
-        min={0}
+        min={min}
+        max={max}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />

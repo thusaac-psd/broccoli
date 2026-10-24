@@ -290,7 +290,9 @@ pub enum MatchOutcome {
 
 /// Decide a match from its accumulated 小局 state.
 ///
-/// After the regular 小局, higher `score_a`/`score_b` wins. A LEVEL score
+/// Reaching the stage's FT target ends a match after the current game is
+/// settled. Otherwise, after the BO game cap, higher `score_a`/`score_b` wins.
+/// A LEVEL score
 /// -- **including 0-0** -- opens the round's first 附加赛 problem:
 /// `if score_a == score_b && score_a > 0` is a real bug shape here, not a
 /// hypothetical one, because it silently leaves a 0-0 match undecided
@@ -360,12 +362,13 @@ pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
         };
     }
 
-    // Regular phase: waiting on every configured regular 小局. 附加赛
-    // attempts are appended only once `m.state` becomes `Tiebreak`, so
-    // nothing here needs to filter them out.
-    let all_regular_decided =
-        m.xiaoju.len() == m.group_a.len() && m.xiaoju.iter().all(|x| x.decided);
-    if !all_regular_decided {
+    // Only settled games can trigger FT. The caller may retry while a game
+    // is still open, and that must never skip judging or create a winner.
+    if m.xiaoju.is_empty() || m.xiaoju.iter().any(|x| !x.decided) {
+        return MatchOutcome::NotYet;
+    }
+    let target_reached = usize::from(m.score_a.max(m.score_b)) >= round_def.win_target();
+    if !target_reached && m.xiaoju.len() < m.group_a.len() {
         return MatchOutcome::NotYet;
     }
 
@@ -976,6 +979,7 @@ mod tests {
         Setup {
             seeds: (1..=16).collect(),
             rounds: vec![RoundDef {
+                wins_to_advance: None,
                 group_a: vec![101, 102, 103],
                 group_b: vec![201, 202, 203],
                 tiebreak: vec![301, 302],
@@ -1099,31 +1103,73 @@ mod tests {
     }
 
     #[test]
-    fn five_regular_games_are_all_played_before_scoring_and_tiebreaking() {
-        let mut m = match_after_xiaoju(&[Some(10), Some(10), Some(10)]);
-        m.group_a.extend([104, 105]);
-        m.group_b.extend([204, 205]);
-        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
-        for index in [3, 4] {
-            m.xiaoju.push(XiaojuState {
-                index,
-                decided: true,
-                ..Default::default()
-            });
+    fn two_zero_finishes_bo3_ft2_for_either_player_without_a_third_game() {
+        for winner in [10, 20] {
+            let mut m = match_after_xiaoju(&[Some(winner), Some(winner)]);
+            let outcome = MatchOutcome::Decided { winner };
+            assert_eq!(decide_match(&mut m, &setup()), outcome);
+            assert_eq!(m.xiaoju.len(), 2);
+            assert_eq!(m.state, MatchPhase::Decided);
+            assert_eq!(m.winner, Some(winner));
+            assert_eq!(decide_match(&mut m, &setup()), outcome);
         }
+    }
+
+    #[test]
+    fn bo5_ft3_finishes_after_three_wins_but_not_two() {
+        let mut config = setup();
+        config.rounds[0].group_a.extend([104, 105]);
+        config.rounds[0].group_b.extend([204, 205]);
+        assert_eq!(config.rounds[0].win_target(), 3);
+        for wins in [2, 3] {
+            let mut m = match_after_xiaoju(&vec![Some(10); wins]);
+            m.group_a = config.rounds[0].group_a.clone();
+            m.group_b = config.rounds[0].group_b.clone();
+            let expected = if wins == 3 {
+                MatchOutcome::Decided { winner: 10 }
+            } else {
+                MatchOutcome::NotYet
+            };
+            assert_eq!(decide_match(&mut m, &config), expected);
+            assert_eq!(m.xiaoju.len(), wins);
+        }
+    }
+
+    #[test]
+    fn ft_is_independent_of_bo_and_can_preserve_the_play_all_rule() {
+        let mut config = setup();
+        config.rounds[0].wins_to_advance = Some(1);
+        let mut m = match_after_xiaoju(&[Some(20)]);
+        assert_eq!(
+            decide_match(&mut m, &config),
+            MatchOutcome::Decided { winner: 20 }
+        );
+        config.rounds[0].wins_to_advance = Some(3);
+        let mut m = match_after_xiaoju(&[Some(10), Some(10)]);
+        assert_eq!(decide_match(&mut m, &config), MatchOutcome::NotYet);
+    }
+
+    #[test]
+    fn scoreless_games_use_the_bo_cap_without_counting_toward_ft() {
+        let mut m = match_after_xiaoju(&[Some(10), None]);
+        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
+        m.xiaoju.push(XiaojuState {
+            index: 2,
+            decided: true,
+            ..Default::default()
+        });
         assert_eq!(
             decide_match(&mut m, &setup()),
             MatchOutcome::Decided { winner: 10 }
         );
-        m.state = MatchPhase::InProgress;
-        m.winner = None;
-        m.score_a = 0;
-        m.score_b = 0;
-        assert!(matches!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::OpenTiebreak { .. }
-        ));
-        assert!(!m.is_regular_game(5));
+        assert_eq!(m.score_a, 1);
+    }
+
+    #[test]
+    fn an_unsettled_game_cannot_trigger_ft() {
+        let mut m = match_after_xiaoju(&[Some(10), Some(10)]);
+        m.xiaoju.last_mut().unwrap().decided = false;
+        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
     }
 
     #[test]
