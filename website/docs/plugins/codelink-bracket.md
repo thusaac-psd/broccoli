@@ -71,8 +71,11 @@ settings. A closed or suspended browser page cannot receive these reminders.
 
 ## Configure the rules
 
-Open the contest's **Rankings** page. Until the bracket exists, staff see the
-setup screen there.
+Open the **Contest Homepage**, then select **Schedule and seeding** under
+**Actions**. You can also open it from the contest's actions menu in the
+management list. This opens **Tournament management**, where volunteers with
+`contest:manage` configure the bracket and stage schedule. Until configuration
+is complete, **Rankings** shows that the bracket has not been created.
 
 1. **Players and seeding.** Choose the bracket size, initially 16. The stage
    count follows the size. The selected players start in registration order.
@@ -85,14 +88,21 @@ setup screen there.
    1 to BO. Each player needs BO problems, plus at least one shared tiebreak problem.
    The two groups must have equal lengths. A stage may have at most 256 games
    including its tiebreak list. The slots start out filled in the contest's
-   problem order. A problem can appear only once in the whole bracket.
-3. **Timing per stage.** Set the regular game duration, tiebreak duration,
-   and break before each stage. The form starts with 30 minutes for both game
-   types and 10 minutes for later stage breaks. Round one opens with the
-   contest and has no preceding break. The wrong submission penalty applies to regular games only and defaults
-   to 20 seconds. Tiebreaks have no error penalties. The wait for a stuck judge
-   applies to the whole contest and defaults to 120 seconds.
-   Set shared extra time per match separately. It defaults to 0 minutes.
+   problem order. A problem can appear only once in the configured groups. The bronze match can explicitly share the final groups.
+3. **Timing per stage.** Set each stage's ordering start using the date and time
+   input. The displayed timezone is your browser's local timezone. Every match
+   in that stage receives the same 3 minute ordering window, then a preparation
+   wait of 30 seconds by default. Set the game base duration, tiebreak duration,
+   shared extra time and game break for that stage. The game break defaults to
+   60 seconds and starts when the previous game is settled. Later stages also
+   require a minimum break after the whole preceding stage, initially 10 minutes.
+   Round one has no preceding stage break. Regular game errors add 20 seconds
+   by default. Tiebreak errors add no penalty. The judge wait defaults to 120 seconds.
+4. **Bronze match.** Enable the bronze match before the contest starts. The two
+   semifinal winners enter the championship and the two losers enter the bronze
+   match. Both use the final stage's clock, BO, FT and durations. The bronze match
+   shares the final's problems by default. Select separate groups to use other
+   problems with the same BO count.
 
 **Create bracket** checks the configuration and lists anything missing. Before
 the contest starts, you can change its size, seeding and stage rules. Once the
@@ -101,7 +111,7 @@ problems, BO, FT and timing are fixed when that stage opens,
 including while its contestants are still ranking.
 
 To script the setup instead, send the same data to the setup route as a user
-with `contest:manage`.
+with `contest:manage`. Replace the example UTC millisecond timestamps with future times inside your contest window.
 
 ```bash
 curl -X POST \
@@ -111,14 +121,23 @@ curl -X POST \
     "seeds": [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26],
     "rounds": [
       { "group_a": [101, 102, 103], "group_b": [104, 105, 106], "tiebreak": [107, 108],
+        "start_at_ms": 1893499200000, "post_order_wait_seconds": 30, "game_break_seconds": 60,
+        "match_extra_time_seconds": 300,
         "wins_to_advance": 2, "xiaoju_seconds": 1200, "tiebreak_seconds": 1200, "break_before_seconds": 0 },
       { "group_a": [111, 112, 113, 114, 115], "group_b": [116, 117, 118, 119, 120], "tiebreak": [129],
+        "start_at_ms": 1893506400000, "post_order_wait_seconds": 30, "game_break_seconds": 60,
+        "match_extra_time_seconds": 300,
         "wins_to_advance": 3, "xiaoju_seconds": 1800, "tiebreak_seconds": 2100, "break_before_seconds": 600 },
       { "group_a": [121, 122, 123], "group_b": [124, 125, 126], "tiebreak": [127],
+        "start_at_ms": 1893513600000, "post_order_wait_seconds": 30, "game_break_seconds": 60,
+        "match_extra_time_seconds": 300,
         "wins_to_advance": 2, "xiaoju_seconds": 2400, "tiebreak_seconds": 2700, "break_before_seconds": 600 },
       { "group_a": [131, 132, 133], "group_b": [134, 135, 136], "tiebreak": [137],
+        "start_at_ms": 1893520800000, "post_order_wait_seconds": 30, "game_break_seconds": 60,
+        "match_extra_time_seconds": 300,
         "wins_to_advance": 2, "xiaoju_seconds": 3000, "tiebreak_seconds": 3600, "break_before_seconds": 900 }
     ],
+    "third_place": { "mode": "shared" },
     "match_extra_time_seconds": 300,
     "penalty_seconds": 20,
     "escalation_grace_seconds": 120
@@ -134,16 +153,25 @@ curl -X POST \
 | `rounds[].xiaoju_seconds` | Required positive base duration for each of the stage's regular games, in seconds. |
 | `rounds[].tiebreak_seconds` | Required positive duration for each tiebreak game in that stage, in seconds. |
 | `rounds[].break_before_seconds` | Required nonnegative break after every match of the preceding stage finishes. Must be 0 for round one. |
-| `match_extra_time_seconds` | Extra time shared by the regular games of each match. Must be nonnegative. Defaults to 0. |
+| `rounds[].start_at_ms` | UTC milliseconds when the whole stage begins ordering. New or changed times must be in the future, inside the contest window, and increasing by stage. |
+| `rounds[].post_order_wait_seconds` | Preparation wait after the full 180 second ordering window. Defaults to 30. |
+| `rounds[].game_break_seconds` | Break after a settled game before the next regular game or tiebreak. Defaults to 60 for scheduled stages. |
+| `rounds[].match_extra_time_seconds` | Regular game allowance per match for this stage. Omission uses the root fallback. |
+| `third_place` | `null` disables the bronze match. `{"mode":"shared"}` shares the final problems. `{"mode":"custom","group_a":[...],"group_b":[...],"tiebreak":[...]}` selects separate groups. |
+| `match_extra_time_seconds` | Fallback extra time shared by the regular games of each match. Must be nonnegative. Defaults to 0. |
 | `penalty_seconds` | Score penalty added by each wrong submission within a regular game. Defaults to 20. Set to 0 to disable. Tiebreaks have no error penalties. |
 | `escalation_grace_seconds` | How long a game waits for a stuck judge before staff must decide. Defaults to 120. |
 
 ### Edit future stages
 
-Select **Edit future stages** on **Rankings** to change any stage that has not
-opened. You can change its BO, FT, problem lists, game durations
-and break. Select **Save changes** to apply the edit. A shortened break can
-open a ready stage immediately. Opened stages stay disabled in the editor.
+Open **Schedule and seeding** from the contest's management actions to change
+any stage that has not opened. You can change its BO, FT, problem lists, game durations
+and breaks. Select **Save changes** to apply the edit. At the configured start,
+the preceding stage must be fully decided and its minimum rest completed. If
+either condition was unmet, the stage shows **Reschedule required** and stays
+closed until you assign a new future time. It never silently shifts its clock.
+A delayed or duplicate timer preserves the original clock when prerequisites
+were satisfied at the configured instant. Opened stages stay disabled in the editor.
 If a stage opens while you are editing, the server rejects changes to it.
 
 The setup API accepts the same edits through the complete setup request. Use
@@ -154,11 +182,13 @@ starts. During play you cannot add or remove elimination stages.
 Existing configured brackets are upgraded when the plugin reloads. Their
 seeding, games, scores and clocks are preserved. Opened stages keep their
 previous rule of playing all regular games. Unopened stages without an FT
-target receive the majority default and remain editable.
+target receive the majority default and remain editable. Stages without
+`start_at_ms` retain their legacy pacing. Add schedules to unopened stages to
+use the shared ordering and preparation windows.
 
 ### Shared extra time
 
-Set **Shared extra time per match** to give each match an allowance shared by
+Set **Shared extra time per match** within each stage to give its matches an allowance shared by
 both contestants across its regular games. When base time runs out,
 extra time starts automatically and continues until someone wins or the
 allowance runs out. Contestants cannot skip extra time to save it for later.
@@ -179,20 +209,21 @@ Opened stages and running matches keep their timing when future stages change.
 
 ## How a match is won
 
-1. **Ranking.** Each player drags the opponent's problems into the order
-   the opponent must solve them in. A ranking can be changed until the match
-   starts.
-2. **Start.** Round one opens with the contest. Later stages open after all
-   matches of the preceding stage finish and the next stage's break elapses.
-   Players can rank only after their stage opens. Each match then starts as
-   soon as both rankings are in. There is no ranking deadline.
+1. **Ranking.** At the stage's configured start, each player ranks the
+   opponent's problems. The window lasts the full 3 minutes even if everyone
+   submits early. The last valid ranking wins. A missing ranking becomes the
+   group's listed order at the deadline.
+2. **Start.** After ordering closes, everyone waits the configured preparation
+   duration, initially 30 seconds. All first games in that stage start together.
 3. **Games.** In each regular game, both players work on their next
    problem at the same time. Accepted submissions are compared using actual
    submission time plus accumulated penalties. The lowest score time wins.
    Judge completion order does not determine the winner. The smaller
    submission id breaks an exact tie. If neither player solves their
-   problem before the game ends, nobody scores. Unless the match has ended, the next game opens as soon as
-   one is decided.
+   problem before the game ends, nobody scores. If the match continues, the next
+   game opens after the configured game break, initially 60 seconds. This
+   applies to regular games and consecutive tiebreaks. Tiebreaks do not repeat
+   ordering or preparation. The final game adds no extra game break.
 4. **Result.** After each regular game, a player who has reached FT advances
    immediately, and the remaining regular games are skipped. Otherwise play
    continues up to BO games. At that cap, the player with more wins advances
@@ -224,11 +255,18 @@ speeds within an open stage, so run the contest in a supervised room.
 Players work from the **Contest Homepage**. It opens with their own match,
 showing where they are, the ranking list when it is their turn to rank, and
 their current problem with its clock once a game is live. A player sees only
-the problems they have reached and can submit only to the one they are
-currently playing. The **Rankings** page shows them a short link
+the opponent's group during ordering. During play, only the current own problem
+is visible, or the shared tiebreak. Problem letters are hidden. Preparation,
+breaks and decided matches expose no statements. Previous URLs, samples and
+attachments are denied by the server too. Statement caches are cleared when
+the phase changes while editor drafts remain. The **Rankings** page shows them a short link
 back to their match.
 
-The **Rankings** page shows the whole bracket as a tree. Each card shows the
+The **Rankings** page shows mirrored left and right halves expanding outward
+from the center. The championship sits above the bronze match in the middle.
+Solid lines carry winners and dashed lines carry semifinal losers. The header
+shows only the current stage and its remaining matches. The schedule overview
+and editing controls are on **Tournament management**. Each match card shows the
 seeds, one dot per game, and the clock of the live game. A waiting match shows
 when it will start. **Present** puts the bracket full screen for an audience
 and hides the staff counts. Select a match to open its panel with the score,
@@ -239,9 +277,18 @@ Staff can act from the match panel. Every action asks for confirmation first.
 
 | Control | When it appears | What it does |
 | --- | --- | --- |
-| **Start now** | The match is waiting for rankings | Starts the match within an open stage. A missing ranking becomes the listed order. It cannot bypass the stage opening. |
+| **Start now** | A legacy unscheduled match is waiting for rankings | Starts that match within an open stage. Scheduled stages have no individual start override. |
 | **Force expiry** | A game is live or waiting on judging | Checks the current game again right away, for example after a rejudge. It never ends a game before its time is up. |
 | **Award to** | A game is live, waiting on judging, or the match needs a staff decision | Gives the match to that player, who moves into the next round. This cannot be undone. |
+
+### Game reminders
+
+Game results appear as persistent web notifications until dismissed. Select
+**Enable desktop notifications**, then **Test notification** to check browser
+and system permissions. When the contest window is in the background, game
+results also request a desktop notification that remains available in the
+system notification center. The operating system controls banner duration.
+The reminders reconnect automatically and do not replay already seen results.
 
 ## When judging is slow or fails
 
