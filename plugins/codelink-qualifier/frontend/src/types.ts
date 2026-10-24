@@ -17,6 +17,7 @@ export interface Standing extends UserDisplayIdentity {
   /** Number of credited problems, independent of their point values. */
   credited: number;
   score: number;
+  /** Distinct accepted problems, including ACs without scoring credit. */
   accepted: number;
   qualification_verdict: QualificationVerdict | null;
   qualified_at_seconds: number | null;
