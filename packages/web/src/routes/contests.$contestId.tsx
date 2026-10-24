@@ -1,3 +1,4 @@
+import { Slot } from '@broccoli/web-sdk/slot';
 import { Outlet, useParams } from 'react-router';
 
 import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
@@ -12,7 +13,9 @@ export default function ContestLayout() {
 
   return (
     <ContestSlotProvider contestId={id}>
-      <Outlet />
+      <Slot name="contest.layout">
+        <Outlet />
+      </Slot>
     </ContestSlotProvider>
   );
 }

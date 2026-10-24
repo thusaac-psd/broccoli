@@ -525,6 +525,26 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     );
 
     // === Phase 3: 小局 0 - current-not-future, and the submission gate ===
+    let stream_url = format!(
+        "http://{}{}",
+        app.addr,
+        bracket_route(contest_id, "/bracket")
+    );
+    let mut streams = Vec::new();
+    for token in [&a.token, &b.token] {
+        let mut response = app
+            .client
+            .get(&stream_url)
+            .bearer_auth(token)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut buffer = Vec::new();
+        crate::common::sse_snapshot(&mut response, &mut buffer, |_| true).await;
+        streams.push((response, buffer));
+    }
     let ids_for_a = visible_problem_ids(&app, contest_id, &a.token).await;
     assert!(
         ids_for_a.contains(&(rounds[0].group_a[0] as i64)),
@@ -594,6 +614,16 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     )
     .await;
     assert_eq!(view["score_b"].as_i64(), Some(0));
+
+    // Both players see game zero settled while the whole match is still live.
+    for (response, buffer) in &mut streams {
+        let snapshot = crate::common::sse_snapshot(response, buffer, |v| {
+            v["matches"][0]["games"][0]["decided"] == true
+        })
+        .await;
+        assert_eq!(snapshot["matches"][0]["state"], "in_progress");
+        assert_eq!(snapshot["matches"][0]["games"][0]["winner"], a.id);
+    }
 
     // === Submission-read assertions ======================================
     let res = app
@@ -673,6 +703,18 @@ async fn codelink_bracket_end_to_end_through_the_real_host() {
     );
     assert_eq!(view["score_a"].as_i64(), Some(2));
     assert_eq!(view["score_b"].as_i64(), Some(0));
+    for (response, buffer) in &mut streams {
+        let snapshot = crate::common::sse_snapshot(response, buffer, |v| {
+            v["matches"][0]["state"] == "decided"
+        })
+        .await;
+        let games = snapshot["matches"][0]["games"].as_array().unwrap();
+        assert_eq!(games.len(), 3);
+        assert!(games.iter().all(|game| game["decided"] == true));
+        assert_eq!(games[1]["winner"], a.id);
+        assert!(games[2]["winner"].is_null());
+    }
+    drop(streams);
 
     // === Phase 6: force-decide match 1, then check the next-round slot ===
     let res = app
