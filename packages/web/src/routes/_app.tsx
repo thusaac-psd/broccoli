@@ -3,6 +3,7 @@ import { AuthProvider } from '@broccoli/web-sdk/auth';
 import { I18nProvider } from '@broccoli/web-sdk/i18n';
 import type { LazyPluginLoader } from '@broccoli/web-sdk/plugin';
 import { PluginRegistryProvider } from '@broccoli/web-sdk/plugin';
+import { ProblemPresentationProvider } from '@broccoli/web-sdk/problem';
 import { ThemeProvider, ThemeToaster } from '@broccoli/web-sdk/theme';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Outlet } from 'react-router';
@@ -31,11 +32,13 @@ export default function AppShell() {
                     backendUrl={appConfig.plugin.backendUrl}
                     lazyPlugins={lazyPlugins}
                   >
-                    <SubmissionNavigationProvider>
-                      <AppLayout>
-                        <Outlet />
-                      </AppLayout>
-                    </SubmissionNavigationProvider>
+                    <ProblemPresentationProvider>
+                      <SubmissionNavigationProvider>
+                        <AppLayout>
+                          <Outlet />
+                        </AppLayout>
+                      </SubmissionNavigationProvider>
+                    </ProblemPresentationProvider>
                     <ThemeToaster richColors closeButton />
                   </PluginRegistryProvider>
                 </SlotPermissionsBridge>

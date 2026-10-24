@@ -1,4 +1,6 @@
+import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 
@@ -26,6 +28,8 @@ export function ProblemViewHeader({
   contestId,
 }: ProblemViewHeaderProps) {
   const { t } = useTranslation();
+  const { user } = useAuth();
+  const { hideLabels } = useProblemPresentation(contestId, user?.id);
 
   const timeLimit = problem ? `${problem.time_limit} ms` : '—';
   const memoryLimit = problem ? formatKibibytes(problem.memory_limit) : '—';
@@ -35,7 +39,7 @@ export function ProblemViewHeader({
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <ProblemHeader
-            id={headerId}
+            id={hideLabels ? undefined : headerId}
             title={problem?.title ?? t('problem.title')}
             type={problem?.problem_type ?? '—'}
             io="Standard Input / Output"

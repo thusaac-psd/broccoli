@@ -1,6 +1,7 @@
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { Skeleton } from '@broccoli/web-sdk/ui';
 import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router';
@@ -14,6 +15,7 @@ import {
 export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
   const { user } = useAuth();
+  const { hideLabels } = useProblemPresentation(contestId, user?.id);
   const { contest } = useContestInfo(contestId);
 
   const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
@@ -55,9 +57,11 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50">
-                <th className="px-4 py-2.5 text-left font-medium text-muted-foreground w-16">
-                  {t('problems.label')}
-                </th>
+                {!hideLabels && (
+                  <th className="px-4 py-2.5 text-left font-medium text-muted-foreground w-16">
+                    {t('problems.label')}
+                  </th>
+                )}
                 <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">
                   {t('problems.titleColumn')}
                 </th>
@@ -70,11 +74,13 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
                   key={p.problem_id}
                   className="group transition-colors hover:bg-muted/50"
                 >
-                  <td className="px-4 py-3">
-                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-xs font-bold text-primary">
-                      {p.label}
-                    </span>
-                  </td>
+                  {!hideLabels && (
+                    <td className="px-4 py-3">
+                      <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-xs font-bold text-primary">
+                        {p.label}
+                      </span>
+                    </td>
+                  )}
                   <td className="px-4 py-3">
                     <Link
                       to={`/contests/${contestId}/problems/${p.problem_id}`}

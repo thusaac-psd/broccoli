@@ -72,6 +72,7 @@
 'problem.notes' = '注意'
 'problem.toggleFullscreen' = '切换全屏'
 'problem.notFound' = '未找到题目。'
+'problem.notAvailableNow' = '当前无法查看此题目。'
 'problem.loadError' = '加载题目失败。'
 'problem.copy' = '复制'
 'problem.copied' = '已复制 {file}'

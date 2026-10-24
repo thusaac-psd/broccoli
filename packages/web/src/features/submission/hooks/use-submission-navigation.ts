@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { SUBMISSION_VIEW_ALL } from '@broccoli/web-sdk/permissions';
 import type { Submission } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
@@ -121,12 +121,18 @@ export function useSubmissionReturn(
     (!checkContest || (!contestAccess.isPending && !canViewContest)) &&
     !!submission?.problem_id;
   const problemAccess = useQuery({
-    queryKey: ['problem', submission?.problem_id],
+    queryKey: [
+      'problem',
+      submission?.problem_id,
+      contestId ?? null,
+      viewerCacheKey(user),
+    ],
     enabled: checkProblem,
     retry: false,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await apiClient.GET('/problems/{id}', {
         params: { path: { id: submission!.problem_id } },
+        signal,
       });
       if (error) throw error;
       return data;

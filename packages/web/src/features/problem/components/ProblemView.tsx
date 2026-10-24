@@ -1,11 +1,15 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth, useAuthReady } from '@broccoli/web-sdk/auth';
+import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useRegistries } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { PROBLEM_EDIT, SYSTEM_ADMIN } from '@broccoli/web-sdk/permissions';
+import {
+  isProblemContentQuery,
+  useProblemPresentation,
+} from '@broccoli/web-sdk/problem';
 import type { SubmissionSummary } from '@broccoli/web-sdk/submission';
 import { SubmitGatingProvider } from '@broccoli/web-sdk/submission';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
@@ -38,6 +42,12 @@ export default function ProblemView({
   const { t } = useTranslation();
   const { user } = useAuth();
   const authReady = useAuthReady();
+  const presentation = useProblemPresentation(contestId, user?.id);
+  const allowed =
+    presentation.allowedProblemIds === null ||
+    presentation.allowedProblemIds.includes(problemId);
+  const queryClient = useQueryClient();
+  const viewerKey = viewerCacheKey(user);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [isCodeFullscreen, setIsCodeFullscreen] = useState(false);
@@ -84,16 +94,28 @@ export default function ProblemView({
     isLoading,
     error,
   } = useQuery({
-    queryKey: ['problem', problemId],
-    enabled: authReady && Number.isFinite(problemId),
-    queryFn: async () => {
+    queryKey: ['problem', problemId, contestId ?? null, viewerKey],
+    enabled: authReady && allowed && Number.isFinite(problemId),
+    queryFn: async ({ signal }) => {
       const { data, error } = await apiClient.GET('/problems/{id}', {
         params: { path: { id: problemId } },
+        signal,
       });
       if (error) throw error;
       return data;
     },
   });
+
+  useEffect(() => {
+    if (allowed || !user) return;
+    const filter = {
+      predicate: (query: { queryKey: readonly unknown[] }) =>
+        isProblemContentQuery(query.queryKey, user.id, new Set([problemId])),
+    };
+    void queryClient
+      .cancelQueries(filter)
+      .then(() => queryClient.removeQueries(filter));
+  }, [allowed, problemId, queryClient, user]);
 
   useRestoreSubmissionScroll(!isLoading);
   const { data: contestProblems = [] } = useContestProblems(contestId);
@@ -147,14 +169,16 @@ export default function ProblemView({
       queryKey: [
         'problem-sample-contents',
         problemId,
+        contestId ?? null,
+        viewerKey,
         problem?.samples.map((sample) => [
           sample.id,
           sample.input_size,
           sample.output_size,
         ]),
       ],
-      enabled: Number.isFinite(problemId) && !!problem,
-      queryFn: async () => {
+      enabled: allowed && !error && Number.isFinite(problemId) && !!problem,
+      queryFn: async ({ signal }) => {
         if (!problem) return {} as SampleContentMap;
 
         const entries = await Promise.all(
@@ -171,6 +195,7 @@ export default function ProblemView({
               '/problems/{id}/test-cases/{tc_id}',
               {
                 params: { path: { id: problemId, tc_id: sample.id } },
+                signal,
               },
             );
             if (error || !data) return [sample.id, {}] as const;
@@ -334,11 +359,19 @@ export default function ProblemView({
     );
   }
 
+  if (!allowed || error) {
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        {t('problem.notAvailableNow')}
+      </div>
+    );
+  }
+
   if (showEditPage) {
     return (
       <div className="flex flex-col flex-1 min-h-0">
         <ProblemViewHeader
-          problem={problem}
+          problem={error ? undefined : problem}
           headerId={headerId}
           contestId={contestId}
         />
@@ -365,7 +398,7 @@ export default function ProblemView({
         )}
 
         <ProblemViewHeader
-          problem={problem}
+          problem={error ? undefined : problem}
           headerId={headerId}
           contestId={contestId}
         />

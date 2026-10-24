@@ -1,5 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useAuthReady } from '@broccoli/web-sdk/auth';
+import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 
@@ -19,13 +20,15 @@ export function useContestProblems(
 ) {
   const apiClient = useApiClient();
   const authReady = useAuthReady();
+  const { user } = useAuth();
+  const presentation = useProblemPresentation(contestId, user?.id);
   const id = contestId ?? NaN;
   const { contest } = useContestInfo(id);
   const startMs = contest ? Date.parse(contest.start_time) : null;
   const started = usePassed(startMs);
 
   const query = useQuery({
-    queryKey: ['contest-problems', contestId],
+    queryKey: ['contest-problems', contestId, viewerCacheKey(user)],
     enabled: authReady && Number.isFinite(id) && enabled,
     queryFn: () => fetchContestProblemList(apiClient, id),
     refetchInterval: () => problemListRefetchInterval(contest, Date.now()),
@@ -45,7 +48,15 @@ export function useContestProblems(
     }
   }, [startMs, started, refetch]);
 
-  return query;
+  return {
+    ...query,
+    data:
+      presentation.allowedProblemIds === null
+        ? query.data
+        : query.data?.filter((problem) =>
+            presentation.allowedProblemIds!.includes(problem.problem_id),
+          ),
+  };
 }
 
 /**

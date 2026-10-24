@@ -175,6 +175,7 @@ function MenuGroupItems({
 
 function ContestProblemsGroup() {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const { contestId: ctxContestId, contestTitle } = useContest();
   const { pathname } = useLocation();
   const apiClient = useApiClient();
@@ -186,6 +187,7 @@ function ContestProblemsGroup() {
   })();
 
   const contestId = ctxContestId ?? urlContestId;
+  const { hideLabels } = useProblemPresentation(contestId, user?.id);
 
   const { data: contestData } = useQuery({
     queryKey: ['contest', contestId],
@@ -250,20 +252,26 @@ function ContestProblemsGroup() {
                 <SidebarMenuButton
                   asChild
                   isActive={isActive}
-                  tooltip={`${p.label}. ${p.problem_title}`}
+                  tooltip={
+                    hideLabels
+                      ? p.problem_title
+                      : `${p.label}. ${p.problem_title}`
+                  }
                 >
                   <Link to={`/contests/${contestId}/problems/${p.problem_id}`}>
-                    <span className="relative flex size-4 shrink-0 items-center justify-center">
-                      <span
-                        className={`absolute flex size-5 items-center justify-center rounded text-[11px] font-bold leading-none ${
-                          isActive
-                            ? 'bg-sidebar-primary text-sidebar-primary-foreground'
-                            : 'bg-sidebar-foreground/10 text-sidebar-foreground/60'
-                        }`}
-                      >
-                        {p.label}
+                    {!hideLabels && (
+                      <span className="relative flex size-4 shrink-0 items-center justify-center">
+                        <span
+                          className={`absolute flex size-5 items-center justify-center rounded text-[11px] font-bold leading-none ${
+                            isActive
+                              ? 'bg-sidebar-primary text-sidebar-primary-foreground'
+                              : 'bg-sidebar-foreground/10 text-sidebar-foreground/60'
+                          }`}
+                        >
+                          {p.label}
+                        </span>
                       </span>
-                    </span>
+                    )}
                     <span>{p.problem_title}</span>
                   </Link>
                 </SidebarMenuButton>
@@ -419,3 +427,4 @@ export function Sidebar() {
     </SidebarUI>
   );
 }
+import { useProblemPresentation } from '@broccoli/web-sdk/problem';

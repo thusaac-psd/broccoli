@@ -137,6 +137,7 @@ export const en: Record<string, string> = {
   'problem.notes': 'Notes',
   'problem.toggleFullscreen': 'Toggle fullscreen',
   'problem.notFound': 'Problem not found.',
+  'problem.notAvailableNow': 'This problem is not available right now.',
   'problem.loadError': 'Failed to load problem.',
   'problem.copy': 'Copy',
   'problem.copied': 'Copied {file}',

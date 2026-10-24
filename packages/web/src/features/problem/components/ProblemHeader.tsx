@@ -1,7 +1,7 @@
 import { Clock, Cpu, FileText } from 'lucide-react';
 
 interface ProblemHeaderProps {
-  id: string;
+  id?: string;
   title: string;
   type: string;
   io: string;
@@ -19,7 +19,8 @@ export function ProblemHeader({
   return (
     <div className="space-y-2">
       <h1 className="text-2xl font-bold tracking-tight">
-        {id}. {title}
+        {id ? `${id}. ` : ''}
+        {title}
       </h1>
       <div className="flex flex-wrap gap-2">
         <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium bg-pink-500/10 text-pink-600 dark:text-pink-400 ring-1 ring-pink-500/25">
