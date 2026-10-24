@@ -55,7 +55,10 @@ export function gameNotificationText(
     title: t('codelink-bracket.notifications.title', {
       game: t(...notification.label),
     }),
-    body: `${t(`codelink-bracket.notifications.${notification.result}`)} ${t('codelink-bracket.notifications.score', { own: notification.score[0], opponent: notification.score[1] })}`,
+    body: t(`codelink-bracket.notifications.${notification.result}`, {
+      own: notification.score[0],
+      opponent: notification.score[1],
+    }),
   };
 }
 

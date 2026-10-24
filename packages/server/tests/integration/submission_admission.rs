@@ -319,8 +319,9 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         UPDATE submission_feedback SET outcome='too_late'").await.unwrap();
     let migrations = server::migration::Migrator::migrations();
     migrations
-        .last()
-        .unwrap()
+        .iter()
+        .find(|migration| migration.name() == "m0010_plugin_submission_feedback")
+        .expect("submission feedback migration must be registered")
         .up(&SchemaManager::new(&app.db))
         .await
         .unwrap();
