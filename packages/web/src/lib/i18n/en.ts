@@ -151,8 +151,12 @@ export const en: Record<string, string> = {
   'editor.title': 'Code',
   'editor.run': 'Run',
   'editor.submit': 'Submit',
-  'editor.upload': 'Upload files',
-  'editor.addFile': 'Add file',
+  'editor.upload': 'Upload file',
+  'editor.singleFileOnly':
+    'Upload one source file at a time. ZIP archives are not supported.',
+  'editor.fileReadError': 'Failed to read the source file.',
+  'editor.multipleFilesRequired':
+    'This problem requires multiple files. The online editor supports one source file.',
   'editor.toggleFullscreen': 'Toggle fullscreen',
   'editor.keybindings': 'Keybinding mode',
   'editor.keybindingNormal': 'Normal',
