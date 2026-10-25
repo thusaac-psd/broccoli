@@ -13,7 +13,7 @@ export default function ContestLayout() {
 
   return (
     <ContestSlotProvider contestId={id}>
-      <Slot name="contest.layout">
+      <Slot name="contest.layout" className="flex min-h-0 flex-1 flex-col">
         <Outlet />
       </Slot>
     </ContestSlotProvider>
