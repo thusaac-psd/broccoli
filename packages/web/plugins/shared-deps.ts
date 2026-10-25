@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Plugin, ResolvedConfig } from 'vite';
+import type { Plugin, ResolvedConfig, Rollup } from 'vite';
 
 /**
  * Vite plugin that enables dynamically loaded plugins (from the backend) to
@@ -229,6 +229,25 @@ function hoistImportMapInHtml(html: string): string {
     importMap +
     htmlWithoutImportMap.slice(insertAt)
   );
+}
+
+/** CSS files attached to a chunk and every chunk it statically imports. */
+function collectStaticCss(
+  bundle: Rollup.OutputBundle,
+  entry: string,
+): string[] {
+  const css = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (fileName: string) => {
+    if (seen.has(fileName)) return;
+    seen.add(fileName);
+    const chunk = bundle[fileName];
+    if (chunk?.type !== 'chunk') return;
+    chunk.viteMetadata?.importedCss.forEach((file) => css.add(file));
+    chunk.imports.forEach(visit);
+  };
+  visit(entry);
+  return [...css];
 }
 
 function hoistClientIndexImportMap(config: ResolvedConfig): void {
@@ -499,6 +518,18 @@ export function sharedDepsPlugin(): Plugin {
 
         const dep = chunk.facadeModuleId.slice(RESOLVED_SHIM_PREFIX.length);
         imports[dep] = `${base}${filename}`;
+
+        // Plugins enter shims through the import map, bypassing Vite's
+        // preload helper that normally attaches a chunk's CSS (e.g. Monaco's
+        // editor styles), so the shim links its static graph's CSS itself.
+        const cssHrefs = collectStaticCss(bundle, filename).map(
+          (css) => `${base}${css}`,
+        );
+        if (cssHrefs.length > 0) {
+          chunk.code =
+            `for(const h of ${JSON.stringify(cssHrefs)})if(!document.querySelector('link[rel="stylesheet"][href="'+h+'"]')){const l=document.createElement('link');l.rel='stylesheet';l.href=h;document.head.appendChild(l)}\n` +
+            chunk.code;
+        }
       }
 
       const replacement = JSON.stringify(imports);
