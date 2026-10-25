@@ -40,6 +40,7 @@ export function CodelinkContestInfo({ contestId }: { contestId?: number }) {
           problem_count: data.problem_count,
           slots_per_problem: data.slots_per_problem,
           solves_to_qualify: data.solves_to_qualify,
+          advancement_slots: data.advancement_slots,
         })}
       </p>
       {isError && (

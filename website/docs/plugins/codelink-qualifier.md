@@ -116,20 +116,22 @@ problem with no test cases, never produces an AC.
 
 ## During the contest
 
-The current **Contest Homepage** and **Rankings** page have not yet been
-adapted for weighted scoring and reserves. The homepage still describes
-qualification by problem count. The board's **Credited** column counts
-problems, not points, and its qualification status covers direct qualifiers
-only. Use the rules on this page and the final API result below for this format.
+The **Rankings** page shows total points, the number of credited problems,
+and each problem's point value. Rows are ordered by total points and then
+the last scoring submission. Once the round and judging finish, the page
+shows direct qualifiers, reserve qualifiers and contestants who did not
+advance, together with the final advancement count and any unfilled places.
 
 | Status | Meaning |
 | --- | --- |
-| **Qualified** | The contestant qualifies however the remaining judging turns out |
+| **Direct qualifier** | The contestant qualifies however the remaining judging turns out |
 | **Awaiting judging** | Unfinished judging could still decide whether the contestant qualifies |
+| **Reserve qualifier** | Selected after the round to fill a remaining place |
+| **Not advanced** | Final selection is complete and the contestant has no place |
 
-Everyone else has no direct qualification status. The qualifier count and
-qualification times include **Qualified** contestants only. They do not
-include reserves.
+During the round, everyone else has no direct qualification status. Direct
+qualification counts and times cover confirmed direct qualifiers only. After
+the round, reserve and total advancement counts are shown separately.
 
 The board refreshes at the configured interval, and keeps refreshing after the
 round ends while queued judging finishes. **Auto refresh** pauses it and
@@ -146,7 +148,7 @@ back. That covers attempts on a problem whose slots are certainly full, repeat
 attempts on a problem already solved, and attempts by contestants who have
 already qualified.
 
-**Qualified** appears as soon as the result is certain, even while other
+**Direct qualifier** appears as soon as the result is certain, even while other
 judging is still running. The slots and times shown next to it can still move
 until that judging finishes.
 

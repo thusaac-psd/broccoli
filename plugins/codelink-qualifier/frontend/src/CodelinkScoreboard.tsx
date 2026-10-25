@@ -99,8 +99,15 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
     );
   }
 
+  const reserveIds = new Set(data.advancement?.reserve_user_ids ?? []);
+  const directIds = new Set(data.advancement?.direct_user_ids ?? []);
   const acceptedView = rankingMode === 'accepted';
   const rankedRows = rankStandings(data.rows, rankingMode);
+  const statusFor = (row: StandingsResponse['rows'][number]) => {
+    if (!data.advancement) return row.qualification_verdict;
+    if (directIds.has(row.user_id)) return 'qualified';
+    return reserveIds.has(row.user_id) ? 'reserve' : 'not_advanced';
+  };
 
   return (
     <div className="space-y-4">
@@ -114,6 +121,21 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
               count: data.qualified_count,
             })}
           </span>
+          {data.advancement && (
+            <>
+              <Badge variant="outline">
+                {t('codelink-qualifier.reserveCount', {
+                  count: reserveIds.size,
+                })}
+              </Badge>
+              <span className="text-sm font-semibold">
+                {t('codelink-qualifier.advancementCount', {
+                  count: directIds.size + reserveIds.size,
+                  total: data.advancement_slots,
+                })}
+              </span>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {data.scoreboard_refresh_seconds > 0 ? (
@@ -176,6 +198,13 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
           {t('codelink-qualifier.pending', { count: data.pending_submissions })}
         </p>
       )}
+      {data.advancement && data.advancement.unfilled_slots > 0 && (
+        <p role="status" className="rounded-md bg-amber-500/10 p-3 text-sm">
+          {t('codelink-qualifier.unfilledSlots', {
+            count: data.advancement.unfilled_slots,
+          })}
+        </p>
+      )}
 
       <section
         hidden={acceptedView}
@@ -197,6 +226,9 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                 >
                   {problem.label}
                 </Link>
+                <Badge variant="outline" className="text-xs">
+                  {problem.points}pt
+                </Badge>
                 <span className="text-xs text-muted-foreground">
                   {t('codelink-qualifier.slots.remaining', {
                     count: problem.remaining,
@@ -275,7 +307,7 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                   {t(
                     acceptedView
                       ? 'codelink-qualifier.table.accepted'
-                      : 'codelink-qualifier.table.credited',
+                      : 'codelink-qualifier.table.score',
                   )}
                 </th>
                 {!acceptedView && (
@@ -289,7 +321,12 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                     scope="col"
                     className="px-3 py-3 text-center"
                   >
-                    {p.label}
+                    <div>{p.label}</div>
+                    {!acceptedView && (
+                      <div className="mt-1 text-xs font-normal text-muted-foreground">
+                        {p.points}pt
+                      </div>
+                    )}
                   </th>
                 ))}
               </tr>
@@ -311,17 +348,15 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                   </th>
                   {!acceptedView && (
                     <td className="whitespace-nowrap border-b border-border px-3 py-3 text-center">
-                      {row.qualification_verdict ? (
+                      {statusFor(row) ? (
                         <Badge
                           variant={
-                            row.qualification_verdict === 'qualified'
+                            statusFor(row) === 'qualified'
                               ? 'default'
                               : 'outline'
                           }
                         >
-                          {t(
-                            `codelink-qualifier.status.${row.qualification_verdict}`,
-                          )}
+                          {t(`codelink-qualifier.status.${statusFor(row)}`)}
                         </Badge>
                       ) : (
                         <span
@@ -334,10 +369,15 @@ export function CodelinkScoreboard({ contestId, children }: Props) {
                     </td>
                   )}
                   <td className="border-b border-border px-3 py-3 text-center font-mono">
-                    {acceptedView ? (
-                      <div className="font-semibold">{row.accepted}</div>
-                    ) : (
-                      `${row.credited}/${data.solves_to_qualify}`
+                    <div className="font-semibold">
+                      {acceptedView ? row.accepted : `${row.score}pt`}
+                    </div>
+                    {!acceptedView && (
+                      <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">
+                        {t('codelink-qualifier.creditedProblems', {
+                          count: row.credited,
+                        })}
+                      </div>
                     )}
                   </td>
                   {!acceptedView && (

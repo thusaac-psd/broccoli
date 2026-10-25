@@ -1,5 +1,5 @@
 'codelink-qualifier.rules.title' = 'Morning qualification round'
-'codelink-qualifier.rules.description' = 'Choose freely among {problem_count} problems. Scoring slots per problem: {slots_per_problem}. Earn credit on {solves_to_qualify} different problems to qualify for the afternoon. Further ACs remain visible but take no additional slots. Your original slots remain occupied.'
+'codelink-qualifier.rules.description' = "Choose freely among {problem_count} problems. Each problem offers {slots_per_problem} scoring slots, worth the points shown on that problem. Reach {solves_to_qualify} points to qualify directly. After judging finishes, reserves fill the remaining places up to {advancement_slots}, ordered by points and then the last scoring submission. Qualified contestants keep their slots and stop earning points."
 'codelink-qualifier.rules.order' = 'Slots follow the submission time of accepted solutions. Submission ID breaks exact time ties. An AC without a scoring slot does not count toward qualification.'
 'codelink-qualifier.loading' = 'Loading Codelink standings…'
 'codelink-qualifier.loadError' = 'Unable to load the standings.'
@@ -18,7 +18,7 @@
 'codelink-qualifier.phase.before' = 'Not started'
 'codelink-qualifier.phase.during' = 'In progress'
 'codelink-qualifier.phase.after' = 'Finished'
-'codelink-qualifier.qualifiedCount' = '{count} qualified'
+'codelink-qualifier.qualifiedCount' = "{count} direct qualifiers"
 'codelink-qualifier.problemCount' = 'This contest has {actual} problems. The Codelink morning round requires {expected}.'
 'codelink-qualifier.pending' = 'Pending submissions: {count}. Scoring slots and displayed times may still change. Awaiting judging means unfinished evaluations may affect qualification.'
 'codelink-qualifier.slots.title' = 'Problem scoring slots'
@@ -31,7 +31,7 @@
 'codelink-qualifier.table.status' = 'Qualification'
 'codelink-qualifier.table.credited' = 'Credited'
 'codelink-qualifier.table.time' = 'Qualification time'
-'codelink-qualifier.status.qualified' = 'Qualified'
+'codelink-qualifier.status.qualified' = "Direct qualifier"
 'codelink-qualifier.status.pending' = 'Awaiting judging'
 'codelink-qualifier.status.noVerdict' = 'No qualification verdict yet'
 'codelink-qualifier.cell.credited' = 'AC with a scoring slot'
@@ -39,3 +39,10 @@
 'codelink-qualifier.cell.slots_full' = 'AC · no slot'
 'codelink-qualifier.cell.after_qualification' = 'AC · credit limit reached'
 'codelink-qualifier.cell.noAc' = 'No accepted solution'
+'codelink-qualifier.reserveCount' = "{count} reserve qualifiers"
+'codelink-qualifier.advancementCount' = "{count}/{total} advance"
+'codelink-qualifier.unfilledSlots' = "{count} places remain unfilled. Organizers need a playoff or another announced selection method."
+'codelink-qualifier.table.score' = "Points"
+'codelink-qualifier.creditedProblems' = "{count} credited problems"
+'codelink-qualifier.status.reserve' = "Reserve qualifier"
+'codelink-qualifier.status.not_advanced' = "Not advanced"
