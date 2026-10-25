@@ -87,9 +87,13 @@
 'editor.run' = '运行'
 'editor.submit' = '提交'
 'editor.upload' = '上传文件'
-'editor.singleFileOnly' = '每次只能上传一个源文件，不支持 ZIP 压缩包。'
+'editor.uploadIntoTab' = '上传到当前标签页'
+'editor.addFile' = '添加文件'
+'editor.zipNotSupported' = '不支持 ZIP 压缩包，请直接上传源文件。'
 'editor.fileReadError' = '读取源文件失败。'
-'editor.multipleFilesRequired' = '本题要求提交多个文件，在线编辑器仅支持一个源文件。'
+'editor.uploadLoadedInto' = '已将 {from} 载入 {to}'
+'editor.uploadSkipped' = '已跳过 {files}；本题需要 {required}'
+'editor.uploadNoMatch' = '上传的文件都不符合要求的文件名：{required}'
 'editor.toggleFullscreen' = '切换全屏'
 
 # Code editor — custom test cases
