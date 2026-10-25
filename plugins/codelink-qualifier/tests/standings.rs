@@ -623,6 +623,31 @@ fn confirmation_is_sound_for_every_pending_outcome_in_generated_small_histories(
 }
 
 #[test]
+fn weighted_standings_order_by_points_then_last_scoring_submission() {
+    let result = weighted_board(vec![
+        ac(1, 1, 17),
+        ac(2, 1, 18),
+        ac(3, 2, 1),
+        ac(4, 2, 2),
+        ac(5, 2, 3),
+        ac(6, 3, 19),
+        ac(7, 4, 4),
+        ac(8, 4, 5),
+    ]);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .take(4)
+            .map(|r| (r.user_id, r.score))
+            .collect::<Vec<_>>(),
+        vec![(1, 4), (2, 3), (3, 2), (4, 2)]
+    );
+    assert_eq!(row(&result, 3).credited, 1);
+    assert_eq!(row(&result, 4).credited, 2);
+}
+
+#[test]
 fn mixed_problem_values_qualify_by_points_instead_of_problem_count() {
     let result = weighted_board(vec![
         ac(1, 1, 1),

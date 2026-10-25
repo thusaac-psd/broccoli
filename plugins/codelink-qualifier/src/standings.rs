@@ -365,7 +365,7 @@ pub fn calculate(
 
     // Order by displayed credit progress. Extra ACs after the credit limit do
     // not change this ordering or the time at which the threshold was reached.
-    rows.sort_by_key(|r| (std::cmp::Reverse(r.credited), r.last_credit, r.user_id));
+    rows.sort_by_key(|r| (std::cmp::Reverse(r.score), r.last_credit, r.user_id));
     Ok(Standings {
         config: config.clone(),
         problem_count: problems.len(),
