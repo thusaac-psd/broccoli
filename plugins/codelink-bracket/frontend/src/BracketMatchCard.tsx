@@ -1,6 +1,7 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { cn } from '@broccoli/web-sdk/utils';
 
+import { isActivelyPlaying } from './lib/phase';
 import { gamePips, type Pip } from './lib/pips';
 import { playerLabel } from './lib/player';
 import { roundShortKey } from './lib/rounds';
@@ -72,7 +73,9 @@ export function BracketMatchCard({
   );
   const game = match.current_xiaoju_index;
   const liveTag =
-    clock && game !== null ? t(...gameLabel(match, game, true)) : null;
+    isActivelyPlaying(match.state) && game !== null
+      ? t(...gameLabel(match, game, true))
+      : null;
   const row = (name: string, id: number, score: number) => {
     const won = match.winner === id;
     const lost = match.winner !== null && !won;
@@ -149,8 +152,8 @@ export function BracketMatchCard({
           match.score_b,
         )}
       </div>
-      <div className="flex items-center gap-2 border-t border-border bg-muted/50 px-3 py-1.5">
-        <span className="font-mono text-[10px] text-muted-foreground">
+      <div className="flex items-center gap-1.5 border-t border-border bg-muted/50 px-2 py-1.5">
+        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
           {t(
             match.kind === 'third_place'
               ? 'codelink-bracket.round.short.thirdPlace'
@@ -158,11 +161,17 @@ export function BracketMatchCard({
           )}
           {match.kind === 'elimination' ? ` ${match.pos + 1}` : ''}
         </span>
-        <StatusPill
-          short
-          state={match.state}
-          className="border-0 bg-transparent px-0 py-0 text-xs"
-        />
+        {liveTag ? (
+          <span className="whitespace-nowrap text-xs font-medium text-muted-foreground">
+            {liveTag}
+          </span>
+        ) : (
+          <StatusPill
+            short
+            state={match.state}
+            className="border-0 bg-transparent px-0 py-0 text-xs"
+          />
+        )}
         {isMine && (
           <span className="rounded bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
             {t('codelink-bracket.card.you')}
@@ -178,13 +187,10 @@ export function BracketMatchCard({
         {clock && (
           <span
             className={cn(
-              'ml-auto font-mono text-[11px] tabular-nums',
+              'ml-auto whitespace-nowrap font-mono text-[11px] tabular-nums',
               clock.overdue ? 'text-amber-700' : 'text-muted-foreground',
             )}
           >
-            {liveTag && (
-              <span className="mr-1.5 font-sans font-semibold">{liveTag}</span>
-            )}
             {clock.text}
           </span>
         )}

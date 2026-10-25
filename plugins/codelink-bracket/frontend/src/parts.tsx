@@ -94,7 +94,9 @@ export function useGameClock(match: MatchView): {
     const timeText = formatDurationMs(status.remainingMs);
     return {
       text:
-        status.kind === 'counting' ? timeText : formatCountdownLabel(status, t),
+        status.kind === 'counting'
+          ? t('codelink-bracket.countdown.remainingShort', { time: timeText })
+          : formatCountdownLabel(status, t),
       timeText,
       label: t(
         status.kind === 'base'
