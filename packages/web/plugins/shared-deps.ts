@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Plugin, ResolvedConfig } from 'vite';
+import type { Plugin, ResolvedConfig, Rollup } from 'vite';
 
 /**
  * Vite plugin that enables dynamically loaded plugins (from the backend) to
@@ -58,14 +58,36 @@ export const SHARED_DEPS = [
   '@monaco-editor/react',
 ] as const;
 
+/** CJS deps whose named exports hang off `module.exports` (the default). */
 const DEFAULT_EXPORT_DEPS = new Set<(typeof SHARED_DEPS)[number]>([
   'react',
   'react/jsx-runtime',
   'react/jsx-dev-runtime',
   'react-dom',
   'react-dom/client',
+]);
+
+/**
+ * ESM deps with a default export alongside real named exports. `export *`
+ * skips `default`, so it is re-exported explicitly. (Treating these as CJS
+ * would read `loader` etc. off the default `Editor` component, yielding
+ * undefined.)
+ */
+const ESM_DEFAULT_EXPORT_DEPS = new Set<(typeof SHARED_DEPS)[number]>([
   '@monaco-editor/react',
 ]);
+
+/**
+ * Host modules (root-relative) a shim imports for side effects before
+ * re-exporting its dep, so plugins get the same configured instance the host
+ * uses even when no host component has loaded it yet.
+ */
+const SHIM_SETUP_MODULES: Partial<
+  Record<(typeof SHARED_DEPS)[number], string>
+> = {
+  // Points the Monaco loader at the bundled copy instead of the jsdelivr CDN.
+  '@monaco-editor/react': 'src/lib/monaco-setup.ts',
+};
 
 const VIRTUAL_MAP_ID = 'virtual:shared-deps-map';
 const RESOLVED_MAP_ID = '\0' + VIRTUAL_MAP_ID;
@@ -209,6 +231,25 @@ function hoistImportMapInHtml(html: string): string {
   );
 }
 
+/** CSS files attached to a chunk and every chunk it statically imports. */
+function collectStaticCss(
+  bundle: Rollup.OutputBundle,
+  entry: string,
+): string[] {
+  const css = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (fileName: string) => {
+    if (seen.has(fileName)) return;
+    seen.add(fileName);
+    const chunk = bundle[fileName];
+    if (chunk?.type !== 'chunk') return;
+    chunk.viteMetadata?.importedCss.forEach((file) => css.add(file));
+    chunk.imports.forEach(visit);
+  };
+  visit(entry);
+  return [...css];
+}
+
 function hoistClientIndexImportMap(config: ResolvedConfig): void {
   const indexPath = resolve(config.root, 'build', 'client', 'index.html');
   try {
@@ -247,7 +288,13 @@ function generateDevShim(dep: string, browserHash: string): string {
     ? toFsModuleUrl(resolveSdkEntry(dep))
     : `/node_modules/.vite/deps/${flattenId(dep)}.js${hashSuffix}`;
 
-  const lines = [`import * as __ns from '${importSource}';`];
+  const setupModule = SHIM_SETUP_MODULES[dep as (typeof SHARED_DEPS)[number]];
+  const lines = [
+    // Root-relative URL matches how the host's own imports resolve in dev,
+    // so the browser shares one module instance.
+    ...(setupModule ? [`import '/${setupModule}';`] : []),
+    `import * as __ns from '${importSource}';`,
+  ];
 
   if (DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
     lines.push(`const __mod = __ns.default;`);
@@ -257,6 +304,9 @@ function generateDevShim(dep: string, browserHash: string): string {
     }
   } else {
     lines.push(`export * from '${importSource}';`);
+    if (ESM_DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
+      lines.push(`export { default } from '${importSource}';`);
+    }
   }
 
   return lines.join('\n');
@@ -415,12 +465,24 @@ export function sharedDepsPlugin(): Plugin {
 
       if (id.startsWith(RESOLVED_SHIM_PREFIX)) {
         const dep = id.slice(RESOLVED_SHIM_PREFIX.length);
+        const setupModule =
+          SHIM_SETUP_MODULES[dep as (typeof SHARED_DEPS)[number]];
+        const setupImports = setupModule
+          ? [`import ${JSON.stringify(resolve(config.root, setupModule))};`]
+          : [];
         if (!DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
-          return `export * from '${dep}';`;
+          const reexports = [`export * from '${dep}';`];
+          if (
+            ESM_DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])
+          ) {
+            reexports.push(`export { default } from '${dep}';`);
+          }
+          return [...setupImports, ...reexports].join('\n');
         }
 
         const named = getNamedExports(dep);
         const lines = [
+          ...setupImports,
           `import * as __ns from '${dep}';`,
           `const __mod = __ns.default;`,
           `export default __mod;`,
@@ -456,6 +518,18 @@ export function sharedDepsPlugin(): Plugin {
 
         const dep = chunk.facadeModuleId.slice(RESOLVED_SHIM_PREFIX.length);
         imports[dep] = `${base}${filename}`;
+
+        // Plugins enter shims through the import map, bypassing Vite's
+        // preload helper that normally attaches a chunk's CSS (e.g. Monaco's
+        // editor styles), so the shim links its static graph's CSS itself.
+        const cssHrefs = collectStaticCss(bundle, filename).map(
+          (css) => `${base}${css}`,
+        );
+        if (cssHrefs.length > 0) {
+          chunk.code =
+            `for(const h of ${JSON.stringify(cssHrefs)})if(!document.querySelector('link[rel="stylesheet"][href="'+h+'"]')){const l=document.createElement('link');l.rel='stylesheet';l.href=h;document.head.appendChild(l)}\n` +
+            chunk.code;
+        }
       }
 
       const replacement = JSON.stringify(imports);

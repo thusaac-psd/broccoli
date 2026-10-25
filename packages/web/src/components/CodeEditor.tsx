@@ -1,3 +1,5 @@
+import '@/lib/monaco-setup';
+
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
