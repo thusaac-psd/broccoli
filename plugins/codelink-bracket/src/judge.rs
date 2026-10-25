@@ -31,6 +31,8 @@
 //!
 //! One deadline timer per 小局: `xiaoju:{contest}:{match_id}:{index}`
 //! plus a separate `:effective:{submission_id}` wakeup for each delayed AC.
+//! An earlier wakeup due to opponent penalties includes its time in the key
+//! so a stale callback cannot postpone it; these wakeups retire on delivery.
 //! ([`xiaoju_timer_key`]). When a 小局 ends EARLY (an AC before its
 //! deadline), the game timers remain durable through the match CAS and all
 //! post-commit work. They are cancelled only after feedback publication and
@@ -76,14 +78,31 @@ pub(crate) fn effective_timer_key(
     )
 }
 
+fn settlement_timer_key(
+    contest: i32,
+    match_id: u8,
+    index: u8,
+    sub: &SubmissionRecord,
+    at_us: i64,
+) -> String {
+    let key = effective_timer_key(contest, match_id, index, sub.submission_id);
+    if at_us == sub.effective_at_us {
+        key
+    } else {
+        format!("{key}:at:{at_us}")
+    }
+}
+
 fn schedule_wakeups(
     host: &Host,
     contest: i32,
     match_id: u8,
-    current: &XiaojuState,
+    m: &MatchState,
     clock: Clock,
     subs: &[SubmissionRecord],
+    penalty_seconds: i64,
 ) -> Result<(), SdkError> {
+    let current = m.xiaoju.last().unwrap();
     let cutoff = clock.cutoff(current.deadline_ms);
     // Keep the deadline independently of effective-time wakeups, including
     // when staff move the contest end after a timer was first scheduled.
@@ -93,13 +112,17 @@ fn schedule_wakeups(
         "",
     )?;
     for sub in subs.iter().filter(|s| {
-        !decide::submission_in_flight(s) && s.verdict.as_ref().is_some_and(Verdict::is_accepted)
+        current.contains_submission_at_us(s.submitted_at_us)
+            && s.submitted_at_us < cutoff.saturating_mul(1_000)
+            && !decide::submission_in_flight(s)
+            && s.verdict.as_ref().is_some_and(Verdict::is_accepted)
     }) {
-        let effective_ms = sub.effective_at_us.saturating_add(999) / 1_000;
-        if effective_ms > clock.now && sub.effective_at_us <= cutoff.saturating_mul(1_000) {
+        let at_us = decide::ac_settlement_at_us(m, subs, sub, penalty_seconds);
+        let at_ms = at_us.saturating_add(999) / 1_000;
+        if at_ms > clock.now && at_us <= cutoff.saturating_mul(1_000) {
             host.timer.schedule(
-                effective_ms,
-                &effective_timer_key(contest, match_id, current.index, sub.submission_id),
+                at_ms,
+                &settlement_timer_key(contest, match_id, current.index, sub, at_us),
                 "",
             )?;
         }
@@ -787,7 +810,8 @@ fn step(
     let now = clock.now;
     let subs = fetch_subs(host, contest, m, &round_def)?;
     let cutoff_ms = clock.cutoff(m.xiaoju.last().unwrap().deadline_ms);
-    let mut outcome = decide::decide_game_at_cutoff(m, &subs, now, cutoff_ms);
+    let mut outcome =
+        decide::decide_game_at_cutoff(m, &subs, now, cutoff_ms, setup.penalty_seconds);
 
     // Past the contest end nobody can submit, so an undecided game cannot
     // be won any more. A verdict still in flight may yet settle it (wait
@@ -812,9 +836,10 @@ fn step(
             host,
             contest,
             match_id,
-            m.xiaoju.last().unwrap(),
+            m,
             clock,
             &subs,
+            setup.penalty_seconds,
         ),
         XiaojuOutcome::AwaitingJudge {
             blocking_submission_id,
@@ -1595,11 +1620,11 @@ mod tests {
             if !raced.swap(true, Ordering::SeqCst) {
                 // Another callback commits between this attempt's read and CAS.
                 storage::update_match(&host, 7, 0, |other| {
-                    decide::decide_xiaoju(other, &subs, 14_000);
+                    decide::decide_xiaoju(other, &subs, 14_000, 20);
                     Ok(())
                 })?;
             }
-            decide::decide_xiaoju(snapshot, &subs, 14_000);
+            decide::decide_xiaoju(snapshot, &subs, 14_000, 20);
             Ok(())
         })
         .unwrap();
@@ -1668,6 +1693,149 @@ mod tests {
             storage::load_match(&host, 7, 0).unwrap().unwrap().state,
             MatchPhase::InProgress
         );
+    }
+
+    #[test]
+    fn opponent_penalty_wakeup_settles_without_another_submission() {
+        let host = Host::mock();
+        let mut m = match_in_progress();
+        m.xiaoju[0].deadline_ms = 50_000;
+        seed(&host, 7, &setup_two_rounds(), 0, &m);
+        let mut ac = ac_row(10, 10_000);
+        // The score is beyond the real deadline, but B's penalty makes an
+        // earlier decision possible. Preserve the microsecond boundary.
+        ac["effective_at_us"] = serde_json::json!(60_000_001);
+        let wrong = row_with_status(5, 20, 5_000, Some("WrongAnswer"), "Judged");
+        let key = format!("{}:at:40000001", effective_timer_key(7, 0, 0, 10));
+        queue_now(&host, 10_000);
+        queue_subs(&host, vec![ac.clone(), wrong.clone()]);
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(host.timer.scheduled_at(&key), Some(40_001));
+        assert_eq!(
+            host.timer.scheduled_at(&xiaoju_timer_key(7, 0, 0)),
+            Some(50_000)
+        );
+
+        queue_now(&host, 40_000);
+        queue_subs(&host, vec![ac.clone(), wrong.clone()]);
+        handle_timer(&host, &key, 40_000).unwrap();
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().score_a,
+            0
+        );
+        queue_now(&host, 40_001);
+        queue_subs(&host, vec![ac, wrong]);
+        handle_timer(&host, &key, 40_001).unwrap();
+        let settled = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(settled.score_a, 1);
+        assert!(settled.xiaoju[0].decided);
+        assert_eq!(settled.xiaoju.len(), 2);
+    }
+
+    #[test]
+    fn stale_penalty_snapshots_cannot_postpone_an_earlier_wakeup() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let original = match_in_progress();
+        let mut ac = ac_row(10, 10_000);
+        ac["effective_at_us"] = serde_json::json!(80_000_000);
+        for count in [2, 1, 0] {
+            let mut rows = vec![ac.clone()];
+            for id in 1..=count {
+                rows.push(row_with_status(
+                    id,
+                    20,
+                    i64::from(id) * 1_000,
+                    Some("WrongAnswer"),
+                    "Judged",
+                ));
+            }
+            let mut snapshot = original.clone();
+            queue_now(&host, 10_000);
+            queue_subs(&host, rows);
+            step(&host, 7, 0, &setup, &mut snapshot).unwrap();
+            assert_eq!(snapshot, original);
+        }
+        let key = effective_timer_key(7, 0, 0, 10);
+        assert_eq!(
+            host.timer.scheduled_at(&format!("{key}:at:40000000")),
+            Some(40_000)
+        );
+        assert_eq!(
+            host.timer.scheduled_at(&format!("{key}:at:60000000")),
+            Some(60_000)
+        );
+        assert_eq!(host.timer.scheduled_at(&key), Some(80_000));
+    }
+
+    #[test]
+    fn an_opponent_error_callback_can_settle_a_waiting_ac_immediately() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        let mut ac = ac_row(10, 10_000);
+        ac["effective_at_us"] = serde_json::json!(30_000_000);
+        queue_now(&host, 11_000);
+        queue_subs(
+            &host,
+            vec![ac.clone(), row_with_status(5, 20, 5_000, None, "Pending")],
+        );
+        advance(&host, 7, 0).unwrap();
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().score_a,
+            0
+        );
+
+        queue_now(&host, 12_000);
+        queue_subs(
+            &host,
+            vec![
+                ac,
+                row_with_status(5, 20, 5_000, Some("WrongAnswer"), "Judged"),
+            ],
+        );
+        resolve_and_advance(&host, 7, 20, 203).unwrap();
+        let settled = storage::load_match(&host, 7, 0).unwrap().unwrap();
+        assert_eq!(settled.score_a, 1);
+        assert!(settled.xiaoju[0].decided);
+    }
+
+    #[test]
+    fn an_admission_racing_early_settlement_forces_a_fresh_submission_snapshot() {
+        use std::cell::Cell;
+
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let original = match_in_progress();
+        seed(&host, 7, &setup, 0, &original);
+        let mut ac = ac_row(10, 10_000);
+        ac["effective_at_us"] = serde_json::json!(30_000_000);
+        let wrong = row_with_status(1, 20, 1_000, Some("WrongAnswer"), "Judged");
+        let mut pending = row_with_status(5, 20, 9_000, None, "Pending");
+        pending["effective_at_us"] = serde_json::json!(29_000_000);
+        let raced = Cell::new(false);
+        let settled = storage::update_match(&host, 7, 0, |snapshot| {
+            let first_attempt = !raced.replace(true);
+            let mut rows = vec![ac.clone(), wrong.clone()];
+            if !first_attempt {
+                rows.push(pending.clone());
+            }
+            queue_now(&host, 11_000);
+            queue_subs(&host, rows);
+            step(&host, 7, 0, &setup, snapshot)?;
+            if first_attempt {
+                // Atomic admission bumps this revision even when the match
+                // document is unchanged; the stale winning CAS must retry.
+                host.storage.set(&[(
+                    storage::match_key(7, 0).as_str(),
+                    serde_json::to_string(&original).unwrap().as_str(),
+                )])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(settled.score_a, 0);
+        assert!(!settled.xiaoju[0].decided);
+        assert_eq!(settled.xiaoju.len(), 1);
     }
 
     #[test]
