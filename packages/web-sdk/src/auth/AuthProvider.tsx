@@ -7,7 +7,7 @@ import React, {
   useState,
 } from 'react';
 
-import { useApiClient, useSetApiAccessToken } from '@/api';
+import { useApiClient, useRefreshSession, useSetApiAccessToken } from '@/api';
 import {
   AUTH_SESSION_EXPIRED_EVENT,
   type LoginRequest,
@@ -40,6 +40,7 @@ export function AuthProvider({
 
   const apiClient = useApiClient();
   const setApiAccessToken = useSetApiAccessToken();
+  const refreshApiSession = useRefreshSession();
 
   const queryClient = useQueryClient();
 
@@ -66,26 +67,26 @@ export function AuthProvider({
     clearSession();
   }, [apiClient, clearSession]);
 
+  // Shares the API client's refresh, so this background refresh can never race
+  // a 401-triggered one for the single-use refresh cookie.
   const refresh = useCallback(async () => {
-    const { data, error } = await apiClient.POST('/auth/refresh');
+    const data = await refreshApiSession();
 
-    if (error) {
+    if (!data) {
       clearSession();
       return;
     }
 
-    if (data) {
-      updateAccessToken(data.token);
-      setUser({
-        id: data.id,
-        username: data.username,
-        display_name: data.display_name,
-        roles: data.roles,
-        permissions: data.permissions,
-      });
-      localStorage.setItem(sessionStatusKey, 'true');
-    }
-  }, [apiClient, clearSession, updateAccessToken, sessionStatusKey]);
+    updateAccessToken(data.token);
+    setUser({
+      id: data.id,
+      username: data.username,
+      display_name: data.display_name,
+      roles: data.roles,
+      permissions: data.permissions,
+    });
+    localStorage.setItem(sessionStatusKey, 'true');
+  }, [refreshApiSession, clearSession, updateAccessToken, sessionStatusKey]);
 
   const login = useCallback(
     async (data: LoginRequest) => {

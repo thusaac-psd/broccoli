@@ -2,6 +2,7 @@ import createClient from 'openapi-fetch';
 import { type ReactNode, useCallback, useMemo, useRef } from 'react';
 
 import { ApiClientContext } from '@/api/api-client-context';
+import { refreshSession as refreshSharedSession } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
 import { AUTH_SESSION_EXPIRED_EVENT } from '@/auth/types';
 
@@ -38,7 +39,6 @@ export function ApiClientProvider({
   baseUrl,
 }: ApiClientProviderProps) {
   const accessTokenRef = useRef<string | null>(null);
-  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
 
   const setAccessToken = useCallback((token: string | null) => {
     accessTokenRef.current = token;
@@ -69,37 +69,27 @@ export function ApiClientProvider({
   // browsers throttle the background refresh interval in inactive/slept tabs.
   // So a 401 TOKEN_INVALID must first attempt a refresh; only when the refresh
   // itself is rejected is the session actually over. Concurrent 401s (e.g. a
-  // refetch-on-focus burst after waking a laptop) share a single in-flight
-  // refresh request.
-  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
-    if (!refreshPromiseRef.current) {
-      const refreshUrl = `${
+  // refetch-on-focus burst after waking a laptop) and the AuthProvider's
+  // background refresh all share one refresh (see refresh-session.ts).
+  const refreshUrl = useMemo(
+    () =>
+      `${
         resolvedBaseUrl.endsWith('/')
           ? resolvedBaseUrl.slice(0, -1)
           : resolvedBaseUrl
-      }/auth/refresh`;
+      }/auth/refresh`,
+    [resolvedBaseUrl],
+  );
 
-      refreshPromiseRef.current = (async () => {
-        try {
-          const response = await fetch(refreshUrl, {
-            method: 'POST',
-            credentials: 'include',
-          });
-          if (!response.ok) return null;
-          const body = (await response.json()) as { token?: unknown };
-          return typeof body?.token === 'string' ? body.token : null;
-        } catch {
-          return null;
-        }
-      })();
+  const refreshSession = useCallback(
+    () => refreshSharedSession(refreshUrl),
+    [refreshUrl],
+  );
 
-      refreshPromiseRef.current.finally(() => {
-        refreshPromiseRef.current = null;
-      });
-    }
-
-    return refreshPromiseRef.current;
-  }, [resolvedBaseUrl]);
+  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
+    const session = await refreshSession();
+    return session?.token ?? null;
+  }, [refreshSession]);
 
   // Returns the new access token after a successful refresh (also storing it
   // for subsequent requests), or null after clearing the session because the
@@ -218,7 +208,9 @@ export function ApiClientProvider({
   );
 
   return (
-    <ApiClientContext value={{ apiClient, apiFetch, setAccessToken }}>
+    <ApiClientContext
+      value={{ apiClient, apiFetch, setAccessToken, refreshSession }}
+    >
       {children}
     </ApiClientContext>
   );
