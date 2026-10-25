@@ -12,9 +12,9 @@ import type { SubmissionEntry } from '@/features/submission/hooks/use-submission
 interface ProblemCodingTabProps {
   isCodeFullscreen: boolean;
   onToggleFullscreen: () => void;
-  onSubmit: (file: EditorFile, language: string) => void;
+  onSubmit: (files: EditorFile[], language: string) => void;
   onRun: (
-    file: EditorFile,
+    files: EditorFile[],
     language: string,
     customTestCases: { input: string; expected_output?: string | null }[],
   ) => void;

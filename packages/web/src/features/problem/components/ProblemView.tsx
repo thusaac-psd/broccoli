@@ -298,9 +298,9 @@ export default function ProblemView({
     contestType ?? problem?.default_contest_type ?? '';
 
   const handleSubmit = useCallback(
-    (file: EditorFile, language: string) => {
+    (files: EditorFile[], language: string) => {
       submissions.submit(
-        [file],
+        files.map(({ filename, content }) => ({ filename, content })),
         language,
         effectiveContestType || undefined,
         canPinWorker && targetWorkers.length > 0 ? targetWorkers : undefined,
@@ -311,11 +311,15 @@ export default function ProblemView({
 
   const handleRun = useCallback(
     (
-      file: EditorFile,
+      files: EditorFile[],
       language: string,
       customTestCases: { input: string; expected_output?: string | null }[],
     ) => {
-      submissions.run([file], language, customTestCases);
+      submissions.run(
+        files.map(({ filename, content }) => ({ filename, content })),
+        language,
+        customTestCases,
+      );
     },
     [submissions],
   );

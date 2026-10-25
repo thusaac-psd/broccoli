@@ -38,10 +38,13 @@ import type { SubmissionEntry } from '@/features/submission/hooks/use-submission
 import { useEditorKeybindings } from '@/lib/use-editor-keybindings';
 
 import {
-  createEditorFile,
+  applyEditorUploads,
+  type EditorDraft,
   type EditorFile,
   getConfiguredFilenames,
-  readEditorUpload,
+  nextNewFilename,
+  normalizeEditorFiles,
+  readEditorUploads,
   restoreEditorDraft,
   saveEditorDraft,
 } from './code-editor-draft';
@@ -59,9 +62,9 @@ const FALLBACK_LANGUAGE: Language = {
 };
 
 interface CodeEditorProps {
-  onSubmit?: (file: EditorFile, language: string) => void;
+  onSubmit?: (files: EditorFile[], language: string) => void;
   onRun?: (
-    file: EditorFile,
+    files: EditorFile[],
     language: string,
     customTestCases: { input: string; expected_output?: string | null }[],
   ) => void;
@@ -194,14 +197,23 @@ function CodeEditorContent({
     ),
   );
   const selectedLanguage = draft.language;
-  const activeFile = useMemo(
-    () => createEditorFile(selectedLanguage, submissionFormat, draft.file),
-    [selectedLanguage, submissionFormat, draft.file],
+  const files = useMemo(
+    () =>
+      normalizeEditorFiles(
+        selectedLanguage,
+        submissionFormat,
+        draft.files,
+        draft.activeFilename,
+      ),
+    [selectedLanguage, submissionFormat, draft.files, draft.activeFilename],
   );
-  const requiresMultipleFiles =
-    getConfiguredFilenames(selectedLanguage.id, submissionFormat).length > 1;
+  const activeFile =
+    files.find((file) => file.filename === draft.activeFilename) ?? files[0];
+  // Required filenames fix the tabs: they can't be added, closed or renamed.
+  const isFormatLocked =
+    getConfiguredFilenames(selectedLanguage.id, submissionFormat).length > 0;
 
-  // Restore the single draft when switching problems/users or when the
+  // Restore the draft when switching problems/users or when the
   // problem's submission format makes the selected language unavailable.
   useEffect(() => {
     if (
@@ -258,8 +270,19 @@ function CodeEditorContent({
     ) {
       return;
     }
-    saveEditorDraft(localStorage, { ...draft, file: activeFile });
-  }, [storageKey, draft, activeFile, availableLanguages, selectedLanguage.id]);
+    saveEditorDraft(localStorage, {
+      ...draft,
+      files,
+      activeFilename: activeFile.filename,
+    });
+  }, [
+    storageKey,
+    draft,
+    files,
+    activeFile.filename,
+    availableLanguages,
+    selectedLanguage.id,
+  ]);
 
   const handleLanguageChange = useCallback(
     (language: Language) => {
@@ -276,31 +299,153 @@ function CodeEditorContent({
     [availableLanguages, storageKey, submissionFormat],
   );
 
-  const updateFileContent = useCallback((content: string) => {
-    setDraft((prev) => ({ ...prev, file: { ...prev.file, content } }));
+  const updateFileContent = useCallback(
+    (filename: string, content: string) => {
+      setDraft((prev) => ({
+        ...prev,
+        files: normalizeEditorFiles(
+          prev.language,
+          submissionFormat,
+          prev.files,
+          prev.activeFilename,
+        ).map((file) =>
+          file.filename === filename ? { ...file, content } : file,
+        ),
+      }));
+    },
+    [submissionFormat],
+  );
+
+  const selectFile = useCallback((filename: string) => {
+    setDraft((prev) => ({ ...prev, activeFilename: filename }));
   }, []);
+
+  const addFile = useCallback(() => {
+    if (isFormatLocked) return;
+    setDraft((prev) => {
+      const filename = nextNewFilename(prev);
+      return {
+        ...prev,
+        files: [
+          ...normalizeEditorFiles(
+            prev.language,
+            submissionFormat,
+            prev.files,
+            prev.activeFilename,
+          ),
+          { filename, content: '' },
+        ],
+        activeFilename: filename,
+      };
+    });
+  }, [isFormatLocked, submissionFormat]);
+
+  const closeFile = useCallback(
+    (filename: string) => {
+      if (isFormatLocked) return;
+      setDraft((prev) => {
+        const current = normalizeEditorFiles(
+          prev.language,
+          submissionFormat,
+          prev.files,
+          prev.activeFilename,
+        );
+        if (current.length <= 1) return prev;
+        const remaining = current.filter((file) => file.filename !== filename);
+        return {
+          ...prev,
+          files: remaining,
+          activeFilename:
+            prev.activeFilename === filename
+              ? remaining[0].filename
+              : prev.activeFilename,
+        };
+      });
+    },
+    [isFormatLocked, submissionFormat],
+  );
 
   const processUploadedFiles = useCallback(
     async (fileList: FileList) => {
       const generation = ++uploadState.current.generation;
-      const result = await readEditorUpload(Array.from(fileList));
+      const read = await readEditorUploads(Array.from(fileList));
       if (generation !== uploadState.current.generation) return;
-      if ('error' in result) {
-        toast.error(t(result.error));
+      if ('error' in read) {
+        toast.error(t(read.error));
         return;
       }
 
-      const ext = result.file.filename.split('.').pop()?.toLowerCase() ?? '';
+      // The first uploaded file with a known extension picks the language.
       const language =
-        availableLanguages.find((lang) => lang.extensions.includes(ext)) ??
-        selectedLanguage;
-      setDraft({
-        storageKey,
-        language,
-        file: createEditorFile(language, submissionFormat, result.file),
-      });
+        read.files
+          .map((file) => file.filename.split('.').pop()?.toLowerCase() ?? '')
+          .map((ext) =>
+            availableLanguages.find((lang) => lang.extensions.includes(ext)),
+          )
+          .find((lang) => lang !== undefined) ?? selectedLanguage;
+      // An upload in another language lands in that language's saved draft.
+      const base = (current: EditorDraft): EditorDraft =>
+        language.id === current.language.id
+          ? {
+              ...current,
+              files: normalizeEditorFiles(
+                current.language,
+                submissionFormat,
+                current.files,
+                current.activeFilename,
+              ),
+            }
+          : restoreEditorDraft(
+              storageKey ? localStorage : undefined,
+              storageKey,
+              availableLanguages,
+              submissionFormat,
+              language.id,
+            );
+
+      const preview = applyEditorUploads(
+        base(draft),
+        read.files,
+        submissionFormat,
+      );
+      if (preview.skipped.length === read.files.length) {
+        toast.error(
+          t('editor.uploadNoMatch', {
+            required: getConfiguredFilenames(
+              language.id,
+              submissionFormat,
+            ).join(', '),
+          }),
+        );
+        return;
+      }
+      setDraft(
+        (prev) =>
+          applyEditorUploads(base(prev), read.files, submissionFormat).draft,
+      );
+      for (const { from, to } of preview.loadedInto) {
+        toast.info(t('editor.uploadLoadedInto', { from, to }));
+      }
+      if (preview.skipped.length > 0) {
+        toast.warning(
+          t('editor.uploadSkipped', {
+            files: preview.skipped.join(', '),
+            required: getConfiguredFilenames(
+              language.id,
+              submissionFormat,
+            ).join(', '),
+          }),
+        );
+      }
     },
-    [availableLanguages, selectedLanguage, storageKey, submissionFormat, t],
+    [
+      availableLanguages,
+      draft,
+      selectedLanguage,
+      storageKey,
+      submissionFormat,
+      t,
+    ],
   );
 
   const handleUploadClick = () => {
@@ -316,8 +461,8 @@ function CodeEditorContent({
   };
 
   const handleSubmit = () => {
-    if (onSubmit && !requiresMultipleFiles) {
-      onSubmit(activeFile, selectedLanguage.id);
+    if (onSubmit) {
+      onSubmit(files, selectedLanguage.id);
     }
   };
 
@@ -377,7 +522,7 @@ function CodeEditorContent({
           ? null
           : `${tc.expectedOutput.trimEnd()}\n`,
     }));
-    onRun(activeFile, selectedLanguage.id, tcs);
+    onRun(files, selectedLanguage.id, tcs);
   };
 
   const handleEditorDidMount = (
@@ -444,13 +589,14 @@ function CodeEditorContent({
         size="sm"
         className="h-7 w-7 p-0 text-muted-foreground"
         onClick={handleUploadClick}
-        title={t('editor.upload')}
+        title={t(isFormatLocked ? 'editor.uploadIntoTab' : 'editor.upload')}
       >
         <Upload className="h-3.5 w-3.5" />
       </Button>
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept=".c,.cpp,.cc,.cxx,.h,.hpp,.py,.java,.js,.ts,.txt,.json,.xml,.md,.sh,.yml,.yaml"
         className="hidden"
         onChange={handleFileInputChange}
@@ -500,14 +646,70 @@ function CodeEditorContent({
     </div>
   );
 
+  const fileTabs = (
+    <div className="flex items-center gap-0 overflow-x-auto border-b">
+      {files.map((file) => (
+        <button
+          key={file.filename}
+          type="button"
+          onClick={() => selectFile(file.filename)}
+          className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+            file.filename === activeFile.filename
+              ? 'border-primary text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/30'
+          }`}
+        >
+          <span>{file.filename}</span>
+          {files.length > 1 && !isFormatLocked && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation();
+                closeFile(file.filename);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.stopPropagation();
+                  closeFile(file.filename);
+                }
+              }}
+              className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+            >
+              <X className="h-3 w-3" />
+            </span>
+          )}
+        </button>
+      ))}
+      {!isFormatLocked && (
+        <button
+          type="button"
+          onClick={addFile}
+          title={t('editor.addFile')}
+          className="flex items-center px-2 py-1.5 text-muted-foreground hover:text-foreground transition-colors border-b-2 border-transparent"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+
   const editorArea = (
     <div className="flex-1 min-h-0 border rounded-lg overflow-hidden flex flex-col">
       <div className="flex-1 min-h-0">
         <Editor
           height="100%"
+          // One Monaco model per tab, so undo never carries text across tabs.
+          // Keyed by the restored draft, so a model starts with the saved code
+          // and undo can't step back past it to the template.
+          path={`inmemory://editor/${encodeURIComponent(
+            draft.storageKey ?? 'draft',
+          )}/${selectedLanguage.id}/${encodeURIComponent(activeFile.filename)}`}
           language={getMonacoLanguage(activeFile.filename)}
           value={activeFile.content}
-          onChange={(value) => updateFileContent(value || '')}
+          onChange={(value) =>
+            updateFileContent(activeFile.filename, value || '')
+          }
           onMount={handleEditorDidMount}
           theme={theme === 'dark' ? 'vs-dark' : 'vs'}
           options={{
@@ -768,18 +970,10 @@ function CodeEditorContent({
           <Play className="mr-2 h-4 w-4" />
           {t('editor.run')}
         </Button>
-        <Button
-          onClick={handleSubmit}
-          disabled={isGated || requiresMultipleFiles}
-        >
+        <Button onClick={handleSubmit} disabled={isGated}>
           {t('editor.submit')}
         </Button>
       </div>
-      {requiresMultipleFiles && (
-        <span className="text-xs text-muted-foreground">
-          {t('editor.multipleFilesRequired')}
-        </span>
-      )}
       {isGated && gating?.blockReason && (
         <span className="text-xs text-muted-foreground">
           {gating.blockReason}
@@ -797,9 +991,7 @@ function CodeEditorContent({
       <div className="flex items-center justify-between px-2 py-1.5 shrink-0 border-b">
         {toolbar}
       </div>
-      <div className="border-b px-3 py-1.5 text-xs font-medium truncate">
-        {activeFile.filename}
-      </div>
+      {fileTabs}
       <div className="flex-1 flex flex-col gap-3 p-3 min-h-0">
         {editorArea}
         {customInputPanel}
