@@ -63,7 +63,11 @@ export function ProblemCodingTab({
   onTargetWorkersChange,
 }: ProblemCodingTabProps) {
   return (
-    <div className="grid flex-1 grid-cols-1 gap-6 overflow-hidden p-6 lg:grid-cols-5">
+    // Explicit row tracks: when stacked below lg, auto rows let a long
+    // submission list claim the height and collapse Monaco (height: 100%).
+    <div
+      className={`grid flex-1 grid-cols-1 gap-6 overflow-hidden p-6 lg:grid-cols-5 ${isCodeFullscreen ? 'grid-rows-1' : 'grid-rows-[minmax(0,1fr)_fit-content(40%)] lg:grid-rows-1'}`}
+    >
       <div
         className={`flex flex-col overflow-hidden ${isCodeFullscreen ? 'lg:col-span-5' : 'lg:col-span-3'}`}
       >
