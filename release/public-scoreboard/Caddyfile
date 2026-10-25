@@ -1,0 +1,41 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'"
+	}
+	@write not method GET HEAD
+	@assets path /assets/app.js /assets/styles.css /assets/i18n.js /assets/ranking.js /assets/user.js
+	header @write Allow "GET, HEAD"
+	route {
+		respond @write "Read only" 405
+
+		handle /api/standings {
+			root * /snapshot
+			rewrite * /standings.json
+			header Cache-Control "no-store"
+			header Content-Type "application/json; charset=utf-8"
+			file_server
+		}
+		handle @assets {
+			root * /site
+			header Cache-Control "public, max-age=60"
+			file_server
+		}
+		handle / {
+			root * /site
+			rewrite * /index.html
+			header Cache-Control "no-cache"
+			file_server
+		}
+		handle {
+			respond "Not found" 404
+		}
+	}
+}

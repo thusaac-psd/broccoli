@@ -1,0 +1,30 @@
+services:
+  public-scoreboard:
+    image: codelink-public-scoreboard:local
+    build: .
+    restart: unless-stopped
+    user: '65534:65534'
+    read_only: true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - '127.0.0.1:8081:8080'
+    environment:
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
+    tmpfs:
+      - /config:uid=65534,gid=65534,mode=0700
+      - /data:uid=65534,gid=65534,mode=0700
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./public:/site:ro
+      - /var/lib/codelink-public-scoreboard:/snapshot:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/']
+      interval: 15s
+      timeout: 5s
+      retries: 3

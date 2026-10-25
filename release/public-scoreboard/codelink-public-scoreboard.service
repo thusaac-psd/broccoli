@@ -1,0 +1,31 @@
+[Unit]
+Description=Codelink public scoreboard snapshot exporter
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/broccoli/public-scoreboard
+ExecStart=/usr/bin/python3 /opt/broccoli/public-scoreboard/exporter.py
+EnvironmentFile=/etc/codelink-public-scoreboard.env
+StateDirectory=codelink-public-scoreboard
+StateDirectoryMode=0755
+UMask=0022
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=128M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

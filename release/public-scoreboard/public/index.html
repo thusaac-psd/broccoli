@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Codelink 2026 · 积分榜</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <svg
+      class="icon-definitions"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <symbol id="i-chart" viewBox="0 0 24 24">
+        <path d="M5 20v-5m7 5V9m7 11V4" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" />
+      </symbol>
+      <symbol id="i-direct" viewBox="0 0 24 24">
+        <path d="m6 11 6-6 6 6M6 18l6-6 6 6" />
+      </symbol>
+      <symbol id="i-reserve" viewBox="0 0 24 24">
+        <path d="M7 17 17 7M7 7h10v10" />
+      </symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8" />
+        <path d="M8 12h8" />
+      </symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3 2" />
+      </symbol>
+      <symbol id="i-users" viewBox="0 0 24 24">
+        <path
+          d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+        />
+        <circle cx="9" cy="7" r="4" />
+      </symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path
+          d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"
+        />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v6m0-10h.01" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M6 18 18 6" />
+      </symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24">
+        <path
+          d="m10.3 3.9-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3.1l-8-14a2 2 0 0 0-3.4 0ZM12 9v4m0 4h.01"
+        />
+      </symbol>
+    </svg>
+    <main>
+      <header class="masthead">
+        <div class="identity">
+          <h1>Codelink <span>2026</span></h1>
+          <p data-i18n="eventSubtitle">清北联合大赛暨北京高校邀请赛</p>
+        </div>
+        <div id="phase" class="phase" role="status"></div>
+      </header>
+      <section
+        class="toolbar"
+        aria-label="排行榜控制"
+        data-i18n-label="controls"
+      >
+        <div
+          class="switcher"
+          role="group"
+          aria-label="排行榜视图"
+          data-i18n-label="views"
+        >
+          <button id="points" aria-pressed="true">
+            <svg class="icon" aria-hidden="true"><use href="#i-chart" /></svg>
+            <span data-i18n="pointsTab">积分榜</span>
+          </button>
+          <button id="accepted" aria-pressed="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-check" /></svg>
+            <span data-i18n="acceptedTab">通过榜</span>
+          </button>
+        </div>
+        <div class="tools">
+          <button
+            id="language"
+            class="icon-button language-button"
+            type="button"
+            aria-label="Switch to English"
+            title="Switch to English"
+            lang="en"
+          >
+            EN
+          </button>
+          <button
+            class="icon-button"
+            popovertarget="legend"
+            aria-label="图标说明"
+            title="图标说明"
+            data-i18n-label="legendTitle"
+            data-i18n-title="legendTitle"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#i-info" /></svg>
+          </button>
+          <button
+            id="refresh"
+            class="icon-button"
+            aria-label="刷新榜单"
+            title="刷新榜单"
+            data-i18n-label="refresh"
+            data-i18n-title="refresh"
+          >
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh" /></svg>
+          </button>
+        </div>
+      </section>
+      <p id="error" role="status" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-alert" /></svg
+        ><span id="error-text"></span>
+      </p>
+      <section
+        id="summary"
+        class="summary"
+        aria-label="比赛概况"
+        data-i18n-label="summary"
+      ></section>
+      <section id="slots-section" aria-labelledby="slots-title" hidden>
+        <h2 id="slots-title" data-i18n="slotsTitle">计分名额</h2>
+        <div
+          id="slots"
+          class="slots"
+          role="group"
+          aria-label="各题计分名额，点击查看详情"
+          data-i18n-label="slotsGroup"
+        ></div>
+      </section>
+      <div
+        id="table-wrap"
+        class="table-wrap"
+        tabindex="0"
+        aria-label="可滚动的排行榜"
+        data-i18n-label="tableRegion"
+      >
+        <table id="rankings">
+          <caption class="sr-only" data-i18n="tableCaption">
+            Codelink 排行榜
+          </caption>
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="empty" class="empty-state" role="status">正在载入…</p>
+      <footer>
+        <span id="updated" class="mono"></span
+        ><span id="table-hint" hidden
+          ><span data-i18n="scrollHint">横向滚动查看全部题目</span>
+          <span aria-hidden="true">↔</span></span
+        >
+      </footer>
+    </main>
+    <aside id="legend" class="popover" popover aria-labelledby="legend-title">
+      <div class="popover-heading">
+        <h2 id="legend-title" data-i18n="legendTitle">图标说明</h2>
+        <button
+          class="icon-button"
+          popovertarget="legend"
+          popovertargetaction="hide"
+          aria-label="关闭图标说明"
+          data-i18n-label="closeLegend"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <ul class="legend-list">
+        <li>
+          <span class="slot-pips" aria-hidden="true"
+            ><span class="slot-pip filled"></span><span class="slot-pip"></span
+          ></span>
+          <span data-i18n="legendSlots">实心名额已占用 · 空心名额空余</span>
+        </li>
+        <li>
+          <span class="result-mark is-credited"
+            ><svg class="icon" aria-hidden="true"><use href="#i-check" /></svg
+            ><span class="cell-score mono">2pt</span></span
+          ><span data-i18n="legendScored">得分 · 按题目权重计 1pt 或 2pt</span>
+        </li>
+        <li>
+          <svg class="icon muted" aria-hidden="true">
+            <use href="#i-minus" /></svg
+          ><span data-i18n="legendFull">通过，计分名额已满（0pt）</span>
+        </li>
+        <li>
+          <svg class="icon muted" aria-hidden="true">
+            <use href="#i-check" /></svg
+          ><span data-i18n="legendAfter">通过，已达晋级上限（0pt）</span>
+        </li>
+        <li>
+          <svg class="icon is-direct" aria-hidden="true">
+            <use href="#i-direct" /></svg
+          ><span data-i18n="qualified">直接晋级</span>
+        </li>
+        <li>
+          <svg class="icon is-reserve" aria-hidden="true">
+            <use href="#i-reserve" /></svg
+          ><span data-i18n="reserve">补位晋级</span>
+        </li>
+        <li>
+          <svg class="icon warning" aria-hidden="true">
+            <use href="#i-clock" /></svg
+          ><span data-i18n="pending">待评测确认</span>
+        </li>
+      </ul>
+      <p class="popover-note" data-i18n="legendNote">
+        通过榜的 ✓ 表示通过，不区分得分。时间为开赛后的分:秒。
+      </p>
+    </aside>
+    <aside
+      id="problem-detail"
+      class="popover"
+      popover
+      aria-labelledby="problem-title"
+    >
+      <div class="popover-heading">
+        <h2 id="problem-title"></h2>
+        <button
+          class="icon-button"
+          popovertarget="problem-detail"
+          popovertargetaction="hide"
+          aria-label="关闭题目详情"
+          data-i18n-label="closeProblem"
+        >
+          <svg class="icon" aria-hidden="true"><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <p id="problem-meta" class="popover-note"></p>
+      <ol id="problem-awards" class="awards"></ol>
+    </aside>
+  </body>
+</html>

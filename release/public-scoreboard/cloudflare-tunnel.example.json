@@ -1,0 +1,17 @@
+{
+  "config": {
+    "ingress": [
+      {
+        "hostname": "ranklist.lyre.moe",
+        "service": "http://127.0.0.1:8081"
+      },
+      {
+        "hostname": "ranklist.thusaac.com",
+        "service": "http://127.0.0.1:8081"
+      },
+      {
+        "service": "http_status:404"
+      }
+    ]
+  }
+}
