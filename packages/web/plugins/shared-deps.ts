@@ -58,14 +58,36 @@ export const SHARED_DEPS = [
   '@monaco-editor/react',
 ] as const;
 
+/** CJS deps whose named exports hang off `module.exports` (the default). */
 const DEFAULT_EXPORT_DEPS = new Set<(typeof SHARED_DEPS)[number]>([
   'react',
   'react/jsx-runtime',
   'react/jsx-dev-runtime',
   'react-dom',
   'react-dom/client',
+]);
+
+/**
+ * ESM deps with a default export alongside real named exports. `export *`
+ * skips `default`, so it is re-exported explicitly. (Treating these as CJS
+ * would read `loader` etc. off the default `Editor` component, yielding
+ * undefined.)
+ */
+const ESM_DEFAULT_EXPORT_DEPS = new Set<(typeof SHARED_DEPS)[number]>([
   '@monaco-editor/react',
 ]);
+
+/**
+ * Host modules (root-relative) a shim imports for side effects before
+ * re-exporting its dep, so plugins get the same configured instance the host
+ * uses even when no host component has loaded it yet.
+ */
+const SHIM_SETUP_MODULES: Partial<
+  Record<(typeof SHARED_DEPS)[number], string>
+> = {
+  // Points the Monaco loader at the bundled copy instead of the jsdelivr CDN.
+  '@monaco-editor/react': 'src/lib/monaco-setup.ts',
+};
 
 const VIRTUAL_MAP_ID = 'virtual:shared-deps-map';
 const RESOLVED_MAP_ID = '\0' + VIRTUAL_MAP_ID;
@@ -247,7 +269,13 @@ function generateDevShim(dep: string, browserHash: string): string {
     ? toFsModuleUrl(resolveSdkEntry(dep))
     : `/node_modules/.vite/deps/${flattenId(dep)}.js${hashSuffix}`;
 
-  const lines = [`import * as __ns from '${importSource}';`];
+  const setupModule = SHIM_SETUP_MODULES[dep as (typeof SHARED_DEPS)[number]];
+  const lines = [
+    // Root-relative URL matches how the host's own imports resolve in dev,
+    // so the browser shares one module instance.
+    ...(setupModule ? [`import '/${setupModule}';`] : []),
+    `import * as __ns from '${importSource}';`,
+  ];
 
   if (DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
     lines.push(`const __mod = __ns.default;`);
@@ -257,6 +285,9 @@ function generateDevShim(dep: string, browserHash: string): string {
     }
   } else {
     lines.push(`export * from '${importSource}';`);
+    if (ESM_DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
+      lines.push(`export { default } from '${importSource}';`);
+    }
   }
 
   return lines.join('\n');
@@ -415,12 +446,24 @@ export function sharedDepsPlugin(): Plugin {
 
       if (id.startsWith(RESOLVED_SHIM_PREFIX)) {
         const dep = id.slice(RESOLVED_SHIM_PREFIX.length);
+        const setupModule =
+          SHIM_SETUP_MODULES[dep as (typeof SHARED_DEPS)[number]];
+        const setupImports = setupModule
+          ? [`import ${JSON.stringify(resolve(config.root, setupModule))};`]
+          : [];
         if (!DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
-          return `export * from '${dep}';`;
+          const reexports = [`export * from '${dep}';`];
+          if (
+            ESM_DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])
+          ) {
+            reexports.push(`export { default } from '${dep}';`);
+          }
+          return [...setupImports, ...reexports].join('\n');
         }
 
         const named = getNamedExports(dep);
         const lines = [
+          ...setupImports,
           `import * as __ns from '${dep}';`,
           `const __mod = __ns.default;`,
           `export default __mod;`,

@@ -1,3 +1,5 @@
+import '@/lib/monaco-setup';
+
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useTheme } from '@broccoli/web-sdk/theme';
 import { Badge } from '@broccoli/web-sdk/ui';

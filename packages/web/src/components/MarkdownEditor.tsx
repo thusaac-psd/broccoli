@@ -1,3 +1,5 @@
+import '@/lib/monaco-setup';
+
 import { useTheme } from '@broccoli/web-sdk/theme';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@broccoli/web-sdk/ui';
 import type { Monaco } from '@monaco-editor/react';
