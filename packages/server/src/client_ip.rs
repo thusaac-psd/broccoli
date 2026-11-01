@@ -260,4 +260,27 @@ mod tests {
             "a malformed forwarded header must not lose the client IP entirely"
         );
     }
+
+    /// Kernel audit (Nov 2026): `filter_map(parse().ok()).next_back()` SKIPS an
+    /// unparseable rightmost hop and falls through to the next token to the
+    /// left, which the client wrote. A trusted proxy that appends `ip:port`
+    /// (Azure App Gateway / ARR style) therefore makes the login throttle key
+    /// on a spoofed address; rotating it gives unlimited guesses. The
+    /// rightmost hop is the only one the proxy vouches for, so if it does not
+    /// parse the resolver must fall back to the peer, never look further left.
+    #[test]
+    #[ignore = "BUG: unparseable rightmost XFF hop falls back to a client-controlled token"]
+    fn unparseable_rightmost_hop_does_not_trust_client_supplied_entries() {
+        let connect = Some("10.0.0.4".parse::<IpAddr>().unwrap());
+        let resolved = resolve_client_ip(
+            &ClientIpSource::RightmostXForwardedFor,
+            &headers(Some("6.6.6.6, 203.0.113.5:443")),
+            connect,
+        );
+        assert_ne!(
+            resolved,
+            Some("6.6.6.6".parse::<IpAddr>().unwrap()),
+            "client-supplied XFF entry was used as the client IP"
+        );
+    }
 }

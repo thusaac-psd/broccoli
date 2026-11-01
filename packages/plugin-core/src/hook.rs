@@ -260,4 +260,40 @@ mod tests {
         let action = interpret_hook_output(br#"{"action":"pass"}"#, TOPIC, "p", "f");
         assert!(matches!(action, GenericHookAction::Pass));
     }
+
+    // Kernel audit (Nov 2026): the wrong-shape -> Pass arm above exists for
+    // JSON with no `action` tag at all, but it also swallows responses that
+    // clearly say `"action":"reject"` and merely mistype a field. Those must
+    // not turn a Blocking gate (cooldown / submission-limit) into an allow.
+    // Expected: Reject (either the plugin's own or a 500 PLUGIN_RUNTIME_ERROR,
+    // matching the non-JSON fail-closed arm). Actual today: Pass.
+    const MISTYPED_REJECTS: &[&[u8]] = &[
+        br#"{"action":"reject","status_code":"429"}"#,
+        br#"{"action":"reject","status_code":70000}"#,
+        br#"{"action":"reject","message":null}"#,
+        br#"{"action":"reject","code":42}"#,
+    ];
+
+    #[test]
+    #[ignore = "BUG: interpret_hook_output fails OPEN on a reject with a mistyped field"]
+    fn mistyped_reject_fails_closed() {
+        for raw in MISTYPED_REJECTS {
+            let action = interpret_hook_output(raw, TOPIC, "p", "f");
+            assert!(
+                matches!(action, GenericHookAction::Reject(_)),
+                "{} was not interpreted as Reject",
+                String::from_utf8_lossy(raw)
+            );
+        }
+    }
+
+    /// Pins today's (buggy) behaviour so a fix is a deliberate, visible change:
+    /// delete this test together with the `#[ignore]` above when fixing.
+    #[test]
+    fn mistyped_reject_currently_passes() {
+        for raw in MISTYPED_REJECTS {
+            let action = interpret_hook_output(raw, TOPIC, "p", "f");
+            assert!(matches!(action, GenericHookAction::Pass));
+        }
+    }
 }
