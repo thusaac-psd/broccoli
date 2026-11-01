@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use axum::extract::{FromRef, FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
+use broccoli_server_sdk::permissions as perm;
 use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
 
 use crate::entity::user;
@@ -36,6 +37,40 @@ impl AuthUser {
         } else {
             Err(AppError::PermissionDenied)
         }
+    }
+
+    /// Privilege ceiling: "you cannot grant or revoke what you do not hold".
+    ///
+    /// Refuses with `PermissionDenied` unless the caller holds every entry of
+    /// `permissions`, the set a privilege change would hand out or take away.
+    /// `SYSTEM_ADMIN` is the only root-equivalent grant and bypasses the check.
+    /// `role` names the role being changed and goes into the refusal log.
+    ///
+    /// This is the single implementation for every privilege change whose
+    /// target the caller chooses (account creation only attaches the fixed
+    /// default roles). Callers: user-role assign/revoke in `handlers/user.rs`
+    /// (the set is the role's permissions) and role-permission grant/revoke in
+    /// `handlers/role.rs` (the set is the one permission). Without it, holding
+    /// the endpoint's gate permission (`USER_MANAGE` or `ROLE_MANAGE`) would be
+    /// enough to escalate to `SYSTEM_ADMIN`.
+    pub fn require_within_ceiling<'a>(
+        &self,
+        role: &str,
+        permissions: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), AppError> {
+        if self.has_permission(perm::SYSTEM_ADMIN) {
+            return Ok(());
+        }
+        if let Some(missing) = permissions.into_iter().find(|p| !self.has_permission(p)) {
+            tracing::warn!(
+                actor = self.user_id,
+                role = %role,
+                missing_permission = %missing,
+                "Refused privilege change crossing the caller's privilege ceiling"
+            );
+            return Err(AppError::PermissionDenied);
+        }
+        Ok(())
     }
 }
 

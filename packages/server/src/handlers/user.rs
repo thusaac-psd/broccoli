@@ -252,32 +252,23 @@ pub async fn delete_user(
 /// USER_MANAGE governs user accounts, not privilege definitions (that is
 /// ROLE_MANAGE); without this ceiling a USER_MANAGE-only principal could assign
 /// itself the all-powerful `admin` role (escalation) or strip `admin` from other
-/// admins (lockout). Mirrors "you cannot grant or revoke what you do not hold".
+/// admins (lockout). The check itself is [`AuthUser::require_within_ceiling`],
+/// shared with the role-permission handlers in `handlers/role.rs`.
+///
+/// [`AuthUser::require_within_ceiling`]: crate::extractors::auth::AuthUser::require_within_ceiling
 async fn require_role_within_ceiling(
     state: &AppState,
     auth_user: &FreshAuthUser,
     role_name: &str,
 ) -> Result<(), AppError> {
-    if auth_user.has_permission(perm::SYSTEM_ADMIN) {
-        return Ok(());
-    }
     let role_permissions = role_permission::Entity::find()
         .filter(role_permission::Column::Role.eq(role_name.to_string()))
         .all(&state.db)
         .await?;
-    if let Some(rp) = role_permissions
-        .iter()
-        .find(|rp| !auth_user.has_permission(&rp.permission))
-    {
-        tracing::warn!(
-            actor = auth_user.user_id,
-            role = %role_name,
-            missing_permission = %rp.permission,
-            "Refused role change crossing the caller's privilege ceiling"
-        );
-        return Err(AppError::PermissionDenied);
-    }
-    Ok(())
+    auth_user.require_within_ceiling(
+        role_name,
+        role_permissions.iter().map(|rp| rp.permission.as_str()),
+    )
 }
 
 #[utoipa::path(

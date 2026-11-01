@@ -81,20 +81,23 @@ pub async fn list_role_permissions(
     Ok(Json(permissions))
 }
 
+/// `ROLE_MANAGE` is not root-equivalent: `SYSTEM_ADMIN` is. So this handler
+/// applies the privilege ceiling. Without it, a `ROLE_MANAGE` holder could grant
+/// `system:admin` to its own role, log in again, and hold it.
 #[utoipa::path(
     post,
     path = "/{role}/permissions",
     tag = "Roles",
     operation_id = "grantPermissionToRole",
     summary = "Grant a permission to a role",
-    description = "Grants a permission to a role. Requires `role:manage` permission.",
+    description = "Grants a permission to a role. Requires `role:manage` permission, and the caller must itself hold the permission being granted unless it holds `system:admin`.",
     params(("role" = String, Path, description = "Role name")),
     request_body = PermissionGrantRequest,
     responses(
         (status = 201, description = "Permission granted successfully"),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -105,6 +108,7 @@ pub async fn grant_permission_to_role(
     AppJson(req): AppJson<PermissionGrantRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::ROLE_MANAGE)?;
+    auth_user.require_within_ceiling(&role_name, [req.permission.as_str()])?;
 
     let existing = role_permission::Entity::find_by_id((role_name.clone(), req.permission.clone()))
         .one(&state.db)
@@ -130,13 +134,17 @@ pub async fn grant_permission_to_role(
     Ok(StatusCode::CREATED)
 }
 
+/// Same privilege ceiling as [`grant_permission_to_role`]. Without it, a
+/// `ROLE_MANAGE` holder could strip `system:admin` from the `admin` role and
+/// lock every administrator out. The ceiling runs before the 404 lookup, so a
+/// caller cannot probe which grants exist above its ceiling.
 #[utoipa::path(
     delete,
     path = "/{role}/permissions/{permission}",
     tag = "Roles",
     operation_id = "revokePermissionFromRole",
     summary = "Revoke a permission from a role",
-    description = "Revokes a permission from a role. Requires `role:manage` permission.",
+    description = "Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.",
     params(
         ("role" = String, Path, description = "Role name"),
         ("permission" = String, Path, description = "Permission name")
@@ -144,7 +152,7 @@ pub async fn grant_permission_to_role(
     responses(
         (status = 204, description = "Permission revoked successfully"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
         (status = 404, description = "Role permission not found (NOT_FOUND)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -155,6 +163,7 @@ pub async fn revoke_permission_from_role(
     AppPath((role_name, permission_name)): AppPath<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::ROLE_MANAGE)?;
+    auth_user.require_within_ceiling(&role_name, [permission_name.as_str()])?;
 
     let existing =
         role_permission::Entity::find_by_id((role_name.clone(), permission_name.clone()))
