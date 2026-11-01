@@ -1975,16 +1975,16 @@ export interface paths {
     post?: never;
     /**
      * Soft-delete a user by ID
-     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission.
+     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;
     head?: never;
     /**
      * Update user information
-     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.
+     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name. Without `system:admin`, the target user may not hold any permission the caller lacks.
      */
     patch: operations['updateUser'];
     trace?: never;
@@ -11410,7 +11410,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11428,7 +11428,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description User is in an active or under-judgement contest (CONFLICT) */
+      /** @description User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11482,7 +11482,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11493,6 +11493,15 @@ export interface operations {
       };
       /** @description User not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Username taken (USERNAME_TAKEN) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -11554,6 +11563,15 @@ export interface operations {
       };
       /** @description User not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description User already has the role (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };

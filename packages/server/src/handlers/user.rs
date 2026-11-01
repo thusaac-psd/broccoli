@@ -23,7 +23,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::{
     BulkCreateUsersRequest, CreateUserRequest, CreatedUserResponse, normalize_display_name,
-    validate_create_users,
+    validate_create_users, validate_password, validate_username,
 };
 use crate::models::user::{RoleAssignmentRequest, UpdateUserRequest, UserResponse};
 use crate::state::AppState;
@@ -103,15 +103,16 @@ pub async fn get_user(
     tag = "Users",
     operation_id = "updateUser",
     summary = "Update user information",
-    description = "Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.",
+    description = "Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name. Without `system:admin`, the target user may not hold any permission the caller lacks.",
     params(("id" = i32, Path, description = "User ID")),
     request_body = UpdateUserRequest,
     responses(
         (status = 200, description = "Updated user details", body = UserResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "Username taken (USERNAME_TAKEN)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -123,21 +124,33 @@ pub async fn update_user(
 ) -> Result<Json<UserResponse>, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
 
+    let username = payload
+        .username
+        .as_deref()
+        .map(|username| validate_username(username).map(|()| username.trim().to_owned()))
+        .transpose()?;
     let display_name = payload
         .display_name
         .as_deref()
         .map(normalize_display_name)
         .transpose()?;
+    if let Some(password) = payload.password.as_deref() {
+        validate_password(password)?;
+    }
 
     let user_model = user::Entity::find_active_by_id(id)
         .one(&state.db)
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
+    // Resetting a password is account takeover by another name: a
+    // USER_MANAGE-only caller must not be able to log in as an admin.
+    require_within_ceiling(&state.db, &auth_user, CeilingTarget::User(id)).await?;
+
     let txn = state.db.begin().await?;
 
     let mut active: user::ActiveModel = user_model.into();
-    if let Some(username) = payload.username {
+    if let Some(username) = username {
         active.username = Set(username);
     }
     if let Some(display_name) = display_name {
@@ -150,7 +163,10 @@ pub async fn update_user(
         refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
         user::Entity::touch_credentials_changed(&txn, id).await?;
     }
-    let updated_user = active.update(&txn).await?;
+    let updated_user = active
+        .update(&txn)
+        .await
+        .map_err(crate::services::user_accounts::username_conflict)?;
 
     txn.commit().await?;
 
@@ -170,14 +186,14 @@ pub async fn update_user(
     tag = "Users",
     operation_id = "deleteUser",
     summary = "Soft-delete a user by ID",
-    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission.\n\nDeletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.",
+    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 204, description = "User deleted"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "User is in an active or under-judgement contest (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -190,12 +206,16 @@ pub async fn delete_user(
     auth_user.require_permission(perm::USER_MANAGE)?;
 
     let txn = state.db.begin().await?;
+    lock_user_deletions(&txn).await?;
 
     let user_model = user::Entity::find_active_by_id(id)
         .lock(LockType::Update)
         .one(&txn)
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+
+    require_within_ceiling(&txn, &auth_user, CeilingTarget::User(id)).await?;
+    require_not_last_system_admin(&txn, id).await?;
 
     let contest_ids: Vec<i32> = contest_user::Entity::find()
         .filter(contest_user::Column::UserId.eq(id))
@@ -247,35 +267,131 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Privilege ceiling for adding or removing a role: a caller may only touch a role
-/// whose permission set is a SUBSET of the caller's own (SYSTEM_ADMIN bypasses).
-/// USER_MANAGE governs user accounts, not privilege definitions (that is
-/// ROLE_MANAGE); without this ceiling a USER_MANAGE-only principal could assign
-/// itself the all-powerful `admin` role (escalation) or strip `admin` from other
-/// admins (lockout). Mirrors "you cannot grant or revoke what you do not hold".
-async fn require_role_within_ceiling(
-    state: &AppState,
-    auth_user: &FreshAuthUser,
-    role_name: &str,
+/// What a [`require_within_ceiling`] check is measured against.
+#[derive(Debug, Clone, Copy)]
+enum CeilingTarget<'a> {
+    /// The permission set of a single role (assign/revoke that role).
+    Role(&'a str),
+    /// The effective permission set of a user account: the union over every
+    /// role it holds (edit/delete that account).
+    User(i32),
+}
+
+/// Privilege ceiling: a caller may only act on a target whose permission set is
+/// a SUBSET of the caller's own (SYSTEM_ADMIN bypasses). USER_MANAGE governs
+/// user accounts, not privilege definitions (that is ROLE_MANAGE). Without this
+/// ceiling a USER_MANAGE-only principal could
+/// - assign itself the all-powerful `admin` role (escalation),
+/// - strip `admin` from other admins (lockout),
+/// - reset an admin's password and log in as them (takeover), or
+/// - soft-delete every admin (lockout).
+///
+/// Mirrors "you cannot grant, revoke, or act as what you do not hold". This is
+/// the single implementation of the subset rule; every USER_MANAGE handler that
+/// can affect another principal's privileges must route through it.
+async fn require_within_ceiling<C: ConnectionTrait>(
+    db: &C,
+    auth_user: &AuthUser,
+    target: CeilingTarget<'_>,
 ) -> Result<(), AppError> {
     if auth_user.has_permission(perm::SYSTEM_ADMIN) {
         return Ok(());
     }
-    let role_permissions = role_permission::Entity::find()
-        .filter(role_permission::Column::Role.eq(role_name.to_string()))
-        .all(&state.db)
-        .await?;
-    if let Some(rp) = role_permissions
+    let target_permissions = match target {
+        CeilingTarget::Role(role_name) => {
+            role_permission::Entity::find()
+                .filter(role_permission::Column::Role.eq(role_name))
+                .all(db)
+                .await?
+        }
+        CeilingTarget::User(user_id) => {
+            role_permission::Entity::find()
+                .filter(
+                    role_permission::Column::Role.in_subquery(
+                        sea_query::Query::select()
+                            .column(user_role::Column::Role)
+                            .from(user_role::Entity)
+                            .and_where(user_role::Column::UserId.eq(user_id))
+                            .to_owned(),
+                    ),
+                )
+                .all(db)
+                .await?
+        }
+    };
+    if let Some(rp) = target_permissions
         .iter()
         .find(|rp| !auth_user.has_permission(&rp.permission))
     {
         tracing::warn!(
             actor = auth_user.user_id,
-            role = %role_name,
+            ?target,
             missing_permission = %rp.permission,
-            "Refused role change crossing the caller's privilege ceiling"
+            "Refused change crossing the caller's privilege ceiling"
         );
         return Err(AppError::PermissionDenied);
+    }
+    Ok(())
+}
+
+/// Advisory-lock key serializing `delete_user` transactions. See
+/// [`require_not_last_system_admin`].
+const USER_DELETION_LOCK: &str = "user-deletion";
+
+/// Serialize user deletions for the rest of `txn`. Must be taken BEFORE any
+/// user row lock: two concurrent deletes of the same account would otherwise
+/// deadlock (one holding the row, the other the advisory lock).
+async fn lock_user_deletions(txn: &DatabaseTransaction) -> Result<(), AppError> {
+    txn.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [USER_DELETION_LOCK.into()],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Refuse to soft-delete the last active account holding SYSTEM_ADMIN, which
+/// would leave nobody able to manage roles or restore access (and the ceiling
+/// above would stop any lesser principal from repairing it).
+///
+/// Requires [`lock_user_deletions`] to be held on `txn`; without it, two admins
+/// deleting each other concurrently would each still see the other as the
+/// surviving holder and both commit.
+async fn require_not_last_system_admin(
+    txn: &DatabaseTransaction,
+    user_id: i32,
+) -> Result<(), AppError> {
+    let holder_ids: Vec<i32> = user::Entity::find_active()
+        .filter(
+            user::Column::Id.in_subquery(
+                sea_query::Query::select()
+                    .column(user_role::Column::UserId)
+                    .from(user_role::Entity)
+                    .and_where(
+                        user_role::Column::Role.in_subquery(
+                            sea_query::Query::select()
+                                .column(role_permission::Column::Role)
+                                .from(role_permission::Entity)
+                                .and_where(
+                                    role_permission::Column::Permission.eq(perm::SYSTEM_ADMIN),
+                                )
+                                .to_owned(),
+                        ),
+                    )
+                    .to_owned(),
+            ),
+        )
+        .select_only()
+        .column(user::Column::Id)
+        .into_tuple()
+        .all(txn)
+        .await?;
+    if holder_ids == [user_id] {
+        return Err(AppError::Conflict(format!(
+            "Cannot delete user: it is the last active account holding {}",
+            perm::SYSTEM_ADMIN
+        )));
     }
     Ok(())
 }
@@ -295,6 +411,7 @@ async fn require_role_within_ceiling(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "User already has the role (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -317,10 +434,19 @@ pub async fn assign_role(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
-    require_role_within_ceiling(&state, &auth_user, &role_model.name).await?;
+    require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_model.name)).await?;
 
     let txn = state.db.begin().await?;
-    user_model.assign_role(&txn, role_model.name).await?;
+    let role_name = role_model.name;
+    user_model
+        .assign_role(&txn, role_name.clone())
+        .await
+        .map_err(|e| match e.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(_)) => {
+                AppError::Conflict(format!("User already has role \"{role_name}\""))
+            }
+            _ => AppError::from(e),
+        })?;
     refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
     user::Entity::touch_credentials_changed(&txn, id).await?;
     txn.commit().await?;
@@ -358,7 +484,7 @@ pub async fn revoke_role(
     // USER_MANAGE/ROLE_MANAGE boundary. Without it, a USER_MANAGE-only principal
     // could strip `admin` (system:admin/role:manage) from every other admin - an
     // administrative lockout, the inverse of the self-escalation assign_role guards.
-    require_role_within_ceiling(&state, &auth_user, &role_name).await?;
+    require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_name)).await?;
 
     let active = user_role::Entity::find_by_id((id, role_name))
         .one(&state.db)
