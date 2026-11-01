@@ -5,5 +5,6 @@ pub mod plugin_config;
 pub mod plugin_storage;
 pub mod submission_dispatch;
 pub mod submission_feedback;
+pub mod system_admin_guard;
 pub mod user_accounts;
 pub mod windowed_session;

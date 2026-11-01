@@ -495,6 +495,10 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub client: Client,
     pub db: DatabaseConnection,
+    /// URL of this test's database. `db` is capped at two connections, so a
+    /// test that must hold a transaction open while requests run opens its
+    /// own connection from this URL instead of starving the server.
+    pub db_url: String,
     /// A clone of the `AppState` the router was built from. Lets a test call
     /// a dispatcher-internal `pub` function directly (e.g.
     /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP -
@@ -947,6 +951,7 @@ impl TestApp {
                 .build()
                 .expect("Failed to build reqwest client"),
             db,
+            db_url,
             state: state_for_app,
             server_handle: Some(server_handle),
             dispatcher,
