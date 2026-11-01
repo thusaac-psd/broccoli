@@ -123,17 +123,22 @@ pub async fn create_submission(
     // directly so a request never holds two connections at once.
     let problem = find_problem(&state.db, problem_id).await?;
     // The kernel OWNS the subject: one kernel per request per subject.
-    // REACHABILITY FIRST: gate on problem read access (contest membership or
-    // problem-edit permission), same as viewing the problem, and do it before
-    // the `before_submission` hook dispatch below. Without this a contestant
-    // can probe and submit against hidden/unreleased problems by guessing
-    // IDs, which is a stronger information oracle than viewing since it runs
-    // secret tests. A denied decision fails closed and silent (404) - this is
-    // reachability, not a business rule, so it must never grow a reason
-    // string; the cooldown/submission-limit plugins' own loud, reasoned
-    // rejections are a separate, later check untouched by this gate. See
-    // `visibility::host_rules::decide_standalone_problem_access`, ported
-    // verbatim from the `require_problem_read_access` this replaces.
+    // REACHABILITY FIRST, before the `before_submission` hook dispatch below.
+    // Without this a contestant can probe and submit against hidden or
+    // unreleased problems by guessing IDs. That is a stronger information
+    // oracle than viewing, because a submission runs the secret tests. A
+    // denied decision fails closed and silent (404). This is reachability,
+    // not a business rule, so it must never grow a reason string. The
+    // cooldown/submission-limit plugins' own loud, reasoned rejections are a
+    // separate, later check that this gate does not touch.
+    //
+    // `Action::Submit` is stricter than viewing. Only a public problem or a
+    // problem editor gets through here. A hidden problem is denied even when
+    // one of its contests would let the caller read it, because this row is
+    // stored with `contest_id = NULL` and would skip that contest's plugin
+    // config, feedback masking and standings. Contestants submit through
+    // `create_contest_submission` instead. See
+    // `visibility::host_rules::standalone_reachable_via_contest`.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     if kernel
         .decide(
