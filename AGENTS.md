@@ -129,6 +129,21 @@ The checked-in Docker Postgres credentials are:
 
 ## Working Rules
 
+### Branches
+
+- Name branches `<type>/<short-kebab-case-summary>`, using the same types as
+  commit messages (`fix`, `feat`, `refactor`, `perf`, `docs`, `test`, `ci`).
+  Existing examples: `fix/auth-refresh-race`, `feat/codelink-bracket`,
+  `docs/readme-sweep`.
+- The summary says what the change does: `fix/cli-token-stale-session`, not
+  `fix/issue-53` or a generated name such as `claude/cool-hypatia-8dlsd4`.
+- Use one branch per issue, or per group of fixes that touch the same code and
+  would otherwise conflict. Branch from the latest `origin/master`, and link the
+  issues in the PR body (`Fixes #53`).
+- Coding agents: this applies even when your environment assigns an
+  auto-generated branch name. Create a properly named branch, commit and push
+  there instead, and tell the user which branch you used.
+
 ### Backend changes
 
 - Keep handler flow consistent: docs, tracing, auth, validation, DB/business
