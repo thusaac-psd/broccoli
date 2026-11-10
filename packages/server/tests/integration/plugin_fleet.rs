@@ -571,3 +571,51 @@ async fn a_replica_with_different_files_is_flagged_and_keeps_its_running_version
         res.text
     );
 }
+
+/// A visibility plugin that is enabled but cannot run on this replica (here:
+/// its files are missing, so there is no manifest) fails closed for what it
+/// governs, as recorded by the replica that loaded it, and only for that:
+/// contests of other types stay readable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn_with_plugins().await;
+    let b_dir = tempfile::tempdir().unwrap();
+    let b = a
+        .spawn_replica(SpawnOptions {
+            plugins_dir: Some(b_dir.path().to_path_buf()),
+            allow_plugin_activation_failures: true,
+            ..Default::default()
+        })
+        .await;
+    let token = admin(&a).await;
+    let outsider = a.create_authenticated_user("outsider", "pass1234").await;
+    let governed = a.create_contest(&token, "Governed", true, true).await;
+    let other = a.create_contest(&token, "Other", true, true).await;
+
+    // The plugin, when it last loaded, registered the `fleet-only` type.
+    for sql in [
+        format!(
+            "UPDATE plugin SET governs = '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}' \
+             WHERE id = '{PLUGIN}'"
+        ),
+        format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&b.state).await.unwrap();
+
+    let res = b
+        .get_with_token(&routes::contest(governed), &outsider)
+        .await;
+    assert_eq!(
+        res.status, 404,
+        "B cannot decide it, so hides it: {}",
+        res.text
+    );
+    let res = b.get_with_token(&routes::contest(other), &outsider).await;
+    assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
+}

@@ -68,6 +68,8 @@ pub struct PluginLifecycle {
     /// Plugins still serving a previous version because the latest failed to
     /// load here, with that error (for readiness).
     outdated: RwLock<HashMap<String, String>>,
+    /// The recorded [`Governs`] per plugin, as of the last reconcile.
+    governs: RwLock<HashMap<String, Governs>>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,18 @@ fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Opt
     })
 }
 
+/// What a plugin governs, recorded fleet-wide whenever a replica loads it.
+/// A replica that cannot load the plugin (it failed, or the files are not
+/// on its disk) uses this to fail closed for exactly what the plugin would
+/// have decided, instead of for everything or nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Governs {
+    /// It declares a `[[server.queries]] topic = "visibility"`.
+    pub visibility: bool,
+    /// The contest types its `init()` registered, sorted.
+    pub contest_types: Vec<String>,
+}
+
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginNotReady {
@@ -164,7 +178,7 @@ impl PluginLifecycle {
             .unwrap_or(false)
     }
 
-    fn desired_enabled_ids(&self) -> Vec<String> {
+    pub(crate) fn desired_enabled_ids(&self) -> Vec<String> {
         self.desired
             .read()
             .map(|d| {
@@ -174,6 +188,12 @@ impl PluginLifecycle {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// What `plugin_id` governs, as recorded by the replica that last loaded
+    /// it; `None` if no replica ever has.
+    pub fn governs(&self, plugin_id: &str) -> Option<Governs> {
+        self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
     pub(crate) fn set_desired(&self, plugin_id: &str, enabled: bool) {
@@ -387,6 +407,14 @@ async fn reconcile_locked(
     let now = Instant::now();
     let mut failures = Vec::new();
     for row in rows {
+        if let Some(governs) = row
+            .governs
+            .clone()
+            .and_then(|g| serde_json::from_value::<Governs>(g).ok())
+            && let Ok(mut map) = state.plugin_lifecycle.governs.write()
+        {
+            map.insert(row.id.clone(), governs);
+        }
         let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
         // plugin is still loading here, the visibility kernel must already
@@ -456,6 +484,9 @@ async fn apply(
         }),
         _ => load_from_disk(state, plugin_id).await.map(drop),
     };
+    if result.is_ok() {
+        record_governs(state, plugin_id).await;
+    }
     let entry = match &result {
         Ok(()) => Applied {
             generation: desired.generation,
@@ -548,6 +579,63 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
     });
     register_rows(state, &new_ids).await?;
     Ok(!new_ids.is_empty())
+}
+
+/// Record what a plugin that just loaded here governs, if that changed.
+/// Best-effort: a stale record only makes a peer that cannot load the plugin
+/// fail closed for a slightly different scope.
+async fn record_governs(state: &AppState, plugin_id: &str) {
+    let visibility = state
+        .plugins
+        .get_registry()
+        .read()
+        .ok()
+        .and_then(|r| r.get(plugin_id).map(|e| declares_visibility(&e.manifest)))
+        .unwrap_or(false);
+    let mut contest_types: Vec<String> = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .iter()
+        .filter(|(_, h)| h.plugin_id == plugin_id)
+        .map(|(t, _)| t.clone())
+        .collect();
+    contest_types.sort();
+    let governs = Governs {
+        visibility,
+        contest_types,
+    };
+    if state.plugin_lifecycle.governs(plugin_id).as_ref() == Some(&governs) {
+        return;
+    }
+    let Ok(value) = serde_json::to_value(&governs) else {
+        return;
+    };
+    let result = state
+        .db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE plugin SET governs = $2 WHERE id = $1 AND governs IS DISTINCT FROM $2",
+            [plugin_id.into(), value.into()],
+        ))
+        .await;
+    match result {
+        Ok(_) => {
+            if let Ok(mut map) = state.plugin_lifecycle.governs.write() {
+                map.insert(plugin_id.to_string(), governs);
+            }
+        }
+        Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to record what a plugin governs"),
+    }
+}
+
+/// Whether a manifest declares a visibility query.
+pub fn declares_visibility(manifest: &plugin_core::manifest::PluginManifest) -> bool {
+    manifest
+        .server
+        .as_ref()
+        .is_some_and(|s| s.queries.iter().any(|q| q.topic == "visibility"))
 }
 
 /// A lifecycle change to record in the desired state.
@@ -669,6 +757,7 @@ async fn load_then_publish(
         }
     };
     let fingerprint = plugin_utils::fingerprint(state, plugin_id).await;
+    record_governs(state, plugin_id).await;
     let published = match publish(state, plugin_id, change, fingerprint.as_ref()).await {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(ChangeError::NotEnabled(plugin_id.to_string())),

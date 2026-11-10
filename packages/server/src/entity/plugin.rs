@@ -20,6 +20,11 @@ pub struct Model {
     pub version: Option<String>,
     #[sea_orm(nullable)]
     pub content_hash: Option<String>,
+    /// What the plugin governs, as recorded by the last replica that loaded
+    /// it (`crate::plugin_lifecycle::Governs`), so a replica that cannot load
+    /// it still knows what to fail closed for. `None` until first loaded.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub governs: Option<Json>,
     pub updated_at: DateTimeUtc,
 }
 

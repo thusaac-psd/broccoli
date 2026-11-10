@@ -48,21 +48,49 @@ struct VisibilityQuerier {
     function: String,
 }
 
-/// Scan the live plugin registry for every currently-`Loaded` plugin that
-/// registered a `[[server.queries]]` entry with `topic = "visibility"`.
+/// What this replica cannot decide right now: resources governed by a
+/// visibility plugin that is enabled fleet-wide but not `Loaded` here.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Blind {
+    /// Nothing: every enabled visibility plugin is loaded.
+    #[default]
+    Nothing,
+    /// Resources in contests of these types (the contest types the missing
+    /// plugins registered when they last loaded anywhere).
+    ContestTypes(std::collections::BTreeSet<String>),
+    /// Everything: a missing plugin's scope is unknown, or it governs more
+    /// than its contest types (it registered none).
+    Everything,
+}
+
+impl Blind {
+    fn widen(&mut self, other: Blind) {
+        *self = match (std::mem::take(self), other) {
+            (Blind::Everything, _) | (_, Blind::Everything) => Blind::Everything,
+            (Blind::Nothing, other) | (other, Blind::Nothing) => other,
+            (Blind::ContestTypes(mut a), Blind::ContestTypes(b)) => {
+                a.extend(b);
+                Blind::ContestTypes(a)
+            }
+        };
+    }
+}
+
+/// Every currently-`Loaded` plugin that registered a `[[server.queries]]`
+/// entry with `topic = "visibility"`, plus what this replica is [`Blind`] to.
 ///
-/// Returns `Err(())`, which the caller turns into `Deny` for the whole batch,
-/// when the set of queriers cannot be established with confidence:
-///
-/// - the registry's `RwLock` is poisoned (a prior panic while some other code
-///   held the write lock);
-/// - a plugin that DECLARES a visibility query is enabled in the fleet's
-///   desired state but is not `Loaded` on this replica (it failed to load
-///   here, or this replica has not converged onto an enable yet). Its authors
-///   expected it to gate every request; skipping it would silently widen
-///   access to unconditional `Allow` on just this replica, so a contestant
-///   load-balanced onto it could read what every other replica hides. This
-///   replica retries the load and reports it in `/healthz`.
+/// A plugin that declares a visibility query, is enabled in the fleet's
+/// desired state, but is not `Loaded` on this replica (it failed to load
+/// here, its files are missing here, or this replica has not converged onto
+/// an enable yet) is enforced by every other replica; skipping it would let a
+/// request load-balanced onto this one read what the rest of the fleet hides.
+/// Its resources are therefore denied (fail closed), but only ITS resources:
+/// the contest types it registered, as recorded fleet-wide by the last
+/// replica that loaded it ([`crate::plugin_lifecycle::Governs`]). Standalone
+/// problems and other contest types stay readable, so one broken plugin
+/// cannot make every request on a replica 404. Whether a plugin missing from
+/// this replica's disk declares a visibility query comes from the same
+/// record, since there is no manifest here to read.
 ///
 /// A plugin that declares a visibility query but is NOT enabled is skipped:
 /// zero queriers is deliberately "no plugin has an opinion" and
@@ -70,46 +98,103 @@ struct VisibilityQuerier {
 /// identity element) - a contest type with no visibility plugin at all relies
 /// on the exact same path.
 ///
-/// Known limit: a plugin that is enabled but missing from this replica's disk
-/// has no manifest here, so whether it declares a visibility query is
-/// unknown; it is reported as not ready but does not fail visibility closed.
-fn visibility_queriers(state: &AppState) -> Result<Vec<VisibilityQuerier>, ()> {
+/// Returns `Err(())` only if the registry's `RwLock` is poisoned; the caller
+/// denies the whole batch, since the set of queriers cannot be established.
+fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blind), ()> {
     let registry = state.plugins.get_registry().read().map_err(|_| {
         tracing::error!("visibility plugin registry lock poisoned; denying batch");
     })?;
 
     let mut queriers = Vec::new();
     for entry in registry.values() {
+        if entry.status != PluginStatus::Loaded {
+            continue;
+        }
         let Some(server) = &entry.manifest.server else {
             continue;
         };
-        let declares_visibility_query = server.queries.iter().any(|q| q.topic == "visibility");
-
-        if entry.status != PluginStatus::Loaded {
-            if declares_visibility_query && state.plugin_lifecycle.is_desired_enabled(&entry.id) {
-                tracing::error!(
-                    plugin_id = %entry.id,
-                    status = ?entry.status,
-                    "plugin declares a visibility query and is enabled, but is not Loaded \
-                     on this replica; denying the batch until it loads"
-                );
-                return Err(());
-            }
-            continue;
-        }
-
-        if declares_visibility_query {
-            for query in &server.queries {
-                if query.topic == "visibility" {
-                    queriers.push(VisibilityQuerier {
-                        plugin_id: entry.id.clone(),
-                        function: query.function.clone(),
-                    });
-                }
+        for query in &server.queries {
+            if query.topic == "visibility" {
+                queriers.push(VisibilityQuerier {
+                    plugin_id: entry.id.clone(),
+                    function: query.function.clone(),
+                });
             }
         }
     }
-    Ok(queriers)
+
+    let mut blind = Blind::Nothing;
+    for id in state.plugin_lifecycle.desired_enabled_ids() {
+        let entry = registry.get(&id);
+        if entry.is_some_and(|e| e.status == PluginStatus::Loaded) {
+            continue;
+        }
+        let recorded = state.plugin_lifecycle.governs(&id);
+        let declares = match entry {
+            Some(e) => crate::plugin_lifecycle::declares_visibility(&e.manifest),
+            None => recorded.as_ref().is_some_and(|g| g.visibility),
+        };
+        if !declares {
+            continue;
+        }
+        let scope = match recorded {
+            Some(g) if !g.contest_types.is_empty() => {
+                Blind::ContestTypes(g.contest_types.into_iter().collect())
+            }
+            _ => Blind::Everything,
+        };
+        tracing::error!(
+            plugin_id = %id,
+            status = ?entry.map(|e| &e.status),
+            scope = ?scope,
+            "plugin declares a visibility query and is enabled, but is not Loaded \
+             on this replica; denying what it governs until it loads"
+        );
+        blind.widen(scope);
+    }
+    Ok((queriers, blind))
+}
+
+/// Deny the resources in contests of `types`; leave the rest to the queriers.
+/// One small lookup, made only while a visibility plugin is down here. A
+/// lookup failure denies everything (fail closed).
+async fn blind_decisions(
+    state: &AppState,
+    types: &std::collections::BTreeSet<String>,
+    resource_contest_ids: &[Option<i32>],
+) -> Vec<Decision> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let mut ids: Vec<i32> = resource_contest_ids.iter().flatten().copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return vec![Decision::Allow; resource_contest_ids.len()];
+    }
+    let rows: Result<Vec<(i32, Option<String>)>, _> = crate::entity::contest::Entity::find()
+        .select_only()
+        .column(crate::entity::contest::Column::Id)
+        .column(crate::entity::contest::Column::ContestType)
+        .filter(crate::entity::contest::Column::Id.is_in(ids))
+        .into_tuple()
+        .all(&state.db)
+        .await;
+    let types_by_contest: std::collections::HashMap<i32, String> = match rows {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|(id, t)| Some((id, t?)))
+            .collect(),
+        Err(e) => {
+            tracing::error!(error = %e, "contest type lookup failed; denying batch");
+            return vec![Decision::Deny; resource_contest_ids.len()];
+        }
+    };
+    resource_contest_ids
+        .iter()
+        .map(|cid| match cid.and_then(|c| types_by_contest.get(&c)) {
+            Some(t) if types.contains(t) => Decision::Deny,
+            _ => Decision::Allow,
+        })
+        .collect()
 }
 
 /// Maximum number of dot-separated segments in one mask path.
@@ -300,16 +385,20 @@ pub(crate) async fn query_plugins(
         "resource_contest_ids must be positional with resources"
     );
 
-    let queriers = match visibility_queriers(state) {
-        Ok(queriers) => queriers,
-        Err(()) => {
-            // `visibility_queriers` logged the cause.
-            return vec![Decision::Deny; resources.len()];
+    let (queriers, blind) = match visibility_queriers(state) {
+        Ok(found) => found,
+        Err(()) => return vec![Decision::Deny; resources.len()],
+    };
+    let blind = match blind {
+        Blind::Everything => return vec![Decision::Deny; resources.len()],
+        Blind::Nothing => None,
+        Blind::ContestTypes(types) => {
+            Some(blind_decisions(state, &types, resource_contest_ids).await)
         }
     };
 
     if queriers.is_empty() {
-        return vec![Decision::Allow; resources.len()];
+        return blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
     }
 
     let input = VisibilityQueryInput {
@@ -332,7 +421,7 @@ pub(crate) async fn query_plugins(
             .collect(),
     };
 
-    let mut combined = vec![Decision::Allow; resources.len()];
+    let mut combined = blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
     for querier in &queriers {
         let call_result: Result<VisibilityQueryOutput, _> = state
             .plugins
