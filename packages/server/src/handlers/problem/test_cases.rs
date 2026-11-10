@@ -17,7 +17,7 @@ use tracing::instrument;
 // and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
 use crate::entity::{test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
@@ -51,15 +51,13 @@ use super::find_problem_for_update;
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id))]
 pub async fn create_test_case(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<CreateTestCaseRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     let txn = state.db.begin().await?;
     find_problem_for_update(&txn, problem_id).await?;
     validate_create_test_case(&payload)?;
@@ -263,14 +261,13 @@ pub async fn get_test_case(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id, tc_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id, tc_id))]
 pub async fn update_test_case(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<UpdateTestCaseRequest>,
 ) -> Result<Json<TestCaseResponse>, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_update_test_case(&payload)?;
 
     if payload == UpdateTestCaseRequest::default() {
@@ -398,14 +395,13 @@ pub async fn delete_test_case(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id))]
 pub async fn reorder_test_cases(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<ReorderTestCasesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_reorder_test_cases(&payload)?;
 
     let txn = state.db.begin().await?;
@@ -468,12 +464,11 @@ pub async fn reorder_test_cases(
 )]
 #[instrument(skip(state, auth_user, payload), fields(problem_id))]
 pub async fn bulk_delete_test_cases(
-    auth_user: FreshAuthUser,
+    auth_user: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<BulkDeleteTestCasesRequest>,
 ) -> Result<Json<BulkDeleteTestCasesResponse>, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_bulk_delete_test_cases(&payload)?;
 
     let txn = state.db.begin().await?;

@@ -2671,3 +2671,49 @@ mod problem_contest_access {
         assert_eq!(res.body["id"], pid);
     }
 }
+
+mod write_permission_before_body {
+    use super::*;
+
+    /// Large-body problem edit endpoints (test-case JSON, ZIP upload, checker
+    /// source) check `PROBLEM_EDIT` before reading the body, so a caller without
+    /// it gets 403 even for a malformed body and cannot make the server buffer up
+    /// to 1 GiB first.
+    #[tokio::test]
+    async fn test_case_writes_check_permission_before_reading_body() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let contestant = app
+            .create_user_with_role("ap_user", "password123", "contestant")
+            .await;
+        let pid = app.create_problem(&admin, "P").await;
+
+        let res = app
+            .post_with_token(&routes::test_cases(pid), &json!({}), &contestant)
+            .await;
+        assert_eq!(
+            res.status, 403,
+            "contestant got {} (body parsed before permission check): {}",
+            res.status, res.text
+        );
+
+        let res = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "t.zip",
+                b"not a zip".to_vec(),
+                None,
+                None,
+                None,
+                &contestant,
+            )
+            .await;
+        assert_eq!(
+            res.status, 403,
+            "contestant upload got {} (body parsed before permission check): {}",
+            res.status, res.text
+        );
+    }
+}

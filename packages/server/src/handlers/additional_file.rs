@@ -19,7 +19,7 @@ use uuid::Uuid;
 // participation.
 use crate::entity::{additional_file, problem};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::attachment::{AdditionalFileListResponse, AdditionalFileResponse};
 use crate::state::AppState;
@@ -74,15 +74,13 @@ fn validate_language_code(lang: &str) -> Result<(), AppError> {
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, multipart), fields(problem_id))]
+#[instrument(skip(_auth, state, multipart), fields(problem_id))]
 pub async fn upload_additional_file(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     problem::Entity::find_active_by_id(problem_id)
         .one(&state.db)
         .await?

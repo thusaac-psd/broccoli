@@ -6,7 +6,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum_typed_multipart::BaseMultipart;
-use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 use tracing::instrument;
 
@@ -16,7 +15,7 @@ use tracing::instrument;
 // returns test case content to a viewer.
 use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::FreshAuthUser;
+use crate::extractors::auth::{Authorized, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
@@ -50,15 +49,13 @@ use super::test_cases::{next_test_case_position, tc_to_list_item};
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, data), fields(problem_id))]
+#[instrument(skip(_auth, state, data), fields(problem_id))]
 pub async fn upload_test_cases(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     BaseMultipart { data, .. }: BaseMultipart<UploadTestCasesRequest, AppError>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     if data.input_format.matches('*').count() != 1 || data.output_format.matches('*').count() != 1 {
         return Err(AppError::Validation(
             "Formats must contain exactly one '*' wildcard".into(),
