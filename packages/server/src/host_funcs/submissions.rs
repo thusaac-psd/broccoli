@@ -4,8 +4,8 @@
 //! Phase 1 of the SQL capability redesign splits the judge's own submission
 //! writes off the raw `db_execute`/`db_query` channel. The guest now serializes
 //! *structured* input (a `SubmissionUpdate`, a batch of `TestCaseResultRow`s,
-//! etc.) and the SERVER owns the SQL: the exact statements the guest SDK used to
-//! build are reproduced here, byte-for-byte, so judging behaves identically. The
+//! etc.) and the SERVER owns the SQL. Every write to a
+//! judgement's results is fenced by [`JUDGEMENT_WRITE_FENCE`]. The
 //! statements run on the PRIVILEGED pool (the app role) - not the restricted
 //! `broccoli_plugin` pool that backs the raw `sql` channel - but still through
 //! the SAME NUL-sanitization / arg-parsing / poisoned-connection recovery choke
@@ -83,18 +83,29 @@ fn ok_affected(n: u64) -> Result<String, extism::Error> {
     Ok(json!({ "data": n }).to_string())
 }
 
-host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("submission_update", &plugin_id);
-    let _enter = span.enter();
+/// The write fence every plugin write to a judgement's results goes through:
+/// the row is the judgement the caller names, of the submission it names, at
+/// the epoch the caller was dispatched with, and still in flight. Epochs are
+/// unique per submission (`services::judgement_lifecycle`) and a superseded
+/// judgement is finalized when it is replaced, so exactly the attempt that
+/// owns an epoch can write and finish, whether it is the current judgement or
+/// a deferred rejudge running beside it, and nothing can write to a
+/// superseded or finalized one. `j` names the `submission_judgement` row.
+const JUDGEMENT_WRITE_FENCE: &str = "j.id = {judgement} AND j.submission_id = {submission} \
+     AND j.judge_epoch = {epoch} AND j.is_finalized = FALSE";
 
-    let update: SubmissionUpdate = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
+fn judgement_write_fence(judgement: &str, submission: &str, epoch: &str) -> String {
+    JUDGEMENT_WRITE_FENCE
+        .replace("{judgement}", judgement)
+        .replace("{submission}", submission)
+        .replace("{epoch}", epoch)
+}
 
+/// `submission_update`'s first statement: mirrors the judged columns onto the
+/// caller's own judgement, behind [`JUDGEMENT_WRITE_FENCE`]. A terminal
+/// Judged/CompilationError status also finalizes it. `None` when the update
+/// sets no judgement column.
+fn judgement_update(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
     let mut p = Params::new();
     let mut sets = Vec::new();
     push_judge_sets(
@@ -109,18 +120,42 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
         &update.error_code,
         &update.error_message,
     );
-
+    // `judged_at` lives on the submission only; the judgement's terminal
+    // stamp is `finalized_at`.
+    sets.retain(|set| set != "judged_at = NOW()");
     if sets.is_empty() {
-        return ok_affected(1);
+        return None;
     }
+    if matches!(
+        update.status,
+        Some(SubmissionStatus::Judged) | Some(SubmissionStatus::CompilationError)
+    ) {
+        sets.push("is_finalized = TRUE".to_string());
+        sets.push("finalized_at = NOW()".to_string());
+    }
+    let fence = judgement_write_fence(
+        &p.bind(update.judgement_id),
+        &p.bind(update.submission_id),
+        &p.bind(update.judge_epoch),
+    );
+    let sql = format!(
+        "UPDATE submission_judgement AS j SET {} WHERE {fence}",
+        sets.join(", ")
+    );
+    Some((sql, p.into_args()))
+}
 
-    // Mirror the same column writes onto submission_judgement so the
-    // versioned row stays in sync with the denormalized cache.
-    let mut jp = Params::new();
-    let mut jsets = Vec::new();
+/// `submission_update`'s second statement: the submission's denormalized
+/// cache row. Only the CURRENT judgement drives it (`j.is_current` and the
+/// submission's own `judge_epoch`), so a deferred rejudge finalizing its own
+/// judgement leaves the visible verdict alone until an admin applies it.
+/// `None` when the update sets no column at all.
+fn submission_cache_update(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
+    let mut p = Params::new();
+    let mut sets = Vec::new();
     push_judge_sets(
-        &mut jp,
-        &mut jsets,
+        &mut p,
+        &mut sets,
         &update.status,
         &update.verdict,
         &update.score,
@@ -130,46 +165,9 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
         &update.error_code,
         &update.error_message,
     );
-    let mut judgement_rows: u64 = 1;
-    if !jsets.is_empty() {
-        let mut judgement_sets: Vec<String> = jsets
-            .into_iter()
-            .filter(|set| set != "judged_at = NOW()")
-            .collect();
-        let is_terminal_marker = matches!(
-            update.status,
-            Some(SubmissionStatus::Judged) | Some(SubmissionStatus::CompilationError)
-        );
-        if is_terminal_marker {
-            judgement_sets.push("is_finalized = TRUE".to_string());
-            judgement_sets.push("finalized_at = NOW()".to_string());
-        }
-        let jsql = format!(
-            "UPDATE submission_judgement SET {} WHERE id = {} AND judge_epoch = {} \
-             AND is_finalized = FALSE \
-             AND (is_current = TRUE OR version = ( \
-                 SELECT MAX(version) FROM submission_judgement WHERE submission_id = {} \
-             ))",
-            judgement_sets.join(", "),
-            jp.bind(update.judgement_id),
-            jp.bind(update.judge_epoch),
-            jp.bind(update.submission_id),
-        );
-        let jargs = serde_json::to_string(&jp.into_args())?;
-        let resp_json = super::sql::execute_on_pool(&db, &plugin_id, jsql, jargs)?;
-        let env: ExecEnvelope = serde_json::from_str(&resp_json)
-            .map_err(|e| extism::Error::msg(format!("Malformed submission_judgement envelope: {e}")))?;
-        if env.error.is_some() {
-            // Surface the DB error to the guest exactly as raw_execute did.
-            return Ok(resp_json);
-        }
-        judgement_rows = env.data.as_ref().and_then(|v| v.as_u64()).unwrap_or(0);
+    if sets.is_empty() {
+        return None;
     }
-
-    if judgement_rows == 0 {
-        return ok_affected(0);
-    }
-
     let sql = format!(
         "UPDATE submission SET {} WHERE id = {} AND judge_epoch = {} \
          AND status NOT IN ('Judged', 'CompilationError', 'SystemError') \
@@ -185,7 +183,43 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
         p.bind(update.judge_epoch),
         p.bind(update.judgement_id),
     );
-    let args = serde_json::to_string(&p.into_args())?;
+    Some((sql, p.into_args()))
+}
+
+host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: String) -> String {
+    let (plugin_id, db) = {
+        let user_data_guard = user_data.get()?;
+        let ctx = super::lock_or_poison(&user_data_guard)?;
+        (ctx.0.clone(), ctx.1.clone())
+    };
+    let span = super::host_fn_span("submission_update", &plugin_id);
+    let _enter = span.enter();
+
+    let update: SubmissionUpdate = serde_json::from_str(&input)
+        .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
+
+    let Some((sql, args)) = submission_cache_update(&update) else {
+        return ok_affected(1);
+    };
+
+    let mut judgement_rows: u64 = 1;
+    if let Some((jsql, jargs)) = judgement_update(&update) {
+        let jargs = serde_json::to_string(&jargs)?;
+        let resp_json = super::sql::execute_on_pool(&db, &plugin_id, jsql, jargs)?;
+        let env: ExecEnvelope = serde_json::from_str(&resp_json)
+            .map_err(|e| extism::Error::msg(format!("Malformed submission_judgement envelope: {e}")))?;
+        if env.error.is_some() {
+            // Surface the DB error to the guest exactly as raw_execute did.
+            return Ok(resp_json);
+        }
+        judgement_rows = env.data.as_ref().and_then(|v| v.as_u64()).unwrap_or(0);
+    }
+
+    if judgement_rows == 0 {
+        return ok_affected(0);
+    }
+
+    let args = serde_json::to_string(&args)?;
     let resp_json = super::sql::execute_on_pool(&db, &plugin_id, sql, args)?;
     let env: ExecEnvelope = serde_json::from_str(&resp_json)
         .map_err(|e| extism::Error::msg(format!("Malformed submission envelope: {e}")))?;
@@ -251,15 +285,34 @@ host_fn!(pub submission_insert_results(user_data: (String, DatabaseConnection); 
              submission_id, judgement_id, judge_epoch, test_case_id, run_index, verdict, score, \
              time_used, memory_used, checker_output, stdout, stderr, created_at \
          ) \
-         JOIN submission_judgement j ON j.id = v.judgement_id \
-         WHERE j.submission_id = v.submission_id \
-           AND j.judge_epoch = v.judge_epoch \
-           AND j.is_finalized = FALSE",
-        rows.join(", ")
+         JOIN submission_judgement j ON {}",
+        rows.join(", "),
+        judgement_write_fence("v.judgement_id", "v.submission_id", "v.judge_epoch"),
     );
     let args = serde_json::to_string(&p.into_args())?;
     super::sql::execute_on_pool(&db, &plugin_id, sql, args)
 });
+
+/// `submission_delete_results`' statement. Same fence as the writes: a
+/// superseded or finalized judgement's late worker cannot wipe the results
+/// its judgement is kept with as version history.
+fn delete_results_statement(
+    submission_id: i32,
+    judgement_id: i32,
+    judge_epoch: i32,
+) -> (String, Vec<JsonValue>) {
+    let mut p = Params::new();
+    let sql = format!(
+        "DELETE FROM test_case_result t \
+         WHERE t.submission_id = {} AND t.judgement_id = {} AND t.judge_epoch = {} \
+           AND EXISTS (SELECT 1 FROM submission_judgement j WHERE {})",
+        p.bind(submission_id),
+        p.bind(judgement_id),
+        p.bind(judge_epoch),
+        judgement_write_fence("t.judgement_id", "t.submission_id", "t.judge_epoch"),
+    );
+    (sql, p.into_args())
+}
 
 host_fn!(pub submission_delete_results(user_data: (String, DatabaseConnection); input: String) -> String {
     let (plugin_id, db) = {
@@ -273,15 +326,8 @@ host_fn!(pub submission_delete_results(user_data: (String, DatabaseConnection); 
     let (submission_id, judgement_id, judge_epoch): (i32, i32, i32) = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_delete_results input: {e}")))?;
 
-    let mut p = Params::new();
-    let sql = format!(
-        "DELETE FROM test_case_result \
-         WHERE submission_id = {} AND judgement_id = {} AND judge_epoch = {}",
-        p.bind(submission_id),
-        p.bind(judgement_id),
-        p.bind(judge_epoch),
-    );
-    let args = serde_json::to_string(&p.into_args())?;
+    let (sql, args) = delete_results_statement(submission_id, judgement_id, judge_epoch);
+    let args = serde_json::to_string(&args)?;
     super::sql::execute_on_pool(&db, &plugin_id, sql, args)
 });
 
@@ -306,3 +352,290 @@ host_fn!(pub submission_query_test_cases(user_data: (String, DatabaseConnection)
     let args = serde_json::to_string(&p.into_args())?;
     super::sql::query_on_pool(&db, &plugin_id, sql, args)
 });
+
+/// The write fence against real Postgres, driven through the same builders and
+/// in the same order as `submission_update`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::{problem, submission, submission_judgement, test_case_result, user};
+    use crate::services::judgement_lifecycle::{OpenJudgement, open_judgement};
+    use broccoli_server_sdk::types::Verdict;
+    use chrono::Utc;
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
+        TransactionTrait,
+    };
+
+    fn execute(db: &DatabaseConnection, sql: String, args: Vec<JsonValue>) -> u64 {
+        let args = serde_json::to_string(&args).expect("args");
+        let resp = super::super::sql::execute_on_pool(db, "fence-test", sql, args).expect("exec");
+        let env: ExecEnvelope = serde_json::from_str(&resp).expect("envelope");
+        assert!(env.error.is_none(), "db error: {:?}", env.error);
+        env.data.and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+
+    /// `submission_update`'s statement sequence: the fenced judgement write,
+    /// then the cache row only if the judgement accepted it. Returns the
+    /// guest-visible rows-affected.
+    async fn submission_update(db: &DatabaseConnection, update: SubmissionUpdate) -> u64 {
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || {
+            let (sql, args) = submission_cache_update(&update).expect("cache sets");
+            let rows = match judgement_update(&update) {
+                Some((jsql, jargs)) => execute(&db, jsql, jargs),
+                None => 1,
+            };
+            if rows > 0 {
+                execute(&db, sql, args);
+            }
+            rows
+        })
+        .await
+        .expect("join")
+    }
+
+    async fn delete_results(db: &DatabaseConnection, judgement: &submission_judgement::Model) {
+        let db = db.clone();
+        let (sid, jid, epoch) = (judgement.submission_id, judgement.id, judgement.judge_epoch);
+        tokio::task::spawn_blocking(move || {
+            let (sql, args) = delete_results_statement(sid, jid, epoch);
+            execute(&db, sql, args);
+        })
+        .await
+        .expect("join");
+    }
+
+    fn finish(j: &submission_judgement::Model, verdict: Verdict, score: f64) -> SubmissionUpdate {
+        SubmissionUpdate {
+            submission_id: j.submission_id,
+            judgement_id: j.id,
+            judge_epoch: j.judge_epoch,
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(Some(verdict)),
+            score: Some(score),
+            ..Default::default()
+        }
+    }
+
+    async fn judgement(db: &DatabaseConnection, id: i32) -> submission_judgement::Model {
+        submission_judgement::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("db")
+            .expect("judgement")
+    }
+
+    async fn submission_row(db: &DatabaseConnection, id: i32) -> submission::Model {
+        submission::Entity::find_by_id(id)
+            .one(db)
+            .await
+            .expect("db")
+            .expect("submission")
+    }
+
+    /// A judged submission with a finalized current v1 at epoch 3.
+    async fn seed_judged(db: &DatabaseConnection) -> (submission::Model, i32) {
+        let now = Utc::now();
+        let u = user::ActiveModel {
+            username: Set("fence-user".into()),
+            display_name: Set("fence-user".into()),
+            password: Set("x".into()),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("user");
+        let p = problem::ActiveModel {
+            title: Set("fence-problem".into()),
+            content: Set("c".into()),
+            time_limit: Set(1000),
+            memory_limit: Set(262_144),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("problem");
+        let sub = submission::ActiveModel {
+            files: Set(serde_json::json!({})),
+            language: Set("cpp".into()),
+            user_id: Set(u.id),
+            problem_id: Set(p.id),
+            status: Set(common::SubmissionStatus::Judged),
+            verdict: Set(Some(common::Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(3),
+            max_judge_epoch: Set(3),
+            created_at: Set(now),
+            judged_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("submission");
+        let v1 = submission_judgement::ActiveModel {
+            submission_id: Set(sub.id),
+            version: Set(1),
+            is_current: Set(true),
+            is_finalized: Set(true),
+            status: Set(common::SubmissionStatus::Judged),
+            verdict: Set(Some(common::Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(3),
+            created_at: Set(now),
+            finalized_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("v1");
+        (sub, v1.id)
+    }
+
+    async fn open(
+        db: &DatabaseConnection,
+        sid: i32,
+        open: OpenJudgement,
+    ) -> submission_judgement::Model {
+        let txn = db.begin().await.expect("begin");
+        let (_, j) = open_judgement(&txn, sid, open)
+            .await
+            .expect("open")
+            .expect("submission exists");
+        txn.commit().await.expect("commit");
+        j
+    }
+
+    /// A deferred rejudge is still running when an immediate rejudge opens a
+    /// higher version. Each finalizes its OWN judgement; only the current one
+    /// drives the submission's visible verdict. Under the old
+    /// `is_current OR version = MAX(version)` fence the deferred judgement was
+    /// neither, so it could never finalize.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deferred_and_immediate_rejudges_each_finalize_their_own_judgement() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _v1) = seed_judged(&db).await;
+
+        let deferred = open(
+            &db,
+            sub.id,
+            OpenJudgement::DeferredRejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        let immediate = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        assert!(immediate.version > deferred.version);
+        assert_ne!(immediate.judge_epoch, deferred.judge_epoch);
+
+        // The deferred run finishes first, while the immediate one is live.
+        let rows = submission_update(&db, finish(&deferred, Verdict::WrongAnswer, 0.0)).await;
+        assert_eq!(rows, 1, "the deferred judgement accepts its own result");
+        let d = judgement(&db, deferred.id).await;
+        assert!(d.is_finalized);
+        assert!(
+            !d.is_current,
+            "finishing never makes a deferred judgement current"
+        );
+        assert_eq!(d.verdict, Some(common::Verdict::WrongAnswer));
+        let s = submission_row(&db, sub.id).await;
+        assert_eq!(
+            s.status,
+            common::SubmissionStatus::Queued,
+            "visible state untouched"
+        );
+        assert_eq!(s.verdict, None);
+        assert_eq!(s.judge_epoch, immediate.judge_epoch);
+
+        // The immediate (current) run finishes and drives the submission.
+        let rows = submission_update(&db, finish(&immediate, Verdict::Accepted, 100.0)).await;
+        assert_eq!(rows, 1);
+        let i = judgement(&db, immediate.id).await;
+        assert!(i.is_finalized && i.is_current);
+        let s = submission_row(&db, sub.id).await;
+        assert_eq!(s.status, common::SubmissionStatus::Judged);
+        assert_eq!(s.verdict, Some(common::Verdict::Accepted));
+        assert_eq!(s.score, Some(100.0));
+    }
+
+    /// Nothing can write to a superseded or finalized judgement, or to a
+    /// judgement through another submission's id, and its kept results
+    /// cannot be deleted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn superseded_or_finalized_judgements_reject_writes() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _v1) = seed_judged(&db).await;
+
+        let first = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        test_case_result::ActiveModel {
+            submission_id: Set(sub.id),
+            judgement_id: Set(Some(first.id)),
+            judge_epoch: Set(first.judge_epoch),
+            verdict: Set(common::Verdict::Accepted),
+            score: Set(1.0),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("partial result");
+        // A second rejudge supersedes the in-flight first one.
+        let second = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+
+        let late = submission_update(&db, finish(&first, Verdict::WrongAnswer, 0.0)).await;
+        assert_eq!(late, 0, "a superseded judgement's late result is rejected");
+        assert_eq!(
+            judgement(&db, first.id).await.error_code.as_deref(),
+            Some("SUPERSEDED"),
+            "it keeps the supersede outcome"
+        );
+        delete_results(&db, &first).await;
+        let kept = test_case_result::Entity::find()
+            .filter(test_case_result::Column::JudgementId.eq(first.id))
+            .count(&db)
+            .await
+            .expect("count");
+        assert_eq!(kept, 1, "a superseded judgement's results are kept");
+
+        let mut wrong_sub = finish(&second, Verdict::WrongAnswer, 0.0);
+        wrong_sub.submission_id += 1;
+        assert_eq!(submission_update(&db, wrong_sub).await, 0);
+
+        assert_eq!(
+            submission_update(&db, finish(&second, Verdict::Accepted, 100.0)).await,
+            1
+        );
+        let again = submission_update(&db, finish(&second, Verdict::WrongAnswer, 0.0)).await;
+        assert_eq!(again, 0, "a finalized judgement accepts no further writes");
+        let s = submission_row(&db, sub.id).await;
+        assert_eq!(s.verdict, Some(common::Verdict::Accepted));
+    }
+}
