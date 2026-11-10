@@ -121,10 +121,7 @@ pub fn evaluate_short_circuit_detached(
     _submission_id: i32,
 ) -> Result<OnSubmissionOutput, SdkError> {
     DetachedEval::start(host, req, test_cases, IcpcJudge, "on_icpc_eval_result", 1)?;
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 pub fn handle_detached_eval_callback(

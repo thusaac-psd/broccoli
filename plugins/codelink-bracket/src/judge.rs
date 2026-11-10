@@ -1290,10 +1290,7 @@ pub fn evaluate_detached(
         if affected == 0 {
             return Err(SdkError::StaleEpoch);
         }
-        return Ok(OnSubmissionOutput {
-            success: true,
-            error_message: None,
-        });
+        return Ok(OnSubmissionOutput::ok());
     }
 
     DetachedEval::start(
@@ -1304,10 +1301,7 @@ pub fn evaluate_detached(
         "on_codelink_bracket_eval_result",
         1,
     )?;
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 /// Handle one detached-evaluate result callback. Mirrors
@@ -1341,14 +1335,8 @@ pub fn handle_codelink_bracket_submission(input: String) -> FnResult<String> {
     let req: OnSubmissionInput = serde_json::from_str(&input)?;
     let output = match evaluate_detached(&host, &req) {
         Ok(out) => out,
-        Err(SdkError::StaleEpoch) => OnSubmissionOutput {
-            success: true,
-            error_message: None,
-        },
-        Err(e) => OnSubmissionOutput {
-            success: false,
-            error_message: Some(format!("{e:?}")),
-        },
+        Err(SdkError::StaleEpoch) => OnSubmissionOutput::ok(),
+        Err(e) => OnSubmissionOutput::failed(format!("{e:?}")),
     };
     Ok(serde_json::to_string(&output)?)
 }

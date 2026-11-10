@@ -91,10 +91,7 @@ pub fn persist_results(
         submission_id, verdict, score
     ));
 
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 #[cfg(test)]

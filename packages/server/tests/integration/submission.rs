@@ -2757,3 +2757,605 @@ mod page_window_bounds {
         }
     }
 }
+
+mod rejudge_lifecycle {
+    use super::*;
+    use chrono::Utc;
+    use common::{SubmissionStatus, Verdict};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+    use server::entity::{submission, submission_judgement};
+
+    /// A judged standalone submission at `judge_epoch = 11` with one finalized
+    /// current judgement, i.e. the normal state before an admin rejudges.
+    async fn seed_judged(app: &TestApp, token: &str, problem_id: i32, retry_count: i32) -> i32 {
+        let user_id = app.get_with_token(routes::ME, token).await.id();
+        let now = Utc::now();
+        let sub = submission::ActiveModel {
+            files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
+            contest_id: Set(None),
+            contest_type: Set("standard".into()),
+            status: Set(SubmissionStatus::Judged),
+            verdict: Set(Some(Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(11),
+            retry_count: Set(retry_count),
+            created_at: Set(now),
+            judged_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert submission");
+        submission_judgement::ActiveModel {
+            submission_id: Set(sub.id),
+            version: Set(11),
+            is_current: Set(true),
+            is_finalized: Set(true),
+            status: Set(SubmissionStatus::Judged),
+            verdict: Set(Some(Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(11),
+            retry_count: Set(retry_count),
+            created_at: Set(now),
+            finalized_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert judgement");
+        sub.id
+    }
+
+    /// Every judgement of submission `sid`, oldest version first.
+    async fn judgements(app: &TestApp, sid: i32) -> Vec<submission_judgement::Model> {
+        submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sid))
+            .order_by_asc(submission_judgement::Column::Version)
+            .all(&app.db)
+            .await
+            .expect("db")
+    }
+
+    /// Every judgement of a submission gets its own `judge_epoch`, even when a deferred
+    /// rejudge is followed by an immediate one, and applying a judgement never moves the
+    /// submission's epoch backwards. The epoch fences late worker results and keys the
+    /// `after_judging` hook dedupe, so two judgements must never share one.
+    #[tokio::test]
+    async fn rejudge_epochs_are_unique() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 1).await;
+
+        let deferred = app
+            .post_with_token(
+                &routes::submission_rejudge(sid),
+                &json!({"apply_immediately": false}),
+                &token,
+            )
+            .await;
+        assert!(deferred.status < 300, "deferred rejudge: {}", deferred.text);
+        let immediate = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(
+            immediate.status < 300,
+            "immediate rejudge: {}",
+            immediate.text
+        );
+
+        let rows = judgements(&app, sid).await;
+        let epochs: Vec<i32> = rows.iter().map(|j| j.judge_epoch).collect();
+        let mut dedup = epochs.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(
+            dedup.len(),
+            epochs.len(),
+            "duplicate judge_epoch across judgements: {epochs:?}"
+        );
+
+        // Applying the (finalized) deferred judgement must not move the
+        // submission's epoch backwards, and the next rejudge must still get an
+        // epoch no other judgement holds.
+        let before = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission")
+            .judge_epoch;
+        let deferred_id = rows[1].id;
+        assert!(!rows[1].is_current, "control: v2 is the deferred judgement");
+        let mut finalize: submission_judgement::ActiveModel = rows[1].clone().into();
+        finalize.is_finalized = Set(true);
+        finalize.status = Set(SubmissionStatus::Judged);
+        finalize.verdict = Set(Some(Verdict::WrongAnswer));
+        finalize.finalized_at = Set(Some(Utc::now()));
+        finalize.update(&app.db).await.expect("finalize deferred");
+        let applied = app
+            .post_with_token(
+                &routes::submission_judgement_apply(sid, deferred_id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(applied.status, 200, "apply: {}", applied.text);
+        let after = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission");
+        assert!(
+            after.judge_epoch > before,
+            "apply moved judge_epoch from {before} to {}",
+            after.judge_epoch
+        );
+        let again = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(again.status < 300, "rejudge after apply: {}", again.text);
+        let epochs: Vec<i32> = judgements(&app, sid)
+            .await
+            .iter()
+            .map(|j| j.judge_epoch)
+            .collect();
+        let mut dedup = epochs.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(
+            dedup.len(),
+            epochs.len(),
+            "duplicate judge_epoch after apply + rejudge: {epochs:?}"
+        );
+    }
+
+    /// Applying a deferred judgement re-stamps it with a fresh epoch, and its
+    /// `test_case_result` rows move to that epoch with it. Plugins such as IOI join
+    /// results to their judgement on the epoch, so stale result epochs would score the
+    /// applied judgement as 0.
+    #[tokio::test]
+    async fn applied_judgement_results_keep_matching_its_epoch() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        use server::entity::test_case_result;
+
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 1).await;
+
+        let deferred = app
+            .post_with_token(
+                &routes::submission_rejudge(sid),
+                &json!({"apply_immediately": false}),
+                &token,
+            )
+            .await;
+        assert!(deferred.status < 300, "deferred rejudge: {}", deferred.text);
+        let rows = judgements(&app, sid).await;
+        let j2 = rows.last().expect("deferred judgement").clone();
+        assert!(!j2.is_current);
+
+        // The deferred run writes its results under its own epoch and finishes.
+        for _ in 0..2 {
+            test_case_result::ActiveModel {
+                submission_id: Set(sid),
+                judgement_id: Set(Some(j2.id)),
+                judge_epoch: Set(j2.judge_epoch),
+                verdict: Set(Verdict::Accepted),
+                score: Set(50.0),
+                created_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&app.db)
+            .await
+            .expect("result");
+        }
+        let mut finalize: submission_judgement::ActiveModel = j2.clone().into();
+        finalize.is_finalized = Set(true);
+        finalize.status = Set(SubmissionStatus::Judged);
+        finalize.verdict = Set(Some(Verdict::Accepted));
+        finalize.score = Set(Some(100.0));
+        finalize.finalized_at = Set(Some(Utc::now()));
+        finalize.update(&app.db).await.expect("finalize deferred");
+
+        let applied = app
+            .post_with_token(
+                &routes::submission_judgement_apply(sid, j2.id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(applied.status, 200, "apply: {}", applied.text);
+        let current = judgements(&app, sid)
+            .await
+            .into_iter()
+            .find(|j| j.is_current)
+            .expect("current judgement");
+        assert_eq!(current.id, j2.id);
+        assert!(
+            current.judge_epoch > j2.judge_epoch,
+            "apply takes a fresh epoch"
+        );
+
+        // IOI's join (`plugins/ioi/src/score.rs`), minus its contest filter.
+        let row = app
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT COUNT(*) AS n FROM test_case_result tcr \
+             JOIN submission_judgement sj \
+               ON sj.id = tcr.judgement_id \
+              AND sj.submission_id = tcr.submission_id \
+              AND sj.judge_epoch = tcr.judge_epoch \
+             WHERE tcr.submission_id = $1 AND sj.is_current AND sj.is_finalized",
+                [sid.into()],
+            ))
+            .await
+            .expect("db")
+            .expect("row");
+        let matched: i64 = row.try_get("", "n").expect("n");
+        assert_eq!(
+            matched, 2,
+            "the applied judgement's results do not join on its epoch"
+        );
+    }
+
+    /// Rejudging an in-flight submission finalizes the judgement it supersedes as a
+    /// `SUPERSEDED` system error. A superseded judgement left unfinalized can never
+    /// finish, so the stuck detector would re-run it until it lands in the DLQ.
+    #[tokio::test]
+    async fn rejudge_finalizes_the_superseded_inflight_judgement() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let user_id = app.get_with_token(routes::ME, &token).await.id();
+        let now = Utc::now();
+        let sub = submission::ActiveModel {
+            files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(pid),
+            contest_type: Set("standard".into()),
+            status: Set(SubmissionStatus::Running),
+            judge_epoch: Set(5),
+            retry_count: Set(1),
+            owner_server_id: Set(Some("server-x".into())),
+            lease_heartbeat_at: Set(Some(now)),
+            leased_at: Set(Some(now)),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert submission");
+        let j1 = submission_judgement::ActiveModel {
+            submission_id: Set(sub.id),
+            version: Set(1),
+            is_current: Set(true),
+            is_finalized: Set(false),
+            status: Set(SubmissionStatus::Running),
+            judge_epoch: Set(5),
+            retry_count: Set(1),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert running judgement");
+
+        let res = app
+            .post_with_token(&routes::submission_rejudge(sub.id), &json!({}), &token)
+            .await;
+        if (400..500).contains(&res.status) {
+            // Refusing to rejudge an in-flight submission is also acceptable.
+            return;
+        }
+        assert!(res.status < 300, "rejudge: {}", res.text);
+
+        let old = submission_judgement::Entity::find_by_id(j1.id)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("j1");
+        assert!(!old.is_current, "control: j1 superseded");
+        assert!(
+            old.is_finalized,
+            "superseded judgement left unfinalized in {:?}; stuck detector will re-run it",
+            old.status
+        );
+        assert_eq!(old.status, SubmissionStatus::SystemError);
+        assert_eq!(old.error_code.as_deref(), Some("SUPERSEDED"));
+
+        // Finalized, it can now be discarded like any other old version.
+        let discard = app
+            .post_with_token(
+                &routes::submission_judgement_discard(sub.id, j1.id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(discard.status, 204, "discard: {}", discard.text);
+    }
+
+    /// A rejudge starts a fresh judging attempt with `retry_count` reset to 0, so lease
+    /// steal and stuck retries get their full budget instead of inheriting the previous
+    /// attempt's count.
+    #[tokio::test]
+    async fn rejudge_resets_retry_budget() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 5).await;
+
+        let res = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(res.status < 300, "rejudge: {}", res.text);
+
+        let sub = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission");
+        assert_eq!(
+            sub.retry_count, 0,
+            "fresh judging attempt inherited the previous attempt's retry budget"
+        );
+    }
+}
+
+mod bulk_rejudge_limits {
+    use super::*;
+
+    /// Bulk rejudge rejects more than `MAX_BULK_REJUDGE_IDS` (10,000) ids with
+    /// `VALIDATION_ERROR` and accepts exactly the cap. The cap also keeps the `IN (...)`
+    /// list under the Postgres bind-parameter limit.
+    #[tokio::test]
+    async fn bulk_rejudge_enforces_documented_cap() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("bulk_rejudge_admin", "password123", "admin")
+            .await;
+        let ids: Vec<i32> = (1..=10_001).collect();
+        let res = app
+            .post_with_token(
+                routes::SUBMISSIONS_BULK_REJUDGE,
+                &json!({"submission_ids": ids}),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+
+        // Control: exactly the cap is accepted (none of these ids exist).
+        let ids: Vec<i32> = (1..=10_000).collect();
+        let res = app
+            .post_with_token(
+                routes::SUBMISSIONS_BULK_REJUDGE,
+                &json!({"submission_ids": ids}),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+    }
+}
+
+mod standalone_submit_to_hidden_contest_problem {
+    use super::*;
+    use crate::codelink_bracket::visible_problem_ids;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+    use serde_json::Value;
+
+    /// A cpp submission body, optionally with a caller-chosen `contest_type`.
+    fn submission_body(contest_type: Option<&str>) -> Value {
+        let mut body = valid_submission_body("cpp");
+        if let Some(ct) = contest_type {
+            body["contest_type"] = json!(ct);
+        }
+        body
+    }
+
+    /// A cpp code-run body with one custom test case.
+    fn code_run_body() -> Value {
+        json!({
+            "files": [{"filename": "main.cpp", "content": "#include <iostream>\nint main() {}"}],
+            "language": "cpp",
+            "custom_test_cases": [{"input": "5\n1 2 3 4 5", "expected_output": "15"}],
+        })
+    }
+
+    /// Contest-less submission and code-run rows stored for `problem_id`. A
+    /// denied standalone request must leave both at zero.
+    async fn standalone_rows(app: &TestApp, problem_id: i32) -> (u64, u64) {
+        use server::entity::{code_run, submission};
+        let submissions = submission::Entity::find()
+            .filter(submission::Column::ProblemId.eq(problem_id))
+            .filter(submission::Column::ContestId.is_null())
+            .count(&app.db)
+            .await
+            .expect("count standalone submissions");
+        let code_runs = code_run::Entity::find()
+            .filter(code_run::Column::ProblemId.eq(problem_id))
+            .filter(code_run::Column::ContestId.is_null())
+            .count(&app.db)
+            .await
+            .expect("count standalone code runs");
+        (submissions, code_runs)
+    }
+
+    /// Asserts that the standalone submit (with and without a caller-chosen
+    /// `contest_type`) and the standalone code run are both a silent 404 for
+    /// `token`, and that neither request stored a row.
+    async fn assert_standalone_submit_hidden(
+        app: &TestApp,
+        problem_id: i32,
+        token: &str,
+        who: &str,
+    ) {
+        for contest_type in [None, Some("standard")] {
+            let res = app
+                .post_with_token(
+                    &routes::problem_submissions(problem_id),
+                    &submission_body(contest_type),
+                    token,
+                )
+                .await;
+            assert_eq!(
+                res.status, 404,
+                "{who}: standalone submit (contest_type {contest_type:?}) to hidden contest problem \
+             {problem_id} must be hidden, got {}: {}",
+                res.status, res.text
+            );
+            assert_eq!(res.body["code"], "NOT_FOUND", "{}", res.text);
+        }
+
+        let res = app
+            .post_with_token(
+                &routes::problem_code_runs(problem_id),
+                &code_run_body(),
+                token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 404,
+            "{who}: standalone code run on hidden contest problem {problem_id} must be hidden, got \
+         {}: {}",
+            res.status, res.text
+        );
+        assert_eq!(res.body["code"], "NOT_FOUND", "{}", res.text);
+
+        assert_eq!(
+            standalone_rows(app, problem_id).await,
+            (0, 0),
+            "{who}: a denied standalone request must not store a contest-less row"
+        );
+    }
+
+    /// A participant can read a hidden problem through its running private contest, but
+    /// can submit or run code on it only through the contest route. The standalone routes
+    /// store rows without a `contest_id`, which would skip contest-scoped plugin config,
+    /// feedback masking and standings. Problem editors can still submit standalone.
+    #[tokio::test]
+    async fn hidden_contest_problem_rejects_standalone_submission() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_hidden_private", "pass1234", "admin")
+            .await;
+        let contestant = app
+            .create_authenticated_user("contestant_hidden_private", "pass1234")
+            .await;
+
+        let pid = app
+            .create_hidden_problem(&admin, "Hidden Contest Problem")
+            .await;
+        // Private, activated, started, and not yet ended.
+        let cid = app
+            .create_contest(&admin, "Private Running Contest", false, true)
+            .await;
+        app.add_problem_to_contest(cid, pid, &admin).await;
+
+        let contestant_id = app.get_with_token(routes::ME, &contestant).await.id();
+        let res = app
+            .post_with_token(
+                &routes::contest_participants(cid),
+                &json!({ "user_id": contestant_id }),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 201, "enroll contestant failed: {}", res.text);
+
+        // READ admits the participant: they see the problem in the contest's
+        // list and can open its statement by id. `GET /problems/{id}` is how the
+        // contest UI loads a problem, and it reaches a hidden one only through
+        // rule 9.
+        assert!(
+            visible_problem_ids(&app, cid, &contestant)
+                .await
+                .contains(&i64::from(pid)),
+            "participant should see hidden problem {pid} in the contest problem list"
+        );
+        let res = app.get_with_token(&routes::problem(pid), &contestant).await;
+        assert_eq!(res.status, 200, "standalone read via rule 9: {}", res.text);
+
+        // SUBMIT is not: the standalone route would store a contest-less row.
+        assert_standalone_submit_hidden(&app, pid, &contestant, "participant").await;
+
+        // The contest route still accepts the same participant, scoped to the
+        // contest.
+        let res = app
+            .post_with_token(
+                &routes::contest_problem_submissions(cid, pid),
+                &submission_body(None),
+                &contestant,
+            )
+            .await;
+        assert_eq!(res.status, 201, "contest-scoped submit: {}", res.text);
+        assert_eq!(res.body["contest_id"], cid);
+
+        // Rule 8 still applies: a problem editor can submit standalone to a
+        // hidden problem (to test it before release).
+        let res = app
+            .post_with_token(
+                &routes::problem_submissions(pid),
+                &submission_body(None),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 201, "editor standalone submit: {}", res.text);
+        assert!(res.body["contest_id"].is_null());
+    }
+
+    /// Any authenticated user can read a hidden problem in a public running contest, but
+    /// an unregistered user cannot submit or run code on it through the standalone
+    /// routes, since the contest route refuses them.
+    #[tokio::test]
+    async fn hidden_problem_in_public_running_contest_rejects_standalone_submission_from_unregistered_user()
+     {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin_hidden_public", "pass1234", "admin")
+            .await;
+        let outsider = app
+            .create_authenticated_user("outsider_hidden_public", "pass1234")
+            .await;
+
+        let pid = app
+            .create_hidden_problem(&admin, "Hidden Public-Contest Problem")
+            .await;
+        // Public, activated, started, and not yet ended.
+        let cid = app
+            .create_contest(&admin, "Public Running Contest", true, true)
+            .await;
+        app.add_problem_to_contest(cid, pid, &admin).await;
+
+        // READ admits everyone: any authenticated user can view a hidden problem
+        // attached to a public started contest (rule 9), with no registration.
+        let res = app.get_with_token(&routes::problem(pid), &outsider).await;
+        assert_eq!(res.status, 200, "standalone read via rule 9: {}", res.text);
+
+        // The contest route refuses the unregistered user...
+        let res = app
+            .post_with_token(
+                &routes::contest_problem_submissions(cid, pid),
+                &submission_body(None),
+                &outsider,
+            )
+            .await;
+        assert_eq!(res.status, 403, "contest-scoped submit: {}", res.text);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+
+        // ...so the standalone route must not be a way around it.
+        assert_standalone_submit_hidden(&app, pid, &outsider, "unregistered user").await;
+    }
+}

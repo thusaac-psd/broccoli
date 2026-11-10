@@ -2,9 +2,8 @@ use std::time::Duration;
 
 use common::{DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QueryResult, QuerySelect, Set,
-    Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, EntityTrait,
+    ExprTrait, QueryFilter, QueryResult, Statement, TransactionTrait,
 };
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -15,6 +14,10 @@ use crate::dlq::DlqService;
 use crate::entity::{
     code_run, judgement_reset::ClearJudgementColumns, submission, submission_judgement,
     test_case_result,
+};
+use crate::services::judgement_lifecycle::{
+    OpenJudgement, RedispatchReason, RetryBudget, allocated_epoch, open_judgement,
+    redispatch_current_submission,
 };
 use crate::state::AppState;
 
@@ -383,41 +386,29 @@ async fn claim_submissions(
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
     let rows = claim_rows(&txn, "submission", lease_ttl_secs, batch_size).await?;
+    let claimed_epochs: std::collections::HashMap<i32, i32> =
+        rows.iter().map(|r| (r.id, r.judge_epoch)).collect();
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
-    if !plan.redispatch_ids.is_empty() {
-        open_stolen_submission_judgements(&txn, server_id, &plan.redispatch_ids).await?;
-        clear_current_submission_results(&txn, &plan.redispatch_ids).await?;
-
-        submission::Entity::update_many()
-            .col_expr(
-                submission::Column::OwnerServerId,
-                sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-            )
-            .col_expr(
-                submission::Column::LeaseHeartbeatAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            .col_expr(
-                submission::Column::LeasedAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            .col_expr(
-                submission::Column::RetryCount,
-                sea_orm::sea_query::Expr::col(submission::Column::RetryCount).add(1),
-            )
-            .col_expr(
-                submission::Column::JudgeEpoch,
-                sea_orm::sea_query::Expr::col(submission::Column::JudgeEpoch).add(1),
-            )
-            .col_expr(
-                submission::Column::Status,
-                sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-            )
-            .clear_judgement_columns()
-            .filter(submission::Column::Id.is_in(plan.redispatch_ids.clone()))
-            .exec(&txn)
-            .await?;
+    // Each stolen submission gets a fresh current judgement at a freshly
+    // allocated epoch, through the same `open_judgement` every new judgement
+    // goes through. The rows are locked by `claim_rows`, so the epoch guard
+    // always matches here.
+    let mut models = Vec::with_capacity(plan.redispatch_ids.len());
+    for &id in &plan.redispatch_ids {
+        let opened = open_judgement(
+            &txn,
+            id,
+            OpenJudgement::Redispatch {
+                expected_epoch: claimed_epochs[&id],
+                owner_server_id: server_id.to_string(),
+                reason: RedispatchReason::LeaseSteal,
+            },
+        )
+        .await?;
+        if let Some((sub, _judgement)) = opened {
+            models.push(sub);
+        }
     }
 
     for row in &plan.exhausted_rows {
@@ -462,15 +453,6 @@ async fn claim_submissions(
             .await?;
     }
 
-    let models = if plan.redispatch_ids.is_empty() {
-        Vec::new()
-    } else {
-        submission::Entity::find()
-            .filter(submission::Column::Id.is_in(plan.redispatch_ids.clone()))
-            .all(&txn)
-            .await?
-    };
-
     txn.commit().await?;
 
     if !models.is_empty() || !plan.exhausted_rows.is_empty() {
@@ -485,111 +467,11 @@ async fn claim_submissions(
     Ok(models)
 }
 
-async fn open_stolen_submission_judgements(
-    txn: &DatabaseTransaction,
-    server_id: &str,
-    submission_ids: &[i32],
-) -> anyhow::Result<()> {
-    if submission_ids.is_empty() {
-        return Ok(());
-    }
-
-    let submissions = submission::Entity::find()
-        .filter(submission::Column::Id.is_in(submission_ids.to_vec()))
-        .all(txn)
-        .await?;
-
-    submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::IsCurrent,
-            sea_orm::sea_query::Expr::value(false),
-        )
-        .filter(submission_judgement::Column::SubmissionId.is_in(submission_ids.to_vec()))
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .exec(txn)
-        .await?;
-
-    for sub in submissions {
-        let max_version: Option<i32> = submission_judgement::Entity::find()
-            .filter(submission_judgement::Column::SubmissionId.eq(sub.id))
-            .order_by_desc(submission_judgement::Column::Version)
-            .one(txn)
-            .await?
-            .map(|j| j.version);
-
-        submission_judgement::ActiveModel {
-            submission_id: Set(sub.id),
-            version: Set(max_version.unwrap_or(0).saturating_add(1)),
-            is_current: Set(true),
-            is_finalized: Set(false),
-            triggered_by_user_id: Set(None),
-            target_worker_id: Set(sub.target_worker_id),
-            note: Set(None),
-            status: Set(SubmissionStatus::Pending),
-            verdict: Set(None),
-            score: Set(None),
-            time_used: Set(None),
-            memory_used: Set(None),
-            compile_output: Set(None),
-            error_code: Set(None),
-            error_message: Set(None),
-            judge_epoch: Set(sub.judge_epoch.saturating_add(1)),
-            // Stamp ownership + a live lease on the replacement current judgement,
-            // matching the sibling steal (`claim_deferred_judgements`) and
-            // `requeue_judgement_for_system_error_retry`. Without this the row is
-            // inserted with NULL owner/heartbeat: `ensure_active_judgement_id`
-            // returns this existing id without setting either, the lease fiber
-            // (owner = self) never refreshes it, and the steal sweeper re-claims it
-            // (`owner_server_id IS NULL AND created_at < threshold`) mid-re-judge.
-            owner_server_id: Set(Some(server_id.to_string())),
-            lease_heartbeat_at: Set(Some(chrono::Utc::now())),
-            leased_at: Set(Some(chrono::Utc::now())),
-            created_at: Set(chrono::Utc::now()),
-            finalized_at: Set(None),
-            ..Default::default()
-        }
-        .insert(txn)
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn clear_current_submission_results(
-    txn: &DatabaseTransaction,
-    submission_ids: &[i32],
-) -> anyhow::Result<()> {
-    if submission_ids.is_empty() {
-        return Ok(());
-    }
-
-    let current_unfinalized_judgement_ids: Vec<i32> = submission_judgement::Entity::find()
-        .select_only()
-        .column(submission_judgement::Column::Id)
-        .filter(submission_judgement::Column::SubmissionId.is_in(submission_ids.to_vec()))
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .filter(submission_judgement::Column::IsFinalized.eq(false))
-        .into_tuple()
-        .all(txn)
-        .await?;
-
-    if current_unfinalized_judgement_ids.is_empty() {
-        return Ok(());
-    }
-
-    test_case_result::Entity::delete_many()
-        .filter(test_case_result::Column::JudgementId.is_in(current_unfinalized_judgement_ids))
-        .exec(txn)
-        .await?;
-
-    Ok(())
-}
-
 // Lock-order note: this path locks the JUDGEMENT first
 // (`claim_deferred_judgement_rows`, FOR UPDATE SKIP LOCKED on
 // `submission_judgement`) then the parent SUBMISSION (the UPDATE below);
 // `claim_submissions` locks the SUBMISSION first then the judgement
-// (`open_stolen_submission_judgements`). During a coordinator failover, two
+// (`open_judgement`). During a coordinator failover, two
 // replicas running the opposite scans can deadlock (Postgres 40P01) on the same
 // (submission, current-judgement) pair. Rather than rewrite the core steal query
 // to force a uniform lock order (risky, and hard to make airtight across two
@@ -626,10 +508,6 @@ async fn claim_deferred_judgements(
                 sea_orm::sea_query::Expr::col(submission_judgement::Column::RetryCount).add(1),
             )
             .col_expr(
-                submission_judgement::Column::JudgeEpoch,
-                sea_orm::sea_query::Expr::col(submission_judgement::Column::JudgeEpoch).add(1),
-            )
-            .col_expr(
                 submission_judgement::Column::Status,
                 sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
             )
@@ -638,8 +516,8 @@ async fn claim_deferred_judgements(
             .exec(&txn)
             .await?;
 
-        // This deferred re-dispatch reuses the SAME judgement id and only bumps
-        // its epoch (unlike the submission-first steal, which opens a fresh
+        // This deferred re-dispatch reuses the SAME judgement id under a fresh
+        // epoch, allocated on its submission further down (unlike the submission-first steal, which opens a fresh
         // judgement). `clear_judgement_columns` above wipes the judgement row's
         // own summary columns, but the failed attempt's per-testcase rows in
         // `test_case_result` are keyed by `judgement_id` and survive. The
@@ -647,8 +525,9 @@ async fn claim_deferred_judgements(
         // (`build_*` in handlers/submission/response.rs) selects test_case_result
         // by `judgement_id` alone - no epoch filter - so both attempts' rows
         // would surface as duplicated per-testcase results. Wipe the stale rows,
-        // mirroring `clear_current_submission_results` (submission-first steal)
-        // and `requeue_judgement_for_system_error_retry` (system-error retry).
+        // mirroring `requeue_judgement_for_system_error_retry` (system-error
+        // retry). The submission-first steal needs no wipe: its fresh judgement
+        // id has no rows yet.
         // `plan.redispatch_ids` here ARE judgement ids, so delete directly.
         test_case_result::Entity::delete_many()
             .filter(test_case_result::Column::JudgementId.is_in(plan.redispatch_ids.clone()))
@@ -754,54 +633,36 @@ async fn claim_deferred_judgements(
         .map(|sub| (sub.id, sub))
         .collect::<std::collections::HashMap<_, _>>();
 
-    // Advance each PARENT submission to the judgement's freshly-bumped epoch in
-    // lockstep. The judgement update above incremented its `judge_epoch`; if the
-    // submission row is left behind, the eventual epoch-gated finalize
-    // (`WHERE id = $ AND judge_epoch = $epoch`) matches 0 rows and the submission
-    // hangs in `Running` while its judgement finalizes. Set the epoch to the
-    // judgement's value (not `+1`) so a previously-desynced row is repaired, and
-    // reset the denormalized result cache the same way the submission-lease steal
-    // does above.
+    // Allocate a fresh epoch on each PARENT submission and advance the
+    // submission and its judgement to it in lockstep. If the submission row
+    // were left behind, the eventual epoch-gated finalize
+    // (`WHERE id = $ AND judge_epoch = $epoch`) would match 0 rows and the
+    // submission would hang in `Running` while its judgement finalizes; both
+    // taking the same freshly allocated value also repairs a previously
+    // desynced pair. Reset the denormalized result cache the same way the
+    // submission-lease steal does.
     for judgement in &judgements {
-        submission::Entity::update_many()
-            .col_expr(
-                submission::Column::JudgeEpoch,
-                sea_orm::sea_query::Expr::value(judgement.judge_epoch),
-            )
-            .col_expr(
-                submission::Column::Status,
-                sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-            )
-            .col_expr(
-                submission::Column::OwnerServerId,
-                sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-            )
-            .col_expr(
-                submission::Column::LeaseHeartbeatAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            .col_expr(
-                submission::Column::LeasedAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            // Never LOWER the submission's dispatch-retry count: claim_submissions
-            // accumulates it on the submission row and terminalizes when it exceeds
-            // the cap, but a deferred judgement carries its own (often fresh, 0)
-            // count. Overwriting the submission's with the judgement's would reset
-            // an already-flapping submission's budget every deferred steal, so it
-            // would never hit max_dispatch_retries. GREATEST keeps it monotonic.
-            .col_expr(
-                submission::Column::RetryCount,
-                sea_orm::sea_query::Expr::cust_with_values(
-                    "GREATEST(retry_count, $1)",
-                    [judgement.retry_count],
-                ),
-            )
-            .clear_judgement_columns()
-            .filter(submission::Column::Id.eq(judgement.submission_id))
-            .exec(&txn)
-            .await?;
+        // `AtLeast`: claim_submissions accumulates the dispatch-retry count on
+        // the submission row and terminalizes past the cap, but a deferred
+        // judgement carries its own (often fresh, 0) count.
+        redispatch_current_submission(
+            judgement.submission_id,
+            server_id,
+            RetryBudget::AtLeast(judgement.retry_count),
+        )
+        .exec(&txn)
+        .await?;
     }
+
+    let judgements = if judgements.is_empty() {
+        judgements
+    } else {
+        submission_judgement::Entity::update_many()
+            .col_expr(submission_judgement::Column::JudgeEpoch, allocated_epoch())
+            .filter(submission_judgement::Column::Id.is_in(plan.redispatch_ids.clone()))
+            .exec_with_returning(&txn)
+            .await?
+    };
 
     txn.commit().await?;
 
@@ -1265,30 +1126,7 @@ mod tests {
 mod deferred_steal_db_tests {
     use super::*;
     use crate::entity::{problem, user};
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    /// Boot a fresh Postgres container and migrate the schema into it. The
-    /// returned container guard must be kept alive for the duration of the test
-    /// (its `Drop` tears the container down).
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
+    use sea_orm::{ActiveModelTrait, Set};
 
     /// Insert a `submission` (plus the `user`/`problem` it references) in the
     /// given status/epoch and return its id.
@@ -1438,7 +1276,7 @@ mod deferred_steal_db_tests {
     /// the submission hangs in `Running` forever.
     #[tokio::test]
     async fn deferred_redispatch_advances_parent_submission_epoch() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
@@ -1480,7 +1318,7 @@ mod deferred_steal_db_tests {
     /// results under one judgement.
     #[tokio::test]
     async fn deferred_redispatch_wipes_stale_testcase_results() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
         let jid = current_judgement(&db, sub_id).await.id;
@@ -1534,7 +1372,7 @@ mod deferred_steal_db_tests {
     /// hanging.
     #[tokio::test]
     async fn exhausted_deferred_judgement_finalizes_parent_submission() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         // retry_count + 1 > max_dispatch_retries(5) => exhausted.
         seed_stale_deferred_judgement(&db, sub_id, 0, 5).await;
@@ -1568,7 +1406,7 @@ mod deferred_steal_db_tests {
     /// reclaims and re-dispatches it.
     #[tokio::test]
     async fn recover_orphaned_leases_makes_own_fresh_inflight_stealable() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-1").await;
         set_submission_owner(&db, sub_id, "server-1").await;
@@ -1617,7 +1455,7 @@ mod deferred_steal_db_tests {
     /// release must stay strictly scoped to `owner_server_id = <self>`.
     #[tokio::test]
     async fn recover_orphaned_leases_releases_own_non_current_inflight() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         let now = chrono::Utc::now();
         submission_judgement::ActiveModel {
@@ -1666,17 +1504,37 @@ mod deferred_steal_db_tests {
     /// and gets re-claimed by the steal sweeper mid-re-judge.
     #[tokio::test]
     async fn stolen_submission_judgement_insert_stamps_owner_and_heartbeat() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
+        let abandoned = current_judgement(&db, sub_id).await.id;
 
         let txn = db.begin().await.expect("begin txn");
-        open_stolen_submission_judgements(&txn, "live-server", &[sub_id])
-            .await
-            .expect("open stolen submission judgement");
+        open_judgement(
+            &txn,
+            sub_id,
+            OpenJudgement::Redispatch {
+                expected_epoch: 0,
+                owner_server_id: "live-server".to_string(),
+                reason: RedispatchReason::LeaseSteal,
+            },
+        )
+        .await
+        .expect("open stolen submission judgement")
+        .expect("submission is in flight at epoch 0");
         txn.commit().await.expect("commit txn");
 
-        let judgement = current_judgement(&db, sub_id).await;
-        assert!(judgement.is_current, "the inserted judgement is current");
+        let judgement = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .one(&db)
+            .await
+            .expect("query judgement")
+            .expect("a current judgement exists");
+        assert_ne!(
+            judgement.id, abandoned,
+            "a replacement judgement was inserted"
+        );
         assert_eq!(
             judgement.owner_server_id.as_deref(),
             Some("live-server"),
@@ -1687,6 +1545,25 @@ mod deferred_steal_db_tests {
             "the inserted judgement carries a live lease heartbeat so the lease \
              fiber refreshes it instead of the steal sweeper re-claiming it"
         );
+        assert!(
+            judgement.judge_epoch > 0,
+            "the replacement runs at a fresh epoch"
+        );
+
+        // The abandoned judgement is finalized, not left in flight for the
+        // stuck detector to re-run.
+        let abandoned = submission_judgement::Entity::find_by_id(abandoned)
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("abandoned judgement");
+        assert!(!abandoned.is_current);
+        assert!(abandoned.is_finalized);
+        assert_eq!(abandoned.status, SubmissionStatus::SystemError);
+        assert_eq!(
+            abandoned.error_code.as_deref(),
+            Some(SubmissionDlqErrorCode::SUPERSEDED)
+        );
     }
 
     /// Fix regression: a reclaimed deferred judgement is always current
@@ -1696,7 +1573,7 @@ mod deferred_steal_db_tests {
     /// fires its after-judging hooks (scoreboard recompute, notifications).
     #[tokio::test]
     async fn deferred_redispatch_reports_current_for_fire_after_judging() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
@@ -1720,7 +1597,7 @@ mod deferred_steal_db_tests {
     /// runs its boot recovery.
     #[tokio::test]
     async fn recover_orphaned_leases_leaves_other_servers_alone() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-2").await;
         set_submission_owner(&db, sub_id, "server-2").await;
