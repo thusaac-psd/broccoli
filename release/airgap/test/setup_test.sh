@@ -96,6 +96,11 @@ grep -qx "BROCCOLI__WORKER__ID='worker-9'" "$wenv" || { echo "FAIL: worker id no
 grep -qx "BROCCOLI__DATABASE__URL='postgres://postgres:pgpw@10.0.0.10:5432/broccoli'" "$wenv" || { echo "FAIL: worker db url wrong"; cat "$wenv"; exit 1; }
 grep -qx "BROCCOLI__MQ__URL='redis://:rdpw@10.0.0.10:6379'" "$wenv" || { echo "FAIL: worker mq url wrong"; cat "$wenv"; exit 1; }
 grep -q 'change-me' "$wenv" && { echo "FAIL: worker placeholder remains"; exit 1; } || true
+# A server name only this host resolves reaches the worker containers as an IP.
+PATH="$tmp/bin:$PATH" bash "$here/../setup.sh" --role worker --bundle "$tmp/bundle" \
+  --lan-host localhost --worker-id worker-9 --reconfigure --non-interactive --dry-run >/dev/null
+grep -qx "BROCCOLI__MQ__URL='redis://:rdpw@127.0.0.1:6379'" "$wenv" \
+  || { echo "FAIL: worker env names the server by a host-only name"; cat "$wenv"; exit 1; }
 
 # --- server role + cluster-secret sidecar: .env.infra must NOT be corrupted ---
 # Regression guard: cluster_seed_infra used to run before envgen_write ever

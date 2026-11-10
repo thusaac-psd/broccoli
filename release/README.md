@@ -138,3 +138,7 @@ on a server that is already installed.
   `enable-plugin.sh` or `BROCCOLI_PLUGINS`.
 - `docs/`: upgrade, TLS, and operations guides.
 - `examples/`: Caddy configs and custom worker image example.
+- `setup-fairness.sh`: prepares a worker host for `max_concurrency` above 1
+  (see `docs/operator-runbook.md`).
+- `contest/`: offline contest helpers: problem export/import and worker
+  bring-up (see `contest/README.md`).

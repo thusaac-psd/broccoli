@@ -114,8 +114,12 @@ if [ "$ROLE" = worker ]; then
   # server LAN host: explicit --lan-host wins, else the sidecar's baked host
   SERVER_HOST="${FLAG_LAN_HOST:-$(env_get "$cluster_dir/cluster-secrets.env" BROCCOLI_SERVER_HOST)}"
   [ -n "$SERVER_HOST" ] || { echo "worker role needs the server LAN host: pass --lan-host, or build the bundle with --lan-host" >&2; exit 2; }
+  # The worker containers dial DB/MQ/S3 by this address, and they cannot see
+  # names that only this host's /etc/hosts knows, so hand them the IP.
+  SERVER_ADDR="$(host_address "$SERVER_HOST")"
+  [ "$SERVER_ADDR" = "$SERVER_HOST" ] || echo "worker reaches the server at $SERVER_ADDR ($SERVER_HOST)"
   workergen_write "$BUNDLE/compose/.env.worker" "$BUNDLE/compose/.env.worker.example" \
-    "$cluster_dir/cluster-secrets.env" "$SERVER_HOST" "$WORKER_ID"
+    "$cluster_dir/cluster-secrets.env" "$SERVER_ADDR" "$WORKER_ID"
 fi
 
 if [ -n "$DRY_RUN" ]; then

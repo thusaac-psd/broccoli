@@ -134,6 +134,11 @@ for file in \
 done
 cp "$ROOT/release/install.sh" "$WORK/install.sh"
 cp "$ROOT/release/enable-plugin.sh" "$WORK/enable-plugin.sh"
+# Worker CPU isolation (docs/operator-runbook.md) and the offline contest
+# helpers (problem export/import, worker bring-up) run from the bundle too.
+cp "$ROOT/release/setup-fairness.sh" "$WORK/setup-fairness.sh"
+copy_tree "$ROOT/release/contest" "$WORK/contest"
+rm -rf "$WORK/contest/test"
 mkdir -p "$WORK/lib"
 cp "$ROOT"/release/lib/*.sh "$WORK/lib/"
 cp "$ROOT/docker-entrypoint-worker.sh" "$WORK/docker-entrypoint-worker.sh"

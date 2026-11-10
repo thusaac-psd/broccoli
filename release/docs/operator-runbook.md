@@ -158,10 +158,10 @@ trade-off. Use the procedure below before changing it.
 Default worker concurrency is `max_concurrency=1`. Leave it there unless the
 worker host has been prepared for CPU isolation.
 
-On the Linux worker host, run:
+On the Linux worker host, from the bundle directory, run:
 
 ```bash
-sudo ./release/setup-fairness.sh --max-concurrency 4 --cpus 0-3
+sudo ./setup-fairness.sh --max-concurrency 4 --cpus 0-3
 cat fairness.env >> .env.worker
 docker compose --env-file .env.worker -f docker-compose.worker.yaml up -d --no-deps worker
 ```

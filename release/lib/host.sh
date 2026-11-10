@@ -48,6 +48,18 @@ trusted_proxies_json() {
   printf '[%s]\n' "$out"
 }
 
+# host_address HOST: HOST as an IPv4 address, resolved here when it is a name.
+# Containers do not read the host's /etc/hosts, so a name listed only there
+# (a typical venue LAN name) must reach them as an address. Prints HOST as
+# given when it is already an address or does not resolve.
+host_address() {
+  local addr=""
+  case "$1" in
+    *[!0-9.]*) case "$1" in *:*) ;; *) addr="$(getent ahostsv4 "$1" 2>/dev/null | awk 'NR == 1 { print $1 }')" || addr="" ;; esac ;;
+  esac
+  printf '%s\n' "${addr:-$1}"
+}
+
 # source_ip_for HOST: this machine's address on the route to HOST, which is
 # the peer address HOST sees for connections from here. Empty if unknown.
 source_ip_for() {
