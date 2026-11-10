@@ -11,38 +11,12 @@ envgen_secret() {
   openssl rand -base64 "$bytes" | tr -d '/+=\n'
 }
 
-# Echo KEY's value from FILE, or "" if absent or a change-me placeholder.
-# Reverses env_set's compose-escape ($$ -> $) so callers see the logical value.
-env_get() {
-  local file="$1" key="$2" val
-  [ -f "$file" ] || { echo ""; return 0; }
-  val="$(grep -E "^${key}=" "$file" | head -1 | cut -d= -f2-)"
-  val="${val//'$$'/'$'}"
-  case "$val" in ""|*change-me*) echo "" ;; *) echo "$val" ;; esac
-}
-
-# Replace-or-append KEY=VALUE in FILE. VALUE written literally (awk -v, not sed,
-# so URL chars :/@ are safe; secrets are alphanumeric). Escape backslashes to avoid
-# awk escape processing (e.g., \n becomes newline, corrupting the file).
-env_set() {
-  local file="$1" key="$2" val="$3" val_c val_esc tmp
-  # Compose-escape first: `docker compose --env-file` interpolates VALUES, so a
-  # literal '$' (e.g. in an admin password 'Secret$var') must be stored as '$$'
-  # or compose eats '$var' -> the container sees 'Secret'. env_get reverses this.
-  # Single-quote the replacement: an unquoted $$ would expand to the shell PID.
-  val_c="${val//'$'/'$$'}"
-  # Escape backslashes for awk: \ -> \\ so awk sees a literal backslash
-  val_esc="${val_c//\\/\\\\}"
-  tmp="$(mktemp)"
-  [ -f "$file" ] || : > "$file"
-  if grep -qE "^${key}=" "$file"; then
-    awk -v k="$key" -v v="$val_esc" 'BEGIN{FS="="} $1==k{print k "=" v; next} {print}' "$file" > "$tmp"
-  else
-    cat "$file" > "$tmp"
-    printf '%s=%s\n' "$key" "$val_c" >> "$tmp"
-  fi
-  mv "$tmp" "$file"
-}
+# env_get, env_set and url_encode come from the env-file helpers every
+# installer shares: next to this file in a bundle, release/lib/ in a checkout.
+_envgen_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
+[ -f "$_envgen_lib" ] || _envgen_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../lib" && pwd)/env.sh"
+# shellcheck source=../../lib/env.sh
+. "$_envgen_lib"
 
 # envgen_write INFRA SERVER INFRA_EXAMPLE SERVER_EXAMPLE ADMIN_USER ADMIN_PASS
 envgen_write() {
@@ -74,8 +48,8 @@ envgen_write() {
   env_set "$server" BROCCOLI__AUTH__JWT_SECRET "$jwt"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
-  env_set "$server" BROCCOLI__DATABASE__URL "postgres://postgres:${pg}@${BROCCOLI_DB_HOST:-db}:5432/broccoli"
-  env_set "$server" BROCCOLI__MQ__URL "redis://:${redis}@${BROCCOLI_MQ_HOST:-redis}:6379"
+  env_set "$server" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" "${BROCCOLI_DB_HOST:-db}" 5432 broccoli)"
+  env_set "$server" BROCCOLI__MQ__URL "$(redis_url "$redis" "${BROCCOLI_MQ_HOST:-redis}" 6379)"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${BROCCOLI_S3_HOST:-seaweedfs}:8333"
   env_set "$server" BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
   env_set "$server" BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
@@ -117,8 +91,8 @@ workergen_write() {
   s3s="$(env_get "$sidecar" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)"
   [ -n "$pg" ] && [ -n "$redis" ] && [ -n "$s3a" ] && [ -n "$s3s" ] \
     || { echo "workergen: cluster-secret missing a PG/REDIS/S3 key: $sidecar" >&2; return 2; }
-  env_set "$worker" BROCCOLI__DATABASE__URL "postgres://postgres:${pg}@${server_host}:5432/broccoli"
-  env_set "$worker" BROCCOLI__MQ__URL "redis://:${redis}@${server_host}:6379"
+  env_set "$worker" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" "$server_host" 5432 broccoli)"
+  env_set "$worker" BROCCOLI__MQ__URL "$(redis_url "$redis" "$server_host" 6379)"
   env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${server_host}:8333"
   env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"

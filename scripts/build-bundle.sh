@@ -135,7 +135,7 @@ done
 cp "$ROOT/release/install.sh" "$WORK/install.sh"
 cp "$ROOT/release/enable-plugin.sh" "$WORK/enable-plugin.sh"
 mkdir -p "$WORK/lib"
-cp "$ROOT/release/lib/plugins.sh" "$WORK/lib/plugins.sh"
+cp "$ROOT"/release/lib/*.sh "$WORK/lib/"
 cp "$ROOT/docker-entrypoint-worker.sh" "$WORK/docker-entrypoint-worker.sh"
 copy_tree "$ROOT/release/examples" "$WORK/examples"
 copy_tree "$ROOT/release/docs" "$WORK/docs"

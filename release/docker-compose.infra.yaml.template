@@ -101,6 +101,13 @@ services:
     image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.15}
     restart: unless-stopped
     entrypoint: ["sh", "-ec"]
+    # The S3 keys reach the script below as container env, expanded by the
+    # shell when it runs ($$S3_ACCESS_KEY). Compose never pastes them into the
+    # script text, so no key can change what the script does. The installers
+    # refuse keys with quotes or backslashes, so the JSON stays valid.
+    environment:
+      S3_ACCESS_KEY: "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY}"
+      S3_SECRET_KEY: "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY}"
     # Tuned for testcase-blob workloads. Defaults assume 50 MB-class testcase
     # inputs/outputs and a single-volume node; raise -volume.max if you observe
     # frequent volume rotation in the master logs.
@@ -117,8 +124,8 @@ services:
               "name": "broccoli",
               "credentials": [
                 {
-                  "accessKey": "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY}",
-                  "secretKey": "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY}"
+                  "accessKey": "$$S3_ACCESS_KEY",
+                  "secretKey": "$$S3_SECRET_KEY"
                 }
               ],
               "actions": ["Admin", "Read", "Write", "List", "Tagging"]

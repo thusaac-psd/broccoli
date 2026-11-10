@@ -36,4 +36,24 @@ rm -f .env.worker
 if BROCCOLI_PLUGINS="no-such-plugin" run worker; then
   fail "an unknown plugin in BROCCOLI_PLUGINS was accepted"
 fi
+
+# Operator passwords survive as themselves: single-quoted in env files (no
+# Compose interpolation, no ' #' comment) and percent-encoded inside URLs.
+. ./lib/env.sh
+mkdir quoting && cp -r install.sh lib docker-compose.*.template quoting/ && cd quoting
+POSTGRES_PASSWORD='p@ss #1/$x?' REDIS_PASSWORD='r%d' BROCCOLI_ADMIN_PASSWORD='Adm$n #1' \
+  BROCCOLI_INFRA_HOST=10.0.0.10 run infra || fail "infra dry run with punctuated passwords"
+[ "$(env_get .env.infra POSTGRES_PASSWORD)" = 'p@ss #1/$x?' ] || fail "POSTGRES_PASSWORD not kept verbatim"
+[ "$(env_get server-secrets.env BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD)" = 'Adm$n #1' ] || fail "admin password not kept verbatim"
+[ "$(env_get connection.env BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2F%24x%3F@10.0.0.10:5432/broccoli' ] \
+  || fail "database URL password not percent-encoded"
+[ "$(env_get connection.env BROCCOLI__MQ__URL)" = 'redis://:r%25d@10.0.0.10:6379' ] || fail "redis URL password not percent-encoded"
+cd ..
+
+# A value no env-file reader agrees on is refused, and no env file is left.
+mkdir refused && cp -r install.sh lib docker-compose.*.template refused/ && cd refused
+if BROCCOLI_ADMIN_PASSWORD="it's" run infra; then fail "a single quote in a value was accepted"; fi
+[ ! -e .env.infra ] && [ ! -e .env.infra.tmp ] || fail "a refused value left a partial .env.infra"
+if BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY='a"b' run infra; then fail "a quote in an S3 key was accepted"; fi
+cd ..
 echo PASS

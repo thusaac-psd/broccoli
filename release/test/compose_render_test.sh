@@ -74,6 +74,12 @@ export LAN_HOST=contest.lan BROCCOLI_TLS_CERT=/tmp/server.crt BROCCOLI_TLS_KEY=/
 render "airgap server" --env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server" \
   -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template \
   -f docker-compose.gateway-airgap.yaml.template
+# The quoted env-file value reaches the container as itself, ' #1' included.
+admin_pass="$(docker compose --env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server" \
+  -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template \
+  -f docker-compose.gateway-airgap.yaml.template config --format json 2>/dev/null \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["server"]["environment"]["BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD"])')"
+[ "$admin_pass" = 'Admin pass #1' ] || fail "admin password rendered as '$admin_pass'"
 unset LAN_HOST BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY
 
 printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=a\nBROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s\n' \

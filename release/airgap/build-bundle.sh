@@ -67,7 +67,7 @@ chmod 600 "$CLS/cluster-secrets.env"
 # 2. Target-side scripts + Caddyfile + trust helpers + installer libs
 cp "$here/load-bundle.sh" "$here/install.sh" "$here/setup.sh" "$B/"
 cp "$here"/lib/*.sh "$B/lib/"
-cp "$repo/release/lib/plugins.sh" "$B/lib/plugins.sh"
+cp "$repo"/release/lib/*.sh "$B/lib/"
 cp "$repo/release/enable-plugin.sh" "$B/enable-plugin.sh"
 cp "$here/caddy/Caddyfile.airgap" "$B/caddy/Caddyfile.airgap"
 cp "$here"/ca/issue-leaf.sh "$B/ca/issue-leaf.sh"
