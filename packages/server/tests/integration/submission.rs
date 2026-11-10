@@ -2629,6 +2629,163 @@ mod backpressure {
     }
 }
 
+mod rejudge_lifecycle {
+    use super::*;
+    use chrono::Utc;
+    use common::{SubmissionStatus, Verdict};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+    use server::entity::{submission, submission_judgement};
+
+    /// A judged standalone submission at `judge_epoch = 11` with one finalized
+    /// current judgement, i.e. the normal state before an admin rejudges.
+    async fn seed_judged(app: &TestApp, token: &str, problem_id: i32, retry_count: i32) -> i32 {
+        let user_id = app.get_with_token(routes::ME, token).await.id();
+        let now = Utc::now();
+        let sub = submission::ActiveModel {
+            files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
+            contest_id: Set(None),
+            contest_type: Set("standard".into()),
+            status: Set(SubmissionStatus::Judged),
+            verdict: Set(Some(Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(11),
+            retry_count: Set(retry_count),
+            created_at: Set(now),
+            judged_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert submission");
+        submission_judgement::ActiveModel {
+            submission_id: Set(sub.id),
+            version: Set(11),
+            is_current: Set(true),
+            is_finalized: Set(true),
+            status: Set(SubmissionStatus::Judged),
+            verdict: Set(Some(Verdict::Accepted)),
+            score: Set(Some(100.0)),
+            judge_epoch: Set(11),
+            retry_count: Set(retry_count),
+            created_at: Set(now),
+            finalized_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert judgement");
+        sub.id
+    }
+
+    /// Every judgement of submission `sid`, oldest version first.
+    async fn judgements(app: &TestApp, sid: i32) -> Vec<submission_judgement::Model> {
+        submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sid))
+            .order_by_asc(submission_judgement::Column::Version)
+            .all(&app.db)
+            .await
+            .expect("db")
+    }
+
+    /// Every judgement of a submission gets its own `judge_epoch`, even when a deferred
+    /// rejudge is followed by an immediate one, and applying a judgement never moves the
+    /// submission's epoch backwards. The epoch fences late worker results and keys the
+    /// `after_judging` hook dedupe, so two judgements must never share one.
+    #[tokio::test]
+    async fn rejudge_epochs_are_unique() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 1).await;
+
+        let deferred = app
+            .post_with_token(
+                &routes::submission_rejudge(sid),
+                &json!({"apply_immediately": false}),
+                &token,
+            )
+            .await;
+        assert!(deferred.status < 300, "deferred rejudge: {}", deferred.text);
+        let immediate = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(
+            immediate.status < 300,
+            "immediate rejudge: {}",
+            immediate.text
+        );
+
+        let rows = judgements(&app, sid).await;
+        let epochs: Vec<i32> = rows.iter().map(|j| j.judge_epoch).collect();
+        let mut dedup = epochs.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(
+            dedup.len(),
+            epochs.len(),
+            "duplicate judge_epoch across judgements: {epochs:?}"
+        );
+
+        // Applying the (finalized) deferred judgement must not move the
+        // submission's epoch backwards, and the next rejudge must still get an
+        // epoch no other judgement holds.
+        let before = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission")
+            .judge_epoch;
+        let deferred_id = rows[1].id;
+        assert!(!rows[1].is_current, "control: v2 is the deferred judgement");
+        let mut finalize: submission_judgement::ActiveModel = rows[1].clone().into();
+        finalize.is_finalized = Set(true);
+        finalize.status = Set(SubmissionStatus::Judged);
+        finalize.verdict = Set(Some(Verdict::WrongAnswer));
+        finalize.finalized_at = Set(Some(Utc::now()));
+        finalize.update(&app.db).await.expect("finalize deferred");
+        let applied = app
+            .post_with_token(
+                &routes::submission_judgement_apply(sid, deferred_id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(applied.status, 200, "apply: {}", applied.text);
+        let after = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission");
+        assert!(
+            after.judge_epoch > before,
+            "apply moved judge_epoch from {before} to {}",
+            after.judge_epoch
+        );
+        let again = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(again.status < 300, "rejudge after apply: {}", again.text);
+        let epochs: Vec<i32> = judgements(&app, sid)
+            .await
+            .iter()
+            .map(|j| j.judge_epoch)
+            .collect();
+        let mut dedup = epochs.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(
+            dedup.len(),
+            epochs.len(),
+            "duplicate judge_epoch after apply + rejudge: {epochs:?}"
+        );
+    }
+}
+
 mod bulk_rejudge_limits {
     use super::*;
 

@@ -58,7 +58,6 @@ pub use rejudge::*;
 // Re-exported for the DLQ retry path, which is an immediate rejudge and must
 // prepare the judgement lineage through the same primitive as the admin
 // rejudge endpoints (see `crate::handlers::dlq`).
-pub(crate) use dispatch::open_rejudge_judgement;
 
 use dispatch::{dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks};
 use filter::{apply_filter_to_judgement_response, apply_filter_to_list, apply_filter_to_response};

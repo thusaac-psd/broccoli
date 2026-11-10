@@ -44,8 +44,19 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub test_case_results: HasMany<super::test_case_result::Entity>,
 
+    /// Fencing token of the current judgement's dispatch. A worker result or
+    /// a dispatch failure carrying any other epoch is ignored.
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
+    /// Highest epoch ever handed out for this submission, to itself or to
+    /// any of its judgements. This is the per-submission epoch allocator:
+    /// new epochs come only from
+    /// `services::judgement_lifecycle::AllocateJudgeEpoch`, which takes
+    /// `GREATEST(max_judge_epoch, judge_epoch) + 1`, so every judgement gets
+    /// a unique epoch even when a deferred rejudge runs beside the current
+    /// one and `judge_epoch` itself does not move.
+    #[sea_orm(default_value = 0)]
+    pub max_judge_epoch: i32,
 
     /// When set by an admin, every operation produced for this submission is
     /// pinned to the named worker via the worker's private queue.
