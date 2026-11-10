@@ -57,12 +57,43 @@ san_entry() {
   if is_ip "$1"; then printf 'IP:%s' "$1"; else printf 'DNS:%s' "$1"; fi
 }
 
-# leaf_sans CERT: the leaf's SANs, one per line, in san_entry's spelling.
+# san_key ENTRY: ENTRY in one spelling per name, for comparing. OpenSSL
+# prints an IPv6 SAN expanded and upper-case (FD00:0:0:0:0:0:0:1) where a
+# --host is usually compressed (fd00::1), so both become eight lower-case
+# groups without leading zeros.
+san_key() {
+  local v="${1#IP:}" head tail g out="" groups=() front=() back=() i
+  case "$1" in
+    IP:*:*) ;;
+    *) printf '%s\n' "$1" | tr 'A-Z' 'a-z'; return ;;
+  esac
+  v="$(printf '%s' "$v" | tr 'A-F' 'a-f')"
+  case "$v" in
+    *::*)
+      head="${v%%::*}" tail="${v#*::}"
+      [ -z "$head" ] || IFS=: read -r -a front <<< "$head"
+      [ -z "$tail" ] || IFS=: read -r -a back <<< "$tail"
+      groups=("${front[@]}")
+      for ((i = ${#front[@]} + ${#back[@]}; i < 8; i++)); do groups+=(0); done
+      groups+=("${back[@]}")
+      ;;
+    *) IFS=: read -r -a groups <<< "$v" ;;
+  esac
+  for g in "${groups[@]}"; do
+    case "$g" in "" | *[!0-9a-f]*) g=x ;; *) g="$(printf '%x' "0x$g")" ;; esac
+    out="$out${out:+:}$g"
+  done
+  printf 'ip:%s\n' "$out"
+}
+
+# leaf_sans CERT: the leaf's SANs, one per line, in san_key's spelling.
 # Read from -text, which every OpenSSL and LibreSSL prints alike.
 leaf_sans() {
+  local san
   openssl x509 -in "$1" -noout -text \
     | awk '/X509v3 Subject Alternative Name/ { getline; print; exit }' \
-    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/^IP Address:/IP:/'
+    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/^IP Address:/IP:/' \
+    | while IFS= read -r san; do san_key "$san"; done
 }
 
 leaf_is_current() {
@@ -72,7 +103,7 @@ leaf_is_current() {
   openssl x509 -in "$OUT/server.crt" -noout -checkend 86400 >/dev/null 2>&1 || return 1
   sans="$(leaf_sans "$OUT/server.crt")"
   for h in "${HOSTS[@]}"; do
-    printf '%s\n' "$sans" | grep -qixF "$(san_entry "$h")" || return 1
+    printf '%s\n' "$sans" | grep -qxF "$(san_key "$(san_entry "$h")")" || return 1
   done
 }
 

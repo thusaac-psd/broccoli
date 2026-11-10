@@ -78,4 +78,15 @@ mkdir -p "$OTHER/pub"; cp "$CA/root.crt" "$OTHER/pub/root.crt"
 bash "$issue" --check --ca-dir "$OTHER/pub" --host judge.contest.lan --out "$LEAF" \
   || { echo "FAIL: --check needs root.key"; exit 1; }
 
+# An IPv6 host is kept however it is spelled: OpenSSL prints the SAN expanded
+# (FD00:0:0:0:0:0:0:1), so a literal comparison reissued it on every install
+# and failed once root.key was burned.
+V6="$(mktemp -d)"; trap 'rm -rf "$CA" "$LEAF" "$LONG" "$V6"' EXIT
+bash "$issue" --ca-dir "$CA" --host fd00::1 --host judge.contest.lan --out "$V6" --days 30 >/dev/null
+for h in fd00::1 FD00:0:0:0:0:0:0:1 fd00:0::0001 JUDGE.contest.lan; do
+  bash "$issue" --check --ca-dir "$CA" --host "$h" --out "$V6" || { echo "FAIL: --check rejected IPv6/DNS host spelled $h"; exit 1; }
+done
+if bash "$issue" --check --ca-dir "$CA" --host fd00::2 --out "$V6"; then
+  echo "FAIL: --check kept a leaf for another IPv6 host"; exit 1; fi
+
 echo "PASS: issue-leaf chains to CA with DNS+IP SANs and serverAuth"
