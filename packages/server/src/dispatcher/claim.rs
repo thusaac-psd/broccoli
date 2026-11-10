@@ -148,15 +148,8 @@ pub async fn claim_once(
     };
     let budget = claim_budget(batch_size, max_in_flight, in_flight);
     // The contest types this replica can judge right now; see
-    // `select_queued_rows`.
-    let contest_types: Vec<String> = state
-        .registries
-        .contest_type_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    // `dispatcher::prefer_local_handler`.
+    let contest_types = super::local_contest_types(state).await;
     let submission_models = if budget > 0 {
         claim_queued_submissions(state, server_id, budget, &contest_types).await?
     } else {
@@ -630,53 +623,26 @@ async fn select_queued_rows(
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             queued_rows_sql(table),
-            [
-                i64::from(limit).into(),
-                contest_types.to_vec().into(),
-                (UNHANDLED_CLAIM_GRACE_SECS as f64).into(),
-            ],
+            [i64::from(limit).into(), contest_types.to_vec().into()],
         ))
         .await?;
 
     rows.into_iter().map(row_to_queued).collect()
 }
 
-/// The claim SELECT for `table`: `$1` batch limit, `$2` handled contest
-/// types, `$3` [`UNHANDLED_CLAIM_GRACE_SECS`].
+/// The claim SELECT for `table`: `$1` batch limit, `$2` the contest types
+/// this replica handles (see [`super::prefer_local_handler`]).
 fn queued_rows_sql(table: &str) -> String {
     format!(
         r#"SELECT id
            FROM {table}
            WHERE status = 'Queued'
-             AND ({handled} OR created_at < NOW() - make_interval(secs => $3))
+             AND {handled}
            ORDER BY created_at
            LIMIT $1
            FOR UPDATE SKIP LOCKED"#,
-        handled = handled_predicate(table),
+        handled = super::prefer_local_handler_for(table, "$2"),
     )
-}
-
-/// How long a `Queued` row whose contest type no handler on this replica
-/// serves is left for a replica that has one. Replicas do not always agree on
-/// which plugins are loaded (one is still converging onto an enable, or
-/// failed to load a plugin its peers run fine), and judging the row here
-/// would only fail it with `NO_HANDLER_REGISTERED`. Past the grace any
-/// replica claims it, so work no replica can judge still fails visibly
-/// instead of queueing forever. Measured against the row's `created_at`, so
-/// a server clock skewed against the database only shifts this fallback.
-const UNHANDLED_CLAIM_GRACE_SECS: u64 = 60;
-
-/// SQL predicate: the row's contest type is in `$2`, the contest types this
-/// replica has a handler for. A judgement row carries no contest type of
-/// its own; it takes its parent submission's.
-fn handled_predicate(table: &str) -> &'static str {
-    if table == "submission_judgement" {
-        "EXISTS (SELECT 1 FROM submission s \
-                 WHERE s.id = submission_judgement.submission_id \
-                   AND s.contest_type = ANY($2))"
-    } else {
-        "contest_type = ANY($2)"
-    }
 }
 
 fn row_to_queued(row: QueryResult) -> Result<QueuedRow, sea_orm::DbErr> {

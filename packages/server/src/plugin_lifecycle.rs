@@ -64,7 +64,7 @@ pub struct PluginLifecycle {
     /// The last report written to this replica's `plugin_replica` row, and
     /// when, so an unchanged report is only re-touched every
     /// [`plugin_fleet::TOUCH_INTERVAL`].
-    reported: std::sync::Mutex<Option<(ReplicaReport, Instant)>>,
+    reported: std::sync::Mutex<Option<(ReplicaReport, Vec<String>, Instant)>>,
     /// Plugins still serving a previous version because the latest failed to
     /// load here, with that error (for readiness).
     outdated: RwLock<HashMap<String, String>>,
@@ -339,18 +339,21 @@ fn build_report(
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
     let now = Instant::now();
     let report = build_report(state, applied, now);
+    let contest_types = crate::dispatcher::local_contest_types(state).await;
     let due = match state.plugin_lifecycle.reported.lock() {
-        Ok(last) => !matches!(&*last, Some((r, at))
-            if same_report(r, &report) && now.duration_since(*at) < plugin_fleet::TOUCH_INTERVAL),
+        Ok(last) => !matches!(&*last, Some((r, types, at))
+            if same_report(r, &report)
+                && *types == contest_types
+                && now.duration_since(*at) < plugin_fleet::TOUCH_INTERVAL),
         Err(_) => true,
     };
     if !due {
         return;
     }
-    match plugin_fleet::report(&state.db, &state.config.server.id, &report).await {
+    match plugin_fleet::report(&state.db, &state.config.server.id, &report, &contest_types).await {
         Ok(()) => {
             if let Ok(mut last) = state.plugin_lifecycle.reported.lock() {
-                *last = Some((report, now));
+                *last = Some((report, contest_types, now));
             }
         }
         Err(e) => tracing::warn!(error = %e, "Failed to write this replica's plugin report"),

@@ -277,21 +277,25 @@ async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_
                 submission_admission: false,
             },
         );
-    let row = submission::ActiveModel {
+    // A publishes what it can judge (its report row).
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let queued = |contest_type: &'static str| submission::ActiveModel {
         files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
         language: Set("cpp".into()),
         user_id: Set(user_id),
         problem_id: Set(problem_id),
         contest_id: Set(None),
-        contest_type: Set("fleet-only".into()),
+        contest_type: Set(contest_type.into()),
         status: Set(SubmissionStatus::Queued),
         judge_epoch: Set(0),
-        created_at: Set(chrono::Utc::now()),
+        // Long queued (a backlog, or a rejudge keeping its original
+        // created_at): no age makes B take work A can judge.
+        created_at: Set(chrono::Utc::now() - chrono::Duration::hours(2)),
         ..Default::default()
-    }
-    .insert(&a.db)
-    .await
-    .unwrap();
+    };
+    let row = queued("fleet-only").insert(&a.db).await.unwrap();
+    // A type no live replica can judge: someone must take it and fail it.
+    let orphan = queued("nobody-has-this").insert(&a.db).await.unwrap();
 
     server::dispatcher::claim::claim_once(&b.state, "replica-b", 32, 0)
         .await
@@ -303,6 +307,16 @@ async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_
         .unwrap();
     assert_eq!(after_b.status, SubmissionStatus::Queued);
     assert_eq!(after_b.owner_server_id, None, "B must not claim it");
+    let orphan = submission::Entity::find_by_id(orphan.id)
+        .one(&a.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        orphan.owner_server_id.as_deref(),
+        Some("replica-b"),
+        "work no replica can judge is still taken (and failed visibly)"
+    );
 
     server::dispatcher::claim::claim_once(&a.state, "replica-a", 32, 0)
         .await

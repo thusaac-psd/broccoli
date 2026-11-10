@@ -13,6 +13,10 @@ pub struct Model {
     /// `{ plugin_id: ReplicaPluginState }`, as last reported.
     #[sea_orm(column_type = "JsonBinary")]
     pub plugins: Json,
+    /// The contest types this replica can judge right now (a JSON array of
+    /// strings), so a replica without a handler can leave work to one with.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub contest_types: Option<Json>,
     /// Database clock: when `plugins` last changed.
     pub state_at: DateTimeUtc,
     /// Database clock: last write or periodic touch by the replica.

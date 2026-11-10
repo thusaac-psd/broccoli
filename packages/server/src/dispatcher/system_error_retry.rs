@@ -28,7 +28,7 @@
 use std::time::Duration;
 
 use common::{SubmissionStatus, Verdict};
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::EntityTrait;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
@@ -77,7 +77,8 @@ async fn scan_once(
 ) -> anyhow::Result<()> {
     let max = std::cmp::min(max_system_error_retries, i32::MAX as u32) as i32;
 
-    let candidates = find_retryable_system_errors(&state.db, max, SCAN_BATCH_SIZE).await?;
+    let local = super::local_contest_types(state).await;
+    let candidates = find_retryable_system_errors(&state.db, max, SCAN_BATCH_SIZE, &local).await?;
 
     if candidates.is_empty() {
         return Ok(());
@@ -175,26 +176,40 @@ async fn scan_once(
 /// A contestant `CompileError` lands as `status == CompilationError` (never
 /// `SystemError`), so it is never selected; nor are own-code verdicts
 /// (`status == Judged` with WA/TLE/MLE/RE), non-current, or unfinalized rows.
+///
+/// Rejudging on a replica without a handler for the contest type would only
+/// fail again and burn the retry budget, so a judgement is left to a replica
+/// that has one (see `dispatcher::prefer_local_handler`).
 async fn find_retryable_system_errors(
     db: &sea_orm::DatabaseConnection,
     max_retry_count: i32,
     batch_size: u64,
+    local_contest_types: &[String],
 ) -> Result<Vec<submission_judgement::Model>, sea_orm::DbErr> {
+    let sql = format!(
+        r#"SELECT * FROM submission_judgement
+           WHERE is_current = TRUE
+             AND is_finalized = TRUE
+             AND ((status = $1 AND verdict = $2) OR status = $3)
+             AND retry_count < $4
+             AND {handled}
+           ORDER BY id
+           LIMIT $5"#,
+        handled = super::prefer_local_handler_for("submission_judgement", "$6"),
+    );
     submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .filter(submission_judgement::Column::IsFinalized.eq(true))
-        .filter(
-            Condition::any()
-                .add(
-                    Condition::all()
-                        .add(submission_judgement::Column::Status.eq(SubmissionStatus::Judged))
-                        .add(submission_judgement::Column::Verdict.eq(Verdict::SystemError)),
-                )
-                .add(submission_judgement::Column::Status.eq(SubmissionStatus::SystemError)),
-        )
-        .filter(submission_judgement::Column::RetryCount.lt(max_retry_count))
-        .order_by_asc(submission_judgement::Column::Id)
-        .limit(batch_size)
+        .from_raw_sql(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            sql,
+            [
+                SubmissionStatus::Judged.to_string().into(),
+                Verdict::SystemError.to_string().into(),
+                SubmissionStatus::SystemError.to_string().into(),
+                max_retry_count.into(),
+                (batch_size as i64).into(),
+                local_contest_types.to_vec().into(),
+            ],
+        ))
         .all(db)
         .await
 }
@@ -397,7 +412,7 @@ mod tests {
         )
         .await;
 
-        let found = find_retryable_system_errors(&db, 5, 64)
+        let found = find_retryable_system_errors(&db, 5, 64, &[])
             .await
             .expect("query candidates");
         let ids: Vec<i32> = found.iter().map(|j| j.id).collect();

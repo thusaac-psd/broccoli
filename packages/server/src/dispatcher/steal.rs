@@ -68,6 +68,10 @@ pub enum Reclaim {
 
 #[cfg(test)]
 const STALE_60: Reclaim = Reclaim::Stale { lease_ttl_secs: 60 };
+/// A test claimer with no local handlers: it takes only work no live replica
+/// can judge (in these tests no replica reports, so that is all of it).
+#[cfg(test)]
+const NO_TYPES: &[String] = &[];
 
 /// Suffix of the owner sentinel [`release_owned_leases`] stamps. Cannot
 /// collide with a real server id.
@@ -206,6 +210,9 @@ async fn scan_once(
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<()> {
+    // Leave work to a replica that can judge it (see
+    // `dispatcher::prefer_local_handler`).
+    let local = super::local_contest_types(&state).await;
     let submission_slots = reserve_redispatch_slots(&state, batch_size, "submission");
     if !submission_slots.is_empty() {
         let submissions = claim_retrying_deadlocks(|| {
@@ -213,6 +220,7 @@ async fn scan_once(
                 &state,
                 server_id,
                 reclaim,
+                &local,
                 submission_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -234,6 +242,7 @@ async fn scan_once(
                 &state.db,
                 server_id,
                 reclaim,
+                &local,
                 deferred_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -268,6 +277,7 @@ async fn scan_once(
                 &state,
                 server_id,
                 reclaim,
+                &local,
                 code_run_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -425,11 +435,12 @@ async fn claim_submissions(
     state: &AppState,
     server_id: &str,
     reclaim: Reclaim,
+    local: &[String],
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "submission", reclaim, batch_size).await?;
+    let rows = claim_rows(&txn, "submission", reclaim, local, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -660,11 +671,12 @@ async fn claim_deferred_judgements(
     db: &DatabaseConnection,
     server_id: &str,
     reclaim: Reclaim,
+    local: &[String],
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<(submission::Model, i32, bool)>> {
     let txn = db.begin().await?;
-    let rows = claim_deferred_judgement_rows(&txn, reclaim, batch_size).await?;
+    let rows = claim_deferred_judgement_rows(&txn, reclaim, local, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -903,11 +915,12 @@ async fn claim_code_runs(
     state: &AppState,
     server_id: &str,
     reclaim: Reclaim,
+    local: &[String],
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<code_run::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "code_run", reclaim, batch_size).await?;
+    let rows = claim_rows(&txn, "code_run", reclaim, local, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -992,6 +1005,7 @@ async fn claim_rows(
     txn: &DatabaseTransaction,
     table: &str,
     reclaim: Reclaim,
+    local: &[String],
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
     let (reclaimable, bound) = reclaim.predicate();
@@ -1000,15 +1014,17 @@ async fn claim_rows(
            FROM {table}
            WHERE status IN ('Pending', 'Compiling', 'Running')
              AND {reclaimable}
+             AND {handled}
            ORDER BY created_at
            LIMIT $2
-           FOR UPDATE SKIP LOCKED"#
+           FOR UPDATE SKIP LOCKED"#,
+        handled = super::prefer_local_handler_for(table, "$3"),
     );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [bound, i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into(), local.to_vec().into()],
         ))
         .await?;
 
@@ -1018,6 +1034,7 @@ async fn claim_rows(
 async fn claim_deferred_judgement_rows(
     txn: &DatabaseTransaction,
     reclaim: Reclaim,
+    local: &[String],
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
     let (reclaimable, bound) = reclaim.predicate();
@@ -1028,15 +1045,17 @@ async fn claim_deferred_judgement_rows(
              AND is_finalized = FALSE
              AND status IN ('Pending', 'Compiling', 'Running')
              AND {reclaimable}
+             AND {handled}
            ORDER BY created_at
            LIMIT $2
-           FOR UPDATE SKIP LOCKED"#
+           FOR UPDATE SKIP LOCKED"#,
+        handled = super::prefer_local_handler_for("submission_judgement", "$3"),
     );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [bound, i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into(), local.to_vec().into()],
         ))
         .await?;
 
@@ -1504,7 +1523,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1562,7 +1581,7 @@ mod deferred_steal_db_tests {
         .await
         .expect("seed stale test_case_result");
 
-        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1601,7 +1620,7 @@ mod deferred_steal_db_tests {
         // retry_count + 1 > max_dispatch_retries(5) => exhausted.
         seed_stale_deferred_judgement(&db, sub_id, 0, 5).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1637,7 +1656,7 @@ mod deferred_steal_db_tests {
 
         // Before recovery: the steal cannot reclaim it (own, fresh lease) -
         // this is the restart-orphan hang.
-        let pre = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
+        let pre = claim_deferred_judgements(&db, "server-1", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("pre-recovery claim");
         assert_eq!(
@@ -1654,7 +1673,7 @@ mod deferred_steal_db_tests {
         assert_eq!(subs, 1, "the parent submission lease is released");
 
         // After recovery: the steal reclaims and re-dispatches it.
-        let post = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
+        let post = claim_deferred_judgements(&db, "server-1", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("post-recovery claim");
         assert_eq!(post.len(), 1, "released judgement is now stealable");
@@ -1762,7 +1781,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1819,7 +1838,7 @@ mod deferred_steal_db_tests {
         seed_stale_deferred_judgement(&db, peer, 0, 0).await;
         set_submission_owner(&db, peer, "server-2").await;
 
-        let before = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
+        let before = claim_deferred_judgements(&db, "server-3", Reclaim::Released, NO_TYPES, 10, 5)
             .await
             .expect("claim before release");
         assert!(before.is_empty(), "nothing has been released yet");
@@ -1827,9 +1846,10 @@ mod deferred_steal_db_tests {
         release_owned_leases(&db, "server-1")
             .await
             .expect("release server-1's work");
-        let claimed = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
-            .await
-            .expect("claim released work");
+        let claimed =
+            claim_deferred_judgements(&db, "server-3", Reclaim::Released, NO_TYPES, 10, 5)
+                .await
+                .expect("claim released work");
         let ids: Vec<i32> = claimed.iter().map(|(sub, _, _)| sub.id).collect();
         assert_eq!(ids, vec![released], "only the released submission is taken");
         assert_eq!(
@@ -1875,12 +1895,40 @@ mod deferred_steal_db_tests {
         let age: f64 = row.try_get("", "age").unwrap();
         assert!(age.abs() < 5.0, "heartbeat is fresh by the DB clock: {age}");
 
-        let claimed = claim_deferred_judgements(&db, "server-2", STALE_60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "server-2", STALE_60, NO_TYPES, 10, 5)
             .await
             .expect("claim");
         assert!(
             claimed.is_empty(),
             "a freshly refreshed lease is not stolen"
         );
+    }
+
+    /// A stale lease is reclaimed by a replica that can judge the work while
+    /// one is live: one without the handler would only fail it and burn its
+    /// retry budget.
+    #[tokio::test]
+    async fn steal_leaves_work_to_a_live_replica_that_can_judge_it() {
+        let (_pg, db) = start_pg().await;
+        let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
+        let contest_type = reload_submission(&db, sub_id).await.contest_type;
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO plugin_replica (server_id, plugins, contest_types, state_at, heartbeat_at) \
+             VALUES ('peer', '{}', jsonb_build_array($1::text), NOW(), NOW())",
+            [contest_type.clone().into()],
+        ))
+        .await
+        .unwrap();
+
+        let without = claim_deferred_judgements(&db, "server-3", STALE_60, NO_TYPES, 10, 5)
+            .await
+            .expect("claim without the handler");
+        assert!(without.is_empty(), "left to the replica that can judge it");
+        let with = claim_deferred_judgements(&db, "server-3", STALE_60, &[contest_type], 10, 5)
+            .await
+            .expect("claim with the handler");
+        assert_eq!(with.len(), 1);
     }
 }
