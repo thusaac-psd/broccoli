@@ -134,7 +134,8 @@ Patch:
 - `get_redis_connection` makes at most 3 check-out attempts (250 ms, then
   500 ms backoff, each attempt bounded by the pool's 2 s connection timeout),
   logs every failure, and returns the error. The pointless pool rebuild is
-  gone.
+  gone, and with it the `RwLock` around the pool and the stored broker URL
+  that only the rebuild used.
 - The pool uses `TimeoutRedisConnectionManager`, identical to
   `bb8_redis::RedisConnectionManager` except that connections carry a 2 s
   connect timeout and a 5 s response timeout, and the check-out `PING` is

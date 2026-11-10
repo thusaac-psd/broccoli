@@ -1,5 +1,3 @@
-use std::sync::RwLock;
-
 use redis::AsyncCommands;
 
 use crate::{
@@ -15,8 +13,10 @@ pub(crate) type RedisPool = bb8_redis::bb8::Pool<TimeoutRedisConnectionManager>;
 #[derive(Default)]
 /// A message broker implementation for Redis.
 pub struct RedisBroker {
-    pub(crate) redis_pool: Option<RwLock<RedisPool>>,
-    pub(crate) broker_url: String,
+    // BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): upstream wrapped the pool
+    // in a `RwLock` and kept the URL only so a failed check-out could rebuild
+    // the pool; patch 6 removed that rebuild, so both are gone.
+    pub(crate) redis_pool: Option<RedisPool>,
     pub(crate) config: Option<BrokerConfig>,
 }
 
@@ -46,8 +46,7 @@ impl Broker for RedisBroker {
             .await
             .map_err(|e| BroccoliError::Broker(format!("Failed to create redis pool: {e:?}")))?;
 
-        self.redis_pool = Some(RwLock::new(redis_pool));
-        self.broker_url = broker_url.to_string();
+        self.redis_pool = Some(redis_pool);
         Ok(())
     }
 

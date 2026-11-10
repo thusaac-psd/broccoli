@@ -19,7 +19,6 @@ impl RedisBroker {
     pub const fn new() -> Self {
         Self {
             redis_pool: None,
-            broker_url: String::new(),
             config: None,
         }
     }
@@ -32,19 +31,13 @@ impl RedisBroker {
     pub const fn new_with_config(config: BrokerConfig) -> Self {
         Self {
             redis_pool: None,
-            broker_url: String::new(),
             config: Some(config),
         }
     }
 
     pub(crate) fn ensure_pool(&self) -> Result<RedisPool, BroccoliError> {
         match &self.redis_pool {
-            Some(pool) => Ok(pool
-                .try_read()
-                .map_err(|_| {
-                    BroccoliError::Broker("Failed to acquire read lock on redis pool".to_string())
-                })?
-                .clone()),
+            Some(pool) => Ok(pool.clone()),
             None => Err(BroccoliError::Broker(
                 "Redis pool not initialized".to_string(),
             )),
