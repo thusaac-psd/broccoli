@@ -124,12 +124,12 @@ pub async fn run(
 /// (which has already flipped the row to `Pending`, set `owner_server_id`
 /// to *us*, and bumped `retry_count`) but before the spawned task
 /// actually publishes the dispatch, the row is now stranded in `Pending`
-/// owned by a dead server. The **only** safety net is the
-/// dispatcher/steal scanner (UP#17): once `lease_heartbeat_at` is older
-/// than `lease_ttl_secs`, a peer server's steal scanner reclaims the row
-/// and re-dispatches it. So the worst-case end-to-end recovery latency
-/// is `lease_ttl_secs`, not "instant" - this is the cost of decoupling
-/// claim from dispatch. Don't introduce a bounded join-set or `await`
+/// owned by a dead server. It is recovered when this `server_id` boots
+/// again (boot releases its own in-flight rows for re-dispatch; see
+/// `steal::release_owned_leases`), or, with lease/steal on, by a peer's
+/// steal scanner once `lease_heartbeat_at` is older than `lease_ttl_secs`.
+/// So recovery is not "instant" - this is the cost of decoupling claim
+/// from dispatch. Don't introduce a bounded join-set or `await`
 /// here without re-thinking that contract: an inline `await` would make
 /// the claim fiber the bottleneck for dispatch throughput.
 ///
@@ -626,20 +626,10 @@ async fn select_queued_rows(
     // into a silent "select 0 rows forever" no-op.
     debug_assert!(batch_size > 0, "batch_size must be positive at this point");
     let limit = std::cmp::max(batch_size, 1);
-    let sql = format!(
-        r#"SELECT id
-           FROM {table}
-           WHERE status = 'Queued'
-             AND ({handled} OR created_at < NOW() - make_interval(secs => $3))
-           ORDER BY created_at
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#,
-        handled = handled_predicate(table),
-    );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            sql,
+            queued_rows_sql(table),
             [
                 i64::from(limit).into(),
                 contest_types.to_vec().into(),
@@ -649,6 +639,21 @@ async fn select_queued_rows(
         .await?;
 
     rows.into_iter().map(row_to_queued).collect()
+}
+
+/// The claim SELECT for `table`: `$1` batch limit, `$2` handled contest
+/// types, `$3` [`UNHANDLED_CLAIM_GRACE_SECS`].
+fn queued_rows_sql(table: &str) -> String {
+    format!(
+        r#"SELECT id
+           FROM {table}
+           WHERE status = 'Queued'
+             AND ({handled} OR created_at < NOW() - make_interval(secs => $3))
+           ORDER BY created_at
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED"#,
+        handled = handled_predicate(table),
+    )
 }
 
 /// How long a `Queued` row whose contest type no handler on this replica
@@ -687,24 +692,18 @@ mod tests {
 
     #[test]
     fn select_queued_rows_sql_includes_for_update_skip_locked() {
-        // Smoke test: assert that the SELECT statement we will emit has
-        // the critical `FOR UPDATE SKIP LOCKED` clause and a bounded
-        // LIMIT. A regression here would be silent (the fiber would
-        // still appear to work but lose concurrency safety vs. peer
-        // fibers and the dispatcher/steal scanner), so guard it.
-        let sql = format!(
-            r#"SELECT id
-           FROM {table}
-           WHERE status = 'Queued'
-           ORDER BY created_at
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#,
-            table = "submission"
-        );
-        assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(sql.contains("LIMIT $1"));
-        assert!(sql.contains("status = 'Queued'"));
-        assert!(sql.contains("ORDER BY created_at"));
+        // The claim SELECT must lock with `FOR UPDATE SKIP LOCKED` and stay
+        // bounded. A regression here would be silent (the fiber would still
+        // appear to work but lose concurrency safety vs. peer fibers and the
+        // dispatcher/steal scanner), so guard the SQL actually emitted.
+        for table in ["submission", "code_run", "submission_judgement"] {
+            let sql = queued_rows_sql(table);
+            assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "{sql}");
+            assert!(sql.contains("LIMIT $1"), "{sql}");
+            assert!(sql.contains("status = 'Queued'"), "{sql}");
+            assert!(sql.contains("ORDER BY created_at"), "{sql}");
+            assert!(sql.contains("ANY($2)"), "{sql}");
+        }
     }
 
     #[test]
