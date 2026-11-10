@@ -158,7 +158,7 @@ case "$ROLE" in
     # generated .env.worker), so a worker on the server host gets its own
     # network and is never an orphan of the server stack. A .env.worker from
     # before that keeps the old shared name, and with it its volumes.
-    worker_project="$(sed -n "s/^COMPOSE_PROJECT_NAME=['\"]\{0,1\}\([^'\"]*\).*/\1/p" "$worker_env" | tail -n 1)"
+    worker_project="$(env_get "$worker_env" COMPOSE_PROJECT_NAME)"
     ( cd "$BUNDLE/compose" && $COMPOSE -p "${worker_project:-compose}" --env-file .env.worker \
         -f docker-compose.worker.yaml.template up -d --pull never )
     echo "worker started against server infra (compose up --pull never)"
