@@ -87,6 +87,33 @@ printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE
 workergen_write "$T/ag/.env.worker" "$rel/.env.worker.example" "$T/ag/cluster-secrets.env" 10.0.0.10 worker-1
 render "airgap worker" --env-file "$T/ag/.env.worker" -f docker-compose.worker.yaml.template
 
+# Every BROCCOLI__<SECTION>__<KEY> an example env file documents, including
+# commented-out optional ones, must reach the container with its value. A key
+# the template does not pass is silently dropped, which is how pool sizing
+# from .env.server.example never reached a server.
+check_passthrough() {
+  local example="$1" template="$2" service="$3" envf="$T/passthrough.env"
+  sed -E 's/^#(BROCCOLI__[A-Z_]+__[A-Z_]+=)/\1/' "$rel/$example" > "$envf"
+  docker compose --env-file "$envf" -f "$template" config --format json 2>/dev/null \
+    | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"][sys.argv[2]]["environment"]
+bad = []
+for line in open(sys.argv[1]):
+    key, sep, value = line.strip().partition("=")
+    parts = key.split("__")
+    if not sep or len(parts) < 3 or parts[0] != "BROCCOLI":
+        continue
+    value = value.strip("\x27")
+    if str(env.get(key)) != value:
+        bad.append(f"{key}={value} (container gets {env.get(key)!r})")
+if bad:
+    sys.exit("dropped or changed: " + "; ".join(bad))
+' "$envf" "$service" || fail "$template drops settings documented in $example"
+}
+check_passthrough .env.server.example docker-compose.server.yaml.template server
+check_passthrough .env.worker.example docker-compose.worker.yaml.template worker
+
 for f in "$rel"/docker-compose.*.yaml.template; do
   case "$rendered" in
     *" $(basename "$f") "*) ;;

@@ -133,11 +133,8 @@ drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
 
 For 100 submissions × 50 testcases × 5 s on 7 machines × 4 slots ≈ 30 minutes.
 
-Servers default to local evaluator admission sizing. After worker heartbeats are
-visible and include `worker.max_concurrency`, operators can enable
-`BROCCOLI__SERVER__FLEET_AWARE_ADMISSION_ENABLED=true`; each server then polls
-live worker/server heartbeats and sizes its evaluator slots to roughly
-`sum(live worker max_concurrency) / live server replicas`.
+Each server sizes its evaluator admission locally, from
+`BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM` (see the plugin pool section below).
 
 **Deployment topology**
 
@@ -274,13 +271,15 @@ BROCCOLI__PLUGIN__POOL_MAX_INSTANCES=64
 BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM=64
 ```
 
-`release/.env.server.example` ships these as the multi-replica defaults.
+`docker-compose.server.yaml.template` passes both to every server, with these
+values as its defaults; set them in `.env.server` to change them. To size
+tokio's blocking pool by hand, set `BROCCOLI__SERVER__MAX_BLOCKING_THREADS`
+there too; when it is unset the server picks a value from the CPU count.
 
 **Diagnosing pool contention.** Both the deadlock case and the queueing case
 show up as climbing `plugin_instance_acquire_duration` for the bottlenecked
 plugin and flat `plugin_instance_acquire_failures` (callers wait rather than
-fail). When the fleet-aware admission semaphore saturates, the API returns
-`503 OVERLOADED`. The auto-bump removes the misconfigured-pool failure mode;
+fail). The auto-bump removes the misconfigured-pool failure mode;
 remaining contention is genuine capacity exhaustion and requires either more
 replicas or higher `pool_max_instances` (at the cost of WASM instance memory).
 
