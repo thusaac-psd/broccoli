@@ -67,6 +67,22 @@ curl -fsS http://127.0.0.1:${BROCCOLI_HTTP_BIND##*:}/healthz
 During the window, submissions should complete successfully and server logs
 should not show legacy `operation_results` warnings for new work.
 
+## Node IDs and heartbeats
+
+From this release every server and worker claims its ID in Redis at boot and
+keeps a heartbeat key alive, and a second live process with the same ID
+refuses to start (or stops within about 15 seconds). When the ID is unset,
+each node derives one for its host instead of `hostname -s` (servers) or
+`worker-1` (workers). Set `BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID`
+explicitly if anything outside Broccoli depends on the old values. An explicit
+but invalid ID now fails boot instead of being replaced.
+
+Finish upgrading every server node within an hour of the first one. With
+`DISPATCHER_LEASE_STEAL_ENABLED=true`, the reply-queue sweeper treats a server
+without a heartbeat as dead, and servers from earlier releases never write one.
+After the sweeper's one-hour grace it would delete a still-running old
+server's result queue.
+
 ## Contests without a contest type
 
 Every contest now needs a contest type. Contests created by earlier releases
