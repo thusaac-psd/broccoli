@@ -143,7 +143,6 @@ async fn cannot_unregister_after_contest_end() {
 /// exactly the rows the delete purged. Contest-scope config correctly 404s.
 /// Location: utils/contest.rs `find_contest_problem`.
 #[tokio::test]
-#[ignore = "BUG: contest-problem config can still be written after the contest is soft-deleted"]
 async fn deleted_contest_rejects_contest_problem_config_writes() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -178,4 +177,49 @@ async fn deleted_contest_rejects_contest_problem_config_writes() {
         "wrote config for a deleted contest: {}",
         res.text
     );
+}
+
+/// Companion to the test above: clarification lookups go through the same
+/// active-parent gate, so `toggle_reply_public` (which has no kernel contest
+/// gate of its own) stops working once the contest is soft-deleted.
+#[tokio::test]
+async fn deleted_contest_rejects_reply_visibility_toggle() {
+    let app = TestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ac_admin", "password123", "admin")
+        .await;
+    let contestant = app
+        .create_user_with_role("ac_p", "password123", "contestant")
+        .await;
+    let cid = app.create_contest(&admin, "C", true, false).await;
+    let q = app
+        .post_with_token(
+            &routes::contest_clarifications(cid),
+            &json!({"content": "Q?", "clarification_type": "question"}),
+            &contestant,
+        )
+        .await;
+    assert!(q.status < 300, "{}", q.text);
+    let clar_id = q.id();
+    let reply = app
+        .post_with_token(
+            &routes::contest_clarification_reply(cid, clar_id),
+            &json!({"content": "A.", "is_public": false}),
+            &admin,
+        )
+        .await;
+    assert_eq!(reply.status, 200, "{}", reply.text);
+    let reply_id = reply.body["replies"][0]["id"].as_i64().unwrap() as i32;
+
+    let del = app.delete_with_token(&routes::contest(cid), &admin).await;
+    assert!(del.status < 300, "delete contest: {}", del.text);
+
+    let res = app
+        .post_with_token(
+            &routes::contest_clarification_toggle(cid, clar_id, reply_id),
+            &json!({}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 404, "{}", res.text);
 }

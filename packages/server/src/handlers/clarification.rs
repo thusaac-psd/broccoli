@@ -27,13 +27,14 @@ use tracing::instrument;
 // display helper. Pinned by the frozen
 // `tests/integration/visibility_matrix.rs::contest_clarification_list` suite
 // and `tests/integration/clarification.rs::clarification_actions`.
-use crate::entity::{clarification, clarification_reply, user};
+use crate::entity::{clarification, clarification_reply, contest, user};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::clarification::*;
 use crate::state::AppState;
+use crate::utils::soft_delete::find_active_child;
 use crate::utils::text::sanitize_db_text;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
@@ -436,11 +437,14 @@ pub async fn reply_clarification(
         return Err(AppError::NotFound("Contest not found".into()));
     }
 
-    let existing = clarification::Entity::find_by_id(clarification_id)
-        .filter(clarification::Column::ContestId.eq(contest_id))
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Clarification not found".into()))?;
+    let existing = find_active_child::<contest::Entity, clarification::Entity, _, _>(
+        &state.db,
+        clarification::Column::ContestId,
+        contest_id,
+        clarification_id,
+        "Clarification",
+    )
+    .await?;
 
     let is_admin = auth_user.has_permission(perm::CONTEST_MANAGE);
     let is_author = existing.author_id == auth_user.user_id;
@@ -601,11 +605,14 @@ pub async fn toggle_reply_public(
 
     let txn = state.db.begin().await?;
 
-    let parent = clarification::Entity::find_by_id(clarification_id)
-        .filter(clarification::Column::ContestId.eq(contest_id))
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Clarification not found in this contest".into()))?;
+    let parent = find_active_child::<contest::Entity, clarification::Entity, _, _>(
+        &txn,
+        clarification::Column::ContestId,
+        contest_id,
+        clarification_id,
+        "Clarification",
+    )
+    .await?;
 
     let reply = clarification_reply::Entity::find_by_id(reply_id)
         .filter(clarification_reply::Column::ClarificationId.eq(clarification_id))
@@ -694,11 +701,14 @@ pub async fn resolve_clarification(
         return Err(AppError::NotFound("Contest not found".into()));
     }
 
-    let existing = clarification::Entity::find_by_id(clarification_id)
-        .filter(clarification::Column::ContestId.eq(contest_id))
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Clarification not found".into()))?;
+    let existing = find_active_child::<contest::Entity, clarification::Entity, _, _>(
+        &state.db,
+        clarification::Column::ContestId,
+        contest_id,
+        clarification_id,
+        "Clarification",
+    )
+    .await?;
 
     let is_admin = auth_user.has_permission(perm::CONTEST_MANAGE);
     let is_author = existing.author_id == auth_user.user_id;
