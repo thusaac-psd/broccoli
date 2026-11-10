@@ -7,7 +7,13 @@
 //! like a crash. The server therefore [`CallGate::close`]s the gate first, so
 //! new calls fail cleanly, and then [`CallGate::drain`]s the calls already
 //! running before it lets the runtime go.
+//!
+//! The gate is re-entrant: a call made from inside a call it already admitted
+//! (a host function that calls back into a plugin, on the same blocking
+//! thread) is let through after close, or the drain would wait on calls it
+//! is itself refusing.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -21,6 +27,28 @@ struct Inner {
     idle: Notify,
 }
 
+thread_local! {
+    /// How many admitted calls this thread is currently running.
+    static IN_CALL: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks the current thread as running an admitted call while alive. Held
+/// inside the blocking closure that runs the guest.
+pub struct ThreadInCall(());
+
+impl ThreadInCall {
+    pub fn enter() -> Self {
+        IN_CALL.with(|c| c.set(c.get() + 1));
+        Self(())
+    }
+}
+
+impl Drop for ThreadInCall {
+    fn drop(&mut self) {
+        IN_CALL.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
 /// Cheap to clone; clones share one gate.
 #[derive(Clone, Default)]
 pub struct CallGate(Arc<Inner>);
@@ -30,10 +58,12 @@ pub struct CallGate(Arc<Inner>);
 pub struct CallGuard(Arc<Inner>);
 
 impl CallGate {
-    /// Admit one call, or `None` once the gate is closed.
+    /// Admit one call, or `None` once the gate is closed, unless this thread
+    /// is already running an admitted call (a nested call).
     pub fn enter(&self) -> Option<CallGuard> {
         self.0.in_flight.fetch_add(1, Ordering::SeqCst);
-        if self.0.closed.load(Ordering::SeqCst) {
+        let nested = IN_CALL.with(|c| c.get() > 0);
+        if self.0.closed.load(Ordering::SeqCst) && !nested {
             drop(CallGuard(self.0.clone()));
             return None;
         }
@@ -96,5 +126,23 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(running);
         assert!(waiter.await.unwrap(), "drained when the last call ended");
+    }
+
+    #[test]
+    fn a_nested_call_is_admitted_after_close() {
+        let gate = CallGate::default();
+        let outer = gate.enter().expect("open gate admits");
+        let in_call = ThreadInCall::enter();
+        gate.close();
+        let nested = gate.enter();
+        assert!(
+            nested.is_some(),
+            "a call made from inside an admitted call gets in"
+        );
+        drop(nested);
+        drop(in_call);
+        assert!(gate.enter().is_none(), "but not a fresh one");
+        drop(outer);
+        assert_eq!(gate.in_flight(), 0);
     }
 }

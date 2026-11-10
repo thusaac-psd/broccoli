@@ -42,6 +42,12 @@ pub enum PluginError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// The host is shutting down and refused to start this call. Not a
+    /// failure of the plugin or of the work it was asked to do: callers
+    /// leave that work in flight for another server to pick up.
+    #[error("Server is shutting down; plugin call refused")]
+    ShuttingDown,
+
     /// Distinct variant for "instance pool acquisition timed out" so callers can
     /// retry with backoff. Plugin pool contention is *not* a permanent failure
     /// of the user's request and should never be surfaced as a final verdict.

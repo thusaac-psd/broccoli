@@ -141,6 +141,12 @@ pub trait PluginInvoker: Send + Sync {
         host_context: Option<serde_json::Value>,
     ) -> Result<Vec<u8>, PluginError> {
         let start = std::time::Instant::now();
+        // First, before anything else: once the host is shutting down every
+        // call is refused the same way, whatever plugin it is for.
+        let guard = match self.call_gate() {
+            Some(gate) => Some(gate.enter().ok_or(PluginError::ShuttingDown)?),
+            None => None,
+        };
 
         // How long to wait for a free pooled instance. Distinct from the
         // guest execution deadline (`call_timeout_secs`), which is enforced by
@@ -170,12 +176,6 @@ pub trait PluginInvoker: Send + Sync {
         let plugin_id_owned = plugin_id.to_string();
         let func_name_owned = func_name.to_string();
         let parent_span = tracing::Span::current();
-        let guard = match self.call_gate() {
-            Some(gate) => Some(gate.enter().ok_or_else(|| {
-                PluginError::Internal("server is shutting down; plugin call refused".into())
-            })?),
-            None => None,
-        };
 
         let result = tokio::task::spawn_blocking({
             let plugin_id = plugin_id_owned.clone();
@@ -185,6 +185,8 @@ pub trait PluginInvoker: Send + Sync {
                 // Held until the guest returns, even if the awaiting task is
                 // cancelled: the blocking call keeps running regardless.
                 let _guard = guard;
+                // Nested host-to-plugin calls from this thread are admitted.
+                let _in_call = crate::call_gate::ThreadInCall::enter();
                 let _span_guard = parent_span.enter();
                 crate::host_context::with_context(host_context, || {
                     let acquire_start = std::time::Instant::now();

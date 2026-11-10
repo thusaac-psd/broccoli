@@ -67,6 +67,10 @@ impl PluginInvoker for TestPluginManager {
         self.inner.get_config()
     }
 
+    fn call_gate(&self) -> Option<&plugin_core::call_gate::CallGate> {
+        self.inner.call_gate()
+    }
+
     async fn call_raw(
         &self,
         plugin_id: &str,

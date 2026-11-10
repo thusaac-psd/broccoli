@@ -300,6 +300,11 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                         .await;
                     }
                 },
+                Err(plugin_core::error::PluginError::ShuttingDown) => {
+                    // This server is stopping: leave the code run in flight for
+                    // a peer (see the matching arm in submission dispatch).
+                    warn!(code_run_id, "Server shutting down; leaving code run for a peer");
+                }
                 Err(e) => {
                     error!(code_run_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
                     mark_code_run_error_or_log(

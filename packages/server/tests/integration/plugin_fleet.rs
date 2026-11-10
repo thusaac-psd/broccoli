@@ -735,3 +735,93 @@ async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_th
         .await;
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }
+
+/// A dispatch refused because this server is shutting down is not a judging
+/// failure: the submission stays in flight (no verdict, no retry spent) and
+/// is released for a peer to re-dispatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
+    use common::SubmissionStatus;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use server::entity::submission;
+
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let user_id = a.get_with_token(routes::ME, &token).await.id();
+    // A contest type judged by a real plugin call (through the call gate).
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "gated".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: PLUGIN.into(),
+                submission_fn: "reflect".into(),
+                code_run_fn: "reflect".into(),
+                submission_admission: false,
+            },
+        );
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    a.db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "INSERT INTO problem (title, content, time_limit, memory_limit, problem_type, \
+         default_contest_type, checker_format, is_public, show_test_details, created_at, updated_at) \
+         VALUES ('p', 'c', 1000, 262144, 'standard', 'standard', 'exact', TRUE, FALSE, NOW(), NOW())",
+    ))
+    .await
+    .unwrap();
+    let problem_id: i32 =
+        a.db.query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT MAX(id) AS id FROM problem",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "id")
+        .unwrap();
+    let row = submission::ActiveModel {
+        files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(None),
+        contest_type: Set("gated".into()),
+        status: Set(SubmissionStatus::Queued),
+        judge_epoch: Set(0),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&a.db)
+    .await
+    .unwrap();
+
+    // Shutdown has begun: the gate refuses new plugin calls.
+    a.state
+        .plugins
+        .call_gate()
+        .expect("server manager gates calls")
+        .close();
+    server::dispatcher::claim::claim_once(&a.state, "stopping", 32, 0)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let sub = submission::Entity::find_by_id(row.id)
+        .one(&a.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sub.status,
+        SubmissionStatus::Pending,
+        "still in flight: {sub:?}"
+    );
+    assert_eq!(sub.error_code, None, "no failure recorded: {sub:?}");
+    let (subs, _, _) = server::dispatcher::steal::release_owned_leases(&a.db, "stopping")
+        .await
+        .unwrap();
+    assert_eq!(subs, 1, "released for a peer to steal");
+}
