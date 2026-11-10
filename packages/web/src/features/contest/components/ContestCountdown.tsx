@@ -5,6 +5,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Fragment } from 'react';
 import { useParams } from 'react-router';
 
+import { contestPhase } from '@/features/contest/utils/status';
+
 // -- helpers ------------------------------------------------------------------
 
 function getTimeLeft(targetMs: number, now: number) {
@@ -45,11 +47,9 @@ function useCountdownData(contestId: number) {
 
   if (!contest) return null;
 
-  const startMs = new Date(contest.start_time).getTime();
-  const endMs = new Date(contest.end_time).getTime();
-
-  const phase: 'upcoming' | 'running' | 'ended' =
-    now < startMs ? 'upcoming' : now <= endMs ? 'running' : 'ended';
+  const startMs = Date.parse(contest.start_time);
+  const endMs = Date.parse(contest.end_time);
+  const phase = contestPhase(startMs, endMs, now);
 
   const tl = getTimeLeft(phase === 'upcoming' ? startMs : endMs, now);
   const totalDuration = endMs - startMs;
