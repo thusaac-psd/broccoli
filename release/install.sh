@@ -550,6 +550,37 @@ refresh_shared_settings() {
   done < <(shared_env_files)
 }
 
+# An infra (or single-host) re-run with BROCCOLI_INFRA_HOST given moves the
+# stored database, MQ and S3 addresses to that host, keeping the stored
+# credentials and ports, so the connection.env it writes points servers and
+# workers at the new address (a rehearsal moving to the venue LAN).
+rehost_infra_urls() {
+  local host="$BROCCOLI_INFRA_HOST" pg_pw redis_pw stored key value
+  pg_pw="$(env_get "$ENV_FILE" POSTGRES_PASSWORD)"
+  redis_pw="$(env_get "$ENV_FILE" REDIS_PASSWORD)"
+  [ -n "$pg_pw" ] && [ -n "$redis_pw" ] || return 0
+  stored() { local v; v="$(env_get "$ENV_FILE" "$1")"; printf '%s' "${v:-$2}"; }
+  for key in BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT; do
+    case "$key" in
+      *DATABASE*) value="$(postgres_url "$(stored POSTGRES_USER postgres)" "$pg_pw" "$host" \
+        "$(bind_port "$(stored POSTGRES_BIND 0.0.0.0:5432)")" "$(stored POSTGRES_DB broccoli)")" ;;
+      *MQ*) value="$(redis_url "$redis_pw" "$host" "$(bind_port "$(stored REDIS_BIND 0.0.0.0:6379)")")" ;;
+      *)
+        [ "$(stored BROCCOLI__STORAGE__BACKEND object_storage)" = object_storage ] || continue
+        value="http://${host}:$(bind_port "$(stored SEAWEEDFS_S3_BIND 0.0.0.0:8333)")"
+        # Leave an operator's own S3 endpoint alone; move only the bundled one.
+        case "$(env_get "$ENV_FILE" "$key")" in
+          "" | "http://"*":${value##*:}") ;;
+          *) continue ;;
+        esac
+        ;;
+    esac
+    [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] && continue
+    env_set "$ENV_FILE" "$key" "$value"
+    echo "updated $key in $ENV_FILE for infra host $host"
+  done
+}
+
 print_env_review() {
   local file
   file="$1"
@@ -1099,6 +1130,9 @@ if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
   refresh_shared_settings
   refresh_bundled_image_tags
+  if { [ "$ROLE" = "infra" ] || [ "$ROLE" = "single-host" ]; } && [ -n "${BROCCOLI_INFRA_HOST:-}" ]; then
+    rehost_infra_urls
+  fi
   if [ "$ROLE" = "server" ] && [ -n "${BROCCOLI_GATEWAY_HOSTS:-}" ]; then
     gateway_trusted_proxies
     env_set_if_changed BROCCOLI__SERVER__TRUSTED_PROXIES "$BROCCOLI__SERVER__TRUSTED_PROXIES"
