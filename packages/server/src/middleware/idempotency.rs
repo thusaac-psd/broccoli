@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, to_bytes},
     extract::State,
-    http::{Method, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -16,6 +16,35 @@ use crate::state::AppState;
 const MAX_RESPONSE_BODY_SIZE: usize = 4 * 1_048_576;
 
 const STALE_PENDING_SECS: i64 = 120;
+
+/// Response marker for bodies that must never be persisted: wraps any
+/// response and adds `Cache-Control: no-store`. The idempotency middleware
+/// honours that standard directive (from this wrapper or any layer that sets
+/// it) by recording only that the request completed, never the body, so a
+/// replay answers 409 instead of re-sending the secret. It also keeps
+/// browsers and intermediaries from caching it. Use it on every handler whose
+/// response carries a credential (generated passwords, tokens).
+pub struct NoStore<T>(pub T);
+
+impl<T: IntoResponse> IntoResponse for NoStore<T> {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    }
+}
+
+/// Whether the response forbids storing its body (`Cache-Control: no-store`).
+fn forbids_storage(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+}
 
 pub async fn idempotency_middleware(
     State(state): State<AppState>,
@@ -169,7 +198,7 @@ async fn handle_existing_key(
                 .body(Body::from(body))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        "completed_too_large" => {
+        "completed_too_large" | "completed_not_stored" => {
             if existing.request_path != request_path || existing.request_method != request_method {
                 return AppError::IdempotencyKeyMismatch(format!(
                     "This key was used with {} {} but this request is {} {}",
@@ -177,7 +206,11 @@ async fn handle_existing_key(
                 ))
                 .into_response();
             }
-            AppError::IdempotencyResponseTooLarge.into_response()
+            if existing.status == "completed_not_stored" {
+                AppError::IdempotencyResponseNotStored.into_response()
+            } else {
+                AppError::IdempotencyResponseTooLarge.into_response()
+            }
         }
         "pending" => {
             let age_secs = (Utc::now() - existing.created_at).num_seconds();
@@ -251,7 +284,14 @@ async fn complete_key(
     let status = response.status();
     let is_success = status.is_success();
 
-    if is_success {
+    if is_success && forbids_storage(response.headers()) {
+        // The body carries a secret: record completion (so a retry is not
+        // executed twice) but never the body itself.
+        if let Err(e) = mark_not_stored(db, key, user_id, status.as_u16() as i16).await {
+            error!(error = %e, "Failed to mark no-store idempotency key as completed");
+        }
+        response
+    } else if is_success {
         let (parts, body) = response.into_parts();
         match to_bytes(body, usize::MAX).await {
             Ok(bytes) => {
@@ -307,12 +347,32 @@ async fn mark_too_large(
     user_id: i32,
     response_status: i16,
 ) -> Result<(), DbErr> {
+    mark_completed_without_body(db, key, user_id, "completed_too_large", response_status).await
+}
+
+async fn mark_not_stored(
+    db: &DatabaseConnection,
+    key: &str,
+    user_id: i32,
+    response_status: i16,
+) -> Result<(), DbErr> {
+    mark_completed_without_body(db, key, user_id, "completed_not_stored", response_status).await
+}
+
+async fn mark_completed_without_body(
+    db: &DatabaseConnection,
+    key: &str,
+    user_id: i32,
+    status: &'static str,
+    response_status: i16,
+) -> Result<(), DbErr> {
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"UPDATE idempotency_key
-           SET status = 'completed_too_large', response_status = $1, response_body = NULL, completed_at = $2
-           WHERE key = $3 AND user_id = $4 AND status = 'pending'"#,
+           SET status = $1, response_status = $2, response_body = NULL, completed_at = $3
+           WHERE key = $4 AND user_id = $5 AND status = 'pending'"#,
         [
+            status.into(),
             response_status.into(),
             Utc::now().into(),
             key.into(),

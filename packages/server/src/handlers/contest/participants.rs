@@ -37,6 +37,7 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
+use crate::middleware::idempotency::NoStore;
 use crate::models::contest::*;
 use crate::state::AppState;
 use crate::utils::contest::find_contest;
@@ -322,7 +323,7 @@ pub async fn bulk_add_participants(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
     AppJson(payload): AppJson<BulkAddParticipantsRequest>,
-) -> Result<Json<BulkAddParticipantsResponse>, AppError> {
+) -> Result<NoStore<Json<BulkAddParticipantsResponse>>, AppError> {
     auth_user.require_permission(perm::CONTEST_MANAGE)?;
     validate_bulk_add_participants(&payload)?;
 
@@ -499,10 +500,10 @@ pub async fn bulk_add_participants(
         "Bulk added participants"
     );
 
-    Ok(Json(BulkAddParticipantsResponse {
+    Ok(NoStore(Json(BulkAddParticipantsResponse {
         added,
         created: created_response,
         already_enrolled,
         not_found,
-    }))
+    })))
 }

@@ -232,29 +232,35 @@ async fn assigning_an_already_held_role_is_not_a_server_error() {
     );
 }
 
-/// BUG (med): the idempotency middleware caches the full 2xx body of any POST
-/// carrying `Idempotency-Key`. The web client sends that header on user and
-/// participant creation, whose responses contain the generated PLAINTEXT
-/// password, so credentials sit in `idempotency_key.response_body` for 24h,
-/// readable by the plugin DB role (m0003 re-granted SELECT on all tables).
-/// Location: middleware/idempotency.rs `complete_key`.
+/// Regression (#58): the idempotency middleware used to cache the full 2xx
+/// body of any POST carrying `Idempotency-Key`, so generated PLAINTEXT
+/// passwords from user and participant creation sat in
+/// `idempotency_key.response_body` for 24h, readable by the plugin DB role.
+/// Credential-bearing handlers now mark their response `no-store`; the cache
+/// records completion only, and a replay answers 409 instead of re-sending the
+/// secret or creating the account twice.
 #[tokio::test]
-#[ignore = "BUG: generated plaintext passwords are persisted in idempotency_key.response_body"]
 async fn created_user_password_is_not_persisted_by_idempotency_cache() {
     let app = TestApp::spawn().await;
     let admin = app
         .create_user_with_role("aa_admin", "password123", "admin")
         .await;
-    let res = app
-        .client
-        .post(format!("http://{}{}", app.addr, routes::USERS))
-        .header("Authorization", format!("Bearer {admin}"))
-        .header("Idempotency-Key", "audit-create-user-1")
-        .json(&json!({"username": "aa_newbie"}))
-        .send()
-        .await
-        .expect("send");
+    let send = || {
+        app.client
+            .post(format!("http://{}{}", app.addr, routes::USERS))
+            .header("Authorization", format!("Bearer {admin}"))
+            .header("Idempotency-Key", "audit-create-user-1")
+            .json(&json!({"username": "aa_newbie"}))
+            .send()
+    };
+    let res = send().await.expect("send");
     assert_eq!(res.status().as_u16(), 201);
+    assert_eq!(
+        res.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
     let body: serde_json::Value = res.json().await.expect("json");
     let password = body["password"].as_str().expect("generated password");
 
@@ -269,6 +275,12 @@ async fn created_user_password_is_not_persisted_by_idempotency_cache() {
         cached.iter().all(|b| !b.contains(password)),
         "plaintext password found in idempotency_key.response_body"
     );
+
+    let replay = send().await.expect("send");
+    assert_eq!(replay.status().as_u16(), 409);
+    let replay: serde_json::Value = replay.json().await.expect("json");
+    assert_eq!(replay["code"], "CONFLICT");
+    assert!(replay.get("password").is_none());
 }
 
 /// DESIGN BUG (med, policy to confirm): `seed_role_permissions` re-inserts
