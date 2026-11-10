@@ -256,7 +256,6 @@ async fn zip_upload_with_overlapping_formats_pairs_files() {
 /// still returns the hidden test data to editors.
 /// Location: handlers/problem/test_cases.rs `find_test_case_for_problem`.
 #[tokio::test]
-#[ignore = "BUG: get_test_case still serves a soft-deleted problem's test data"]
 async fn soft_deleted_problem_hides_individual_test_cases() {
     let app = TestApp::spawn().await;
     let token = app
@@ -279,4 +278,33 @@ async fn soft_deleted_problem_hides_individual_test_cases() {
         "sibling endpoints disagree: list=404 but get={}",
         one.status
     );
+}
+
+/// Companion to the test above: every problem child lookup goes through the
+/// same active-parent gate, so additional files of a soft-deleted problem are
+/// gone too (download and delete both 404).
+#[tokio::test]
+async fn soft_deleted_problem_hides_additional_files() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("ap_admin", "password123", "admin")
+        .await;
+    let pid = app.create_problem(&token, "P").await;
+    let up = app
+        .upload_additional_file(pid, "extra.txt", b"data".to_vec(), "cpp", &token)
+        .await;
+    assert_eq!(up.status, 201, "{}", up.text);
+    let ref_id = up.body["id"].as_str().unwrap().to_string();
+
+    let del = app.delete_with_token(&routes::problem(pid), &token).await;
+    assert_eq!(del.status, 204, "{}", del.text);
+
+    let download = app
+        .get_with_token(&routes::additional_file(pid, &ref_id), &token)
+        .await;
+    assert_eq!(download.status, 404, "{}", download.text);
+    let delete = app
+        .delete_with_token(&routes::additional_file(pid, &ref_id), &token)
+        .await;
+    assert_eq!(delete.status, 404, "{}", delete.text);
 }

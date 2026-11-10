@@ -28,7 +28,7 @@ use crate::utils::blob::{
     BlobMetadata, build_blob_response, resolve_virtual_path, stream_field_to_store,
     take_required_file,
 };
-use crate::utils::soft_delete::SoftDeletable;
+use crate::utils::soft_delete::{SoftDeletable, find_active_child};
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 pub fn attachment_upload_body_limit() -> DefaultBodyLimit {
@@ -289,14 +289,14 @@ pub async fn download_attachment(
     let ref_uuid = Uuid::parse_str(&ref_id)
         .map_err(|_| AppError::Validation("Invalid attachment ID".into()))?;
 
-    let model = problem_attachment::Entity::find_by_id(ref_uuid)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Attachment not found".into()))?;
-
-    if model.problem_id != problem_id {
-        return Err(AppError::NotFound("Attachment not found".into()));
-    }
+    let model = find_active_child::<problem::Entity, problem_attachment::Entity, _, _>(
+        &state.db,
+        problem_attachment::Column::ProblemId,
+        problem_id,
+        ref_uuid,
+        "Attachment",
+    )
+    .await?;
 
     // Per-attachment Download decision, distinct from the problem-level
     // gate above: a plugin can still Deny/Redact ONE specific attachment
@@ -360,14 +360,14 @@ pub async fn delete_attachment(
     let ref_uuid = Uuid::parse_str(&ref_id)
         .map_err(|_| AppError::Validation("Invalid attachment ID".into()))?;
 
-    let model = problem_attachment::Entity::find_by_id(ref_uuid)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Attachment not found".into()))?;
-
-    if model.problem_id != problem_id {
-        return Err(AppError::NotFound("Attachment not found".into()));
-    }
+    find_active_child::<problem::Entity, problem_attachment::Entity, _, _>(
+        &state.db,
+        problem_attachment::Column::ProblemId,
+        problem_id,
+        ref_uuid,
+        "Attachment",
+    )
+    .await?;
 
     problem_attachment::Entity::delete_by_id(ref_uuid)
         .exec(&state.db)
