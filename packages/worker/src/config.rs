@@ -99,8 +99,11 @@ pub struct WorkerConfig {
     pub box_slot_lock_dir: Option<String>,
 }
 
+/// Empty means "derive one for this host" (see
+/// [`common::node_identity::default_node_id`]); [`WorkerAppConfig::load`]
+/// resolves it, so a loaded config always carries a usable ID.
 fn default_worker_id() -> String {
-    "worker-1".into()
+    String::new()
 }
 fn default_isolate_bin() -> String {
     "isolate".into()
@@ -210,7 +213,6 @@ impl WorkerAppConfig {
             std::env::var("BROCCOLI_CONFIG").unwrap_or_else(|_| "config/config".to_string());
 
         let s = Config::builder()
-            .set_default("worker.id", "worker-1")?
             .set_default("worker.isolate_bin", "isolate")?
             .set_default("worker.enable_cgroups", true)?
             .set_default("worker.allow_insecure_no_cgroups", false)?
@@ -261,7 +263,14 @@ impl WorkerAppConfig {
             )
             .build()?;
 
-        s.try_deserialize()
+        let mut config: Self = s.try_deserialize()?;
+        config.worker.id = common::node_identity::resolve_node_id(
+            common::node_identity::NodeRole::Worker,
+            &config.worker.id,
+            false,
+        )
+        .map_err(|e| ConfigError::Message(e.to_string()))?;
+        Ok(config)
     }
 }
 

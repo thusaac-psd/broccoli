@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use common::cancel::RedisCancelChecker;
+use common::node_identity::{NodeClaim, NodeRole};
 
 use crate::config::WorkerAppConfig;
 use crate::consumer::{WorkerConsumer, WorkerConsumerDeps};
@@ -127,6 +128,35 @@ impl WorkerRuntime {
             "MQ connected"
         );
 
+        // Claim the worker ID before acting under it: a second live process with
+        // the same ID would share this worker's private queue, dedup claims and
+        // heartbeat, so it refuses to start instead.
+        info!(
+            hostname = ?system_info.hostname,
+            ip_addresses = ?system_info.ip_addresses,
+            os = %system_info.os,
+            arch = %system_info.arch,
+            cpu_count = system_info.cpu_count,
+            pid = system_info.pid,
+            "Detected system info for heartbeat"
+        );
+        let in_flight = InFlightCounter::new();
+        let started_at = chrono::Utc::now();
+        let heartbeat_config = HeartbeatConfig {
+            worker_id: config.worker.id.clone(),
+            sandbox_backend: config.worker.sandbox_backend.clone(),
+            max_concurrency: Some(capacity.max_concurrency as u32),
+            fairness_mode: capacity.fairness_mode.as_str().into(),
+            system_info,
+        };
+        let claim = NodeClaim::claim_at_boot(
+            redis::Client::open(config.mq.url.as_str()).context("Invalid MQ URL")?,
+            NodeRole::Worker,
+            &config.worker.id,
+            heartbeat_config.payload(started_at, &in_flight),
+        )
+        .await?;
+
         let dedup = match RedisTaskDedup::new(
             &config.mq.url,
             config.worker.dedup_ttl_secs,
@@ -159,27 +189,8 @@ impl WorkerRuntime {
                 .context("Failed to initialize worker executors")?,
         );
 
-        let in_flight = InFlightCounter::new();
-        info!(
-            hostname = ?system_info.hostname,
-            ip_addresses = ?system_info.ip_addresses,
-            os = %system_info.os,
-            arch = %system_info.arch,
-            cpu_count = system_info.cpu_count,
-            pid = system_info.pid,
-            "Detected system info for heartbeat"
-        );
-        let heartbeat = crate::heartbeat::spawn(
-            HeartbeatConfig {
-                redis_url: config.mq.url.clone(),
-                worker_id: config.worker.id.clone(),
-                sandbox_backend: config.worker.sandbox_backend.clone(),
-                max_concurrency: Some(capacity.max_concurrency as u32),
-                fairness_mode: capacity.fairness_mode.as_str().into(),
-                system_info,
-            },
-            in_flight.clone(),
-        );
+        let heartbeat =
+            crate::heartbeat::spawn(claim, heartbeat_config, started_at, in_flight.clone());
 
         // Pre-warm subscriber: listens for contest cache-warm jobs and fills the
         // local file cache ahead of the opening burst. Independent of judging.
