@@ -1150,8 +1150,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Server liveness and dependency health
-     * @description Public, unauthenticated. Pings the database and message queue with a 2s timeout each. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. Used by load balancers and Docker `HEALTHCHECK` (via the `--healthcheck` CLI flag).
+     * Server readiness and dependency health
+     * @description Public, unauthenticated. Pings the database and message queue concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
      */
     get: operations['getHealth'];
     put?: never;

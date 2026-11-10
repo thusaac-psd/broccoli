@@ -324,7 +324,9 @@ pub fn build_router(state: AppState) -> axum::Router {
         )
         .fallback_service(frontend_assets_service(&frontend_dist));
 
-    // `/metrics` and `/healthz` are also served on a dedicated tokio runtime
+    // `/livez` is the shallow liveness probe for load balancers (no dependency
+    // calls); `/healthz` is the deep readiness check (DB + Redis).
+    // `/metrics`, `/livez` and `/healthz` are also served on a dedicated tokio runtime
     // + listener when `server.healthz_listen` is configured - see UP#14e in
     // `healthz_runtime`. Operators are encouraged to point load-balancer
     // probes and Prometheus scrapes at the dedicated listener so main-runtime
@@ -335,6 +337,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .nest("/api", router.fallback(api_not_found))
         .route("/metrics", axum::routing::get(metrics_handler))
         .route("/healthz", axum::routing::get(handlers::health::healthz))
+        .route("/livez", axum::routing::get(handlers::health::livez))
         .nest("/assets", assets_router)
         .fallback_service(spa_fallback_service(frontend_dist))
         .with_state(state)

@@ -81,13 +81,14 @@ pub async fn run(
             _ = interval.tick() => {
                 let jitter_ms = rand::random::<u64>() % 3001;
                 tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
-                if let Err(e) = scan_once(
+                let scan = scan_once(
                     state.clone(),
                     &server_id,
                     lease_ttl_secs,
                     batch_size,
                     max_dispatch_retries,
-                ).await {
+                );
+                if let Some(Err(e)) = common::deadline::bounded("dispatcher.steal", common::deadline::BACKGROUND_STEP, scan).await {
                     error!(server_id = %server_id, error = %e, "Steal scan failed");
                 }
             }
@@ -1205,6 +1206,7 @@ mod tests {
                     plugin_max_connections: 1,
                     plugin_privileged_max_connections: 1,
                     plugin_url: None,
+                    ..Default::default()
                 },
                 auth: AuthConfig {
                     jwt_secret: "test-secret".to_string(),
@@ -1222,6 +1224,7 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
+                clock: Default::default(),
             },
             mq: None,
             redis_client: None,
