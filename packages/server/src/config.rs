@@ -701,6 +701,9 @@ pub struct AppConfig {
     pub batch_max_age_secs: u64,
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
+    /// Boot-time clock skew bounds against Postgres and Redis.
+    #[serde(default)]
+    pub clock: common::clock::ClockConfig,
 }
 
 fn default_batch_max_age_secs() -> u64 {

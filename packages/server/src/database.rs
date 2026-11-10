@@ -636,6 +636,30 @@ mod tests {
         boot.release().await
     }
 
+    /// The boot-time skew check reads both shared clocks for real; on one host
+    /// they agree with ours, so it passes even with a strict bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clock_skew_check_reads_postgres_and_redis() {
+        use testcontainers::runners::AsyncRunner;
+        let (_pg, url) = fresh_postgres().await;
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("start redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("redis port");
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let db = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        let strict = common::clock::ClockConfig {
+            warn_skew_ms: 1_000,
+            max_skew_ms: 1_000,
+        };
+        common::clock::check_clock_skew(&db, Some(&client), &strict)
+            .await
+            .expect("same-host clocks agree");
+    }
+
     /// A second booter blocks on the boot lock until the first releases it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn boot_lock_serializes_booters() {

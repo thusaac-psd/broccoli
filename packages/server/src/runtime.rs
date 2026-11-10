@@ -223,6 +223,8 @@ impl ServerRuntime {
             None
         };
 
+        common::clock::check_clock_skew(&db, redis_client.as_deref(), &app_config.clock).await?;
+
         if let Some(ref mq_arc) = mq {
             let op_dlq_consumer_db = db.clone();
             let op_dlq_consumer_mq = Arc::clone(mq_arc);
