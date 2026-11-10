@@ -297,6 +297,9 @@ fn spa_fallback_service(frontend_dist: impl Into<PathBuf>) -> ServeDir<ServeFile
     ServeDir::new(&frontend_dist).fallback(ServeFile::new(frontend_dist.join("index.html")))
 }
 
+/// Upper bound on handling one API request.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub fn build_router(state: AppState) -> axum::Router {
     let trusted_proxies =
         client_ip::parse_trusted_proxy_networks(&state.config.server.trusted_proxies);
@@ -305,13 +308,16 @@ pub fn build_router(state: AppState) -> axum::Router {
     let (router, api) = routes::api_routes(&state.config, ApiDoc::openapi());
     let frontend_dist = state.config.server.frontend_dist.clone();
 
+    // The timeout sits INSIDE the idempotency middleware so a timed-out
+    // handler surfaces as a 408 the middleware sees (and releases the key
+    // for), rather than cancelling the middleware with its key still pending.
+    let router = router.layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        REQUEST_TIMEOUT,
+    ));
     let router = router.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::idempotency_middleware,
-    ));
-    let router = router.layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        std::time::Duration::from_secs(60),
     ));
 
     #[cfg(feature = "bundled-stress-test")]
