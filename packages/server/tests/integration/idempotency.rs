@@ -148,6 +148,170 @@ async fn oversized_keyed_body_is_refused_before_buffering() {
     assert!(response.starts_with("HTTP/1.1 413"), "{response}");
 }
 
+/// A router behind the real idempotency middleware whose handlers count how
+/// often they ran: `/fail` commits (counts) and then answers 500, `/hang`
+/// commits and never answers, `/reject` answers 400 without committing.
+fn outcome_router(
+    app: &TestApp,
+    runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> axum::Router {
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use std::sync::atomic::Ordering;
+
+    let fail_runs = runs.clone();
+    let hang_runs = runs;
+    axum::Router::new()
+        .route(
+            "/fail",
+            post(move || {
+                let runs = fail_runs.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        )
+        .route(
+            "/hang",
+            post(move || {
+                let runs = hang_runs.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        )
+        .route("/reject", post(|| async { StatusCode::BAD_REQUEST }))
+        .layer(axum::middleware::from_fn_with_state(
+            app.state.clone(),
+            server::middleware::idempotency_middleware,
+        ))
+}
+
+fn keyed_post(path: &str, token: &str, key: &str) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::post(path)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Idempotency-Key", key)
+        .body(axum::body::Body::from("{}"))
+        .unwrap()
+}
+
+async fn key_status(app: &TestApp, key: &str, user_id: i32) -> Option<String> {
+    idempotency_key::Entity::find_by_id((key.to_string(), user_id))
+        .one(&app.db)
+        .await
+        .expect("db")
+        .map(|row| row.status)
+}
+
+async fn error_code(response: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"].clone()
+}
+
+/// Once the handler has run, a 5xx proves nothing about
+/// whether it committed, so the key must not be released for a re-execution.
+#[tokio::test]
+async fn server_error_after_the_handler_ran_does_not_allow_re_execution() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let user_id = app.get_with_token(routes::ME, &token).await.id();
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let router = outcome_router(&app, runs.clone());
+
+    let first = router
+        .clone()
+        .oneshot(keyed_post("/fail", &token, "idem-5xx"))
+        .await
+        .unwrap();
+    assert_eq!(first.status().as_u16(), 500);
+    assert_eq!(
+        key_status(&app, "idem-5xx", user_id).await.as_deref(),
+        Some("outcome_unknown")
+    );
+
+    let retry = router
+        .oneshot(keyed_post("/fail", &token, "idem-5xx"))
+        .await
+        .unwrap();
+    assert_eq!(retry.status().as_u16(), 409);
+    assert_eq!(error_code(retry).await, "IDEMPOTENCY_OUTCOME_UNKNOWN");
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "the handler ran twice");
+}
+
+/// A request cancelled mid-handler (client disconnect, an
+/// outer timeout) may have committed, so its key is settled as unknown too.
+#[tokio::test]
+async fn cancelled_request_does_not_allow_re_execution() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let user_id = app.get_with_token(routes::ME, &token).await.id();
+    let runs = std::sync::Arc::new(AtomicUsize::new(0));
+    let router = outcome_router(&app, runs.clone());
+
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        router
+            .clone()
+            .oneshot(keyed_post("/hang", &token, "idem-cancel")),
+    )
+    .await;
+    assert!(cancelled.is_err(), "the hanging handler answered");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+    // The drop guard settles the key from a spawned task.
+    let mut status = None;
+    for _ in 0..50 {
+        status = key_status(&app, "idem-cancel", user_id).await;
+        if status.as_deref() != Some("pending") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status.as_deref(), Some("outcome_unknown"));
+
+    let retry = router
+        .oneshot(keyed_post("/hang", &token, "idem-cancel"))
+        .await
+        .unwrap();
+    assert_eq!(retry.status().as_u16(), 409);
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "the handler ran twice");
+}
+
+/// A 4xx proves the request was refused before committing: the key is freed.
+#[tokio::test]
+async fn client_error_releases_the_key_for_a_corrected_retry() {
+    use std::sync::atomic::AtomicUsize;
+    use tower::ServiceExt;
+
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let user_id = app.get_with_token(routes::ME, &token).await.id();
+    let router = outcome_router(&app, std::sync::Arc::new(AtomicUsize::new(0)));
+
+    let res = router
+        .oneshot(keyed_post("/reject", &token, "idem-4xx"))
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 400);
+    assert_eq!(key_status(&app, "idem-4xx", user_id).await, None);
+}
+
 mod response_binding {
     use super::*;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};

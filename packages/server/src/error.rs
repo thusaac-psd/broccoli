@@ -55,6 +55,9 @@ pub enum AppError {
     /// Idempotent response carried credentials (`Cache-Control: no-store`),
     /// so only its completion was recorded and it cannot be replayed.
     IdempotencyResponseNotStored,
+    /// The original request's handler ran but failed or was cancelled, so it
+    /// may have committed; the key is never reused for a re-execution.
+    IdempotencyOutcomeUnknown,
     Internal(String),
 }
 
@@ -166,6 +169,15 @@ impl AppError {
                     "CONFLICT",
                     "Idempotent response carries credentials and is never stored; \
                      original request succeeded but cannot be replayed"
+                        .into(),
+                ),
+            ),
+            AppError::IdempotencyOutcomeUnknown => (
+                StatusCode::CONFLICT,
+                simple(
+                    "IDEMPOTENCY_OUTCOME_UNKNOWN",
+                    "The original request with this idempotency key failed after it started \
+                     and may have taken effect; check its result and retry with a new key"
                         .into(),
                 ),
             ),

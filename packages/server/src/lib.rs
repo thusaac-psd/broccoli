@@ -324,8 +324,8 @@ pub fn build_router(state: AppState) -> axum::Router {
     let frontend_dist = state.config.server.frontend_dist.clone();
 
     // The timeout sits INSIDE the idempotency middleware so a timed-out
-    // handler surfaces as a 408 the middleware sees (and releases the key
-    // for), rather than cancelling the middleware with its key still pending.
+    // handler surfaces as a 408 the middleware settles (as outcome unknown),
+    // rather than cancelling the middleware with its key still pending.
     let router = router.layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
         REQUEST_TIMEOUT,

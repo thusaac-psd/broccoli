@@ -4,8 +4,14 @@
 //! SHA-256 fingerprint of the body. Reusing the key for a different request
 //! answers 422 `IDEMPOTENCY_KEY_MISMATCH`; retrying the same request replays
 //! the stored 2xx response (or 409 when the response was deliberately not
-//! stored, see [`NoStore`]). Error responses are never stored, so a failed
-//! request can be retried with the same key.
+//! stored, see [`NoStore`]).
+//!
+//! Only outcomes that prove nothing was committed free the key: a 4xx (other
+//! than 408) releases it, so a corrected request can reuse it. A 5xx, a 408
+//! timeout or a request cancelled mid-handler may have committed, so the key
+//! is settled as `outcome_unknown` and retries answer 409
+//! `IDEMPOTENCY_OUTCOME_UNKNOWN` until the key expires; the client must check
+//! what happened and use a fresh key.
 //!
 //! Only JSON-sized bodies are covered (see [`max_request_body_bytes`]); a keyed
 //! request with a larger body is refused with 413 before it is read.
@@ -105,14 +111,18 @@ enum KeyStatus {
     CompletedTooLarge,
     /// Finished, but the response forbade storing its body (`no-store`).
     CompletedNotStored,
+    /// The handler ran but the outcome is unknown (5xx, 408, cancelled): it may
+    /// have committed, so the key is never handed to a re-execution.
+    OutcomeUnknown,
 }
 
 impl KeyStatus {
-    const ALL: [KeyStatus; 4] = [
+    const ALL: [KeyStatus; 5] = [
         KeyStatus::Pending,
         KeyStatus::Completed,
         KeyStatus::CompletedTooLarge,
         KeyStatus::CompletedNotStored,
+        KeyStatus::OutcomeUnknown,
     ];
 
     fn as_str(self) -> &'static str {
@@ -121,6 +131,7 @@ impl KeyStatus {
             KeyStatus::Completed => "completed",
             KeyStatus::CompletedTooLarge => "completed_too_large",
             KeyStatus::CompletedNotStored => "completed_not_stored",
+            KeyStatus::OutcomeUnknown => "outcome_unknown",
         }
     }
 
@@ -349,6 +360,7 @@ async fn replay_existing(
         Some(KeyStatus::CompletedNotStored) => {
             AppError::IdempotencyResponseNotStored.into_response()
         }
+        Some(KeyStatus::OutcomeUnknown) => AppError::IdempotencyOutcomeUnknown.into_response(),
         // Not stale, or `try_claim_key` would have reclaimed it.
         Some(KeyStatus::Pending) => AppError::IdempotencyKeyInProgress.into_response(),
         None => {
@@ -358,13 +370,35 @@ async fn replay_existing(
     }
 }
 
+/// How a claimed key is settled once the handler has produced `status`.
+fn settlement_for(status: StatusCode) -> Settlement {
+    if status.is_success() {
+        Settlement::Store
+    } else if status == StatusCode::REQUEST_TIMEOUT || status.is_server_error() {
+        Settlement::Unknown
+    } else {
+        Settlement::Release
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Settlement {
+    /// The request succeeded: keep (or note) its response for replays.
+    Store,
+    /// The request was refused before committing anything: free the key.
+    Release,
+    /// The request may or may not have committed.
+    Unknown,
+}
+
 /// A `pending` claim owned by the in-flight request. Every write is fenced on
 /// `epoch` (the claim's `created_at`), so a request whose stale claim was
 /// reclaimed by a retry can no longer settle or delete the retry's row.
 ///
 /// If the request future is dropped before the claim settles (the client
-/// disconnected, or a layer cancelled it), `Drop` releases the key so it does
-/// not sit `pending` until the stale window lets the request run again.
+/// disconnected, or a layer cancelled it), `Drop` settles the key as
+/// `outcome_unknown` rather than leaving it `pending` until the stale window
+/// lets the request run again.
 struct PendingClaim {
     db: DatabaseConnection,
     key: String,
@@ -374,89 +408,92 @@ struct PendingClaim {
 }
 
 impl PendingClaim {
-    /// Store the handler's response against the key (or release the key for
-    /// an error response) and hand the response back to the client.
+    /// Settle the key for the handler's response and hand the response back.
     async fn complete(mut self, response: Response) -> Response {
         let status = response.status();
-        let response = if !status.is_success() {
-            if let Err(e) = self.release().await {
-                warn!(error = %e, "Failed to delete idempotency key after error response");
+        let response = match settlement_for(status) {
+            Settlement::Release => {
+                if let Err(e) = self.release().await {
+                    warn!(error = %e, "Failed to delete idempotency key after error response");
+                }
+                response
             }
-            response
-        } else if forbids_storage(response.headers()) {
+            Settlement::Unknown => {
+                self.mark(KeyStatus::OutcomeUnknown, Some(status), None)
+                    .await;
+                response
+            }
             // The body carries a secret: record completion (so a retry is not
             // executed twice) but never the body itself.
-            if let Err(e) = self.mark(KeyStatus::CompletedNotStored, status, None).await {
-                error!(error = %e, "Failed to mark no-store idempotency key as completed");
+            Settlement::Store if forbids_storage(response.headers()) => {
+                self.mark(KeyStatus::CompletedNotStored, Some(status), None)
+                    .await;
+                response
             }
-            response
-        } else {
-            let (parts, body) = response.into_parts();
-            match to_bytes(body, usize::MAX).await {
-                Ok(bytes) if bytes.len() > MAX_RESPONSE_BODY_SIZE => {
-                    // Too large to cache. Pass the FULL body through to the
-                    // current client, then mark the key so retries get 409.
-                    warn!(
-                        body_len = bytes.len(),
-                        cap = MAX_RESPONSE_BODY_SIZE,
-                        "Response body too large to cache for idempotency; passing original body through, retries will be rejected"
-                    );
-                    if let Err(e) = self.mark(KeyStatus::CompletedTooLarge, status, None).await {
-                        error!(error = %e, "Failed to mark oversized idempotency key as completed_too_large");
-                    }
-                    Response::from_parts(parts, Body::from(bytes))
-                }
-                Ok(bytes) => {
-                    match std::str::from_utf8(&bytes) {
-                        Ok(body_str) => {
-                            if let Err(e) = self
-                                .mark(KeyStatus::Completed, status, Some(body_str))
-                                .await
-                            {
-                                error!(error = %e, "Failed to cache idempotency response");
-                            }
-                        }
-                        Err(_) => {
-                            warn!("Response body is not valid UTF-8, skipping idempotency cache");
-                            let _ = self.release().await;
-                        }
-                    }
-                    Response::from_parts(parts, Body::from(bytes))
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to read response body for idempotency cache");
-                    let _ = self.release().await;
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }
-            }
+            Settlement::Store => self.store(response).await,
         };
         self.settled = true;
         response
     }
 
+    async fn store(&self, response: Response) -> Response {
+        let status = response.status();
+        let (parts, body) = response.into_parts();
+        match to_bytes(body, usize::MAX).await {
+            Ok(bytes) if bytes.len() > MAX_RESPONSE_BODY_SIZE => {
+                // Too large to cache. Pass the FULL body through to the
+                // current client, then mark the key so retries get 409.
+                warn!(
+                    body_len = bytes.len(),
+                    cap = MAX_RESPONSE_BODY_SIZE,
+                    "Response body too large to cache for idempotency; passing original body through, retries will be rejected"
+                );
+                self.mark(KeyStatus::CompletedTooLarge, Some(status), None)
+                    .await;
+                Response::from_parts(parts, Body::from(bytes))
+            }
+            Ok(bytes) => {
+                match std::str::from_utf8(&bytes) {
+                    Ok(body_str) => {
+                        self.mark(KeyStatus::Completed, Some(status), Some(body_str))
+                            .await
+                    }
+                    Err(_) => {
+                        warn!("Response body is not valid UTF-8, not storing it for replay");
+                        self.mark(KeyStatus::CompletedNotStored, Some(status), None)
+                            .await
+                    }
+                }
+                Response::from_parts(parts, Body::from(bytes))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to read response body for idempotency cache");
+                self.mark(KeyStatus::OutcomeUnknown, Some(status), None)
+                    .await;
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+
     async fn mark(
         &self,
         new_status: KeyStatus,
-        response_status: StatusCode,
+        response_status: Option<StatusCode>,
         response_body: Option<&str>,
-    ) -> Result<(), DbErr> {
-        self.db
-            .execute_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                r#"UPDATE idempotency_key
-                   SET status = $1, response_status = $2, response_body = $3, completed_at = NOW()
-                   WHERE key = $4 AND user_id = $5 AND status = 'pending' AND created_at = $6"#,
-                [
-                    new_status.as_str().into(),
-                    (response_status.as_u16() as i16).into(),
-                    response_body.into(),
-                    self.key.as_str().into(),
-                    self.user_id.into(),
-                    self.epoch.into(),
-                ],
-            ))
-            .await?;
-        Ok(())
+    ) {
+        if let Err(e) = settle_claim(
+            &self.db,
+            &self.key,
+            self.user_id,
+            self.epoch,
+            new_status,
+            response_status,
+            response_body,
+        )
+        .await
+        {
+            error!(error = %e, status = new_status.as_str(), "Failed to settle idempotency key");
+        }
     }
 
     async fn release(&self) -> Result<(), DbErr> {
@@ -475,11 +512,39 @@ impl Drop for PendingClaim {
         let (db, key, user_id, epoch) =
             (self.db.clone(), self.key.clone(), self.user_id, self.epoch);
         handle.spawn(async move {
-            if let Err(e) = release_claim(&db, &key, user_id, epoch).await {
-                warn!(error = %e, key = %key, "Failed to release abandoned idempotency key");
+            let unknown = KeyStatus::OutcomeUnknown;
+            if let Err(e) = settle_claim(&db, &key, user_id, epoch, unknown, None, None).await {
+                warn!(error = %e, key = %key, "Failed to settle abandoned idempotency key");
             }
         });
     }
+}
+
+async fn settle_claim(
+    db: &DatabaseConnection,
+    key: &str,
+    user_id: i32,
+    epoch: DateTime<Utc>,
+    new_status: KeyStatus,
+    response_status: Option<StatusCode>,
+    response_body: Option<&str>,
+) -> Result<(), DbErr> {
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"UPDATE idempotency_key
+           SET status = $1, response_status = $2, response_body = $3, completed_at = NOW()
+           WHERE key = $4 AND user_id = $5 AND status = 'pending' AND created_at = $6"#,
+        [
+            new_status.as_str().into(),
+            response_status.map(|s| s.as_u16() as i16).into(),
+            response_body.into(),
+            key.into(),
+            user_id.into(),
+            epoch.into(),
+        ],
+    ))
+    .await?;
+    Ok(())
 }
 
 async fn release_claim(
@@ -544,5 +609,21 @@ mod tests {
         let (bytes, fingerprint) = buffer_and_fingerprint(Body::from("abc"), 10).await.unwrap();
         assert_eq!(&bytes[..], b"abc");
         assert_eq!(fingerprint, hex::encode(Sha256::digest(b"abc")));
+    }
+
+    #[test]
+    fn only_outcomes_that_prove_nothing_committed_release_the_key() {
+        assert_eq!(settlement_for(StatusCode::CREATED), Settlement::Store);
+        assert_eq!(settlement_for(StatusCode::BAD_REQUEST), Settlement::Release);
+        assert_eq!(settlement_for(StatusCode::CONFLICT), Settlement::Release);
+        assert_eq!(
+            settlement_for(StatusCode::REQUEST_TIMEOUT),
+            Settlement::Unknown
+        );
+        assert_eq!(
+            settlement_for(StatusCode::INTERNAL_SERVER_ERROR),
+            Settlement::Unknown
+        );
+        assert_eq!(settlement_for(StatusCode::BAD_GATEWAY), Settlement::Unknown);
     }
 }
