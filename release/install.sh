@@ -581,6 +581,26 @@ rehost_infra_urls() {
   done
 }
 
+# Single-host containers reach db and redis by service name. Compose cannot
+# percent-encode, so the in-container URLs are built here from the stored
+# credentials and the template only references them; a password holding `@`,
+# `#` or `/` would otherwise break the URL. Rebuilt on every run, which also
+# fills them in for env files from before they existed.
+single_host_local_urls() {
+  local pg_pw redis_pw user db key value
+  pg_pw="$(env_get "$ENV_FILE" POSTGRES_PASSWORD)"
+  redis_pw="$(env_get "$ENV_FILE" REDIS_PASSWORD)"
+  user="$(env_get "$ENV_FILE" POSTGRES_USER)"
+  db="$(env_get "$ENV_FILE" POSTGRES_DB)"
+  for key in BROCCOLI_LOCAL_DATABASE_URL BROCCOLI_LOCAL_MQ_URL; do
+    case "$key" in
+      *DATABASE*) value="$(postgres_url "${user:-postgres}" "$pg_pw" db 5432 "${db:-broccoli}")" ;;
+      *) value="$(redis_url "$redis_pw" redis 6379)" ;;
+    esac
+    [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] || env_set "$ENV_FILE" "$key" "$value"
+  done
+}
+
 print_env_review() {
   local file
   file="$1"
@@ -1140,6 +1160,7 @@ if [ -f "$ENV_FILE" ]; then
 else
   write_env_file
 fi
+[ "$ROLE" != "single-host" ] || single_host_local_urls
 
 review_env_file_interactive
 

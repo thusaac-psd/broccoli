@@ -56,9 +56,23 @@ render worker --env-file .env.worker -f docker-compose.worker.yaml.template
 BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' install_dry gateway
 render gateway --env-file .env.gateway -f docker-compose.gateway.yaml.template
 
-install_dry single-host
+POSTGRES_PASSWORD='p@ss #1/x' REDIS_PASSWORD='r%d' install_dry single-host
 render single-host --env-file .env.single-host \
   -f docker-compose.single-host.object-storage.yaml.template
+# A punctuated password reaches the containers percent-encoded in their URLs.
+single_env() {
+  docker compose --env-file .env.single-host -f docker-compose.single-host.object-storage.yaml.template \
+    config --format json 2>/dev/null \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["environment"][sys.argv[2]])' "$1" "$2"
+}
+[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
+  || fail "single-host database URL: $(single_env server BROCCOLI__DATABASE__URL)"
+[ "$(single_env worker BROCCOLI__MQ__URL)" = 'redis://:r%25d@redis:6379' ] || fail "single-host MQ URL"
+# An env file from before these URLs existed gets them on a re-run.
+sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
+install_dry single-host
+[ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
+  || fail "a single-host re-run did not restore the in-container URLs"
 
 BROCCOLI_ENV_FILE=.env.single-host-db BROCCOLI__STORAGE__BACKEND=database install_dry single-host
 render "single-host (database)" --env-file .env.single-host-db \
