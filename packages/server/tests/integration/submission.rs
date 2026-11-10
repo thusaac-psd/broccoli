@@ -2628,3 +2628,52 @@ mod backpressure {
         );
     }
 }
+
+mod page_window_bounds {
+    use super::*;
+
+    /// `page` large enough that `(page - 1) * 20` overflows `u64`.
+    const OVERFLOWING_PAGE: &str = "18446744073709551615";
+
+    /// Send a GET and return the status, or `None` if the server closed the
+    /// connection without answering (what a panicking handler looks like).
+    async fn status_of(app: &TestApp, path: &str, token: &str) -> Option<u16> {
+        app.client
+            .get(format!("http://{}{}", app.addr, path))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .ok()
+            .map(|r| r.status().as_u16())
+    }
+
+    async fn admin(app: &TestApp) -> String {
+        app.create_user_with_role("pg_admin", "password123", "admin")
+            .await
+    }
+
+    /// Testcase-result pages go through the same page window: an overflowing
+    /// `page` gets an answer below 500, never a dropped connection.
+    #[tokio::test]
+    async fn submission_result_page_overflow_is_a_validation_error() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = app
+            .create_submission(pid, &token, "cpp", "int main(){}")
+            .await;
+
+        let path = format!(
+            "{}?page={OVERFLOWING_PAGE}",
+            routes::submission_judgements(sid)
+        );
+        let status = status_of(&app, &path, &token).await;
+        assert_ne!(status, None, "{path}: connection dropped");
+        // 400 (bad page) or 404 (no judgement yet) are both fine; what matters is
+        // that the guarded arithmetic answers instead of panicking.
+        assert!(
+            status.unwrap() < 500,
+            "{path}: got {status:?}, expected a non-5xx"
+        );
+    }
+}
