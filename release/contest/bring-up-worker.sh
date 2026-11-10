@@ -32,7 +32,6 @@ done
 [ -x "$BUNDLE/install.sh" ] || { echo "install.sh not found at $BUNDLE (run from the extracted bundle)" >&2; exit 2; }
 [ -f "$BUNDLE/connection.env" ] || { echo "connection.env not found in $BUNDLE -- copy it from the infra box first" >&2; exit 2; }
 
-export BROCCOLI_SKIP_TIME_CHECK=1          # offline LAN: no clock check
 [ -z "$WID" ] || export BROCCOLI__WORKER__ID="$WID"
 # Only go non-interactive if the image is pinned; otherwise let install.sh ask.
 [ -n "${BROCCOLI_WORKER_IMAGE:-}" ] && export BROCCOLI_NONINTERACTIVE=1

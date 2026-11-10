@@ -120,6 +120,47 @@ server-secrets.env   # copy only to servers
 
 Workers do not need `server-secrets.env`.
 
+## Time Sync on an Offline LAN
+
+Every server and worker must agree on the time to within about a second. The
+message queue orders messages by the publisher's clock, so a server running
+ahead of a worker by some delta hides its work from that worker for that delta
+(and the other way round for results); a few seconds of skew add seconds to
+every test case, and hours of skew lose results. Worker liveness (10 s),
+refresh-token reuse and lease checks also compare clocks across machines. An
+offline venue has no internet NTP, so make the infra node the LAN's time
+server with chrony and point every other node at it. Containers use their
+host's clock, so this is host configuration.
+
+On the infra node, set the clock once (for example from a phone:
+`sudo date -s '2026-11-10 09:00:00'`), then in `/etc/chrony/chrony.conf`
+(`/etc/chrony.conf` on RHEL-family hosts):
+
+```
+# Serve this machine's clock to the LAN even without an upstream source.
+local stratum 8
+allow 10.0.0.0/24        # the venue LAN
+```
+
+On every server and worker node, replace the `pool`/`server` lines with:
+
+```
+server 10.0.0.10 iburst  # the infra node
+makestep 1 -1            # step the clock whenever it is more than 1 s off
+```
+
+Restart chrony (`sudo systemctl restart chrony`, or `chronyd`) everywhere, then
+check each node: `chronyc tracking` names the infra node as its reference and
+shows a system time offset well under a second, and `chronyc sources` marks it
+with `*`. Pointing contestant PCs at the same server also keeps contest
+countdowns and certificate validity honest.
+
+`install.sh` reports the platform time-sync status and, when online, compares
+the clock against an HTTPS `Date` header. Both checks only warn, and offline
+the HTTPS check gives up after three seconds, so leave it on for real events.
+`BROCCOLI_SKIP_TIME_CHECK=1` skips it entirely and exists for scripted test
+runs.
+
 ## Capacity Planning
 
 Broccoli's per-machine throughput is bounded by the worker's intra-process

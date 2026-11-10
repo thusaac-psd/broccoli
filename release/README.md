@@ -59,7 +59,10 @@ generated `.env.<role>` before any containers start.
 Before starting containers, the installer also checks the machine clock with the
 available platform time service (`timedatectl`, `chrony`, or macOS network time)
 and compares against an HTTPS `Date` header when `curl` and `python3` are
-available. Set `BROCCOLI_SKIP_TIME_CHECK=1` only for offline rehearsals.
+available. The check only warns, so keep it on offline too. What matters on a
+venue LAN is that all nodes agree with each other: serve time from the infra
+node with chrony, as in
+[docs/operator-runbook.md](docs/operator-runbook.md#time-sync-on-an-offline-lan).
 
 To install multiple roles from the same extracted bundle directory on one host,
 pass them in order:

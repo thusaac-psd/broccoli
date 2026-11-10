@@ -32,7 +32,10 @@ runbook sequences the whole hand-off around it.
 
 China LAN reality baked in: **nothing is fetched at deploy time.** Docker images
 are `docker load`-ed from the bundle (never pulled), the S3 copy is pure Python
-stdlib (no `aws-cli`), and the time-check is skipped (`BROCCOLI_SKIP_TIME_CHECK=1`).
+stdlib (no `aws-cli`), and the clock check only warns. Before the contest, make the
+infra box the LAN's time server and point every other box at it
+([../docs/operator-runbook.md](../docs/operator-runbook.md#time-sync-on-an-offline-lan)):
+servers and workers that disagree on the time delay or lose judging results.
 
 ---
 
@@ -82,7 +85,6 @@ contest box over USB or LAN scp. Extract to the same directory on each.
 
 ```bash
 cd <bundle>
-export BROCCOLI_SKIP_TIME_CHECK=1            # offline: no NTP/HTTPS clock check
 export BROCCOLI_INFRA_HOST=<box1-LAN-IP>     # so workers reach DB/MQ/S3 over the LAN
 ./install.sh infra server
 #   - choose object_storage (SeaweedFS) at the storage menu  [recommended]
@@ -110,7 +112,6 @@ Copy `connection.env` from Box 1 into each worker's bundle dir, then:
 ```bash
 cd <bundle>
 # (connection.env from box 1 is in this dir)
-export BROCCOLI_SKIP_TIME_CHECK=1
 ./install.sh worker     # the worker id defaults to one unique to this machine
 #   choose the 'icpc' worker image (C/C++/Python) at the worker-image menu
 ```

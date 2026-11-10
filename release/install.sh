@@ -596,6 +596,7 @@ check_clock_sync() {
   else
     echo "time sync: no timedatectl/chrony check available; continuing" >&2
   fi
+  echo "time sync: every server and worker must agree within about a second; offline, serve time from the infra node (docs/operator-runbook.md, Time Sync on an Offline LAN)"
 
   if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
     echo "warning: WSL detected. Make sure the Windows host clock is synchronized before judging." >&2
