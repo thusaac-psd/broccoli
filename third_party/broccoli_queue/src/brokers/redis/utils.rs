@@ -63,7 +63,10 @@ impl RedisBroker {
         {
             let script = redis::Script::new(
                 r#"
-                local current_time = tonumber(ARGV[1])
+                -- BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): Redis clock,
+                -- not the consumer's, so it matches the publish score's base.
+                local now = redis.call('TIME')
+                local current_time = tonumber(now[1]) * 1000000000 + tonumber(now[2]) * 1000
                 local queue_to_process = redis.call('LPOP', KEYS[1])
                 if not queue_to_process then
                 return nil
@@ -91,7 +94,7 @@ impl RedisBroker {
                 redis.call('SREM', KEYS[3], queue_to_process)
                 end
 
-                if ARGV[2] == "false" then
+                if ARGV[1] == "false" then
                     local processing_queue_name = string.format("%s_%s_processing", KEYS[2], queue_to_process)
                     redis.call('LPUSH', processing_queue_name, message)
                 end
@@ -101,7 +104,6 @@ impl RedisBroker {
             );
 
             script
-                .arg(time::OffsetDateTime::now_utc().unix_timestamp_nanos() as f64)
                 .arg(
                     options
                         .is_some_and(|x| x.auto_ack.unwrap_or(false))
@@ -115,7 +117,10 @@ impl RedisBroker {
         } else {
             let script = redis::Script::new(
                 r#"
-                local current_time = tonumber(ARGV[1])
+                -- BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): Redis clock,
+                -- not the consumer's, so it matches the publish score's base.
+                local now = redis.call('TIME')
+                local current_time = tonumber(now[1]) * 1000000000 + tonumber(now[2]) * 1000
                 local popped_message = redis.call('ZPOPMIN', KEYS[1], 1)
                 if #popped_message == 0 then
                 return nil
@@ -129,7 +134,7 @@ impl RedisBroker {
                 return nil
                 end
                 
-                if ARGV[2] == "false" then
+                if ARGV[1] == "false" then
                     redis.call('LPUSH', KEYS[2], message)
                 end
                 return message
@@ -137,7 +142,6 @@ impl RedisBroker {
             );
 
             script
-                .arg(time::OffsetDateTime::now_utc().unix_timestamp_nanos() as f64)
                 .arg(
                     options
                         .is_some_and(|x| x.auto_ack.unwrap_or(false))

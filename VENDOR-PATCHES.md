@@ -8,7 +8,8 @@ re-vendor.
 
 ## `broccoli_queue` 0.4.6 (`third_party/broccoli_queue`)
 
-Two message-loss bugs in the Redis broker path. Both silently drop a message
+Patches 1, 2, 4 and 5 fix bugs in the Redis broker path; patch 3 is a lint
+fix. The first two are message-loss bugs. Both silently drop a message
 that the queue is supposed to retry or dead-letter, and neither is reachable
 from our own code (they live inside `reject` / `process_messages`), so they can
 only be fixed in the crate itself.
@@ -89,10 +90,33 @@ Patch: the per-task loop yields instead of sleeping. `consume` awaits Redis I/O
 and naps on an empty queue, so the task is still abortable. With `consume_wait`
 unset (every other consumer) behavior is unchanged: upstream slept zero there.
 
+### 5. Message visibility depends on publisher vs consumer wall clocks
+
+`src/brokers/redis/broker.rs` (`RedisBroker::publish`) and
+`src/brokers/redis/utils.rs` (`RedisBroker::get_task_id`, both consume
+scripts).
+
+Upstream scores a published message as `priority x publisher's now()` and the
+consume script pops the minimum but pushes it back while
+`score > 5 x consumer's now()`. Both clocks were the hosts' own wall clocks, so
+at priority 5 (the default for worker results and server op tasks) a message
+from a host whose clock ran ahead of the consumer by D stayed invisible for D.
+On an offline LAN without NTP that added the skew to every operation
+round-trip, and with hours of skew results were effectively lost.
+
+Patch: both scripts read Redis `TIME` instead of taking a client timestamp, so
+the only clock involved is Redis's. The publisher passes only a relative delay
+(0 unless scheduling is enabled and a delay was requested) or, for
+`scheduled_at`, the explicit absolute instant the caller asked for. The score
+format (`priority x unix nanoseconds`) and so the priority encoding are
+unchanged, which keeps upgrades safe: a message already in Redis from the old
+code is consumed normally (it is still gated by its old publisher's clock that
+one time). `TIME` before a write is fine on Redis >= 5, which replicates script
+effects rather than script bodies.
+
 ### Re-vendoring
 
 To pull a new upstream version: replace `third_party/broccoli_queue`, bump the
-version here and in `[patch.crates-io]`, and re-apply all four patches (grep for
-`BROCCOLI VENDOR PATCH`). If upstream fixes the two message-loss bugs, drop the
-vendor and the `[patch.crates-io]` entry (the lint patch is only needed while we
-vendor).
+version here and in `[patch.crates-io]`, and re-apply all five patches (grep for
+`BROCCOLI VENDOR PATCH`). If upstream fixes the message-loss and clock bugs, drop the vendor and the `[patch.crates-io]` entry (the lint patch is only
+needed while we vendor).

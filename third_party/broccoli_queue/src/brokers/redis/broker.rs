@@ -97,30 +97,34 @@ impl Broker for RedisBroker {
                 items.push(("disambiguator", disambiguator));
             }
 
-            let mut score = time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
-
             redis_connection
                 .hset_multiple::<&str, &str, &str, String>(&msg.task_id.to_string(), &items)
                 .await?;
 
+            // BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): upstream computed
+            // the score from the PUBLISHER's wall clock here and the consume
+            // script compared it with the CONSUMER's wall clock, so a message
+            // from a host whose clock ran ahead by D stayed invisible for D (at
+            // priority 5). The score's time base is now Redis `TIME`, read
+            // inside the ZADD script; the publisher only contributes a relative
+            // delay or (for `scheduled_at`) an explicit absolute instant.
+            let scheduling = self
+                .config
+                .as_ref()
+                .is_some_and(|c| c.enable_scheduling.unwrap_or(false));
+            let mut delay_ns: i64 = 0;
+            let mut absolute_ns = String::new();
+
             if let Some(ref publish_options) = publish_options {
                 if let Some(delay) = publish_options.delay {
-                    if self
-                        .config
-                        .as_ref()
-                        .is_some_and(|c| c.enable_scheduling.unwrap_or(false))
-                    {
-                        score += (delay.as_seconds_f32() * 1_000_000_000.0) as i64;
+                    if scheduling {
+                        delay_ns = (delay.as_seconds_f32() * 1_000_000_000.0) as i64;
                     }
                 }
 
                 if let Some(timestamp) = publish_options.scheduled_at {
-                    if self
-                        .config
-                        .as_ref()
-                        .is_some_and(|c| c.enable_scheduling.unwrap_or(false))
-                    {
-                        score = timestamp.unix_timestamp_nanos() as i64;
+                    if scheduling {
+                        absolute_ns = (timestamp.unix_timestamp_nanos() as i64).to_string();
                     }
                 }
 
@@ -138,9 +142,16 @@ impl Broker for RedisBroker {
                 r#"
                 local base_queue_name = KEYS[1]
                 local task_id = ARGV[1]
-                local score = tonumber(ARGV[2])
+                local delay_ns = tonumber(ARGV[2])
                 local priority = tonumber(ARGV[3])
                 local disambiguator = ARGV[4]
+                local absolute_ns = tonumber(ARGV[5])
+
+                local score = absolute_ns
+                if not score then
+                    local now = redis.call('TIME')
+                    score = tonumber(now[1]) * 1000000000 + tonumber(now[2]) * 1000 + delay_ns
+                end
 
                 local queue_name = base_queue_name
                 if disambiguator ~= '' then
@@ -167,9 +178,10 @@ impl Broker for RedisBroker {
             script
                 .key(queue_name)
                 .arg(&msg.task_id)
-                .arg(score)
+                .arg(delay_ns)
                 .arg(priority)
                 .arg(&disambiguator_str)
+                .arg(&absolute_ns)
                 .invoke_async::<()>(&mut redis_connection)
                 .await?;
         }
