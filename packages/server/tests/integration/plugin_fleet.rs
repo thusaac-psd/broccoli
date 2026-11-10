@@ -937,3 +937,43 @@ async fn a_retired_replica_row_stays_retired() {
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
     assert_eq!(rows().await, 0, "no ghost row after retire");
 }
+
+/// During a SIGTERM, an evaluator's running call can make a nested host call
+/// (language resolution) back into a plugin; refusing it would fail the
+/// judgement. A call made from inside an admitted call
+/// (the same blocking thread, bridged with `block_on`, as host functions do)
+/// is admitted after close; a fresh call is refused with `ShuttingDown`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nested_plugin_call_is_admitted_while_shutdown_drains() {
+    use plugin_core::call_gate::ThreadInCall;
+    use plugin_core::error::PluginError;
+
+    let a = TestApp::spawn_with_plugins().await;
+    let plugins = a.state.plugins.clone();
+    let gate = plugins
+        .call_gate()
+        .expect("server manager gates calls")
+        .clone();
+    let input = || serde_json::to_vec(&json!({})).unwrap();
+
+    let nested = tokio::task::spawn_blocking({
+        let plugins = plugins.clone();
+        let gate = gate.clone();
+        move || {
+            // The outer call's blocking closure: admitted, then shutdown begins.
+            let _outer = gate.enter().expect("admitted before close");
+            let _in_call = ThreadInCall::enter();
+            gate.close();
+            tokio::runtime::Handle::current().block_on(plugins.call_raw(PLUGIN, "reflect", input()))
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !matches!(nested, Err(PluginError::ShuttingDown)),
+        "the nested call must not be refused: {nested:?}"
+    );
+
+    let fresh = plugins.call_raw(PLUGIN, "reflect", input()).await;
+    assert!(matches!(fresh, Err(PluginError::ShuttingDown)), "{fresh:?}");
+}
