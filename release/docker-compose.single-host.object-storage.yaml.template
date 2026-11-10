@@ -64,3 +64,4 @@ volumes:
   seaweed_data:
   server_data:
   worker_data:
+  worker_box_slots:

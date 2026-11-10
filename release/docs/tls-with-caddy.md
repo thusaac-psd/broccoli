@@ -32,13 +32,19 @@ caddy run --config examples/Caddyfile
 
 ## Trusted Proxies
 
-On every server node behind the gateway, set `BROCCOLI__SERVER__TRUSTED_PROXIES`
-to the gateway machine's private CIDR or IP:
+Every server node behind the gateway must trust the gateway's address, and
+only that address, for `X-Forwarded-For`. Without it, login and register rate
+limits key on the gateway and the whole venue shares one budget; with a wider
+range, any client inside it can forge its address. `install.sh gateway` prints
+the addresses its upstreams see it as. On each server node run:
 
 ```bash
-BROCCOLI__SERVER__TRUSTED_PROXIES='["10.0.0.5/32"]'
-BROCCOLI__AUTH__SECURE_COOKIES=true
+BROCCOLI_GATEWAY_HOSTS='10.0.0.5' ./install.sh server
 ```
+
+which writes `BROCCOLI__SERVER__TRUSTED_PROXIES='["10.0.0.5/32"]'` into
+`.env.server`. With HTTPS at the gateway, also set
+`BROCCOLI__AUTH__SECURE_COOKIES=true` there.
 
 ## Troubleshooting
 

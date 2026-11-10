@@ -5,11 +5,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 . "$here/lib/runtime.sh"
-# In a bundle plugins.sh sits in lib/; in a repo checkout, in release/lib/.
-plugins_lib="$here/lib/plugins.sh"
-[ -f "$plugins_lib" ] || plugins_lib="$here/../lib/plugins.sh"
-# shellcheck source=/dev/null
-. "$plugins_lib"
+# shellcheck source=lib/release-lib.sh
+. "$here/lib/release-lib.sh"
 
 usage() {
   echo "Usage: install.sh --role {server|worker|contestant} --bundle DIR [--lan-host H] [--server-secret DIR] [--burn-ca-key]"
@@ -61,11 +58,13 @@ case "$ROLE" in
     SECRET="${SECRET:-${abs_bundle}.server-secret}"
     [ -d "$SECRET" ] || { echo "server-secret dir not found: $SECRET — deliver the '<bundle>.server-secret' dir to this host, or pass --server-secret DIR" >&2; exit 2; }
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
-    # Ensure a TLS leaf exists in the secret dir: pre-issued at assembly, or
-    # issue it now from the CA key that lives only here.
-    if [ ! -f "$SECRET/server.crt" ] || [ ! -f "$SECRET/server.key" ]; then
-      [ -f "$SECRET/root.key" ] || { echo "no leaf and no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host, or place root.key in the server-secret dir (server host only)" >&2; exit 2; }
-      [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
+    # Ensure the secret dir holds a current TLS leaf for --lan-host: keep a
+    # pre-issued or earlier one only if it chains to this CA, covers LAN_HOST
+    # and is not about to expire; otherwise issue one now from the CA key that
+    # lives only here. A venue whose address moved therefore gets a new leaf.
+    [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
+    if ! bash "$here/ca/issue-leaf.sh" --check --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"; then
+      [ -f "$SECRET/root.key" ] || { echo "the leaf in $SECRET is missing, expiring, or does not cover $LAN_HOST, and there is no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host $LAN_HOST, or place root.key in the server-secret dir (server host only)" >&2; exit 2; }
       bash "$here/ca/issue-leaf.sh" --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"
     fi
     if [ "$BURN" = "1" ]; then rm -f "$SECRET/root.key"; echo "burned $SECRET/root.key"; fi
@@ -85,6 +84,14 @@ case "$ROLE" in
     # operator ops still reach it. Universal across Compose versions (an override
     # `ports: !reset []` would hard-fail below Compose v2.24, no offline remedy).
     export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-127.0.0.1:3000}"
+    # The server trusts X-Forwarded-For only from the gateway: the edge network
+    # it shares with the gateway here, or BROCCOLI_GATEWAY_HOSTS when the
+    # gateway runs on its own host. The subnet default matches the templates'.
+    export BROCCOLI_EDGE_SUBNET="${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
+    BROCCOLI_GATEWAY_TRUSTED_PROXIES="$(trusted_proxies_json "${BROCCOLI_GATEWAY_HOSTS:-$BROCCOLI_EDGE_SUBNET}")" \
+      || { echo "BROCCOLI_GATEWAY_HOSTS must list IP addresses or CIDRs" >&2; exit 2; }
+    export BROCCOLI_GATEWAY_TRUSTED_PROXIES
+    echo "server trusts forwarded client addresses only from $BROCCOLI_GATEWAY_TRUSTED_PROXIES"
     echo "TLS gateway will serve https://$LAN_HOST using leaf in $abs_secret"
     echo "server plaintext :3000 bound to host loopback ($BROCCOLI_HTTP_BIND); 443 is the only LAN entrypoint"
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
@@ -107,6 +114,7 @@ case "$ROLE" in
         --env-file .env.infra --env-file .env.server
         -f docker-compose.infra.yaml.template
         -f docker-compose.server.yaml.template
+        -f docker-compose.server-airgap.yaml.template
         -f docker-compose.gateway-airgap.yaml.template
       )
       $COMPOSE "${compose_args[@]}" up -d --pull never
@@ -123,19 +131,16 @@ case "$ROLE" in
   worker)
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
     # build-bundle.sh stages the preflight into the bundle at native/.
+    # --host-only: isolate and the compilers live in the worker image, so only
+    # the host's kernel side (cgroup v2, systemd) is checked here.
     preflight="$here/native/live-boot-preflight.sh"
     if [ -x "$preflight" ]; then
-      bash "$preflight" || echo "WARN: worker sandbox preflight reported issues"
+      bash "$preflight" --host-only || echo "WARN: worker host preflight reported issues"
     else
       echo "WARN: sandbox preflight not found at $preflight — skipping go/no-go check" >&2
     fi
-    # Surface a genuine trust failure; only unsupported-OS is a soft warning.
-    helper="$(os_helper)"
-    if [ -n "$helper" ]; then
-      bash "$helper" "$BUNDLE/ca/root.crt" || { echo "ERROR: CA trust failed" >&2; exit 1; }
-    else
-      echo "WARN: unsupported OS for CA trust helper; trust $BUNDLE/ca/root.crt manually" >&2
-    fi
+    # No CA trust step: a worker talks plain Postgres, Redis and S3 to the
+    # server host and never makes a TLS connection to the gateway.
     # Bring the worker up against the server's LAN infra. .env.worker is
     # rendered by setup.sh (secrets from the cluster-secret sidecar).
     worker_env="$BUNDLE/compose/.env.worker"
@@ -153,7 +158,7 @@ case "$ROLE" in
     # generated .env.worker), so a worker on the server host gets its own
     # network and is never an orphan of the server stack. A .env.worker from
     # before that keeps the old shared name, and with it its volumes.
-    worker_project="$(sed -n "s/^COMPOSE_PROJECT_NAME=['\"]\{0,1\}\([^'\"]*\).*/\1/p" "$worker_env" | tail -n 1)"
+    worker_project="$(env_get "$worker_env" COMPOSE_PROJECT_NAME)"
     ( cd "$BUNDLE/compose" && $COMPOSE -p "${worker_project:-compose}" --env-file .env.worker \
         -f docker-compose.worker.yaml.template up -d --pull never )
     echo "worker started against server infra (compose up --pull never)"

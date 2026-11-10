@@ -33,6 +33,11 @@ case "$VERSION" in
   *[!A-Za-z0-9._-]*) echo "--version must match [A-Za-z0-9._-] (got: $VERSION)" >&2; exit 2 ;;
 esac
 
+# Provenance stamped into the images and bundle.json: the commit and the
+# moment this bundle was built.
+git_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)"
+created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 B="$OUTPUT/broccoli-airgap-$VERSION"
 rm -rf "$B"
 mkdir -p "$B"/{images,compose,cli,ca,caddy,trust-ca,lib,native}
@@ -67,10 +72,10 @@ chmod 600 "$CLS/cluster-secrets.env"
 # 2. Target-side scripts + Caddyfile + trust helpers + installer libs
 cp "$here/load-bundle.sh" "$here/install.sh" "$here/setup.sh" "$B/"
 cp "$here"/lib/*.sh "$B/lib/"
-cp "$repo/release/lib/plugins.sh" "$B/lib/plugins.sh"
+cp "$repo"/release/lib/*.sh "$B/lib/"
 cp "$repo/release/enable-plugin.sh" "$B/enable-plugin.sh"
 cp "$here/caddy/Caddyfile.airgap" "$B/caddy/Caddyfile.airgap"
-cp "$here"/ca/issue-leaf.sh "$B/ca/issue-leaf.sh"
+cp "$here"/ca/issue-leaf.sh "$here"/ca/sign.sh "$B/ca/"
 cp "$here"/trust-ca/* "$B/trust-ca/"
 cp "$repo/release/native/live-boot-preflight.sh" "$B/native/live-boot-preflight.sh"
 chmod +x "$B/native/live-boot-preflight.sh"
@@ -79,6 +84,7 @@ chmod +x "$B/native/live-boot-preflight.sh"
 cp "$repo/release/docker-compose.server.yaml.template" \
    "$repo/release/docker-compose.infra.yaml.template" \
    "$repo/release/docker-compose.worker.yaml.template" \
+   "$repo/release/docker-compose.server-airgap.yaml.template" \
    "$repo/release/docker-compose.gateway-airgap.yaml.template" "$B/compose/"
 cp "$repo/release/.env.server.example" "$repo/release/.env.infra.example" \
    "$repo/release/.env.worker.example" "$B/compose/"
@@ -108,22 +114,23 @@ if [ "$SKIP_IMAGES" = "0" ]; then
   [ -n "${BROCCOLI_RUNTIME_IMAGE:-}" ] && \
     server_runtime_arg=(--build-arg "RUNTIME_IMAGE=$BROCCOLI_RUNTIME_IMAGE")
 
-  # Stamp the bundle version into both images' OCI version label. Both
-  # Dockerfiles carry `ARG VERSION=dev` -> org.opencontainers.image.version;
-  # without this build-arg every shipped image reports "dev" regardless of the
-  # bundle version. Air-gapped targets have no registry to query, so
-  # `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}'`
-  # on the loaded image is the ONLY offline way to tell one bundle's images
-  # from the next's (e.g. verifying an upgrade actually swapped the image).
-  version_build_arg=(--build-arg "VERSION=$VERSION")
+  # Stamp provenance into both images' OCI labels. Both Dockerfiles carry
+  # `ARG VERSION=dev`, `ARG REVISION=unknown` and `ARG CREATED=unknown` ->
+  # org.opencontainers.image.{version,revision,created}; without these
+  # build-args every shipped image reports "dev"/"unknown". Air-gapped targets
+  # have no registry to query, so
+  # `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
+  # on the loaded image is the ONLY offline way to tell which commit a site
+  # runs (e.g. whether it includes a given fix) or that an upgrade swapped it.
+  provenance_build_args=(--build-arg "VERSION=$VERSION" --build-arg "REVISION=$git_sha" --build-arg "CREATED=$created")
 
   # broccoli images — built from the repo. Frontend is baked fresh into the
   # server image (verify served bundle behaviorally, not by mtime).
   "$ENGINE" build -f "$repo/Dockerfile.server" \
-    "${mirror_build_args[@]}" "${server_runtime_arg[@]}" "${version_build_arg[@]}" \
+    "${mirror_build_args[@]}" "${server_runtime_arg[@]}" "${provenance_build_args[@]}" \
     -t "broccoli-server:$VERSION" "$repo"
   "$ENGINE" build -f "$repo/Dockerfile.worker" --target runtime-full \
-    "${mirror_build_args[@]}" "${version_build_arg[@]}" \
+    "${mirror_build_args[@]}" "${provenance_build_args[@]}" \
     -t "broccoli-worker:$VERSION" "$repo"
 
   # Default plugins for the bind-mount source. The server + worker compose
@@ -191,11 +198,11 @@ if [ "$SKIP_IMAGES" = "0" ]; then
 fi
 
 # 5. Provenance + integrity
-git_sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo unknown)"
 cat > "$B/bundle.json" <<JSON
 {
   "version": "$VERSION",
   "git_sha": "$git_sha",
+  "created": "$created",
   "roles": ["server", "worker", "contestant"]
 }
 JSON

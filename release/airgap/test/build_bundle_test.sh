@@ -15,8 +15,9 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 bash "$bb" --version testv --output "$T" --skip-images >/dev/null
 b="$T/broccoli-airgap-testv"
 for p in bundle.json manifest.sha256 ca/root.crt caddy/Caddyfile.airgap \
-         compose/docker-compose.gateway-airgap.yaml.template \
-         load-bundle.sh install.sh setup.sh trust-ca/linux.sh compose \
+         compose/docker-compose.gateway-airgap.yaml.template compose/docker-compose.server-airgap.yaml.template \
+         lib/release-lib.sh lib/env.sh lib/host.sh lib/plugins.sh \
+         load-bundle.sh install.sh setup.sh trust-ca/linux.sh compose ca/issue-leaf.sh ca/sign.sh \
          lib/manifest.sh lib/runtime.sh lib/answers.sh lib/envgen.sh \
          lib/preflight.sh native/live-boot-preflight.sh; do
   [ -e "$b/$p" ] || { echo "FAIL: bundle missing $p"; exit 1; }
@@ -28,9 +29,9 @@ for p in compose/docker-compose.worker.yaml.template compose/.env.worker.example
   [ -e "$b/$p" ] || { echo "FAIL: bundle missing $p"; exit 1; }
 done
 # staged env examples carry LOCAL versioned image tags so target `--pull never` resolves
-grep -qx 'BROCCOLI_SERVER_IMAGE=broccoli-server:testv' "$b/compose/.env.server.example" \
+grep -qx "BROCCOLI_SERVER_IMAGE='broccoli-server:testv'" "$b/compose/.env.server.example" \
   || { echo "FAIL: .env.server.example image tag not rewritten to broccoli-server:testv"; exit 1; }
-grep -qx 'BROCCOLI_WORKER_IMAGE=broccoli-worker:testv' "$b/compose/.env.worker.example" \
+grep -qx "BROCCOLI_WORKER_IMAGE='broccoli-worker:testv'" "$b/compose/.env.worker.example" \
   || { echo "FAIL: .env.worker.example image tag not rewritten to broccoli-worker:testv"; exit 1; }
 # manifest actually verifies
 # shellcheck source=/dev/null
@@ -138,13 +139,18 @@ set_out="$( set -u
 #     one bundle's images from the next's (e.g. confirming an in-place upgrade
 #     actually swapped the image). Unlike the mirror levers this is
 #     unconditional — every build stamps it. ---
-grep -qE 'version_build_arg=\(--build-arg "VERSION=\$VERSION"\)' "$bb" \
-  || { echo "FAIL: build-bundle must stamp the bundle VERSION via --build-arg VERSION (image OCI label is the only offline provenance signal)"; exit 1; }
-awk '/Dockerfile.server/{s=1} s&&/version_build_arg\[@\]/{sv=1} /-t "broccoli-server/{s=0}
-     /Dockerfile.worker/{w=1} w&&/version_build_arg\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
-     END{ if(!sv){print "MISS server version"; exit 1}
-          if(!wv){print "MISS worker version"; exit 1} }' "$bb" \
-  || { echo "FAIL: --build-arg VERSION not wired into both image builds"; exit 1; }
+for arg in 'VERSION=\$VERSION' 'REVISION=\$git_sha' 'CREATED=\$created'; do
+  grep -qE "provenance_build_args=\(.*--build-arg \"$arg\"" "$bb" \
+    || { echo "FAIL: build-bundle must stamp $arg via --build-arg (image OCI labels are the only offline provenance signal)"; exit 1; }
+done
+grep -qE '^git_sha="\$\(git -C "\$repo" rev-parse HEAD' "$bb" || { echo "FAIL: REVISION is not the repo commit"; exit 1; }
+awk '/Dockerfile.server/{s=1} s&&/provenance_build_args\[@\]/{sv=1} /-t "broccoli-server/{s=0}
+     /Dockerfile.worker/{w=1} w&&/provenance_build_args\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
+     END{ if(!sv){print "MISS server provenance"; exit 1}
+          if(!wv){print "MISS worker provenance"; exit 1} }' "$bb" \
+  || { echo "FAIL: provenance build-args not wired into both image builds"; exit 1; }
+grep -q "\"git_sha\": \"$(git -C "$here" rev-parse HEAD)\"" "$b/bundle.json" \
+  || { echo "FAIL: bundle.json does not record the commit"; exit 1; }
 
 # --- third-party image pull must tolerate a blocked registry when the image is
 #     ALREADY in the local store. This air-gap feature targets mirror-fronted /

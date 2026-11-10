@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 # shellcheck source=lib/plugins.sh
 . "$ROOT/lib/plugins.sh"
+# shellcheck source=lib/env.sh
+. "$ROOT/lib/env.sh"
+# shellcheck source=lib/host.sh
+. "$ROOT/lib/host.sh"
 BUNDLE_VERSION_DEFAULT="v0.3.0"
 
 die() {
@@ -171,14 +175,61 @@ primary_ip() {
   hostname -I 2>/dev/null | awk '{print $1}' || true
 }
 
-env_quote() {
-  local value
-  value="$1"
-  case "$value" in
-    *$'\n'*|*$'\r'*) die "environment values must not contain newlines" ;;
-  esac
-  value=${value//\'/\'\\\'\'}
-  printf "'%s'" "$value"
+# Settle BROCCOLI_INFRA_HOST, the address servers and workers dial for DB, MQ
+# and S3. A guess is never silent: several addresses make the installer say
+# which one it took, and none at all stops an infra install, since 127.0.0.1
+# would point every other machine at itself. Called directly, not in $(...),
+# so that die stops the install.
+resolve_infra_host() {
+  local addrs
+  [ -z "${BROCCOLI_INFRA_HOST:-}" ] || return 0
+  addrs="$(hostname -I 2>/dev/null || true)"
+  # shellcheck disable=SC2086
+  set -- $addrs
+  if [ "$#" -eq 0 ]; then
+    [ "$ROLE" = "single-host" ] || die "cannot detect this machine's LAN address; set BROCCOLI_INFRA_HOST to the address servers and workers will use"
+    BROCCOLI_INFRA_HOST=127.0.0.1
+    return 0
+  fi
+  if [ "$#" -gt 1 ]; then
+    echo "warning: this machine has several addresses ($*); servers and workers will be told to use $1." >&2
+    echo "warning: set BROCCOLI_INFRA_HOST to choose another one." >&2
+  fi
+  BROCCOLI_INFRA_HOST="$1"
+}
+
+# Behind a gateway every request reaches a server from the gateway's address.
+# Unless the server trusts the gateway's X-Forwarded-For, login and register
+# limits key on that one address and the whole venue shares one budget.
+# BROCCOLI_GATEWAY_HOSTS names the gateway(s); trust exactly those.
+gateway_trusted_proxies() {
+  [ -n "${BROCCOLI_GATEWAY_HOSTS:-}" ] || return 0
+  BROCCOLI__SERVER__TRUSTED_PROXIES="$(trusted_proxies_json "$BROCCOLI_GATEWAY_HOSTS")" \
+    || die "BROCCOLI_GATEWAY_HOSTS must list IP addresses or CIDRs, separated by spaces"
+}
+
+# Tell the operator which address each upstream server sees this gateway as,
+# and how to make that server trust it.
+print_gateway_trust_hint() {
+  local upstream host addr addrs=""
+  for upstream in $BROCCOLI_UPSTREAMS; do
+    host="${upstream%:*}"
+    host="${host#[}"
+    host="${host%]}"
+    addr="$(source_ip_for "$host")"
+    [ -n "$addr" ] || addr="$(primary_ip)"
+    [ -n "$addr" ] || continue
+    case " $addrs " in
+      *" $addr "*) ;;
+      *) addrs="$addrs${addrs:+ }$addr" ;;
+    esac
+  done
+  [ -n "$addrs" ] || addrs="<this gateway's LAN address>"
+  cat <<EOF
+Servers behind this gateway must trust it for X-Forwarded-For, or every
+contestant shares one login rate limit. On each server node run:
+  BROCCOLI_GATEWAY_HOSTS='$addrs' ./install.sh server
+EOF
 }
 
 bind_port() {
@@ -187,27 +238,98 @@ bind_port() {
   printf '%s' "${bind##*:}"
 }
 
-json_string_value() {
-  local name value
-  name="$1"
-  value="$2"
-  case "$value" in
-    *$'\n'*|*$'\r'*|*\"*|*\\*) die "$name cannot contain newlines, quotes, or backslashes" ;;
-  esac
-  printf '"%s"' "$value"
+# The seaweedfs service writes the S3 keys into a JSON identity file, so they
+# must be plain JSON string content.
+require_json_safe() {
+  local name
+  for name in "$@"; do
+    case "${!name:-}" in
+      *\"*|*\\*) die "$name cannot contain double quotes or backslashes" ;;
+    esac
+  done
 }
 
 # Each role is its own Compose project (COMPOSE_PROJECT_NAME, written into
 # new env files), so roles installed from one directory get separate networks
 # and never treat each other's containers as orphans. Env files written before
-# that keep Compose's default, the directory name, so an upgrade does not
-# attach an existing install to new, empty volumes.
+# that have no project name and run under Compose's default, the directory
+# name; guard_unpinned_project_name stops one from starting on empty volumes
+# after it was copied into a new bundle directory.
 compose() {
   if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
     docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
   else
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
   fi
+}
+
+# The volume holding each role's data, named as in its compose template.
+role_data_volume() {
+  case "$ROLE" in
+    infra|single-host) echo postgres_data ;;
+    server) echo server_data ;;
+    worker) echo worker_data ;;
+  esac
+}
+
+# An env file without COMPOSE_PROJECT_NAME takes the directory name as its
+# project, as Compose normalizes it. Bundle directories are versioned
+# (broccoli-platform-v0.2.0), so copying such a file into a new release's
+# directory would start the role on new, empty volumes, for infra an empty
+# database. Refuse when this role's data volume exists only under another
+# project, and say which name to pin.
+guard_unpinned_project_name() {
+  local volume current projects
+  [ -z "${COMPOSE_PROJECT_NAME:-}" ] || return 0
+  volume="$(role_data_volume)"
+  [ -n "$volume" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  current="$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')"
+  projects="$(docker volume ls --filter "label=com.docker.compose.volume=$volume" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u)" || return 0
+  [ -n "$projects" ] || return 0
+  printf '%s\n' "$projects" | grep -qx "$current" && return 0
+  die "$ENV_FILE sets no COMPOSE_PROJECT_NAME, so this directory would run as project '$current' with new, empty volumes, but this host keeps '$volume' for: $(printf '%s\n' "$projects" | tr '\n' ' ')
+Add COMPOSE_PROJECT_NAME='<the project to keep>' to $ENV_FILE to keep that data (or a new name to start empty), then re-run."
+}
+
+# Re-running a role from a newer bundle keeps its env file, which still names
+# the previous release's images. Point it at the images just loaded from this
+# bundle. Infra images are left alone: those are upgraded only deliberately.
+refresh_bundled_image_tags() {
+  local current variant image
+  case "$ROLE" in
+    server|single-host)
+      [ -z "${loaded_server_image:-}" ] || env_set_if_changed BROCCOLI_SERVER_IMAGE "$loaded_server_image"
+      ;;
+  esac
+  case "$ROLE" in
+    worker|single-host)
+      current="$(env_get "$ENV_FILE" BROCCOLI_WORKER_IMAGE)"
+      case "$current" in
+        *-icpc) variant=icpc ;;
+        *-full) variant=full ;;
+        *-base) variant=base ;;
+        *) variant="" ;;
+      esac
+      case "$variant" in
+        icpc) image="${loaded_worker_icpc_image:-${loaded_worker_image:-}}" ;;
+        full) image="${loaded_worker_full_image:-}" ;;
+        base) image="${loaded_worker_base_image:-}" ;;
+        *) image="" ;;
+      esac
+      [ -z "$image" ] || env_set_if_changed BROCCOLI_WORKER_IMAGE "$image"
+      ;;
+    gateway)
+      [ -z "${loaded_caddy_image:-}" ] || env_set_if_changed CADDY_IMAGE "$loaded_caddy_image"
+      ;;
+  esac
+}
+
+env_set_if_changed() {
+  [ "$(env_get "$ENV_FILE" "$1")" != "$2" ] || return 0
+  env_set "$ENV_FILE" "$1" "$2"
+  echo "updated $1 in $ENV_FILE to $2"
 }
 
 start_role() {
@@ -236,23 +358,10 @@ load_image() {
   printf '%s\n' "$image_tag"
 }
 
-single_host_storage_backend_from_env_file() {
-  [ -f "$ENV_FILE" ] || return 1
-  awk -F= '
-    $1 == "BROCCOLI__STORAGE__BACKEND" {
-      value = $2
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      gsub(/^'\''|'\''$/, "", value)
-      print value
-      exit
-    }
-  ' "$ENV_FILE"
-}
-
 single_host_plans_object_storage() {
   [ "${BROCCOLI__STORAGE__BACKEND:-}" = "object_storage" ] && return 0
   [ -z "${BROCCOLI__STORAGE__BACKEND:-}" ] && [ ! -f "$ENV_FILE" ] && return 0
-  [ "$(single_host_storage_backend_from_env_file)" = "object_storage" ]
+  [ "$(env_get "$ENV_FILE" BROCCOLI__STORAGE__BACKEND)" = "object_storage" ]
 }
 
 load_bundled_images() {
@@ -383,28 +492,50 @@ server_secrets_env_file() {
   printf '%s\n' "${BROCCOLI_SERVER_SECRETS_ENV_FILE:-server-secrets.env}"
 }
 
-load_connection_env_if_present() {
-  local file secrets_file
-  file="$(connection_env_file)"
+# The files the infra install hands to this role: connection.env for servers
+# and workers, plus server-secrets.env for servers. Prints those present.
+shared_env_files() {
+  local file
   case "$ROLE" in
-    server|worker)
-      [ -f "$file" ] || return 0
-      echo "loading shared LAN connection settings from $file"
-      set -a
-      # shellcheck disable=SC1090
-      source "$file"
-      set +a
-      ;;
+    server) set -- "$(connection_env_file)" "$(server_secrets_env_file)" ;;
+    worker) set -- "$(connection_env_file)" ;;
+    *) return 0 ;;
   esac
-  if [ "$ROLE" = "server" ]; then
-    secrets_file="$(server_secrets_env_file)"
-    [ -f "$secrets_file" ] || return 0
-    echo "loading server-only settings from $secrets_file"
+  for file in "$@"; do
+    [ -f "$file" ] && printf '%s\n' "$file"
+  done
+  return 0
+}
+
+load_connection_env_if_present() {
+  local file
+  while IFS= read -r file; do
+    echo "loading shared settings from $file"
     set -a
     # shellcheck disable=SC1090
-    source "$secrets_file"
+    source "$file"
     set +a
-  fi
+  done < <(shared_env_files)
+}
+
+# Re-runs keep an existing env file, but whatever the infra node handed over
+# must follow the infra node: after a rehearsal moves to the venue and infra
+# is re-installed with new addresses, copy each shared key into the env file.
+refresh_shared_settings() {
+  local file line key value
+  while IFS= read -r file; do
+    while IFS= read -r line; do
+      case "$line" in
+        [A-Za-z_]*=*) ;;
+        *) continue ;;
+      esac
+      key="${line%%=*}"
+      value="$(env_unquote "${line#*=}")"
+      [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] && continue
+      env_set "$ENV_FILE" "$key" "$value"
+      echo "updated $key in $ENV_FILE from $file"
+    done < "$file"
+  done < <(shared_env_files)
 }
 
 print_env_review() {
@@ -466,6 +597,7 @@ check_clock_sync() {
   else
     echo "time sync: no timedatectl/chrony check available; continuing" >&2
   fi
+  echo "time sync: every server and worker must agree within about a second; offline, serve time from the infra node (docs/operator-runbook.md, Time Sync on an Offline LAN)"
 
   if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
     echo "warning: WSL detected. Make sure the Windows host clock is synchronized before judging." >&2
@@ -496,26 +628,23 @@ PY
   fi
 }
 
-host_health_url() {
-  local bind host port
-  bind="${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-  port="${bind##*:}"
-  host="${bind%:*}"
+# health_url BIND: the /healthz URL of a port published on BIND, reached from
+# this host (a wildcard bind is reached on loopback).
+health_url() {
+  local host
+  host="${1%:*}"
   case "$host" in
     ""|"0.0.0.0"|"::"|"[::]") host="127.0.0.1" ;;
   esac
-  printf 'http://%s:%s/healthz\n' "$host" "$port"
+  printf 'http://%s:%s/healthz\n' "$host" "$(bind_port "$1")"
+}
+
+host_health_url() {
+  health_url "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
 }
 
 gateway_health_url() {
-  local bind host port
-  bind="${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
-  port="${bind##*:}"
-  host="${bind%:*}"
-  case "$host" in
-    ""|"0.0.0.0"|"::"|"[::]") host="127.0.0.1" ;;
-  esac
-  printf 'http://%s:%s/healthz\n' "$host" "$port"
+  health_url "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
 }
 
 should_run_stress_smoke() {
@@ -535,6 +664,11 @@ require_env() {
   local name
   for name in "$@"; do
     [ -n "${!name:-}" ] || die "set $name before installing role '$ROLE'"
+    # The .env.*.example files mark every value an operator must supply with
+    # change-me (a forgeable JWT secret, a phantom infra address, ...).
+    case "${!name}" in
+      *change-me*) die "$name still holds a change-me placeholder from an example file; set a real value" ;;
+    esac
   done
 }
 
@@ -581,27 +715,10 @@ validate_role_env() {
       fi
       ;;
   esac
-}
-
-write_seaweedfs_config() {
-  mkdir -p config
-  umask 077
-  cat > config/seaweedfs-s3.json <<EOF
-{
-  "identities": [
-    {
-      "name": "broccoli",
-      "credentials": [
-        {
-          "accessKey": $(json_string_value BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY"),
-          "secretKey": $(json_string_value BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY")
-        }
-      ],
-      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
-    }
-  ]
-}
-EOF
+  if using_object_storage; then
+    require_json_safe BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
+      BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
+  fi
 }
 
 populate_connection_defaults() {
@@ -611,8 +728,8 @@ populate_connection_defaults() {
     *) return 0 ;;
   esac
 
-  infra_host="${BROCCOLI_INFRA_HOST:-$(primary_ip)}"
-  infra_host="${infra_host:-127.0.0.1}"
+  resolve_infra_host
+  infra_host="$BROCCOLI_INFRA_HOST"
   postgres_port="$(bind_port "${POSTGRES_BIND:-0.0.0.0:5432}")"
   redis_port="$(bind_port "${REDIS_BIND:-0.0.0.0:6379}")"
   s3_port="$(bind_port "${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}")"
@@ -622,10 +739,10 @@ populate_connection_defaults() {
   redis_password="${REDIS_PASSWORD:?}"
 
   if [ -z "${BROCCOLI__DATABASE__URL:-}" ]; then
-    BROCCOLI__DATABASE__URL="postgres://${postgres_user}:${postgres_password}@${infra_host}:${postgres_port}/${postgres_db}"
+    BROCCOLI__DATABASE__URL="$(postgres_url "$postgres_user" "$postgres_password" "$infra_host" "$postgres_port" "$postgres_db")"
   fi
   if [ -z "${BROCCOLI__MQ__URL:-}" ]; then
-    BROCCOLI__MQ__URL="redis://:${redis_password}@${infra_host}:${redis_port}"
+    BROCCOLI__MQ__URL="$(redis_url "$redis_password" "$infra_host" "$redis_port")"
   fi
   if using_object_storage && [ -z "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}" ]; then
     BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT="http://${infra_host}:${s3_port}"
@@ -636,21 +753,22 @@ write_connection_env_file() {
   local file
   file="$(connection_env_file)"
   umask 077
-  cat > "$file" <<EOF
-# Worker-safe shared LAN connection settings generated by ./install.sh $ROLE.
-# Copy this file into every server/worker bundle directory before running
-# ./install.sh server or ./install.sh worker. It intentionally excludes
-# server-only secrets.
-BROCCOLI__DATABASE__URL=$(env_quote "$BROCCOLI__DATABASE__URL")
-BROCCOLI__MQ__URL=$(env_quote "$BROCCOLI__MQ__URL")
-BROCCOLI__STORAGE__BACKEND=$(env_quote "$(storage_backend)")
-BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}")
-EOF
+  {
+    echo "# Worker-safe shared LAN connection settings generated by ./install.sh $ROLE."
+    echo "# Copy this file into every server/worker bundle directory before running"
+    echo "# ./install.sh server or ./install.sh worker. It intentionally excludes"
+    echo "# server-only secrets."
+    env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
+    env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
+    env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
+    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
+  } > "$file.tmp"
+  mv "$file.tmp" "$file"
   chmod 0600 "$file"
   echo "created $file for server/worker LAN installs"
 }
@@ -659,15 +777,16 @@ write_server_secrets_env_file() {
   local file
   file="$(server_secrets_env_file)"
   umask 077
-  cat > "$file" <<EOF
-# Server-only secrets generated by ./install.sh $ROLE.
-# Copy this file only into server bundle directories before running
-# ./install.sh server.
-BROCCOLI__AUTH__JWT_SECRET=$(env_quote "${BROCCOLI__AUTH__JWT_SECRET:-}")
-BROCCOLI__AUTH__SECURE_COOKIES=$(env_quote "${BROCCOLI__AUTH__SECURE_COOKIES:-false}")
-BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=$(env_quote "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}")
-BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=$(env_quote "${BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD:-}")
-EOF
+  {
+    echo "# Server-only secrets generated by ./install.sh $ROLE."
+    echo "# Copy this file only into server bundle directories before running"
+    echo "# ./install.sh server."
+    env_line BROCCOLI__AUTH__JWT_SECRET "${BROCCOLI__AUTH__JWT_SECRET:-}"
+    env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
+    env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
+    env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "${BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD:-}"
+  } > "$file.tmp"
+  mv "$file.tmp" "$file"
   chmod 0600 "$file"
   echo "created $file for server LAN installs"
 }
@@ -703,8 +822,8 @@ write_env_file() {
       prompt_value SEAWEEDFS_MASTER_BIND "SeaweedFS master bind address" "127.0.0.1:9333"
       prompt_value BROCCOLI_ADMIN_USERNAME "Initial admin username" "admin"
       prompt_secret BROCCOLI_ADMIN_PASSWORD "Initial admin password" generate
-      infra_host="${BROCCOLI_INFRA_HOST:-$(primary_ip)}"
-      infra_host="${infra_host:-127.0.0.1}"
+      resolve_infra_host
+      infra_host="$BROCCOLI_INFRA_HOST"
       postgres_bind="${POSTGRES_BIND:-0.0.0.0:5432}"
       redis_bind="${REDIS_BIND:-0.0.0.0:6379}"
       s3_bind="${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}"
@@ -722,56 +841,59 @@ write_env_file() {
       jwt_secret="${BROCCOLI__AUTH__JWT_SECRET:-$(random_secret)}"
       admin_user="${BROCCOLI_ADMIN_USERNAME:-admin}"
       admin_pass="${BROCCOLI_ADMIN_PASSWORD:-$(random_secret)}"
-      cat > "$ENV_FILE" <<EOF
-BROCCOLI_ROLE=$(env_quote "$ROLE")
-COMPOSE_PROJECT_NAME=$(env_quote "broccoli-$ROLE")
-BROCCOLI_VERSION=$(env_quote "$version")
-BROCCOLI_SERVER_IMAGE=$(env_quote "$server_image")
-BROCCOLI_WORKER_IMAGE=$(env_quote "$worker_image")
-POSTGRES_IMAGE=$(env_quote "$postgres_image")
-REDIS_IMAGE=$(env_quote "$redis_image")
-SEAWEEDFS_IMAGE=$(env_quote "$seaweedfs_image")
-CADDY_IMAGE=$(env_quote "$caddy_image")
-
-POSTGRES_BIND=$(env_quote "$postgres_bind")
-REDIS_BIND=$(env_quote "$redis_bind")
-SEAWEEDFS_S3_BIND=$(env_quote "$s3_bind")
-SEAWEEDFS_MASTER_BIND=$(env_quote "${SEAWEEDFS_MASTER_BIND:-127.0.0.1:9333}")
-POSTGRES_USER=$(env_quote "$postgres_user")
-POSTGRES_PASSWORD=$(env_quote "$postgres_password")
-POSTGRES_DB=$(env_quote "$postgres_db")
-REDIS_PASSWORD=$(env_quote "$redis_password")
-
-BROCCOLI__DATABASE__URL=$(env_quote "postgres://${postgres_user}:${postgres_password}@${infra_host}:${postgres_port}/${postgres_db}")
-BROCCOLI__MQ__URL=$(env_quote "redis://:${redis_password}@${infra_host}:${redis_port}")
-BROCCOLI__STORAGE__BACKEND=$(env_quote "$(storage_backend)")
-BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET=$(env_quote "$s3_bucket")
-BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT=$(env_quote "$s3_endpoint")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=$(env_quote "$s3_access")
-BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=$(env_quote "$s3_secret")
-BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}")
-
-BROCCOLI__AUTH__JWT_SECRET=$(env_quote "$jwt_secret")
-BROCCOLI__AUTH__SECURE_COOKIES=$(env_quote "${BROCCOLI__AUTH__SECURE_COOKIES:-false}")
-BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=$(env_quote "$admin_user")
-BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=$(env_quote "$admin_pass")
-BROCCOLI_HTTP_BIND=$(env_quote "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}")
-BROCCOLI__SERVER__ID=$(env_quote "${BROCCOLI__SERVER__ID:-server-1}")
-BROCCOLI__WORKER__ID=$(env_quote "${BROCCOLI__WORKER__ID:-worker-1}")
-BROCCOLI__WORKER__DEDUP_TTL_SECS=$(env_quote "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}")
-BROCCOLI__SERVER__TRUSTED_PROXIES=$(env_quote "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}")
-BROCCOLI__SERVER__RATE_LIMIT_AUTH=$(env_quote "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}")
-BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE=$(env_quote "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}")
-BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS=$(env_quote "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}")
-BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS=$(env_quote "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}")
-BROCCOLI__OBSERVABILITY__LOG_FORMAT=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}")
-BROCCOLI__OBSERVABILITY__LOG_FILTER=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}")
-EOF
+      {
+        env_line BROCCOLI_ROLE "$ROLE"
+        env_line COMPOSE_PROJECT_NAME "broccoli-$ROLE"
+        env_line BROCCOLI_VERSION "$version"
+        env_line BROCCOLI_SERVER_IMAGE "$server_image"
+        env_line BROCCOLI_WORKER_IMAGE "$worker_image"
+        env_line POSTGRES_IMAGE "$postgres_image"
+        env_line REDIS_IMAGE "$redis_image"
+        env_line SEAWEEDFS_IMAGE "$seaweedfs_image"
+        env_line CADDY_IMAGE "$caddy_image"
+        echo
+        env_line POSTGRES_BIND "$postgres_bind"
+        env_line REDIS_BIND "$redis_bind"
+        env_line SEAWEEDFS_S3_BIND "$s3_bind"
+        env_line SEAWEEDFS_MASTER_BIND "${SEAWEEDFS_MASTER_BIND:-127.0.0.1:9333}"
+        env_line POSTGRES_USER "$postgres_user"
+        env_line POSTGRES_PASSWORD "$postgres_password"
+        env_line POSTGRES_DB "$postgres_db"
+        env_line REDIS_PASSWORD "$redis_password"
+        echo
+        env_line BROCCOLI__DATABASE__URL "$(postgres_url "$postgres_user" "$postgres_password" "$infra_host" "$postgres_port" "$postgres_db")"
+        env_line BROCCOLI__MQ__URL "$(redis_url "$redis_password" "$infra_host" "$redis_port")"
+        env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "$s3_bucket"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "$s3_endpoint"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3_access"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3_secret"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
+        echo
+        env_line BROCCOLI__AUTH__JWT_SECRET "$jwt_secret"
+        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
+        env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
+        env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
+        env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
+        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-server-1}"
+        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-worker-1}"
+        env_line BROCCOLI__WORKER__DEDUP_TTL_SECS "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}"
+        env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
+        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
+        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
+        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
+        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
+      } > "$ENV_FILE.tmp"
+      mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     server)
-      prompt_value BROCCOLI__SERVER__ID "Server ID" "$(hostname -s 2>/dev/null || echo server-1)"
+      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$(node_id server)"
       prompt_value BROCCOLI_HTTP_BIND "Server HTTP bind address" "0.0.0.0:3000"
+      prompt_value BROCCOLI_GATEWAY_HOSTS "Gateway addresses in front of this server, space-separated (blank if none)" ""
+      gateway_trusted_proxies
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -785,36 +907,37 @@ EOF
       if using_object_storage; then
         require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
       fi
-      cat > "$ENV_FILE" <<EOF
-BROCCOLI_ROLE='server'
-COMPOSE_PROJECT_NAME='broccoli-server'
-BROCCOLI_VERSION=$(env_quote "$version")
-BROCCOLI_SERVER_IMAGE=$(env_quote "$server_image")
-BROCCOLI_HTTP_BIND=$(env_quote "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}")
-BROCCOLI__SERVER__ID=$(env_quote "${BROCCOLI__SERVER__ID:-$(hostname -s 2>/dev/null || echo server-1)}")
-BROCCOLI__SERVER__TRUSTED_PROXIES=$(env_quote "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}")
-BROCCOLI__SERVER__RATE_LIMIT_AUTH=$(env_quote "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}")
-BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS=$(env_quote "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}")
-BROCCOLI__DATABASE__URL=$(env_quote "$BROCCOLI__DATABASE__URL")
-BROCCOLI__MQ__URL=$(env_quote "$BROCCOLI__MQ__URL")
-BROCCOLI__AUTH__JWT_SECRET=$(env_quote "$BROCCOLI__AUTH__JWT_SECRET")
-BROCCOLI__AUTH__SECURE_COOKIES=$(env_quote "${BROCCOLI__AUTH__SECURE_COOKIES:-false}")
-BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=$(env_quote "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}")
-BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=$(env_quote "$BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD")
-BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE=$(env_quote "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}")
-BROCCOLI__STORAGE__BACKEND=$(env_quote "$(storage_backend)")
-BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}")
-BROCCOLI__OBSERVABILITY__LOG_FORMAT=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}")
-BROCCOLI__OBSERVABILITY__LOG_FILTER=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}")
-EOF
+      {
+        env_line BROCCOLI_ROLE server
+        env_line COMPOSE_PROJECT_NAME broccoli-server
+        env_line BROCCOLI_VERSION "$version"
+        env_line BROCCOLI_SERVER_IMAGE "$server_image"
+        env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
+        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(node_id server)}"
+        env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
+        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
+        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
+        env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
+        env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
+        env_line BROCCOLI__AUTH__JWT_SECRET "$BROCCOLI__AUTH__JWT_SECRET"
+        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
+        env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
+        env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD"
+        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
+        env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
+      } > "$ENV_FILE.tmp"
+      mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     worker)
-      prompt_value BROCCOLI__WORKER__ID "Worker ID" "$(hostname -s 2>/dev/null || echo worker-1)"
+      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "$(node_id worker)"
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -826,106 +949,102 @@ EOF
       if using_object_storage; then
         require_env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
       fi
-      cat > "$ENV_FILE" <<EOF
-BROCCOLI_ROLE='worker'
-COMPOSE_PROJECT_NAME='broccoli-worker'
-BROCCOLI_VERSION=$(env_quote "$version")
-BROCCOLI_WORKER_IMAGE=$(env_quote "$worker_image")
-BROCCOLI__WORKER__ID=$(env_quote "${BROCCOLI__WORKER__ID:-$(hostname -s 2>/dev/null || echo worker-1)}")
-BROCCOLI__WORKER__DEDUP_TTL_SECS=$(env_quote "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}")
-BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS=$(env_quote "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}")
-BROCCOLI__DATABASE__URL=$(env_quote "$BROCCOLI__DATABASE__URL")
-BROCCOLI__MQ__URL=$(env_quote "$BROCCOLI__MQ__URL")
-BROCCOLI__STORAGE__BACKEND=$(env_quote "$(storage_backend)")
-BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}")
-BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=$(env_quote "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}")
-BROCCOLI__OBSERVABILITY__LOG_FORMAT=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}")
-BROCCOLI__OBSERVABILITY__LOG_FILTER=$(env_quote "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}")
-EOF
+      {
+        env_line BROCCOLI_ROLE worker
+        env_line COMPOSE_PROJECT_NAME broccoli-worker
+        env_line BROCCOLI_VERSION "$version"
+        env_line BROCCOLI_WORKER_IMAGE "$worker_image"
+        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(node_id worker)}"
+        env_line BROCCOLI__WORKER__DEDUP_TTL_SECS "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}"
+        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
+        env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
+        env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
+        env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
+        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
+        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
+      } > "$ENV_FILE.tmp"
+      mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     gateway)
       prompt_value BROCCOLI_UPSTREAMS "Server upstreams, separated by spaces" ""
       prompt_value BROCCOLI_GATEWAY_HTTP_BIND "Gateway HTTP bind address" "0.0.0.0:80"
       require_env BROCCOLI_UPSTREAMS
-      cat > "$ENV_FILE" <<EOF
-BROCCOLI_ROLE='gateway'
-COMPOSE_PROJECT_NAME='broccoli-gateway'
-CADDY_IMAGE=$(env_quote "$caddy_image")
-BROCCOLI_GATEWAY_HTTP_BIND=$(env_quote "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}")
-BROCCOLI_UPSTREAMS=$(env_quote "$BROCCOLI_UPSTREAMS")
-EOF
+      {
+        env_line BROCCOLI_ROLE gateway
+        env_line COMPOSE_PROJECT_NAME broccoli-gateway
+        env_line CADDY_IMAGE "$caddy_image"
+        env_line BROCCOLI_GATEWAY_HTTP_BIND "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
+        env_line BROCCOLI_UPSTREAMS "$BROCCOLI_UPSTREAMS"
+      } > "$ENV_FILE.tmp"
+      mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
   esac
   chmod 0600 "$ENV_FILE"
   echo "created $ENV_FILE for role '$ROLE'"
 }
 
-wait_http() {
-  local url label attempt
-  url="$1"
-  label="$2"
+# wait_until LABEL VERB CHECK [ARG...]: run CHECK every 5s until it succeeds,
+# for at most 120s, then die with "LABEL did not VERB within 120s". A CHECK
+# that sees a final failure dies itself.
+wait_until() {
+  local label="$1" verb="$2" attempt
+  shift 2
   echo "waiting for $label"
   for attempt in $(seq 1 24); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
+    "$@" && return 0
     if [ "$attempt" = 24 ]; then
       compose ps
-      die "$label did not become healthy within 120s"
+      die "$label did not $verb within 120s"
     fi
     sleep 5
   done
+}
+
+http_ok() {
+  curl -fsS "$1" >/dev/null 2>&1
+}
+
+service_healthy() {
+  local container status
+  container="$(compose ps -q "$1" || true)"
+  [ -n "$container" ] || return 1
+  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+  case "$status" in
+    healthy|running) return 0 ;;
+  esac
+  return 1
+}
+
+# service_completed SERVICE LABEL: a one-shot service exited 0; dies if it
+# exited with anything else.
+service_completed() {
+  local container status exit_code
+  container="$(compose ps -a -q "$1" || true)"
+  [ -n "$container" ] || return 1
+  status="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  [ "$status" = "exited" ] || return 1
+  exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+  [ "$exit_code" = "0" ] && return 0
+  compose logs "$1" || true
+  die "$2 exited with status $exit_code"
+}
+
+wait_http() {
+  wait_until "$2" "become healthy" http_ok "$1"
 }
 
 wait_service_healthy() {
-  local service label attempt container status
-  service="$1"
-  label="$2"
-  echo "waiting for $label"
-  for attempt in $(seq 1 24); do
-    container="$(compose ps -q "$service" || true)"
-    if [ -n "$container" ]; then
-      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
-      case "$status" in
-        healthy|running) return 0 ;;
-      esac
-    fi
-    if [ "$attempt" = 24 ]; then
-      compose ps
-      die "$label did not become healthy within 120s"
-    fi
-    sleep 5
-  done
+  wait_until "$2" "become healthy" service_healthy "$1"
 }
 
 wait_service_completed() {
-  local service label attempt container status exit_code
-  service="$1"
-  label="$2"
-  echo "waiting for $label"
-  for attempt in $(seq 1 24); do
-    container="$(compose ps -a -q "$service" || true)"
-    if [ -n "$container" ]; then
-      status="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
-      exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-      if [ "$status" = "exited" ] && [ "$exit_code" = "0" ]; then
-        return 0
-      fi
-      if [ "$status" = "exited" ]; then
-        compose logs "$service" || true
-        die "$label exited with status $exit_code"
-      fi
-    fi
-    if [ "$attempt" = 24 ]; then
-      compose ps
-      die "$label did not complete within 120s"
-    fi
-    sleep 5
-  done
+  wait_until "$2" complete service_completed "$1" "$2"
 }
 
 if [ "$#" -gt 1 ]; then
@@ -946,6 +1065,9 @@ esac
 COMPOSE_FILE="docker-compose.${ROLE}.yaml"
 TEMPLATE_FILE="${COMPOSE_FILE}.template"
 ENV_FILE="${BROCCOLI_ENV_FILE:-.env.$ROLE}"
+# Env files are written to FILE.tmp and renamed into place, so a refused value
+# never leaves a half-written file that a re-run would then preserve.
+trap 'rm -f "$ENV_FILE.tmp" "$(connection_env_file).tmp" "$(server_secrets_env_file).tmp"' EXIT
 
 need openssl "Install OpenSSL with your OS package manager."
 if ! is_dry_run; then
@@ -963,6 +1085,12 @@ fi
 
 if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
+  refresh_shared_settings
+  refresh_bundled_image_tags
+  if [ "$ROLE" = "server" ] && [ -n "${BROCCOLI_GATEWAY_HOSTS:-}" ]; then
+    gateway_trusted_proxies
+    env_set_if_changed BROCCOLI__SERVER__TRUSTED_PROXIES "$BROCCOLI__SERVER__TRUSTED_PROXIES"
+  fi
 else
   write_env_file
 fi
@@ -978,6 +1106,7 @@ if [ -n "${BROCCOLI_ROLE:-}" ] && [ "$BROCCOLI_ROLE" != "$ROLE" ]; then
   die "$ENV_FILE was created for role '$BROCCOLI_ROLE'; use the matching role or remove $ENV_FILE"
 fi
 validate_role_env
+guard_unpinned_project_name
 
 populate_connection_defaults
 
@@ -992,10 +1121,6 @@ elif ! cmp -s "$SELECTED_TEMPLATE_FILE" "$COMPOSE_FILE"; then
   echo "Updated $COMPOSE_FILE from template; previous file saved as $backup_file"
 fi
 
-if { [ "$ROLE" = "infra" ] || [ "$ROLE" = "single-host" ]; } && using_object_storage; then
-  write_seaweedfs_config
-fi
-
 if [ "$ROLE" = "infra" ] || [ "$ROLE" = "single-host" ]; then
   write_connection_env_file
   write_server_secrets_env_file
@@ -1006,6 +1131,10 @@ case "$ROLE" in
 esac
 
 check_clock_sync
+
+if [ "$ROLE" = "gateway" ]; then
+  print_gateway_trust_hint
+fi
 
 if is_dry_run; then
   echo "dry run complete; Docker containers were not started"

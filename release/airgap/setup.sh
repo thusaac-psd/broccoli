@@ -22,11 +22,6 @@ usage() {
        "[--reconfigure] [--non-interactive] [--dry-run]"
 }
 
-default_worker_id() {
-  local h; h="$(hostname -s 2>/dev/null | tr -cd 'A-Za-z0-9_-')"
-  [ -n "$h" ] && echo "$h" || echo "worker-1"
-}
-
 FLAG_NON_INTERACTIVE="" DRY_RUN="" FLAG_RECONFIGURE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -115,12 +110,16 @@ if [ "$ROLE" = server ]; then
 fi
 
 if [ "$ROLE" = worker ]; then
-  WORKER_ID="$(answer WORKER_ID 'Worker id' "$(default_worker_id)" 0)"
+  WORKER_ID="$(answer WORKER_ID 'Worker id (unique per worker)' "$(node_id worker)" 0)"
   # server LAN host: explicit --lan-host wins, else the sidecar's baked host
   SERVER_HOST="${FLAG_LAN_HOST:-$(env_get "$cluster_dir/cluster-secrets.env" BROCCOLI_SERVER_HOST)}"
   [ -n "$SERVER_HOST" ] || { echo "worker role needs the server LAN host: pass --lan-host, or build the bundle with --lan-host" >&2; exit 2; }
+  # The worker containers dial DB/MQ/S3 by this address, and they cannot see
+  # names that only this host's /etc/hosts knows, so hand them the IP.
+  SERVER_ADDR="$(host_address "$SERVER_HOST")"
+  [ "$SERVER_ADDR" = "$SERVER_HOST" ] || echo "worker reaches the server at $SERVER_ADDR ($SERVER_HOST)"
   workergen_write "$BUNDLE/compose/.env.worker" "$BUNDLE/compose/.env.worker.example" \
-    "$cluster_dir/cluster-secrets.env" "$SERVER_HOST" "$WORKER_ID"
+    "$cluster_dir/cluster-secrets.env" "$SERVER_ADDR" "$WORKER_ID"
 fi
 
 if [ -n "$DRY_RUN" ]; then

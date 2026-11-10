@@ -86,7 +86,7 @@ install -m755 "$ROOT/scripts/fix-live-ubuntu-isolate.sh" "$WORK/scripts/fix-live
 echo ">> collecting installer + templates + contest tooling"
 install -m755 "$HERE/install-native.sh" "$WORK/install-native.sh"
 install -m755 "$HERE/../enable-plugin.sh" "$WORK/enable-plugin.sh"
-mkdir -p "$WORK/lib"; cp "$HERE/../lib/plugins.sh" "$WORK/lib/plugins.sh"
+mkdir -p "$WORK/lib"; cp "$HERE"/../lib/*.sh "$WORK/lib/"
 install -m755 "$HERE/stage-toolchain.sh" "$WORK/stage-toolchain.sh"
 install -m755 "$HERE/live-boot-preflight.sh" "$WORK/live-boot-preflight.sh"
 # pre-staged offline C/C++/Python toolchain .deb sets for live-boot workers, if any.

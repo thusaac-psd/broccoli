@@ -1,0 +1,27 @@
+# Harden the server for life behind the air-gap TLS gateway. Compose merges
+# env per-key onto docker-compose.server.yaml.template, so this overrides
+# only what changes behind the gateway. The plaintext :3000 publish is
+# loopback-bound by install.sh (BROCCOLI_HTTP_BIND), so 443 is the only LAN
+# ingress when the gateway runs on this host.
+services:
+  server:
+    environment:
+      # Gateway terminates TLS: mark session cookies Secure so they never travel
+      # over the plaintext gateway->server hop or a host-local :3000.
+      BROCCOLI__AUTH__SECURE_COOKIES: "true"
+      # X-Forwarded-For is trusted only from the gateway, so login limits see
+      # each contestant's own address and nobody else can forge one. install.sh
+      # sets this to the edge subnet below when the gateway shares this host,
+      # or to BROCCOLI_GATEWAY_HOSTS for a gateway on its own host. Never a
+      # private range: any contestant inside a trusted range can forge XFF.
+      BROCCOLI__SERVER__TRUSTED_PROXIES: "${BROCCOLI_GATEWAY_TRUSTED_PROXIES:?install.sh sets the gateway addresses this server trusts}"
+    networks:
+      - default
+      - edge
+
+networks:
+  # Keep in step with docker-compose.gateway-airgap.yaml.template.
+  edge:
+    ipam:
+      config:
+        - subnet: "${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"

@@ -80,7 +80,8 @@ everything an install needs:
   assembled with `--skip-images`, or assembled before image build/save is wired
   up, will not have them, and `load-bundle.sh` will fail with
   `no images/*.tar in bundle` on the target when it tries to `docker load` them.
-- `compose/` — the server, infra, and Caddy TLS gateway
+- `compose/` — the server, infra, server-behind-gateway override
+  (`docker-compose.server-airgap.yaml.template`), and Caddy TLS gateway
   (`docker-compose.gateway-airgap.yaml.template`) compose templates, plus
   `compose/.env.server.example` and `compose/.env.infra.example` (real env files
   are _not_ shipped — see the server install section below).
@@ -114,7 +115,7 @@ everything an install needs:
 - `lib/` — the installer's shared shell libraries (`runtime.sh`, `answers.sh`,
   `envgen.sh`, `preflight.sh`, `manifest.sh`), sourced by `setup.sh` and
   `install.sh`.
-- `bundle.json` — provenance (version, source git SHA, role list).
+- `bundle.json` — provenance (version, source git SHA, build time, role list).
 - `manifest.sha256` — a `sha256sum` of every other file in the tree, sorted by
   relative path, used to detect transfer corruption or tampering.
 
@@ -276,14 +277,19 @@ This:
 
 1. Runs `load-bundle.sh --bundle .` to re-verify `manifest.sha256` and
    `docker load` every tarball in `images/`.
-2. Ensures the TLS leaf exists in the server-secret dir (pre-issued at assembly,
-   or issued now via `ca/issue-leaf.sh` from the CA key that lives only in the
-   sidecar) — the leaf's SAN covers `<host-or-ip>`.
+2. Ensures the server-secret dir holds a current TLS leaf for `<host-or-ip>`.
+   A pre-issued or earlier leaf is kept only while it chains to the bundle's
+   CA, its SAN covers `<host-or-ip>`, and it is valid for at least another
+   day; otherwise `ca/issue-leaf.sh` issues a new one from the CA key that
+   lives only in the sidecar, so a venue whose address moved gets a matching
+   leaf. The root and the leaf are both backdated a day, so a contestant
+   machine whose clock runs behind does not reject them as not yet valid, and
+   the leaf never outlives the CA.
 3. If `--burn-ca-key` was passed, deletes `root.key` from the server-secret
    sidecar right after the leaf is issued (see §8).
 4. Brings up infra, server, AND the Caddy TLS gateway (443, serving the
    internal-CA leaf, reverse-proxying to the server) with
-   `docker compose -p compose --env-file .env.infra --env-file .env.server -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template -f docker-compose.gateway-airgap.yaml.template up -d --pull never`
+   `docker compose -p compose --env-file .env.infra --env-file .env.server -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template -f docker-compose.server-airgap.yaml.template -f docker-compose.gateway-airgap.yaml.template up -d --pull never`
    — the Caddyfile is mounted un-rendered and Caddy expands its variables from
    the container environment; `--pull never` guarantees Compose only uses the
    images already loaded from `images/*.tar`, never reaching for a registry.
@@ -291,18 +297,24 @@ This:
    bound to host loopback (`BROCCOLI_HTTP_BIND=127.0.0.1:3000`), so no
    contestant on the LAN can reach it and bypass TLS — HTTPS on 443 is the sole
    entrypoint. Host-local `curl http://127.0.0.1:3000/...` still works for
-   operator troubleshooting. The gateway also runs the server with
-   `SECURE_COOKIES=true` and trusts the gateway's private network as a proxy, so
-   session cookies are marked `Secure` and auth rate limiting sees each
-   contestant's real IP (via `X-Forwarded-For`) rather than the gateway's. To
-   publish the server on the LAN anyway (e.g. a multi-node air-gap fronted by a
-   separate gateway host), export `BROCCOLI_HTTP_BIND=0.0.0.0:3000` before
-   running `install.sh`. **Only do this behind a separate fronting gateway:** it
-   re-exposes plaintext `:3000` on the LAN, and because the server still trusts
-   the private ranges as proxies, a client reaching `:3000` directly from a
-   trusted subnet could forge `X-Forwarded-For` to poison auth rate limiting.
-   When you take this path, narrow `BROCCOLI__SERVER__TRUSTED_PROXIES` to the
-   fronting gateway's address only.
+   operator troubleshooting. The server override
+   (`docker-compose.server-airgap.yaml.template`) runs the server with
+   `SECURE_COOKIES=true`, and the server trusts `X-Forwarded-For` only from the
+   gateway, so auth rate limiting sees each contestant's real IP rather than
+   the gateway's. The gateway and the server share a small `edge` network
+   (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else,
+   and that subnet is the whole trust list; no LAN range is ever trusted.
+
+   To run the gateway on a separate host instead (e.g. several servers), on the
+   gateway host compose `docker-compose.gateway-airgap.yaml.template` alone,
+   with `LAN_HOST`, `BROCCOLI_TLS_CERT`, `BROCCOLI_TLS_KEY` and
+   `BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000'` exported. On each server
+   host, export `BROCCOLI_HTTP_BIND=0.0.0.0:3000` and
+   `BROCCOLI_GATEWAY_HOSTS=<gateway LAN IP>` before running `install.sh`: the
+   server is then reachable on the LAN at `:3000` and trusts only that address.
+   The airgap installer has no gateway-only role yet, and a second server host
+   still needs `BROCCOLI_DB_HOST`, `BROCCOLI_MQ_HOST` and `BROCCOLI_S3_HOST`
+   pointed at the first server's infra.
 
 ## 6. Worker install
 
@@ -316,27 +328,23 @@ cd <bundle-dir>
 ./install.sh --role worker --bundle .
 ```
 
-This loads the worker image via `load-bundle.sh`, then runs the sandbox go/no-go
-check staged inside the bundle at `native/live-boot-preflight.sh` (arch/OS,
-cgroup-v2 controllers, isolate setuid + cgroup delegation, live MLE/TLE probes,
-and a real C/C++/Python compile). `install.sh` locates that preflight script
+This loads the worker image via `load-bundle.sh`, then runs the host half of
+the go/no-go check staged inside the bundle at `native/live-boot-preflight.sh
+--host-only` (arch/OS, systemd, cgroup-v2 controllers). isolate and the
+compilers ship inside the worker image, so the host is not checked for them.
+`install.sh` locates that preflight script
 relative to its own path, so this step only fires when you run the bundle's own
 `install.sh` as shown above — running a repo checkout's `install.sh` against the
 same bundle directory makes `native/live-boot-preflight.sh` resolve to a
 nonexistent path relative to the repo, and the check silently skips instead of
 running. A failed preflight only warns
-(`WARN: worker sandbox preflight reported issues`) — inspect its `[FAIL]` lines
+(`WARN: worker host preflight reported issues`) — inspect its `[FAIL]` lines
 and fix them before trusting the box for judging, but it does not by itself
 abort the install.
 
-The installer then trusts the bundle's `ca/root.crt` using the matching
-`trust-ca/` helper for the host OS (`trust-ca/linux.sh` or `trust-ca/macos.sh`,
-selected automatically from `uname -s`). Unlike the preflight, **a genuine
-CA-trust failure aborts the install** — the script prints
-`ERROR: CA trust failed` and exits non-zero, because a worker that doesn't trust
-the server's certificate can't reliably fetch submissions over HTTPS. An
-unsupported OS (neither Linux nor macOS) is only a warning; in that case trust
-`ca/root.crt` manually using your OS's certificate tooling.
+A worker does not trust the bundle's `ca/root.crt`: it talks plain Postgres,
+Redis and S3 to the server host and never connects to the TLS gateway, so the
+install works the same on Debian, RHEL-family and other hosts.
 
 ## Worker host (one-click)
 
@@ -377,10 +385,13 @@ This re-runs `load-bundle.sh --bundle . --verify-only` first — a second,
 independent `manifest.sha256` check at the point the media reaches the
 contestant machine, since the trust boundary crosses again here. It then trusts
 `ca/root.crt` via the appropriate per-OS `trust-ca/` helper (`linux.sh` installs
-into `/usr/local/share/ca-certificates` and runs `update-ca-certificates`;
+it with `update-ca-certificates` on Debian/Ubuntu/SUSE or `update-ca-trust` on
+RHEL/Rocky/Fedora/Arch, as root or through `sudo`;
 `macos.sh` adds it to the System keychain via `security add-trusted-cert`).
 Finally, if `cli/broccoli` is present in the bundle, it installs the musl-static
-CLI to `/usr/local/bin/broccoli`.
+CLI to `/usr/local/bin/broccoli`. The CLI trusts the OS certificate store by
+default (alongside its bundled public roots), so `broccoli login` and
+`broccoli submit` to `https://<host-or-ip>` work with no `BROCCOLI_TLS` setting.
 
 ### Windows
 
@@ -432,8 +443,8 @@ to keep it off the venue entirely:
 2. **Pre-issue at assembly** — pass `--lan-host <host-or-ip>` to
    `build-bundle.sh` on the staging box (step 2) when you already know the
    venue's address ahead of time. The leaf is issued into the sidecar during
-   assembly, so `install.sh --role server` finds `server.crt`/`server.key`
-   already present and skips leaf issuance entirely — you may then withhold
+   assembly, so `install.sh --role server` finds a leaf that already covers
+   that address and skips leaf issuance — you may then withhold
    `root.key` from the venue completely (deliver only `server.crt`/`server.key`
    in the sidecar, or drop `root.key` from it before copying to media).
 
@@ -470,15 +481,20 @@ Repeat on each **worker** host with `--role worker` (step 6). Server and worker
 may run mixed versions briefly during a rolling upgrade — a new server judges
 correctly against an as-yet-un-upgraded worker.
 
-Confirm the swap took effect. The image carries its version in an OCI label —
-the only offline provenance signal, since there is no registry to query:
+Confirm the swap took effect. The image carries its version, source commit and
+build time in OCI labels — the only offline provenance signal, since there is
+no registry to query. The commit matches `bundle.json`'s `git_sha`, so it also
+answers whether a site runs a given fix:
 
 ```
-docker inspect <server-container> \
-  --format '{{index .Config.Labels "org.opencontainers.image.version"}}'
+docker inspect <server-container> --format \
+  '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.created"}}'
 ```
 
-then check that `https://<host>/healthz` returns `200`.
+then check that `https://<host>/healthz` returns `200`. To confirm the editor
+works offline, open a problem page with the browser's developer tools on the
+Network tab: it loads `/assets/editor.worker-*.js` from the server and makes
+no request to `cdn.jsdelivr.net`.
 
 > **Always upgrade with `install.sh`, never a hand-rolled `docker compose up`.**
 > The infra secrets (`REDIS_PASSWORD`, the database and S3 credentials) live in
@@ -507,9 +523,16 @@ unchanged, so **no worker or contestant needs to do anything.** On the server,
 with `root.key` still in the sidecar (do this before burning it):
 
 ```
+./install.sh --role server --lan-host <host-or-ip> --bundle .
+```
+
+`install.sh` re-issues the leaf by itself when the address changed or the leaf
+expires within a day. To force a new leaf (e.g. a few weeks before expiry),
+issue it first:
+
+```
 ./ca/issue-leaf.sh --ca-dir <server-secret-dir> --host <host-or-ip> \
   --out <server-secret-dir>
-./install.sh --role server --lan-host <host-or-ip> --bundle .
 ```
 
 The re-issued leaf gets a new serial, still chains to the unchanged `root.crt`,
@@ -538,8 +561,8 @@ it holds the new `root.crt`, it rejects the server.
 3. On the **server**, deliver the new sidecar and re-run
    `./install.sh --role server --lan-host <host-or-ip> --bundle .`. The gateway
    restarts onto the new leaf.
-4. Re-distribute the new `ca/root.crt` to **every worker and contestant** and
-   re-run their trust step: `install.sh --role worker` / `--role contestant`
+4. Re-distribute the new `ca/root.crt` to **every contestant machine** and
+   re-run their trust step: `install.sh --role contestant`
    re-trust from the bundle's `ca/root.crt`; Firefox users re-import it (step 7).
 
 A client still holding only the old `root.crt` fails the handshake with an

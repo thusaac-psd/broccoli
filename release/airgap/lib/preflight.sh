@@ -44,8 +44,8 @@ _pf_cluster() {
 _pf_worker() {
   local pf="$_pf_dir/../native/live-boot-preflight.sh"
   if [ -x "$pf" ]; then
-    if bash "$pf" >/dev/null 2>&1; then _pf_pass "worker sandbox preflight"
-    else _pf_warn "worker sandbox preflight reported issues (isolate may be degraded)"; fi
+    if bash "$pf" --host-only >/dev/null 2>&1; then _pf_pass "worker host preflight (cgroup v2, systemd)"
+    else _pf_warn "worker host preflight reported issues (cgroup v2 or systemd; run it as root to see which)"; fi
   else
     _pf_warn "sandbox preflight not staged; run go/no-go manually"
   fi

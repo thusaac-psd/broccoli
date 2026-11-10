@@ -21,8 +21,9 @@ services:
       BROCCOLI__SERVER__SWEEP_INTERVAL_SECS: "${BROCCOLI__SERVER__SWEEP_INTERVAL_SECS:-300}"
       BROCCOLI__SERVER__MAX_DISPATCH_RETRIES: "${BROCCOLI__SERVER__MAX_DISPATCH_RETRIES:-5}"
       BROCCOLI__SERVER__SWEEPER_DRY_RUN: "${BROCCOLI__SERVER__SWEEPER_DRY_RUN:-false}"
-      BROCCOLI__SERVER__FLEET_AWARE_ADMISSION_ENABLED: "${BROCCOLI__SERVER__FLEET_AWARE_ADMISSION_ENABLED:-false}"
-      BROCCOLI__SERVER__FLEET_CAPACITY_POLL_INTERVAL_SECS: "${BROCCOLI__SERVER__FLEET_CAPACITY_POLL_INTERVAL_SECS:-5}"
+      # Unset unless the env file sets it: the server then sizes tokio's
+      # blocking pool itself (see server.max_blocking_threads).
+      BROCCOLI__SERVER__MAX_BLOCKING_THREADS:
       BROCCOLI__SERVER__FRONTEND_DIST: /srv/dist
       BROCCOLI__SERVER__TRUSTED_PROXIES: "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
       BROCCOLI__SERVER__RATE_LIMIT_AUTH: "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
@@ -33,6 +34,9 @@ services:
       BROCCOLI__AUTH__JWT_SECRET: "${BROCCOLI__AUTH__JWT_SECRET}"
       BROCCOLI__AUTH__SECURE_COOKIES: "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
       BROCCOLI__PLUGIN__PLUGINS_DIR: /plugins
+      # Per-replica plugin capacity; docs/operator-runbook.md explains both.
+      BROCCOLI__PLUGIN__POOL_MAX_INSTANCES: "${BROCCOLI__PLUGIN__POOL_MAX_INSTANCES:-64}"
+      BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM: "${BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM:-64}"
       BROCCOLI__STORAGE__BACKEND: "${BROCCOLI__STORAGE__BACKEND:-object_storage}"
       BROCCOLI__STORAGE__DATA_DIR: /data
       BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET: "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
@@ -47,6 +51,8 @@ services:
       BROCCOLI__OBSERVABILITY__LOG_FORMAT: "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
       BROCCOLI__OBSERVABILITY__LOG_FILTER: "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
     volumes:
+      # Read-only on purpose: plugins ship in the bundle to every node, and
+      # admin plugin upload is unsupported here (see README.md).
       - ./plugins:/plugins:ro
       - server_data:/data
     healthcheck:
