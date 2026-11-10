@@ -71,10 +71,11 @@ Repeat per server node.
 Use the admin UI when another admin account is available.
 
 The bootstrap admin (`BROCCOLI_BOOTSTRAP_ADMIN_USERNAME`) is created on the
-first boot. After that, a restart leaves the account alone: a password changed
-in the UI, or an `admin` role revoked on purpose, survives restarts. A boot
-resets the account to the configured password, and restores the `admin` role
-and its built-in permissions, only in two cases:
+first boot. After that, a restart leaves it alone: a password changed in the
+UI, an `admin` role revoked on purpose, or the account renamed or deleted,
+survives restarts. A boot creates the account (if no active user has that
+username) or resets it to the configured password, and restores the `admin`
+role and its built-in permissions, only in two cases:
 
 - no active user holds `system:admin`; this happens automatically;
 - `BROCCOLI_BOOTSTRAP_ADMIN_RESET=true` is set; use this when admin accounts

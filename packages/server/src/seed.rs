@@ -116,22 +116,20 @@ pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr>
     Ok(())
 }
 
-/// Make sure the configured bootstrap admin can sign in, without undoing an
-/// operator's later changes on every boot of every replica.
+/// Make sure some admin can sign in, without undoing an operator's later
+/// changes on every boot of every replica.
 ///
-/// - No active user has the bootstrap username: create it with the configured
-///   password and the `admin` role.
-/// - The user exists: leave it alone (its password may have been changed in
-///   the UI, its role revoked on purpose), unless one of the recovery
-///   conditions holds:
-///   - `reset_admin` is set: an explicit request, for example after the admin
-///     password was lost;
-///   - no active user holds `system:admin`: nobody could repair access through
-///     the API.
+/// Boot acts only when one of these holds; otherwise it changes nothing (a
+/// password changed in the UI, a revoked role, or a renamed or deleted
+/// bootstrap account all survive restarts):
+/// - no active user holds `system:admin`, which includes a fresh database;
+/// - `reset_admin` is set: an explicit request, for example after the admin
+///   password was lost.
 ///
-///   Recovery resets the password to the configured one, ends the user's
-///   sessions, grants the `admin` role and re-applies the built-in `admin`
-///   permissions.
+/// It then creates the bootstrap account if no active user has its username,
+/// or else resets its password to the configured one and ends its sessions,
+/// and in both cases grants the `admin` role and re-applies the built-in
+/// `admin` permissions.
 pub async fn ensure_bootstrap_admin(
     db: &DatabaseConnection,
     bootstrap: &BootstrapConfig,
@@ -152,43 +150,46 @@ pub async fn ensure_bootstrap_admin(
     // the holder check below cannot race one.
     let admins = SystemAdminLock::acquire(&txn).await.map_err(app_err)?;
 
-    let Some(existing) = user::Entity::find_active()
-        .filter(user::Column::Username.eq(username))
-        .one(&txn)
-        .await?
-    else {
-        let created = user::ActiveModel {
-            username: Set(username.to_string()),
-            display_name: Set(username.to_string()),
-            password: Set(hash_configured_password().await?),
-            created_at: Set(chrono::Utc::now()),
-            ..Default::default()
-        }
-        .insert(&txn)
-        .await?;
-        user_role::Entity::grant(&txn, created.id, ADMIN_ROLE).await?;
-        txn.commit().await?;
-        info!(username, "Created bootstrap admin user");
-        return Ok(());
-    };
-
     let reason = if bootstrap.reset_admin {
         "bootstrap.reset_admin is set"
     } else if !admins.any_holder().await.map_err(app_err)? {
         "no active user holds system:admin"
     } else {
+        // An operator may have renamed or deleted the bootstrap account on
+        // purpose; with an admin in place there is nothing to recover.
         info!(
             username,
-            "Bootstrap admin exists; leaving its password and roles unchanged"
+            "An active system:admin holder exists; leaving the bootstrap admin unchanged"
         );
         return Ok(());
     };
 
-    let mut active: user::ActiveModel = existing.clone().into();
-    active.password = Set(hash_configured_password().await?);
-    active.update(&txn).await?;
-    refresh_token::Entity::revoke_all_for_user(&txn, existing.id).await?;
-    user_role::Entity::grant(&txn, existing.id, ADMIN_ROLE).await?;
+    let existing = user::Entity::find_active()
+        .filter(user::Column::Username.eq(username))
+        .one(&txn)
+        .await?;
+    let user_id = match existing {
+        Some(existing) => {
+            let mut active: user::ActiveModel = existing.clone().into();
+            active.password = Set(hash_configured_password().await?);
+            active.update(&txn).await?;
+            refresh_token::Entity::revoke_all_for_user(&txn, existing.id).await?;
+            existing.id
+        }
+        None => {
+            user::ActiveModel {
+                username: Set(username.to_string()),
+                display_name: Set(username.to_string()),
+                password: Set(hash_configured_password().await?),
+                created_at: Set(chrono::Utc::now()),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await?
+            .id
+        }
+    };
+    user_role::Entity::grant(&txn, user_id, ADMIN_ROLE).await?;
     for &(role, permission) in DEFAULT_MAPPINGS.iter().filter(|(r, _)| *r == ADMIN_ROLE) {
         role_permission::Entity::insert(role_permission::ActiveModel {
             role: Set(role.to_owned()),
@@ -210,7 +211,7 @@ pub async fn ensure_bootstrap_admin(
     tracing::warn!(
         username,
         reason,
-        "Recovered bootstrap admin: password reset, admin role and permissions restored"
+        "Bootstrap admin ready: password set, admin role and its built-in permissions restored"
     );
     Ok(())
 }

@@ -666,12 +666,12 @@ fn default_submission_rate_limit_per_minute() -> u32 {
 
 /// The bootstrap admin account (see `seed::ensure_bootstrap_admin`).
 ///
-/// When both fields are set, boot creates the account if no active user has
-/// that username. An existing account is left alone, so a password changed
-/// in the UI or a role revoked on purpose survives restarts, except on
-/// recovery: when `reset_admin` is set, or when no active user holds
-/// `system:admin`, boot resets the account's password to `admin_password` and
-/// restores the `admin` role and its built-in permissions.
+/// When both fields are set, boot acts only on recovery: when no active user
+/// holds `system:admin` (including a fresh database), or when `reset_admin`
+/// is set. It then creates the account, or resets its password to
+/// `admin_password`, and restores the `admin` role and its built-in
+/// permissions. Otherwise a changed password, a revoked role or a renamed or
+/// deleted bootstrap account survives restarts.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct BootstrapConfig {
     #[serde(default)]

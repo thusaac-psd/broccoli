@@ -158,3 +158,23 @@ async fn reset_admin_forces_recovery_and_ends_old_sessions() {
     assert_eq!(login_status(&app, "configured-pass").await, 200);
     assert_ne!(login_status(&app, "changed-in-ui").await, 200);
 }
+
+#[tokio::test]
+async fn a_deleted_bootstrap_account_is_not_recreated_while_an_admin_exists() {
+    let app = TestApp::spawn().await;
+    boot(&app, false).await;
+    let other = app
+        .create_user_with_role("other_admin", "password123", "admin")
+        .await;
+    let res = app
+        .delete_with_token(&routes::user(boot_id(&app).await), &other)
+        .await;
+    assert_eq!(res.status, 204, "{}", res.text);
+
+    boot(&app, false).await;
+    assert_ne!(
+        login_status(&app, "configured-pass").await,
+        200,
+        "the deleted bootstrap account came back"
+    );
+}
