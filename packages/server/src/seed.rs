@@ -6,8 +6,7 @@ use tracing::{error, info};
 
 use crate::entity::{
     additional_file, clarification, dead_letter_message, plugin_storage, problem_attachment, role,
-    role_permission, submission, submission_judgement, test_case, test_case_result, user,
-    user_role,
+    submission, submission_judgement, test_case, test_case_result, user, user_role,
 };
 use crate::utils::hash;
 use crate::utils::test_case_body::{INLINE_TEST_CASE_BODY_THRESHOLD_BYTES, prepare_test_case_body};
@@ -41,6 +40,28 @@ const DEFAULT_MAPPINGS: &[(&str, &str)] = &[
     ("contestant", perm::SUBMISSION_SUBMIT),
 ];
 
+/// Apply each built-in mapping to `role_permission` exactly once, the first
+/// time it is recorded in `seeded_role_permission`. A mapping an admin later
+/// revokes stays revoked across restarts; a mapping added to
+/// [`DEFAULT_MAPPINGS`] by a later release is applied on its first boot.
+const SEED_MAPPINGS_SQL: &str = r#"
+WITH mapping AS (
+    SELECT role, permission
+    FROM jsonb_to_recordset($1::jsonb) AS m(role text, permission text)
+),
+recorded AS (
+    INSERT INTO seeded_role_permission (role, permission)
+    SELECT role, permission FROM mapping
+    ON CONFLICT DO NOTHING
+    RETURNING role, permission
+)
+INSERT INTO role_permission (role, permission)
+SELECT role, permission FROM recorded
+ON CONFLICT DO NOTHING
+"#;
+
+/// Ensure the built-in roles exist and apply new built-in role-permission
+/// mappings (see [`SEED_MAPPINGS_SQL`]).
 pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr> {
     let mut roles_inserted = 0u32;
     for &name in DEFAULT_ROLES {
@@ -68,31 +89,20 @@ pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr>
         info!("Seeded {} new roles", roles_inserted);
     }
 
-    let mut perms_inserted = 0u32;
-    for &(role, permission) in DEFAULT_MAPPINGS {
-        let model = role_permission::ActiveModel {
-            role: Set(role.to_string()),
-            permission: Set(permission.to_string()),
-        };
-
-        let result = role_permission::Entity::insert(model)
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::columns([
-                    role_permission::Column::Role,
-                    role_permission::Column::Permission,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec_without_returning(db)
-            .await;
-
-        match result {
-            Ok(_) => perms_inserted += 1,
-            Err(DbErr::RecordNotInserted) => {}
-            Err(e) => return Err(e),
-        }
-    }
+    let mappings = serde_json::Value::Array(
+        DEFAULT_MAPPINGS
+            .iter()
+            .map(|(role, permission)| serde_json::json!({ "role": role, "permission": permission }))
+            .collect(),
+    );
+    let perms_inserted = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            SEED_MAPPINGS_SQL,
+            [mappings.into()],
+        ))
+        .await?
+        .rows_affected();
 
     if perms_inserted > 0 {
         info!("Seeded {} new role-permission mappings", perms_inserted);

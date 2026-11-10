@@ -19,6 +19,7 @@ pub mod problem_attachment;
 pub mod refresh_token;
 pub mod role;
 pub mod role_permission;
+pub mod seeded_role_permission;
 pub mod submission;
 pub mod submission_judgement;
 pub mod test_case;

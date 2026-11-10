@@ -922,3 +922,86 @@ mod role_assignment_idempotency {
         assert_eq!(malformed.body["code"], "VALIDATION_ERROR");
     }
 }
+
+mod builtin_role_permission_seeding {
+    use super::*;
+    use broccoli_server_sdk::permissions as perm;
+
+    /// Seeding applies each built-in role permission once and records it in
+    /// `seeded_role_permission`, so an admin's revoke of a built-in permission
+    /// survives a restart.
+    #[tokio::test]
+    async fn revoked_builtin_permission_survives_reseed() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let res = app
+            .delete_with_token(
+                &routes::role_permission("contestant", perm::SUBMISSION_SUBMIT),
+                &admin,
+            )
+            .await;
+        if res.status == 400 || res.status == 403 || res.status == 409 {
+            // Refusing to edit built-in mappings is also acceptable.
+            return;
+        }
+        assert!(res.status < 300, "revoke failed: {}", res.text);
+
+        server::seed::seed_role_permissions(&app.db)
+            .await
+            .expect("reseed (simulated restart)");
+
+        let perms = app
+            .get_with_token(&routes::role_permissions("contestant"), &admin)
+            .await;
+        assert!(
+            !perms.text.contains(perm::SUBMISSION_SUBMIT),
+            "revoked permission came back after restart: {}",
+            perms.text
+        );
+    }
+
+    /// A built-in mapping that seeding has never applied, such as one added by a
+    /// later release, is still seeded and recorded on the next boot.
+    #[tokio::test]
+    async fn builtin_mapping_new_to_this_release_is_seeded_once() {
+        use sea_orm::{ConnectionTrait, EntityTrait, Statement};
+        use server::entity::{role_permission, seeded_role_permission};
+
+        let app = TestApp::spawn().await;
+        // Simulate a database from before this mapping existed.
+        for table in ["seeded_role_permission", "role_permission"] {
+            app.db
+                .execute_raw(Statement::from_string(
+                    app.db.get_database_backend(),
+                    format!(
+                        "DELETE FROM {table} WHERE role = 'problem_setter' AND permission = '{}'",
+                        perm::PROBLEM_EDIT
+                    ),
+                ))
+                .await
+                .expect("delete mapping");
+        }
+
+        server::seed::seed_role_permissions(&app.db)
+            .await
+            .expect("reseed (upgrade boot)");
+        let granted = role_permission::Entity::find_by_id((
+            "problem_setter".to_string(),
+            perm::PROBLEM_EDIT.to_string(),
+        ))
+        .one(&app.db)
+        .await
+        .expect("db");
+        assert!(granted.is_some(), "new built-in mapping was not seeded");
+        let recorded = seeded_role_permission::Entity::find_by_id((
+            "problem_setter".to_string(),
+            perm::PROBLEM_EDIT.to_string(),
+        ))
+        .one(&app.db)
+        .await
+        .expect("db");
+        assert!(recorded.is_some(), "seeding was not recorded");
+    }
+}
