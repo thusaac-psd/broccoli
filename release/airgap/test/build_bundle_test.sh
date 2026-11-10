@@ -139,13 +139,18 @@ set_out="$( set -u
 #     one bundle's images from the next's (e.g. confirming an in-place upgrade
 #     actually swapped the image). Unlike the mirror levers this is
 #     unconditional — every build stamps it. ---
-grep -qE 'version_build_arg=\(--build-arg "VERSION=\$VERSION"\)' "$bb" \
-  || { echo "FAIL: build-bundle must stamp the bundle VERSION via --build-arg VERSION (image OCI label is the only offline provenance signal)"; exit 1; }
-awk '/Dockerfile.server/{s=1} s&&/version_build_arg\[@\]/{sv=1} /-t "broccoli-server/{s=0}
-     /Dockerfile.worker/{w=1} w&&/version_build_arg\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
-     END{ if(!sv){print "MISS server version"; exit 1}
-          if(!wv){print "MISS worker version"; exit 1} }' "$bb" \
-  || { echo "FAIL: --build-arg VERSION not wired into both image builds"; exit 1; }
+for arg in 'VERSION=\$VERSION' 'REVISION=\$git_sha' 'CREATED=\$created'; do
+  grep -qE "provenance_build_args=\(.*--build-arg \"$arg\"" "$bb" \
+    || { echo "FAIL: build-bundle must stamp $arg via --build-arg (image OCI labels are the only offline provenance signal)"; exit 1; }
+done
+grep -qE '^git_sha="\$\(git -C "\$repo" rev-parse HEAD' "$bb" || { echo "FAIL: REVISION is not the repo commit"; exit 1; }
+awk '/Dockerfile.server/{s=1} s&&/provenance_build_args\[@\]/{sv=1} /-t "broccoli-server/{s=0}
+     /Dockerfile.worker/{w=1} w&&/provenance_build_args\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
+     END{ if(!sv){print "MISS server provenance"; exit 1}
+          if(!wv){print "MISS worker provenance"; exit 1} }' "$bb" \
+  || { echo "FAIL: provenance build-args not wired into both image builds"; exit 1; }
+grep -q "\"git_sha\": \"$(git -C "$here" rev-parse HEAD)\"" "$b/bundle.json" \
+  || { echo "FAIL: bundle.json does not record the commit"; exit 1; }
 
 # --- third-party image pull must tolerate a blocked registry when the image is
 #     ALREADY in the local store. This air-gap feature targets mirror-fronted /

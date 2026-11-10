@@ -115,7 +115,7 @@ everything an install needs:
 - `lib/` — the installer's shared shell libraries (`runtime.sh`, `answers.sh`,
   `envgen.sh`, `preflight.sh`, `manifest.sh`), sourced by `setup.sh` and
   `install.sh`.
-- `bundle.json` — provenance (version, source git SHA, role list).
+- `bundle.json` — provenance (version, source git SHA, build time, role list).
 - `manifest.sha256` — a `sha256sum` of every other file in the tree, sorted by
   relative path, used to detect transfer corruption or tampering.
 
@@ -474,15 +474,20 @@ Repeat on each **worker** host with `--role worker` (step 6). Server and worker
 may run mixed versions briefly during a rolling upgrade — a new server judges
 correctly against an as-yet-un-upgraded worker.
 
-Confirm the swap took effect. The image carries its version in an OCI label —
-the only offline provenance signal, since there is no registry to query:
+Confirm the swap took effect. The image carries its version, source commit and
+build time in OCI labels — the only offline provenance signal, since there is
+no registry to query. The commit matches `bundle.json`'s `git_sha`, so it also
+answers whether a site runs a given fix:
 
 ```
-docker inspect <server-container> \
-  --format '{{index .Config.Labels "org.opencontainers.image.version"}}'
+docker inspect <server-container> --format \
+  '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.created"}}'
 ```
 
-then check that `https://<host>/healthz` returns `200`.
+then check that `https://<host>/healthz` returns `200`. To confirm the editor
+works offline, open a problem page with the browser's developer tools on the
+Network tab: it loads `/assets/editor.worker-*.js` from the server and makes
+no request to `cdn.jsdelivr.net`.
 
 > **Always upgrade with `install.sh`, never a hand-rolled `docker compose up`.**
 > The infra secrets (`REDIS_PASSWORD`, the database and S3 credentials) live in
