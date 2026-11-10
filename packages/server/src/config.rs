@@ -705,27 +705,19 @@ fn default_batch_max_age_secs() -> u64 {
 /// IDs; see [`common::node_identity::is_valid_node_id`].
 pub use common::node_identity::is_valid_node_id as is_valid_server_id;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ServerIdResolveError {
-    #[error(
-        "server.id must be explicitly set to a valid value when server.expects_multi_replica is true"
-    )]
-    MultiReplicaServerIdRequired,
-}
-
 /// Resolves the effective server ID: a valid configured value, else (unless
 /// multi-replica mode demands an explicit one) the host default from
-/// [`common::node_identity::default_node_id`].
+/// [`common::node_identity::default_node_id`]. An explicit but invalid value is
+/// an error.
 pub fn resolve_server_id(
     configured: &str,
     expects_multi_replica: bool,
-) -> Result<String, ServerIdResolveError> {
+) -> Result<String, common::node_identity::NodeIdError> {
     common::node_identity::resolve_node_id(
         common::node_identity::NodeRole::Server,
         configured,
         expects_multi_replica,
     )
-    .map_err(|_| ServerIdResolveError::MultiReplicaServerIdRequired)
 }
 
 /// Centralized derivation of the per-replica operation-result queue name.
@@ -820,11 +812,8 @@ mod tests {
     }
 
     #[test]
-    fn resolves_invalid_explicit_id_via_fallback() {
-        // "has space" is invalid; we expect a non-empty host default.
-        let resolved = resolve_server_id("has space", false).unwrap();
-        assert!(!resolved.is_empty());
-        assert!(is_valid_server_id(&resolved));
+    fn rejects_an_invalid_explicit_id() {
+        assert!(resolve_server_id("has space", false).is_err());
     }
 
     #[test]

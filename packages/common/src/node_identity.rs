@@ -79,12 +79,21 @@ pub fn is_valid_node_id(id: &str) -> bool {
 pub enum NodeIdError {
     #[error("{role}.id must be explicitly set to a valid value", role = .0.as_str())]
     ExplicitIdRequired(NodeRole),
+    #[error(
+        "{role}.id {id:?} is invalid: use 1 to 128 of A-Z a-z 0-9 - _ . \
+         (and no _processing, _failed or _fairness_set suffix), or leave it empty \
+         to derive one for this host",
+        role = .role.as_str()
+    )]
+    Invalid { role: NodeRole, id: String },
 }
 
 /// Resolve the effective node ID from a configured value:
-/// 1. a non-empty, valid `configured` value is used as is;
-/// 2. with `require_explicit`, a missing or invalid value is an error;
-/// 3. otherwise the host's [`default_node_id`].
+/// 1. a valid `configured` value is used as is;
+/// 2. a non-empty invalid value is an error (never silently replaced: the
+///    operator asked for a specific identity);
+/// 3. an empty value is an error with `require_explicit`, otherwise the host's
+///    [`default_node_id`].
 pub fn resolve_node_id(
     role: NodeRole,
     configured: &str,
@@ -95,11 +104,14 @@ pub fn resolve_node_id(
         info!(role = role.as_str(), node_id = %trimmed, "Node ID resolved from explicit configuration");
         return Ok(trimmed.to_string());
     }
+    if !trimmed.is_empty() {
+        return Err(NodeIdError::Invalid {
+            role,
+            id: trimmed.to_string(),
+        });
+    }
     if require_explicit {
         return Err(NodeIdError::ExplicitIdRequired(role));
-    }
-    if !trimmed.is_empty() {
-        warn!(role = role.as_str(), configured = %trimmed, "Configured node ID failed validation; using the host default");
     }
     Ok(default_node_id(role))
 }
@@ -571,9 +583,14 @@ mod tests {
         assert!(is_valid_node_id(
             &resolve_node_id(NodeRole::Worker, "", false).unwrap()
         ));
-        assert!(is_valid_node_id(
-            &resolve_node_id(NodeRole::Worker, "bad id", false).unwrap()
-        ));
+        assert_eq!(
+            resolve_node_id(NodeRole::Worker, " bad id ", false),
+            Err(NodeIdError::Invalid {
+                role: NodeRole::Worker,
+                id: "bad id".into()
+            }),
+            "an explicit but invalid ID must fail, not be replaced"
+        );
         assert_eq!(
             resolve_node_id(NodeRole::Server, "", true),
             Err(NodeIdError::ExplicitIdRequired(NodeRole::Server))
