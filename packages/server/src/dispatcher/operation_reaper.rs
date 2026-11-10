@@ -28,7 +28,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use common::worker::Task;
 use mq::Mq;
 use tokio::sync::watch;
@@ -41,6 +40,18 @@ const DEDUP_PREFIX: &str = "broccoli:dedup:";
 /// MUST stay last so a `..._processing` key matches `_processing` before `""`.
 const BROKER_SUFFIXES: [&str; 4] = ["_processing", "_failed", "_fairness_set", ""];
 const DEAD_SINCE_TTL_SECS: u64 = 86_400;
+
+/// How long ago the `dead_since` clock was started, from its key's remaining
+/// TTL in milliseconds (`PTTL`). `None` when there is no clock (the key is
+/// absent, or has no TTL).
+fn dead_for(ttl_ms: i64) -> Option<Duration> {
+    if ttl_ms < 0 {
+        return None;
+    }
+    Some(Duration::from_millis(
+        (DEAD_SINCE_TTL_SECS * 1000).saturating_sub(ttl_ms as u64),
+    ))
+}
 
 #[derive(Clone)]
 pub struct ReaperConfig {
@@ -377,45 +388,39 @@ async fn reapable_now(
         return Ok(false);
     }
 
-    let dead_since: Option<String> = redis::cmd("GET")
-        .arg(&dead_since_key)
-        .query_async(conn)
-        .await?;
-    let now = Utc::now();
-
-    let ready = match dead_since {
-        None => {
-            // A plain SET (not SETNX): across replicas two reapers may both
-            // observe the clock absent and both start it a few ms apart, then
-            // both requeue once the grace elapses. That is deliberately fine -
-            // a duplicate requeue is absorbed by the worker's heartbeat-aware
-            // dedup at execution time (one runs, the rest get HeldByOther), so
-            // this needs no distributed lock.
-            if !config.dry_run {
-                let _: () = redis::cmd("SET")
-                    .arg(&dead_since_key)
-                    .arg(now.to_rfc3339())
-                    .arg("EX")
-                    .arg(DEAD_SINCE_TTL_SECS)
-                    .query_async(conn)
-                    .await?;
-            }
-            debug!(
-                worker_id = owner,
-                "Worker first observed dead; debouncing reaper"
-            );
-            false
-        }
-        Some(ts) => {
-            let elapsed = DateTime::parse_from_rfc3339(&ts)
-                .map(|t| {
-                    now.signed_duration_since(t.with_timezone(&Utc))
-                        .num_seconds()
-                })
-                .unwrap_or(0);
-            elapsed >= config.grace_secs
-        }
+    // The debounce clock is the key's own TTL, so how long the worker has
+    // been dead is measured by Redis alone. Storing one replica's wall-clock
+    // timestamp and subtracting it from another replica's clock let a few
+    // seconds of skew between servers defeat or stretch the grace. `NX` starts
+    // the clock once, however many replicas observe the death; the `PTTL` in
+    // the same round trip reads how much of it is left.
+    let (started_now, ttl_ms): (bool, i64) = if config.dry_run {
+        let ttl_ms = redis::cmd("PTTL")
+            .arg(&dead_since_key)
+            .query_async(conn)
+            .await?;
+        (false, ttl_ms)
+    } else {
+        let (set, ttl_ms): (Option<String>, i64) = redis::pipe()
+            .cmd("SET")
+            .arg(&dead_since_key)
+            .arg(1)
+            .arg("NX")
+            .arg("EX")
+            .arg(DEAD_SINCE_TTL_SECS)
+            .cmd("PTTL")
+            .arg(&dead_since_key)
+            .query_async(conn)
+            .await?;
+        (set.is_some(), ttl_ms)
     };
+    // The tick that starts the clock always debounces, even with a 0 grace.
+    let ready = !started_now
+        && dead_for(ttl_ms)
+            .is_some_and(|dead_for| dead_for.as_secs() >= config.grace_secs.max(0) as u64);
+    if !ready {
+        debug!(worker_id = owner, "Worker observed dead; debouncing reaper");
+    }
 
     decisions.insert(owner.to_string(), ready);
     Ok(ready)
