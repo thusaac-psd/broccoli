@@ -16,7 +16,9 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::PermissionGrantRequest;
-use crate::services::privileges::{CeilingTarget, require_within_ceiling};
+use crate::services::privileges::{
+    AdminSetChange, CeilingTarget, SystemAdminLock, require_within_ceiling,
+};
 use crate::state::AppState;
 
 #[utoipa::path(
@@ -145,7 +147,7 @@ pub async fn grant_permission_to_role(
     tag = "Roles",
     operation_id = "revokePermissionFromRole",
     summary = "Revoke a permission from a role",
-    description = "Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.",
+    description = "Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.\n\nRefused if afterwards no active user would hold `system:admin`.",
     params(
         ("role" = String, Path, description = "Role name"),
         ("permission" = String, Path, description = "Permission name")
@@ -155,6 +157,7 @@ pub async fn grant_permission_to_role(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
         (status = 404, description = "Role permission not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "Would leave no active `system:admin` holder (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -173,18 +176,27 @@ pub async fn revoke_permission_from_role(
     )
     .await?;
 
+    // Revoke + invalidate the in-flight access tokens of everyone holding this
+    // role in one transaction, so a stale token cannot keep exercising the
+    // permission that was just removed.
+    let txn = state.db.begin().await?;
+    let admins = SystemAdminLock::acquire(&txn).await?;
+
     let existing =
         role_permission::Entity::find_by_id((role_name.clone(), permission_name.clone()))
-            .one(&state.db)
+            .one(&txn)
             .await?;
     if existing.is_none() {
         return Err(AppError::NotFound("Role permission not found".into()));
     }
 
-    // Revoke + invalidate the in-flight access tokens of everyone holding this
-    // role in one transaction, so a stale token cannot keep exercising the
-    // permission that was just removed.
-    let txn = state.db.begin().await?;
+    admins
+        .require_survivor(AdminSetChange::RevokeRolePermission {
+            role: &role_name,
+            permission: &permission_name,
+        })
+        .await?;
+
     role_permission::Entity::delete_by_id((role_name.clone(), permission_name))
         .exec(&txn)
         .await?;

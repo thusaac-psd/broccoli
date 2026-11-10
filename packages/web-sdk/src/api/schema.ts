@@ -1711,6 +1711,8 @@ export interface paths {
     /**
      * Revoke a permission from a role
      * @description Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokePermissionFromRole'];
     options?: never;
@@ -1977,7 +1979,7 @@ export interface paths {
      * Soft-delete a user by ID
      * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;
@@ -2022,6 +2024,8 @@ export interface paths {
     /**
      * Revoke a role from a user
      * @description Revokes a role from the user. Requires `user:manage` permission.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokeRole'];
     options?: never;
@@ -10588,6 +10592,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   listSubmissions: {
@@ -11428,7 +11441,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description User is in an active or under-judgement contest (CONFLICT) */
+      /** @description User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11604,6 +11617,15 @@ export interface operations {
       };
       /** @description User role not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
