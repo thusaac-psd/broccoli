@@ -378,6 +378,7 @@ impl ServerRuntime {
             metrics,
             prometheus_registry,
             dispatcher_permits,
+            plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
                 Duration::from_secs(app_config.auth.login_failure_window_secs),
@@ -413,6 +414,9 @@ impl ServerRuntime {
         }
 
         let _failures = sync_plugins(&state).await?;
+        // Converge onto plugin lifecycle changes made through any replica,
+        // and retry plugins that failed to load here.
+        tokio::spawn(crate::plugin_lifecycle::run(state.clone()));
 
         // Boot-time orphan recovery: a restart leaves this server's in-flight
         // submissions/judgements/code-runs tagged with our own `server_id` and a

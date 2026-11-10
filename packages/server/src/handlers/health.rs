@@ -34,6 +34,16 @@ pub struct HealthResponse {
     /// from a git checkout).
     #[schema(example = "abc1234")]
     pub git_sha: String,
+    /// Plugin readiness on this replica: `"ok"` when every plugin enabled in
+    /// the shared desired state is loaded here, `"degraded"` otherwise. It
+    /// does not change `status` or the HTTP code, so one plugin that fails
+    /// everywhere cannot take the whole fleet out of rotation; a load
+    /// balancer that should drain such a replica can match on this field.
+    #[schema(example = "ok")]
+    pub plugins: String,
+    /// The enabled plugins that are not loaded on this replica, and why.
+    /// This replica keeps retrying them with backoff.
+    pub plugins_not_ready: Vec<crate::plugin_lifecycle::PluginNotReady>,
 }
 
 /// Probes the database and MQ backends and returns a populated
@@ -41,11 +51,10 @@ pub struct HealthResponse {
 ///
 /// Shared between the documented `/api/v1/health` route and the plain
 /// `/healthz` route mounted on the outer Router.
-pub async fn compute_health(
-    db: &DatabaseConnection,
-    redis_client: Option<&redis::Client>,
-    mq_enabled: bool,
-) -> HealthResponse {
+pub async fn compute_health(state: &AppState) -> HealthResponse {
+    let db = &state.db;
+    let redis_client = state.redis_client.as_deref();
+    let mq_enabled = state.mq.is_some();
     let db_status = match timeout(PING_TIMEOUT, ping_db(db)).await {
         Ok(Ok(())) => "ok",
         Ok(Err(e)) => {
@@ -86,6 +95,8 @@ pub async fn compute_health(
         "degraded"
     };
 
+    let plugins_not_ready = crate::plugin_lifecycle::not_ready(state);
+
     HealthResponse {
         status: status.to_string(),
         db: db_status.to_string(),
@@ -94,6 +105,13 @@ pub async fn compute_health(
         git_sha: option_env!("BROCCOLI_GIT_SHA")
             .unwrap_or("unknown")
             .to_string(),
+        plugins: if plugins_not_ready.is_empty() {
+            "ok"
+        } else {
+            "degraded"
+        }
+        .to_string(),
+        plugins_not_ready,
     }
 }
 
@@ -123,7 +141,7 @@ fn status_code(body: &HealthResponse) -> StatusCode {
 /// Plain-router handler for `GET /healthz`. Not part of the OpenAPI surface.
 #[instrument(skip(state))]
 pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }
 
@@ -164,6 +182,6 @@ pub async fn healthz_liveness() -> impl IntoResponse {
 )]
 #[instrument(skip(state))]
 pub async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }

@@ -22,6 +22,7 @@ pub mod manager;
 pub mod middleware;
 pub mod migration;
 pub mod models;
+pub mod plugin_lifecycle;
 pub mod registry;
 pub mod routes;
 pub mod runtime;

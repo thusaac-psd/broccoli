@@ -90,7 +90,10 @@ or on a running install, then select **Reload All** on the admin Plugins page:
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server node.
+a plugin on every server node first, then select **Reload All** once: it reaches
+every server replica within a few seconds, not only the one that served the
+click. A replica that is missing an enabled plugin reports it in `/healthz`
+(`"plugins": "degraded"` and `plugins_not_ready`) and keeps retrying.
 
 For server redundancy, install a gateway node with:
 
