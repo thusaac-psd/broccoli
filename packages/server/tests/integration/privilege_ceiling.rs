@@ -363,7 +363,13 @@ mod user_role_assignment {
     async fn user_manager_can_assign_role_within_ceiling() {
         let app = TestApp::spawn().await;
         let token = app
-            .create_user_with_permissions("granter", PASSWORD, &["user:manage", "problem:create"])
+            .create_user_with_permissions(
+                "granter",
+                PASSWORD,
+                // `submission:submit` covers the recipient's `contestant` role,
+                // which the revoke's user-level ceiling also measures.
+                &["user:manage", "problem:create", "submission:submit"],
+            )
             .await;
         // Creates `setter_role`, whose permission set is a subset of the
         // caller's own.
@@ -387,5 +393,33 @@ mod user_role_assignment {
             .delete_with_token(&routes::user_role(recipient_id, "setter_role"), &token)
             .await;
         assert_eq!(res.status, 204, "{}", res.text);
+    }
+
+    /// Revoking even a low role is refused when the target user is above the
+    /// caller, consistent with update and delete.
+    #[tokio::test]
+    async fn user_manager_cannot_revoke_a_low_role_from_a_user_above_ceiling() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_permissions("lowmgr", PASSWORD, &["user:manage", "submission:submit"])
+            .await;
+        let boss_token = app.create_user_with_role("boss", PASSWORD, "admin").await;
+        let boss = app.get_with_token(routes::ME, &boss_token).await.body["id"]
+            .as_i64()
+            .unwrap() as i32;
+        // The boss also holds `contestant`, a role within the caller's ceiling.
+        let res = app
+            .post_with_token(
+                &routes::user_roles(boss),
+                &json!({"role": "contestant"}),
+                &boss_token,
+            )
+            .await;
+        assert!(res.status < 300, "{}", res.text);
+
+        let res = app
+            .delete_with_token(&routes::user_role(boss, "contestant"), &token)
+            .await;
+        assert_permission_denied(&res, "revoking contestant from an admin");
     }
 }

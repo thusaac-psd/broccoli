@@ -346,7 +346,7 @@ pub async fn assign_role(
     tag = "Users",
     operation_id = "revokeRole",
     summary = "Revoke a role from a user",
-    description = "Revokes a role from the user. Requires `user:manage` permission.\n\nRefused if afterwards no active user would hold `system:admin`.",
+    description = "Revokes a role from the user. Requires `user:manage` permission; without `system:admin`, neither the role nor the target user may hold a permission the caller lacks.\n\nRefused if afterwards no active user would hold `system:admin`.",
     params(
         ("id" = i32, Path, description = "User ID"),
         ("role" = String, Path, description = "Role name")
@@ -379,6 +379,15 @@ pub async fn revoke_role(
     // role set rather than lingering on a stale cached permission.
     let txn = state.db.begin().await?;
     let admins = SystemAdminLock::acquire(&txn).await?;
+
+    // Like update/delete: a caller may not act on a user above its ceiling,
+    // even to remove a role it could itself hand out.
+    user::Entity::find_active_by_id(id)
+        .lock(LockType::Update)
+        .one(&txn)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User role not found".into()))?;
+    require_within_ceiling(&txn, &auth_user, CeilingTarget::User(id)).await?;
 
     let active = user_role::Entity::find_by_id((id, role_name.clone()))
         .one(&txn)

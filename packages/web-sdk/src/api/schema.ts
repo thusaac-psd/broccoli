@@ -2023,7 +2023,7 @@ export interface paths {
     post?: never;
     /**
      * Revoke a role from a user
-     * @description Revokes a role from the user. Requires `user:manage` permission.
+     * @description Revokes a role from the user. Requires `user:manage` permission; without `system:admin`, neither the role nor the target user may hold a permission the caller lacks.
      *
      *     Refused if afterwards no active user would hold `system:admin`.
      */
