@@ -226,6 +226,75 @@ compose() {
   fi
 }
 
+# The volume holding each role's data, named as in its compose template.
+role_data_volume() {
+  case "$ROLE" in
+    infra|single-host) echo postgres_data ;;
+    server) echo server_data ;;
+    worker) echo worker_data ;;
+  esac
+}
+
+# An env file without COMPOSE_PROJECT_NAME takes the directory name as its
+# project, as Compose normalizes it. Bundle directories are versioned
+# (broccoli-platform-v0.2.0), so copying such a file into a new release's
+# directory would start the role on new, empty volumes, for infra an empty
+# database. Refuse when this role's data volume exists only under another
+# project, and say which name to pin.
+guard_unpinned_project_name() {
+  local volume current projects
+  [ -z "${COMPOSE_PROJECT_NAME:-}" ] || return 0
+  volume="$(role_data_volume)"
+  [ -n "$volume" ] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  current="$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')"
+  projects="$(docker volume ls --filter "label=com.docker.compose.volume=$volume" \
+    --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u)" || return 0
+  [ -n "$projects" ] || return 0
+  printf '%s\n' "$projects" | grep -qx "$current" && return 0
+  die "$ENV_FILE sets no COMPOSE_PROJECT_NAME, so this directory would run as project '$current' with new, empty volumes, but this host keeps '$volume' for: $(printf '%s\n' "$projects" | tr '\n' ' ')
+Add COMPOSE_PROJECT_NAME='<the project to keep>' to $ENV_FILE to keep that data (or a new name to start empty), then re-run."
+}
+
+# Re-running a role from a newer bundle keeps its env file, which still names
+# the previous release's images. Point it at the images just loaded from this
+# bundle. Infra images are left alone: those are upgraded only deliberately.
+refresh_bundled_image_tags() {
+  local current variant image
+  case "$ROLE" in
+    server|single-host)
+      [ -z "${loaded_server_image:-}" ] || env_set_if_changed BROCCOLI_SERVER_IMAGE "$loaded_server_image"
+      ;;
+  esac
+  case "$ROLE" in
+    worker|single-host)
+      current="$(env_get "$ENV_FILE" BROCCOLI_WORKER_IMAGE)"
+      case "$current" in
+        *-icpc) variant=icpc ;;
+        *-full) variant=full ;;
+        *-base) variant=base ;;
+        *) variant="" ;;
+      esac
+      case "$variant" in
+        icpc) image="${loaded_worker_icpc_image:-${loaded_worker_image:-}}" ;;
+        full) image="${loaded_worker_full_image:-}" ;;
+        base) image="${loaded_worker_base_image:-}" ;;
+        *) image="" ;;
+      esac
+      [ -z "$image" ] || env_set_if_changed BROCCOLI_WORKER_IMAGE "$image"
+      ;;
+    gateway)
+      [ -z "${loaded_caddy_image:-}" ] || env_set_if_changed CADDY_IMAGE "$loaded_caddy_image"
+      ;;
+  esac
+}
+
+env_set_if_changed() {
+  [ "$(env_get "$ENV_FILE" "$1")" != "$2" ] || return 0
+  env_set "$ENV_FILE" "$1" "$2"
+  echo "updated $1 in $ENV_FILE to $2"
+}
+
 start_role() {
   if [ "$ROLE" = "infra" ] && ! using_object_storage; then
     compose up -d db redis
@@ -986,6 +1055,7 @@ fi
 if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
   refresh_shared_settings
+  refresh_bundled_image_tags
 else
   write_env_file
 fi
@@ -1001,6 +1071,7 @@ if [ -n "${BROCCOLI_ROLE:-}" ] && [ "$BROCCOLI_ROLE" != "$ROLE" ]; then
   die "$ENV_FILE was created for role '$BROCCOLI_ROLE'; use the matching role or remove $ENV_FILE"
 fi
 validate_role_env
+guard_unpinned_project_name
 
 populate_connection_defaults
 

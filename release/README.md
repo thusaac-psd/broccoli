@@ -70,9 +70,12 @@ pass them in order:
 
 Each role runs as its own Compose project (`COMPOSE_PROJECT_NAME=broccoli-<role>`
 in its env file), so roles on one host get separate networks, just as they
-would on separate machines. Env files written by earlier releases have no
-project name and keep the directory name; leave them that way, because a
-role's volumes (including the database) are named after its project.
+would on separate machines. A role's volumes, including the database, are
+named after its project. Env files written by earlier releases have no project
+name, so Compose names the project after the bundle directory. Before you copy
+such a file into a new bundle directory, pin the old name; see
+[docs/upgrade.md](docs/upgrade.md#compose-project-names). The installer refuses
+to start a role whose data volume exists only under another project.
 
 ## Optional plugins
 
