@@ -1,9 +1,7 @@
-use broccoli_server_sdk::types::{
-    DetachedEvaluateSession, StartDetachedWindowedEvaluateInput, StartEvaluateBatchInput,
-    TestCaseVerdict,
-};
+use broccoli_server_sdk::types::{StartDetachedWindowedEvaluateInput, StartEvaluateBatchInput};
 use extism::{Function, UserData, Val, ValType};
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::host_funcs::context::EvaluateHostDeps;
@@ -31,10 +29,16 @@ struct EvaluateContext {
     deps: EvaluateHostDeps,
 }
 
-type EvaluateUserData = EvaluateContext;
+impl super::HostFnContext for EvaluateContext {
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+}
+
+type EvaluateUserData = UserData<Arc<EvaluateContext>>;
 
 pub fn create_evaluate_functions(plugin_id: String, deps: EvaluateHostDeps) -> Vec<Function> {
-    let user_data: UserData<EvaluateUserData> = UserData::new(EvaluateContext { plugin_id, deps });
+    let user_data = super::host_data(EvaluateContext { plugin_id, deps });
 
     vec![
         Function::new(
@@ -79,86 +83,53 @@ fn start_detached_windowed_evaluate_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<EvaluateUserData>,
+    user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: StartDetachedWindowedEvaluateInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
+    let input: StartDetachedWindowedEvaluateInput = super::read_json(plugin, inputs, "input")?;
+    let call = super::HostCall::enter(&user_data, "start_detached_windowed_evaluate")?;
 
-    let (caller_plugin_id, deps) = {
-        let user_data_guard = user_data.get()?;
-        let guard = user_data_guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (guard.plugin_id.clone(), guard.deps.clone())
-    };
-    let span = super::host_fn_span("start_detached_windowed_evaluate", &caller_plugin_id);
-    let _enter = span.enter();
-
-    let session = evaluate_batch::start_detached_windowed_evaluate(caller_plugin_id, deps, input)
-        .map_err(|e| extism::Error::msg(e.to_string()))?;
-    write_session(plugin, outputs, session)
+    let session = evaluate_batch::start_detached_windowed_evaluate(
+        call.plugin_id.clone(),
+        call.deps.clone(),
+        input,
+    )
+    .map_err(|e| extism::Error::msg(e.to_string()))?;
+    super::write_json(plugin, outputs, &session, "session")
 }
 
 fn start_evaluate_batch_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<EvaluateUserData>,
+    user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: StartEvaluateBatchInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
-
-    let (caller_plugin_id, deps) = {
-        let user_data_guard = user_data.get()?;
-        let guard = user_data_guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (guard.plugin_id.clone(), guard.deps.clone())
-    };
-    let span = super::host_fn_span("start_evaluate_batch", &caller_plugin_id);
-    let _enter = span.enter();
+    let input: StartEvaluateBatchInput = super::read_json(plugin, inputs, "input")?;
+    let call = super::HostCall::enter(&user_data, "start_evaluate_batch")?;
 
     let batch_id = tokio::runtime::Handle::current()
         .block_on(evaluate_batch::start_evaluate_batch(
-            caller_plugin_id,
-            deps,
+            call.plugin_id.clone(),
+            call.deps.clone(),
             input,
         ))
         .map_err(|e| extism::Error::msg(e.to_string()))?;
 
     let response = serde_json::json!({ "batch_id": batch_id });
-    let output_bytes = serde_json::to_vec(&response)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize batch_id: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-
-    Ok(())
+    super::write_json(plugin, outputs, &response, "batch_id")
 }
 
 fn get_next_evaluate_result_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<EvaluateUserData>,
+    user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: GetNextEvaluateResultInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
-
-    let (plugin_id, deps) = {
-        let user_data_guard = user_data.get()?;
-        let guard = user_data_guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (guard.plugin_id.clone(), guard.deps.clone())
-    };
-    let span = super::host_fn_span("get_next_evaluate_result", &plugin_id);
-    let _enter = span.enter();
+    let input: GetNextEvaluateResultInput = super::read_json(plugin, inputs, "input")?;
+    let call = super::HostCall::enter(&user_data, "get_next_evaluate_result")?;
+    let deps = &call.deps;
 
     let result = evaluate_batch::next_evaluate_result(
-        &plugin_id,
+        &call.plugin_id,
         &deps.evaluate_batches,
         deps.metrics.as_ref(),
         &deps.evaluate_ops_registry,
@@ -166,29 +137,19 @@ fn get_next_evaluate_result_fn(
         Duration::from_millis(input.timeout_ms),
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
-    write_result(plugin, outputs, result)
+    let response = serde_json::json!({ "result": result });
+    super::write_json(plugin, outputs, &response, "result")
 }
 
 fn cancel_evaluate_batch_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<EvaluateUserData>,
+    user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: CancelEvaluateBatchInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
-
-    let (plugin_id, deps) = {
-        let user_data_guard = user_data.get()?;
-        let guard = user_data_guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (guard.plugin_id.clone(), guard.deps.clone())
-    };
-    let span = super::host_fn_span("cancel_evaluate_batch", &plugin_id);
-    let _enter = span.enter();
-
+    let input: CancelEvaluateBatchInput = super::read_json(plugin, inputs, "input")?;
+    let call = super::HostCall::enter(&user_data, "cancel_evaluate_batch")?;
+    let deps = &call.deps;
     if deps.cancel_primitive_enabled
         && let Some(client) = deps.redis_client.as_ref()
     {
@@ -216,7 +177,7 @@ fn cancel_evaluate_batch_fn(
         .mark_batch_cancelled(&input.batch_id);
 
     evaluate_batch::cancel_evaluate_batch(
-        &plugin_id,
+        &call.plugin_id,
         &deps.evaluate_batches,
         deps.metrics.as_ref(),
         &deps.evaluate_ops_registry,
@@ -230,21 +191,11 @@ fn cancel_evaluate_test_cases_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<EvaluateUserData>,
+    user_data: EvaluateUserData,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: CancelEvaluateTestCasesInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
-
-    let (plugin_id, deps) = {
-        let user_data_guard = user_data.get()?;
-        let guard = user_data_guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (guard.plugin_id.clone(), guard.deps.clone())
-    };
-    let span = super::host_fn_span("cancel_evaluate_test_cases", &plugin_id);
-    let _enter = span.enter();
+    let input: CancelEvaluateTestCasesInput = super::read_json(plugin, inputs, "input")?;
+    let call = super::HostCall::enter(&user_data, "cancel_evaluate_test_cases")?;
+    let deps = &call.deps;
 
     let count = deps
         .evaluate_ops_registry
@@ -270,34 +221,5 @@ fn cancel_evaluate_test_cases_fn(
     }
 
     let response = serde_json::json!({ "count": count });
-    let output_bytes = serde_json::to_vec(&response)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize count: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-    Ok(())
-}
-
-fn write_result(
-    plugin: &mut extism::CurrentPlugin,
-    outputs: &mut [Val],
-    result: Option<TestCaseVerdict>,
-) -> Result<(), extism::Error> {
-    let response = serde_json::json!({ "result": result });
-    let output_bytes = serde_json::to_vec(&response)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize result: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-    Ok(())
-}
-
-fn write_session(
-    plugin: &mut extism::CurrentPlugin,
-    outputs: &mut [Val],
-    session: DetachedEvaluateSession,
-) -> Result<(), extism::Error> {
-    let output_bytes = serde_json::to_vec(&session)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize session: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-    Ok(())
+    super::write_json(plugin, outputs, &response, "count")
 }
