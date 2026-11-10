@@ -335,7 +335,8 @@ Phase 1.
 multi-server deployment, and the same holds for `BROCCOLI__WORKER__ID` on every
 worker. `install.sh server` and `install.sh worker` default each to an id unique
 to the machine, such as `worker-ubuntu-3f9c2a1b`: the hostname plus a hash of
-the host's `/etc/machine-id`, so cloned or live-boot machines that all call
+the host's `/etc/machine-id` and the MAC address of its first physical network
+card, so cloned or live-boot machines that all call
 themselves `ubuntu` still get distinct ids. The installer writes the id into
 `.env.server` or `.env.worker`, and re-runs keep it. If you write env files by
 hand (`.env.server.example` ships `server-1`), give each replica a unique stable
