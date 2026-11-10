@@ -1,5 +1,5 @@
 import { parseApiError, serverNow, useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -21,18 +21,19 @@ export function useContestEnroll({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
 
   const enrollMutation = useMutation({
     mutationFn: async () => {
-      const { error } = await apiClient.POST('/contests/{id}/register', {
-        headers: { 'Idempotency-Key': getKey() },
-        params: { path: { id: contestId } },
-      });
+      const { error } = await sendIdempotent({ contestId }, (key) =>
+        apiClient.POST('/contests/{id}/register', {
+          headers: { 'Idempotency-Key': key },
+          params: { path: { id: contestId } },
+        }),
+      );
       if (error) throw error;
     },
     onSuccess: () => {
-      resetKey();
       toast.success(t('toast.contest.enrolled'));
       queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
       queryClient.invalidateQueries({

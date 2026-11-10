@@ -1,6 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
@@ -107,7 +107,7 @@ export function ProblemFormDialog({
   const [loading, setLoading] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
   const apiClient = useApiClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
 
   const { data: attachments = [] } = useQuery({
     queryKey: attachmentsQueryKey(problem?.id ?? 0),
@@ -186,14 +186,15 @@ export function ProblemFormDialog({
       new Set(existing.map((p: ContestProblem) => p.label)),
     );
     if (!label) return false;
-    const { error } = await apiClient.POST('/contests/{id}/problems', {
-      headers: { 'Idempotency-Key': getKey() },
-      params: { path: { id: contestId } },
-      body: { problem_id: problemId, label },
-    });
-    if (error) return false;
-    resetKey();
-    return true;
+    const body = { problem_id: problemId, label };
+    const { error } = await sendIdempotent({ contestId, body }, (key) =>
+      apiClient.POST('/contests/{id}/problems', {
+        headers: { 'Idempotency-Key': key },
+        params: { path: { id: contestId } },
+        body,
+      }),
+    );
+    return !error;
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -241,10 +242,12 @@ export function ProblemFormDialog({
           params: { path: { id: problem!.id } },
           body,
         })
-      : await apiClient.POST('/problems', {
-          headers: { 'Idempotency-Key': getKey() },
-          body,
-        });
+      : await sendIdempotent(body, (key) =>
+          apiClient.POST('/problems', {
+            headers: { 'Idempotency-Key': key },
+            body,
+          }),
+        );
 
     if (result.error) {
       setLoading(false);
@@ -256,8 +259,6 @@ export function ProblemFormDialog({
       );
       return;
     }
-
-    if (!isEdit) resetKey();
 
     let attachFailed = false;
     if (!isEdit && contestId && result.data) {
