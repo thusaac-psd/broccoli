@@ -144,8 +144,9 @@ pub async fn update_user(
         active.display_name = Set(display_name);
     }
     if let Some(password) = payload.password {
-        let password_hash = hash::hash_password(&password)
-            .map_err(|_| AppError::Validation("Failed to hash password".into()))?;
+        let password_hash = hash::hash_password_off_thread(password)
+            .await
+            .map_err(|e| AppError::Internal(format!("Password hash error: {e}")))?;
         active.password = Set(password_hash);
         refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
         user::Entity::touch_credentials_changed(&txn, id).await?;

@@ -27,7 +27,7 @@ use crate::config::ServerConfig;
 // (`authenticated_user_can_retrieve_their_profile`) - all in
 // tests/integration/auth.rs. There is no `Resource::User` in the kernel this
 // could route through.
-use crate::entity::{refresh_token, user};
+use crate::entity::user;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
@@ -36,44 +36,12 @@ use crate::models::auth::{
     DeviceCodeResponse, DeviceTokenRequest, LoginRequest, LoginResponse, MeResponse,
     RegisterRequest, RegisterResponse, validate_login_request, validate_register_request,
 };
-use crate::services::auth_tokens::issue_access_token;
+use crate::services::auth_tokens::{
+    issue_access_token, mint_refresh_token, revoke_presented, rotate_refresh_token,
+};
 use crate::state::AppState;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::{hash, refresh};
-
-/// Seconds after a refresh token is rotated during which a replay of it is
-/// treated as a benign concurrent-refresh race (two in-flight requests carried
-/// the same pre-rotation cookie) rather than theft. Past this window, replaying
-/// an already-rotated token is treated as a stolen refresh chain.
-const REFRESH_REUSE_GRACE_SECS: i64 = 10;
-
-/// Handle a presented refresh token whose row was already rotated out
-/// (`revoked_at` is set), returning the error to reject the request with.
-///
-/// Within [`REFRESH_REUSE_GRACE_SECS`] it is a benign concurrent-refresh race
-/// (soft reject, no side effect). Past it, the replay is treated as a stolen
-/// refresh chain and ALL of the user's refresh tokens are revoked (family kill)
-/// so a leaked chain cannot outlive detection. Consumes the transaction.
-async fn reject_reused_refresh_token(
-    txn: sea_orm::DatabaseTransaction,
-    user_id: i32,
-    revoked_at: chrono::DateTime<chrono::Utc>,
-) -> AppError {
-    let elapsed = chrono::Utc::now() - revoked_at;
-    if elapsed > chrono::Duration::seconds(REFRESH_REUSE_GRACE_SECS) {
-        tracing::warn!(
-            user_id,
-            "Refresh token reuse detected past the grace window; revoking all refresh tokens for the user"
-        );
-        if let Err(e) = refresh_token::Entity::revoke_all_for_user(&txn, user_id).await {
-            return AppError::from(e);
-        }
-        if let Err(e) = txn.commit().await {
-            return AppError::from(e);
-        }
-    }
-    AppError::TokenInvalid
-}
 
 #[utoipa::path(
     post,
@@ -156,11 +124,14 @@ pub async fn login(
         .one(&state.db)
         .await?;
 
-    let is_valid = hash::verify_password(
-        &payload.password,
-        maybe_user.as_ref().map(|u| u.password.as_str()),
+    // An unknown username is checked against a dummy hash so both cases cost
+    // the same.
+    let is_valid = hash::verify_password_off_thread(
+        payload.password.clone(),
+        maybe_user.as_ref().map(|u| u.password.clone()),
     )
-    .map_err(|e| AppError::Internal(format!("Password verify error: {}", e)))?;
+    .await
+    .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;
 
     let user = match maybe_user {
         Some(u) if is_valid => u,
@@ -179,27 +150,8 @@ pub async fn login(
 
     let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
 
-    let now = chrono::Utc::now();
-    let expiry = now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS);
-
-    let selector = hash::generate_random_string();
-    let validator = hash::generate_random_string();
-    let hash = hash::hash_password(&validator)
-        .map_err(|e| AppError::Internal(format!("Refresh token hash error: {}", e)))?;
-
-    refresh_token::ActiveModel {
-        selector: Set(selector.clone()),
-        validator: Set(hash),
-        user_id: Set(user.id),
-        expires_at: Set(expiry),
-        created_at: Set(now),
-        revoked_at: Set(None),
-    }
-    .insert(&state.db)
-    .await?;
-
-    let cookie =
-        refresh::build_refresh_cookie(&selector, &validator, state.config.auth.secure_cookies);
+    let refresh_token = mint_refresh_token(&state.db, user.id).await?;
+    let cookie = refresh::build_refresh_cookie(&refresh_token, state.config.auth.secure_cookies);
 
     Ok((jar.add(cookie), Json(LoginResponse::from(grant))))
 }
@@ -222,101 +174,15 @@ pub async fn refresh(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
-    use sea_orm::sea_query::LockType;
-
-    let cookie_value = jar
+    let presented = jar
         .get(refresh::REFRESH_COOKIE_NAME)
         .map(|c| c.value().to_string())
         .ok_or(AppError::TokenMissing)?;
 
-    let (selector, validator) =
-        refresh::parse_refresh_token(&cookie_value).map_err(|_| AppError::TokenInvalid)?;
-
-    let txn = state.db.begin().await?;
-
-    let maybe_rt = refresh_token::Entity::find_by_id(selector.to_string())
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?;
-
-    let is_valid =
-        hash::verify_password(validator, maybe_rt.as_ref().map(|rt| rt.validator.as_str()))
-            .map_err(|e| AppError::Internal(format!("Refresh token verify error: {}", e)))?;
-
-    let rt_model = match maybe_rt {
-        Some(rt) if is_valid => rt,
-        _ => return Err(AppError::TokenInvalid),
-    };
-
-    // Reuse detection: the validator matched, but if this token's row was already
-    // rotated out (`revoked_at` set) it is either a benign concurrent-refresh race
-    // or a replayed stolen token. Past the grace window this kills the whole token
-    // family. A mismatched validator never reaches here (handled above), so an
-    // attacker cannot trip a victim's family-kill by guessing a revoked selector.
-    if let Some(revoked_at) = rt_model.revoked_at {
-        return Err(reject_reused_refresh_token(txn, rt_model.user_id, revoked_at).await);
-    }
-
-    if rt_model.expires_at < chrono::Utc::now() {
-        rt_model.delete(&txn).await?;
-        txn.commit().await?;
-        return Err(AppError::TokenInvalid);
-    }
-
-    let user_id = rt_model.user_id;
-    let maybe_user = user::Entity::find_by_id(user_id).one(&txn).await?;
-
-    let user = match maybe_user {
-        Some(u) if u.deleted_at.is_none() => u,
-        _ => {
-            rt_model.delete(&txn).await?;
-            txn.commit().await?;
-            return Err(AppError::PermissionDenied);
-        }
-    };
-
-    let grant = issue_access_token(&txn, &state.config.auth.jwt_secret, user.id).await?;
-
-    let now = chrono::Utc::now();
-    let new_expiry = now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS);
-    let new_selector = hash::generate_random_string();
-    let new_validator = hash::generate_random_string();
-    let new_validator_hash = hash::hash_password(&new_validator)
-        .map_err(|e| AppError::Internal(format!("Refresh token hash error: {}", e)))?;
-
-    // Retain the rotated token (mark revoked) instead of deleting it, so a later
-    // replay is detectable as reuse rather than an unknown selector.
-    let mut rotated: refresh_token::ActiveModel = rt_model.into();
-    rotated.revoked_at = Set(Some(now));
-    rotated.update(&txn).await?;
-
-    refresh_token::ActiveModel {
-        selector: Set(new_selector.clone()),
-        validator: Set(new_validator_hash),
-        user_id: Set(user.id),
-        expires_at: Set(new_expiry),
-        created_at: Set(now),
-        revoked_at: Set(None),
-    }
-    .insert(&txn)
-    .await?;
-
-    // Bound retention: drop this user's now-expired refresh tokens (rotated or
-    // not). Revoked-but-unexpired rows are kept until expiry so a replay stays
-    // detectable for the token's whole lifetime.
-    refresh_token::Entity::delete_many()
-        .filter(refresh_token::Column::UserId.eq(user.id))
-        .filter(refresh_token::Column::ExpiresAt.lt(chrono::Utc::now()))
-        .exec(&txn)
-        .await?;
-
-    txn.commit().await?;
-
-    let new_cookie = refresh::build_refresh_cookie(
-        &new_selector,
-        &new_validator,
-        state.config.auth.secure_cookies,
-    );
+    let (grant, refresh_token) =
+        rotate_refresh_token(&state.db, &state.config.auth.jwt_secret, &presented).await?;
+    let new_cookie =
+        refresh::build_refresh_cookie(&refresh_token, state.config.auth.secure_cookies);
 
     Ok((jar.add(new_cookie), Json(LoginResponse::from(grant))))
 }
@@ -338,23 +204,7 @@ pub async fn logout(
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(cookie) = jar.get(refresh::REFRESH_COOKIE_NAME) {
-        let cookie_value = cookie.value().to_string();
-
-        let (selector, validator) =
-            refresh::parse_refresh_token(&cookie_value).map_err(|_| AppError::TokenInvalid)?;
-        let maybe_model = refresh_token::Entity::find_by_id(selector)
-            .one(&state.db)
-            .await?;
-        let is_valid = hash::verify_password(
-            validator,
-            maybe_model.as_ref().map(|rt| rt.validator.as_str()),
-        )
-        .map_err(|e| AppError::Internal(format!("Refresh token verify error: {}", e)))?;
-        let rt_model = match maybe_model {
-            Some(rt) if is_valid => rt,
-            _ => return Err(AppError::TokenInvalid),
-        };
-        rt_model.delete(&state.db).await?;
+        revoke_presented(&state.db, cookie.value()).await?;
     }
 
     let removal_cookie = refresh::build_removal_cookie(state.config.auth.secure_cookies);
@@ -709,30 +559,6 @@ pub async fn poll_device_token(
     ))
 }
 
-/// Create a refresh-token row for a user and return the opaque token string
-/// (`selector:validator`) the client should store.
-async fn mint_refresh_token<C: ConnectionTrait>(db: &C, user_id: i32) -> Result<String, AppError> {
-    let now = chrono::Utc::now();
-    let expiry = now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS);
-    let selector = hash::generate_random_string();
-    let validator = hash::generate_random_string();
-    let validator_hash = hash::hash_password(&validator)
-        .map_err(|e| AppError::Internal(format!("Refresh token hash error: {}", e)))?;
-
-    refresh_token::ActiveModel {
-        selector: Set(selector.clone()),
-        validator: Set(validator_hash),
-        user_id: Set(user_id),
-        expires_at: Set(expiry),
-        created_at: Set(now),
-        revoked_at: Set(None),
-    }
-    .insert(db)
-    .await?;
-
-    Ok(refresh::construct_refresh_token(&selector, &validator))
-}
-
 #[utoipa::path(
     post,
     path = "/cli-token",
@@ -782,74 +608,16 @@ pub async fn cli_refresh(
     State(state): State<AppState>,
     AppJson(payload): AppJson<CliRefreshRequest>,
 ) -> Result<Json<CliTokenResponse>, AppError> {
-    use sea_orm::sea_query::LockType;
-
-    let (selector, validator) =
-        refresh::parse_refresh_token(&payload.refresh_token).map_err(|_| AppError::TokenInvalid)?;
-
-    let txn = state.db.begin().await?;
-
-    let maybe_rt = refresh_token::Entity::find_by_id(selector.to_string())
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?;
-
-    let is_valid =
-        hash::verify_password(validator, maybe_rt.as_ref().map(|rt| rt.validator.as_str()))
-            .map_err(|e| AppError::Internal(format!("Refresh token verify error: {}", e)))?;
-
-    let rt_model = match maybe_rt {
-        Some(rt) if is_valid => rt,
-        _ => return Err(AppError::TokenInvalid),
-    };
-
-    // Reuse detection: same as `refresh` -- a validated but already-rotated token
-    // is a benign concurrent-refresh race or a replayed stolen token (family kill
-    // past the grace window).
-    if let Some(revoked_at) = rt_model.revoked_at {
-        return Err(reject_reused_refresh_token(txn, rt_model.user_id, revoked_at).await);
-    }
-
-    if rt_model.expires_at < chrono::Utc::now() {
-        rt_model.delete(&txn).await?;
-        txn.commit().await?;
-        return Err(AppError::TokenInvalid);
-    }
-
-    let user_id = rt_model.user_id;
-    let maybe_user = user::Entity::find_by_id(user_id).one(&txn).await?;
-    let user = match maybe_user {
-        Some(u) if u.deleted_at.is_none() => u,
-        _ => {
-            rt_model.delete(&txn).await?;
-            txn.commit().await?;
-            return Err(AppError::PermissionDenied);
-        }
-    };
-
-    let new_access_token = issue_access_token(&txn, &state.config.auth.jwt_secret, user.id)
-        .await?
-        .token;
-
-    // Rotate: retain the old token (mark revoked) so a replay is detectable as
-    // reuse, then mint a new one and drop this user's now-expired rows.
-    let now = chrono::Utc::now();
-    let mut rotated: refresh_token::ActiveModel = rt_model.into();
-    rotated.revoked_at = Set(Some(now));
-    rotated.update(&txn).await?;
-    let new_refresh_token = mint_refresh_token(&txn, user_id).await?;
-
-    refresh_token::Entity::delete_many()
-        .filter(refresh_token::Column::UserId.eq(user_id))
-        .filter(refresh_token::Column::ExpiresAt.lt(now))
-        .exec(&txn)
-        .await?;
-
-    txn.commit().await?;
+    let (grant, refresh_token) = rotate_refresh_token(
+        &state.db,
+        &state.config.auth.jwt_secret,
+        &payload.refresh_token,
+    )
+    .await?;
 
     Ok(Json(CliTokenResponse {
-        token: new_access_token,
-        refresh_token: new_refresh_token,
+        token: grant.token,
+        refresh_token,
     }))
 }
 
