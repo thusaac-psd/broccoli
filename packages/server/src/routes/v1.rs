@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
 use axum_client_ip::ClientIpSource;
 use serde_json::json;
 use tower_governor::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::KeyExtractor;
+use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::config::AppConfig;
@@ -119,6 +120,9 @@ fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
             )
     };
 
+    // Every auth response is session material (tokens, refresh cookies, the
+    // caller's identity): mark the whole group `no-store` so neither browsers,
+    // intermediaries nor the idempotency cache ever persist it.
     OpenApiRouter::new()
         .merge(register)
         .merge(login)
@@ -130,6 +134,10 @@ fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::auth::poll_device_token))
         .routes(routes!(handlers::auth::issue_cli_token))
         .routes(routes!(handlers::auth::cli_refresh))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
 }
 
 #[derive(Clone, Copy, Debug)]
