@@ -3,7 +3,7 @@ use std::time::Duration;
 use common::{DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, EntityTrait,
-    ExprTrait, QueryFilter, QueryResult, QuerySelect, Statement, TransactionTrait,
+    ExprTrait, QueryFilter, QueryResult, Statement, TransactionTrait,
 };
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -408,7 +408,6 @@ async fn claim_submissions(
             models.push(sub);
         }
     }
-    clear_current_submission_results(&txn, &plan.redispatch_ids).await?;
 
     for row in &plan.exhausted_rows {
         let message = format!(
@@ -464,36 +463,6 @@ async fn claim_submissions(
     }
 
     Ok(models)
-}
-
-async fn clear_current_submission_results(
-    txn: &DatabaseTransaction,
-    submission_ids: &[i32],
-) -> anyhow::Result<()> {
-    if submission_ids.is_empty() {
-        return Ok(());
-    }
-
-    let current_unfinalized_judgement_ids: Vec<i32> = submission_judgement::Entity::find()
-        .select_only()
-        .column(submission_judgement::Column::Id)
-        .filter(submission_judgement::Column::SubmissionId.is_in(submission_ids.to_vec()))
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .filter(submission_judgement::Column::IsFinalized.eq(false))
-        .into_tuple()
-        .all(txn)
-        .await?;
-
-    if current_unfinalized_judgement_ids.is_empty() {
-        return Ok(());
-    }
-
-    test_case_result::Entity::delete_many()
-        .filter(test_case_result::Column::JudgementId.is_in(current_unfinalized_judgement_ids))
-        .exec(txn)
-        .await?;
-
-    Ok(())
 }
 
 // Lock-order note: this path locks the JUDGEMENT first
@@ -554,8 +523,9 @@ async fn claim_deferred_judgements(
         // (`build_*` in handlers/submission/response.rs) selects test_case_result
         // by `judgement_id` alone - no epoch filter - so both attempts' rows
         // would surface as duplicated per-testcase results. Wipe the stale rows,
-        // mirroring `clear_current_submission_results` (submission-first steal)
-        // and `requeue_judgement_for_system_error_retry` (system-error retry).
+        // mirroring `requeue_judgement_for_system_error_retry` (system-error
+        // retry). The submission-first steal needs no wipe: its fresh judgement
+        // id has no rows yet.
         // `plan.redispatch_ids` here ARE judgement ids, so delete directly.
         test_case_result::Entity::delete_many()
             .filter(test_case_result::Column::JudgementId.is_in(plan.redispatch_ids.clone()))
