@@ -404,6 +404,15 @@ mod dlq_retry {
         let problem_id = app.create_problem(&admin_token, "Retry Test Problem").await;
 
         let sub_id = insert_submission(&app, 1, problem_id, SubmissionStatus::SystemError).await;
+        // The stuck detector DLQs a submission once its retry budget is spent.
+        submission::ActiveModel {
+            id: Set(sub_id),
+            retry_count: Set(6),
+            ..Default::default()
+        }
+        .update(&app.db)
+        .await
+        .expect("spend retry budget");
 
         let dlq_id = create_dlq_entry(&app, sub_id, "stuck_submission", false).await;
 
@@ -420,6 +429,10 @@ mod dlq_retry {
         assert_eq!(sub.status, SubmissionStatus::Queued);
         assert!(sub.error_code.is_none());
         assert!(sub.error_message.is_none());
+        assert_eq!(
+            sub.retry_count, 0,
+            "a DLQ retry starts a new judging attempt with a fresh retry budget"
+        );
 
         let msg = dead_letter_message::Entity::find_by_id(dlq_id)
             .one(&app.db)

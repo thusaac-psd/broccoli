@@ -448,7 +448,14 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
             Expr::value(SubmissionStatus::Pending.to_string()),
         )
         .clear_judgement_columns()
-        .col_expr(submission::Column::RetryCount, Expr::value(new_retry))
+        // Never LOWER the submission's dispatch-retry budget: the judgement's
+        // SystemError-retry count is a separate, larger budget and is often
+        // below the submission's dispatch count. Same rule as the deferred
+        // steal in `dispatcher/steal.rs`.
+        .col_expr(
+            submission::Column::RetryCount,
+            Expr::cust_with_values("GREATEST(retry_count, $1)", [new_retry]),
+        )
         .col_expr(
             submission::Column::OwnerServerId,
             Expr::value(Some(server_id.to_string())),
@@ -1327,6 +1334,37 @@ mod tests {
         assert!(!j.is_finalized, "judgement un-finalized for re-judge");
         assert_eq!(j.status, SubmissionStatus::Pending);
         assert_eq!(j.verdict, None);
+    }
+
+    /// The requeue never LOWERS the submission's dispatch-retry count: the
+    /// judgement's own SystemError-retry count is a separate budget and is
+    /// usually below the submission's. Copying it over used to hand a
+    /// flapping submission a fresh steal/stuck budget on every SE retry.
+    #[tokio::test]
+    async fn system_error_requeue_never_lowers_submission_retry_count() {
+        let (_pg, db) = start_pg().await;
+        let sub = seed_owned_submission(&db, "srv-A").await;
+        let jid = finalize_judgement(
+            &db,
+            &sub,
+            0,
+            0,
+            SubmissionStatus::Judged,
+            Some(Verdict::SystemError),
+        )
+        .await;
+        submission::Entity::update_many()
+            .col_expr(submission::Column::RetryCount, Expr::value(4))
+            .filter(submission::Column::Id.eq(sub.id))
+            .exec(&db)
+            .await
+            .expect("seed dispatch attempts");
+
+        let resub = requeue_judgement_for_system_error_retry(&db, sub.id, jid, 0, "srv-A", 5)
+            .await
+            .expect("requeue call")
+            .expect("system-error judgement is requeued");
+        assert_eq!(resub.retry_count, 4, "submission retry budget kept");
     }
 
     /// Bounded: once the retry budget is exhausted, the SystemError stands.

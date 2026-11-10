@@ -252,13 +252,12 @@ async fn rejudge_finalizes_the_superseded_inflight_judgement() {
     assert_eq!(discard.status, 204, "discard: {}", discard.text);
 }
 
-/// BUG (low): `retry_count` is documented as per-dispatch attempts ("1 after a
-/// normal first dispatch") and budgets steal/stuck retries, but no rejudge
-/// resets it. After 4 rejudges the first lease steal goes straight to
+/// B22 (#73, low): `retry_count` is documented as per-dispatch attempts ("1
+/// after a normal first dispatch") and budgets steal/stuck retries, but no
+/// rejudge reset it. After 4 rejudges the first lease steal goes straight to
 /// DISPATCH_RETRY_EXHAUSTED + DLQ without a single retry.
 /// Location: handlers/submission/rejudge.rs; dispatcher/claim.rs increments.
 #[tokio::test]
-#[ignore = "BUG: rejudge does not reset retry_count, so retry budgets are lifetime counters"]
 async fn rejudge_resets_retry_budget() {
     let app = TestApp::spawn().await;
     let token = app
