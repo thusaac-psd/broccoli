@@ -411,8 +411,17 @@ impl Client {
         self.parse_response(resp)
     }
 
-    pub fn get_problem(&self, problem_id: &str) -> anyhow::Result<ProblemDetailResponse> {
-        let resp = self.get(&format!("/api/v1/problems/{}", problem_id))?;
+    /// A problem's statement, read through the contest it belongs to so the
+    /// server decides visibility for that contest only.
+    pub fn get_contest_problem(
+        &self,
+        contest_id: &str,
+        problem_id: &str,
+    ) -> anyhow::Result<ProblemDetailResponse> {
+        let resp = self.get(&format!(
+            "/api/v1/contests/{}/problems/{}",
+            contest_id, problem_id
+        ))?;
         self.parse_response(resp)
     }
 
