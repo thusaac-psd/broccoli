@@ -156,6 +156,9 @@ impl WorkerRuntime {
             heartbeat_config.payload(started_at, &in_flight),
         )
         .await?;
+        // Renew from now on: executor setup below can outlast the claim's TTL.
+        let heartbeat =
+            crate::heartbeat::spawn(claim, heartbeat_config, started_at, in_flight.clone());
 
         let dedup = match RedisTaskDedup::new(
             &config.mq.url,
@@ -188,9 +191,6 @@ impl WorkerRuntime {
                 .await
                 .context("Failed to initialize worker executors")?,
         );
-
-        let heartbeat =
-            crate::heartbeat::spawn(claim, heartbeat_config, started_at, in_flight.clone());
 
         // Pre-warm subscriber: listens for contest cache-warm jobs and fills the
         // local file cache ahead of the opening burst. Independent of judging.
