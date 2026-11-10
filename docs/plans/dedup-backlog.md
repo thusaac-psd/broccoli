@@ -82,7 +82,15 @@ Done already (for reference on the pattern):
    `test-support` as free functions over `&DatabaseConnection` and have both
    fixtures delegate.
 
-2. **Shared API-client auth/retry protocol** (defensible split, lowest
-   priority). `packages/cli-core/src/client.rs` (sync ureq) vs
-   `packages/stress-test/src/client.rs` (async reqwest) both maintain login +
-   token storage + retry-on-401 against the same server API.
+2. **Shared API-client auth/retry protocol** (defensible split, lowest priority;
+   reviewed November 2026 and deliberately left).
+   `packages/cli-core/src/client.rs` (sync ureq) vs
+   `packages/stress-test/src/client.rs` (async reqwest) both retry a request
+   once after re-authenticating on 401, but nothing else is shared: cli-core
+   rotates a refresh token through `/auth/cli-refresh`, with a persisted,
+   thread-shared `TokenStore` that deduplicates concurrent refreshes, while
+   stress-test re-logs in with username and password behind an async `RwLock`.
+   The only common shape is the ~10-line "on 401, re-auth once and resend",
+   which cannot be shared across a sync and an async HTTP stack without a trait
+   heavier than the code it replaces. Revisit if both move to one HTTP client or
+   one auth flow.
