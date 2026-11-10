@@ -159,12 +159,7 @@ impl ServerRuntime {
         );
 
         crate::seed::seed_role_permissions(&db).await?;
-        crate::seed::ensure_bootstrap_admin(
-            &db,
-            &app_config.bootstrap.admin_username,
-            &app_config.bootstrap.admin_password,
-        )
-        .await?;
+        crate::seed::ensure_bootstrap_admin(&db, &app_config.bootstrap).await?;
         crate::seed::ensure_indexes(&db).await?;
         crate::seed::backfill_submission_judgements(&db).await?;
         crate::seed::spawn_large_test_case_body_backfill(db.clone(), Arc::clone(&blob_store));

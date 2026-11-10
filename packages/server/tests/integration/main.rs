@@ -1,6 +1,7 @@
 mod additional_file;
 mod attachment;
 mod auth;
+mod bootstrap_admin;
 mod claim_in_flight;
 mod clarification;
 mod code_run;
