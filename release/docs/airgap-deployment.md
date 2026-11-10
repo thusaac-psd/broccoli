@@ -80,7 +80,8 @@ everything an install needs:
   assembled with `--skip-images`, or assembled before image build/save is wired
   up, will not have them, and `load-bundle.sh` will fail with
   `no images/*.tar in bundle` on the target when it tries to `docker load` them.
-- `compose/` — the server, infra, and Caddy TLS gateway
+- `compose/` — the server, infra, server-behind-gateway override
+  (`docker-compose.server-airgap.yaml.template`), and Caddy TLS gateway
   (`docker-compose.gateway-airgap.yaml.template`) compose templates, plus
   `compose/.env.server.example` and `compose/.env.infra.example` (real env files
   are _not_ shipped — see the server install section below).
@@ -283,7 +284,7 @@ This:
    sidecar right after the leaf is issued (see §8).
 4. Brings up infra, server, AND the Caddy TLS gateway (443, serving the
    internal-CA leaf, reverse-proxying to the server) with
-   `docker compose -p compose --env-file .env.infra --env-file .env.server -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template -f docker-compose.gateway-airgap.yaml.template up -d --pull never`
+   `docker compose -p compose --env-file .env.infra --env-file .env.server -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template -f docker-compose.server-airgap.yaml.template -f docker-compose.gateway-airgap.yaml.template up -d --pull never`
    — the Caddyfile is mounted un-rendered and Caddy expands its variables from
    the container environment; `--pull never` guarantees Compose only uses the
    images already loaded from `images/*.tar`, never reaching for a registry.
@@ -291,18 +292,24 @@ This:
    bound to host loopback (`BROCCOLI_HTTP_BIND=127.0.0.1:3000`), so no
    contestant on the LAN can reach it and bypass TLS — HTTPS on 443 is the sole
    entrypoint. Host-local `curl http://127.0.0.1:3000/...` still works for
-   operator troubleshooting. The gateway also runs the server with
-   `SECURE_COOKIES=true` and trusts the gateway's private network as a proxy, so
-   session cookies are marked `Secure` and auth rate limiting sees each
-   contestant's real IP (via `X-Forwarded-For`) rather than the gateway's. To
-   publish the server on the LAN anyway (e.g. a multi-node air-gap fronted by a
-   separate gateway host), export `BROCCOLI_HTTP_BIND=0.0.0.0:3000` before
-   running `install.sh`. **Only do this behind a separate fronting gateway:** it
-   re-exposes plaintext `:3000` on the LAN, and because the server still trusts
-   the private ranges as proxies, a client reaching `:3000` directly from a
-   trusted subnet could forge `X-Forwarded-For` to poison auth rate limiting.
-   When you take this path, narrow `BROCCOLI__SERVER__TRUSTED_PROXIES` to the
-   fronting gateway's address only.
+   operator troubleshooting. The server override
+   (`docker-compose.server-airgap.yaml.template`) runs the server with
+   `SECURE_COOKIES=true`, and the server trusts `X-Forwarded-For` only from the
+   gateway, so auth rate limiting sees each contestant's real IP rather than
+   the gateway's. The gateway and the server share a small `edge` network
+   (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else,
+   and that subnet is the whole trust list; no LAN range is ever trusted.
+
+   To run the gateway on a separate host instead (e.g. several servers), on the
+   gateway host compose `docker-compose.gateway-airgap.yaml.template` alone,
+   with `LAN_HOST`, `BROCCOLI_TLS_CERT`, `BROCCOLI_TLS_KEY` and
+   `BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000'` exported. On each server
+   host, export `BROCCOLI_HTTP_BIND=0.0.0.0:3000` and
+   `BROCCOLI_GATEWAY_HOSTS=<gateway LAN IP>` before running `install.sh`: the
+   server is then reachable on the LAN at `:3000` and trusts only that address.
+   The airgap installer has no gateway-only role yet, and a second server host
+   still needs `BROCCOLI_DB_HOST`, `BROCCOLI_MQ_HOST` and `BROCCOLI_S3_HOST`
+   pointed at the first server's infra.
 
 ## 6. Worker install
 

@@ -15,7 +15,8 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 bash "$bb" --version testv --output "$T" --skip-images >/dev/null
 b="$T/broccoli-airgap-testv"
 for p in bundle.json manifest.sha256 ca/root.crt caddy/Caddyfile.airgap \
-         compose/docker-compose.gateway-airgap.yaml.template \
+         compose/docker-compose.gateway-airgap.yaml.template compose/docker-compose.server-airgap.yaml.template \
+         lib/release-lib.sh lib/env.sh lib/host.sh lib/plugins.sh \
          load-bundle.sh install.sh setup.sh trust-ca/linux.sh compose \
          lib/manifest.sh lib/runtime.sh lib/answers.sh lib/envgen.sh \
          lib/preflight.sh native/live-boot-preflight.sh; do

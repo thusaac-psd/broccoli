@@ -79,6 +79,7 @@ chmod +x "$B/native/live-boot-preflight.sh"
 cp "$repo/release/docker-compose.server.yaml.template" \
    "$repo/release/docker-compose.infra.yaml.template" \
    "$repo/release/docker-compose.worker.yaml.template" \
+   "$repo/release/docker-compose.server-airgap.yaml.template" \
    "$repo/release/docker-compose.gateway-airgap.yaml.template" "$B/compose/"
 cp "$repo/release/.env.server.example" "$repo/release/.env.infra.example" \
    "$repo/release/.env.worker.example" "$B/compose/"

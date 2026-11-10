@@ -70,17 +70,25 @@ mkdir -p "$T/ag"
 . "$rel/airgap/lib/envgen.sh"
 envgen_write "$T/ag/.env.infra" "$T/ag/.env.server" \
   "$rel/.env.infra.example" "$rel/.env.server.example" admin 'Admin pass #1'
+# What release/airgap/install.sh exports for the server role.
 export LAN_HOST=contest.lan BROCCOLI_TLS_CERT=/tmp/server.crt BROCCOLI_TLS_KEY=/tmp/server.key
-render "airgap server" --env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server" \
-  -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template \
-  -f docker-compose.gateway-airgap.yaml.template
+export BROCCOLI_GATEWAY_TRUSTED_PROXIES='["172.31.250.0/28"]'
+airgap_server=(--env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server"
+  -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template
+  -f docker-compose.server-airgap.yaml.template -f docker-compose.gateway-airgap.yaml.template)
+render "airgap server" "${airgap_server[@]}"
+server_env() {
+  docker compose "${airgap_server[@]}" config --format json 2>/dev/null \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["server"]["environment"][sys.argv[1]])' "$1"
+}
 # The quoted env-file value reaches the container as itself, ' #1' included.
-admin_pass="$(docker compose --env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server" \
-  -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template \
-  -f docker-compose.gateway-airgap.yaml.template config --format json 2>/dev/null \
-  | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["server"]["environment"]["BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD"])')"
-[ "$admin_pass" = 'Admin pass #1' ] || fail "admin password rendered as '$admin_pass'"
-unset LAN_HOST BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY
+[ "$(server_env BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD)" = 'Admin pass #1' ] || fail "admin password mangled"
+# The override wins over .env.server's TRUSTED_PROXIES and trusts the gateway only.
+[ "$(server_env BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["172.31.250.0/28"]' ] || fail "airgap server trusts more than the gateway"
+# A gateway on a host of its own: the gateway template alone.
+BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' render "airgap gateway alone" \
+  -f docker-compose.gateway-airgap.yaml.template
+unset LAN_HOST BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_GATEWAY_TRUSTED_PROXIES
 
 printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=a\nBROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s\n' \
   > "$T/ag/cluster-secrets.env"

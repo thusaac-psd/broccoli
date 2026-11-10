@@ -82,6 +82,14 @@ case "$ROLE" in
     # operator ops still reach it. Universal across Compose versions (an override
     # `ports: !reset []` would hard-fail below Compose v2.24, no offline remedy).
     export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-127.0.0.1:3000}"
+    # The server trusts X-Forwarded-For only from the gateway: the edge network
+    # it shares with the gateway here, or BROCCOLI_GATEWAY_HOSTS when the
+    # gateway runs on its own host. The subnet default matches the templates'.
+    export BROCCOLI_EDGE_SUBNET="${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
+    BROCCOLI_GATEWAY_TRUSTED_PROXIES="$(trusted_proxies_json "${BROCCOLI_GATEWAY_HOSTS:-$BROCCOLI_EDGE_SUBNET}")" \
+      || { echo "BROCCOLI_GATEWAY_HOSTS must list IP addresses or CIDRs" >&2; exit 2; }
+    export BROCCOLI_GATEWAY_TRUSTED_PROXIES
+    echo "server trusts forwarded client addresses only from $BROCCOLI_GATEWAY_TRUSTED_PROXIES"
     echo "TLS gateway will serve https://$LAN_HOST using leaf in $abs_secret"
     echo "server plaintext :3000 bound to host loopback ($BROCCOLI_HTTP_BIND); 443 is the only LAN entrypoint"
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
@@ -104,6 +112,7 @@ case "$ROLE" in
         --env-file .env.infra --env-file .env.server
         -f docker-compose.infra.yaml.template
         -f docker-compose.server.yaml.template
+        -f docker-compose.server-airgap.yaml.template
         -f docker-compose.gateway-airgap.yaml.template
       )
       $COMPOSE "${compose_args[@]}" up -d --pull never

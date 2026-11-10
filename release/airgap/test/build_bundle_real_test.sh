@@ -24,6 +24,7 @@ cleanup() {
   ( cd "$T/broccoli-airgap-$V/compose" 2>/dev/null && \
     $COMPOSE -p compose --env-file .env.infra --env-file .env.server \
       -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template \
+      -f docker-compose.server-airgap.yaml.template \
       -f docker-compose.gateway-airgap.yaml.template down -v 2>/dev/null || true )
   rm -rf "$T"
 }
