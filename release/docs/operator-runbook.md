@@ -373,26 +373,35 @@ memory until manually deleted.
 The release `install.sh` prompts for the ID; if you bypass the installer, audit
 each replica's env file before starting.
 
-## Recovering In-Flight Submissions After a Server Crash
+## Recovering In-Flight Submissions After a Server Restart or Crash
 
-Unless the Phase 1b lease/steal mechanism is explicitly enabled, a server crash
-leaves its in-flight submissions in `Running` status until the stuck-job
-detector catches them (default 2 hours via `stuck_job_timeout_secs`). When this
-happens:
+Every server re-dispatches its own unfinished work automatically, whatever
+`BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED` is set to:
+
+- **Graceful stop** (`docker compose stop`, a rolling restart, a redeploy): the
+  server releases the submissions, rejudges and code runs it was judging as it
+  shuts down, and the other servers pick them up within one steal-scan interval
+  (`steal_scan_interval_secs`, default 15 s). Nobody has to resubmit.
+- **Restart after a crash**: a server that comes back with the same
+  `BROCCOLI__SERVER__ID` releases and re-dispatches the work its previous
+  instance left behind as it boots. That work no longer counts against its
+  in-flight limit.
+- **Crash without a restart**: with lease/steal enabled, the other servers
+  steal the dead server's work once its lease expires (`lease_ttl_secs`). With
+  it disabled (the release default) nothing can tell a dead server from a live
+  one, so the work waits until that server ID boots again, or until the
+  stuck-job detector fails it after `max_inflight_secs` (default 1 hour) so it
+  can be rejudged.
+
+When a crashed server will not come back:
 
 1. Confirm the failed server is dead (not merely network-partitioned). Two
    replicas with the same ID racing on the same queue is worse than ghost
    queues.
-2. After restart, the new server with the same ID consumes its old reply queue
-   and drops the stale results (logged as "no waiter found"). The failed
-   submissions still need to be re-submitted by the user, because the platform
-   does not automatically replay them.
+2. Either start a replacement with the same `BROCCOLI__SERVER__ID` (its boot
+   recovery re-dispatches the stranded work), or rejudge the affected
+   submissions once the stuck-job detector has failed them.
 3. If `redis-cli SCAN MATCH operation_results.*` shows queues with no live
    consumer (i.e. their `<server_id>` does not match any healthy replica),
    `redis-cli DEL <queue_name> <queue_name>_processing <queue_name>_failed <queue_name>_fairness_set`
    to reclaim the memory.
-
-With `BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED=true`, Phase 1b automates
-the recovery loop foundation: servers write heartbeats, refresh owned leases,
-and dry-run ghost reply-queue sweeps. Steal scanning remains behind the same
-opt-in rollout path until the dispatch replay path is enabled.

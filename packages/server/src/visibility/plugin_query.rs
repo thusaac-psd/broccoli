@@ -51,27 +51,32 @@ struct VisibilityQuerier {
 /// Scan the live plugin registry for every currently-`Loaded` plugin that
 /// registered a `[[server.queries]]` entry with `topic = "visibility"`.
 ///
-/// Returns `Err(())` only if the registry's `RwLock` is poisoned (a prior
-/// panic while some other code held the write lock) - the caller treats that
-/// exactly like any other plugin-side failure and fails the whole batch
-/// closed, since a poisoned lock means the set of registered queriers can no
-/// longer be established with confidence.
+/// Returns `Err(())`, which the caller turns into `Deny` for the whole batch,
+/// when the set of queriers cannot be established with confidence:
 ///
-/// A plugin that is not `Loaded` (failed to load, crashed, unloaded, ...) is
-/// still skipped here exactly as before: zero queriers is deliberately
-/// treated as "no plugin has an opinion" and `query_plugins` returns
-/// `Decision::Allow` for the whole batch (`Allow` is the `meet` lattice's
-/// identity element) - this is correct and must not change, since a contest
-/// type with no registered visibility plugin at all relies on the exact same
-/// path. What was missing is an alarm for the specific case where a plugin
-/// that DECLARED a `topic = "visibility"` query is the one that is not
-/// `Loaded`: that plugin's authors expected it to gate every request in its
-/// manifest's topic, so its absence silently widens access from "whatever
-/// that plugin would have decided" to unconditional Allow, with nothing
-/// surfaced anywhere. Log it at `error!` so it is visible without changing
-/// the fail-open behavior it is warning about.
+/// - the registry's `RwLock` is poisoned (a prior panic while some other code
+///   held the write lock);
+/// - a plugin that DECLARES a visibility query is enabled in the fleet's
+///   desired state but is not `Loaded` on this replica (it failed to load
+///   here, or this replica has not converged onto an enable yet). Its authors
+///   expected it to gate every request; skipping it would silently widen
+///   access to unconditional `Allow` on just this replica, so a contestant
+///   load-balanced onto it could read what every other replica hides. This
+///   replica retries the load and reports it in `/healthz`.
+///
+/// A plugin that declares a visibility query but is NOT enabled is skipped:
+/// zero queriers is deliberately "no plugin has an opinion" and
+/// `query_plugins` returns `Decision::Allow` (`Allow` is the `meet` lattice's
+/// identity element) - a contest type with no visibility plugin at all relies
+/// on the exact same path.
+///
+/// Known limit: a plugin that is enabled but missing from this replica's disk
+/// has no manifest here, so whether it declares a visibility query is
+/// unknown; it is reported as not ready but does not fail visibility closed.
 fn visibility_queriers(state: &AppState) -> Result<Vec<VisibilityQuerier>, ()> {
-    let registry = state.plugins.get_registry().read().map_err(|_| ())?;
+    let registry = state.plugins.get_registry().read().map_err(|_| {
+        tracing::error!("visibility plugin registry lock poisoned; denying batch");
+    })?;
 
     let mut queriers = Vec::new();
     for entry in registry.values() {
@@ -81,14 +86,14 @@ fn visibility_queriers(state: &AppState) -> Result<Vec<VisibilityQuerier>, ()> {
         let declares_visibility_query = server.queries.iter().any(|q| q.topic == "visibility");
 
         if entry.status != PluginStatus::Loaded {
-            if declares_visibility_query {
+            if declares_visibility_query && state.plugin_lifecycle.is_desired_enabled(&entry.id) {
                 tracing::error!(
                     plugin_id = %entry.id,
                     status = ?entry.status,
-                    "plugin declares a visibility query but is not Loaded; \
-                     its resources will be decided as if it had no opinion \
-                     (Allow), not by this plugin's logic"
+                    "plugin declares a visibility query and is enabled, but is not Loaded \
+                     on this replica; denying the batch until it loads"
                 );
+                return Err(());
             }
             continue;
         }
@@ -298,7 +303,7 @@ pub(crate) async fn query_plugins(
     let queriers = match visibility_queriers(state) {
         Ok(queriers) => queriers,
         Err(()) => {
-            tracing::error!("visibility plugin registry lock poisoned; denying batch");
+            // `visibility_queriers` logged the cause.
             return vec![Decision::Deny; resources.len()];
         }
     };
@@ -965,6 +970,7 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
+            plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),
@@ -1033,20 +1039,7 @@ mod tests {
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
 
-    /// A plugin that DECLARES a `topic = "visibility"` query but is not
-    /// `Loaded` (e.g. it failed to load) must be excluded from `queriers`
-    /// exactly like one with no query at all - this is the fail-open
-    /// behavior that must NOT change. `visibility_queriers` additionally
-    /// logs an `error!` for this specific case (declared-but-not-Loaded, as
-    /// opposed to never-declared), but that is an observability addition
-    /// only; this test pins that the decision output is unaffected, using
-    /// `PanicPluginManager` to also prove the not-`Loaded` plugin is never
-    /// called.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn declared_but_not_loaded_querier_is_excluded_and_still_allows() {
-        let _guard = crate::metrics_test_lock();
-
+    async fn decide_with_failed_querier(enabled_in_fleet: bool) -> Vec<Decision> {
         let mut entry = visibility_plugin_entry("declared-but-failed");
         entry.status = PluginStatus::Failed("deliberate test failure".to_string());
         let mut registry_map = HashMap::new();
@@ -1060,11 +1053,14 @@ mod tests {
         });
 
         let state = test_app_state(plugins).await;
+        state
+            .plugin_lifecycle
+            .set_desired("declared-but-failed", enabled_in_fleet);
         let subject = Subject::anonymous();
         let resources = vec![Resource::Contest(1), Resource::Submission(2)];
 
         let resource_contest_ids = vec![Some(1); resources.len()];
-        let result = query_plugins(
+        query_plugins(
             &state,
             &subject,
             Action::Read,
@@ -1072,9 +1068,35 @@ mod tests {
             &resources,
             &resource_contest_ids,
         )
-        .await;
+        .await
+    }
 
-        assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
+    /// A plugin that DECLARES a `topic = "visibility"` query but is disabled
+    /// fleet-wide has no opinion: it is excluded from `queriers` exactly like
+    /// one with no query at all. `PanicPluginManager` also proves the
+    /// not-`Loaded` plugin is never called.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn declared_querier_that_is_disabled_is_excluded_and_still_allows() {
+        let _guard = crate::metrics_test_lock();
+        assert_eq!(
+            decide_with_failed_querier(false).await,
+            vec![Decision::Allow, Decision::Allow]
+        );
+    }
+
+    /// The same plugin while ENABLED fleet-wide but not `Loaded` on this
+    /// replica (failed to load here, or not converged yet) must fail closed:
+    /// every other replica is enforcing it, so allowing here would let a
+    /// load-balanced request read what the rest of the fleet hides.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn declared_querier_that_is_enabled_but_not_loaded_denies_whole_batch() {
+        let _guard = crate::metrics_test_lock();
+        assert_eq!(
+            decide_with_failed_querier(true).await,
+            vec![Decision::Deny, Decision::Deny]
+        );
     }
 
     #[allow(clippy::await_holding_lock)]

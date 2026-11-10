@@ -53,6 +53,15 @@ pub fn worker_private_queue_name(shared_queue: &str, worker_id: &str) -> String 
 /// than as a hand-copied literal in each crate.
 pub use crate::node_identity::WORKER_HEARTBEAT_KEY_PREFIX;
 
+/// TTL (seconds) the worker sets on its heartbeat key, refreshing it every few
+/// seconds. Readers derive a heartbeat's age from the key's remaining TTL, so
+/// liveness is measured on the Redis clock alone and never compares a
+/// worker's clock with a server's.
+///
+/// Derived from the node-identity claim TTL, which is what actually writes the
+/// key, so the writer and every reader agree by construction.
+pub const WORKER_HEARTBEAT_TTL_SECS: u64 = crate::node_identity::HEARTBEAT_TTL.as_secs();
+
 fn default_fairness_mode() -> String {
     "unknown".into()
 }

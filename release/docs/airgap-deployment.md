@@ -97,7 +97,8 @@ everything an install needs:
   the Codelink contest formats. They are not loaded until enabled, either with
   `BROCCOLI_PLUGINS="codelink-qualifier codelink-bracket"` on the server
   `install.sh` run, or later with `./enable-plugin.sh codelink-qualifier
-  codelink-bracket` followed by **Reload All** on the admin Plugins page.
+  codelink-bracket` on every server node followed by **Reload All** on the admin
+  Plugins page (once; it reaches every server replica).
   `./enable-plugin.sh` with no arguments lists them. An enabled plugin stays
   covered by the integrity check: it must match its copy here byte for byte.
 - `cli/` — the musl-static `broccoli` contestant CLI binary.

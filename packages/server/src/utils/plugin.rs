@@ -1,5 +1,4 @@
 use plugin_core::traits::PluginManager;
-use sea_orm::*;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -7,7 +6,6 @@ use plugin_core::error::PluginError;
 use plugin_core::hook::PluginHook;
 use plugin_core::manifest::PluginManifest;
 
-use crate::entity::plugin as plugin_entity;
 use crate::state::{AppState, RegistryState};
 
 pub async fn purge_plugin_registrations(registries: &RegistryState, plugin_id: &str) {
@@ -89,35 +87,33 @@ fn mark_plugin_failed(
     Ok(())
 }
 
+/// Register a freshly loaded plugin's hooks and run its `init()`. On failure
+/// the plugin is left unloaded with status `Failed` (see [`fail_plugin`]).
+///
+/// A failure here is LOCAL to this replica: it never touches fleet-wide
+/// state such as the plugin's pending timers, which a peer that loaded the
+/// plugin fine is still delivering. [`crate::plugin_lifecycle`] retries it.
 pub async fn activate_plugin(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
-    state.plugins.load_plugin(plugin_id)?;
-
-    let manifest = plugin_manifest(state.plugins.as_ref(), plugin_id)?;
-    register_plugin_hooks(state, plugin_id, &manifest).await;
-
-    match call_plugin_init(state.plugins.as_ref(), plugin_id).await {
-        Ok(()) => {
-            state.plugins.update_translations()?;
-            Ok(())
-        }
-        Err(error) => {
-            purge_plugin_registrations(&state.registries, plugin_id).await;
-            let _ = state.plugins.unload_plugin(plugin_id);
-            let _ = mark_plugin_failed(state.plugins.as_ref(), plugin_id, &error);
-            if let Err(e) =
-                crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id)
-                    .await
-            {
-                tracing::error!(
-                    plugin_id,
-                    error = %e,
-                    "Failed to delete pending timers for a plugin that failed activation"
-                );
-            }
-            tracing::error!("Plugin '{}' init() failed: {}", plugin_id, error);
-            Err(error)
-        }
+    let result = async {
+        state.plugins.load_plugin(plugin_id)?;
+        let manifest = plugin_manifest(state.plugins.as_ref(), plugin_id)?;
+        register_plugin_hooks(state, plugin_id, &manifest).await;
+        call_plugin_init(state.plugins.as_ref(), plugin_id).await?;
+        state.plugins.update_translations()
     }
+    .await;
+    if let Err(error) = &result {
+        tracing::error!("Plugin '{}' activation failed: {}", plugin_id, error);
+        fail_plugin(state, plugin_id, error).await;
+    }
+    result
+}
+
+/// Drop everything a half-activated plugin registered and mark it `Failed`.
+pub async fn fail_plugin(state: &AppState, plugin_id: &str, error: &PluginError) {
+    purge_plugin_registrations(&state.registries, plugin_id).await;
+    let _ = state.plugins.unload_plugin(plugin_id);
+    let _ = mark_plugin_failed(state.plugins.as_ref(), plugin_id, error);
 }
 
 /// Activation outcome for a single plugin during [`sync_plugins`].
@@ -130,49 +126,11 @@ pub struct PluginActivationFailure {
     pub error: PluginError,
 }
 
+/// Boot-time plugin sync: discover plugins on disk and converge onto the
+/// fleet's desired state. See [`crate::plugin_lifecycle::boot`].
 #[instrument(skip(state))]
 pub async fn sync_plugins(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailure>> {
-    state.plugins.discover_plugins()?;
-
-    let mut failures = Vec::new();
-
-    for plugin in state.plugins.list_plugins()? {
-        let plugin_id = plugin.id.clone();
-
-        let plugin_model = plugin_entity::Entity::find_by_id(plugin_id.clone())
-            .one(&state.db)
-            .await?;
-        let plugin_model = match plugin_model {
-            None => {
-                let new_plugin = plugin_entity::ActiveModel {
-                    id: Set(plugin_id),
-                    is_enabled: Set(true),
-                    updated_at: Set(chrono::Utc::now()),
-                };
-                new_plugin.insert(&state.db).await?
-            }
-            Some(existing_plugin) => existing_plugin,
-        };
-
-        if plugin_model.is_enabled {
-            match activate_plugin(state, &plugin.id).await {
-                Ok(()) => {
-                    tracing::info!("Plugin '{}' loaded successfully", plugin.id);
-                }
-                Err(error) => {
-                    tracing::error!("Plugin '{}' activation failed: {}", plugin.id, error);
-                    failures.push(PluginActivationFailure {
-                        plugin_id: plugin.id.clone(),
-                        error,
-                    });
-                }
-            }
-        } else {
-            tracing::info!("Plugin '{}' is disabled, skipping load", plugin.id);
-        }
-    }
-
-    Ok(failures)
+    crate::plugin_lifecycle::boot(state).await
 }
 
 async fn register_plugin_hooks(

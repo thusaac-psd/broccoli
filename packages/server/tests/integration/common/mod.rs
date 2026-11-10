@@ -272,6 +272,10 @@ pub mod routes {
         format!("/api/v1/admin/plugins/{id}/disable")
     }
 
+    pub fn admin_plugin_reload(id: &str) -> String {
+        format!("/api/v1/admin/plugins/{id}/reload")
+    }
+
     pub fn plugin_proxy(id: &str, path: &str) -> String {
         let path = path.trim_start_matches('/');
         format!("/api/v1/p/{id}/{path}")
@@ -505,6 +509,9 @@ pub struct TestApp {
     /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP -
     /// the same pattern `scaling.rs` uses for `dispatcher::sweeper::sweep_once`.
     pub state: AppState,
+    /// The test database this app runs on; pass it as
+    /// [`SpawnOptions::shared_db`] to spawn another replica on it.
+    pub db_name: String,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -622,6 +629,10 @@ pub struct SpawnOptions {
     /// cannot succeed (see `plugins_dir` above) sets this to `true` instead
     /// of weakening that assertion for everyone else.
     pub allow_plugin_activation_failures: bool,
+    /// Join an existing test database instead of creating a fresh one: the
+    /// spawned app is another server replica of the app whose `db_name` this
+    /// is (same Postgres, own process-local state). See [`TestApp::spawn_replica`].
+    pub shared_db: Option<String>,
 }
 
 impl TestApp {
@@ -641,15 +652,24 @@ impl TestApp {
         Self::spawn_internal(true, options).await
     }
 
+    /// Another server replica of `self`: same database, its own plugin
+    /// registry, dispatcher state and HTTP listener.
+    pub async fn spawn_replica(&self, mut options: SpawnOptions) -> Self {
+        options.shared_db = Some(self.db_name.clone());
+        Self::spawn_internal(true, options).await
+    }
+
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
         let port = shared_pg_port().await;
-        let db_name = format!("test_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
-
-        let _lock = CREATE_DB_LOCK.get_or_init(|| Mutex::new(())).lock().await;
-
-        create_test_database(&db_name).await;
-
-        drop(_lock);
+        let db_name = match options.shared_db.clone() {
+            Some(existing) => existing,
+            None => {
+                let db_name = format!("test_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                let _lock = CREATE_DB_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+                create_test_database(&db_name).await;
+                db_name
+            }
+        };
 
         let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
         let mut opts = ConnectOptions::new(&db_url);
@@ -882,6 +902,7 @@ impl TestApp {
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
+            plugin_lifecycle: Default::default(),
             login_throttle: std::sync::Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),
@@ -954,6 +975,7 @@ impl TestApp {
                 .expect("Failed to build reqwest client"),
             db,
             state: state_for_app,
+            db_name,
             server_handle: Some(server_handle),
             dispatcher,
         }

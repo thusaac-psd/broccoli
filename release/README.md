@@ -96,16 +96,17 @@ or on a running install:
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server and worker node, then restart every server. **Reload
-All** on the admin Plugins page reloads only the server that handled the
-click, so with several servers the others keep running without the plugin.
+a plugin on every server and worker node first, then select **Reload All** once:
+it reaches every server replica within a few seconds, not only the one that
+served the click. A replica that is missing an enabled plugin reports it in
+`/healthz` (`"plugins": "degraded"` and `plugins_not_ready`) and keeps retrying.
 
 Uploading a plugin archive from the admin Plugins page does not work with these
 templates, by design: servers and workers mount `./plugins` read-only. An
-upload would reach only the one server that handled it, never the workers or
-the other servers, and a read-only mount means a stolen admin session cannot
-install code on contest machines. Ship plugins in the bundle's `plugins/` or
-`plugins-available/` directory on every node instead.
+upload would reach only the disk of the one server that handled it, never the
+workers or the other servers, and a read-only mount means a stolen admin session
+cannot install code on contest machines. Ship plugins in the bundle's `plugins/`
+or `plugins-available/` directory on every node instead.
 
 For server redundancy, install a gateway node with:
 

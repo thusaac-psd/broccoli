@@ -105,12 +105,12 @@ mod livez {
         let redis = redis::Client::open(format!("redis://{addr}")).unwrap();
 
         let started = Instant::now();
-        let body = server::handlers::health::compute_health(&app.db, Some(&redis), true).await;
+        let deps = server::handlers::health::probe_dependencies(&app.db, Some(&redis), true).await;
         let elapsed = started.elapsed();
 
-        assert_eq!(body.mq, "down");
-        assert_eq!(body.db, "ok");
-        assert_eq!(body.status, "degraded");
+        assert_eq!(deps.mq(), "down");
+        assert_eq!(deps.db(), "ok");
+        assert!(!deps.healthy());
         assert!(elapsed < Duration::from_millis(1900), "took {elapsed:?}");
     }
 }

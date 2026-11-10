@@ -54,10 +54,53 @@ impl ClaimPlan {
     }
 }
 
+/// Which in-flight rows a scan may take over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaim {
+    /// The lease/steal sweeper: any row whose lease lapsed (heartbeat older
+    /// than the TTL, or never stamped), whoever owns it. Needs every live
+    /// owner to refresh its leases, so it only runs with lease/steal on.
+    Stale { lease_ttl_secs: u64 },
+    /// Only rows a server explicitly gave up with [`release_owned_leases`]
+    /// (on graceful shutdown, or at boot for a previous instance's work). No
+    /// live server owns those, so this is safe without lease refresh: it is
+    /// how released work is recovered when lease/steal is off.
+    Released,
+}
+
+#[cfg(test)]
+const STALE_60: Reclaim = Reclaim::Stale { lease_ttl_secs: 60 };
+
+/// Suffix of the owner sentinel [`release_owned_leases`] stamps. Cannot
+/// collide with a real server id.
+const RELEASED_OWNER_SUFFIX: &str = "#orphaned";
+
+impl Reclaim {
+    /// The `WHERE` predicate selecting reclaimable rows, binding `$1`.
+    fn predicate(self) -> (&'static str, sea_orm::Value) {
+        match self {
+            // Lease ages are measured on the database clock, which also
+            // stamps every refresh (see `lease::refresh_owned_leases`).
+            Reclaim::Stale { lease_ttl_secs } => (
+                "((owner_server_id IS NULL \
+                   AND created_at < NOW() - make_interval(secs => $1)) \
+                  OR (owner_server_id IS NOT NULL \
+                      AND (lease_heartbeat_at IS NULL \
+                           OR lease_heartbeat_at < NOW() - make_interval(secs => $1))))",
+                (lease_ttl_secs as f64).into(),
+            ),
+            Reclaim::Released => (
+                "owner_server_id LIKE '%' || $1",
+                RELEASED_OWNER_SUFFIX.into(),
+            ),
+        }
+    }
+}
+
 pub async fn run(
     state: AppState,
     server_id: String,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     interval_secs: u64,
     batch_size: u32,
     max_dispatch_retries: u32,
@@ -66,7 +109,7 @@ pub async fn run(
     if let Err(e) = scan_once(
         state.clone(),
         &server_id,
-        lease_ttl_secs,
+        reclaim,
         batch_size,
         max_dispatch_retries,
     )
@@ -86,7 +129,7 @@ pub async fn run(
                 let scan = scan_once(
                     state.clone(),
                     &server_id,
-                    lease_ttl_secs,
+                    reclaim,
                     batch_size,
                     max_dispatch_retries,
                 );
@@ -162,7 +205,7 @@ where
 async fn scan_once(
     state: AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<()> {
@@ -172,7 +215,7 @@ async fn scan_once(
             claim_submissions(
                 &state,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 submission_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -193,7 +236,7 @@ async fn scan_once(
             claim_deferred_judgements(
                 &state.db,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 deferred_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -227,7 +270,7 @@ async fn scan_once(
             claim_code_runs(
                 &state,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 code_run_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -245,8 +288,12 @@ async fn scan_once(
     Ok(())
 }
 
-/// Release this server's OWN in-flight leases at startup so the steal sweeper
-/// can reclaim them.
+/// Release this server's OWN in-flight leases so the rest of the fleet (or this
+/// server after a restart) re-dispatches them. Called at boot, for work a
+/// previous instance of this `server_id` left behind, and on graceful
+/// shutdown, for the work whose drivers are about to die with the process.
+/// Released rows are reclaimed by the steal sweeper with lease/steal on, and
+/// by the [`Reclaim::Released`] scan with it off.
 ///
 /// A restarted coordinator keeps the **same** `server_id`, so every submission,
 /// code-run, and unfinalized in-flight judgement (current OR not) it owned
@@ -258,8 +305,9 @@ async fn scan_once(
 /// forever; the steal sweeper's `lease_heartbeat_at < threshold` test then never
 /// trips and the work hangs in `Running` until a human intervenes.
 ///
-/// Boot-time recovery breaks the cycle: re-tag every own-owned in-flight row with
-/// an `#orphaned` owner sentinel and NULL its heartbeat. That makes the rows look
+/// Releasing breaks the cycle: re-tag every own-owned in-flight row with an
+/// `#orphaned` owner sentinel (kept under that name so rows released by older
+/// versions are still recognized) and NULL its heartbeat. That makes the rows look
 /// exactly like a **dead foreign server's** expired lease
 /// (`owner_server_id IS NOT NULL AND lease_heartbeat_at IS NULL`), which the steal
 /// sweeper reclaims on its very first scan - no `created_at` aging required - and
@@ -269,7 +317,7 @@ async fn scan_once(
 /// Strictly scoped to `owner_server_id = <self>`: a sibling replica's in-flight
 /// work (different `server_id`, live lease) is left untouched, preserving
 /// multi-replica safety. Returns `(submissions, code_runs, judgements)` released.
-pub async fn recover_orphaned_leases(
+pub async fn release_owned_leases(
     db: &DatabaseConnection,
     server_id: &str,
 ) -> Result<(u64, u64, u64), sea_orm::DbErr> {
@@ -278,7 +326,7 @@ pub async fn recover_orphaned_leases(
     // reclaims it on the first scan with no `created_at` aging, and (b) differs
     // from `server_id` so the lease fiber's `owner = server_id` refresh skips
     // it. The `#orphaned` suffix cannot collide with a real server id.
-    let orphan_owner = format!("{server_id}#orphaned");
+    let released_owner = format!("{server_id}{RELEASED_OWNER_SUFFIX}");
     let leased = || {
         [
             SubmissionStatus::Pending,
@@ -290,7 +338,7 @@ pub async fn recover_orphaned_leases(
     let submissions = submission::Entity::update_many()
         .col_expr(
             submission::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             submission::Column::LeaseHeartbeatAt,
@@ -309,7 +357,7 @@ pub async fn recover_orphaned_leases(
     let code_runs = code_run::Entity::update_many()
         .col_expr(
             code_run::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             code_run::Column::LeaseHeartbeatAt,
@@ -328,7 +376,7 @@ pub async fn recover_orphaned_leases(
     let judgements = submission_judgement::Entity::update_many()
         .col_expr(
             submission_judgement::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             submission_judgement::Column::LeaseHeartbeatAt,
@@ -379,12 +427,12 @@ fn reserve_redispatch_slots(
 async fn claim_submissions(
     state: &AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "submission", lease_ttl_secs, batch_size).await?;
+    let rows = claim_rows(&txn, "submission", reclaim, batch_size).await?;
     let claimed_epochs: std::collections::HashMap<i32, i32> =
         rows.iter().map(|r| (r.id, r.judge_epoch)).collect();
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
@@ -480,12 +528,12 @@ async fn claim_submissions(
 async fn claim_deferred_judgements(
     db: &DatabaseConnection,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<(submission::Model, i32, bool)>> {
     let txn = db.begin().await?;
-    let rows = claim_deferred_judgement_rows(&txn, lease_ttl_secs, batch_size).await?;
+    let rows = claim_deferred_judgement_rows(&txn, reclaim, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -727,12 +775,12 @@ async fn claim_deferred_judgements(
 async fn claim_code_runs(
     state: &AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<code_run::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "code_run", lease_ttl_secs, batch_size).await?;
+    let rows = claim_rows(&txn, "code_run", reclaim, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -816,18 +864,15 @@ async fn claim_code_runs(
 async fn claim_rows(
     txn: &DatabaseTransaction,
     table: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
-    let threshold = chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64);
+    let (reclaimable, bound) = reclaim.predicate();
     let sql = format!(
         r#"SELECT id, judge_epoch, retry_count
            FROM {table}
            WHERE status IN ('Pending', 'Compiling', 'Running')
-             AND (
-               (owner_server_id IS NULL AND created_at < $1)
-               OR (owner_server_id IS NOT NULL AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1))
-             )
+             AND {reclaimable}
            ORDER BY created_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#
@@ -836,7 +881,7 @@ async fn claim_rows(
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [threshold.into(), i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into()],
         ))
         .await?;
 
@@ -845,27 +890,26 @@ async fn claim_rows(
 
 async fn claim_deferred_judgement_rows(
     txn: &DatabaseTransaction,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
-    let threshold = chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64);
-    let sql = r#"SELECT id, judge_epoch, retry_count
-                 FROM submission_judgement
-                 WHERE is_current = TRUE
-                   AND is_finalized = FALSE
-                   AND status IN ('Pending', 'Compiling', 'Running')
-                   AND (
-                     (owner_server_id IS NULL AND created_at < $1)
-                     OR (owner_server_id IS NOT NULL AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1))
-                   )
-                 ORDER BY created_at
-                 LIMIT $2
-                 FOR UPDATE SKIP LOCKED"#;
+    let (reclaimable, bound) = reclaim.predicate();
+    let sql = format!(
+        r#"SELECT id, judge_epoch, retry_count
+           FROM submission_judgement
+           WHERE is_current = TRUE
+             AND is_finalized = FALSE
+             AND status IN ('Pending', 'Compiling', 'Running')
+             AND {reclaimable}
+           ORDER BY created_at
+           LIMIT $2
+           FOR UPDATE SKIP LOCKED"#
+    );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [threshold.into(), i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into()],
         ))
         .await?;
 
@@ -1127,15 +1171,22 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits,
+            plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),
             )),
         };
 
-        scan_once(state, "server-b", 1, 8, 5)
-            .await
-            .expect("full dispatcher queue should skip steal claims");
+        scan_once(
+            state,
+            "server-b",
+            Reclaim::Stale { lease_ttl_secs: 1 },
+            8,
+            5,
+        )
+        .await
+        .expect("full dispatcher queue should skip steal claims");
 
         drop(held_slot);
     }
@@ -1328,7 +1379,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1386,7 +1437,7 @@ mod deferred_steal_db_tests {
         .await
         .expect("seed stale test_case_result");
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1425,7 +1476,7 @@ mod deferred_steal_db_tests {
         // retry_count + 1 > max_dispatch_retries(5) => exhausted.
         seed_stale_deferred_judgement(&db, sub_id, 0, 5).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1450,10 +1501,10 @@ mod deferred_steal_db_tests {
     /// in-flight judgement is still owned by `server-1` with a FRESH lease (the
     /// lease fiber keeps refreshing it), so the steal sweeper can never reclaim
     /// it and the submission hangs in `Running` forever.
-    /// `recover_orphaned_leases` must release that lease so the steal then
+    /// `release_owned_leases` must release that lease so the steal then
     /// reclaims and re-dispatches it.
     #[tokio::test]
-    async fn recover_orphaned_leases_makes_own_fresh_inflight_stealable() {
+    async fn release_owned_leases_makes_own_fresh_inflight_stealable() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-1").await;
@@ -1461,7 +1512,7 @@ mod deferred_steal_db_tests {
 
         // Before recovery: the steal cannot reclaim it (own, fresh lease) -
         // this is the restart-orphan hang.
-        let pre = claim_deferred_judgements(&db, "server-1", 60, 10, 5)
+        let pre = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
             .await
             .expect("pre-recovery claim");
         assert_eq!(
@@ -1471,14 +1522,14 @@ mod deferred_steal_db_tests {
         );
 
         // Recovery releases the lease on both the judgement and its parent.
-        let (subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(judg, 1, "the current unfinalized judgement is released");
         assert_eq!(subs, 1, "the parent submission lease is released");
 
         // After recovery: the steal reclaims and re-dispatches it.
-        let post = claim_deferred_judgements(&db, "server-1", 60, 10, 5)
+        let post = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
             .await
             .expect("post-recovery claim");
         assert_eq!(post.len(), 1, "released judgement is now stealable");
@@ -1502,7 +1553,7 @@ mod deferred_steal_db_tests {
     /// `is_current = TRUE` filter left it hanging until the 6-hour ceiling. The
     /// release must stay strictly scoped to `owner_server_id = <self>`.
     #[tokio::test]
-    async fn recover_orphaned_leases_releases_own_non_current_inflight() {
+    async fn release_owned_leases_releases_own_non_current_inflight() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         let now = chrono::Utc::now();
@@ -1523,9 +1574,9 @@ mod deferred_steal_db_tests {
         .await
         .expect("insert non-current owned judgement");
 
-        let (_subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (_subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(
             judg, 1,
             "a non-current in-flight judgement owned by self is released"
@@ -1625,7 +1676,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1644,15 +1695,15 @@ mod deferred_steal_db_tests {
     /// `server_id`, live lease) must be left strictly alone when THIS server
     /// runs its boot recovery.
     #[tokio::test]
-    async fn recover_orphaned_leases_leaves_other_servers_alone() {
+    async fn release_owned_leases_leaves_other_servers_alone() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-2").await;
         set_submission_owner(&db, sub_id, "server-2").await;
 
-        let (subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(judg, 0, "another server's judgement is untouched");
         assert_eq!(subs, 0, "another server's submission is untouched");
 
@@ -1665,6 +1716,85 @@ mod deferred_steal_db_tests {
         assert!(
             judgement.lease_heartbeat_at.is_some(),
             "sibling replica's lease is left intact"
+        );
+    }
+
+    /// With lease/steal off, nothing refreshes leases, so a live peer's
+    /// heartbeat looks just as stale as a dead one's. The `Released` scan must
+    /// therefore take only work a server explicitly released, never a peer's
+    /// row merely because its heartbeat is old.
+    #[tokio::test]
+    async fn released_scan_takes_released_work_and_leaves_live_peers_alone() {
+        let (_pg, db) = start_pg().await;
+        let released = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_owned_fresh_judgement(&db, released, 0, 0, "server-1").await;
+        set_submission_owner(&db, released, "server-1").await;
+        let peer = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, peer, 0, 0).await;
+        set_submission_owner(&db, peer, "server-2").await;
+
+        let before = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
+            .await
+            .expect("claim before release");
+        assert!(before.is_empty(), "nothing has been released yet");
+
+        release_owned_leases(&db, "server-1")
+            .await
+            .expect("release server-1's work");
+        let claimed = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
+            .await
+            .expect("claim released work");
+        let ids: Vec<i32> = claimed.iter().map(|(sub, _, _)| sub.id).collect();
+        assert_eq!(ids, vec![released], "only the released submission is taken");
+        assert_eq!(
+            current_judgement(&db, released)
+                .await
+                .owner_server_id
+                .as_deref(),
+            Some("server-3")
+        );
+        assert_eq!(
+            current_judgement(&db, peer)
+                .await
+                .owner_server_id
+                .as_deref(),
+            Some("dead-server"),
+            "the stale-heartbeat judgement nobody released is left alone"
+        );
+    }
+
+    /// The lease refresh stamps the database clock, which is what the steal
+    /// scan compares against: an hour-old heartbeat becomes fresh by the
+    /// database's own `NOW()`, and so is no longer stealable.
+    #[tokio::test]
+    async fn lease_refresh_stamps_the_database_clock() {
+        let (_pg, db) = start_pg().await;
+        let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
+
+        let (_, _, judgements) = crate::dispatcher::lease::refresh_owned_leases(&db, "dead-server")
+            .await
+            .expect("refresh");
+        assert_eq!(judgements, 1);
+        let row = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT EXTRACT(EPOCH FROM (NOW() - lease_heartbeat_at))::float8 AS age \
+                 FROM submission_judgement WHERE is_current"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let age: f64 = row.try_get("", "age").unwrap();
+        assert!(age.abs() < 5.0, "heartbeat is fresh by the DB clock: {age}");
+
+        let claimed = claim_deferred_judgements(&db, "server-2", STALE_60, 10, 5)
+            .await
+            .expect("claim");
+        assert!(
+            claimed.is_empty(),
+            "a freshly refreshed lease is not stolen"
         );
     }
 }

@@ -29,6 +29,7 @@ mod meta;
 mod permission_fixture;
 mod plugin;
 mod plugin_config;
+mod plugin_fleet;
 mod plugin_timer;
 mod privilege_ceiling;
 mod problem;

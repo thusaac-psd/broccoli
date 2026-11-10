@@ -613,6 +613,7 @@ impl E2eTestApp {
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
+            plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),

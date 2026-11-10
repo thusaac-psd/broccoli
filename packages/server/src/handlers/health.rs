@@ -38,6 +38,16 @@ pub struct HealthResponse {
     /// from a git checkout).
     #[schema(example = "abc1234")]
     pub git_sha: String,
+    /// Plugin readiness on this replica: `"ok"` when every plugin enabled in
+    /// the shared desired state is loaded here, `"degraded"` otherwise. It
+    /// does not change `status` or the HTTP code, so one plugin that fails
+    /// everywhere cannot take the whole fleet out of rotation; a load
+    /// balancer that should drain such a replica can match on this field.
+    #[schema(example = "ok")]
+    pub plugins: String,
+    /// The enabled plugins that are not loaded on this replica, and why.
+    /// This replica keeps retrying them with backoff.
+    pub plugins_not_ready: Vec<crate::plugin_lifecycle::PluginNotReady>,
 }
 
 /// Outcome of one dependency probe.
@@ -83,19 +93,34 @@ impl Probe {
     }
 }
 
-/// Probes the database and MQ backends concurrently and returns a populated
-/// [`HealthResponse`]. The whole check is bounded by [`PROBE_BUDGET`].
-///
-/// This is the deep readiness / monitoring check, shared between the documented
-/// `/api/v1/health` route and the plain `/healthz` route. Load balancers should
-/// probe [`livez`] instead: every server shares the same database and Redis, so
-/// a dependency blip would fail this check on every replica at once and leave
-/// the balancer with no upstream at all.
-pub async fn compute_health(
+/// Result of probing the shared dependencies, see [`probe_dependencies`].
+#[derive(Debug, Clone, Copy)]
+pub struct DependencyHealth {
+    db: Probe,
+    mq: Probe,
+}
+
+impl DependencyHealth {
+    pub fn db(&self) -> &'static str {
+        self.db.as_str()
+    }
+
+    pub fn mq(&self) -> &'static str {
+        self.mq.as_str()
+    }
+
+    pub fn healthy(&self) -> bool {
+        self.db.healthy() && self.mq.healthy()
+    }
+}
+
+/// Probes the database and MQ backends concurrently; the whole probe is
+/// bounded by [`PROBE_BUDGET`], not budget-per-dependency.
+pub async fn probe_dependencies(
     db: &DatabaseConnection,
     redis_client: Option<&redis::Client>,
     mq_enabled: bool,
-) -> HealthResponse {
+) -> DependencyHealth {
     let mq_probe = async {
         match (mq_enabled, redis_client) {
             (false, _) => Probe::Disabled,
@@ -106,22 +131,36 @@ pub async fn compute_health(
             }
         }
     };
-    let (db_status, mq_status) = tokio::join!(Probe::run("db", ping_db(db)), mq_probe);
+    let (db, mq) = tokio::join!(Probe::run("db", ping_db(db)), mq_probe);
+    DependencyHealth { db, mq }
+}
 
-    let status = if db_status.healthy() && mq_status.healthy() {
-        "ok"
-    } else {
-        "degraded"
-    };
+/// The deep readiness / monitoring check, shared between the documented
+/// `/api/v1/health` route and the plain `/healthz` route: the shared
+/// dependencies plus this replica's plugin readiness. Load balancers should
+/// probe [`livez`] instead: every server shares the same database and Redis, so
+/// a dependency blip would fail this check on every replica at once and leave
+/// the balancer with no upstream at all.
+pub async fn compute_health(state: &AppState) -> HealthResponse {
+    let deps =
+        probe_dependencies(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let plugins_not_ready = crate::plugin_lifecycle::not_ready(state);
 
     HealthResponse {
-        status: status.to_string(),
-        db: db_status.as_str().to_string(),
-        mq: mq_status.as_str().to_string(),
+        status: if deps.healthy() { "ok" } else { "degraded" }.to_string(),
+        db: deps.db().to_string(),
+        mq: deps.mq().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: option_env!("BROCCOLI_GIT_SHA")
             .unwrap_or("unknown")
             .to_string(),
+        plugins: if plugins_not_ready.is_empty() {
+            "ok"
+        } else {
+            "degraded"
+        }
+        .to_string(),
+        plugins_not_ready,
     }
 }
 
@@ -151,7 +190,7 @@ fn status_code(body: &HealthResponse) -> StatusCode {
 /// Plain-router handler for `GET /healthz`. Not part of the OpenAPI surface.
 #[instrument(skip(state))]
 pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }
 
@@ -194,6 +233,6 @@ pub async fn livez() -> impl IntoResponse {
 )]
 #[instrument(skip(state))]
 pub async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }
