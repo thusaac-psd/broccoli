@@ -353,10 +353,7 @@ async fn update_user_validates_like_registration() {
         .await;
     let carol = user_id(&app, "aa_carol").await;
 
-    for body in [
-        json!({"password": "x"}),
-        json!({"username": "has space!"}),
-    ] {
+    for body in [json!({"password": "x"}), json!({"username": "has space!"})] {
         let res = app
             .patch_with_token(&routes::user(carol), &body, &admin)
             .await;
@@ -386,7 +383,6 @@ async fn update_user_validates_like_registration() {
 /// `contestant` via DEFAULT_ROLES) inserts a duplicate composite PK -> 500.
 /// Location: handlers/user.rs `assign_role`.
 #[tokio::test]
-#[ignore = "BUG: assigning an already-held role returns 500"]
 async fn assigning_an_already_held_role_is_not_a_server_error() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -403,12 +399,46 @@ async fn assigning_an_already_held_role_is_not_a_server_error() {
             &admin,
         )
         .await;
-    assert!(
-        res.status < 500,
+    assert_eq!(
+        res.status, 200,
         "duplicate role assignment -> {}: {}",
-        res.status,
-        res.text
+        res.status, res.text
     );
+
+    // A no-op does not end the user's sessions.
+    let dave_token = app
+        .post_without_token(
+            routes::LOGIN,
+            &json!({"username": "aa_dave", "password": "password123"}),
+        )
+        .await
+        .body["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let again = app
+        .post_with_token(
+            &routes::user_roles(dave),
+            &json!({"role": "contestant"}),
+            &admin,
+        )
+        .await;
+    assert_eq!(again.status, 200, "{}", again.text);
+    let me = app
+        .post_with_token(CLI_TOKEN, &json!({}), &dave_token)
+        .await;
+    assert_eq!(
+        me.status, 200,
+        "no-op assignment invalidated the session: {}",
+        me.text
+    );
+
+    // A malformed body is a structured validation error.
+    let malformed = app
+        .post_with_token(&routes::user_roles(dave), &json!({"rol": "admin"}), &admin)
+        .await;
+    assert_eq!(malformed.status, 400, "{}", malformed.text);
+    assert_eq!(malformed.body["code"], "VALIDATION_ERROR");
 }
 
 /// BUG (med): the idempotency middleware caches the full 2xx body of any POST

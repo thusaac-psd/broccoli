@@ -2002,7 +2002,7 @@ export interface paths {
     put?: never;
     /**
      * Assign a role to a user
-     * @description Assigns a role to the user. Requires `user:manage` permission.
+     * @description Assigns a role to the user. Requires `user:manage` permission. Idempotent: assigning a role the user already holds changes nothing and returns 200.
      */
     post: operations['assignRole'];
     delete?: never;
@@ -11540,6 +11540,13 @@ export interface operations {
       };
     };
     responses: {
+      /** @description User already holds the role; nothing changed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Role assigned */
       201: {
         headers: {
