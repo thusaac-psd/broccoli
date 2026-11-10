@@ -98,6 +98,23 @@ pub fn require_contest_started(
     Ok(())
 }
 
+/// The "contest has not started" business rule (400) for a problem part
+/// read under `contest_id`'s scope. A no-op for a standalone read
+/// (`None`). The visibility kernel deliberately does not model this rule
+/// (it is not a reachability outcome), so a handler serving a contest's
+/// problem routes calls this after the kernel has already allowed the read.
+pub async fn require_scope_started<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    auth_user: &AuthUser,
+    contest_id: Option<i32>,
+) -> Result<(), AppError> {
+    let Some(contest_id) = contest_id else {
+        return Ok(());
+    };
+    let contest = find_contest(db, contest_id).await?;
+    require_contest_started(auth_user, &contest)
+}
+
 pub fn require_contest_running(
     auth_user: &AuthUser,
     contest: &contest::Model,

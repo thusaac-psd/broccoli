@@ -13,10 +13,10 @@ use tracing::instrument;
 // (the admin problem-bank browser, not the contestant-facing problem list)
 // requires PROBLEM_CREATE or PROBLEM_EDIT - all asserted at handler entry and
 // pinned by tests/integration/problem.rs's permission-denial tests for each
-// verb. The one viewer-facing read, `get_problem`, routes through
-// `VisibilityKernel` below (`Resource::Problem`); `contest`/`contest_problem`
-// here are only used for the pre-kernel row fetch and for the admin write
-// paths' own bookkeeping.
+// verb. The viewer-facing reads, `get_problem` and `get_contest_problem`,
+// route through `VisibilityKernel` below (`Resource::Problem`);
+// `contest`/`contest_problem` here are only used for the pre-kernel row fetch
+// and for the admin write paths' own bookkeeping.
 use crate::entity::{contest, contest_problem, problem, test_case};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
@@ -27,11 +27,12 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
+use crate::utils::contest::require_scope_started;
 use crate::utils::problem::find_problem;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::test_case_body::test_case_body_size;
 use crate::utils::text::{sanitize_db_json, sanitize_db_text};
-use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
+use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
 
 mod checker_source;
 mod test_cases;
@@ -231,19 +232,60 @@ pub async fn get_problem(
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    get_problem_in(&state, &auth_user, ProblemScope::standalone(id)).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/{problem_id}",
+    tag = "Contest Problems",
+    operation_id = "getContestProblem",
+    summary = "Get a contest problem",
+    description = "Returns the same problem details as `getProblem`, read through this contest. Visibility is decided for this contest only, so a problem that another contest still hides stays readable here. The contest must have started.",
+    params(
+        ("id" = i32, Path, description = "Contest ID"),
+        ("problem_id" = i32, Path, description = "Problem ID"),
+    ),
+    responses(
+        (status = 200, description = "Problem details", body = ProblemResponse),
+        (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(contest_id, problem_id))]
+pub async fn get_contest_problem(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    get_problem_in(
+        &state,
+        &auth_user,
+        ProblemScope::in_contest(contest_id, problem_id),
+    )
+    .await
+}
+
+/// Shared body of `get_problem` and `get_contest_problem`: the problem as
+/// reached under `scope`.
+async fn get_problem_in(
+    state: &AppState,
+    auth_user: &AuthUser,
+    scope: ProblemScope,
+) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
-    let resource = Resource::Problem {
-        contest_id: None,
-        problem_id: id,
-    };
+    let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
+    let resource = scope.problem();
 
     // Fail fast, before doing any of the reads below, on a resource the
-    // kernel already knows is unreachable. This single Problem decision
-    // folds in what the pre-kernel handler checked as `require_problem_read_access`
-    // (permission bypass, `is_public`, and - for a hidden draft - reachability
-    // via any contest it is attached to) - see
-    // `visibility::host_rules::decide_standalone_problem_access`.
+    // kernel already knows is unreachable. Standalone, this folds in what
+    // the pre-kernel handler checked as `require_problem_read_access`
+    // (permission bypass, `is_public`, and - for a hidden draft -
+    // reachability via any contest it is attached to); under a contest it
+    // is that contest's access, window and membership checks - see
+    // `visibility::host_rules::decide_problem_or_sample`.
     if kernel
         .decide(Action::Read, resource.clone())
         .await?
@@ -251,9 +293,10 @@ pub async fn get_problem(
     {
         return Err(AppError::NotFound("Problem not found".into()));
     }
+    require_scope_started(&state.db, auth_user, scope.contest_id).await?;
 
-    let mut response = ProblemResponse::from(find_problem(&state.db, id).await?);
-    response.samples = load_sample_test_cases(&state.db, id).await?;
+    let mut response = ProblemResponse::from(find_problem(&state.db, scope.problem_id).await?);
+    response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;
 
     // The DTO reaches the response body only through `into_masked_json`, so
     // a `Redact` decision on this Problem resource can never be forgotten at
