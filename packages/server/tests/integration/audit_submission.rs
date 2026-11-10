@@ -220,12 +220,11 @@ async fn rejudge_resets_retry_budget() {
     );
 }
 
-/// BUG (low): the utoipa docs and handler comment promise "Max 10,000 IDs per
-/// request" for bulk rejudge, but `validate_bulk_rejudge` never enforces it;
-/// above 65,535 ids the `IN (...)` list exceeds Postgres' bind limit -> 500.
-/// Location: models/submission.rs `validate_bulk_rejudge`.
+/// B23 (#74): the utoipa docs promised "Max 10,000 IDs per request" for bulk
+/// rejudge, but `validate_bulk_rejudge` never enforced it; above 65,535 ids
+/// the `IN (...)` list exceeded Postgres' bind limit -> 500. Both now come
+/// from `models::submission::MAX_BULK_REJUDGE_IDS`.
 #[tokio::test]
-#[ignore = "BUG: documented 10,000-id cap on bulk rejudge is not enforced"]
 async fn bulk_rejudge_enforces_documented_cap() {
     let app = TestApp::spawn().await;
     let token = app
@@ -240,6 +239,18 @@ async fn bulk_rejudge_enforces_documented_cap() {
         )
         .await;
     assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+
+    // Control: exactly the cap is accepted (none of these ids exist).
+    let ids: Vec<i32> = (1..=10_000).collect();
+    let res = app
+        .post_with_token(
+            routes::SUBMISSIONS_BULK_REJUDGE,
+            &json!({"submission_ids": ids}),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
 }
 
 /// BUG (med): the idempotency key stores only (method, path), not a body
