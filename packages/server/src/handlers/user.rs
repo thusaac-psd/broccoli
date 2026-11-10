@@ -26,7 +26,9 @@ use crate::models::user::{
     validate_create_users,
 };
 use crate::models::user::{RoleAssignmentRequest, UpdateUserRequest, UserResponse};
-use crate::services::privileges::{CeilingTarget, require_within_ceiling};
+use crate::services::privileges::{
+    AdminSetChange, CeilingTarget, SystemAdminLock, require_within_ceiling,
+};
 use crate::state::AppState;
 use crate::utils::hash;
 use crate::utils::soft_delete::SoftDeletable;
@@ -183,14 +185,14 @@ pub async fn update_user(
     tag = "Users",
     operation_id = "deleteUser",
     summary = "Soft-delete a user by ID",
-    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.",
+    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 204, description = "User deleted"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "User is in an active or under-judgement contest (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -203,6 +205,8 @@ pub async fn delete_user(
     auth_user.require_permission(perm::USER_MANAGE)?;
 
     let txn = state.db.begin().await?;
+    // Before the row lock, per the lock order in `services::privileges`.
+    let admins = SystemAdminLock::acquire(&txn).await?;
 
     let user_model = user::Entity::find_active_by_id(id)
         .lock(LockType::Update)
@@ -213,6 +217,9 @@ pub async fn delete_user(
     // Deleting an account above the caller's ceiling would let a
     // USER_MANAGE-only principal remove every admin.
     require_within_ceiling(&txn, &auth_user, CeilingTarget::User(id)).await?;
+    admins
+        .require_survivor(AdminSetChange::DeleteUser { user_id: id })
+        .await?;
 
     let contest_ids: Vec<i32> = contest_user::Entity::find()
         .filter(contest_user::Column::UserId.eq(id))
@@ -320,7 +327,7 @@ pub async fn assign_role(
     tag = "Users",
     operation_id = "revokeRole",
     summary = "Revoke a role from a user",
-    description = "Revokes a role from the user. Requires `user:manage` permission.",
+    description = "Revokes a role from the user. Requires `user:manage` permission.\n\nRefused if afterwards no active user would hold `system:admin`.",
     params(
         ("id" = i32, Path, description = "User ID"),
         ("role" = String, Path, description = "Role name")
@@ -330,6 +337,7 @@ pub async fn assign_role(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User role not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "Would leave no active `system:admin` holder (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -346,16 +354,25 @@ pub async fn revoke_role(
     // administrative lockout, the inverse of the self-escalation assign_role guards.
     require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_name)).await?;
 
-    let active = user_role::Entity::find_by_id((id, role_name))
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User role not found".into()))?;
-
     // Revoke the user's refresh tokens in the same transaction as the role
     // delete, mirroring `assign_role`. Removing a role is a de-authorization, so
     // existing sessions must be forced to re-authenticate and re-read the reduced
     // role set rather than lingering on a stale cached permission.
     let txn = state.db.begin().await?;
+    let admins = SystemAdminLock::acquire(&txn).await?;
+
+    let active = user_role::Entity::find_by_id((id, role_name.clone()))
+        .one(&txn)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User role not found".into()))?;
+
+    admins
+        .require_survivor(AdminSetChange::RevokeUserRole {
+            user_id: id,
+            role: &role_name,
+        })
+        .await?;
+
     active.delete(&txn).await?;
     refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
     user::Entity::touch_credentials_changed(&txn, id).await?;
