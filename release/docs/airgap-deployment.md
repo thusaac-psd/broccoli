@@ -16,10 +16,14 @@ at an air-gapped venue. The `release/airgap/` tooling replaces all three with a
 have internet access, then carried to the venue on removable media (USB drive,
 external SSD) and installed with zero network calls.
 
-The bundle covers three roles:
+The bundle covers four roles:
 
 - **server** — the broccoli API/dispatcher plus its infra (Postgres, Redis,
-  SeaweedFS/S3), fronted by Caddy serving an internal-CA TLS leaf.
+  SeaweedFS/S3), fronted by Caddy serving an internal-CA TLS leaf. With
+  several servers, the first one is the infra node and the others join it
+  (see "Multi-server topology" below).
+- **gateway** — a gateway-only node: just the internal-CA TLS Caddy gateway,
+  balancing across several servers and health-checking each on `/livez`.
 - **worker** — the judging box that runs the isolate sandbox and executes
   submissions.
 - **contestant** — a contestant's machine, which only needs the LAN root CA
@@ -27,7 +31,7 @@ The bundle covers three roles:
   `PATH`.
 
 Every role installs from the same bundle tree. The recommended path is the
-guided one-click installer, `setup.sh --role {server|worker|contestant}`, which
+guided one-click installer, `setup.sh --role {server|gateway|worker|contestant}`, which
 wraps the underlying per-role engine `install.sh` with runtime detection, a
 go/no-go preflight, and auto-generated configuration (§4). `install.sh` remains
 available directly for operators who manage their own `.env` files. Nothing
@@ -305,16 +309,11 @@ This:
    (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else,
    and that subnet is the whole trust list; no LAN range is ever trusted.
 
-   To run the gateway on a separate host instead (e.g. several servers), on the
-   gateway host compose `docker-compose.gateway-airgap.yaml.template` alone,
-   with `LAN_HOST`, `BROCCOLI_TLS_CERT`, `BROCCOLI_TLS_KEY` and
-   `BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000'` exported. On each server
-   host, export `BROCCOLI_HTTP_BIND=0.0.0.0:3000` and
-   `BROCCOLI_GATEWAY_HOSTS=<gateway LAN IP>` before running `install.sh`: the
-   server is then reachable on the LAN at `:3000` and trusts only that address.
-   The airgap installer has no gateway-only role yet, and a second server host
-   still needs `BROCCOLI_DB_HOST`, `BROCCOLI_MQ_HOST` and `BROCCOLI_S3_HOST`
-   pointed at the first server's infra.
+   To run several servers behind one gateway-only node instead, see
+   "Multi-server topology" below.
+
+`install.sh --dry-run` prints the settings and the exact compose command a role
+would run, without loading images, issuing a leaf or starting anything.
 
 ## 6. Worker install
 
@@ -365,6 +364,102 @@ The worker connects to the server's Postgres/Redis/SeaweedFS over the LAN
 (published on the server at ports 5432/6379/8333, password-gated). No image is
 pulled; the worker image is loaded from the bundle and Compose runs
 `--pull never`.
+
+## Multi-server topology
+
+For more contestants than one server handles, run several servers behind one
+gateway-only node. The example below uses these addresses:
+
+| Node        | Address                   | Runs                                      |
+| ----------- | ------------------------- | ----------------------------------------- |
+| infra node  | `10.0.0.10`               | Postgres, Redis, SeaweedFS and one server |
+| server node | `10.0.0.11`, `10.0.0.12`  | one server each, no infra                 |
+| gateway     | `10.0.0.5`, `contest.lan` | the internal-CA TLS gateway only          |
+| workers     | any                       | one judge worker each                     |
+
+Contestants reach only the gateway, over HTTPS. Each server publishes its
+plaintext `:3000` on the LAN for the gateway and trusts `X-Forwarded-For` from
+the gateway's address alone, so no contestant can forge a client address.
+Firewall `:3000` on the server nodes to the gateway's address if the LAN allows.
+
+Build one bundle without `--lan-host` (§2) and deliver it to every node. Then
+deliver the sidecars:
+
+- `<bundle>.server-secret/` (the CA key) to the gateway only. The servers
+  terminate no TLS in this topology and need no TLS material.
+- `<bundle>.cluster-secret/` to the infra node and every worker.
+
+Install the nodes in this order.
+
+1. **Infra node.** Name the gateway with `--gateway-host`:
+
+   ```bash
+   ./setup.sh --role server --bundle . --gateway-host 10.0.0.5 --admin-user admin
+   ```
+
+   This runs infra and a server, but no gateway, and publishes the server on
+   `0.0.0.0:3000`. It also writes `compose/server-join.env`: the infra
+   credentials, the JWT secret and the bootstrap admin, which every server must
+   share. Treat that file like the server-secret sidecar: copy it to the server
+   nodes only.
+
+2. **Each further server.** Copy `compose/server-join.env` from the infra node
+   into the same place in this node's bundle, then name the infra node and the
+   gateway:
+
+   ```bash
+   ./setup.sh --role server --bundle . --infra-host 10.0.0.10 --gateway-host 10.0.0.5
+   ```
+
+   The server reaches the infra node's Postgres, Redis and S3 on `10.0.0.10`
+   (ports 5432, 6379 and 8333) and starts no db, redis or seaweedfs of its
+   own. `--server-join FILE` reads `server-join.env` from somewhere else.
+
+3. **Gateway.** List every name and address contestants may use with
+   `--lan-host` (the first is the default for clients that send no name), and
+   every server with `--upstream` (`HOST` or `HOST:PORT`, port 3000 by default):
+
+   ```bash
+   ./setup.sh --role gateway --bundle . \
+       --lan-host contest.lan --lan-host 10.0.0.5 \
+       --upstream 10.0.0.10 --upstream 10.0.0.11 --upstream 10.0.0.12
+   ```
+
+   The gateway gets a TLS leaf covering every `--lan-host` from the CA scripts,
+   reusing a current one. It checks each server on `GET /livez` every 5 s,
+   stops sending traffic to one after two failed checks, and retries a request
+   that cannot reach a server on another one. It also prints the address the
+   servers see it as; if that differs from what you passed as
+   `--gateway-host`, re-run the server installs with that address and
+   `--reconfigure`. Run the gateway on a host of its own: on a host that also
+   runs a server, the server sees the gateway's Docker bridge address instead.
+
+4. **Workers.** Point each worker at the infra node:
+
+   ```bash
+   ./setup.sh --role worker --bundle . --cluster-secret <bundle>.cluster-secret \
+       --lan-host 10.0.0.10
+   ```
+
+5. **Contestants** trust `ca/root.crt` as in §7 and open `https://contest.lan`
+   (or `https://10.0.0.5`).
+
+Each server gets its own id (`--server-id`, by default derived from the
+machine's id), since two servers sharing one take each other's results. Every
+node records its place in its env file: `BROCCOLI_INFRA_HOST` and
+`BROCCOLI_GATEWAY_HOSTS` in `compose/.env.server`, and the gateway's hosts and
+upstreams in `compose/.env.gateway`. A re-run of `setup.sh --reconfigure` or
+`install.sh` keeps them; pass the flags again to change them. `--upstream`
+replaces the whole list, so to add a server, install it, then re-run the
+gateway's `setup.sh --reconfigure` with every `--upstream`.
+
+If the infra node's secrets change, copy its new `server-join.env` to every
+server node and re-run `setup.sh --role server --reconfigure` there. After any
+plugin change, restart every server: **Reload All** reloads only the server
+that handled the click. When upgrading (§9), carry each node's env files into
+the new bundle as §9 describes, plus `compose/server-join.env` on the server
+nodes and `compose/.env.gateway` on the gateway, and deliver the server-secret
+sidecar to the gateway.
 
 ## 7. Contestant machines
 

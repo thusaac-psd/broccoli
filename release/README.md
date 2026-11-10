@@ -15,6 +15,12 @@ Use the same roles for LAN and cloud deployments:
 
 The `single-host` role exists only for release rehearsal or small demos.
 
+For a venue with no internet, build an air-gap bundle instead; see
+[docs/airgap-deployment.md](docs/airgap-deployment.md). Its roles are `server`
+(with infra, or joining an infra node with `--infra-host`), `gateway` (a
+gateway-only node serving HTTPS from an internal CA in front of several
+servers), `worker` and `contestant`.
+
 ## Install
 
 Install infra first:
