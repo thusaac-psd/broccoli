@@ -9,13 +9,15 @@
 //! guard.
 
 use broccoli_server_sdk::permissions as perm;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Statement};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement,
+};
 use serde_json::json;
-use server::entity::{idempotency_key, user};
+use server::entity::{idempotency_key, user, user_role};
 
 use crate::common::{TestApp, routes};
 
-const CLI_TOKEN: &str = "/api/v1/auth/cli-token";
+use crate::common::routes::CLI_TOKEN;
 
 async fn user_id(app: &TestApp, username: &str) -> i32 {
     user::Entity::find()
@@ -51,7 +53,6 @@ async fn invalidate_sessions(app: &TestApp, uid: i32) {
 /// `/auth/device-authorize` has the same shape.
 /// Location: handlers/auth.rs `issue_cli_token`, `authorize_device`.
 #[tokio::test]
-#[ignore = "BUG: /auth/cli-token re-signs a revoked token's claims with a fresh iat"]
 async fn cli_token_refuses_a_stale_access_token() {
     let app = TestApp::spawn().await;
     let token = app
@@ -81,7 +82,6 @@ async fn cli_token_refuses_a_stale_access_token() {
 /// BUG (high): same root cause, soft-deleted user. The deleted account keeps
 /// minting fresh tokens + refresh tokens.
 #[tokio::test]
-#[ignore = "BUG: a soft-deleted user's token can still mint fresh tokens via /auth/cli-token"]
 async fn cli_token_refuses_a_deleted_user() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -96,6 +96,144 @@ async fn cli_token_refuses_a_deleted_user() {
 
     let res = app.post_with_token(CLI_TOKEN, &json!({}), &victim).await;
     assert_eq!(res.status, 401, "deleted user minted a token: {}", res.text);
+}
+
+/// Replace a user's roles directly in the DB WITHOUT bumping
+/// `credentials_changed_at`, so their existing access token still counts as
+/// fresh. Stands in for a change landing in the same second the token was
+/// minted, which `FreshAuthUser`'s strict `<` tolerates by design: a minted
+/// token must still reflect the new roles rather than the presented claims.
+async fn replace_roles_without_bump(app: &TestApp, uid: i32, role: &str) {
+    user_role::Entity::delete_many()
+        .filter(user_role::Column::UserId.eq(uid))
+        .exec(&app.db)
+        .await
+        .expect("clear user roles");
+    user_role::ActiveModel {
+        user_id: Set(uid),
+        role: Set(role.to_string()),
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert user role");
+}
+
+/// Roles and permissions a token carries, as `/auth/me` echoes its claims.
+async fn token_grants(app: &TestApp, token: &str) -> (serde_json::Value, Vec<String>) {
+    let me = app.get_with_token(routes::ME, token).await;
+    assert_eq!(me.status, 200, "/me with minted token: {}", me.text);
+    let permissions = me.body["permissions"]
+        .as_array()
+        .expect("permissions array")
+        .iter()
+        .map(|p| p.as_str().expect("permission string").to_string())
+        .collect();
+    (me.body["roles"].clone(), permissions)
+}
+
+/// Start a device-flow login and return `(device_code, user_code)`.
+async fn start_device_flow(app: &TestApp) -> (String, String) {
+    let res = app
+        .post_without_token(routes::DEVICE_CODE, &json!({}))
+        .await;
+    assert_eq!(res.status, 200, "device-code: {}", res.text);
+    (
+        res.body["device_code"].as_str().unwrap().to_string(),
+        res.body["user_code"].as_str().unwrap().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn cli_token_reissues_from_current_roles_not_the_presented_claims() {
+    let app = TestApp::spawn().await;
+    let admin_token = app
+        .create_user_with_role("aa_demoted", "password123", "admin")
+        .await;
+    let uid = user_id(&app, "aa_demoted").await;
+    replace_roles_without_bump(&app, uid, "contestant").await;
+
+    let res = app
+        .post_with_token(CLI_TOKEN, &json!({}), &admin_token)
+        .await;
+    assert_eq!(res.status, 200, "cli-token: {}", res.text);
+
+    let (roles, permissions) = token_grants(&app, res.body["token"].as_str().unwrap()).await;
+    assert_eq!(roles, json!(["contestant"]));
+    assert!(
+        !permissions.iter().any(|p| p == perm::USER_MANAGE),
+        "minted token must not carry the revoked admin permissions: {permissions:?}"
+    );
+
+    let refreshed = app
+        .post_without_token(
+            routes::CLI_REFRESH,
+            &json!({ "refresh_token": res.body["refresh_token"] }),
+        )
+        .await;
+    assert_eq!(refreshed.status, 200, "cli-refresh: {}", refreshed.text);
+}
+
+#[tokio::test]
+async fn device_authorize_refuses_a_stale_access_token() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("aa_stale_dev", "password123", "admin")
+        .await;
+    let uid = user_id(&app, "aa_stale_dev").await;
+    invalidate_sessions(&app, uid).await;
+
+    let (device_code, user_code) = start_device_flow(&app).await;
+    let res = app
+        .post_with_token(
+            routes::DEVICE_AUTHORIZE,
+            &json!({ "user_code": user_code }),
+            &token,
+        )
+        .await;
+    assert_eq!(
+        res.status, 401,
+        "stale token authorized a device: {}",
+        res.text
+    );
+    assert_eq!(res.body["code"], "TOKEN_INVALID");
+
+    let poll = app
+        .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+        .await;
+    assert_eq!(poll.status, 400, "device-token: {}", poll.text);
+    assert_eq!(poll.body["error"], "authorization_pending");
+}
+
+#[tokio::test]
+async fn device_authorize_issues_a_token_from_current_roles() {
+    let app = TestApp::spawn().await;
+    let admin_token = app
+        .create_user_with_role("aa_dev_demoted", "password123", "admin")
+        .await;
+    let uid = user_id(&app, "aa_dev_demoted").await;
+    replace_roles_without_bump(&app, uid, "contestant").await;
+
+    let (device_code, user_code) = start_device_flow(&app).await;
+    let res = app
+        .post_with_token(
+            routes::DEVICE_AUTHORIZE,
+            &json!({ "user_code": user_code }),
+            &admin_token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "device-authorize: {}", res.text);
+
+    let poll = app
+        .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+        .await;
+    assert_eq!(poll.status, 200, "device-token: {}", poll.text);
+
+    let (roles, permissions) = token_grants(&app, poll.body["token"].as_str().unwrap()).await;
+    assert_eq!(roles, json!(["contestant"]));
+    assert!(
+        !permissions.iter().any(|p| p == perm::USER_MANAGE),
+        "device token must not carry the revoked admin permissions: {permissions:?}"
+    );
 }
 
 /// BUG (high): `assign_role`/`revoke_role` enforce a privilege ceiling

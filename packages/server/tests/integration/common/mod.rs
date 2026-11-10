@@ -228,6 +228,11 @@ pub mod routes {
     pub const REFRESH: &str = "/api/v1/auth/refresh";
     pub const LOGOUT: &str = "/api/v1/auth/logout";
     pub const ME: &str = "/api/v1/auth/me";
+    pub const CLI_TOKEN: &str = "/api/v1/auth/cli-token";
+    pub const CLI_REFRESH: &str = "/api/v1/auth/cli-refresh";
+    pub const DEVICE_CODE: &str = "/api/v1/auth/device-code";
+    pub const DEVICE_AUTHORIZE: &str = "/api/v1/auth/device-authorize";
+    pub const DEVICE_TOKEN: &str = "/api/v1/auth/device-token";
 
     pub const USERS: &str = "/api/v1/users";
 
