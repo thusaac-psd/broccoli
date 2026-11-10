@@ -197,6 +197,21 @@ export function useSubmissions({
       contestType?: string,
       targetWorkerIds?: string[],
     ) => {
+      // Lists that show this problem's submissions now include new ones.
+      const invalidateSubmissionLists = () => {
+        if (contestId) {
+          queryClient.invalidateQueries({
+            queryKey: ['contest-submissions-table', String(contestId)],
+          });
+        }
+        queryClient.invalidateQueries({
+          queryKey: ['problem-recent-submissions', contestId, problemId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ['admin-submissions-table'],
+        });
+      };
+
       // Fan-out path: one pinned submission per worker, grouped together for
       // the comparison-strip UI.
       if (targetWorkerIds && targetWorkerIds.length > 0) {
@@ -277,17 +292,7 @@ export function useSubmissions({
             }),
           );
 
-          if (contestId) {
-            queryClient.invalidateQueries({
-              queryKey: ['contest-submissions-table', String(contestId)],
-            });
-          }
-          queryClient.invalidateQueries({
-            queryKey: ['problem-recent-submissions', contestId, problemId],
-          });
-          queryClient.invalidateQueries({
-            queryKey: ['admin-submissions-table'],
-          });
+          invalidateSubmissionLists();
 
           toast.success(
             t('toast.submission.fannedOut', {
@@ -373,20 +378,12 @@ export function useSubmissions({
           ),
         );
 
+        invalidateSubmissionLists();
         if (contestId) {
-          queryClient.invalidateQueries({
-            queryKey: ['contest-submissions-table', String(contestId)],
-          });
           queryClient.invalidateQueries({
             queryKey: ['contest-submission-languages', contestId],
           });
         }
-        queryClient.invalidateQueries({
-          queryKey: ['problem-recent-submissions', contestId, problemId],
-        });
-        queryClient.invalidateQueries({
-          queryKey: ['admin-submissions-table'],
-        });
 
         toast.success(t('toast.submission.submitted'));
         startSubmissionPolling(entryId, data.id);
