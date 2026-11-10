@@ -71,7 +71,7 @@ cluster_seed_infra() {
     # baked into its data volume — must survive: silently replacing it would lock
     # the server out of its own database.
     v="$(env_get "$sidecar" "$k")"
-    [ -n "$v" ] && [ -z "$(env_get "$infra" "$k")" ] && env_set "$infra" "$k" "$v"
+    if [ -n "$v" ] && [ -z "$(env_get "$infra" "$k")" ]; then env_set "$infra" "$k" "$v"; fi
   done
 }
 

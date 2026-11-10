@@ -157,6 +157,11 @@ rc=$?
 set -e
 [ "$rc" = "2" ] || { echo "FAIL: workergen_write rc=$rc, expected 2 for sidecar missing REDIS/S3 keys"; exit 1; }
 
+# --- a re-run, where every key is already set, succeeds: under set -e a
+#     nonzero status would end setup.sh --reconfigure without a word ---
+( set -e; cluster_seed_infra "$infra_pre" "$cls"; cluster_seed_infra "$infra_pre" "$cls" ) \
+  || { echo "FAIL: cluster_seed_infra fails when the last key is already set"; exit 1; }
+
 # --- cluster_seed_infra is a true no-op when the sidecar is absent ---
 infra3="$tmp/.env.infra3"
 cp "$iex" "$infra3"
