@@ -375,8 +375,8 @@ pub async fn rejudge_submission(
 /// surface already has and keeps after the submission:rejudge visibility
 /// fix - `GET /submissions/{id}` still answers 200 vs. 404 for exactly this
 /// reason, and `apply_submission_judgement`/`rejudge_submission` still
-/// succeed-or-404 on a nonexistent id - just aggregated across up to 10,000
-/// ids in one round trip instead of one id per request. It is not a
+/// succeed-or-404 on a nonexistent id - just aggregated across up to
+/// [`MAX_BULK_REJUDGE_IDS`] ids in one round trip instead of one id per request. It is not a
 /// regression introduced by that fix. Don't close it by changing this
 /// endpoint's behaviour alone: the identical oracle stays reachable one id
 /// at a time via the endpoints above, so narrowing only this one would trade
@@ -387,11 +387,11 @@ pub async fn rejudge_submission(
     tag = "Submissions",
     operation_id = "bulkRejudgeSubmissions",
     summary = "Bulk rejudge submissions",
-    description = "Re-queues submissions in the provided ID list for rejudging. Max 10,000 IDs per request. Requires `submission:rejudge` permission.",
+    description = format!("Re-queues submissions in the provided ID list for rejudging. Max {MAX_BULK_REJUDGE_IDS} IDs per request. Requires `submission:rejudge` permission."),
     request_body = BulkRejudgeRequest,
     responses(
         (status = 200, description = "Submissions re-queued", body = BulkRejudgeResponse),
-        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Empty or oversized id list, non-positive id, or invalid worker (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED)", body = ErrorBody),

@@ -2629,6 +2629,42 @@ mod backpressure {
     }
 }
 
+mod bulk_rejudge_limits {
+    use super::*;
+
+    /// Bulk rejudge rejects more than `MAX_BULK_REJUDGE_IDS` (10,000) ids with
+    /// `VALIDATION_ERROR` and accepts exactly the cap. The cap also keeps the `IN (...)`
+    /// list under the Postgres bind-parameter limit.
+    #[tokio::test]
+    async fn bulk_rejudge_enforces_documented_cap() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("bulk_rejudge_admin", "password123", "admin")
+            .await;
+        let ids: Vec<i32> = (1..=10_001).collect();
+        let res = app
+            .post_with_token(
+                routes::SUBMISSIONS_BULK_REJUDGE,
+                &json!({"submission_ids": ids}),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+
+        // Control: exactly the cap is accepted (none of these ids exist).
+        let ids: Vec<i32> = (1..=10_000).collect();
+        let res = app
+            .post_with_token(
+                routes::SUBMISSIONS_BULK_REJUDGE,
+                &json!({"submission_ids": ids}),
+                &token,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+    }
+}
+
 mod standalone_submit_to_hidden_contest_problem {
     use super::*;
     use crate::codelink_bracket::visible_problem_ids;
