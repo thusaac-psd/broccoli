@@ -42,6 +42,7 @@ import {
 } from '@/features/user-management/lib/bulk-users';
 import { downloadUserCredentials } from '@/features/user-management/lib/user-credentials';
 import type { ManagedUserRow } from '@/features/user-management/types';
+import { toastUnsettled, unsettledMessage } from '@/lib/idempotency-feedback';
 
 // -- Types --
 
@@ -277,6 +278,16 @@ function AddParticipantsTab({
         }),
     );
     setAddingId(null);
+    if (
+      toastUnsettled(error, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({
+            queryKey: ['contest-participants', contest.id],
+          }),
+      })
+    ) {
+      return;
+    }
     if (error && !isAlreadyDone(error)) {
       toast.error(getErrorMessage(error, t('toast.participant.addError')));
     } else {
@@ -605,6 +616,31 @@ function BulkImportTab({
     );
     setSubmitting(false);
 
+    const refetchAffected = () => {
+      queryClient.invalidateQueries({
+        queryKey: ['contest-participants', contest.id],
+      });
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      queryClient.invalidateQueries({
+        queryKey: ['all-users-for-participants'],
+      });
+    };
+
+    const unsettled = unsettledMessage(error, t, {
+      refetch: () => {
+        refetchAffected();
+        // The preview may be stale now: previewing again sorts the users
+        // into created, added and enrolled against the refetched lists.
+        setPreview(null);
+      },
+      outcomeUnknownKey: 'admin.bulkParticipantsOutcomeUnknown',
+    });
+    if (unsettled) {
+      setErrorMsg(unsettled);
+      toast.warning(unsettled);
+      return;
+    }
+
     if (isAlreadyDone(error)) {
       // Nothing left to confirm: sending it again would be a new import.
       setPreview(null);
@@ -619,11 +655,7 @@ function BulkImportTab({
       setResult(data);
       toast.success(t('toast.participant.bulkSuccess'));
     }
-    queryClient.invalidateQueries({
-      queryKey: ['contest-participants', contest.id],
-    });
-    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
-    queryClient.invalidateQueries({ queryKey: ['all-users-for-participants'] });
+    refetchAffected();
   }
 
   return (

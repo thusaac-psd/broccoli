@@ -61,6 +61,7 @@ import { SwitchField } from '@/features/admin/components/SwitchField';
 import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 // -- Data fetcher --
 
@@ -263,6 +264,16 @@ export function ContestFormDialog({
         );
 
     setLoading(false);
+    if (
+      toastUnsettled(result.error, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({ queryKey: ['admin-contests'] }),
+      })
+    ) {
+      // The form stays open: if the contest is not in the list, it can be
+      // sent again as it is.
+      return;
+    }
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(
@@ -539,6 +550,14 @@ export function ContestProblemsDialog({
         }),
     );
     setAddingId(null);
+    if (
+      toastUnsettled(apiError, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({ queryKey: contestProblemsKey }),
+      })
+    ) {
+      return;
+    }
     if (apiError && !isAlreadyDone(apiError)) {
       toast.error(getErrorMessage(apiError, t('toast.problem.addError')));
     } else {

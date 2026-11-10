@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -399,6 +400,19 @@ export function useSubmissions({
         toast.success(t('toast.submission.submitted'));
         startSubmissionPolling(entryId, submission.id);
       } catch (err) {
+        if (
+          toastUnsettled(err, t, {
+            refetch: invalidateSubmissionLists,
+            outcomeUnknownKey: 'toast.submission.outcomeUnknown',
+          })
+        ) {
+          // Not a failure of this code: an earlier attempt to submit it may
+          // have gone through (the refetched list shows it if so) or is
+          // still running. There is nothing to poll here either way.
+          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          setActiveEntryId(null);
+          return;
+        }
         console.error('Submission failed:', err);
         const submissionError = parseSubmissionError(err);
         setEntries((prev) =>

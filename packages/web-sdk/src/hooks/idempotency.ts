@@ -19,10 +19,55 @@ export const IDEMPOTENCY_RESPONSE_NOT_STORED =
   'IDEMPOTENCY_RESPONSE_NOT_STORED';
 export const IDEMPOTENCY_RESPONSE_TOO_LARGE = 'IDEMPOTENCY_RESPONSE_TOO_LARGE';
 
-const ALREADY_DONE_CODES: ReadonlySet<unknown> = new Set([
-  IDEMPOTENCY_RESPONSE_NOT_STORED,
-  IDEMPOTENCY_RESPONSE_TOO_LARGE,
+// An earlier send under this key is still running on the server (a 409). Once
+// it finishes, sending the same key again gets its stored result.
+export const IDEMPOTENCY_KEY_IN_PROGRESS = 'IDEMPOTENCY_KEY_IN_PROGRESS';
+
+// An earlier send under this key started but then failed or was cut off (a
+// 5xx, a timeout, a cancellation), so it may or may not have taken effect. The
+// server answers every later send of that key with this 409 until the key
+// expires: it neither replays nor reruns it.
+export const IDEMPOTENCY_OUTCOME_UNKNOWN = 'IDEMPOTENCY_OUTCOME_UNKNOWN';
+
+/**
+ * Where an idempotency refusal leaves the operation, when it is neither a
+ * plain success nor a plain failure:
+ *
+ * - `already-done`: an earlier send succeeded; only its response is gone.
+ * - `outcome-unknown`: an earlier send may or may not have taken effect.
+ *   Refetch what it would have changed and have the user check before they
+ *   send it again (which then gets a fresh key and runs as a new operation).
+ * - `in-progress`: an earlier send is still running. Sending the identical
+ *   operation again later reuses its key and gets that send's result.
+ */
+export type IdempotencyOutcome =
+  | 'already-done'
+  | 'outcome-unknown'
+  | 'in-progress';
+
+const OUTCOMES: ReadonlyMap<unknown, IdempotencyOutcome> = new Map<
+  unknown,
+  IdempotencyOutcome
+>([
+  [IDEMPOTENCY_RESPONSE_NOT_STORED, 'already-done'],
+  [IDEMPOTENCY_RESPONSE_TOO_LARGE, 'already-done'],
+  [IDEMPOTENCY_OUTCOME_UNKNOWN, 'outcome-unknown'],
+  [IDEMPOTENCY_KEY_IN_PROGRESS, 'in-progress'],
 ]);
+
+function codeOf(error: unknown): unknown {
+  return typeof error === 'object' && error !== null
+    ? (error as { code?: unknown }).code
+    : undefined;
+}
+
+/**
+ * The `IdempotencyOutcome` an error passed on by `sendIdempotent` stands for,
+ * or null for any other error (a real failure, to be reported as one).
+ */
+export function idempotencyOutcome(error: unknown): IdempotencyOutcome | null {
+  return OUTCOMES.get(codeOf(error)) ?? null;
+}
 
 /**
  * Whether `error` is the server saying an earlier send of this very request
@@ -31,11 +76,16 @@ const ALREADY_DONE_CODES: ReadonlySet<unknown> = new Set([
  * failure, which would invite sending it again as a new operation.
  */
 export function isAlreadyDone(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    ALREADY_DONE_CODES.has((error as { code?: unknown }).code)
-  );
+  return idempotencyOutcome(error) === 'already-done';
+}
+
+/**
+ * Whether `error` is the server saying an earlier send of this very request
+ * may or may not have taken effect. Not a failure to retry blindly: refetch
+ * the affected data and have the user check whether it happened first.
+ */
+export function isOutcomeUnknown(error: unknown): boolean {
+  return idempotencyOutcome(error) === 'outcome-unknown';
 }
 
 /** How many unaccepted operations keep their key (oldest forgotten first). */
@@ -147,14 +197,24 @@ export function createIdempotencyKeys(
   };
 }
 
-type Verdict = 'accepted' | 'already-done' | 'mismatch' | 'failed';
+type Verdict = 'accepted' | 'mismatch' | 'failed' | IdempotencyOutcome;
 
-function isMismatch(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { code?: unknown }).code === IDEMPOTENCY_KEY_MISMATCH
-  );
+// Whether a verdict retires the key. A failed send keeps it, so retrying the
+// identical operation can get a lost result replayed, and so does a send whose
+// original is still running, so the retry gets that original's result. Every
+// other verdict settles the key: the server will never run it again.
+const RETIRES: Readonly<Record<Verdict, boolean>> = {
+  accepted: true,
+  'already-done': true,
+  'outcome-unknown': true,
+  mismatch: true,
+  'in-progress': false,
+  failed: false,
+};
+
+function errorVerdict(error: unknown): Verdict {
+  if (codeOf(error) === IDEMPOTENCY_KEY_MISMATCH) return 'mismatch';
+  return idempotencyOutcome(error) ?? 'failed';
 }
 
 // `request` may return an openapi-fetch result ({ data, error, response }) or
@@ -165,9 +225,7 @@ function verdictOf(result: unknown): Verdict {
     return 'accepted';
   }
   if (response.ok) return 'accepted';
-  const error = (result as { error?: unknown }).error;
-  if (isAlreadyDone(error)) return 'already-done';
-  return isMismatch(error) ? 'mismatch' : 'failed';
+  return errorVerdict((result as { error?: unknown }).error);
 }
 
 /**
@@ -178,11 +236,21 @@ function verdictOf(result: unknown): Verdict {
  * - Already done (`isAlreadyDone(error)`): an earlier send succeeded but its
  *   response cannot be replayed. The key is retired as if accepted and the
  *   error is passed on, so the caller reports success without the data.
+ * - Outcome unknown (`isOutcomeUnknown(error)`): an earlier send was cut off
+ *   after it started and may have taken effect. The key is retired (the
+ *   server refuses it from now on) and the error is passed on, never resent:
+ *   the caller refetches what it would have changed and has the user check
+ *   before sending it again, which then gets a fresh key.
+ * - In progress (IDEMPOTENCY_KEY_IN_PROGRESS): an earlier send is still
+ *   running. The key is kept, so retrying the identical operation later gets
+ *   that send's result, and the error is passed on.
  * - Failed (network error, 5xx, validation): the key is kept, so a retry of
  *   the identical operation lets the server replay a result that was lost.
  * - IDEMPOTENCY_KEY_MISMATCH: the server holds a different request under this
  *   key and ran nothing, so the key is retired and the request is sent once
  *   more with a fresh key.
+ *
+ * `idempotencyOutcome(error)` tells the passed-on refusals apart.
  */
 export async function sendIdempotent<T>(
   keys: IdempotencyKeys,
@@ -192,19 +260,19 @@ export async function sendIdempotent<T>(
   const id = fingerprint(operation);
   for (let attempt = 0; ; attempt += 1) {
     const key = keys.keyFor(id);
+    let sent: { ok: true; result: T } | { ok: false; error: unknown };
     let verdict: Verdict;
-    let result: T;
     try {
-      result = await request(key);
+      const result = await request(key);
+      sent = { ok: true, result };
       verdict = verdictOf(result);
     } catch (error) {
-      if (isAlreadyDone(error)) keys.retire(id, key);
-      if (!isMismatch(error)) throw error;
-      keys.retire(id, key);
-      if (attempt > 0) throw error;
-      continue;
+      sent = { ok: false, error };
+      verdict = errorVerdict(error);
     }
-    if (verdict !== 'failed') keys.retire(id, key);
-    if (verdict !== 'mismatch' || attempt > 0) return result;
+    if (RETIRES[verdict]) keys.retire(id, key);
+    if (verdict === 'mismatch' && attempt === 0) continue;
+    if (!sent.ok) throw sent.error;
+    return sent.result;
   }
 }

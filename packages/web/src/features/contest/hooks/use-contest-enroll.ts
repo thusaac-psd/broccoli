@@ -4,6 +4,8 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
+import { toastUnsettled } from '@/lib/idempotency-feedback';
+
 type ContestEnrollState = {
   is_public: boolean;
   end_time: string;
@@ -46,6 +48,15 @@ export function useContestEnroll({
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
     onError: (error: unknown) => {
+      // The refetched status shows whether the earlier attempt enrolled.
+      if (
+        toastUnsettled(error, t, {
+          refetch: invalidateEnrollment,
+          outcomeUnknownKey: 'toast.contest.enrollOutcomeUnknown',
+        })
+      ) {
+        return;
+      }
       if (parseApiError(error)?.code === 'CONFLICT') {
         toast.success(t('toast.contest.enrolled'));
         invalidateEnrollment();

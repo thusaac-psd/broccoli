@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 interface TestCaseFormDialogProps {
   problemId: number;
@@ -161,6 +162,16 @@ export function TestCaseFormDialog({
         );
 
     setLoading(false);
+    if (
+      toastUnsettled(result.error, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({ queryKey: testCasesQueryKey }),
+      })
+    ) {
+      // The form stays open: if the test case is not in the list, it can be
+      // sent again as it is.
+      return;
+    }
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(

@@ -29,6 +29,7 @@ import {
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
 import { downloadUserCredentials } from '@/features/user-management/lib/user-credentials';
+import { unsettledMessage } from '@/lib/idempotency-feedback';
 
 export function CreateUsersDialog({
   onOpenChange,
@@ -123,7 +124,14 @@ export function CreateUsersDialog({
         t('users.create.success', { count: String(result.length) }),
       );
     } catch (error) {
-      setErrorMsg(getErrorMessage(error, t('users.create.error')));
+      // An unknown outcome keeps the form as it is: if the users are not in
+      // the refetched list, it can be sent again (as a new operation).
+      setErrorMsg(
+        unsettledMessage(error, t, {
+          refetch: refreshUserLists,
+          outcomeUnknownKey: 'users.create.outcomeUnknown',
+        }) ?? getErrorMessage(error, t('users.create.error')),
+      );
     } finally {
       setBusy(false);
     }
