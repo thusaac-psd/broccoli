@@ -115,13 +115,23 @@ enum IdSource {
 /// A default ID for this host that is unique across machines and stable across
 /// restarts: `{role}-` plus a hash of `/etc/machine-id`. Hostnames are only a
 /// fallback because cloned and live-boot machines share them (every Ubuntu live
-/// session is `ubuntu`); inside a container without a machine ID the hostname is
-/// the container ID. Duplicates that slip through are still caught by
+/// session is `ubuntu`). Inside a container the machine ID is ignored (images
+/// can bake one in) and the hostname, i.e. the container ID, is used. Duplicates that slip through are still caught by
 /// [`NodeClaim::claim_at_boot`].
 pub fn default_node_id(role: NodeRole) -> String {
-    let machine_id = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+    // Inside a container the machine ID is absent or baked into the image (so
+    // shared by every container from it), while the hostname is the unique
+    // container ID: skip the machine ID there.
+    let in_container = ["/.dockerenv", "/run/.containerenv"]
         .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok());
+        .any(|p| std::path::Path::new(p).exists());
+    let machine_id = (!in_container)
+        .then(|| {
+            ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+                .iter()
+                .find_map(|path| std::fs::read_to_string(path).ok())
+        })
+        .flatten();
     let hostname = hostname::get()
         .ok()
         .map(|h| h.to_string_lossy().into_owned());
@@ -133,7 +143,7 @@ pub fn default_node_id(role: NodeRole) -> String {
         IdSource::Hostname => warn!(
             role = role.as_str(),
             node_id = %id,
-            "Node ID not configured and no machine ID found; derived from the hostname. \
+            "Node ID not configured and no usable machine ID (none, or inside a container); derived from the hostname. \
              Hosts with identical hostnames will refuse to start; set the ID explicitly."
         ),
         IdSource::Random => warn!(
