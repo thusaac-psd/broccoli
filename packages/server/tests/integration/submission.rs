@@ -2784,6 +2784,85 @@ mod rejudge_lifecycle {
             "duplicate judge_epoch after apply + rejudge: {epochs:?}"
         );
     }
+
+    /// Rejudging an in-flight submission finalizes the judgement it supersedes as a
+    /// `SUPERSEDED` system error. A superseded judgement left unfinalized can never
+    /// finish, so the stuck detector would re-run it until it lands in the DLQ.
+    #[tokio::test]
+    async fn rejudge_finalizes_the_superseded_inflight_judgement() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let user_id = app.get_with_token(routes::ME, &token).await.id();
+        let now = Utc::now();
+        let sub = submission::ActiveModel {
+            files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(pid),
+            contest_type: Set("standard".into()),
+            status: Set(SubmissionStatus::Running),
+            judge_epoch: Set(5),
+            retry_count: Set(1),
+            owner_server_id: Set(Some("server-x".into())),
+            lease_heartbeat_at: Set(Some(now)),
+            leased_at: Set(Some(now)),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert submission");
+        let j1 = submission_judgement::ActiveModel {
+            submission_id: Set(sub.id),
+            version: Set(1),
+            is_current: Set(true),
+            is_finalized: Set(false),
+            status: Set(SubmissionStatus::Running),
+            judge_epoch: Set(5),
+            retry_count: Set(1),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert running judgement");
+
+        let res = app
+            .post_with_token(&routes::submission_rejudge(sub.id), &json!({}), &token)
+            .await;
+        if (400..500).contains(&res.status) {
+            // Refusing to rejudge an in-flight submission is also acceptable.
+            return;
+        }
+        assert!(res.status < 300, "rejudge: {}", res.text);
+
+        let old = submission_judgement::Entity::find_by_id(j1.id)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("j1");
+        assert!(!old.is_current, "control: j1 superseded");
+        assert!(
+            old.is_finalized,
+            "superseded judgement left unfinalized in {:?}; stuck detector will re-run it",
+            old.status
+        );
+        assert_eq!(old.status, SubmissionStatus::SystemError);
+        assert_eq!(old.error_code.as_deref(), Some("SUPERSEDED"));
+
+        // Finalized, it can now be discarded like any other old version.
+        let discard = app
+            .post_with_token(
+                &routes::submission_judgement_discard(sub.id, j1.id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(discard.status, 204, "discard: {}", discard.text);
+    }
 }
 
 mod bulk_rejudge_limits {

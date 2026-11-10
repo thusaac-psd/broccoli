@@ -24,8 +24,8 @@ use chrono::Utc;
 use common::{SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::sea_query::{Expr, SimpleExpr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, ExprTrait, QueryFilter,
-    QueryOrder, Set, UpdateMany,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, ExprTrait,
+    QueryFilter, QueryOrder, Set, Statement, UpdateMany,
 };
 
 use crate::entity::judgement_reset::ClearJudgementColumns;
@@ -120,29 +120,51 @@ pub(crate) enum RedispatchReason {
     StuckJob,
 }
 
-/// What happens to the judgement that stops being current.
-enum Supersede {
-    /// Only `is_current = false`.
-    Demote,
-    /// Also finalize it as `SystemError` with this code and message if it was
-    /// still in flight.
-    Finalize {
-        error_code: &'static str,
-        error_message: &'static str,
-    },
+/// Why a current judgement stops being current. Each reason picks the
+/// `error_code`/`error_message` a still-in-flight judgement is finalized with
+/// (see [`supersede_current_judgement`]).
+#[derive(Clone, Copy)]
+pub(crate) enum SupersededBy {
+    /// An admin rejudge or DLQ retry opened a new current judgement.
+    Rejudge,
+    /// An admin applied another, finalized judgement.
+    AppliedJudgement,
+    /// The lease-steal scanner re-dispatched under a new judgement.
+    LeaseSteal,
+    /// The stuck-job detector re-dispatched under a new judgement.
+    StuckJob,
+}
+
+impl SupersededBy {
+    fn error(self) -> (&'static str, &'static str) {
+        match self {
+            SupersededBy::Rejudge => (SubmissionDlqErrorCode::SUPERSEDED, "Superseded by rejudge"),
+            SupersededBy::AppliedJudgement => (
+                SubmissionDlqErrorCode::SUPERSEDED,
+                "Superseded by an applied judgement",
+            ),
+            SupersededBy::LeaseSteal => (
+                SubmissionDlqErrorCode::SUPERSEDED,
+                "Superseded by lease-steal retry",
+            ),
+            SupersededBy::StuckJob => (
+                SubmissionDlqErrorCode::STUCK_JOB,
+                "Superseded by stuck-job retry",
+            ),
+        }
+    }
 }
 
 impl OpenJudgement {
-    fn supersede(&self) -> Option<Supersede> {
+    /// The reason the previous current judgement is superseded, or `None`
+    /// when the new judgement does not replace it.
+    fn supersedes(&self) -> Option<SupersededBy> {
         match self {
-            OpenJudgement::Rejudge { .. } => Some(Supersede::Demote),
+            OpenJudgement::Rejudge { .. } => Some(SupersededBy::Rejudge),
             OpenJudgement::DeferredRejudge { .. } => None,
             OpenJudgement::Redispatch { reason, .. } => Some(match reason {
-                RedispatchReason::LeaseSteal => Supersede::Demote,
-                RedispatchReason::StuckJob => Supersede::Finalize {
-                    error_code: SubmissionDlqErrorCode::STUCK_JOB,
-                    error_message: "Superseded by stuck-job retry",
-                },
+                RedispatchReason::LeaseSteal => SupersededBy::LeaseSteal,
+                RedispatchReason::StuckJob => SupersededBy::StuckJob,
             }),
         }
     }
@@ -214,22 +236,8 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
         return Ok(None);
     };
 
-    match open.supersede() {
-        None => {}
-        Some(Supersede::Demote) => {
-            submission_judgement::Entity::update_many()
-                .col_expr(submission_judgement::Column::IsCurrent, Expr::value(false))
-                .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
-                .filter(submission_judgement::Column::IsCurrent.eq(true))
-                .exec(txn)
-                .await?;
-        }
-        Some(Supersede::Finalize {
-            error_code,
-            error_message,
-        }) => {
-            supersede_current_judgement(txn, submission_id, error_code, error_message).await?;
-        }
+    if let Some(reason) = open.supersedes() {
+        supersede_current_judgement(txn, submission_id, reason).await?;
     }
 
     let max_version: Option<i32> = submission_judgement::Entity::find()
@@ -308,45 +316,36 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
     Ok(Some((sub, judgement)))
 }
 
-/// Takes the submission's current judgement out of service: clears
-/// `is_current` and, if it was still in flight, finalizes it as `SystemError`
-/// with `error_code`/`error_message`. A finalized judgement is never picked up
-/// again by the stuck detector or the steal scanner, and its worker's late
-/// writes are rejected (`submission_update` requires `is_finalized = FALSE`).
-async fn supersede_current_judgement<C: ConnectionTrait>(
+/// Takes the submission's current judgement out of service, in one
+/// statement: clears `is_current` and, if it was still in flight, finalizes
+/// it as `SystemError` with `reason`'s code and message. A finalized
+/// judgement is never picked up again by the stuck detector or the steal
+/// scanner, its worker's late writes are rejected (`submission_update`
+/// requires `is_finalized = FALSE`), and `discard` accepts it. An already
+/// finalized judgement keeps its verdict untouched as version history.
+pub(crate) async fn supersede_current_judgement<C: ConnectionTrait>(
     txn: &C,
     submission_id: i32,
-    error_code: &str,
-    error_message: &str,
+    reason: SupersededBy,
 ) -> Result<(), DbErr> {
-    submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::Status,
-            Expr::value(SubmissionStatus::SystemError.to_string()),
-        )
-        .col_expr(
-            submission_judgement::Column::ErrorCode,
-            Expr::value(Some(error_code.to_string())),
-        )
-        .col_expr(
-            submission_judgement::Column::ErrorMessage,
-            Expr::value(Some(error_message.to_string())),
-        )
-        .col_expr(submission_judgement::Column::IsFinalized, Expr::value(true))
-        .col_expr(
-            submission_judgement::Column::FinalizedAt,
-            Expr::cust("NOW()"),
-        )
-        .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .filter(submission_judgement::Column::IsFinalized.eq(false))
-        .exec(txn)
-        .await?;
-    submission_judgement::Entity::update_many()
-        .col_expr(submission_judgement::Column::IsCurrent, Expr::value(false))
-        .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
-        .filter(submission_judgement::Column::IsCurrent.eq(true))
-        .exec(txn)
-        .await?;
+    let (error_code, error_message) = reason.error();
+    txn.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"UPDATE submission_judgement SET
+               is_current = FALSE,
+               status = CASE WHEN is_finalized THEN status ELSE $1 END,
+               error_code = CASE WHEN is_finalized THEN error_code ELSE $2 END,
+               error_message = CASE WHEN is_finalized THEN error_message ELSE $3 END,
+               finalized_at = CASE WHEN is_finalized THEN finalized_at ELSE NOW() END,
+               is_finalized = TRUE
+           WHERE submission_id = $4 AND is_current = TRUE"#,
+        [
+            SubmissionStatus::SystemError.to_string().into(),
+            error_code.into(),
+            error_message.into(),
+            submission_id.into(),
+        ],
+    ))
+    .await?;
     Ok(())
 }
