@@ -133,7 +133,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub id: String,
     /// Multi-replica deployments require a stable explicit server ID; when
-    /// true, hostname/random fallbacks are rejected.
+    /// true, the host-default fallback is rejected.
     #[serde(default)]
     pub expects_multi_replica: bool,
     /// Master switch for lease refresh, steal scanning, and reply-queue
