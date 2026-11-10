@@ -383,6 +383,14 @@ mod tests {
         let conn = crate::database::init_db(&url)
             .await
             .expect("init schema on test db");
+        // The plugin these tests schedule for (only an enabled plugin may arm
+        // a timer through `host_funcs::timer::schedule`).
+        sea_orm::ConnectionTrait::execute_unprepared(
+            &conn,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at) VALUES ('p', TRUE, 0, NOW())",
+        )
+        .await
+        .expect("seed plugin row");
         TestDb {
             _container: container,
             conn,
