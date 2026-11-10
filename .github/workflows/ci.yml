@@ -144,6 +144,13 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # The server caches `/assets/*` as `immutable`, so a file name that
+      # ships new bytes would stay stale in browsers for a year. This rebuilds
+      # the web app after edits that reach it through the shared-deps shims
+      # and fails if any content-hashed name kept its name with new bytes.
+      - name: Check asset hashes
+        run: pnpm --filter @broccoli/web check:asset-hashes
+
   release-bundled-feature:
     name: Release / bundled-stress-test feature
     runs-on: ubuntu-latest
