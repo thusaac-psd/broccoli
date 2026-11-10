@@ -21,6 +21,7 @@ use crate::entity::{problem, problem_attachment};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::path::AppPath;
+use crate::handlers::problem::require_problem_part_reachable;
 use crate::models::attachment::{AttachmentListResponse, AttachmentResponse};
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
@@ -28,7 +29,6 @@ use crate::utils::blob::{
     BlobMetadata, build_blob_response, resolve_virtual_path, stream_field_to_store,
     take_required_file,
 };
-use crate::utils::contest::require_scope_started;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
@@ -231,14 +231,15 @@ async fn list_attachments_in(
     // Fail fast, before reading the attachment rows below, on a problem the
     // kernel already knows is unreachable under this scope. This is the
     // same Problem decision `get_problem_in` makes (handlers/problem/mod.rs).
-    if kernel
-        .decide(Action::Read, scope.problem())
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Problem not found".into()));
-    }
-    require_scope_started(&state.db, auth_user, scope.contest_id).await?;
+    require_problem_part_reachable(
+        &kernel,
+        state,
+        auth_user,
+        scope,
+        Action::Read,
+        "Problem not found",
+    )
+    .await?;
 
     let refs = problem_attachment::Entity::find()
         .filter(problem_attachment::Column::ProblemId.eq(scope.problem_id))
@@ -370,14 +371,15 @@ async fn download_attachment_in(
     // pre-kernel handler's exact order (`require_problem_read_access` ran
     // before `Uuid::parse_str`). `Action::Download` throughout this handler:
     // the whole operation is a file-bytes read, not a metadata read.
-    if kernel
-        .decide(Action::Download, scope.problem())
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Problem not found".into()));
-    }
-    require_scope_started(&state.db, auth_user, scope.contest_id).await?;
+    require_problem_part_reachable(
+        &kernel,
+        state,
+        auth_user,
+        scope,
+        Action::Download,
+        "Problem not found",
+    )
+    .await?;
 
     let ref_uuid = Uuid::parse_str(ref_id)
         .map_err(|_| AppError::Validation("Invalid attachment ID".into()))?;

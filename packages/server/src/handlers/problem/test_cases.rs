@@ -23,7 +23,6 @@ use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
-use crate::utils::contest::require_scope_started;
 use crate::utils::problem::find_problem;
 use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
@@ -31,7 +30,7 @@ use crate::utils::test_case_body::{
 use crate::utils::text::{sanitize_db_text, sanitize_db_text_opt};
 use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
 
-use super::find_problem_for_update;
+use super::{find_problem_for_update, require_problem_part_reachable};
 
 #[utoipa::path(
     post,
@@ -255,8 +254,6 @@ async fn get_test_case_in(
     scope: ProblemScope,
     tc_id: i32,
 ) -> Result<Json<TestCaseResponse>, AppError> {
-    let tc = find_test_case_for_problem(&state.db, scope.problem_id, tc_id).await?;
-
     // Setters keep full access to every test case, but only on the
     // standalone route: a contest-scoped read serves samples only, under
     // that contest's rules, whoever asks.
@@ -279,20 +276,25 @@ async fn get_test_case_in(
         // `Resource::Problem`, so this is a documented no-op, not a live
         // bug - see Task 20 Item 6.
         let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
-        if kernel
-            .decide(Action::Read, scope.problem())
-            .await?
-            .is_denied()
-        {
-            return Err(AppError::NotFound("Test case not found".into()));
-        }
-        require_scope_started(&state.db, auth_user, scope.contest_id).await?;
-        // The kernel only knows the *problem* is reachable; whether this
-        // particular test case is a public sample is local to test cases and
-        // has no kernel resource of its own.
-        if !tc.is_sample {
-            return Err(AppError::NotFound("Test case not found".into()));
-        }
+        require_problem_part_reachable(
+            &kernel,
+            state,
+            auth_user,
+            scope,
+            Action::Read,
+            "Test case not found",
+        )
+        .await?;
+    }
+
+    // Looked up only after the gate, so a viewer who cannot reach the
+    // problem cannot tell which test case ids belong to it.
+    let tc = find_test_case_for_problem(&state.db, scope.problem_id, tc_id).await?;
+    // The kernel only knows the *problem* is reachable; whether this
+    // particular test case is a public sample is local to test cases and
+    // has no kernel resource of its own.
+    if !setter_bypass && !tc.is_sample {
+        return Err(AppError::NotFound("Test case not found".into()));
     }
 
     Ok(Json(

@@ -27,12 +27,12 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
-use crate::utils::contest::require_scope_started;
+use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::problem::find_problem;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::test_case_body::test_case_body_size;
 use crate::utils::text::{sanitize_db_json, sanitize_db_text};
-use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
+use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
 mod checker_source;
 mod test_cases;
@@ -268,6 +268,44 @@ pub async fn get_contest_problem(
     .await
 }
 
+/// The reachability gate every viewer-facing read of a problem part (its
+/// statement, samples or attachments) passes before touching any row, in an
+/// order that tells the viewer nothing they could not already see:
+///
+/// 1. under a contest, the contest itself must be reachable (404) and must
+///    have started (400). These are `list_contest_problems`' two gates in
+///    the same order, so before the start a 400 says only that the contest
+///    has not started, never whether this problem is one of its problems;
+/// 2. the problem must be reachable under `scope` (404).
+///
+/// `not_found` is the calling handler's own 404 message. The "not started"
+/// rule is a 400 business rule, not a reachability outcome, so the kernel
+/// does not model it and it is applied here between the two decisions.
+pub(crate) async fn require_problem_part_reachable(
+    kernel: &VisibilityKernel<'_>,
+    state: &AppState,
+    auth_user: &AuthUser,
+    scope: ProblemScope,
+    action: Action,
+    not_found: &str,
+) -> Result<(), AppError> {
+    if let Some(contest_id) = scope.contest_id {
+        if kernel
+            .decide(Action::Read, Resource::Contest(contest_id))
+            .await?
+            .is_denied()
+        {
+            return Err(AppError::NotFound(not_found.into()));
+        }
+        let contest = find_contest(&state.db, contest_id).await?;
+        require_contest_started(auth_user, &contest)?;
+    }
+    if kernel.decide(action, scope.problem()).await?.is_denied() {
+        return Err(AppError::NotFound(not_found.into()));
+    }
+    Ok(())
+}
+
 /// Shared body of `get_problem` and `get_contest_problem`: the problem as
 /// reached under `scope`.
 async fn get_problem_in(
@@ -286,14 +324,15 @@ async fn get_problem_in(
     // reachability via any contest it is attached to); under a contest it
     // is that contest's access, window and membership checks - see
     // `visibility::host_rules::decide_problem_or_sample`.
-    if kernel
-        .decide(Action::Read, resource.clone())
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Problem not found".into()));
-    }
-    require_scope_started(&state.db, auth_user, scope.contest_id).await?;
+    require_problem_part_reachable(
+        &kernel,
+        state,
+        auth_user,
+        scope,
+        Action::Read,
+        "Problem not found",
+    )
+    .await?;
 
     let mut response = ProblemResponse::from(find_problem(&state.db, scope.problem_id).await?);
     response.samples = load_sample_test_cases(&state.db, scope.problem_id).await?;

@@ -227,12 +227,44 @@ async fn a_pending_bracket_still_hides_its_problem_outside_every_contest() {
         .await;
     assert_eq!(res.status, 404, "standalone submission: {}", res.text);
 
-    // The contestant is not in the bracket, so its own route stays closed.
+    // The bracket is public but has not started, so its own route answers
+    // only that, exactly as its problem list does.
     let res = fx
         .app
         .get_with_token(&routes::contest_problem(fx.bracket_id, pid), token)
         .await;
-    assert_eq!(res.status, 404, "bracket statement: {}", res.text);
+    assert_eq!(res.status, 400, "bracket statement: {}", res.text);
+}
+
+/// Before a contest starts, its problem routes must not tell a viewer which
+/// problems it holds: a problem in the contest and one that does not exist
+/// get the same "not started" answer on every problem part route.
+#[tokio::test]
+async fn a_contest_that_has_not_started_does_not_reveal_which_problems_it_holds() {
+    let fx = setup_fixture().await;
+    let (bid, token) = (fx.bracket_id, &fx.contestant.token);
+    let missing = fx.problem_id + 10_000;
+
+    for pid in [fx.problem_id, missing] {
+        for path in [
+            routes::contest_problem(bid, pid),
+            routes::contest_problem_samples(bid, pid),
+            routes::contest_problem_sample(bid, pid, fx.sample_id),
+            routes::contest_problem_attachments(bid, pid),
+        ] {
+            let res = fx.app.get_with_token(&path, token).await;
+            assert_eq!(res.status, 400, "{path}: {}", res.text);
+            assert_eq!(res.body["code"], "VALIDATION_ERROR", "{path}");
+        }
+        let res = fx
+            .app
+            .download_raw(
+                &routes::contest_problem_attachment(bid, pid, &fx.attachment_id),
+                token,
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 400, "attachment of problem {pid}");
+    }
 }
 
 #[tokio::test]

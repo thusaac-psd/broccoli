@@ -13,8 +13,8 @@ use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::path::AppPath;
+use crate::handlers::problem::require_problem_part_reachable;
 use crate::state::AppState;
-use crate::utils::contest::require_scope_started;
 use crate::utils::test_case_body::read_test_case_body_preview;
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
@@ -64,15 +64,17 @@ pub async fn get_contest_problem_samples(
 
     // Samples are a part of their problem: a plugin that hides the problem
     // under this contest hides its samples too, whether or not it also
-    // judges `sample` resources. Same gate (and same 404) as the
-    // attachment handlers' problem check.
-    if kernel
-        .decide(Action::Read, scope.problem())
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Contest not found".into()));
-    }
+    // judges `sample` resources. Same gate as every other problem part
+    // (contest reachable, then started, then the problem reachable).
+    require_problem_part_reachable(
+        &kernel,
+        &state,
+        &auth_user,
+        scope,
+        Action::Read,
+        "Contest not found",
+    )
+    .await?;
 
     // Fail fast, before doing any (bounded but non-trivial) blob reads below,
     // on a resource the kernel already knows is unreachable. This single
@@ -101,12 +103,6 @@ pub async fn get_contest_problem_samples(
     {
         return Err(AppError::NotFound("Contest not found".into()));
     }
-
-    // NOT covered by the kernel decision above: `require_contest_started`'s
-    // `now < start_time` check is a 400 business-rule rejection, not a
-    // reachability outcome, so it has no representation in `Decision` and is
-    // re-applied here, on top of the kernel's `Allow`.
-    require_scope_started(&state.db, &auth_user, scope.contest_id).await?;
 
     let sample_test_cases = test_case::Entity::find()
         .filter(test_case::Column::ProblemId.eq(problem_id))
