@@ -271,7 +271,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh a CLI access token using a stored refresh token
-     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated.
+     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated, with the same 30-second replay grace as POST /auth/refresh.
      */
     post: operations['cliRefreshToken'];
     delete?: never;
@@ -431,7 +431,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh access token
-     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token. Fails if the user is banned or the token is expired/revoked.
+     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered with a new token pair; presented later, it revokes every refresh token of the user.
      */
     post: operations['refreshToken'];
     delete?: never;

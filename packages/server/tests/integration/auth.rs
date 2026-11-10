@@ -255,6 +255,9 @@ mod token_refresh {
             .cookie_store(false)
             .build()
             .unwrap();
+        // Replaying A right away is a benign race (another tab, or a retry
+        // after a lost response): it is answered with a sibling token rather
+        // than a 401 that would log the client out.
         let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
             .header("cookie", format!("broccoli_refresh={}", cookie_a))
@@ -262,27 +265,87 @@ mod token_refresh {
             .send()
             .await
             .expect("send refresh replay A");
-        assert_eq!(replay_a.status(), 401);
-        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
-        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+        assert_eq!(replay_a.status(), 200, "in-grace replay must succeed");
 
-        // Second legit refresh with cookie B (via the cookie-store client): rotates to cookie C.
-        let r2 = app.post_without_token(routes::REFRESH, &json!({})).await;
-        assert_eq!(r2.status, 200);
-        let cookie_c = extract_refresh_cookie(&r2);
-        assert_ne!(cookie_b, cookie_c, "second refresh must also rotate");
-
-        // Replay cookie B: 401 TOKEN_INVALID.
-        let replay_b = raw_client
+        // Past the grace window, the same replay is reuse.
+        {
+            use sea_orm::ConnectionTrait;
+            app.db
+                .execute_unprepared(
+                    "UPDATE refresh_tokens SET revoked_at = NOW() - INTERVAL '1 hour' \
+                     WHERE revoked_at IS NOT NULL",
+                )
+                .await
+                .expect("backdate revoked_at");
+        }
+        let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
-            .header("cookie", format!("broccoli_refresh={}", cookie_b))
+            .header("cookie", format!("broccoli_refresh={}", cookie_a))
             .json(&json!({}))
             .send()
             .await
-            .expect("send refresh replay B");
-        assert_eq!(replay_b.status(), 401);
-        let replay_b_body: serde_json::Value = replay_b.json().await.unwrap();
-        assert_eq!(replay_b_body["code"], "TOKEN_INVALID");
+            .expect("send refresh replay A past grace");
+        assert_eq!(replay_a.status(), 401);
+        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
+        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+    }
+
+    /// Two refreshes carrying the same cookie (two tabs, or a retry after the
+    /// response with the new cookie was lost) both succeed, and both resulting
+    /// tokens stay usable.
+    #[tokio::test]
+    async fn concurrent_refreshes_with_one_cookie_both_succeed() {
+        fn extract_refresh_cookie(resp: &reqwest::Response) -> String {
+            for hv in resp.headers().get_all("set-cookie").iter() {
+                let s = hv.to_str().expect("set-cookie utf-8");
+                if let Some(rest) = s.strip_prefix("broccoli_refresh=") {
+                    let val = rest.split(';').next().unwrap_or("").to_string();
+                    if !val.is_empty() {
+                        return val;
+                    }
+                }
+            }
+            panic!("no broccoli_refresh Set-Cookie on response");
+        }
+
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "dora", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let raw = reqwest::Client::builder()
+            .no_proxy()
+            .cookie_store(false)
+            .build()
+            .unwrap();
+        let login = raw
+            .post(format!("http://{}{}", app.addr, routes::LOGIN))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let cookie = extract_refresh_cookie(&login);
+
+        let refresh = |cookie: String| {
+            let raw = raw.clone();
+            let url = format!("http://{}{}", app.addr, routes::REFRESH);
+            async move {
+                raw.post(url)
+                    .header("cookie", format!("broccoli_refresh={cookie}"))
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+        let (a, b) = tokio::join!(refresh(cookie.clone()), refresh(cookie));
+        assert_eq!(a.status(), 200);
+        assert_eq!(b.status(), 200);
+        let (cookie_a, cookie_b) = (extract_refresh_cookie(&a), extract_refresh_cookie(&b));
+        assert_ne!(cookie_a, cookie_b);
+
+        for next in [cookie_a, cookie_b] {
+            let res = refresh(next).await;
+            assert_eq!(res.status(), 200, "a sibling token must stay usable");
+        }
     }
 
     /// Replaying a rotated refresh token AFTER the benign-race grace window is
