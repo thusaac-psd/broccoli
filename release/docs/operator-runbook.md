@@ -56,15 +56,25 @@ during a contest window.
 
 ## Plugin Reload
 
-The server image contains the default plugins and also mounts `./plugins`. After
-replacing plugin files on a server node, restart that server or use the admin UI
-plugin reload action:
+The server image contains the default plugins and also mounts `./plugins`. To
+roll out new plugin files:
 
-```bash
-docker compose --env-file .env.server -f docker-compose.server.yaml restart server
-```
+1. Copy the same files to `./plugins` on **every** server node.
+2. Select **Reload** for the plugin (or **Reload All**) once, on the admin
+   Plugins page. The server that handles the click loads the new files first;
+   only if that works is the change published, and every other server reloads
+   from its own `./plugins` within a few seconds.
 
-Repeat per server node.
+The Plugins page shows each server's state. A server that cannot load the new
+version keeps running the version it had and shows **Running previous version**;
+a server whose files differ from the published ones shows **Different files**.
+Fix that node's files and select **Retry** (or **Reload**) again. Enable,
+disable and reload all act on every server; there is no need to restart servers
+or repeat the action per node.
+
+Upgrade all server nodes together. Servers from before this mechanism do not
+publish plugin changes to their peers, so in a mixed fleet a change made through
+an old server only reaches that server.
 
 ## Password Reset
 
@@ -319,12 +329,12 @@ Every server re-dispatches its own unfinished work automatically, whatever
   `BROCCOLI__SERVER__ID` releases and re-dispatches the work its previous
   instance left behind as it boots. That work no longer counts against its
   in-flight limit.
-- **Crash without a restart**: with lease/steal enabled, the other servers
-  steal the dead server's work once its lease expires (`lease_ttl_secs`). With
-  it disabled (the release default) nothing can tell a dead server from a live
-  one, so the work waits until that server ID boots again, or until the
-  stuck-job detector fails it after `max_inflight_secs` (default 1 hour) so it
-  can be rejudged.
+- **Crash without a restart**: with lease/steal enabled, the other servers steal
+  the dead server's work once its lease expires (`lease_ttl_secs`). With it
+  disabled (the release default) nothing can tell a dead server from a live one,
+  so the work waits until that server ID boots again, or until the stuck-job
+  detector fails it after `max_inflight_secs` (default 1 hour) so it can be
+  rejudged.
 
 When a crashed server will not come back:
 
