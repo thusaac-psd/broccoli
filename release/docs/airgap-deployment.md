@@ -19,9 +19,9 @@ external SSD) and installed with zero network calls.
 The bundle covers four roles:
 
 - **server** — the broccoli API/dispatcher plus its infra (Postgres, Redis,
-  SeaweedFS/S3), fronted by Caddy serving an internal-CA TLS leaf. With
-  several servers, the first one is the infra node and the others join it
-  (see "Multi-server topology" below).
+  SeaweedFS/S3), fronted by Caddy serving an internal-CA TLS leaf. With several
+  servers, the first one is the infra node and the others join it (see
+  "Multi-server topology" below).
 - **gateway** — a gateway-only node: just the internal-CA TLS Caddy gateway,
   balancing across several servers and health-checking each on `/livez`.
 - **worker** — the judging box that runs the isolate sandbox and executes
@@ -31,14 +31,15 @@ The bundle covers four roles:
   `PATH`.
 
 Every role installs from the same bundle tree. The recommended path is the
-guided one-click installer, `setup.sh --role {server|gateway|worker|contestant}`, which
-wraps the underlying per-role engine `install.sh` with runtime detection, a
-go/no-go preflight, and auto-generated configuration (§4). `install.sh` remains
-available directly for operators who manage their own `.env` files. Nothing
-under `release/airgap/` ever shells out to `curl`, `wget`, `apt`, `pip`, or
-`docker pull` — that invariant is enforced by
-`release/airgap/test/offline_guard_test.sh` and `install_test.sh`, and it's what
-makes the target-side scripts safe to run with no network at all.
+guided one-click installer,
+`setup.sh --role {server|gateway|worker|contestant}`, which wraps the underlying
+per-role engine `install.sh` with runtime detection, a go/no-go preflight, and
+auto-generated configuration (§4). `install.sh` remains available directly for
+operators who manage their own `.env` files. Nothing under `release/airgap/`
+ever shells out to `curl`, `wget`, `apt`, `pip`, or `docker pull` — that
+invariant is enforced by `release/airgap/test/offline_guard_test.sh` and
+`install_test.sh`, and it's what makes the target-side scripts safe to run with
+no network at all.
 
 ## 2. On the staging box (networked)
 
@@ -93,17 +94,19 @@ everything an install needs:
   (built `.wasm` + frontend assets), copied out of the server image at assembly.
   The server and worker compose files bind-mount `./plugins:/plugins:ro`, which
   overlays the image-baked copy, so this directory must be present or the judge
-  boots with an empty plugin registry and cannot evaluate submissions. It is part
-  of the manifested tree, so `load-bundle.sh` integrity-verifies the plugin code
-  along with everything else. (A `--skip-images` structural bundle omits it, as it
-  omits the images themselves.)
+  boots with an empty plugin registry and cannot evaluate submissions. It is
+  part of the manifested tree, so `load-bundle.sh` integrity-verifies the plugin
+  code along with everything else. (A `--skip-images` structural bundle omits
+  it, as it omits the images themselves.)
 - `compose/plugins-available/` — optional plugins for particular events, such as
   the Codelink contest formats. They are not loaded until enabled, either with
   `BROCCOLI_PLUGINS="codelink-qualifier codelink-bracket"` on the server
-  `install.sh` run, or later with `./enable-plugin.sh codelink-qualifier
-  codelink-bracket` followed by **Reload All** on the admin Plugins page.
-  `./enable-plugin.sh` with no arguments lists them. An enabled plugin stays
-  covered by the integrity check: it must match its copy here byte for byte.
+  `install.sh` run, or later with
+  `./enable-plugin.sh codelink-qualifier codelink-bracket` on every server node
+  followed by **Reload All** on the admin Plugins page (once; it reaches every
+  server replica). `./enable-plugin.sh` with no arguments lists them. An enabled
+  plugin stays covered by the integrity check: it must match its copy here byte
+  for byte.
 - `cli/` — the musl-static `broccoli` contestant CLI binary.
 - `ca/` — `root.crt` (public, ships everywhere) and `issue-leaf.sh`; NO private
   key lives here. The CA/leaf private keys live only in the
@@ -281,14 +284,14 @@ This:
 
 1. Runs `load-bundle.sh --bundle .` to re-verify `manifest.sha256` and
    `docker load` every tarball in `images/`.
-2. Ensures the server-secret dir holds a current TLS leaf for `<host-or-ip>`.
-   A pre-issued or earlier leaf is kept only while it chains to the bundle's
-   CA, its SAN covers `<host-or-ip>`, and it is valid for at least another
-   day; otherwise `ca/issue-leaf.sh` issues a new one from the CA key that
-   lives only in the sidecar, so a venue whose address moved gets a matching
-   leaf. The root and the leaf are both backdated a day, so a contestant
-   machine whose clock runs behind does not reject them as not yet valid, and
-   the leaf never outlives the CA.
+2. Ensures the server-secret dir holds a current TLS leaf for `<host-or-ip>`. A
+   pre-issued or earlier leaf is kept only while it chains to the bundle's CA,
+   its SAN covers `<host-or-ip>`, and it is valid for at least another day;
+   otherwise `ca/issue-leaf.sh` issues a new one from the CA key that lives only
+   in the sidecar, so a venue whose address moved gets a matching leaf. The root
+   and the leaf are both backdated a day, so a contestant machine whose clock
+   runs behind does not reject them as not yet valid, and the leaf never
+   outlives the CA.
 3. If `--burn-ca-key` was passed, deletes `root.key` from the server-secret
    sidecar right after the leaf is issued (see §8).
 4. Brings up infra, server, AND the Caddy TLS gateway (443, serving the
@@ -304,8 +307,8 @@ This:
    operator troubleshooting. The server override
    (`docker-compose.server-airgap.yaml.template`) runs the server with
    `SECURE_COOKIES=true`, and the server trusts `X-Forwarded-For` only from the
-   gateway, so auth rate limiting sees each contestant's real IP rather than
-   the gateway's. The gateway and the server share a small `edge` network
+   gateway, so auth rate limiting sees each contestant's real IP rather than the
+   gateway's. The gateway and the server share a small `edge` network
    (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else.
    The gateway sits at a fixed address on it (`BROCCOLI_GATEWAY_EDGE_IP`,
    default `172.31.250.2`, outside the `BROCCOLI_EDGE_RANGE` Docker hands out),
@@ -330,19 +333,19 @@ cd <bundle-dir>
 ./install.sh --role worker --bundle .
 ```
 
-This loads the worker image via `load-bundle.sh`, then runs the host half of
-the go/no-go check staged inside the bundle at `native/live-boot-preflight.sh
---host-only` (arch/OS, systemd, cgroup-v2 controllers). isolate and the
-compilers ship inside the worker image, so the host is not checked for them.
-`install.sh` locates that preflight script
+This loads the worker image via `load-bundle.sh`, then runs the host half of the
+go/no-go check staged inside the bundle at
+`native/live-boot-preflight.sh --host-only` (arch/OS, systemd, cgroup-v2
+controllers). isolate and the compilers ship inside the worker image, so the
+host is not checked for them. `install.sh` locates that preflight script
 relative to its own path, so this step only fires when you run the bundle's own
 `install.sh` as shown above — running a repo checkout's `install.sh` against the
 same bundle directory makes `native/live-boot-preflight.sh` resolve to a
 nonexistent path relative to the repo, and the check silently skips instead of
 running. A failed preflight only warns
-(`WARN: worker host preflight reported issues`) — inspect its `[FAIL]` lines
-and fix them before trusting the box for judging, but it does not by itself
-abort the install.
+(`WARN: worker host preflight reported issues`) — inspect its `[FAIL]` lines and
+fix them before trusting the box for judging, but it does not by itself abort
+the install.
 
 A worker does not trust the bundle's `ca/root.crt`: it talks plain Postgres,
 Redis and S3 to the server host and never connects to the TLS gateway, so the
@@ -415,8 +418,8 @@ Install the nodes in this order.
    ```
 
    The server reaches the infra node's Postgres, Redis and S3 on `10.0.0.10`
-   (ports 5432, 6379 and 8333) and starts no db, redis or seaweedfs of its
-   own. `--server-join FILE` reads `server-join.env` from somewhere else.
+   (ports 5432, 6379 and 8333) and starts no db, redis or seaweedfs of its own.
+   `--server-join FILE` reads `server-join.env` from somewhere else.
 
 3. **Gateway.** List every name and address contestants may use with
    `--lan-host` (the first is the default for clients that send no name), and
@@ -429,13 +432,13 @@ Install the nodes in this order.
    ```
 
    The gateway gets a TLS leaf covering every `--lan-host` from the CA scripts,
-   reusing a current one. It checks each server on `GET /livez` every 5 s,
-   stops sending traffic to one after two failed checks, and retries a request
-   that cannot reach a server on another one. It also prints the address the
-   servers see it as; if that differs from what you passed as
-   `--gateway-host`, re-run the server installs with that address and
-   `--reconfigure`. Run the gateway on a host of its own: on a host that also
-   runs a server, the server sees the gateway's Docker bridge address instead.
+   reusing a current one. It checks each server on `GET /livez` every 5 s, stops
+   sending traffic to one after two failed checks, and retries a request that
+   cannot reach a server on another one. It also prints the address the servers
+   see it as; if that differs from what you passed as `--gateway-host`, re-run
+   the server installs with that address and `--reconfigure`. Run the gateway on
+   a host of its own: on a host that also runs a server, the server sees the
+   gateway's Docker bridge address instead.
 
 4. **Workers.** Point each worker at the infra node:
 
@@ -458,11 +461,11 @@ gateway's `setup.sh --reconfigure` with every `--upstream`.
 
 If the infra node's secrets change, copy its new `server-join.env` to every
 server node and re-run `setup.sh --role server --reconfigure` there. After any
-plugin change, restart every server: **Reload All** reloads only the server
-that handled the click. When upgrading (§9), carry each node's env files into
-the new bundle as §9 describes, plus `compose/server-join.env` on the server
-nodes and `compose/.env.gateway` on the gateway, and deliver the server-secret
-sidecar to the gateway.
+plugin change, restart every server: **Reload All** reloads only the server that
+handled the click. When upgrading (§9), carry each node's env files into the new
+bundle as §9 describes, plus `compose/server-join.env` on the server nodes and
+`compose/.env.gateway` on the gateway, and deliver the server-secret sidecar to
+the gateway.
 
 ## 7. Contestant machines
 
@@ -484,12 +487,12 @@ independent `manifest.sha256` check at the point the media reaches the
 contestant machine, since the trust boundary crosses again here. It then trusts
 `ca/root.crt` via the appropriate per-OS `trust-ca/` helper (`linux.sh` installs
 it with `update-ca-certificates` on Debian/Ubuntu/SUSE or `update-ca-trust` on
-RHEL/Rocky/Fedora/Arch, as root or through `sudo`;
-`macos.sh` adds it to the System keychain via `security add-trusted-cert`).
-Finally, if `cli/broccoli` is present in the bundle, it installs the musl-static
-CLI to `/usr/local/bin/broccoli`. The CLI trusts the OS certificate store by
-default (alongside its bundled public roots), so `broccoli login` and
-`broccoli submit` to `https://<host-or-ip>` work with no `BROCCOLI_TLS` setting.
+RHEL/Rocky/Fedora/Arch, as root or through `sudo`; `macos.sh` adds it to the
+System keychain via `security add-trusted-cert`). Finally, if `cli/broccoli` is
+present in the bundle, it installs the musl-static CLI to
+`/usr/local/bin/broccoli`. The CLI trusts the OS certificate store by default
+(alongside its bundled public roots), so `broccoli login` and `broccoli submit`
+to `https://<host-or-ip>` work with no `BROCCOLI_TLS` setting.
 
 ### Windows
 
@@ -541,10 +544,10 @@ to keep it off the venue entirely:
 2. **Pre-issue at assembly** — pass `--lan-host <host-or-ip>` to
    `build-bundle.sh` on the staging box (step 2) when you already know the
    venue's address ahead of time. The leaf is issued into the sidecar during
-   assembly, so `install.sh --role server` finds a leaf that already covers
-   that address and skips leaf issuance — you may then withhold
-   `root.key` from the venue completely (deliver only `server.crt`/`server.key`
-   in the sidecar, or drop `root.key` from it before copying to media).
+   assembly, so `install.sh --role server` finds a leaf that already covers that
+   address and skips leaf issuance — you may then withhold `root.key` from the
+   venue completely (deliver only `server.crt`/`server.key` in the sidecar, or
+   drop `root.key` from it before copying to media).
 
 Either way, only `ca/root.crt` (the public certificate, safe to distribute) is
 ever installed on worker or contestant machines by `trust-ca` — now structurally
@@ -580,8 +583,8 @@ may run mixed versions briefly during a rolling upgrade — a new server judges
 correctly against an as-yet-un-upgraded worker.
 
 Confirm the swap took effect. The image carries its version, source commit and
-build time in OCI labels — the only offline provenance signal, since there is
-no registry to query. The commit matches `bundle.json`'s `git_sha`, so it also
+build time in OCI labels — the only offline provenance signal, since there is no
+registry to query. The commit matches `bundle.json`'s `git_sha`, so it also
 answers whether a site runs a given fix:
 
 ```
@@ -591,8 +594,8 @@ docker inspect <server-container> --format \
 
 then check that `https://<host>/healthz` returns `200`. To confirm the editor
 works offline, open a problem page with the browser's developer tools on the
-Network tab: it loads `/assets/editor.worker-*.js` from the server and makes
-no request to `cdn.jsdelivr.net`.
+Network tab: it loads `/assets/editor.worker-*.js` from the server and makes no
+request to `cdn.jsdelivr.net`.
 
 > **Always upgrade with `install.sh`, never a hand-rolled `docker compose up`.**
 > The infra secrets (`REDIS_PASSWORD`, the database and S3 credentials) live in
@@ -608,7 +611,7 @@ leaf is in the server-secret sidecar. How many machines you must touch depends
 on **which** key changes.
 
 The leaf is bind-mounted into the gateway at a fixed path, so Compose does not
-recreate the gateway when only the file *content* changes, and Caddy does not
+recreate the gateway when only the file _content_ changes, and Caddy does not
 watch the cert files — a new leaf is served only after the gateway restarts.
 `install.sh --role server` restarts the gateway for you on every run, so always
 rotate by re-running it, never with a hand-rolled `docker compose up`.
@@ -635,7 +638,7 @@ issue it first:
 
 The re-issued leaf gets a new serial, still chains to the unchanged `root.crt`,
 and the gateway serves it as soon as `install.sh` restarts it. Confirm with
-`curl --cacert ca/root.crt https://<host>/healthz` — the *same* `root.crt`
+`curl --cacert ca/root.crt https://<host>/healthz` — the _same_ `root.crt`
 clients already trust.
 
 ### CA rotation (new root)
@@ -660,8 +663,8 @@ it holds the new `root.crt`, it rejects the server.
    `./install.sh --role server --lan-host <host-or-ip> --bundle .`. The gateway
    restarts onto the new leaf.
 4. Re-distribute the new `ca/root.crt` to **every contestant machine** and
-   re-run their trust step: `install.sh --role contestant`
-   re-trust from the bundle's `ca/root.crt`; Firefox users re-import it (step 7).
+   re-run their trust step: `install.sh --role contestant` re-trust from the
+   bundle's `ca/root.crt`; Firefox users re-import it (step 7).
 
 A client still holding only the old `root.crt` fails the handshake with an
 `unable to get local issuer certificate` error — that is the rotation working,

@@ -77,14 +77,15 @@ pass them in order:
 ./install.sh infra server
 ```
 
-Each role runs as its own Compose project (`COMPOSE_PROJECT_NAME=broccoli-<role>`
-in its env file), so roles on one host get separate networks, just as they
-would on separate machines. A role's volumes, including the database, are
-named after its project. Env files written by earlier releases have no project
-name, so Compose names the project after the bundle directory. Before you copy
-such a file into a new bundle directory, pin the old name; see
-[docs/upgrade.md](docs/upgrade.md#compose-project-names). The installer refuses
-to start a role whose data volume exists only under another project.
+Each role runs as its own Compose project
+(`COMPOSE_PROJECT_NAME=broccoli-<role>` in its env file), so roles on one host
+get separate networks, just as they would on separate machines. A role's
+volumes, including the database, are named after its project. Env files written
+by earlier releases have no project name, so Compose names the project after the
+bundle directory. Before you copy such a file into a new bundle directory, pin
+the old name; see [docs/upgrade.md](docs/upgrade.md#compose-project-names). The
+installer refuses to start a role whose data volume exists only under another
+project.
 
 ## Optional plugins
 
@@ -102,15 +103,17 @@ or on a running install:
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server and worker node, then restart every server. **Reload
-All** on the admin Plugins page reloads only the server that handled the
-click, so with several servers the others keep running without the plugin.
+a plugin on every server and worker node first, then select **Reload All** once:
+it reaches every server replica within a few seconds, not only the one that
+served the click. A replica that is missing an enabled plugin, or failed to load
+one, keeps retrying and reports `"plugins": "degraded"` in `/healthz`; the admin
+Plugins page shows which server and why.
 
 Uploading a plugin archive from the admin Plugins page does not work with these
-templates, by design: servers and workers mount `./plugins` read-only. An
-upload would reach only the one server that handled it, never the workers or
-the other servers, and a read-only mount means a stolen admin session cannot
-install code on contest machines. Ship plugins in the bundle's `plugins/` or
+templates, by design: servers and workers mount `./plugins` read-only. An upload
+would reach only the one server that handled it, never the workers or the other
+servers, and a read-only mount means a stolen admin session cannot install code
+on contest machines. Ship plugins in the bundle's `plugins/` or
 `plugins-available/` directory on every node instead.
 
 For server redundancy, install a gateway node with:
@@ -132,8 +135,8 @@ This sets `BROCCOLI__SERVER__TRUSTED_PROXIES` to exactly those addresses, also
 on a server that is already installed.
 
 Run the gateway on a machine with no server. A server on the gateway's own
-machine sees the gateway's Docker bridge address rather than its LAN address,
-so the printed command would not cover it; the gateway install warns when an
+machine sees the gateway's Docker bridge address rather than its LAN address, so
+the printed command would not cover it; the gateway install warns when an
 upstream is on its own machine.
 
 ## Files
@@ -152,7 +155,7 @@ upstream is on its own machine.
   `enable-plugin.sh` or `BROCCOLI_PLUGINS`.
 - `docs/`: upgrade, TLS, and operations guides.
 - `examples/`: Caddy configs and custom worker image example.
-- `setup-fairness.sh`: prepares a worker host for `max_concurrency` above 1
-  (see `docs/operator-runbook.md`).
-- `contest/`: offline contest helpers: problem export/import and worker
-  bring-up (see `contest/README.md`).
+- `setup-fairness.sh`: prepares a worker host for `max_concurrency` above 1 (see
+  `docs/operator-runbook.md`).
+- `contest/`: offline contest helpers: problem export/import and worker bring-up
+  (see `contest/README.md`).

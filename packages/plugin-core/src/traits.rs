@@ -115,6 +115,13 @@ pub trait PluginInvoker: Send + Sync {
         None
     }
 
+    /// Gate every call passes through, so the host can refuse new calls and
+    /// wait for running ones before it shuts down (see [`crate::call_gate`]).
+    /// `None` for managers that never shut down mid-call (tests).
+    fn call_gate(&self) -> Option<&crate::call_gate::CallGate> {
+        None
+    }
+
     async fn call_raw(
         &self,
         plugin_id: &str,
@@ -134,6 +141,12 @@ pub trait PluginInvoker: Send + Sync {
         host_context: Option<serde_json::Value>,
     ) -> Result<Vec<u8>, PluginError> {
         let start = std::time::Instant::now();
+        // First, before anything else: once the host is shutting down every
+        // call is refused the same way, whatever plugin it is for.
+        let guard = match self.call_gate() {
+            Some(gate) => Some(gate.enter().ok_or(PluginError::ShuttingDown)?),
+            None => None,
+        };
 
         // How long to wait for a free pooled instance. Distinct from the
         // guest execution deadline (`call_timeout_secs`), which is enforced by
@@ -169,6 +182,11 @@ pub trait PluginInvoker: Send + Sync {
             let func_name = func_name_owned.clone();
             let metrics = metrics.clone();
             move || {
+                // Held until the guest returns, even if the awaiting task is
+                // cancelled: the blocking call keeps running regardless.
+                let _guard = guard;
+                // Nested host-to-plugin calls from this thread are admitted.
+                let _in_call = crate::call_gate::ThreadInCall::enter();
                 let _span_guard = parent_span.enter();
                 crate::host_context::with_context(host_context, || {
                     let acquire_start = std::time::Instant::now();

@@ -44,11 +44,11 @@ release.
 
 This release stores refresh-token validators as SHA-256 digests instead of
 argon2 hashes. A new server still accepts the old format, so sessions issued
-before the upgrade keep working. An older server cannot read the new format
-and answers a refresh with 500. Upgrade every server node together (or drain
-the old ones from the gateway first) rather than mixing versions for long; a
-contestant whose refresh reaches an old node during the overlap is retried by
-the web client but can be signed out.
+before the upgrade keep working. An older server cannot read the new format and
+answers a refresh with 500. Upgrade every server node together (or drain the old
+ones from the gateway first) rather than mixing versions for long; a contestant
+whose refresh reaches an old node during the overlap is retried by the web
+client but can be signed out.
 
 ## Rolling-Upgrade Rehearsal
 
@@ -88,18 +88,18 @@ should not show legacy `operation_results` warnings for new work.
 ## Node IDs and heartbeats
 
 From this release every server and worker claims its ID in Redis at boot and
-keeps a heartbeat key alive, and a second live process with the same ID
-refuses to start (or stops within about 15 seconds). When the ID is unset,
-each node derives one for its host instead of `hostname -s` (servers) or
-`worker-1` (workers). Set `BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID`
-explicitly if anything outside Broccoli depends on the old values. An explicit
-but invalid ID now fails boot instead of being replaced.
+keeps a heartbeat key alive, and a second live process with the same ID refuses
+to start (or stops within about 15 seconds). When the ID is unset, each node
+derives one for its host instead of `hostname -s` (servers) or `worker-1`
+(workers). Set `BROCCOLI__SERVER__ID` and `BROCCOLI__WORKER__ID` explicitly if
+anything outside Broccoli depends on the old values. An explicit but invalid ID
+now fails boot instead of being replaced.
 
 Finish upgrading every server node within an hour of the first one. With
 `DISPATCHER_LEASE_STEAL_ENABLED=true`, the reply-queue sweeper treats a server
 without a heartbeat as dead, and servers from earlier releases never write one.
-After the sweeper's one-hour grace it would delete a still-running old
-server's result queue.
+After the sweeper's one-hour grace it would delete a still-running old server's
+result queue.
 
 ## Contests without a contest type
 
@@ -119,8 +119,8 @@ docker compose --env-file .env.infra -f docker-compose.infra.yaml exec db \
 
 Servers now refuse to start when a boot-time unique index cannot be built
 because duplicate rows already exist. Earlier releases only logged a warning, so
-a database can carry duplicates from then: most often a second bootstrap
-`admin` from two servers' simultaneous first boot, or repeated attachment or
+a database can carry duplicates from then: most often a second bootstrap `admin`
+from two servers' simultaneous first boot, or repeated attachment or
 additional-file paths. The error names the index and prints a `SELECT` that
 lists the duplicate keys; run it on the infra node:
 
@@ -149,12 +149,12 @@ switch exists for one release only.
 
 ## Compose project names
 
-Env files written by this release set `COMPOSE_PROJECT_NAME=broccoli-<role>`,
-so each role is its own Compose project. Env files from earlier releases have
-no project name, and Compose uses the bundle directory's name instead, for
-example `broccoli-platform-v020` for `broccoli-platform-v0.2.0/`. A role's
-volumes, including the database, are named after its project, so the same env
-file in a new release's directory would start on new, empty volumes.
+Env files written by this release set `COMPOSE_PROJECT_NAME=broccoli-<role>`, so
+each role is its own Compose project. Env files from earlier releases have no
+project name, and Compose uses the bundle directory's name instead, for example
+`broccoli-platform-v020` for `broccoli-platform-v0.2.0/`. A role's volumes,
+including the database, are named after its project, so the same env file in a
+new release's directory would start on new, empty volumes.
 
 Before moving such an env file, pin the project it runs as today. On the node,
 in the old bundle directory:
@@ -166,9 +166,9 @@ docker volume ls --filter label=com.docker.compose.volume=postgres_data \
 echo "COMPOSE_PROJECT_NAME='broccoli-platform-v020'" >> .env.infra
 ```
 
-Never rename the project of a role that is already running. `install.sh`
-refuses to start a role whose env file has no project name while that role's
-data volume exists only under a different project, and prints the name to pin.
+Never rename the project of a role that is already running. `install.sh` refuses
+to start a role whose env file has no project name while that role's data volume
+exists only under a different project, and prints the name to pin.
 
 ## Upgrading from a new bundle offline
 
@@ -178,11 +178,10 @@ To move a node to a newly extracted bundle without a registry:
 2. Copy the role's env file (and `connection.env`, plus `server-secrets.env` on
    server nodes) from the old bundle directory into the new one.
 3. Run `./install.sh <role>` in the new directory. It loads the bundled images
-   (`images/*.tar.gz`), keeps the env file's secrets, takes any changed
-   settings from `connection.env` and `server-secrets.env`, and points
+   (`images/*.tar.gz`), keeps the env file's secrets, takes any changed settings
+   from `connection.env` and `server-secrets.env`, and points
    `BROCCOLI_SERVER_IMAGE`, `BROCCOLI_WORKER_IMAGE` (same variant) or
-   `CADDY_IMAGE` at the images it just loaded. It leaves infra image tags
-   alone.
+   `CADDY_IMAGE` at the images it just loaded. It leaves infra image tags alone.
 
 To load the images by hand instead, then edit the image tag in the env file:
 
@@ -203,8 +202,8 @@ workers before servers when both roles were upgraded.
 
 Rolling the server back past the release with SHA-256 refresh tokens signs
 everyone out: the older server cannot read the new refresh tokens and answers
-every refresh with 500. After rolling back, delete those tokens so clients get
-a clean 401 and go to the login page instead:
+every refresh with 500. After rolling back, delete those tokens so clients get a
+clean 401 and go to the login page instead:
 
 ```sql
 DELETE FROM refresh_tokens WHERE validator LIKE 'sha256$%';

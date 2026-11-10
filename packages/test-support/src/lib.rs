@@ -124,7 +124,7 @@ pub async fn shared_pg_port() -> u16 {
             server::seed::seed_role_permissions(&template_db)
                 .await
                 .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
+            server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
             drop(template_db);
@@ -192,6 +192,13 @@ pub async fn create_test_database(db_name: &str) -> String {
         let _lock = CREATE_DB_LOCK.lock().await;
         clone_template(port, db_name).await;
     }
+    test_database_url(db_name).await
+}
+
+/// Connection URL of an existing test database on the shared container, for
+/// a second app instance that joins a database another one created.
+pub async fn test_database_url(db_name: &str) -> String {
+    let port = shared_pg_port().await;
     format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}")
 }
 

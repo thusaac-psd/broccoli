@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * List all discovered plugins
-     * @description Returns a list of all plugins that have been discovered on disk, along with their manifest information and current status. Requires `plugin:manage` permission.
+     * @description Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['listAllPlugins'];
     put?: never;
@@ -35,7 +35,7 @@ export interface paths {
     put?: never;
     /**
      * Reload all plugins and discover new ones
-     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory. Requires `plugin:manage` permission.
+     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.
      */
     post: operations['reloadAllPlugins'];
     delete?: never;
@@ -55,7 +55,7 @@ export interface paths {
     put?: never;
     /**
      * Upload a plugin archive
-     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload. Requires `plugin:manage` permission.
+     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.
      */
     post: operations['uploadPlugin'];
     delete?: never;
@@ -73,7 +73,7 @@ export interface paths {
     };
     /**
      * Get details of a specific plugin
-     * @description Returns detailed information about a specific plugin, including its manifest and current status. Requires `plugin:manage` permission.
+     * @description Returns detailed information about a specific plugin, including its manifest, whether it is enabled, and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['getPluginDetails'];
     put?: never;
@@ -131,7 +131,7 @@ export interface paths {
     put?: never;
     /**
      * Disable a plugin
-     * @description Disables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Disables a plugin by its ID on every server replica and deletes its pending timers. The other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['disablePlugin'];
     delete?: never;
@@ -151,7 +151,7 @@ export interface paths {
     put?: never;
     /**
      * Enable a plugin
-     * @description Enables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Enables a plugin by its ID on every server replica. Loads it on the serving replica first and records it as enabled only if that succeeds; the other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['enablePlugin'];
     delete?: never;
@@ -171,7 +171,7 @@ export interface paths {
     put?: never;
     /**
      * Reload a plugin
-     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Requires `plugin:manage` permission.
+     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['reloadPlugin'];
     delete?: never;
@@ -3068,6 +3068,11 @@ export interface components {
        */
       problem_type: string;
     };
+    /**
+     * @description Fleet-wide state of one plugin.
+     * @enum {string}
+     */
+    FleetPluginState: 'loaded' | 'failed' | 'pending' | 'disabled';
     HealthResponse: {
       /**
        * @description Database probe result: `"ok"` or `"down"`.
@@ -3086,6 +3091,18 @@ export interface components {
        * @example ok
        */
       mq: string;
+      /**
+       * @description Plugin readiness on this replica: `"ok"` when every plugin enabled in
+       *     the shared desired state is loaded here, `"degraded"` otherwise. It
+       *     does not change `status` or the HTTP code, so one plugin that fails
+       *     everywhere cannot take the whole fleet out of rotation; a load
+       *     balancer that should drain such a replica can match on this field.
+       *     Which plugins and why is in the authenticated admin plugin API
+       *     (`fleet`), not here: this endpoint is public, and load errors carry
+       *     file paths and database messages.
+       * @example ok
+       */
+      plugins: string;
       /**
        * @description Aggregate status: `"ok"` when every probed component is healthy,
        *     `"degraded"` otherwise.
@@ -3291,6 +3308,13 @@ export interface components {
       config_schemas: components['schemas']['ConfigSchemaResponse'][];
       /** @example This plugin does awesome things! */
       description?: string | null;
+      /**
+       * @description Whether the plugin is enabled (the fleet-wide desired state).
+       * @example true
+       */
+      enabled: boolean;
+      /** @description The plugin's load state on every live server replica. */
+      fleet: components['schemas']['PluginFleetResponse'];
       /** @example true */
       has_server: boolean;
       /** @example true */
@@ -3301,9 +3325,35 @@ export interface components {
       id: string;
       /** @example An Awesome Plugin */
       name: string;
+      /**
+       * @description Load state on the replica that served this request only. Prefer
+       *     `enabled` and `fleet`, which cover every server replica.
+       */
       status: components['schemas']['PluginStatusResponse'];
       /** @example 1.0.0 */
       version: string;
+    };
+    /** @description A plugin's state across all live server replicas. */
+    PluginFleetResponse: {
+      replicas: components['schemas']['PluginReplicaResponse'][];
+      /**
+       * Format: int32
+       * @description Live replicas where the plugin failed, is not installed, is still on a
+       *     previous version because the latest one failed to load, or runs files
+       *     that differ from the published version.
+       */
+      replicas_failed: number;
+      /**
+       * Format: int32
+       * @description Live replicas with the plugin loaded at the latest generation.
+       */
+      replicas_loaded: number;
+      /**
+       * Format: int32
+       * @description Live replicas.
+       */
+      replicas_total: number;
+      state: components['schemas']['FleetPluginState'];
     };
     PluginFullDetailResponse: {
       /**
@@ -3314,6 +3364,13 @@ export interface components {
       config_schemas: components['schemas']['ConfigSchemaResponse'][];
       /** @example This plugin does awesome things! */
       description?: string | null;
+      /**
+       * @description Whether the plugin is enabled (the fleet-wide desired state).
+       * @example true
+       */
+      enabled: boolean;
+      /** @description The plugin's load state on every live server replica. */
+      fleet: components['schemas']['PluginFleetResponse'];
       /** @example true */
       has_server: boolean;
       /** @example true */
@@ -3325,12 +3382,36 @@ export interface components {
       /** @example An Awesome Plugin */
       name: string;
       server?: null | components['schemas']['ServerDetailResponse'];
+      /**
+       * @description Load state on the replica that served this request only. Prefer
+       *     `enabled` and `fleet`, which cover every server replica.
+       */
       status: components['schemas']['PluginStatusResponse'];
       translations: string[];
       /** @example 1.0.0 */
       version: string;
       web?: null | components['schemas']['WebDetailResponse'];
       worker?: null | components['schemas']['WorkerDetailResponse'];
+    };
+    /** @description One live replica's view of a plugin. */
+    PluginReplicaResponse: {
+      /** @description Load or `init()` error, when `status` is `failed`. */
+      error?: string | null;
+      /**
+       * Format: date-time
+       * @description When this replica next retries a failed load.
+       */
+      retry_at?: string | null;
+      /** @example server-1 */
+      server_id: string;
+      status: components['schemas']['ReplicaPluginStatus'];
+      /** @description Whether this replica has applied the latest lifecycle change. */
+      up_to_date: boolean;
+      /**
+       * @description Manifest version of what is loaded on this replica.
+       * @example 1.2.0
+       */
+      version?: string | null;
     };
     /** @enum {string} */
     PluginStatusResponse: 'Unloaded' | 'Loaded' | 'Failed';
@@ -3565,6 +3646,17 @@ export interface components {
        */
       test_case_ids: number[];
     };
+    /**
+     * @description One plugin's state on one replica.
+     * @enum {string}
+     */
+    ReplicaPluginStatus:
+      | 'loaded'
+      | 'failed'
+      | 'not_installed'
+      | 'outdated'
+      | 'mismatched'
+      | 'unloaded';
     ReplyClarificationRequest: {
       /** @example Yes, the input is always sorted in ascending order. */
       content: string;
@@ -4965,7 +5057,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin not currently loaded (CONFLICT) */
+      /** @description Plugin not enabled (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7525,7 +7617,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After */
       503: {
         headers: {
           [name: string]: unknown;

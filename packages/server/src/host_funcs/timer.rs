@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use extism::host_fn;
-use sea_orm::sea_query::OnConflict;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, Statement,
+};
 use serde::Deserialize;
 use tracing::error;
 
@@ -79,37 +81,46 @@ pub(crate) async fn schedule(
     let fire_at = chrono::DateTime::from_timestamp_millis(fire_at_ms)
         .ok_or_else(|| extism::Error::msg("fire_at_ms is out of range"))?;
 
-    let model = plugin_timer::ActiveModel {
-        plugin_id: Set(plugin_id.to_string()),
-        key: Set(key.to_string()),
-        fire_at: Set(fire_at),
-        payload: Set(payload.to_string()),
-        claimed_at: Set(None),
-        attempts: Set(0),
-        created_at: Set(chrono::Utc::now()),
-        ..Default::default()
-    };
-
-    plugin_timer::Entity::insert(model)
-        .on_conflict(
-            OnConflict::columns([plugin_timer::Column::PluginId, plugin_timer::Column::Key])
-                // Replace semantics: rescheduling an existing key resets the
-                // delivery state too, so a previously-failed timer does not
-                // inherit its old attempt count.
-                .update_columns([
-                    plugin_timer::Column::FireAt,
-                    plugin_timer::Column::Payload,
-                    plugin_timer::Column::ClaimedAt,
-                    plugin_timer::Column::Attempts,
-                ])
-                .to_owned(),
-        )
-        .exec(db)
+    // Only an enabled plugin may arm a timer. A replica that has not yet
+    // unloaded a plugin another replica just disabled would otherwise re-arm
+    // timers right after the disable deleted them. `FOR SHARE` on the
+    // plugin row serializes this insert against that disable: either the
+    // disable's update waits for this insert to commit (and its delete then
+    // removes the row), or this insert waits for the disable and then sees
+    // the plugin disabled.
+    //
+    // Replace semantics on conflict: rescheduling an existing key resets the
+    // delivery state too, so a previously-failed timer does not inherit its
+    // old attempt count.
+    let inserted = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO plugin_timer (plugin_id, key, fire_at, payload, claimed_at, attempts, created_at)
+               SELECT $1, $2, $3, $4, NULL, 0, NOW()
+                WHERE EXISTS (SELECT 1 FROM plugin WHERE id = $1 AND is_enabled FOR SHARE)
+               ON CONFLICT (plugin_id, key) DO UPDATE
+                 SET fire_at = EXCLUDED.fire_at,
+                     payload = EXCLUDED.payload,
+                     claimed_at = EXCLUDED.claimed_at,
+                     attempts = EXCLUDED.attempts"#,
+            [
+                plugin_id.into(),
+                key.into(),
+                fire_at.into(),
+                payload.into(),
+            ],
+        ))
         .await
         .map_err(|e| {
             error!("DB timer_schedule insert error: {e}");
             extism::Error::msg("Database error")
-        })?;
+        })?
+        .rows_affected();
+    if inserted == 0 {
+        return Err(extism::Error::msg(format!(
+            "plugin {plugin_id} is not enabled, so it cannot schedule timers"
+        )));
+    }
 
     Ok(())
 }
@@ -197,10 +208,30 @@ mod tests {
         let conn = crate::database::init_db(&url)
             .await
             .expect("init schema on test db");
+        // The plugins these tests schedule for, enabled (only an enabled
+        // plugin may arm a timer).
+        conn.execute_unprepared(
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at) VALUES \
+             ('p', TRUE, 0, NOW()), ('greedy', TRUE, 0, NOW()), ('atcap', TRUE, 0, NOW()), \
+             ('off', FALSE, 0, NOW())",
+        )
+        .await
+        .expect("seed plugin rows");
         TestDb {
             _container: container,
             conn,
         }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_plugin_cannot_arm_a_timer() {
+        let db = test_db().await;
+        let err = schedule(&db, "off", "k", future_ms(), "{}")
+            .await
+            .expect_err("a disabled plugin must not schedule");
+        assert!(err.to_string().contains("not enabled"), "{err}");
+        let n = plugin_timer::Entity::find().count(&*db).await.unwrap();
+        assert_eq!(n, 0);
     }
 
     /// Reschedule-by-key must keep working after the server RESTARTS, not

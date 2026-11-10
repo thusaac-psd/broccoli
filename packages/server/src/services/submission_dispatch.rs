@@ -984,6 +984,14 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
                         }
                     }
                 }
+                Err(plugin_core::error::PluginError::ShuttingDown) => {
+                    // Not a judging failure: this server is stopping. Leave the
+                    // submission in flight (no verdict, no hooks, no retry
+                    // spent); shutdown releases its lease and a peer
+                    // re-dispatches it.
+                    warn!(submission_id, judgement_id, "Server shutting down; leaving submission for a peer");
+                    return;
+                }
                 Err(e) => {
                     error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
                     record_dispatch_failure(

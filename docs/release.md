@@ -99,8 +99,8 @@ BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY='...' \
 docker compose -f docker-compose.worker.yaml ps
 ```
 
-Every server and worker compares its clock with Postgres and Redis at boot.
-It logs a warning above 1 s of skew and refuses to start above 5 s, because
+Every server and worker compares its clock with Postgres and Redis at boot. It
+logs a warning above 1 s of skew and refuses to start above 5 s, because
 cross-node timestamps (MQ visibility, heartbeats, leases) break under larger
 skew. Point every node at the same NTP source (for example chrony on the infra
 node, serving the LAN). The bounds are `BROCCOLI__CLOCK__WARN_SKEW_MS` and
