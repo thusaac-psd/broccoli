@@ -116,7 +116,6 @@ dry_run_plan() {
 case "$ROLE" in
   server)
     # Secrets are operator-supplied: the bundle ships .env.*.example only.
-    infra_env="$BUNDLE/compose/.env.infra"
     server_env="$BUNDLE/compose/.env.server"
     # Two settings in .env.server (written by setup.sh, or by hand) shape a
     # multi-server deployment, so a re-run keeps the same shape:
