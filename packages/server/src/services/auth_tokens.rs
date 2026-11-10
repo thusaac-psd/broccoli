@@ -9,7 +9,8 @@
 //! into one it accepts.
 
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
+    Statement, TransactionTrait,
 };
 
 use crate::entity::refresh_token;
@@ -132,8 +133,10 @@ async fn validator_matches(presented: &str, stored: &str) -> Result<bool, AppErr
 /// is a benign race rather than theft: two tabs refreshing with the same
 /// cookie, or a client retrying after the response carrying its new cookie
 /// was lost in a network blip or gateway failover. Such a replay is answered
-/// like a normal rotation (a sibling token), so the client stays logged in.
-/// Past the window, a replay is treated as a stolen refresh chain. The window
+/// like a normal rotation (a sibling token), so the client stays logged in,
+/// but at most once per rotated row and only while its successor is unused;
+/// see [`TokenState::Rotated`]. Past the window, a replay is treated as a
+/// stolen refresh chain. The window
 /// stays far below the clients' 4.5 minute refresh interval, so a token
 /// stolen and replayed later is still detected.
 const REFRESH_REUSE_GRACE_SECS: i32 = 30;
@@ -151,8 +154,9 @@ WITH retired AS (
 purged AS (
     DELETE FROM refresh_tokens WHERE user_id = $3 AND expires_at < now()
 )
-INSERT INTO refresh_tokens (selector, validator, user_id, expires_at, created_at, revoked_at)
-VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL)
+INSERT INTO refresh_tokens
+    (selector, validator, user_id, expires_at, created_at, revoked_at, rotated_from)
+VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL, $1)
 "#;
 
 async fn issue_refresh_token<C: ConnectionTrait>(
@@ -191,16 +195,29 @@ pub async fn mint_refresh_token<C: ConnectionTrait>(
 struct PresentedToken {
     selector: String,
     user_id: i32,
+    rotated_from: Option<String>,
     state: TokenState,
 }
 
 enum TokenState {
     Live,
     Expired,
-    /// Already rotated out; `in_grace` when within [`REFRESH_REUSE_GRACE_SECS`].
-    Rotated {
-        in_grace: bool,
-    },
+    /// Already rotated out.
+    Rotated(Replay),
+}
+
+/// How a replay of a rotated token is answered.
+enum Replay {
+    /// Inside the grace window, with exactly one unused successor (or none
+    /// recorded, for rows rotated before successors were linked): issue one
+    /// sibling.
+    Sibling,
+    /// Inside the grace window, but a sibling was already issued: refuse
+    /// without side effects. The client's other request holds a valid cookie.
+    AlreadyAnswered,
+    /// Past the grace window, or the successor was itself rotated: the chain
+    /// moved on without this token, so treat it as stolen.
+    Reuse,
 }
 
 const FIND_PRESENTED_SQL: &str = r#"
@@ -208,8 +225,12 @@ SELECT selector, validator, user_id,
        expires_at <= now() AS expired,
        revoked_at IS NOT NULL AS rotated,
        revoked_at IS NOT NULL
-           AND now() - revoked_at <= make_interval(secs => $2::int) AS in_grace
-FROM refresh_tokens
+           AND now() - revoked_at <= make_interval(secs => $2::int) AS in_grace,
+       (SELECT count(*) FROM refresh_tokens c WHERE c.rotated_from = r.selector) AS children,
+       (SELECT count(*) FROM refresh_tokens c
+        WHERE c.rotated_from = r.selector AND c.revoked_at IS NULL) AS live_children,
+       rotated_from
+FROM refresh_tokens r
 WHERE selector = $1
 "#;
 
@@ -245,9 +266,16 @@ async fn find_presented<C: ConnectionTrait>(
         return Ok(None);
     }
     let state = if row.try_get("", "rotated")? {
-        TokenState::Rotated {
-            in_grace: row.try_get("", "in_grace")?,
-        }
+        let in_grace: bool = row.try_get("", "in_grace")?;
+        let children: i64 = row.try_get("", "children")?;
+        let live_children: i64 = row.try_get("", "live_children")?;
+        TokenState::Rotated(if !in_grace || live_children < children {
+            Replay::Reuse
+        } else if children <= 1 {
+            Replay::Sibling
+        } else {
+            Replay::AlreadyAnswered
+        })
     } else if row.try_get("", "expired")? {
         TokenState::Expired
     } else {
@@ -256,17 +284,24 @@ async fn find_presented<C: ConnectionTrait>(
     Ok(Some(PresentedToken {
         selector: row.try_get("", "selector")?,
         user_id: row.try_get("", "user_id")?,
+        rotated_from: row.try_get("", "rotated_from")?,
         state,
     }))
 }
 
-/// Delete the refresh-token row a presented token names (logout). Returns
-/// `TokenInvalid` when it names none.
+/// Delete the refresh-token row a presented token names (logout), together
+/// with the row it was rotated from, which would otherwise stay replayable
+/// for the rest of the grace window. Returns `TokenInvalid` when it names
+/// none.
 pub async fn revoke_presented(db: &DatabaseConnection, presented: &str) -> Result<(), AppError> {
     let token = find_presented(db, presented, false)
         .await?
         .ok_or(AppError::TokenInvalid)?;
-    refresh_token::Entity::delete_by_id(token.selector)
+    refresh_token::Entity::delete_many()
+        .filter(
+            refresh_token::Column::Selector
+                .is_in(std::iter::once(token.selector).chain(token.rotated_from)),
+        )
         .exec(db)
         .await?;
     Ok(())
@@ -311,20 +346,23 @@ pub async fn rotate_refresh_token(
         TokenState::Live => {}
         // A benign race; answered with a sibling of the token that won it.
         // The retire step below is a no-op for an already-rotated row.
-        TokenState::Rotated { in_grace: true } => {
+        TokenState::Rotated(Replay::Sibling) => {
             tracing::debug!(
                 user_id = token.user_id,
                 "Refresh token replayed inside the grace window; issuing a sibling"
             );
         }
+        TokenState::Rotated(Replay::AlreadyAnswered) => {
+            return Err(AppError::TokenInvalid);
+        }
         // The validator matched, so this is the token's real holder or a
         // thief: kill the whole family so a stolen chain cannot outlive
         // detection. A mismatched validator never reaches here, so nobody can
         // trip a victim's family kill by guessing a revoked selector.
-        TokenState::Rotated { in_grace: false } => {
+        TokenState::Rotated(Replay::Reuse) => {
             tracing::warn!(
                 user_id = token.user_id,
-                "Refresh token reuse detected past the grace window; revoking all refresh tokens for the user"
+                "Refresh token reuse detected; revoking all refresh tokens for the user"
             );
             refresh_token::Entity::revoke_all_for_user(&txn, token.user_id).await?;
             txn.commit().await?;

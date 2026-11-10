@@ -455,6 +455,7 @@ mod refresh_validator_format {
                 expires_at: sea_orm::Set(now + chrono::Duration::days(1)),
                 created_at: sea_orm::Set(now),
                 revoked_at: sea_orm::Set(None),
+                rotated_from: sea_orm::Set(None),
             },
             &app.db,
         )
@@ -518,6 +519,130 @@ mod refresh_validator_format {
             .await;
         assert_eq!(res.status, 401);
         assert_eq!(res.body["code"], "TOKEN_INVALID");
+    }
+}
+
+mod refresh_grace_cap {
+    use super::*;
+
+    fn cookie_of(resp: &reqwest::Response) -> String {
+        for hv in resp.headers().get_all("set-cookie").iter() {
+            let s = hv.to_str().expect("set-cookie utf-8");
+            if let Some(rest) = s.strip_prefix("broccoli_refresh=") {
+                let val = rest.split(';').next().unwrap_or("").to_string();
+                if !val.is_empty() {
+                    return val;
+                }
+            }
+        }
+        panic!("no broccoli_refresh Set-Cookie on response");
+    }
+
+    struct Raw {
+        client: reqwest::Client,
+        base: String,
+    }
+
+    impl Raw {
+        fn new(app: &TestApp) -> Self {
+            Self {
+                client: reqwest::Client::builder()
+                    .no_proxy()
+                    .cookie_store(false)
+                    .build()
+                    .unwrap(),
+                base: format!("http://{}", app.addr),
+            }
+        }
+
+        async fn login(&self, username: &str) -> String {
+            let res = self
+                .client
+                .post(format!("{}{}", self.base, routes::LOGIN))
+                .json(&json!({"username": username, "password": "securepass"}))
+                .send()
+                .await
+                .unwrap();
+            cookie_of(&res)
+        }
+
+        async fn post(&self, path: &str, cookie: &str) -> reqwest::Response {
+            self.client
+                .post(format!("{}{}", self.base, path))
+                .header("cookie", format!("broccoli_refresh={cookie}"))
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+        }
+    }
+
+    async fn setup(app: &TestApp, username: &str) -> Raw {
+        app.post_without_token(
+            routes::REGISTER,
+            &json!({"username": username, "password": "securepass"}),
+        )
+        .await;
+        Raw::new(app)
+    }
+
+    /// Inside the grace window a rotated token gets one sibling, not one per
+    /// replay: a thief replaying it cannot fork extra live chains.
+    #[tokio::test]
+    async fn only_one_sibling_per_rotated_token() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "gina").await;
+        let a = raw.login("gina").await;
+
+        let first = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(first.status(), 200);
+        let b = cookie_of(&first);
+        let sibling = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(sibling.status(), 200, "one in-grace replay is answered");
+
+        let third = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(third.status(), 401, "a second in-grace replay is refused");
+
+        // A refused extra replay is not treated as theft.
+        assert_eq!(raw.post(routes::REFRESH, &b).await.status(), 200);
+    }
+
+    /// Once the successor has itself been rotated, the chain moved on without
+    /// the old token: a replay is reuse even inside the grace window.
+    #[tokio::test]
+    async fn replay_after_the_successor_was_used_is_reuse() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "hank").await;
+        let a = raw.login("hank").await;
+
+        let b = cookie_of(&raw.post(routes::REFRESH, &a).await);
+        let next = raw.post(routes::REFRESH, &b).await;
+        assert_eq!(next.status(), 200);
+        let c = cookie_of(&next);
+
+        assert_eq!(raw.post(routes::REFRESH, &a).await.status(), 401);
+        assert_eq!(
+            raw.post(routes::REFRESH, &c).await.status(),
+            401,
+            "reuse must revoke the whole family"
+        );
+    }
+
+    /// Logging out also retires the token the presented one replaced, so it
+    /// cannot be replayed during the rest of the grace window.
+    #[tokio::test]
+    async fn logout_retires_the_rotated_predecessor() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "ivy").await;
+        let a = raw.login("ivy").await;
+        let b = cookie_of(&raw.post(routes::REFRESH, &a).await);
+
+        assert_eq!(raw.post(routes::LOGOUT, &b).await.status(), 204);
+        assert_eq!(
+            raw.post(routes::REFRESH, &a).await.status(),
+            401,
+            "the predecessor stayed replayable after logout"
+        );
     }
 }
 

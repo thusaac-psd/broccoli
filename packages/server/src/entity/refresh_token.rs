@@ -21,6 +21,12 @@ pub struct Model {
     #[sea_orm(nullable)]
     pub revoked_at: Option<DateTimeUtc>,
 
+    /// Selector of the row this one replaced, when it was issued by a
+    /// rotation. It caps the reuse grace at one sibling per rotated row and
+    /// lets logout retire the predecessor along with the presented row.
+    #[sea_orm(nullable, indexed)]
+    pub rotated_from: Option<String>,
+
     #[sea_orm(belongs_to, from = "user_id", to = "id")]
     pub user: HasOne<super::user::Entity>,
 }
