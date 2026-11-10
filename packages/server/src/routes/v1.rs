@@ -63,61 +63,48 @@ fn telemetry_routes() -> OpenApiRouter<AppState> {
         .layer(handlers::telemetry::telemetry_body_limit())
 }
 
+/// Apply a per-client-IP POST quota: `burst` requests, then one more per
+/// `period`. Keyed on the request's resolved [`ClientIp`].
+fn with_per_ip_post_limit<S>(
+    router: OpenApiRouter<S>,
+    period: Duration,
+    burst: u32,
+) -> OpenApiRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let mut builder = GovernorConfigBuilder::default();
+    builder
+        .period(period)
+        .burst_size(burst)
+        .methods(vec![Method::POST]);
+    let config = builder
+        .key_extractor(ConfiguredClientIpKeyExtractor)
+        .finish()
+        .expect("valid auth rate-limit quota");
+    router.layer(
+        tower_governor::GovernorLayer::new(Arc::new(config))
+            .error_handler(auth_rate_limit_error_response),
+    )
+}
+
 fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
     let login = OpenApiRouter::new().routes(routes!(handlers::auth::login));
     let login = if rate_limit_auth {
-        let mut builder = GovernorConfigBuilder::default();
-        builder
-            .period(AUTH_RATE_LIMIT_PERIOD)
-            .burst_size(AUTH_RATE_LIMIT_BURST)
-            .methods(vec![Method::POST]);
-        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
-
-        login.layer(
-            tower_governor::GovernorLayer::new(Arc::new(
-                builder.finish().expect("valid auth rate-limit quota"),
-            ))
-            .error_handler(auth_rate_limit_error_response),
-        )
+        with_per_ip_post_limit(login, AUTH_RATE_LIMIT_PERIOD, AUTH_RATE_LIMIT_BURST)
     } else {
         login
     };
-
-    let register = {
-        let mut builder = GovernorConfigBuilder::default();
-        builder
-            .period(REGISTER_RATE_LIMIT_PERIOD)
-            .burst_size(REGISTER_RATE_LIMIT_BURST)
-            .methods(vec![Method::POST]);
-        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
-        OpenApiRouter::new()
-            .routes(routes!(handlers::auth::register))
-            .layer(
-                tower_governor::GovernorLayer::new(Arc::new(
-                    builder.finish().expect("valid register rate-limit quota"),
-                ))
-                .error_handler(auth_rate_limit_error_response),
-            )
-    };
-
-    let device_code = {
-        let mut builder = GovernorConfigBuilder::default();
-        builder
-            .period(DEVICE_CODE_RATE_LIMIT_PERIOD)
-            .burst_size(DEVICE_CODE_RATE_LIMIT_BURST)
-            .methods(vec![Method::POST]);
-        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
-        OpenApiRouter::new()
-            .routes(routes!(handlers::auth::request_device_code))
-            .layer(
-                tower_governor::GovernorLayer::new(Arc::new(
-                    builder
-                        .finish()
-                        .expect("valid device-code rate-limit quota"),
-                ))
-                .error_handler(auth_rate_limit_error_response),
-            )
-    };
+    let register = with_per_ip_post_limit(
+        OpenApiRouter::new().routes(routes!(handlers::auth::register)),
+        REGISTER_RATE_LIMIT_PERIOD,
+        REGISTER_RATE_LIMIT_BURST,
+    );
+    let device_code = with_per_ip_post_limit(
+        OpenApiRouter::new().routes(routes!(handlers::auth::request_device_code)),
+        DEVICE_CODE_RATE_LIMIT_PERIOD,
+        DEVICE_CODE_RATE_LIMIT_BURST,
+    );
 
     // Every auth response is session material (tokens, refresh cookies, the
     // caller's identity): mark the whole group `no-store` so neither browsers,
@@ -555,23 +542,17 @@ mod tests {
     use std::net::SocketAddr;
     use tower::ServiceExt;
 
+    fn limited_login(burst: u32) -> Router {
+        let router =
+            OpenApiRouter::<()>::new().route("/login", post(|| async { StatusCode::UNAUTHORIZED }));
+        let (router, _) =
+            with_per_ip_post_limit(router, AUTH_RATE_LIMIT_PERIOD, burst).split_for_parts();
+        router
+    }
+
     #[tokio::test]
     async fn auth_governor_returns_429_with_retry_after_after_ten_posts() {
-        let mut builder = GovernorConfigBuilder::default();
-        builder
-            .period(AUTH_RATE_LIMIT_PERIOD)
-            .burst_size(AUTH_RATE_LIMIT_BURST)
-            .methods(vec![Method::POST]);
-        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
-
-        let app = Router::new()
-            .route("/login", post(|| async { StatusCode::UNAUTHORIZED }))
-            .layer(
-                tower_governor::GovernorLayer::new(Arc::new(
-                    builder.finish().expect("valid auth rate-limit quota"),
-                ))
-                .error_handler(auth_rate_limit_error_response),
-            );
+        let app = limited_login(AUTH_RATE_LIMIT_BURST);
 
         for _ in 0..10 {
             let mut request = Request::builder()
@@ -603,22 +584,10 @@ mod tests {
 
     #[tokio::test]
     async fn auth_governor_keys_on_the_resolved_client_behind_a_trusted_proxy() {
-        let mut builder = GovernorConfigBuilder::default();
-        builder
-            .period(AUTH_RATE_LIMIT_PERIOD)
-            .burst_size(1)
-            .methods(vec![Method::POST]);
-        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
-        let app = Router::new()
-            .route("/login", post(|| async { StatusCode::UNAUTHORIZED }))
-            .layer(
-                tower_governor::GovernorLayer::new(Arc::new(builder.finish().unwrap()))
-                    .error_handler(auth_rate_limit_error_response),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                crate::client_ip::parse_trusted_proxy_networks(&["10.0.0.0/8".into()]),
-                crate::client_ip::client_ip_source_middleware,
-            ));
+        let app = limited_login(1).layer(axum::middleware::from_fn_with_state(
+            crate::client_ip::parse_trusted_proxy_networks(&["10.0.0.0/8".into()]),
+            crate::client_ip::client_ip_source_middleware,
+        ));
         let send = |xff: &'static str| {
             let mut request = Request::builder()
                 .method(Method::POST)
