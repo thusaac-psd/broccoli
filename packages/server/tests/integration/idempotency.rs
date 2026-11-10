@@ -363,6 +363,61 @@ async fn unknown_key_status_fails_closed() {
     assert_eq!(body["code"], "IDEMPOTENCY_OUTCOME_UNKNOWN");
 }
 
+/// `bulkAddParticipants` returns generated plaintext passwords for the
+/// accounts it creates: it must be `no-store`, never cached, and a replay
+/// must refuse rather than create the accounts again.
+#[tokio::test]
+async fn bulk_participant_credentials_are_not_persisted() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let contest_id = app.create_contest(&token, "C", true, true).await;
+    let send = || {
+        app.client
+            .post(format!(
+                "http://{}{}/bulk",
+                app.addr,
+                routes::contest_participants(contest_id)
+            ))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Idempotency-Key", "idem-bulk-participants")
+            .json(&json!({"create_users": [{"username": "idem_newbie"}]}))
+            .send()
+    };
+
+    let res = send().await.expect("send");
+    assert_eq!(res.status().as_u16(), 200);
+    assert_eq!(
+        res.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    let body: serde_json::Value = res.json().await.expect("json");
+    let password = body["created"][0]["password"]
+        .as_str()
+        .expect("generated password")
+        .to_string();
+
+    let rows = idempotency_key::Entity::find()
+        .all(&app.db)
+        .await
+        .expect("db");
+    assert!(
+        rows.iter().all(|r| r
+            .response_body
+            .as_deref()
+            .is_none_or(|b| !b.contains(&password))),
+        "generated password was persisted"
+    );
+
+    let replay = send().await.expect("send");
+    assert_eq!(replay.status().as_u16(), 409);
+    let replay: serde_json::Value = replay.json().await.expect("json");
+    assert_eq!(replay["code"], "IDEMPOTENCY_RESPONSE_NOT_STORED");
+}
+
 mod response_binding {
     use super::*;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
