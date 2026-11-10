@@ -342,13 +342,16 @@ async fn reconcile_locked(
             enabled: row.is_enabled,
             generation: row.generation,
         };
+        // Record the desired state BEFORE applying it: while an enabled
+        // plugin is still loading here, the visibility kernel must already
+        // treat it as enabled-but-not-loaded (fail closed), not as disabled.
+        state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
         if let Err(error) = apply(state, applied, &row.id, desired, now).await {
             failures.push(PluginActivationFailure {
                 plugin_id: row.id.clone(),
                 error,
             });
         }
-        state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
     }
     Ok(failures)
 }
