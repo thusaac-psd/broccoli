@@ -1,7 +1,7 @@
 export type { ApiClientContextValue } from '@/api/api-client-context';
 export * from '@/api/ApiClientProvider';
 export * from '@/api/errors';
-export type { RefreshedSession } from '@/api/refresh-session';
+export type { RefreshedSession, RefreshOutcome } from '@/api/refresh-session';
 export * from '@/api/types';
 export * from '@/api/use-api-client';
 export * from '@/api/use-api-fetch';

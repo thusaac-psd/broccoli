@@ -37,6 +37,12 @@ export function AuthProvider({
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const bootstrapStartedRef = useRef(false);
+  // Whether the bootstrap refresh has settled (the server answered).
+  const settledRef = useRef(false);
+  // When the next background refresh runs: a full interval after a success,
+  // sooner (with backoff) while the server is unreachable, never once the
+  // session is over. A fresh object re-arms the timer even for the same delay.
+  const [nextRefresh, setNextRefresh] = useState<{ inMs: number } | null>(null);
 
   const apiClient = useApiClient();
   const setApiAccessToken = useSetApiAccessToken();
@@ -52,10 +58,16 @@ export function AuthProvider({
     [setApiAccessToken],
   );
 
+  // Ends the session in this tab and, through the session hint, in every
+  // other tab. Only for an explicit logout or a definitive auth rejection:
+  // anything weaker would sign out tabs whose session is fine.
   const clearSession = useCallback(() => {
     localStorage.setItem(sessionStatusKey, 'false');
     updateAccessToken(null);
     setUser(null);
+    setNextRefresh(null);
+    settledRef.current = true;
+    setIsLoading(false);
     queryClient.clear();
   }, [updateAccessToken, sessionStatusKey, queryClient]);
 
@@ -70,13 +82,21 @@ export function AuthProvider({
   // Shares the API client's refresh, so this background refresh can never race
   // a 401-triggered one for the single-use refresh cookie.
   const refresh = useCallback(async () => {
-    const data = await refreshApiSession();
+    const outcome = await refreshApiSession();
 
-    if (!data) {
+    if (outcome.status === 'unavailable') {
+      // Offline, a gateway 502, a database blip: the session is probably
+      // fine, so keep it (and keep the bootstrap pending) and ask again.
+      setNextRefresh({ inMs: outcome.retryInMs });
+      return;
+    }
+
+    if (outcome.status === 'rejected') {
       clearSession();
       return;
     }
 
+    const data = outcome.session;
     updateAccessToken(data.token);
     setUser({
       id: data.id,
@@ -86,7 +106,22 @@ export function AuthProvider({
       permissions: data.permissions,
     });
     localStorage.setItem(sessionStatusKey, 'true');
-  }, [refreshApiSession, clearSession, updateAccessToken, sessionStatusKey]);
+    setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
+
+    if (!settledRef.current) {
+      settledRef.current = true;
+      setIsLoading(false);
+      // Re-run any queries that fired before the access token was restored
+      // and got a 401 because no Authorization header was attached.
+      queryClient.invalidateQueries();
+    }
+  }, [
+    refreshApiSession,
+    clearSession,
+    updateAccessToken,
+    sessionStatusKey,
+    queryClient,
+  ]);
 
   const login = useCallback(
     async (data: LoginRequest) => {
@@ -107,6 +142,7 @@ export function AuthProvider({
       });
 
       localStorage.setItem(sessionStatusKey, 'true');
+      setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
       queryClient.clear();
     },
     [apiClient, updateAccessToken, sessionStatusKey, queryClient],
@@ -141,12 +177,14 @@ export function AuthProvider({
 
       const sessionHint = localStorage.getItem(sessionStatusKey);
       if (sessionHint === 'true') {
+        // Settles the bootstrap once the server has answered either way;
+        // while it is unreachable the app keeps waiting instead of
+        // concluding the user is signed out.
         await refresh();
-        // Re-run any queries that fired before the access token was restored
-        // and got a 401 because no Authorization header was attached.
-        queryClient.invalidateQueries();
+      } else {
+        settledRef.current = true;
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
 
     initAuth();
@@ -158,18 +196,14 @@ export function AuthProvider({
       );
       window.removeEventListener('storage', handleStorage);
     };
-  }, [clearSession, refresh, sessionStatusKey, queryClient]);
+  }, [clearSession, refresh, sessionStatusKey]);
 
   // Automatic background refresh loop
   useEffect(() => {
-    if (!accessToken) return;
-
-    const timer = setInterval(() => {
-      refresh();
-    }, REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(timer);
-  }, [accessToken, refresh]);
+    if (!nextRefresh) return;
+    const timer = setTimeout(() => void refresh(), nextRefresh.inMs);
+    return () => clearTimeout(timer);
+  }, [nextRefresh, refresh]);
 
   const value = useMemo(
     () => ({

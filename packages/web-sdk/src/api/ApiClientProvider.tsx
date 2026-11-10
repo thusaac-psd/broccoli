@@ -86,23 +86,20 @@ export function ApiClientProvider({
     [refreshUrl],
   );
 
-  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
-    const session = await refreshSession();
-    return session?.token ?? null;
-  }, [refreshSession]);
-
   // Returns the new access token after a successful refresh (also storing it
-  // for subsequent requests), or null after clearing the session because the
-  // refresh token itself was rejected.
+  // for subsequent requests), or null when there is none. Only a definitive
+  // rejection ends the session; when the server is merely unreachable the
+  // caller gets the original 401 and the session survives for a later retry.
   const recoverSession = useCallback(async (): Promise<string | null> => {
-    const token = await refreshAccessToken();
-    if (!token) {
+    const outcome = await refreshSession();
+    if (outcome.status === 'rejected') {
       clearAuth();
       return null;
     }
-    accessTokenRef.current = token;
-    return token;
-  }, [refreshAccessToken, clearAuth]);
+    if (outcome.status === 'unavailable') return null;
+    accessTokenRef.current = outcome.session.token;
+    return outcome.session.token;
+  }, [refreshSession, clearAuth]);
 
   const apiClient = useMemo(() => {
     const client = createClient<paths>({
@@ -135,12 +132,11 @@ export function ApiClientProvider({
           return response;
         }
 
-        // A rejected /auth/refresh means the refresh token itself is dead;
-        // attempting another refresh would loop.
-        if (isRefreshUrl(request.url)) {
-          clearAuth();
-          return response;
-        }
+        // Never answer a refresh's 401 with another refresh (it would loop).
+        // Nor is it proof the session is over: a refresh sent around
+        // `refreshSession` can lose a rotation race, so only that function
+        // decides when a session has ended.
+        if (isRefreshUrl(request.url)) return response;
 
         const token = await recoverSession();
         if (!token) {
@@ -160,7 +156,7 @@ export function ApiClientProvider({
     });
 
     return client;
-  }, [resolvedBaseUrl, clearAuth, recoverSession]);
+  }, [resolvedBaseUrl, recoverSession]);
 
   const apiFetch = useMemo(
     () => async (input: string | URL, init?: RequestInit) => {
@@ -181,10 +177,7 @@ export function ApiClientProvider({
         return response;
       }
 
-      if (isRefreshUrl(url.toString())) {
-        clearAuth();
-        return response;
-      }
+      if (isRefreshUrl(url.toString())) return response;
 
       const token = await recoverSession();
       if (!token) {
@@ -204,7 +197,7 @@ export function ApiClientProvider({
         headers: retryHeaders,
       });
     },
-    [resolvedBaseUrl, clearAuth, recoverSession],
+    [resolvedBaseUrl, recoverSession],
   );
 
   return (

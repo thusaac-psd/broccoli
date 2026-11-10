@@ -1,6 +1,6 @@
 import { createContext } from 'react';
 
-import type { RefreshedSession } from '@/api/refresh-session';
+import type { RefreshOutcome } from '@/api/refresh-session';
 import type { ApiClient } from '@/api/types';
 
 export type ApiFetch = (
@@ -15,11 +15,11 @@ export interface ApiClientContextValue {
   /** Sets the in-memory access token used for requests. */
   setAccessToken: (token: string | null) => void;
   /**
-   * Exchanges the refresh cookie for a new session (null when it is over).
-   * The only way to refresh: concurrent refreshes would rotate the
-   * single-use cookie out from under each other.
+   * Exchanges the refresh cookie for a new session. The only way to refresh:
+   * concurrent refreshes would rotate the single-use cookie out from under
+   * each other. Only a `rejected` outcome means the session is over.
    */
-  refreshSession: () => Promise<RefreshedSession | null>;
+  refreshSession: () => Promise<RefreshOutcome>;
 }
 
 export const ApiClientContext = createContext<ApiClientContextValue | null>(
