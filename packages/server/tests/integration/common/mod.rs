@@ -877,7 +877,6 @@ impl TestApp {
                 evaluate_batches,
                 hook_registry,
             },
-            device_codes: std::sync::Arc::new(dashmap::DashMap::new()),
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
