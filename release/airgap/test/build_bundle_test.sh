@@ -28,9 +28,9 @@ for p in compose/docker-compose.worker.yaml.template compose/.env.worker.example
   [ -e "$b/$p" ] || { echo "FAIL: bundle missing $p"; exit 1; }
 done
 # staged env examples carry LOCAL versioned image tags so target `--pull never` resolves
-grep -qx 'BROCCOLI_SERVER_IMAGE=broccoli-server:testv' "$b/compose/.env.server.example" \
+grep -qx "BROCCOLI_SERVER_IMAGE='broccoli-server:testv'" "$b/compose/.env.server.example" \
   || { echo "FAIL: .env.server.example image tag not rewritten to broccoli-server:testv"; exit 1; }
-grep -qx 'BROCCOLI_WORKER_IMAGE=broccoli-worker:testv' "$b/compose/.env.worker.example" \
+grep -qx "BROCCOLI_WORKER_IMAGE='broccoli-worker:testv'" "$b/compose/.env.worker.example" \
   || { echo "FAIL: .env.worker.example image tag not rewritten to broccoli-worker:testv"; exit 1; }
 # manifest actually verifies
 # shellcheck source=/dev/null
