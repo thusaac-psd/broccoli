@@ -96,6 +96,7 @@ tower-http = { version = "0.6", features = [
   "compression-gzip",
   "cors",
   "fs",
+  "set-header",
   "timeout",
   "trace",
 ] }

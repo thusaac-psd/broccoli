@@ -44,6 +44,7 @@ use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
 use tower::Service;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeader;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::{info, info_span};
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -292,10 +293,27 @@ fn frontend_assets_service(
         .service(ServeDir::new(frontend_dist.as_ref().join("assets")))
 }
 
-fn spa_fallback_service(frontend_dist: impl Into<PathBuf>) -> ServeDir<ServeFile> {
+/// `index.html`, client routes and the other unhashed root files. Served
+/// `no-cache` so a browser revalidates them on every load: a stale
+/// `index.html` would reference hashed chunks a redeploy no longer has.
+///
+/// Hashed `/assets/*` deliberately keep the default (no `immutable`): the web
+/// build's shared-deps plugin rewrites chunk bytes after their filename hash is
+/// fixed (it inlines the import map into the entry chunk), so a name does not
+/// yet pin its content.
+fn spa_fallback_service(
+    frontend_dist: impl Into<PathBuf>,
+) -> SetResponseHeader<ServeDir<ServeFile>, HeaderValue> {
     let frontend_dist = frontend_dist.into();
-    ServeDir::new(&frontend_dist).fallback(ServeFile::new(frontend_dist.join("index.html")))
+    SetResponseHeader::overriding(
+        ServeDir::new(&frontend_dist).fallback(ServeFile::new(frontend_dist.join("index.html"))),
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    )
 }
+
+/// Upper bound on handling one API request.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn build_router(state: AppState) -> axum::Router {
     let trusted_proxies =
@@ -305,13 +323,16 @@ pub fn build_router(state: AppState) -> axum::Router {
     let (router, api) = routes::api_routes(&state.config, ApiDoc::openapi());
     let frontend_dist = state.config.server.frontend_dist.clone();
 
+    // The timeout sits INSIDE the idempotency middleware so a timed-out
+    // handler surfaces as a 408 the middleware settles (as outcome unknown),
+    // rather than cancelling the middleware with its key still pending.
+    let router = router.layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        REQUEST_TIMEOUT,
+    ));
     let router = router.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::idempotency_middleware,
-    ));
-    let router = router.layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        std::time::Duration::from_secs(60),
     ));
 
     #[cfg(feature = "bundled-stress-test")]
@@ -457,6 +478,10 @@ mod tests {
             assert_eq!(
                 response.headers()[axum::http::header::CONTENT_TYPE],
                 "text/html"
+            );
+            assert_eq!(
+                response.headers()[axum::http::header::CACHE_CONTROL],
+                "no-cache"
             );
         }
     }

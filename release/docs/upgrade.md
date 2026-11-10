@@ -27,6 +27,14 @@ curl -fsS http://127.0.0.1:${BROCCOLI_HTTP_BIND##*:}/healthz
 3. If a gateway is present, keep it running while server nodes roll. Restart it
    only after all upstream server health checks pass.
 
+Servers share the `idempotency_key` table. A server only recognises the key
+states its own version writes, and older servers pass unknown states through, so
+a client retry that lands on a not-yet-upgraded server can run a request a newer
+server already recorded (for example, create the same users twice). When a
+release adds idempotency key states, as the release introducing
+`completed_not_stored` and `outcome_unknown` does, upgrade every server node in
+one step outside contest hours instead of one at a time.
+
 The workers-first order preserves the rolling-upgrade path while per-replica
 operation-result queues are introduced. The legacy `operation_results` queue is
 kept for one release for compatibility and is scheduled for removal in the next
@@ -96,9 +104,9 @@ server's result queue.
 ## Contests without a contest type
 
 Every contest now needs a contest type. Contests created by earlier releases
-without one accept no submissions until an admin sets it, where they used to
-be judged by whichever type sorted first. Before a contest, list them on the
-infra node and set a type for each in the contest editor:
+without one accept no submissions until an admin sets it, where they used to be
+judged by whichever type sorted first. Before a contest, list them on the infra
+node and set a type for each in the contest editor:
 
 ```bash
 set -a; . ./.env.infra; set +a
