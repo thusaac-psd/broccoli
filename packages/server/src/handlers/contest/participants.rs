@@ -236,13 +236,7 @@ pub async fn register_for_contest(
     let now = chrono::Utc::now();
     let txn = state.db.begin().await?;
     let contest_model = find_contest_for_update(&txn, contest_id).await?;
-
-    if contest_model.activate_time.is_none_or(|at| at > now)
-        || contest_model.deactivate_time.is_some_and(|dt| dt <= now)
-        || !contest_model.is_public
-    {
-        return Err(AppError::NotFound("Contest not found".into()));
-    }
+    ensure_self_service_contest(&contest_model, now)?;
 
     if now >= contest_model.end_time {
         return Err(AppError::Validation("Contest has ended".into()));
@@ -264,16 +258,34 @@ pub async fn register_for_contest(
         Err(e) => Err(e.into()),
     }
 }
+/// Self-registration and self-unregistration are only offered for active
+/// public contests. Anything else is a 404 for both, so the two endpoints
+/// cannot be told apart for a contest the caller may not see (no existence
+/// oracle), and a caller can never leave a contest it could not rejoin.
+fn ensure_self_service_contest(
+    contest: &crate::entity::contest::Model,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AppError> {
+    if contest.activate_time.is_none_or(|at| at > now)
+        || contest.deactivate_time.is_some_and(|dt| dt <= now)
+        || !contest.is_public
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     delete,
     path = "/{id}/register",
     tag = "Contests",
     operation_id = "unregisterFromContest",
     summary = "Self-unregister from a contest",
-    description = "Removes the authenticated user's registration from a contest. Returns 404 if the caller is not registered.",
+    description = "Removes the authenticated user's registration from an active public contest that has not started yet. Inactive or non-public contests return 404, like self-registration. Blocked once the contest has started, because standings are built from registrations. Returns 404 if the caller is not registered.",
     params(("id" = i32, Path, description = "Contest ID")),
     responses(
         (status = 204, description = "Unregistered from contest"),
+        (status = 400, description = "Contest has already started (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Not registered or contest not found (NOT_FOUND)", body = ErrorBody),
     ),
@@ -285,8 +297,18 @@ pub async fn unregister_from_contest(
     State(state): State<AppState>,
     AppPath(contest_id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {
+    let now = chrono::Utc::now();
     let txn = state.db.begin().await?;
-    find_contest_for_update(&txn, contest_id).await?;
+    let contest_model = find_contest_for_update(&txn, contest_id).await?;
+    ensure_self_service_contest(&contest_model, now)?;
+
+    // Standings are built from `contest_user`, so leaving a contest that has
+    // started would erase the participant's results. Same cut-off as
+    // `delete_user`, which refuses to drop registrations in started contests.
+    if now >= contest_model.start_time {
+        return Err(AppError::Validation("Contest has already started".into()));
+    }
+
     let cu = contest_user::Entity::find_by_id((contest_id, auth_user.user_id))
         .one(&txn)
         .await?

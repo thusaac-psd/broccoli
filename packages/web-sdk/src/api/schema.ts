@@ -990,7 +990,7 @@ export interface paths {
     post: operations['registerForContest'];
     /**
      * Self-unregister from a contest
-     * @description Removes the authenticated user's registration from a contest. Returns 404 if the caller is not registered.
+     * @description Removes the authenticated user's registration from an active public contest that has not started yet. Inactive or non-public contests return 404, like self-registration. Blocked once the contest has started, because standings are built from registrations. Returns 404 if the caller is not registered.
      */
     delete: operations['unregisterFromContest'];
     options?: never;
@@ -7593,6 +7593,15 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description Contest has already started (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {

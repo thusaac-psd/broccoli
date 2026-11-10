@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 
 type ContestEnrollState = {
   is_public: boolean;
+  start_time: string;
   end_time: string;
 };
 
@@ -90,6 +91,11 @@ export function useContestEnroll({
   const hasEnded = contest
     ? Date.now() >= new Date(contest.end_time).getTime()
     : true;
+  // The server refuses to unregister once the contest has started, because
+  // standings are built from registrations.
+  const hasStarted = contest
+    ? Date.now() >= new Date(contest.start_time).getTime()
+    : true;
 
   const canShowEnrollCard =
     !!contest &&
@@ -105,7 +111,7 @@ export function useContestEnroll({
     !canManageContest &&
     contest.is_public &&
     isRegistered &&
-    !hasEnded;
+    !hasStarted;
 
   return {
     canShowEnrollCard,
