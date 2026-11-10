@@ -220,22 +220,9 @@ pub async fn list_contests(
     select = select.order_by_with_nulls(sort_column, sort_order, sea_query::NullOrdering::Last);
 
     let data = select
-        .select_only()
-        .column(contest::Column::Id)
-        .column(contest::Column::Title)
-        .column(contest::Column::ActivateTime)
-        .column(contest::Column::StartTime)
-        .column(contest::Column::EndTime)
-        .column(contest::Column::DeactivateTime)
-        .column(contest::Column::IsPublic)
-        .column(contest::Column::SubmissionsVisible)
-        .column(contest::Column::ShowCompileOutput)
-        .column(contest::Column::ShowParticipantsList)
-        .column(contest::Column::CreatedAt)
-        .column(contest::Column::UpdatedAt)
         .offset(Some(window.offset()))
         .limit(Some(window.limit()))
-        .into_model::<ContestListItem>()
+        .into_partial_model::<ContestListItem>()
         .all(&state.db)
         .await?;
 

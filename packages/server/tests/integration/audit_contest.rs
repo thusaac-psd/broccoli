@@ -80,7 +80,6 @@ async fn hidden_contest_problem_rejects_standalone_submission() {
 /// shows `contest_type: null` (the admin UI renders a red "Not set").
 /// Location: handlers/contest/mod.rs `list_contests`.
 #[tokio::test]
-#[ignore = "BUG: GET /contests always returns contest_type: null (column not selected)"]
 async fn list_contests_includes_contest_type() {
     let app = TestApp::spawn().await;
     let admin = app
