@@ -15,6 +15,7 @@ use crate::entity::{
     test_case_result,
 };
 use crate::hooks;
+use crate::services::judgement_lifecycle::{AllocateJudgeEpoch, allocated_epoch};
 use crate::state::AppState;
 use crate::utils::test_case_body::{
     AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES, select_inline_within_budget,
@@ -191,7 +192,7 @@ pub(crate) async fn ensure_active_judgement_id(
             // Adopt the existing current judgement under THIS dispatch's owner +
             // a fresh lease, exactly as the creation branch below stamps a new
             // one. A judgement created unowned elsewhere - notably the
-            // apply-immediately rejudge path (`open_rejudge_judgement`), which
+            // apply-immediately rejudge (`judgement_lifecycle::open_judgement`), which
             // inserts it with owner_server_id=NULL - would otherwise stay unowned
             // while being judged, and the deferred-judgement steal
             // (`owner_server_id IS NULL AND created_at < threshold`) would reclaim
@@ -296,8 +297,8 @@ async fn mark_submission_dispatch_system_error(
         // write below. A dispatch task captures `submission.judge_epoch` at
         // spawn time and carries it, unre-read, into its detached future; if
         // the age-cap stuck-detector (`max_inflight_secs`) recovers this job's
-        // judgement mid-flight, it re-dispatches the SAME judgement id at
-        // `judge_epoch + 1`. Without the epoch guard, this task's later failure
+        // judgement mid-flight, it re-dispatches the SAME judgement id at a
+        // freshly allocated epoch. Without the epoch guard, this task's later failure
         // would clobber that live, newer-epoch judgement by id alone — flipping
         // a correctly-judged (or still-in-flight) result to a finalized
         // SystemError. The `is_finalized = FALSE` guard mirrors the sibling and
@@ -432,19 +433,50 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
         return Ok(None);
     }
 
-    let new_epoch = expected_epoch.saturating_add(1);
     let new_retry = judgement.retry_count.saturating_add(1);
     let now = Utc::now();
 
-    // Reset the judgement to a fresh, re-dispatchable epoch, owned by this server
-    // with a live lease (so the lease fiber keeps it alive and the steal leaves
-    // it alone while it re-judges). Epoch-gated so a concurrent steal/retry that
-    // already advanced this judgement wins and we abandon (rows == 0).
-    let judgement_rows = submission_judgement::Entity::update_many()
+    // Allocate a fresh epoch on the parent submission and advance it there in
+    // lockstep with the judgement below. Both writes are epoch-gated so a
+    // concurrent steal/retry that already advanced this attempt wins and we
+    // abandon (rows == 0). The submission goes first: its UPDATE allocates
+    // the epoch and holds the row lock while the judgement copies it.
+    let submission_rows = submission::Entity::update_many()
+        .advance_judge_epoch()
         .col_expr(
-            submission_judgement::Column::JudgeEpoch,
-            Expr::value(new_epoch),
+            submission::Column::Status,
+            Expr::value(SubmissionStatus::Pending.to_string()),
         )
+        .clear_judgement_columns()
+        // Never LOWER the submission's dispatch-retry budget: the judgement's
+        // SystemError-retry count is a separate, larger budget and is often
+        // below the submission's dispatch count. Same rule as the deferred
+        // steal in `dispatcher/steal.rs`.
+        .col_expr(
+            submission::Column::RetryCount,
+            Expr::cust_with_values("GREATEST(retry_count, $1)", [new_retry]),
+        )
+        .col_expr(
+            submission::Column::OwnerServerId,
+            Expr::value(Some(server_id.to_string())),
+        )
+        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
+        .col_expr(submission::Column::LeasedAt, Expr::value(Some(now)))
+        .filter(submission::Column::Id.eq(submission_id))
+        .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
+        .exec(&txn)
+        .await?
+        .rows_affected;
+    if submission_rows == 0 {
+        txn.rollback().await.ok();
+        return Ok(None);
+    }
+
+    // Reset the judgement to the fresh, re-dispatchable epoch, owned by this
+    // server with a live lease (so the lease fiber keeps it alive and the
+    // steal leaves it alone while it re-judges).
+    let judgement_rows = submission_judgement::Entity::update_many()
+        .col_expr(submission_judgement::Column::JudgeEpoch, allocated_epoch())
         .col_expr(
             submission_judgement::Column::Status,
             Expr::value(SubmissionStatus::Pending.to_string()),
@@ -480,31 +512,6 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
         .await?
         .rows_affected;
     if judgement_rows == 0 {
-        txn.rollback().await.ok();
-        return Ok(None);
-    }
-
-    // Advance the parent submission in lockstep, epoch-gated for the same reason.
-    let submission_rows = submission::Entity::update_many()
-        .col_expr(submission::Column::JudgeEpoch, Expr::value(new_epoch))
-        .col_expr(
-            submission::Column::Status,
-            Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .clear_judgement_columns()
-        .col_expr(submission::Column::RetryCount, Expr::value(new_retry))
-        .col_expr(
-            submission::Column::OwnerServerId,
-            Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
-        .col_expr(submission::Column::LeasedAt, Expr::value(Some(now)))
-        .filter(submission::Column::Id.eq(submission_id))
-        .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
-        .exec(&txn)
-        .await?
-        .rows_affected;
-    if submission_rows == 0 {
         txn.rollback().await.ok();
         return Ok(None);
     }
@@ -1327,6 +1334,37 @@ mod tests {
         assert!(!j.is_finalized, "judgement un-finalized for re-judge");
         assert_eq!(j.status, SubmissionStatus::Pending);
         assert_eq!(j.verdict, None);
+    }
+
+    /// The requeue never LOWERS the submission's dispatch-retry count: the
+    /// judgement's own SystemError-retry count is a separate budget and is
+    /// usually below the submission's. Copying it over used to hand a
+    /// flapping submission a fresh steal/stuck budget on every SE retry.
+    #[tokio::test]
+    async fn system_error_requeue_never_lowers_submission_retry_count() {
+        let (_pg, db) = start_pg().await;
+        let sub = seed_owned_submission(&db, "srv-A").await;
+        let jid = finalize_judgement(
+            &db,
+            &sub,
+            0,
+            0,
+            SubmissionStatus::Judged,
+            Some(Verdict::SystemError),
+        )
+        .await;
+        submission::Entity::update_many()
+            .col_expr(submission::Column::RetryCount, Expr::value(4))
+            .filter(submission::Column::Id.eq(sub.id))
+            .exec(&db)
+            .await
+            .expect("seed dispatch attempts");
+
+        let resub = requeue_judgement_for_system_error_retry(&db, sub.id, jid, 0, "srv-A", 5)
+            .await
+            .expect("requeue call")
+            .expect("system-error judgement is requeued");
+        assert_eq!(resub.retry_count, 4, "submission retry budget kept");
     }
 
     /// Bounded: once the retry budget is exhausted, the SystemError stands.

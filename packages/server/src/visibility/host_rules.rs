@@ -42,6 +42,11 @@
 //!      `Resource::Attachment` uses this same rule 8+9 pair, keyed on its
 //!      `problem_id` only - see [`decide_standalone_problem_access`] for why
 //!      `attachment_id` never enters the host decision.
+//!      Rule 9 widens READ only: under `Action::Submit` a standalone
+//!      decision stops after rule 8, so a hidden problem is denied there
+//!      even when one of its contests would admit reading it - see
+//!      [`standalone_reachable_via_contest`]. This is a deliberate departure
+//!      from the verbatim port (audit finding B1).
 //!  10. `Resource::Clarification`, ported from `list_clarifications`
 //!      (`handlers/clarification.rs:58-208`) - see [`decide_clarification`]
 //!      for the full mapping. A missing clarification, or one where the
@@ -168,6 +173,11 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 /// not an `Option<i32>`; a miss (key absent) still means "not resolved by
 /// this call", handled by the caller the same way as a submission miss.
 ///
+/// `action` matters only for standalone (`contest_id: None`) problem-keyed
+/// resources: it decides whether rule 9 applies (see
+/// [`standalone_reachable_via_contest`]). Every other rule is the same for
+/// every action.
+///
 /// Called from `VisibilityKernel::decide_batch`
 /// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
 /// deduped, not-yet-memoized resource in a batch before any plugin is
@@ -175,7 +185,7 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     db: &C,
     subject: &Subject,
-    _action: Action,
+    action: Action,
     resources: &[Resource],
     submission_contest_ids: &mut HashMap<i32, Option<i32>>,
     clarification_contest_ids: &mut HashMap<i32, i32>,
@@ -254,7 +264,12 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // `can_access_problem_via_contest`'s first query
     // (`utils/contest.rs:147-153`). Distinct from Query 3 below, which
     // answers "is this exact (contest_id, problem_id) pair a member".
-    let problem_contest_ids: HashMap<i32, Vec<i32>> = if standalone_problem_ids.is_empty() {
+    // Skipped when `action` never reaches rule 9 (`Action::Submit`): nothing
+    // would read the map, and leaving it empty also keeps this batch's
+    // contest/`contest_user` queries from fetching rule 9's candidates.
+    let rule9_may_apply =
+        !standalone_problem_ids.is_empty() && standalone_reachable_via_contest(action);
+    let problem_contest_ids: HashMap<i32, Vec<i32>> = if !rule9_may_apply {
         HashMap::new()
     } else {
         let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -439,6 +454,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
         .map(|r| {
             decide_one(
                 subject,
+                action,
                 now,
                 r,
                 &contests,
@@ -457,6 +473,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
 #[allow(clippy::too_many_arguments)]
 fn decide_one(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     resource: &Resource,
     contests: &HashMap<i32, contest::Model>,
@@ -479,6 +496,7 @@ fn decide_one(
             problem_id,
         } => decide_problem_or_sample(
             subject,
+            action,
             now,
             *contest_id,
             *problem_id,
@@ -493,6 +511,7 @@ fn decide_one(
         }
         Resource::Attachment { problem_id, .. } => decide_standalone_problem_access(
             subject,
+            action,
             now,
             *problem_id,
             problems,
@@ -586,6 +605,7 @@ fn decide_contest(
 #[allow(clippy::too_many_arguments)]
 fn decide_problem_or_sample(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     contest_id: Option<i32>,
     problem_id: i32,
@@ -599,6 +619,7 @@ fn decide_problem_or_sample(
         // Standalone problem/sample access - rules 8-9.
         return decide_standalone_problem_access(
             subject,
+            action,
             now,
             problem_id,
             problems,
@@ -648,8 +669,13 @@ fn decide_problem_or_sample(
 /// strict subset of `started_contest_ids`'s, so filtering once and checking
 /// `is_public` first, then membership, is bit-identical to the source's two
 /// queries for every input.
+///
+/// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
+/// can use it. For `Action::Submit` the decision ends after rule 8.
+#[allow(clippy::too_many_arguments)]
 fn decide_standalone_problem_access(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     problem_id: i32,
     problems: &HashMap<i32, problem::Model>,
@@ -668,6 +694,9 @@ fn decide_standalone_problem_access(
     }
     if problem.is_public {
         return Decision::Allow;
+    }
+    if !standalone_reachable_via_contest(action) {
+        return Decision::Deny;
     }
     // `can_access_problem_via_contest`, inlined below.
     let no_contests: Vec<i32> = Vec::new();
@@ -696,6 +725,36 @@ fn decide_standalone_problem_access(
         return Decision::Allow;
     }
     Decision::Deny
+}
+
+/// Whether rule 9 ("hidden problem reachable via a contest") may admit a
+/// standalone (`contest_id: None`) problem-keyed resource for `action`.
+///
+/// Rule 9 lets a contestant READ a hidden problem's statement, samples and
+/// attachments by id while one of its contests runs. It must not admit
+/// `Action::Submit`. `create_submission` and `run_code` store their rows with
+/// `contest_id = NULL`, so a standalone submit to a contest's hidden problem
+/// skips everything that is keyed on the contest:
+///   - contest-scoped plugin config such as submission-limit and cooldown,
+///     because `resource_enablements(problem_id, None)` ignores it;
+///   - IOI/ICPC feedback masking, which only runs when `contest_id` is set;
+///   - standings, and the contest's own `contest_type`, since the caller may
+///     pick any `contest_type`.
+///
+/// A contestant submits to a hidden contest problem through the
+/// contest-scoped route (`Resource::Problem { contest_id: Some(_) }`, rules
+/// 1-5), and the handler then applies the contest's running-window and
+/// participant checks. Only rule 8 (problem editors, public problems) admits
+/// a standalone submit.
+///
+/// The match is exhaustive on purpose: a new `Action` has to choose here.
+/// `Clarify` and `Download` keep the READ behaviour they always had. Neither
+/// is currently decided on a standalone problem.
+fn standalone_reachable_via_contest(action: Action) -> bool {
+    match action {
+        Action::Submit => false,
+        Action::Read | Action::Clarify | Action::Download => true,
+    }
 }
 
 /// Ported from `require_submission_visible`
@@ -903,6 +962,7 @@ mod tests {
             time_used: None,
             memory_used: None,
             judge_epoch: 0,
+            max_judge_epoch: 0,
             target_worker_id: None,
             owner_server_id: None,
             lease_heartbeat_at: None,
@@ -1820,6 +1880,93 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(decisions, vec![Decision::Deny]);
+    }
+
+    // -- Action::Submit on a standalone problem: rule 8 only, never rule 9
+    // (audit finding B1). Each mock below queues ONLY the problem fetch, so
+    // these also pin that Submit skips rule 9's contest_problem / contest /
+    // contest_user prefetch: an extra query would exhaust the mock and fail
+    // the `unwrap()`. --
+
+    async fn decide_standalone_submit(
+        db: &sea_orm::DatabaseConnection,
+        subject: &Subject,
+    ) -> Vec<Decision> {
+        host_decide(
+            db,
+            subject,
+            Action::Submit,
+            &[Resource::Problem {
+                contest_id: None,
+                problem_id: 1,
+            }],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_denies_even_for_started_contest_participant() {
+        // Under Action::Read, a participant of a started contest that holds
+        // this problem reaches it through rule 9 (see
+        // `rule9_hidden_problem_in_private_started_contest_allows_participant`).
+        // Submit never looks at contests, so no contest data is queued here.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[])).await,
+            vec![Decision::Deny]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_denies_contest_manage_without_problem_edit() {
+        // Rule 9's `contest:manage` bypass is a READ widening too. Staff who
+        // need to submit to a hidden problem use the contest route or hold
+        // `problem:create`/`problem:edit` (rule 8).
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::CONTEST_MANAGE])).await,
+            vec![Decision::Deny]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_public_standalone_problem_allows() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, true)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[])).await,
+            vec![Decision::Allow]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_allows_problem_editor() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
+            vec![Decision::Allow]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_missing_standalone_problem_denies_even_for_editor() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<problem::Model>::new()])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
+            vec![Decision::Deny]
+        );
     }
 
     // -- Resource::Attachment routes through the exact same rules 8-9,

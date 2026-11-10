@@ -176,13 +176,16 @@ pub async fn run_code(
     // `submission::create_submission` - each step runs on the pool directly,
     // matching `run_contest_code` below.
     let problem = find_problem(&state.db, problem_id).await?;
-    // Prevent probing hidden/unreleased problems: a code run must be gated by
-    // the same read-access rule as viewing the problem (contest membership or
-    // problem-edit permission), not merely the `submission:submit` capability.
-    // The kernel OWNS the subject: one kernel per request per subject. This
-    // shares `visibility::host_rules::decide_standalone_problem_access` with
-    // `get_problem`/`create_submission` instead of duplicating the rule via
-    // the now-removed `require_problem_read_access`.
+    // Prevent probing hidden/unreleased problems: a code run is gated on
+    // reachability, not merely the `submission:submit` capability. The kernel
+    // OWNS the subject: one kernel per request per subject. This shares
+    // `create_submission`'s `Action::Submit` decision, which is stricter than
+    // viewing. Only a public problem or a problem editor gets through. A
+    // hidden problem is denied even when one of its contests would let the
+    // caller read it, because this row is stored with `contest_id = NULL` and
+    // would run outside that contest's window and `contest_type`. Contestants
+    // use `run_contest_code` instead. See
+    // `visibility::host_rules::standalone_reachable_via_contest`.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     if kernel
         .decide(

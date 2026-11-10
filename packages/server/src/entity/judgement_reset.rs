@@ -1,9 +1,10 @@
 //! Single source of truth for "clear all judged output before re-dispatch".
 //!
-//! Every re-dispatch path - work-stealing (`dispatcher/steal.rs`), stuck-recovery
-//! (`dlq/stuck/recovery.rs`), DLQ retry (`handlers/dlq.rs`), the submission-dispatch
-//! service (`services/submission_dispatch.rs`), and admin apply-immediately rejudge
-//! (`handlers/submission/rejudge.rs`) - must NULL the same set of judged-output
+//! Every re-dispatch path - opening a new judgement for a rejudge, DLQ retry,
+//! stuck retry or lease steal (`services/judgement_lifecycle.rs`), the in-place
+//! steal and stuck recovery of a judgement (`dispatcher/steal.rs`,
+//! `dlq/stuck/recovery.rs`) and the SystemError retry
+//! (`services/submission_dispatch.rs`) - must NULL the same set of judged-output
 //! columns when a submission, code run, or deferred judgement is re-queued for
 //! judging; a column present in one list but not the other leaks stale
 //! results into the re-judged row. The lists were previously hand-maintained
@@ -25,15 +26,6 @@ pub trait ClearJudgementFields {
     fn clear_judgement_fields(&mut self);
 }
 
-/// `ActiveModel` twin of [`ClearJudgementColumns`] for single-row `.update()`
-/// re-dispatch paths (admin apply-immediately rejudge). Sets each judged-output
-/// column to `Set(None)` so the reset is actually persisted: a Model converted
-/// via `.into()` yields `Unchanged` values that `.update()` would skip, so only
-/// an explicit `Set(None)` NULLs the column.
-pub trait ClearJudgementActiveModel {
-    fn clear_judgement_columns(&mut self);
-}
-
 macro_rules! impl_judgement_reset {
     ($entity:ident, $ts_col:ident, $ts_field:ident) => {
         impl ClearJudgementColumns for sea_orm::UpdateMany<super::$entity::Entity> {
@@ -50,20 +42,6 @@ macro_rules! impl_judgement_reset {
                         Column::$ts_col,
                         Expr::value(None::<chrono::DateTime<chrono::Utc>>).into(),
                     )
-            }
-        }
-
-        impl ClearJudgementActiveModel for super::$entity::ActiveModel {
-            fn clear_judgement_columns(&mut self) {
-                use sea_orm::ActiveValue::Set;
-                self.verdict = Set(None);
-                self.compile_output = Set(None);
-                self.error_code = Set(None);
-                self.error_message = Set(None);
-                self.score = Set(None);
-                self.time_used = Set(None);
-                self.memory_used = Set(None);
-                self.$ts_field = Set(None);
             }
         }
 
