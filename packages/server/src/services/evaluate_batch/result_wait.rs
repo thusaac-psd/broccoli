@@ -14,17 +14,19 @@ pub fn next_evaluate_result(
             .ok_or_else(|| anyhow!("Batch not found: {}", batch_id))?;
         (batch.result_rx.clone(), batch.pending_count.clone())
     };
+    let ctx = EvaluateVerdictCtx {
+        plugin_id,
+        batches,
+        metrics,
+        evaluate_ops_registry,
+        batch_id,
+        result_rx: &result_rx,
+        pending_count: &pending_count,
+    };
 
     let wait_start = Instant::now();
     if timeout.is_zero() {
-        return handle_evaluate_receive(
-            plugin_id,
-            batches,
-            metrics,
-            evaluate_ops_registry,
-            batch_id,
-            &result_rx,
-            &pending_count,
+        return ctx.handle_receive(
             wait_start,
             result_rx.try_recv().map_err(|err| match err {
                 flume::TryRecvError::Empty => flume::RecvTimeoutError::Timeout,
@@ -36,17 +38,7 @@ pub fn next_evaluate_result(
     loop {
         match result_rx.recv_timeout(next_evaluate_wait_tick(timeout)) {
             Ok(verdict) => {
-                return handle_evaluate_verdict(
-                    plugin_id,
-                    batches,
-                    metrics,
-                    evaluate_ops_registry,
-                    batch_id,
-                    &result_rx,
-                    &pending_count,
-                    wait_start,
-                    verdict,
-                );
+                return ctx.handle_verdict(wait_start, verdict);
             }
             Err(flume::RecvTimeoutError::Timeout) => {
                 if pending_count.load(Ordering::SeqCst) > 0
@@ -66,16 +58,7 @@ pub fn next_evaluate_result(
                 // pending_count, so this give-up branch can observe the timeout
                 // with a completed verdict already buffered. Deliver it instead
                 // of dropping it into a spurious timeout.
-                if let Some(delivered) = drain_evaluate_verdict_before_giveup(
-                    plugin_id,
-                    batches,
-                    metrics,
-                    evaluate_ops_registry,
-                    batch_id,
-                    &result_rx,
-                    &pending_count,
-                    wait_start,
-                ) {
+                if let Some(delivered) = ctx.drain_before_giveup(wait_start) {
                     return delivered;
                 }
 
@@ -129,17 +112,19 @@ pub async fn next_evaluate_result_async(
             .ok_or_else(|| anyhow!("Batch not found: {}", batch_id))?;
         (batch.result_rx.clone(), batch.pending_count.clone())
     };
+    let ctx = EvaluateVerdictCtx {
+        plugin_id,
+        batches,
+        metrics,
+        evaluate_ops_registry,
+        batch_id,
+        result_rx: &result_rx,
+        pending_count: &pending_count,
+    };
 
     let wait_start = Instant::now();
     if timeout.is_zero() {
-        return handle_evaluate_receive(
-            plugin_id,
-            batches,
-            metrics,
-            evaluate_ops_registry,
-            batch_id,
-            &result_rx,
-            &pending_count,
+        return ctx.handle_receive(
             wait_start,
             result_rx.try_recv().map_err(|err| match err {
                 flume::TryRecvError::Empty => flume::RecvTimeoutError::Timeout,
@@ -151,17 +136,7 @@ pub async fn next_evaluate_result_async(
     loop {
         match tokio::time::timeout(next_evaluate_wait_tick(timeout), result_rx.recv_async()).await {
             Ok(Ok(verdict)) => {
-                return handle_evaluate_verdict(
-                    plugin_id,
-                    batches,
-                    metrics,
-                    evaluate_ops_registry,
-                    batch_id,
-                    &result_rx,
-                    &pending_count,
-                    wait_start,
-                    verdict,
-                );
+                return ctx.handle_verdict(wait_start, verdict);
             }
             Ok(Err(_recv_error)) => {
                 record_evaluate_wait_metric(plugin_id, metrics, wait_start, "disconnected");
@@ -182,16 +157,7 @@ pub async fn next_evaluate_result_async(
                 }
                 // Same race as the sync path: a verdict may have landed in the
                 // channel just as this branch decided to give up. Deliver it.
-                if let Some(delivered) = drain_evaluate_verdict_before_giveup(
-                    plugin_id,
-                    batches,
-                    metrics,
-                    evaluate_ops_registry,
-                    batch_id,
-                    &result_rx,
-                    &pending_count,
-                    wait_start,
-                ) {
+                if let Some(delivered) = ctx.drain_before_giveup(wait_start) {
                     return delivered;
                 }
                 record_evaluate_wait_metric(plugin_id, metrics, wait_start, "timeout");
@@ -224,59 +190,44 @@ fn next_evaluate_wait_tick(timeout: Duration) -> Duration {
     timeout.min(EVALUATE_RESULT_WAIT_TICK)
 }
 
-// Same evaluate-batch verdict context tuple as
-// mod::handle_evaluate_verdict (dedup backlog: shared `EvaluateVerdictCtx`).
-#[allow(clippy::too_many_arguments)]
-fn handle_evaluate_receive(
-    plugin_id: &str,
-    batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry,
-    batch_id: &str,
-    result_rx: &flume::Receiver<TestCaseVerdict>,
-    pending_count: &Arc<AtomicUsize>,
-    wait_start: Instant,
-    result: Result<TestCaseVerdict, flume::RecvTimeoutError>,
-) -> anyhow::Result<Option<TestCaseVerdict>> {
-    match result {
-        Ok(verdict) => handle_evaluate_verdict(
-            plugin_id,
-            batches,
-            metrics,
-            evaluate_ops_registry,
-            batch_id,
-            result_rx,
-            pending_count,
-            wait_start,
-            verdict,
-        ),
-        Err(flume::RecvTimeoutError::Timeout) => {
-            if let Some(metrics) = metrics {
-                let attrs = [
-                    KeyValue::new("batch.kind", "evaluate"),
-                    KeyValue::new("plugin.id", plugin_id.to_string()),
-                    KeyValue::new("outcome", "timeout"),
-                ];
-                metrics
-                    .batch_wait_duration
-                    .record(wait_start.elapsed().as_secs_f64(), &attrs);
-                metrics.batch_results_total.add(1, &attrs);
+impl EvaluateVerdictCtx<'_> {
+    fn handle_receive(
+        &self,
+        wait_start: Instant,
+        result: Result<TestCaseVerdict, flume::RecvTimeoutError>,
+    ) -> anyhow::Result<Option<TestCaseVerdict>> {
+        let plugin_id = self.plugin_id;
+        let metrics = self.metrics;
+        match result {
+            Ok(verdict) => self.handle_verdict(wait_start, verdict),
+            Err(flume::RecvTimeoutError::Timeout) => {
+                if let Some(metrics) = metrics {
+                    let attrs = [
+                        KeyValue::new("batch.kind", "evaluate"),
+                        KeyValue::new("plugin.id", plugin_id.to_string()),
+                        KeyValue::new("outcome", "timeout"),
+                    ];
+                    metrics
+                        .batch_wait_duration
+                        .record(wait_start.elapsed().as_secs_f64(), &attrs);
+                    metrics.batch_results_total.add(1, &attrs);
+                }
+                Ok(None)
             }
-            Ok(None)
-        }
-        Err(flume::RecvTimeoutError::Disconnected) => {
-            if let Some(metrics) = metrics {
-                let attrs = [
-                    KeyValue::new("batch.kind", "evaluate"),
-                    KeyValue::new("plugin.id", plugin_id.to_string()),
-                    KeyValue::new("outcome", "disconnected"),
-                ];
-                metrics
-                    .batch_wait_duration
-                    .record(wait_start.elapsed().as_secs_f64(), &attrs);
-                metrics.batch_results_total.add(1, &attrs);
+            Err(flume::RecvTimeoutError::Disconnected) => {
+                if let Some(metrics) = metrics {
+                    let attrs = [
+                        KeyValue::new("batch.kind", "evaluate"),
+                        KeyValue::new("plugin.id", plugin_id.to_string()),
+                        KeyValue::new("outcome", "disconnected"),
+                    ];
+                    metrics
+                        .batch_wait_duration
+                        .record(wait_start.elapsed().as_secs_f64(), &attrs);
+                    metrics.batch_results_total.add(1, &attrs);
+                }
+                Err(anyhow!("Evaluate batch channel disconnected"))
             }
-            Err(anyhow!("Evaluate batch channel disconnected"))
         }
     }
 }

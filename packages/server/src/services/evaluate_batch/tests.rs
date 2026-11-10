@@ -33,16 +33,16 @@ fn giveup_drains_verdict_buffered_in_the_send_before_decrement_race() {
     tx.send(system_error_verdict(7, "buffered in race window"))
         .unwrap();
 
-    let delivered = drain_evaluate_verdict_before_giveup(
-        "plugin",
-        &batches,
-        None,
-        &registry,
+    let delivered = EvaluateVerdictCtx {
+        plugin_id: "plugin",
+        batches: &batches,
+        metrics: None,
+        evaluate_ops_registry: &registry,
         batch_id,
-        &rx,
-        &pending_count,
-        Instant::now(),
-    );
+        result_rx: &rx,
+        pending_count: &pending_count,
+    }
+    .drain_before_giveup(Instant::now());
     let verdict = delivered
         .expect("a buffered verdict must be drained, not dropped")
         .expect("drain runs the normal delivery path")
@@ -69,16 +69,16 @@ fn giveup_drain_is_none_when_channel_genuinely_empty() {
     );
 
     assert!(
-        drain_evaluate_verdict_before_giveup(
-            "plugin",
-            &batches,
-            None,
-            &registry,
+        EvaluateVerdictCtx {
+            plugin_id: "plugin",
+            batches: &batches,
+            metrics: None,
+            evaluate_ops_registry: &registry,
             batch_id,
-            &rx,
-            &pending_count,
-            Instant::now(),
-        )
+            result_rx: &rx,
+            pending_count: &pending_count,
+        }
+        .drain_before_giveup(Instant::now())
         .is_none()
     );
 }

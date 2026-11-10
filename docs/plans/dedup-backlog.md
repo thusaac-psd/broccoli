@@ -41,6 +41,10 @@ Done already (for reference on the pattern):
   all host fns, raw `Function::new` callbacks and `host_fn!` bodies alike;
   contexts live behind `host_data`'s `Arc`, so the prologue is a refcount bump
   and no host fn holds the shared `UserData` mutex across its blocking call.
+- `evaluate_batch::EvaluateVerdictCtx` - the seven values the evaluate
+  result-wait helpers shared (plugin id, batches, metrics, ops registry, batch
+  id, verdict channel, pending count) are one borrowed context; the helpers are
+  its methods, and their three `#[allow(clippy::too_many_arguments)]` are gone.
 
 ## Open items
 
@@ -71,13 +75,3 @@ Done already (for reference on the pattern):
    priority). `packages/cli-core/src/client.rs` (sync ureq) vs
    `packages/stress-test/src/client.rs` (async reqwest) both maintain login +
    token storage + retry-on-401 against the same server API.
-
-5. **`EvaluateVerdictCtx` param tuple** (small, mechanical). Three
-   `services/evaluate_batch` helpers — `mod::handle_evaluate_verdict`,
-   `mod::drain_evaluate_verdict_before_giveup`, and
-   `result_wait::handle_evaluate_receive` — each take the same seven values
-   (plugin id, `&EvaluateBatches`, metrics, `&EvaluateBatchOpsRegistry`, batch
-   id, verdict `result_rx`, pending-count atomic). Each carries a justified
-   `#[allow(clippy::too_many_arguments)]`; bundling the tuple into one borrowed
-   context struct drops all three allows and the arg churn. Narrower than item 4
-   (that unifies the whole wait-loop skeleton; this is just the shared context).
