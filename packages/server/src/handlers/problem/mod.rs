@@ -180,21 +180,9 @@ pub async fn list_problems(
     select = select.order_by(sort_column, sort_order);
 
     let data = select
-        .select_only()
-        .column(problem::Column::Id)
-        .column(problem::Column::Title)
-        .column(problem::Column::TimeLimit)
-        .column(problem::Column::MemoryLimit)
-        .column(problem::Column::ProblemType)
-        .column(problem::Column::CheckerFormat)
-        .column(problem::Column::DefaultContestType)
-        .column(problem::Column::ShowTestDetails)
-        .column(problem::Column::IsPublic)
-        .column(problem::Column::CreatedAt)
-        .column(problem::Column::UpdatedAt)
         .offset(Some(window.offset()))
         .limit(Some(window.limit()))
-        .into_model::<ProblemListItem>()
+        .into_partial_model::<ProblemListItem>()
         .all(&state.db)
         .await?;
 

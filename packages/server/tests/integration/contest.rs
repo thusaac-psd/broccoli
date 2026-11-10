@@ -2785,3 +2785,28 @@ mod contest_type_required {
         assert_eq!(submit.status, 201, "{}", submit.text);
     }
 }
+
+mod contest_list_projection {
+    use super::*;
+
+    /// Each row of `GET /contests` carries the contest's `contest_type`, matching
+    /// the detail view, so the admin list never shows a contest without a type.
+    #[tokio::test]
+    async fn list_contests_includes_contest_type() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("ac_admin", "password123", "admin")
+            .await;
+        let cid = app.create_contest(&admin, "C", true, true).await;
+
+        let one = app.get_with_token(&routes::contest(cid), &admin).await;
+        assert_eq!(one.body["contest_type"], "standard", "control: detail view");
+
+        let list = app.get_with_token(routes::CONTESTS, &admin).await;
+        let row = list.body["data"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["id"] == cid))
+            .expect("contest listed");
+        assert_eq!(row["contest_type"], "standard", "list row: {row}");
+    }
+}

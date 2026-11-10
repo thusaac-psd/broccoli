@@ -3,7 +3,7 @@ use std::str::FromStr;
 use axum::body::Bytes;
 use axum_typed_multipart::{TryFromField, TryFromMultipart};
 use chrono::{DateTime, Utc};
-use sea_orm::FromQueryResult;
+use sea_orm::{DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -114,7 +114,9 @@ pub struct SampleTestCaseMeta {
     pub description: Option<String>,
 }
 
-#[derive(Serialize, FromQueryResult, utoipa::ToSchema)]
+/// A `problem` projection; see `ContestListItem` for why it is a partial model.
+#[derive(Serialize, DerivePartialModel, utoipa::ToSchema)]
+#[sea_orm(entity = "crate::entity::problem::Entity")]
 pub struct ProblemListItem {
     #[schema(example = 1)]
     pub id: i32,
