@@ -32,6 +32,15 @@ pub const HEARTBEAT_TTL: Duration = Duration::from_secs(15);
 /// How often a live node renews its heartbeat key.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Consecutive [`RenewOutcome::Lost`] renewals (about 15 s) after which the
+/// node stops: a live twin holds its ID. This also closes the fail-open boot
+/// path (booting unclaimed when Redis was unreachable), since such a twin loses
+/// its first renewals.
+const LOST_RENEWALS_BEFORE_EXIT: u32 = 3;
+/// Exit status after giving up a lost claim, so a supervisor restarts the node
+/// (whose boot claim then refuses to start while the twin is alive).
+const LOST_CLAIM_EXIT_CODE: i32 = 75;
+
 /// The JSON field holding the per-process token that owns a claim.
 const INSTANCE_FIELD: &str = "instance";
 
@@ -402,29 +411,65 @@ impl NodeClaim {
     where
         F: Fn() -> serde_json::Value + Send + 'static,
     {
+        self.spawn_heartbeat_with(interval, payload, || {
+            // No graceful drain: every moment spent here is spent as a twin.
+            // Work in flight is redelivered by the queue.
+            std::process::exit(LOST_CLAIM_EXIT_CODE)
+        })
+    }
+
+    fn spawn_heartbeat_with<F, L>(self, interval: Duration, payload: F, on_lost: L) -> NodeHeartbeat
+    where
+        F: Fn() -> serde_json::Value + Send + 'static,
+        L: FnOnce() + Send + 'static,
+    {
+        let mut on_lost = Some(on_lost);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {
             let role = self.role.as_str();
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut lost_in_a_row = 0u32;
             loop {
                 tokio::select! {
-                    _ = ticker.tick() => match self.renew(payload()).await {
-                        Ok(RenewOutcome::Renewed) => {}
-                        Ok(RenewOutcome::Reacquired) => warn!(
-                            role,
-                            node_id = %self.id,
-                            "Heartbeat key had expired; claimed the node ID again"
-                        ),
-                        Ok(RenewOutcome::Lost) => error!(
-                            role,
-                            node_id = %self.id,
-                            key = %self.key,
-                            "Another process now holds this node ID; two nodes are running with the same ID. \
-                             Stop one of them and give it a unique ID"
-                        ),
-                        Err(e) => warn!(role, node_id = %self.id, error = %e, "Heartbeat write failed"),
-                    },
+                    _ = ticker.tick() => {
+                        let outcome = self.renew(payload()).await;
+                        match &outcome {
+                            Ok(RenewOutcome::Renewed) => {}
+                            Ok(RenewOutcome::Reacquired) => warn!(
+                                role,
+                                node_id = %self.id,
+                                "Heartbeat key had expired; claimed the node ID again"
+                            ),
+                            Ok(RenewOutcome::Lost) => error!(
+                                role,
+                                node_id = %self.id,
+                                key = %self.key,
+                                "Another process now holds this node ID; two nodes are running with the same ID. \
+                                 Stop one of them and give it a unique ID"
+                            ),
+                            Err(e) => warn!(role, node_id = %self.id, error = %e, "Heartbeat write failed"),
+                        }
+                        // A Redis error says nothing about ownership, so it
+                        // neither counts towards nor resets the streak.
+                        match outcome {
+                            Ok(RenewOutcome::Lost) => lost_in_a_row += 1,
+                            Ok(_) => lost_in_a_row = 0,
+                            Err(_) => {}
+                        }
+                        if lost_in_a_row >= LOST_RENEWALS_BEFORE_EXIT
+                            && let Some(on_lost) = on_lost.take()
+                        {
+                            error!(
+                                role,
+                                node_id = %self.id,
+                                "Node ID held by another live process for {lost_in_a_row} renewals in a row; \
+                                 stopping instead of running as its twin"
+                            );
+                            on_lost();
+                            return;
+                        }
+                    }
                     _ = &mut cancel_rx => {
                         match self.release().await {
                             Ok(()) => info!(role, node_id = %self.id, "Released node ID on shutdown"),
@@ -725,6 +770,52 @@ mod tests {
         assert_eq!(
             successor.renew(payload).await.unwrap(),
             RenewOutcome::Reacquired
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_whose_id_is_held_by_a_live_twin_stops() {
+        let (client, _c) = redis().await;
+        let ttl = Duration::from_secs(5);
+        let tick = Duration::from_millis(100);
+        let payload = serde_json::json!({});
+        let owner = NodeClaim::claim_with_timing(
+            client.clone(),
+            NodeRole::Worker,
+            "w1",
+            payload.clone(),
+            ttl,
+            tick,
+        )
+        .await
+        .unwrap();
+        // A twin that booted unclaimed (e.g. Redis timed out at boot) and so
+        // never held the key.
+        let twin = NodeClaim {
+            client: client.clone(),
+            role: NodeRole::Worker,
+            id: owner.id.clone(),
+            key: owner.key.clone(),
+            instance: "twin".into(),
+            ttl,
+            conn: Mutex::new(None),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut _hb = twin.spawn_heartbeat_with(
+            Duration::from_millis(100),
+            || serde_json::json!({}),
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .expect("a node that keeps losing its claim must stop")
+            .unwrap();
+        assert_eq!(
+            owner.renew(payload).await.unwrap(),
+            RenewOutcome::Renewed,
+            "the owner keeps its ID"
         );
     }
 }
