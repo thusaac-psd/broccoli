@@ -23,7 +23,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::{
     BulkCreateUsersRequest, CreateUserRequest, CreatedUserResponse, normalize_display_name,
-    validate_create_users,
+    normalize_username, validate_create_users, validate_password,
 };
 use crate::models::user::{RoleAssignmentRequest, UpdateUserRequest, UserResponse};
 use crate::services::privileges::{
@@ -115,6 +115,7 @@ pub async fn get_user(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "User not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "Username taken (USERNAME_TAKEN)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -126,11 +127,19 @@ pub async fn update_user(
 ) -> Result<Json<UserResponse>, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
 
+    let username = payload
+        .username
+        .as_deref()
+        .map(normalize_username)
+        .transpose()?;
     let display_name = payload
         .display_name
         .as_deref()
         .map(normalize_display_name)
         .transpose()?;
+    if let Some(password) = payload.password.as_deref() {
+        validate_password(password)?;
+    }
 
     // Hash before the transaction, so the row lock is never held across it.
     let password_hash = match payload.password {
@@ -154,7 +163,7 @@ pub async fn update_user(
     require_within_ceiling(&txn, &auth_user, CeilingTarget::User(id)).await?;
 
     let mut active: user::ActiveModel = user_model.into();
-    if let Some(username) = payload.username {
+    if let Some(username) = username {
         active.username = Set(username);
     }
     if let Some(display_name) = display_name {
@@ -165,7 +174,10 @@ pub async fn update_user(
         refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
         user::Entity::touch_credentials_changed(&txn, id).await?;
     }
-    let updated_user = active.update(&txn).await?;
+    let updated_user = active
+        .update(&txn)
+        .await
+        .map_err(crate::services::user_accounts::username_conflict)?;
 
     txn.commit().await?;
 
