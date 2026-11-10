@@ -2863,6 +2863,34 @@ mod rejudge_lifecycle {
             .await;
         assert_eq!(discard.status, 204, "discard: {}", discard.text);
     }
+
+    /// A rejudge starts a fresh judging attempt with `retry_count` reset to 0, so lease
+    /// steal and stuck retries get their full budget instead of inheriting the previous
+    /// attempt's count.
+    #[tokio::test]
+    async fn rejudge_resets_retry_budget() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 5).await;
+
+        let res = app
+            .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+            .await;
+        assert!(res.status < 300, "rejudge: {}", res.text);
+
+        let sub = submission::Entity::find_by_id(sid)
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("submission");
+        assert_eq!(
+            sub.retry_count, 0,
+            "fresh judging attempt inherited the previous attempt's retry budget"
+        );
+    }
 }
 
 mod bulk_rejudge_limits {

@@ -85,8 +85,9 @@ const IN_FLIGHT: [SubmissionStatus; 3] = [
 
 /// Why [`open_judgement`] opens a new judgement row.
 pub(crate) enum OpenJudgement {
-    /// Admin rejudge or DLQ retry that becomes current at once. The
-    /// submission goes back to `Queued`; the claim fiber dispatches it.
+    /// Admin rejudge or DLQ retry that becomes current at once: a new judging
+    /// attempt. The submission goes back to `Queued` with a fresh retry
+    /// budget (`retry_count = 0`); the claim fiber dispatches it.
     Rejudge {
         triggered_by_user_id: i32,
         /// `Some` overrides the submission's worker pin (`Some(None)`
@@ -94,16 +95,18 @@ pub(crate) enum OpenJudgement {
         target_worker_id: Option<Option<String>>,
     },
     /// Admin rejudge that runs beside the current judgement until an admin
-    /// applies it. The submission keeps its status, verdict and epoch; the
-    /// new judgement starts `Queued` for the claim fiber's judgement scan.
+    /// applies it. The submission keeps its status, verdict, epoch and retry
+    /// count; the new judgement starts `Queued`, with its own fresh retry
+    /// budget, for the claim fiber's judgement scan.
     DeferredRejudge {
         triggered_by_user_id: i32,
         /// Pin for the new judgement only; `None` inherits the submission's.
         target_worker_id: Option<Option<String>>,
     },
     /// Re-dispatch of the in-flight current judgement after its owner was
-    /// lost, by this server. Applies only while the submission is still in
-    /// flight at `expected_epoch`.
+    /// lost, by this server: the same judging attempt, so it spends one unit
+    /// of the submission's retry budget. Applies only while the submission is
+    /// still in flight at `expected_epoch`.
     Redispatch {
         expected_epoch: i32,
         owner_server_id: String,
@@ -198,6 +201,7 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
                     submission::Column::Status,
                     Expr::value(SubmissionStatus::Queued.to_string()),
                 )
+                .col_expr(submission::Column::RetryCount, Expr::value(0))
                 .clear_judgement_columns();
             match target_worker_id {
                 Some(target) => update.col_expr(
