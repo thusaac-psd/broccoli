@@ -3080,6 +3080,9 @@ export interface components {
        *     does not change `status` or the HTTP code, so one plugin that fails
        *     everywhere cannot take the whole fleet out of rotation; a load
        *     balancer that should drain such a replica can match on this field.
+       *     Which plugins and why is in the authenticated admin plugin API
+       *     (`fleet`), not here: this endpoint is public, and load errors carry
+       *     file paths and database messages.
        * @example ok
        */
       plugins: string;
@@ -3318,7 +3321,9 @@ export interface components {
       replicas: components['schemas']['PluginReplicaResponse'][];
       /**
        * Format: int32
-       * @description Live replicas where the plugin failed or is not installed.
+       * @description Live replicas where the plugin failed, is not installed, is still on a
+       *     previous version because the latest one failed to load, or runs files
+       *     that differ from the published version.
        */
       replicas_failed: number;
       /**
@@ -7585,7 +7590,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After */
       503: {
         headers: {
           [name: string]: unknown;

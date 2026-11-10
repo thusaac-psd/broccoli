@@ -633,3 +633,47 @@ async fn a_missing_visibility_plugin_fails_closed_only_for_its_contest_types() {
     let res = b.get_with_token(&routes::contest(other), &outsider).await;
     assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
 }
+
+/// A contest submission served by a replica with no handler for the contest's
+/// type is rejected with a retryable 503, never inserted without the
+/// plugin's admission check (the handler owns admission).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contest_submission_without_a_local_handler_is_a_retryable_503() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let a = TestApp::spawn().await;
+    let token = admin(&a).await;
+    let problem_id = a.create_problem(&token, "No handler here").await;
+    let contest_id = a.create_contest(&token, "Unhandled", true, true).await;
+    a.add_problem_to_contest(contest_id, problem_id, &token)
+        .await;
+    a.db.execute_raw(Statement::from_string(
+        DbBackend::Postgres,
+        format!("UPDATE contest SET contest_type = 'not-on-this-replica' WHERE id = {contest_id}"),
+    ))
+    .await
+    .unwrap();
+
+    let res = a
+        .post_with_token(
+            &routes::contest_problem_submissions(contest_id, problem_id),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": "int main() {}"}],
+                "language": "cpp",
+            }),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "CONTEST_TYPE_UNAVAILABLE", "{}", res.text);
+    assert!(res.headers.contains_key("retry-after"));
+    use sea_orm::{EntityTrait, PaginatorTrait};
+    assert_eq!(
+        server::entity::submission::Entity::find()
+            .count(&a.db)
+            .await
+            .unwrap(),
+        0,
+        "nothing was inserted"
+    );
+}

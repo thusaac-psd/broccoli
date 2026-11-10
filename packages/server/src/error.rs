@@ -19,6 +19,10 @@ pub struct ErrorBody {
     pub details: Option<serde_json::Value>,
 }
 
+/// `Retry-After` for [`AppError::ContestTypeUnavailable`]: about one plugin
+/// reconcile interval, after which this replica may have loaded the plugin.
+const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -39,6 +43,10 @@ pub enum AppError {
     /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
     /// 503 means "the system as a whole is past capacity". UP#39 uses this
     /// for durable-queue depth backpressure.
+    /// The serving replica has no handler for this contest type right now
+    /// (its plugin is still loading, or failed to load, here). Retryable: the
+    /// load balancer will likely route the retry to a replica that has it.
+    ContestTypeUnavailable(String),
     Overloaded {
         retry_after: u64,
     },
@@ -106,6 +114,16 @@ impl AppError {
                 simple(
                     "RATE_LIMITED",
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
+                ),
+            ),
+            AppError::ContestTypeUnavailable(contest_type) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "CONTEST_TYPE_UNAVAILABLE",
+                    format!(
+                        "This server cannot accept '{contest_type}' submissions right now; \
+                         retry in {CONTEST_TYPE_RETRY_AFTER_SECS} seconds"
+                    ),
                 ),
             ),
             AppError::Overloaded { retry_after } => (
@@ -178,6 +196,7 @@ impl IntoResponse for AppError {
             AppError::RateLimited { retry_after } | AppError::Overloaded { retry_after } => {
                 Some(*retry_after)
             }
+            AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             _ => None,
         };
 

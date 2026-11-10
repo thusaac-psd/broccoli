@@ -701,7 +701,7 @@ pub async fn get_submission_judgement(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -802,10 +802,15 @@ pub async fn create_contest_submission(
         .await
         .get(&contest_type)
         .cloned();
+    // Contest types are plugin-provided, and the handler owns admission: a
+    // replica without one (its plugin still loading or failed here) must not
+    // accept the submission unchecked. Reject before any hook runs.
+    let Some(handler) = handler else {
+        return Err(AppError::ContestTypeUnavailable(contest_type));
+    };
     let admission_owner = handler
-        .as_ref()
-        .filter(|h| h.submission_admission)
-        .map(|h| h.plugin_id.as_str());
+        .submission_admission
+        .then_some(handler.plugin_id.as_str());
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
         problem_id,
@@ -838,8 +843,8 @@ pub async fn create_contest_submission(
         ..Default::default()
     };
 
-    let model = match (handler, admission) {
-        (Some(handler), Some(admission)) if handler.submission_admission => {
+    let model = match admission {
+        Some(admission) if handler.submission_admission => {
             crate::services::submission_feedback::insert_admitted(
                 &state,
                 new_submission,
@@ -848,13 +853,13 @@ pub async fn create_contest_submission(
             )
             .await?
         }
-        (Some(handler), None) if handler.submission_admission => {
+        None if handler.submission_admission => {
             return Err(AppError::Internal(
                 "Contest plugin did not provide submission admission".into(),
             ));
         }
-        (_, Some(_)) => return Err(AppError::Internal("Unexpected submission admission".into())),
-        _ => new_submission.insert(&state.db).await?,
+        Some(_) => return Err(AppError::Internal("Unexpected submission admission".into())),
+        None => new_submission.insert(&state.db).await?,
     };
 
     fire_after_submission_hooks(
