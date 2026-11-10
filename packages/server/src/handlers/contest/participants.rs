@@ -39,7 +39,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::state::AppState;
-use crate::utils::contest::find_contest;
+use crate::utils::contest::{ensure_self_service_contest, find_contest};
 use crate::utils::soft_delete::SoftDeletable;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
@@ -258,23 +258,6 @@ pub async fn register_for_contest(
         Err(e) => Err(e.into()),
     }
 }
-/// Self-registration and self-unregistration are only offered for active
-/// public contests. Anything else is a 404 for both, so the two endpoints
-/// cannot be told apart for a contest the caller may not see (no existence
-/// oracle), and a caller can never leave a contest it could not rejoin.
-fn ensure_self_service_contest(
-    contest: &crate::entity::contest::Model,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), AppError> {
-    if contest.activate_time.is_none_or(|at| at > now)
-        || contest.deactivate_time.is_some_and(|dt| dt <= now)
-        || !contest.is_public
-    {
-        return Err(AppError::NotFound("Contest not found".into()));
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     delete,
     path = "/{id}/register",
