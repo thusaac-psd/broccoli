@@ -1,12 +1,8 @@
 //! Problem-management defects found by the kernel audit (Nov 2026).
 //!
-//! Each `#[ignore]`d test reproduces a bug and asserts the CORRECT behaviour,
-//! so it fails today. Run the whole set with:
-//!
-//! `cargo test -p server --test integration audit_problem -- --ignored`
-//!
-//! When fixing a bug, delete its `#[ignore]` so the test becomes a regression
-//! guard.
+//! Each test reproduced a bug and asserts the CORRECT behaviour; all of them
+//! are fixed, so they now run as regression guards. The `BUG` notes on each
+//! test describe the original defect, for context.
 
 use common::{SubmissionStatus, Verdict};
 use sea_orm::{ActiveModelTrait, Set};
