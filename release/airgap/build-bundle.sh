@@ -114,23 +114,27 @@ if [ "$SKIP_IMAGES" = "0" ]; then
   [ -n "${BROCCOLI_RUNTIME_IMAGE:-}" ] && \
     server_runtime_arg=(--build-arg "RUNTIME_IMAGE=$BROCCOLI_RUNTIME_IMAGE")
 
-  # Stamp provenance into both images' OCI labels. Both Dockerfiles carry
-  # `ARG VERSION=dev`, `ARG REVISION=unknown` and `ARG CREATED=unknown` ->
-  # org.opencontainers.image.{version,revision,created}; without these
-  # build-args every shipped image reports "dev"/"unknown". Air-gapped targets
+  # Stamp provenance into both images' OCI labels
+  # (org.opencontainers.image.{version,revision,created}); without these every
+  # shipped image reports the Dockerfiles' "dev"/"unknown". Air-gapped targets
   # have no registry to query, so
   # `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
   # on the loaded image is the ONLY offline way to tell which commit a site
   # runs (e.g. whether it includes a given fix) or that an upgrade swapped it.
-  provenance_build_args=(--build-arg "VERSION=$VERSION" --build-arg "REVISION=$git_sha" --build-arg "CREATED=$created")
+  # Passed as --label, not --build-arg: a build arg in scope of the worker's
+  # apt RUNs that changes every build (CREATED is a timestamp) would rebuild
+  # every toolchain stage each time. A label touches only the final image.
+  provenance_labels=(--label "org.opencontainers.image.version=$VERSION"
+    --label "org.opencontainers.image.revision=$git_sha"
+    --label "org.opencontainers.image.created=$created")
 
   # broccoli images — built from the repo. Frontend is baked fresh into the
   # server image (verify served bundle behaviorally, not by mtime).
   "$ENGINE" build -f "$repo/Dockerfile.server" \
-    "${mirror_build_args[@]}" "${server_runtime_arg[@]}" "${provenance_build_args[@]}" \
+    "${mirror_build_args[@]}" "${server_runtime_arg[@]}" "${provenance_labels[@]}" \
     -t "broccoli-server:$VERSION" "$repo"
   "$ENGINE" build -f "$repo/Dockerfile.worker" --target runtime-full \
-    "${mirror_build_args[@]}" "${provenance_build_args[@]}" \
+    "${mirror_build_args[@]}" "${provenance_labels[@]}" \
     -t "broccoli-worker:$VERSION" "$repo"
 
   # Default plugins for the bind-mount source. The server + worker compose

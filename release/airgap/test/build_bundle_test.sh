@@ -131,24 +131,25 @@ set_out="$( set -u
 [ "$set_out" = "<--build-arg><USE_CN_MIRRORS=true><--build-arg><RUNTIME_IMAGE=debian:bookworm-slim>" ] \
   || { echo "FAIL: set env must emit both --build-args as distinct tokens (got: $set_out)"; exit 1; }
 
-# --- the bundle VERSION must reach BOTH images' OCI version label. Both
-#     Dockerfiles carry `ARG VERSION=dev` -> org.opencontainers.image.version;
-#     without an emitted `--build-arg VERSION` every shipped image reports "dev"
-#     regardless of the bundle version. Air-gapped targets have no registry to
-#     query, so the loaded image's version label is the ONLY offline way to tell
-#     one bundle's images from the next's (e.g. confirming an in-place upgrade
-#     actually swapped the image). Unlike the mirror levers this is
-#     unconditional — every build stamps it. ---
-for arg in 'VERSION=\$VERSION' 'REVISION=\$git_sha' 'CREATED=\$created'; do
-  grep -qE "provenance_build_args=\(.*--build-arg \"$arg\"" "$bb" \
-    || { echo "FAIL: build-bundle must stamp $arg via --build-arg (image OCI labels are the only offline provenance signal)"; exit 1; }
+# --- the bundle VERSION, commit and build time must reach BOTH images' OCI
+#     labels. Air-gapped targets have no registry to query, so the loaded
+#     image's labels are the ONLY offline way to tell one bundle's images from
+#     the next's (e.g. confirming an in-place upgrade actually swapped the
+#     image). They go in as --label, never --build-arg: a build arg that
+#     changes on every build (CREATED) and is in scope of the worker's apt
+#     RUNs rebuilds every toolchain stage on every bundle build. ---
+for arg in 'version=\$VERSION' 'revision=\$git_sha' 'created=\$created'; do
+  grep -qE -- "--label \"org\.opencontainers\.image\.$arg\"" "$bb" \
+    || { echo "FAIL: build-bundle must stamp $arg as an image label (the only offline provenance signal)"; exit 1; }
 done
+grep -qE -- '--build-arg "(VERSION|REVISION|CREATED)=' "$bb" \
+  && { echo "FAIL: provenance passed as a build arg busts the worker build cache"; exit 1; } || true
 grep -qE '^git_sha="\$\(git -C "\$repo" rev-parse HEAD' "$bb" || { echo "FAIL: REVISION is not the repo commit"; exit 1; }
-awk '/Dockerfile.server/{s=1} s&&/provenance_build_args\[@\]/{sv=1} /-t "broccoli-server/{s=0}
-     /Dockerfile.worker/{w=1} w&&/provenance_build_args\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
+awk '/Dockerfile.server/{s=1} s&&/provenance_labels\[@\]/{sv=1} /-t "broccoli-server/{s=0}
+     /Dockerfile.worker/{w=1} w&&/provenance_labels\[@\]/{wv=1} /-t "broccoli-worker/{w=0}
      END{ if(!sv){print "MISS server provenance"; exit 1}
           if(!wv){print "MISS worker provenance"; exit 1} }' "$bb" \
-  || { echo "FAIL: provenance build-args not wired into both image builds"; exit 1; }
+  || { echo "FAIL: provenance labels not wired into both image builds"; exit 1; }
 grep -q "\"git_sha\": \"$(git -C "$here" rev-parse HEAD)\"" "$b/bundle.json" \
   || { echo "FAIL: bundle.json does not record the commit"; exit 1; }
 
