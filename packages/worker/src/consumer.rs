@@ -236,8 +236,18 @@ impl WorkerConsumer {
                         consume_start,
                     );
                     // A result that could not be delivered within the publish
-                    // window is handed back to the broker (reject -> redelivery):
-                    // nothing else can reach the waiting server.
+                    // window is handed back to the broker for redelivery. Drop
+                    // our dedup claim first: it can outlive this attempt, and a
+                    // worker that receives the redelivery would otherwise see
+                    // it held, skip the task and ack it away. This is best
+                    // effort: if Redis is still failing, the reject can fail too
+                    // (under OOM the vendored reject drops the message from the
+                    // processing list before its re-publish is refused).
+                    if published.is_err()
+                        && let Some(dedup) = self.dedup.as_ref()
+                    {
+                        dedup.release(&task_id).await;
+                    }
                     return published.map_err(|e| BroccoliError::Publish(e.to_string()));
                 }
                 Err(e) => {
@@ -601,5 +611,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(depth, 1, "exactly one (successful) result is published");
+    }
+
+    /// Regression: when the publish window runs out the task is handed back for
+    /// redelivery, so this worker's dedup claim must be released; otherwise the
+    /// worker that receives the redelivery sees it held, skips and acks it.
+    #[tokio::test]
+    async fn exhausted_publish_releases_the_dedup_claim() {
+        let redis = Redis::default().start().await.expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let redis_url = format!("redis://127.0.0.1:{port}");
+        let client = redis::Client::open(redis_url.as_str()).unwrap();
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+        consumer.cancel_checker = None;
+        consumer.dedup = Some(Arc::new(
+            RedisTaskDedup::new(&redis_url, 600, "worker-cancel-test".into()).unwrap(),
+        ));
+        consumer.publish_retry = PublishRetry {
+            base_delay_ms: 50,
+            max_delay_ms: 100,
+            deadline: std::time::Duration::from_millis(500),
+        };
+
+        // The dedup claim fits before memory runs out; the result publish never does.
+        let t = task("publish-exhausted", None);
+        let dedup_key = format!("broccoli:dedup:{}", t.id);
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory-policy")
+            .arg("noeviction")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let claimed = consumer.dedup.as_ref().unwrap().try_claim(&t.id).await;
+        assert!(matches!(claimed, ClaimOutcome::Claimed));
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory")
+            .arg("1")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let result = consumer.process_message(BrokerMessage::new(t, None)).await;
+        assert!(
+            result.is_err(),
+            "an undeliverable result is handed back to the broker"
+        );
+        let held: bool = redis::cmd("EXISTS")
+            .arg(&dedup_key)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert!(
+            !held,
+            "the dedup claim must be released before the redelivery"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
