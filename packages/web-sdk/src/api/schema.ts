@@ -1975,7 +1975,7 @@ export interface paths {
     post?: never;
     /**
      * Soft-delete a user by ID
-     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission.
+     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
      *     Deletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
      */
@@ -1984,7 +1984,7 @@ export interface paths {
     head?: never;
     /**
      * Update user information
-     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.
+     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name. Without `system:admin`, the target user may not hold any permission the caller lacks.
      */
     patch: operations['updateUser'];
     trace?: never;
@@ -11410,7 +11410,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11482,7 +11482,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;

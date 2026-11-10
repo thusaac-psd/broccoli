@@ -692,3 +692,105 @@ mod user_creation {
         assert_ne!(response.id(), id);
     }
 }
+
+/// Looks up the id of the user named `username`.
+async fn user_id(app: &TestApp, username: &str) -> i32 {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("db")
+        .expect("user exists")
+        .id
+}
+
+mod account_management_ceiling {
+    use super::*;
+    use broccoli_server_sdk::permissions as perm;
+
+    /// A `user:manage` holder cannot reset the password of a user whose roles exceed
+    /// its own permissions, so it cannot log in as an admin. Update and delete apply
+    /// the same privilege ceiling as role assignment.
+    #[tokio::test]
+    async fn user_manager_cannot_take_over_an_admin() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions("aa_mgr", "password123", &[perm::USER_MANAGE])
+            .await;
+        app.create_user_with_role("aa_boss", "password123", "admin")
+            .await;
+        let boss = user_id(&app, "aa_boss").await;
+
+        let res = app
+            .patch_with_token(
+                &routes::user(boss),
+                &json!({"password": "takeover123"}),
+                &mgr,
+            )
+            .await;
+        assert_eq!(
+            res.status, 403,
+            "user:manage reset an admin's password: {}",
+            res.text
+        );
+
+        let login = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "aa_boss", "password": "takeover123"}),
+            )
+            .await;
+        assert_ne!(login.status, 200, "attacker logged in as the admin");
+    }
+
+    /// A `user:manage` holder cannot delete a user whose roles exceed its own
+    /// permissions.
+    #[tokio::test]
+    async fn user_manager_cannot_delete_an_admin() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions("aa_mgr", "password123", &[perm::USER_MANAGE])
+            .await;
+        app.create_user_with_role("aa_boss", "password123", "admin")
+            .await;
+        let boss = user_id(&app, "aa_boss").await;
+
+        let res = app.delete_with_token(&routes::user(boss), &mgr).await;
+        assert_eq!(
+            res.status, 403,
+            "user:manage deleted an admin: {}",
+            res.text
+        );
+    }
+
+    /// The ceiling allows what the caller does hold: a user manager can still
+    /// reset a contestant's password and delete a contestant.
+    #[tokio::test]
+    async fn user_manager_can_manage_accounts_within_its_ceiling() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions(
+                "aa_mgr",
+                "password123",
+                &[perm::USER_MANAGE, perm::SUBMISSION_SUBMIT],
+            )
+            .await;
+        app.create_authenticated_user("aa_pupil", "password123")
+            .await;
+        let pupil = user_id(&app, "aa_pupil").await;
+
+        let res = app
+            .patch_with_token(
+                &routes::user(pupil),
+                &json!({"password": "newpass123"}),
+                &mgr,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let res = app.delete_with_token(&routes::user(pupil), &mgr).await;
+        assert_eq!(res.status, 204, "{}", res.text);
+    }
+}

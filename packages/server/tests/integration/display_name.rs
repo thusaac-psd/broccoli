@@ -135,8 +135,11 @@ async fn admin_and_contest_creation_share_names_without_overwriting_existing_acc
 #[tokio::test]
 async fn only_user_managers_can_rename_and_names_do_not_follow_username_changes() {
     let app = TestApp::spawn().await;
+    // `submission:submit` keeps the contestant within the privilege ceiling
+    // `update_user` enforces (covered in user.rs); `user:manage` is the
+    // gate under test here.
     let admin = app
-        .create_user_with_permissions("admin", "securepass", &["user:manage"])
+        .create_user_with_permissions("admin", "securepass", &["user:manage", "submission:submit"])
         .await;
     let player = app.create_authenticated_user("player", "securepass").await;
     let manager = app
