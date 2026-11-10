@@ -21,6 +21,8 @@ mkdir -p plugins
 
 fail() { echo "FAIL: $*"; exit 1; }
 install_dry() {
+  # A fixed infra address, so the render never depends on `hostname -I`.
+  BROCCOLI_INFRA_HOST="${BROCCOLI_INFRA_HOST:-10.0.0.10}" \
   BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 BROCCOLI_NONINTERACTIVE=1 \
     ./install.sh "$@" </dev/null >"$T/install.log" 2>&1 \
     || { cat "$T/install.log"; fail "install.sh $* dry run"; }

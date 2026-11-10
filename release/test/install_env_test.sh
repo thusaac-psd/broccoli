@@ -19,7 +19,7 @@ run() { BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 ./install.sh "$@" </dev/nu
 BROCCOLI__AUTH__SECURE_COOKIES=true \
 BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=cn-north-1 \
 BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=false \
-  run infra || fail "infra dry run"
+  BROCCOLI_INFRA_HOST=10.0.0.10 run infra || fail "infra dry run"
 for f in .env.infra server-secrets.env; do
   grep -qx "BROCCOLI__AUTH__SECURE_COOKIES='true'" "$f" || fail "$f ignored SECURE_COOKIES"
 done

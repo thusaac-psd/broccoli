@@ -171,3 +171,28 @@ jobs:
       # only re-run the tests that exercise the cfg-gated `/downloads` routes.
       - name: Test downloads endpoint
         run: cargo test -p server --features bundled-stress-test --locked --test integration -- downloads
+
+  release-scripts:
+    name: Release / installer scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # caddy validate and the airgap TLS loop skip without a local Caddy image.
+      - name: Pull the gateway images
+        run: docker pull caddy:2-alpine && docker pull caddy:2
+
+      - name: Run every release shell suite
+        run: |
+          status=0
+          for t in release/test/*.sh release/*/test/*.sh; do
+            echo "::group::$t"
+            if bash "$t"; then
+              echo "ok: $t"
+            else
+              echo "::error file=$t::$t failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
