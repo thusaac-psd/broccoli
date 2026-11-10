@@ -4,7 +4,7 @@ use broccoli_server_sdk::types::{
     SourceFile, TestCaseBodyRef, TestCaseRow, sanitize_text_field,
 };
 use chrono::Utc;
-use common::{SubmissionStatus, Verdict};
+use common::{SubmissionDlqErrorCode, SubmissionStatus, Verdict};
 use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use sea_orm::prelude::Expr;
 use sea_orm::*;
@@ -929,12 +929,20 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
                                     error = ?output.error_message,
                                     "Plugin reported failure"
                                 );
+                                // A refusal is deterministic: record it under
+                                // its own code, which the SystemError-retry
+                                // reaper leaves alone.
+                                let error_code = if output.retryable {
+                                    "PLUGIN_ERROR"
+                                } else {
+                                    SubmissionDlqErrorCode::PLUGIN_REFUSED
+                                };
                                 record_dispatch_failure(
                                     &db,
                                     &metrics,
                                     submission_id,
                                     judgement_id,
-                                    "PLUGIN_ERROR",
+                                    error_code,
                                     &output
                                         .error_message
                                         .unwrap_or_else(|| "Unknown plugin error".to_string()),

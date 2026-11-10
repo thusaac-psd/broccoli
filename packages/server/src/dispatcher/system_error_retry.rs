@@ -27,7 +27,7 @@
 
 use std::time::Duration;
 
-use common::{SubmissionStatus, Verdict};
+use common::{SubmissionDlqErrorCode, SubmissionStatus, Verdict};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -172,6 +172,10 @@ async fn scan_once(
 /// * `status == SystemError` - stuck-handler terminal / dispatch-exhaustion
 ///   (verdict typically NULL).
 ///
+/// A deterministic plugin refusal (`error_code == PLUGIN_REFUSED`, see
+/// `OnSubmissionOutput::refused`) is a `SystemError` too, but re-running it
+/// can only fail the same way, so it is excluded.
+///
 /// A contestant `CompileError` lands as `status == CompilationError` (never
 /// `SystemError`), so it is never selected; nor are own-code verdicts
 /// (`status == Judged` with WA/TLE/MLE/RE), non-current, or unfinalized rows.
@@ -191,6 +195,14 @@ async fn find_retryable_system_errors(
                         .add(submission_judgement::Column::Verdict.eq(Verdict::SystemError)),
                 )
                 .add(submission_judgement::Column::Status.eq(SubmissionStatus::SystemError)),
+        )
+        .filter(
+            Condition::any()
+                .add(submission_judgement::Column::ErrorCode.is_null())
+                .add(
+                    submission_judgement::Column::ErrorCode
+                        .ne(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+                ),
         )
         .filter(submission_judgement::Column::RetryCount.lt(max_retry_count))
         .order_by_asc(submission_judgement::Column::Id)
@@ -397,13 +409,52 @@ mod tests {
         )
         .await;
 
+        // NOT selected - a plugin's deterministic refusal. SHOULD be selected -
+        // an ordinary (retryable) plugin failure.
+        let s_refused = seed_submission(&db).await;
+        let j_refused = seed_judgement(
+            &db,
+            s_refused,
+            true,
+            true,
+            SubmissionStatus::SystemError,
+            None,
+            0,
+        )
+        .await;
+        let s_plugin_err = seed_submission(&db).await;
+        let j_plugin_err = seed_judgement(
+            &db,
+            s_plugin_err,
+            true,
+            true,
+            SubmissionStatus::SystemError,
+            None,
+            0,
+        )
+        .await;
+        for (id, code) in [
+            (j_refused, SubmissionDlqErrorCode::PLUGIN_REFUSED),
+            (j_plugin_err, "PLUGIN_ERROR"),
+        ] {
+            submission_judgement::Entity::update_many()
+                .col_expr(
+                    submission_judgement::Column::ErrorCode,
+                    sea_orm::sea_query::Expr::value(Some(code.to_string())),
+                )
+                .filter(submission_judgement::Column::Id.eq(id))
+                .exec(&db)
+                .await
+                .expect("set error code");
+        }
+
         let found = find_retryable_system_errors(&db, 5, 64)
             .await
             .expect("query candidates");
         let ids: Vec<i32> = found.iter().map(|j| j.id).collect();
         assert_eq!(
             ids,
-            vec![j_ok, j_stuck],
+            vec![j_ok, j_stuck, j_plugin_err],
             "both the Judged+SystemError and the status=SystemError shapes (with budget) are selected"
         );
     }
