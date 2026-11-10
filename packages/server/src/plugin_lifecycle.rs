@@ -90,6 +90,18 @@ pub struct PluginNotReady {
     pub reason: String,
 }
 
+impl Retry {
+    /// The retry after one more failed attempt (following `previous`, if the
+    /// last attempt failed too).
+    fn after(previous: Option<Retry>, now: Instant) -> Self {
+        let attempts = previous.map_or(1, |r| r.attempts.saturating_add(1));
+        Retry {
+            attempts,
+            at: now + retry_delay(attempts),
+        }
+    }
+}
+
 fn retry_delay(attempts: u32) -> Duration {
     let factor = 1u32 << attempts.saturating_sub(1).min(16);
     RETRY_BASE.saturating_mul(factor).min(RETRY_MAX)
@@ -256,13 +268,7 @@ async fn apply(
     }
 
     let result = load_from_disk(state, plugin_id).await;
-    let retry = result.as_ref().err().map(|_| {
-        let attempts = retry.map_or(1, |r| r.attempts.saturating_add(1));
-        Retry {
-            attempts,
-            at: now + retry_delay(attempts),
-        }
-    });
+    let retry = result.as_ref().err().map(|_| Retry::after(retry, now));
     if let (Some(r), Err(e)) = (retry, &result) {
         tracing::warn!(
             plugin_id,
@@ -398,11 +404,7 @@ async fn load_then_publish(
 ) -> Result<(), ChangeError> {
     if let Err(error) = load_from_disk(state, plugin_id).await {
         if let Some(a) = applied.get_mut(plugin_id) {
-            let attempts = a.retry.map_or(1, |r| r.attempts.saturating_add(1));
-            a.retry = Some(Retry {
-                attempts,
-                at: Instant::now() + retry_delay(attempts),
-            });
+            a.retry = Some(Retry::after(a.retry, Instant::now()));
         }
         return Err(ChangeError::Load(error));
     }
