@@ -2027,7 +2027,12 @@ mod contest_registration {
         let user = app
             .create_user_with_role("user1", "pass1234", "contestant")
             .await;
-        let id = create_contest_as_admin(&app, &admin, "Public", true).await;
+        // Unregistering is only allowed before the contest starts.
+        let mut body = valid_contest_body("Public", true);
+        body["start_time"] = json!("2098-01-01T00:00:00Z");
+        let res = app.post_with_token(routes::CONTESTS, &body, &admin).await;
+        assert_eq!(res.status, 201, "{}", res.text);
+        let id = res.id();
 
         app.post_with_token(&routes::contest_register(id), &json!({}), &user)
             .await;
@@ -2046,12 +2051,70 @@ mod contest_registration {
         let user = app
             .create_user_with_role("user1", "pass1234", "contestant")
             .await;
-        let id = create_contest_as_admin(&app, &admin, "Public", true).await;
+        let mut body = valid_contest_body("Public", true);
+        body["start_time"] = json!("2098-01-01T00:00:00Z");
+        let id = app
+            .post_with_token(routes::CONTESTS, &body, &admin)
+            .await
+            .id();
 
         let res = app
             .delete_with_token(&routes::contest_register(id), &user)
             .await;
         assert_eq!(res.status, 404);
+    }
+
+    #[tokio::test]
+    async fn cannot_unregister_from_a_running_contest() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user1", "pass1234", "contestant")
+            .await;
+        let id = create_contest_as_admin(&app, &admin, "Public", true).await;
+        app.post_with_token(&routes::contest_register(id), &json!({}), &user)
+            .await;
+
+        let res = app
+            .delete_with_token(&routes::contest_register(id), &user)
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn unregister_from_a_private_contest_is_not_found() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("admin1", "pass1234", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("user1", "pass1234", "contestant")
+            .await;
+        let mut body = valid_contest_body("Private", false);
+        body["start_time"] = json!("2098-01-01T00:00:00Z");
+        let id = app
+            .post_with_token(routes::CONTESTS, &body, &admin)
+            .await
+            .id();
+        let uid = app.get_with_token(routes::ME, &user).await.id();
+        let add = app
+            .post_with_token(
+                &routes::contest_participants(id),
+                &json!({"user_id": uid}),
+                &admin,
+            )
+            .await;
+        assert!(add.status < 300, "{}", add.text);
+
+        // Same answer as self-registration: the caller could not rejoin.
+        let res = app
+            .delete_with_token(&routes::contest_register(id), &user)
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
+        assert_eq!(res.body["message"], "Contest not found");
     }
 }
 

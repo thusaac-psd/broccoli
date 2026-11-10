@@ -103,8 +103,9 @@ you are registered.
 broccoli contest info "Spring Round"
 ```
 
-If a contest needs registration, register before you submit. You leave one the
-same way with `broccoli contest unregister`.
+If a contest needs registration, register before you submit. You can leave one
+with `broccoli contest unregister` until it starts. After that your registration
+stays, so the standings keep your results.
 
 ```bash
 broccoli contest register "Spring Round"

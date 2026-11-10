@@ -990,7 +990,7 @@ export interface paths {
     post: operations['registerForContest'];
     /**
      * Self-unregister from a contest
-     * @description Removes the authenticated user's registration from a contest. Returns 404 if the caller is not registered.
+     * @description Removes the authenticated user's registration from an active public contest that has not started yet. Inactive or non-public contests return 404, like self-registration. Blocked once the contest has started, because standings are built from registrations. Returns 404 if the caller is not registered.
      */
     delete: operations['unregisterFromContest'];
     options?: never;
@@ -1617,7 +1617,7 @@ export interface paths {
     put?: never;
     /**
      * Upload test cases from a ZIP file
-     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
+     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
      */
     post: operations['uploadTestCases'];
     delete?: never;
@@ -5624,6 +5624,15 @@ export interface operations {
           'application/json': components['schemas']['ContestListResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -7589,6 +7598,15 @@ export interface operations {
         };
         content?: never;
       };
+      /** @description Contest has already started (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -7705,6 +7723,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['DlqListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -8706,6 +8733,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ProblemListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -10217,7 +10253,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;

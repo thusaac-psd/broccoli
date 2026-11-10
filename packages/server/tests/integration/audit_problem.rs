@@ -1,12 +1,8 @@
 //! Problem-management defects found by the kernel audit (Nov 2026).
 //!
-//! Each `#[ignore]`d test reproduces a bug and asserts the CORRECT behaviour,
-//! so it fails today. Run the whole set with:
-//!
-//! `cargo test -p server --test integration audit_problem -- --ignored`
-//!
-//! When fixing a bug, delete its `#[ignore]` so the test becomes a regression
-//! guard.
+//! Each test reproduced a bug and asserts the CORRECT behaviour; all of them
+//! are fixed, so they now run as regression guards. The `BUG` notes on each
+//! test describe the original defect, for context.
 
 use common::{SubmissionStatus, Verdict};
 use sea_orm::{ActiveModelTrait, Set};
@@ -58,7 +54,6 @@ async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) 
 /// Location: handlers/problem/test_cases.rs (create/update/reorder/bulk) and
 /// handlers/problem/upload.rs. `checker_source.rs` documents the same class.
 #[tokio::test]
-#[ignore = "BUG: test-case write endpoints parse the (up to 1 GiB) body before checking PROBLEM_EDIT"]
 async fn test_case_writes_check_permission_before_reading_body() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -94,6 +89,20 @@ async fn test_case_writes_check_permission_before_reading_body() {
         "contestant upload got {} (body parsed before permission check): {}",
         res.status, res.text
     );
+
+    // The checker-source JSON body (32 MiB limit) is gated the same way.
+    let res = app
+        .put_with_token(
+            &format!("{}/checker-source", routes::problem(pid)),
+            &json!({}),
+            &contestant,
+        )
+        .await;
+    assert_eq!(
+        res.status, 403,
+        "contestant checker-source upload got {} (body parsed before permission check): {}",
+        res.status, res.text
+    );
 }
 
 /// BUG (med): ZIP upload with `strategy=replace` deletes every test case with
@@ -102,7 +111,6 @@ async fn test_case_writes_check_permission_before_reading_body() {
 /// problem that has ever been judged can never be re-uploaded with replace.
 /// Location: handlers/problem/upload.rs (replace branch).
 #[tokio::test]
-#[ignore = "BUG: upload strategy=replace returns 500 (FK violation) once any test case has results"]
 async fn replace_upload_on_judged_problem_is_a_conflict_not_500() {
     let app = TestApp::spawn().await;
     let token = app
@@ -136,7 +144,6 @@ async fn replace_upload_on_judged_problem_is_a_conflict_not_500() {
 /// labels "1".."N") the next auto label is always taken.
 /// Location: handlers/problem/test_cases.rs (`create_test_case`).
 #[tokio::test]
-#[ignore = "BUG: auto-generated test-case label collides with ZIP-uploaded labels -> 409"]
 async fn create_test_case_after_zip_upload_gets_a_free_label() {
     let app = TestApp::spawn().await;
     let token = app
@@ -179,7 +186,6 @@ async fn create_test_case_after_zip_upload_gets_a_free_label() {
 /// handlers/problem/mod.rs (stores `serde_json::to_value(sf)` raw),
 /// utils/judging.rs (`validate_submission_contract`).
 #[tokio::test]
-#[ignore = "BUG: submission_format validated trimmed but stored raw -> problem cannot accept submissions"]
 async fn submission_format_with_padded_filename_is_normalised_or_rejected() {
     let app = TestApp::spawn().await;
     let token = app
@@ -229,7 +235,6 @@ async fn submission_format_with_padded_filename_is_normalised_or_rejected() {
 /// output". Both patterns pass format validation.
 /// Location: handlers/problem/upload.rs (`label_as_input` checked first).
 #[tokio::test]
-#[ignore = "BUG: overlapping input/output formats (`*` and `*.a`) misclassify answer files as inputs"]
 async fn zip_upload_with_overlapping_formats_pairs_files() {
     let app = TestApp::spawn().await;
     let token = app
@@ -261,7 +266,6 @@ async fn zip_upload_with_overlapping_formats_pairs_files() {
 /// still returns the hidden test data to editors.
 /// Location: handlers/problem/test_cases.rs `find_test_case_for_problem`.
 #[tokio::test]
-#[ignore = "BUG: get_test_case still serves a soft-deleted problem's test data"]
 async fn soft_deleted_problem_hides_individual_test_cases() {
     let app = TestApp::spawn().await;
     let token = app
@@ -284,4 +288,33 @@ async fn soft_deleted_problem_hides_individual_test_cases() {
         "sibling endpoints disagree: list=404 but get={}",
         one.status
     );
+}
+
+/// Companion to the test above: every problem child lookup goes through the
+/// same active-parent gate, so additional files of a soft-deleted problem are
+/// gone too (download and delete both 404).
+#[tokio::test]
+async fn soft_deleted_problem_hides_additional_files() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("ap_admin", "password123", "admin")
+        .await;
+    let pid = app.create_problem(&token, "P").await;
+    let up = app
+        .upload_additional_file(pid, "extra.txt", b"data".to_vec(), "cpp", &token)
+        .await;
+    assert_eq!(up.status, 201, "{}", up.text);
+    let ref_id = up.body["id"].as_str().unwrap().to_string();
+
+    let del = app.delete_with_token(&routes::problem(pid), &token).await;
+    assert_eq!(del.status, 204, "{}", del.text);
+
+    let download = app
+        .get_with_token(&routes::additional_file(pid, &ref_id), &token)
+        .await;
+    assert_eq!(download.status, 404, "{}", download.text);
+    let delete = app
+        .delete_with_token(&routes::additional_file(pid, &ref_id), &token)
+        .await;
+    assert_eq!(delete.status, 404, "{}", delete.text);
 }

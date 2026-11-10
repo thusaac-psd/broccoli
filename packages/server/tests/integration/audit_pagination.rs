@@ -1,33 +1,12 @@
 //! Pagination arithmetic on list endpoints (kernel audit, Nov 2026).
 //!
-//! Every admin/contestant list handler computes `OFFSET` as
-//! `(page - 1) * per_page` on a caller-supplied `page: u64`. Only
-//! `handlers/submission/response.rs::result_selection` guards it with
-//! `checked_mul(..).filter(|n| *n <= i64::MAX as u64)` and maps overflow to
-//! `400 VALIDATION_ERROR`; the five sibling sites below were never brought in
-//! line:
-//!
-//! - `handlers/problem/mod.rs`        `list_problems`
-//! - `handlers/contest/mod.rs`        `list_contests`
-//! - `handlers/submission/mod.rs`     `list_submissions`
-//! - `handlers/submission/mod.rs`     `list_contest_submissions`
-//! - `dlq/service.rs`                 `DlqService::list` (uses
-//!   `saturating_sub` but still an unchecked `*`)
-//!
-//! Two failure modes, both reachable with one query parameter:
-//!
-//! 1. `page * per_page` overflows `u64`. With debug assertions (every test
-//!    build) the handler task panics and hyper drops the connection with no
-//!    response; in release it silently wraps, so e.g. `page=2^63+1,
-//!    per_page=2` yields OFFSET 0 and the server returns page-1 rows labelled
-//!    as page 9e18.
-//! 2. No overflow, but the offset exceeds `i64::MAX`. Postgres `OFFSET` is a
-//!    `bigint`, so the bound value is rejected and the caller gets a 500.
-//!
-//! The tests assert the contract `result_selection` already established: an
-//! out-of-range page is a client error (4xx), never a dropped connection or a
-//! 5xx. They are `#[ignore]`d until the handlers are fixed; run them with
-//! `cargo test -p server --test integration audit_pagination -- --ignored`.
+//! List handlers used to compute `OFFSET` as `(page - 1) * per_page` on a
+//! caller-supplied `page: u64`. That overflowed `u64` (a dropped connection in
+//! debug builds, a wrapped offset in release) or produced an offset above
+//! `i64::MAX`, which Postgres' `bigint` OFFSET rejects with a 500. Every list
+//! endpoint now derives its offset through `models::shared::PageWindow`, which
+//! maps both cases to `400 VALIDATION_ERROR`. These tests pin that contract
+//! for each paginated endpoint.
 
 use crate::common::{TestApp, routes};
 
@@ -67,8 +46,7 @@ async fn admin(app: &TestApp) -> String {
         .await
 }
 
-/// Control: the one guarded site already behaves. Not ignored - this pins the
-/// contract the other sites should converge on.
+/// Testcase-result pages (`result_selection`) go through the same window.
 #[tokio::test]
 async fn submission_result_page_overflow_is_a_validation_error() {
     let app = TestApp::spawn().await;
@@ -93,7 +71,6 @@ async fn submission_result_page_overflow_is_a_validation_error() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_problems computes (page - 1) * per_page unchecked on u64"]
 async fn list_problems_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -104,7 +81,6 @@ async fn list_problems_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_contests computes (page - 1) * per_page unchecked on u64"]
 async fn list_contests_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -115,7 +91,6 @@ async fn list_contests_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_submissions computes (page - 1) * per_page unchecked on u64"]
 async fn list_submissions_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -126,7 +101,6 @@ async fn list_submissions_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_contest_submissions computes (page - 1) * per_page unchecked on u64"]
 async fn list_contest_submissions_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -141,7 +115,6 @@ async fn list_contest_submissions_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: DlqService::list computes page.saturating_sub(1) * per_page unchecked on u64"]
 async fn list_dlq_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
