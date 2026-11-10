@@ -19,6 +19,7 @@ use crate::services::judgement_lifecycle::{
     RetryBudget, allocated_epoch, redispatch_current_submission,
 };
 use crate::state::AppState;
+use crate::utils::judging::files_log_summary;
 use crate::utils::test_case_body::{
     AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES, select_inline_within_budget,
 };
@@ -553,15 +554,26 @@ async fn record_dispatch_failure(
     );
 }
 
-#[instrument(skip(state), fields(submission_id = submission.id))]
+// The submission model is skipped in both spans: its `files` hold the
+// contestant's full source. Ids, language and file names/sizes only.
+#[instrument(
+    skip(state, submission),
+    fields(
+        submission_id = submission.id,
+        language = %submission.language,
+        files = %files_log_summary(&submission.files),
+    )
+)]
 pub(crate) async fn dispatch_submission_to_plugin(state: AppState, submission: submission::Model) {
     dispatch_submission_to_plugin_with_judgement(state, submission, None, true).await;
 }
 
 #[instrument(
-    skip(state),
+    skip(state, submission),
     fields(
         submission_id = submission.id,
+        language = %submission.language,
+        files = %files_log_summary(&submission.files),
         judgement_id = ?judgement_id,
         problem_id = tracing::field::Empty,
         contest_id = tracing::field::Empty,
