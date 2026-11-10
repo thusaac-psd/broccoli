@@ -23,6 +23,8 @@ services:
       # Unset unless the env file sets them, so the binary's defaults apply.
       # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
       BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
+      BROCCOLI__DATABASE__TCP_KEEPALIVES:
+      BROCCOLI__DATABASE__ALLOW_MISSING_UNIQUE_INDEXES:
       BROCCOLI__CLOCK__WARN_SKEW_MS:
       BROCCOLI__CLOCK__MAX_SKEW_MS:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
@@ -41,6 +43,7 @@ services:
       # Unset unless the env file sets them, so the binary's defaults apply.
       # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
       BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
+      BROCCOLI__DATABASE__TCP_KEEPALIVES:
       BROCCOLI__CLOCK__WARN_SKEW_MS:
       BROCCOLI__CLOCK__MAX_SKEW_MS:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
