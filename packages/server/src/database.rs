@@ -632,7 +632,12 @@ mod tests {
         boot.migrate().await?;
         crate::seed::ensure_indexes(boot.conn()).await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
-        crate::seed::ensure_bootstrap_admin(boot.conn(), "admin", "pw").await?;
+        let bootstrap = crate::config::BootstrapConfig {
+            admin_username: "admin".into(),
+            admin_password: "pw".into(),
+            ..Default::default()
+        };
+        crate::seed::ensure_bootstrap_admin(boot.conn(), &bootstrap).await?;
         boot.release().await
     }
 

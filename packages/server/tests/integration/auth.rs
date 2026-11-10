@@ -255,6 +255,9 @@ mod token_refresh {
             .cookie_store(false)
             .build()
             .unwrap();
+        // Replaying A right away is a benign race (another tab, or a retry
+        // after a lost response): it is answered with a sibling token rather
+        // than a 401 that would log the client out.
         let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
             .header("cookie", format!("broccoli_refresh={}", cookie_a))
@@ -262,27 +265,87 @@ mod token_refresh {
             .send()
             .await
             .expect("send refresh replay A");
-        assert_eq!(replay_a.status(), 401);
-        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
-        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+        assert_eq!(replay_a.status(), 200, "in-grace replay must succeed");
 
-        // Second legit refresh with cookie B (via the cookie-store client): rotates to cookie C.
-        let r2 = app.post_without_token(routes::REFRESH, &json!({})).await;
-        assert_eq!(r2.status, 200);
-        let cookie_c = extract_refresh_cookie(&r2);
-        assert_ne!(cookie_b, cookie_c, "second refresh must also rotate");
-
-        // Replay cookie B: 401 TOKEN_INVALID.
-        let replay_b = raw_client
+        // Past the grace window, the same replay is reuse.
+        {
+            use sea_orm::ConnectionTrait;
+            app.db
+                .execute_unprepared(
+                    "UPDATE refresh_tokens SET revoked_at = NOW() - INTERVAL '1 hour' \
+                     WHERE revoked_at IS NOT NULL",
+                )
+                .await
+                .expect("backdate revoked_at");
+        }
+        let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
-            .header("cookie", format!("broccoli_refresh={}", cookie_b))
+            .header("cookie", format!("broccoli_refresh={}", cookie_a))
             .json(&json!({}))
             .send()
             .await
-            .expect("send refresh replay B");
-        assert_eq!(replay_b.status(), 401);
-        let replay_b_body: serde_json::Value = replay_b.json().await.unwrap();
-        assert_eq!(replay_b_body["code"], "TOKEN_INVALID");
+            .expect("send refresh replay A past grace");
+        assert_eq!(replay_a.status(), 401);
+        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
+        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+    }
+
+    /// Two refreshes carrying the same cookie (two tabs, or a retry after the
+    /// response with the new cookie was lost) both succeed, and both resulting
+    /// tokens stay usable.
+    #[tokio::test]
+    async fn concurrent_refreshes_with_one_cookie_both_succeed() {
+        fn extract_refresh_cookie(resp: &reqwest::Response) -> String {
+            for hv in resp.headers().get_all("set-cookie").iter() {
+                let s = hv.to_str().expect("set-cookie utf-8");
+                if let Some(rest) = s.strip_prefix("broccoli_refresh=") {
+                    let val = rest.split(';').next().unwrap_or("").to_string();
+                    if !val.is_empty() {
+                        return val;
+                    }
+                }
+            }
+            panic!("no broccoli_refresh Set-Cookie on response");
+        }
+
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "dora", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let raw = reqwest::Client::builder()
+            .no_proxy()
+            .cookie_store(false)
+            .build()
+            .unwrap();
+        let login = raw
+            .post(format!("http://{}{}", app.addr, routes::LOGIN))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let cookie = extract_refresh_cookie(&login);
+
+        let refresh = |cookie: String| {
+            let raw = raw.clone();
+            let url = format!("http://{}{}", app.addr, routes::REFRESH);
+            async move {
+                raw.post(url)
+                    .header("cookie", format!("broccoli_refresh={cookie}"))
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+        let (a, b) = tokio::join!(refresh(cookie.clone()), refresh(cookie));
+        assert_eq!(a.status(), 200);
+        assert_eq!(b.status(), 200);
+        let (cookie_a, cookie_b) = (extract_refresh_cookie(&a), extract_refresh_cookie(&b));
+        assert_ne!(cookie_a, cookie_b);
+
+        for next in [cookie_a, cookie_b] {
+            let res = refresh(next).await;
+            assert_eq!(res.status(), 200, "a sibling token must stay usable");
+        }
     }
 
     /// Replaying a rotated refresh token AFTER the benign-race grace window is
@@ -358,6 +421,103 @@ mod token_refresh {
             401,
             "reuse past grace must revoke the whole token family, including the current token"
         );
+    }
+}
+
+mod refresh_validator_format {
+    use super::*;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::{refresh_token, user};
+
+    /// Refresh rows written before validators moved to SHA-256 hold argon2
+    /// hashes. They must keep working until they expire, and rotating one
+    /// writes its successor in the new format.
+    #[tokio::test]
+    async fn legacy_argon2_refresh_token_still_rotates_into_the_new_format() {
+        let app = TestApp::spawn().await;
+        app.create_authenticated_user("legacy_rt", "securepass")
+            .await;
+        let uid = user::Entity::find()
+            .filter(user::Column::Username.eq("legacy_rt"))
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let now = chrono::Utc::now();
+        let validator = "legacy-validator";
+        sea_orm::ActiveModelTrait::insert(
+            refresh_token::ActiveModel {
+                selector: sea_orm::Set("legacy-selector".into()),
+                validator: sea_orm::Set(server::utils::hash::hash_password(validator).unwrap()),
+                user_id: sea_orm::Set(uid),
+                expires_at: sea_orm::Set(now + chrono::Duration::days(1)),
+                created_at: sea_orm::Set(now),
+                revoked_at: sea_orm::Set(None),
+            },
+            &app.db,
+        )
+        .await
+        .unwrap();
+
+        let res = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": format!("legacy-selector:{validator}") }),
+            )
+            .await;
+        assert_eq!(res.status, 200, "legacy refresh: {}", res.text);
+
+        let successor = res.body["refresh_token"].as_str().unwrap();
+        let (selector, _) = successor.split_once(':').unwrap();
+        let row = refresh_token::Entity::find_by_id(selector.to_owned())
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.validator.starts_with("sha256$"),
+            "successor stored as {}",
+            row.validator
+        );
+
+        let again = app
+            .post_without_token(routes::CLI_REFRESH, &json!({ "refresh_token": successor }))
+            .await;
+        assert_eq!(again.status, 200, "sha256 refresh: {}", again.text);
+    }
+
+    #[tokio::test]
+    async fn wrong_validator_is_rejected() {
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "wrong_rt", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let login = app.post_without_token(routes::CLI_TOKEN, &json!({})).await;
+        assert_eq!(
+            login.status, 401,
+            "cli-token needs a bearer: {}",
+            login.text
+        );
+
+        let token = app.post_without_token(routes::LOGIN, &body).await.body["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let issued = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &token)
+            .await;
+        let rt = issued.body["refresh_token"].as_str().unwrap();
+        let (selector, _) = rt.split_once(':').unwrap();
+
+        let res = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": format!("{selector}:not-the-validator") }),
+            )
+            .await;
+        assert_eq!(res.status, 401);
+        assert_eq!(res.body["code"], "TOKEN_INVALID");
     }
 }
 

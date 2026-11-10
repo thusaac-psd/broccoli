@@ -1,4 +1,4 @@
-use sea_orm::{Set, entity::prelude::*};
+use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::soft_delete::SoftDeletable;
@@ -40,21 +40,6 @@ impl SoftDeletable for Entity {
     type DeletedAtColumn = Column;
     fn deleted_at() -> Self::DeletedAtColumn {
         Column::DeletedAt
-    }
-}
-
-impl Model {
-    pub async fn assign_role<C>(self, db: &C, role_name: String) -> Result<(), sea_orm::DbErr>
-    where
-        C: ConnectionTrait,
-    {
-        super::user_role::ActiveModel {
-            user_id: Set(self.id),
-            role: Set(role_name),
-        }
-        .insert(db)
-        .await?;
-        Ok(())
     }
 }
 

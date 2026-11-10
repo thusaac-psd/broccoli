@@ -4,15 +4,19 @@ use sea_orm::*;
 use sea_query::{Expr, Index, IndexCreateStatement, PostgresQueryBuilder};
 use tracing::{error, info};
 
+use crate::config::BootstrapConfig;
 use crate::entity::{
-    additional_file, clarification, dead_letter_message, plugin_storage, problem_attachment, role,
-    role_permission, submission, submission_judgement, test_case, test_case_result, user,
-    user_role,
+    additional_file, clarification, dead_letter_message, plugin_storage, problem_attachment,
+    refresh_token, role, role_permission, submission, submission_judgement, test_case,
+    test_case_result, user, user_role,
 };
+use crate::services::privileges::SystemAdminLock;
 use crate::utils::hash;
+use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::test_case_body::{INLINE_TEST_CASE_BODY_THRESHOLD_BYTES, prepare_test_case_body};
 
-const DEFAULT_ROLES: &[&str] = &["admin", "problem_setter", "contestant"];
+const ADMIN_ROLE: &str = "admin";
+const DEFAULT_ROLES: &[&str] = &[ADMIN_ROLE, "problem_setter", "contestant"];
 const SERVER_MIGRATION_PLUGIN_ID: &str = "__server_migration";
 const SERVER_MIGRATION_COLLECTION: &str = "default";
 const LARGE_TEST_CASE_BODY_BACKFILL_KEY: &str = "large_test_case_body_backfill_v1";
@@ -41,6 +45,28 @@ const DEFAULT_MAPPINGS: &[(&str, &str)] = &[
     ("contestant", perm::SUBMISSION_SUBMIT),
 ];
 
+/// Apply each built-in mapping to `role_permission` exactly once, the first
+/// time it is recorded in `seeded_role_permission`. A mapping an admin later
+/// revokes stays revoked across restarts; a mapping added to
+/// [`DEFAULT_MAPPINGS`] by a later release is applied on its first boot.
+const SEED_MAPPINGS_SQL: &str = r#"
+WITH mapping AS (
+    SELECT role, permission
+    FROM jsonb_to_recordset($1::jsonb) AS m(role text, permission text)
+),
+recorded AS (
+    INSERT INTO seeded_role_permission (role, permission)
+    SELECT role, permission FROM mapping
+    ON CONFLICT DO NOTHING
+    RETURNING role, permission
+)
+INSERT INTO role_permission (role, permission)
+SELECT role, permission FROM recorded
+ON CONFLICT DO NOTHING
+"#;
+
+/// Ensure the built-in roles exist and apply new built-in role-permission
+/// mappings (see [`SEED_MAPPINGS_SQL`]).
 pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr> {
     let mut roles_inserted = 0u32;
     for &name in DEFAULT_ROLES {
@@ -68,31 +94,20 @@ pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr>
         info!("Seeded {} new roles", roles_inserted);
     }
 
-    let mut perms_inserted = 0u32;
-    for &(role, permission) in DEFAULT_MAPPINGS {
-        let model = role_permission::ActiveModel {
-            role: Set(role.to_string()),
-            permission: Set(permission.to_string()),
-        };
-
-        let result = role_permission::Entity::insert(model)
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::columns([
-                    role_permission::Column::Role,
-                    role_permission::Column::Permission,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec_without_returning(db)
-            .await;
-
-        match result {
-            Ok(_) => perms_inserted += 1,
-            Err(DbErr::RecordNotInserted) => {}
-            Err(e) => return Err(e),
-        }
-    }
+    let mappings = serde_json::Value::Array(
+        DEFAULT_MAPPINGS
+            .iter()
+            .map(|(role, permission)| serde_json::json!({ "role": role, "permission": permission }))
+            .collect(),
+    );
+    let perms_inserted = db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            SEED_MAPPINGS_SQL,
+            [mappings.into()],
+        ))
+        .await?
+        .rows_affected();
 
     if perms_inserted > 0 {
         info!("Seeded {} new role-permission mappings", perms_inserted);
@@ -101,78 +116,107 @@ pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr>
     Ok(())
 }
 
+/// Make sure the configured bootstrap admin can sign in, without undoing an
+/// operator's later changes on every boot of every replica.
+///
+/// - No active user has the bootstrap username: create it with the configured
+///   password and the `admin` role.
+/// - The user exists: leave it alone (its password may have been changed in
+///   the UI, its role revoked on purpose), unless one of the recovery
+///   conditions holds:
+///   - `reset_admin` is set: an explicit request, for example after the admin
+///     password was lost;
+///   - no active user holds `system:admin`: nobody could repair access through
+///     the API.
+///
+///   Recovery resets the password to the configured one, ends the user's
+///   sessions, grants the `admin` role and re-applies the built-in `admin`
+///   permissions.
 pub async fn ensure_bootstrap_admin(
     db: &DatabaseConnection,
-    username: &str,
-    password: &str,
+    bootstrap: &BootstrapConfig,
 ) -> Result<(), DbErr> {
-    let username = username.trim();
+    let username = bootstrap.admin_username.trim();
+    let password = bootstrap.admin_password.as_str();
     if username.is_empty() || password.is_empty() {
         return Ok(());
     }
-
-    if let Some(existing) = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .filter(user::Column::DeletedAt.is_null())
-        .one(db)
-        .await?
-    {
-        let password_hash = hash::hash_password(password)
-            .map_err(|e| DbErr::Custom(format!("failed to hash bootstrap admin password: {e}")))?;
-        let mut active: user::ActiveModel = existing.clone().into();
-        active.password = Set(password_hash);
-        active.update(db).await?;
-        ensure_user_role(db, existing.id, "admin").await?;
-        info!(username, "Ensured bootstrap admin user");
-        return Ok(());
-    }
-
-    let password_hash = hash::hash_password(password)
-        .map_err(|e| DbErr::Custom(format!("failed to hash bootstrap admin password: {e}")))?;
-
-    let txn = db.begin().await?;
-    let created = user::ActiveModel {
-        username: Set(username.to_string()),
-        display_name: Set(username.to_string()),
-        password: Set(password_hash),
-        created_at: Set(chrono::Utc::now()),
-        ..Default::default()
-    }
-    .insert(&txn)
-    .await?;
-
-    ensure_user_role(&txn, created.id, "admin").await?;
-    txn.commit().await?;
-
-    info!(username, "Created bootstrap admin user");
-    Ok(())
-}
-
-async fn ensure_user_role<C>(db: &C, user_id: i32, role_name: &str) -> Result<(), DbErr>
-where
-    C: ConnectionTrait,
-{
-    let model = user_role::ActiveModel {
-        user_id: Set(user_id),
-        role: Set(role_name.to_string()),
+    let hash_configured_password = || async {
+        hash::hash_password_off_thread(password.to_owned())
+            .await
+            .map_err(|e| DbErr::Custom(format!("failed to hash bootstrap admin password: {e}")))
     };
 
-    let result = user_role::Entity::insert(model)
+    let txn = db.begin().await?;
+    // Serializes with every write that can remove a `system:admin` holder, so
+    // the holder check below cannot race one.
+    let admins = SystemAdminLock::acquire(&txn).await.map_err(app_err)?;
+
+    let Some(existing) = user::Entity::find_active()
+        .filter(user::Column::Username.eq(username))
+        .one(&txn)
+        .await?
+    else {
+        let created = user::ActiveModel {
+            username: Set(username.to_string()),
+            display_name: Set(username.to_string()),
+            password: Set(hash_configured_password().await?),
+            created_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await?;
+        user_role::Entity::grant(&txn, created.id, ADMIN_ROLE).await?;
+        txn.commit().await?;
+        info!(username, "Created bootstrap admin user");
+        return Ok(());
+    };
+
+    let reason = if bootstrap.reset_admin {
+        "bootstrap.reset_admin is set"
+    } else if !admins.any_holder().await.map_err(app_err)? {
+        "no active user holds system:admin"
+    } else {
+        info!(
+            username,
+            "Bootstrap admin exists; leaving its password and roles unchanged"
+        );
+        return Ok(());
+    };
+
+    let mut active: user::ActiveModel = existing.clone().into();
+    active.password = Set(hash_configured_password().await?);
+    active.update(&txn).await?;
+    refresh_token::Entity::revoke_all_for_user(&txn, existing.id).await?;
+    user_role::Entity::grant(&txn, existing.id, ADMIN_ROLE).await?;
+    for &(role, permission) in DEFAULT_MAPPINGS.iter().filter(|(r, _)| *r == ADMIN_ROLE) {
+        role_permission::Entity::insert(role_permission::ActiveModel {
+            role: Set(role.to_owned()),
+            permission: Set(permission.to_owned()),
+        })
         .on_conflict(
             sea_orm::sea_query::OnConflict::columns([
-                user_role::Column::UserId,
-                user_role::Column::Role,
+                role_permission::Column::Role,
+                role_permission::Column::Permission,
             ])
             .do_nothing()
             .to_owned(),
         )
-        .exec_without_returning(db)
-        .await;
-
-    match result {
-        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-        Err(e) => Err(e),
+        .exec_without_returning(&txn)
+        .await?;
     }
+    user::Entity::touch_credentials_changed_for_role(&txn, ADMIN_ROLE).await?;
+    txn.commit().await?;
+    tracing::warn!(
+        username,
+        reason,
+        "Recovered bootstrap admin: password reset, admin role and permissions restored"
+    );
+    Ok(())
+}
+
+fn app_err(e: crate::error::AppError) -> DbErr {
+    DbErr::Custom(format!("{e:?}"))
 }
 
 /// Indexes the entity schema sync does not declare. UNIQUE ones enforce

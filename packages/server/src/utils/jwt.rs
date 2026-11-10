@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 
@@ -21,15 +21,19 @@ pub struct Claims {
     pub iat: u64,
 }
 
+/// Sign a 5-minute access token. `issued_at` comes from the database clock
+/// (see `services::auth_tokens`), the same clock that stamps
+/// `user.credentials_changed_at`, so `FreshAuthUser`'s `iat` comparison does
+/// not depend on clock agreement between server replicas.
 pub fn sign_access_token(
     user_id: i32,
     username: &str,
     roles: Vec<String>,
     permissions: Vec<String>,
+    issued_at: DateTime<Utc>,
     secret: &str,
 ) -> Result<String> {
-    let now = Utc::now();
-    let expiration = now
+    let expiration = issued_at
         .checked_add_signed(Duration::minutes(5))
         .expect("valid timestamp")
         .timestamp();
@@ -41,7 +45,7 @@ pub fn sign_access_token(
         roles,
         permissions,
         exp: expiration as u64,
-        iat: now.timestamp().max(0) as u64,
+        iat: issued_at.timestamp().max(0) as u64,
     };
 
     let token = encode(
