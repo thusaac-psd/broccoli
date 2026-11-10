@@ -169,15 +169,14 @@ async fn rejudge_epochs_are_unique() {
     );
 }
 
-/// BUG (med): rejudging an in-flight submission flips its current judgement
-/// to `is_current=false` but leaves it `is_finalized=false`. Its pending
+/// B6 (#57, med): rejudging an in-flight submission flipped its current
+/// judgement to `is_current=false` but left it `is_finalized=false`. Its pending
 /// finalize is then rejected (`submission_update` requires is_current or max
 /// version), so it never finalizes; the stuck detector re-runs it up to
 /// `max_stuck_retries` times and finally DLQs it. The stuck-retry path
 /// finalizes the judgement it supersedes; the rejudge path does not.
 /// Location: handlers/submission/dispatch.rs `open_rejudge_judgement`.
 #[tokio::test]
-#[ignore = "BUG: rejudging an in-flight submission strands the superseded judgement unfinalized"]
 async fn rejudge_finalizes_the_superseded_inflight_judgement() {
     let app = TestApp::spawn().await;
     let token = app
@@ -239,6 +238,18 @@ async fn rejudge_finalizes_the_superseded_inflight_judgement() {
         "superseded judgement left unfinalized in {:?}; stuck detector will re-run it",
         old.status
     );
+    assert_eq!(old.status, SubmissionStatus::SystemError);
+    assert_eq!(old.error_code.as_deref(), Some("SUPERSEDED"));
+
+    // Finalized, it can now be discarded like any other old version.
+    let discard = app
+        .post_with_token(
+            &routes::submission_judgement_discard(sub.id, j1.id),
+            &json!({}),
+            &token,
+        )
+        .await;
+    assert_eq!(discard.status, 204, "discard: {}", discard.text);
 }
 
 /// BUG (low): `retry_count` is documented as per-dispatch attempts ("1 after a

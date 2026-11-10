@@ -448,12 +448,12 @@ async fn direct_submission_recovery_sql_claims_detector_lease() {
     redispatched.leased_at = Some(now);
 
     // Queries: submission UPDATE ... RETURNING, latest-version lookup,
-    // judgement INSERT ... RETURNING. Execs: finalize + demote of the
-    // superseded judgement.
+    // judgement INSERT ... RETURNING. Exec: the supersede of the abandoned
+    // judgement.
     let db = MockDatabase::new(DbBackend::Postgres)
         .append_query_results([vec![redispatched]])
         .append_query_results([vec![inserted_judgement.clone()], vec![inserted_judgement]])
-        .append_exec_results([mock_exec(), mock_exec()])
+        .append_exec_results([mock_exec()])
         .into_connection();
     let txn = db.begin().await.expect("begin mock transaction");
 

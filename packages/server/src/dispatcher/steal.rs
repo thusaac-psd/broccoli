@@ -1582,6 +1582,8 @@ mod deferred_steal_db_tests {
     async fn stolen_submission_judgement_insert_stamps_owner_and_heartbeat() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
+        let abandoned = current_judgement(&db, sub_id).await.id;
 
         let txn = db.begin().await.expect("begin txn");
         open_judgement(
@@ -1598,8 +1600,17 @@ mod deferred_steal_db_tests {
         .expect("submission is in flight at epoch 0");
         txn.commit().await.expect("commit txn");
 
-        let judgement = current_judgement(&db, sub_id).await;
-        assert!(judgement.is_current, "the inserted judgement is current");
+        let judgement = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+            .filter(submission_judgement::Column::IsCurrent.eq(true))
+            .one(&db)
+            .await
+            .expect("query judgement")
+            .expect("a current judgement exists");
+        assert_ne!(
+            judgement.id, abandoned,
+            "a replacement judgement was inserted"
+        );
         assert_eq!(
             judgement.owner_server_id.as_deref(),
             Some("live-server"),
@@ -1609,6 +1620,25 @@ mod deferred_steal_db_tests {
             judgement.lease_heartbeat_at.is_some(),
             "the inserted judgement carries a live lease heartbeat so the lease \
              fiber refreshes it instead of the steal sweeper re-claiming it"
+        );
+        assert!(
+            judgement.judge_epoch > 0,
+            "the replacement runs at a fresh epoch"
+        );
+
+        // The abandoned judgement is finalized, not left in flight for the
+        // stuck detector to re-run.
+        let abandoned = submission_judgement::Entity::find_by_id(abandoned)
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("abandoned judgement");
+        assert!(!abandoned.is_current);
+        assert!(abandoned.is_finalized);
+        assert_eq!(abandoned.status, SubmissionStatus::SystemError);
+        assert_eq!(
+            abandoned.error_code.as_deref(),
+            Some(SubmissionDlqErrorCode::SUPERSEDED)
         );
     }
 

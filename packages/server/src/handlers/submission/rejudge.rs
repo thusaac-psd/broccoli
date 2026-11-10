@@ -35,7 +35,9 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::validate_contest_type;
 use crate::models::submission::*;
-use crate::services::judgement_lifecycle::{AllocateJudgeEpoch, OpenJudgement, open_judgement};
+use crate::services::judgement_lifecycle::{
+    AllocateJudgeEpoch, OpenJudgement, SupersededBy, open_judgement, supersede_current_judgement,
+};
 use crate::services::submission_dispatch::fire_after_judging_hooks;
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest, required_contest_type};
@@ -101,14 +103,9 @@ pub async fn apply_submission_judgement(
         ));
     }
 
-    submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::IsCurrent,
-            sea_orm::sea_query::Expr::value(false),
-        )
-        .filter(submission_judgement::Column::SubmissionId.eq(id))
-        .exec(&txn)
-        .await?;
+    // A current judgement still in flight is finalized as superseded rather
+    // than left running unfinalized for the stuck detector to retry.
+    supersede_current_judgement(&txn, id, SupersededBy::AppliedJudgement).await?;
 
     let mut active_judgement: submission_judgement::ActiveModel = judgement.clone().into();
     active_judgement.is_current = Set(true);
