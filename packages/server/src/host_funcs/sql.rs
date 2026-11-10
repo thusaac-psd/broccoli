@@ -109,10 +109,15 @@ fn spawn_txn_reaper_with(
 /// state are clean by construction - it CANNOT be poisoned - making the insert
 /// succeed deterministically (modulo a genuine DB failure).
 static PLUGIN_DB_FALLBACK_URL: OnceLock<String> = OnceLock::new();
+/// Session settings (statement timeout, keepalives) for fresh fallback
+/// connections, so they are bounded exactly like the pooled plugin connections.
+static PLUGIN_DB_SESSION: OnceLock<common::db::PgSession> = OnceLock::new();
 
-/// Register the URL for the fresh-connection fallback. Idempotent.
-pub fn set_plugin_db_fallback_url(url: String) {
+/// Register the URL and the app session for the fresh-connection fallback.
+/// Idempotent.
+pub fn set_plugin_db_fallback_url(url: String, session: common::db::PgSession) {
     let _ = PLUGIN_DB_FALLBACK_URL.set(url);
+    let _ = PLUGIN_DB_SESSION.set(crate::database::plugin_session(&session));
 }
 
 /// Connection parameters for the RESTRICTED fresh-connection fallback. When set,
@@ -209,25 +214,16 @@ async fn connect_fresh_single(
     url: &str,
     login: Option<&crate::database::PluginLoginOverride>,
 ) -> Result<DatabaseConnection, sea_orm::DbErr> {
-    use sea_orm::sqlx::ConnectOptions as _;
-    use sea_orm::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-    let mut opts = url
-        .parse::<PgConnectOptions>()
-        .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?
-        .disable_statement_logging();
+    let session = PLUGIN_DB_SESSION.get().cloned().unwrap_or_else(|| {
+        crate::database::plugin_session(&crate::database::app_session(
+            common::db::DEFAULT_STATEMENT_TIMEOUT_SECS,
+        ))
+    });
+    let mut opts = common::db::pg_connect_options(url, &session)?;
     if let Some(login) = login {
         opts = opts.username(&login.username).password(&login.password);
     }
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .min_connections(1)
-        .connect_with(opts)
-        .await
-        .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?;
-    Ok(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(
-        pool,
-    ))
+    common::db::connect_with(common::db::PgPoolSpec::new(1, 1).pool_options(), opts).await
 }
 
 /// Which DB role a fresh fallback connection must assume before running its

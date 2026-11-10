@@ -10,6 +10,17 @@ pub struct DatabaseConfig {
     pub url: String,
     #[serde(default = "default_database_max_connections")]
     pub max_connections: u32,
+    /// Server-side `statement_timeout` for every worker connection, in seconds
+    /// (`0` disables it). See `common::db`.
+    #[serde(default = "common::db::default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+}
+
+impl DatabaseConfig {
+    /// The session every worker connection runs with.
+    pub fn session(&self) -> common::db::PgSession {
+        common::db::PgSession::new("broccoli-worker", self.statement_timeout_secs)
+    }
 }
 
 fn default_database_url() -> String {
@@ -24,6 +35,7 @@ impl Default for DatabaseConfig {
         Self {
             url: default_database_url(),
             max_connections: default_database_max_connections(),
+            statement_timeout_secs: common::db::default_statement_timeout_secs(),
         }
     }
 }
@@ -205,6 +217,9 @@ pub struct WorkerAppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub observability: common::config::ObservabilityConfig,
+    /// Boot-time clock skew bounds against Postgres and Redis.
+    #[serde(default)]
+    pub clock: common::clock::ClockConfig,
 }
 
 impl WorkerAppConfig {

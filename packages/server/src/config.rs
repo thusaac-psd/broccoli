@@ -43,6 +43,11 @@ pub struct DatabaseConfig {
     /// its way back to the privileged app role.
     #[serde(default)]
     pub plugin_url: Option<String>,
+    /// Server-side `statement_timeout` for every pooled connection, in seconds
+    /// (`0` disables it). Boot-time schema sync, migrations and seeding run on a
+    /// separate unbounded session. See `common::db`.
+    #[serde(default = "common::db::default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -53,6 +58,7 @@ impl Default for DatabaseConfig {
             plugin_max_connections: default_plugin_max_connections(),
             plugin_privileged_max_connections: default_plugin_privileged_max_connections(),
             plugin_url: None,
+            statement_timeout_secs: common::db::default_statement_timeout_secs(),
         }
     }
 }
@@ -283,10 +289,10 @@ pub struct ServerConfig {
     #[serde(default = "default_operation_batch_publish_concurrency")]
     pub operation_batch_publish_concurrency: u32,
     /// Address (e.g. `"0.0.0.0:9091"`) for an **optional** dedicated TCP
-    /// listener that serves only `/healthz` and `/metrics` on its own tokio
-    /// runtime + OS thread (UP#14e). When `None`, behavior is identical to
-    /// the legacy setup: the two endpoints are served only on the main
-    /// router and therefore share the main runtime's scheduler.
+    /// listener that serves only `/livez`, `/healthz` (both liveness-only
+    /// there) and `/metrics` on its own tokio runtime + OS thread (UP#14e).
+    /// When `None`, these endpoints are served only on the main router and
+    /// therefore share the main runtime's scheduler.
     ///
     /// Setting this is **opt-in**: it lets liveness probes and metrics
     /// scrapes survive even when the api runtime is saturated by submission
@@ -695,6 +701,9 @@ pub struct AppConfig {
     pub batch_max_age_secs: u64,
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
+    /// Boot-time clock skew bounds against Postgres and Redis.
+    #[serde(default)]
+    pub clock: common::clock::ClockConfig,
 }
 
 fn default_batch_max_age_secs() -> u64 {

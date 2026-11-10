@@ -99,6 +99,9 @@ pub async fn create_blob_store(
                     .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
             }, metrics.clone())?;
+            // Refuse to start against a missing or inaccessible bucket rather
+            // than failing on the first upload or fetch.
+            store.verify_bucket().await?;
             Arc::new(store)
         }
         #[cfg(not(feature = "object-storage"))]

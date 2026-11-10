@@ -720,6 +720,7 @@ impl TestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
@@ -740,6 +741,7 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            clock: Default::default(),
         };
 
         if let Some(cap) = options.max_queued_submissions {

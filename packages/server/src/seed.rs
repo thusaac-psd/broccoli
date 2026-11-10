@@ -1,7 +1,7 @@
 use broccoli_server_sdk::permissions as perm;
 use common::storage::BlobStore;
 use sea_orm::*;
-use sea_query::{Expr, Index, PostgresQueryBuilder};
+use sea_query::{Expr, Index, IndexCreateStatement, PostgresQueryBuilder};
 use tracing::{error, info};
 
 use crate::entity::{
@@ -175,211 +175,123 @@ where
     }
 }
 
+/// Indexes the entity schema sync does not declare. UNIQUE ones enforce
+/// invariants the application relies on (one active account per username, one
+/// current judgement per submission, ...); the rest are performance aids.
+fn boot_indexes() -> Vec<IndexCreateStatement> {
+    vec![
+        Index::create()
+            .name("idx_submission_user_created")
+            .table(submission::Entity)
+            .col(submission::Column::UserId)
+            .col(submission::Column::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_dlq_resolved_created")
+            .table(dead_letter_message::Entity)
+            .col(dead_letter_message::Column::Resolved)
+            .col(dead_letter_message::Column::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .unique()
+            .name("idx_user_username_active")
+            .table(user::Entity)
+            .col(user::Column::Username)
+            .and_where(Expr::col(user::Column::DeletedAt).is_null())
+            .to_owned(),
+        Index::create()
+            .unique()
+            .name("idx_problem_attachment_problem_path_unique")
+            .table(problem_attachment::Entity)
+            .col(problem_attachment::Column::ProblemId)
+            .col(problem_attachment::Column::Path)
+            .to_owned(),
+        Index::create()
+            .name("idx_problem_attachment_problem_id")
+            .table(problem_attachment::Entity)
+            .col(problem_attachment::Column::ProblemId)
+            .to_owned(),
+        Index::create()
+            .unique()
+            .name("idx_additional_file_problem_lang_path_unique")
+            .table(additional_file::Entity)
+            .col(additional_file::Column::ProblemId)
+            .col(additional_file::Column::Language)
+            .col(additional_file::Column::Path)
+            .to_owned(),
+        Index::create()
+            .name("idx_additional_file_problem_id")
+            .table(additional_file::Entity)
+            .col(additional_file::Column::ProblemId)
+            .to_owned(),
+        Index::create()
+            .name("idx_clarification_contest_created")
+            .table(clarification::Entity)
+            .col(clarification::Column::ContestId)
+            .col(clarification::Column::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .unique()
+            .name("idx_submission_judgement_version_unique")
+            .table(submission_judgement::Entity)
+            .col(submission_judgement::Column::SubmissionId)
+            .col(submission_judgement::Column::Version)
+            .to_owned(),
+        Index::create()
+            .unique()
+            .name("idx_submission_judgement_one_current")
+            .table(submission_judgement::Entity)
+            .col(submission_judgement::Column::SubmissionId)
+            .and_where(Expr::col(submission_judgement::Column::IsCurrent))
+            .to_owned(),
+        Index::create()
+            .name("idx_test_case_result_judgement")
+            .table(test_case_result::Entity)
+            .col(test_case_result::Column::JudgementId)
+            .to_owned(),
+    ]
+}
+
+/// Create every [`boot_indexes`] entry that is missing.
+///
+/// A UNIQUE index that cannot be created means its invariant is not enforced
+/// (typically because duplicate rows already exist), so boot fails loudly
+/// instead of running on silently. Callers run this under the boot lock (see
+/// [`crate::database::BootSession`]), so a failure is never a concurrent-create
+/// race with a peer. A failed performance index only costs speed and is logged.
 pub async fn ensure_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_submission_user_created")
-        .table(submission::Entity)
-        .col(submission::Column::UserId)
-        .col(submission::Column::CreatedAt)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_submission_user_created exists");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to create index idx_submission_user_created: {}", e);
-        }
+    for mut index in boot_indexes() {
+        ensure_index(db, index.if_not_exists()).await?;
     }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_dlq_resolved_created")
-        .table(dead_letter_message::Entity)
-        .col(dead_letter_message::Column::Resolved)
-        .col(dead_letter_message::Column::CreatedAt)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_dlq_resolved_created exists");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to create index idx_dlq_resolved_created: {}", e);
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .unique()
-        .name("idx_user_username_active")
-        .table(user::Entity)
-        .col(user::Column::Username)
-        .and_where(Expr::col(user::Column::DeletedAt).is_null())
-        .to_string(PostgresQueryBuilder);
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => info!("Ensured partial unique index idx_user_username_active exists"),
-        Err(e) => tracing::warn!("Failed to create idx_user_username_active: {}", e),
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .unique()
-        .name("idx_problem_attachment_problem_path_unique")
-        .table(problem_attachment::Entity)
-        .col(problem_attachment::Column::ProblemId)
-        .col(problem_attachment::Column::Path)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_problem_attachment_problem_path_unique exists");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to create index idx_problem_attachment_problem_path_unique: {}",
-                e
-            );
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_problem_attachment_problem_id")
-        .table(problem_attachment::Entity)
-        .col(problem_attachment::Column::ProblemId)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_problem_attachment_problem_id exists");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to create index idx_problem_attachment_problem_id: {}",
-                e
-            );
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .unique()
-        .name("idx_additional_file_problem_lang_path_unique")
-        .table(additional_file::Entity)
-        .col(additional_file::Column::ProblemId)
-        .col(additional_file::Column::Language)
-        .col(additional_file::Column::Path)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_additional_file_problem_lang_path_unique exists");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to create index idx_additional_file_problem_lang_path_unique: {}",
-                e
-            );
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_additional_file_problem_id")
-        .table(additional_file::Entity)
-        .col(additional_file::Column::ProblemId)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_additional_file_problem_id exists");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to create index idx_additional_file_problem_id: {}",
-                e
-            );
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_clarification_contest_created")
-        .table(clarification::Entity)
-        .col(clarification::Column::ContestId)
-        .col(clarification::Column::CreatedAt)
-        .to_string(PostgresQueryBuilder);
-
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => {
-            info!("Ensured index idx_clarification_contest_created exists");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to create index idx_clarification_contest_created: {}",
-                e
-            );
-        }
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .unique()
-        .name("idx_submission_judgement_version_unique")
-        .table(submission_judgement::Entity)
-        .col(submission_judgement::Column::SubmissionId)
-        .col(submission_judgement::Column::Version)
-        .to_string(PostgresQueryBuilder);
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => info!("Ensured idx_submission_judgement_version_unique exists"),
-        Err(e) => tracing::warn!(
-            "Failed to create idx_submission_judgement_version_unique: {}",
-            e
-        ),
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .unique()
-        .name("idx_submission_judgement_one_current")
-        .table(submission_judgement::Entity)
-        .col(submission_judgement::Column::SubmissionId)
-        .and_where(Expr::col(submission_judgement::Column::IsCurrent))
-        .to_string(PostgresQueryBuilder);
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => info!("Ensured idx_submission_judgement_one_current exists"),
-        Err(e) => tracing::warn!(
-            "Failed to create idx_submission_judgement_one_current: {}",
-            e
-        ),
-    }
-
-    let stmt = Index::create()
-        .if_not_exists()
-        .name("idx_test_case_result_judgement")
-        .table(test_case_result::Entity)
-        .col(test_case_result::Column::JudgementId)
-        .to_string(PostgresQueryBuilder);
-    let result = db.execute_unprepared(&stmt).await;
-    match result {
-        Ok(_) => info!("Ensured idx_test_case_result_judgement exists"),
-        Err(e) => tracing::warn!("Failed to create idx_test_case_result_judgement: {}", e),
-    }
-
     Ok(())
+}
+
+async fn ensure_index(db: &DatabaseConnection, index: &IndexCreateStatement) -> Result<(), DbErr> {
+    let name = index.get_index_spec().get_name().unwrap_or("<unnamed>");
+    match db
+        .execute_unprepared(&index.to_string(PostgresQueryBuilder))
+        .await
+    {
+        Ok(_) => {
+            info!(index = name, "Ensured index exists");
+            Ok(())
+        }
+        Err(e) if index.is_unique_key() => {
+            error!(
+                index = name,
+                error = %e,
+                "Failed to create a UNIQUE index; refusing to start without the invariant \
+                 it enforces. Remove the duplicate rows it reports, then restart."
+            );
+            Err(DbErr::Custom(format!(
+                "failed to create unique index {name}: {e}"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(index = name, error = %e, "Failed to create index");
+            Ok(())
+        }
+    }
 }
 
 /// One-shot migration that ensures every existing submission has a v1
