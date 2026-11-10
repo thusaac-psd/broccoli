@@ -139,20 +139,23 @@ pub async fn sync_plugins(state: &AppState) -> anyhow::Result<Vec<PluginActivati
     for plugin in state.plugins.list_plugins()? {
         let plugin_id = plugin.id.clone();
 
-        let plugin_model = plugin_entity::Entity::find_by_id(plugin_id.clone())
+        // Replicas booting together all discover the same new plugin, so the
+        // row must be created idempotently: a find-then-insert lets the
+        // slower replica fail its whole boot on the primary-key conflict.
+        plugin_entity::Entity::insert(plugin_entity::ActiveModel {
+            id: Set(plugin_id.clone()),
+            is_enabled: Set(true),
+            updated_at: Set(chrono::Utc::now()),
+        })
+        .on_conflict_do_nothing_on([plugin_entity::Column::Id])
+        .exec(&state.db)
+        .await?;
+        let plugin_model = plugin_entity::Entity::find_by_id(plugin_id)
             .one(&state.db)
-            .await?;
-        let plugin_model = match plugin_model {
-            None => {
-                let new_plugin = plugin_entity::ActiveModel {
-                    id: Set(plugin_id),
-                    is_enabled: Set(true),
-                    updated_at: Set(chrono::Utc::now()),
-                };
-                new_plugin.insert(&state.db).await?
-            }
-            Some(existing_plugin) => existing_plugin,
-        };
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("plugin row for '{}' vanished after upsert", plugin.id)
+            })?;
 
         if plugin_model.is_enabled {
             match activate_plugin(state, &plugin.id).await {
