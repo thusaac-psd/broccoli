@@ -33,8 +33,7 @@ pub fn sign_access_token(
     issued_at: DateTime<Utc>,
     secret: &str,
 ) -> Result<String> {
-    let now = issued_at;
-    let expiration = now
+    let expiration = issued_at
         .checked_add_signed(Duration::minutes(5))
         .expect("valid timestamp")
         .timestamp();
@@ -46,7 +45,7 @@ pub fn sign_access_token(
         roles,
         permissions,
         exp: expiration as u64,
-        iat: now.timestamp().max(0) as u64,
+        iat: issued_at.timestamp().max(0) as u64,
     };
 
     let token = encode(

@@ -44,8 +44,8 @@ async fn invalidate_sessions(app: &TestApp, uid: i32) {
         .expect("bump credentials_changed_at");
 }
 
-/// BUG (high): `/auth/cli-token` takes the stateless `AuthUser` (signature +
-/// exp only) and re-signs the OLD token's roles/permissions with `iat = now`.
+/// Regression guard for #53. `/auth/cli-token` used to take the stateless
+/// `AuthUser` (signature + exp only) and re-sign the OLD token's roles/permissions with `iat = now`.
 /// The new token then passes `FreshAuthUser`'s `iat >= credentials_changed_at`
 /// check, so a token revoked by a role change / password reset is laundered
 /// into a "fresh" one, plus a brand-new 7-day refresh token. Chaining it
@@ -79,8 +79,8 @@ async fn cli_token_refuses_a_stale_access_token() {
     );
 }
 
-/// BUG (high): same root cause, soft-deleted user. The deleted account keeps
-/// minting fresh tokens + refresh tokens.
+/// Regression guard for #53: same root cause, soft-deleted user. The deleted
+/// account kept minting fresh tokens + refresh tokens.
 #[tokio::test]
 async fn cli_token_refuses_a_deleted_user() {
     let app = TestApp::spawn().await;
@@ -236,12 +236,10 @@ async fn device_authorize_issues_a_token_from_current_roles() {
     );
 }
 
-/// BUG (high): `assign_role`/`revoke_role` enforce a privilege ceiling
-/// (`require_role_within_ceiling`: "you cannot grant or revoke what you do
-/// not hold") but `update_user` and `delete_user` only check USER_MANAGE. A
-/// USER_MANAGE-only principal can reset an admin's password and log in as
-/// them, or delete every admin.
-/// Location: handlers/user.rs `update_user`, `delete_user`.
+/// Regression guard for #54. `update_user` and `delete_user` used to check only
+/// USER_MANAGE, so a USER_MANAGE-only principal could reset an admin's
+/// password and log in as them, or delete every admin. Both now apply
+/// `services::privileges::require_within_ceiling`.
 #[tokio::test]
 async fn user_manager_cannot_take_over_an_admin() {
     let app = TestApp::spawn().await;
@@ -320,11 +318,10 @@ async fn user_manager_can_manage_accounts_within_its_ceiling() {
     assert_eq!(res.status, 204, "{}", res.text);
 }
 
-/// BUG (med): `update_user` applies `username` raw: no trim/length/charset
-/// validation and no uniqueness pre-check, so a duplicate surfaces as a DB
-/// error -> 500 INTERNAL_ERROR (the create path maps it to 409
-/// USERNAME_TAKEN). The password is not length-checked either.
-/// Location: handlers/user.rs `update_user`.
+/// Regression guard for #67. `update_user` used to store `username` raw (no
+/// trim/length/charset validation) and let a duplicate surface as a 500; the
+/// password was not length-checked either. It now validates like registration
+/// and maps a clash to 409 USERNAME_TAKEN.
 #[tokio::test]
 async fn update_user_to_taken_username_is_a_conflict() {
     let app = TestApp::spawn().await;
@@ -379,9 +376,9 @@ async fn update_user_validates_like_registration() {
     assert_eq!(login.status, 200, "{}", login.text);
 }
 
-/// BUG (med): assigning a role the user already holds (every new user holds
-/// `contestant` via DEFAULT_ROLES) inserts a duplicate composite PK -> 500.
-/// Location: handlers/user.rs `assign_role`.
+/// Regression guard for #69. Assigning a role the user already holds (every
+/// new user holds `contestant` via DEFAULT_ROLES) used to insert a duplicate
+/// composite PK and return 500; it is now an idempotent 200.
 #[tokio::test]
 async fn assigning_an_already_held_role_is_not_a_server_error() {
     let app = TestApp::spawn().await;
@@ -480,11 +477,10 @@ async fn created_user_password_is_not_persisted_by_idempotency_cache() {
     );
 }
 
-/// DESIGN BUG (med, policy to confirm): `seed_role_permissions` re-inserts
-/// every DEFAULT_MAPPINGS row on every boot (`ON CONFLICT DO NOTHING`), so an
-/// admin's deliberate revoke of a built-in permission is silently undone at
-/// the next restart. Either persist the revoke or reject edits to built-ins.
-/// Location: seed.rs, called unconditionally from runtime.rs.
+/// Regression guard for #68. `seed_role_permissions` used to re-insert every
+/// DEFAULT_MAPPINGS row on every boot, silently undoing an admin's revoke of a
+/// built-in permission. Seeding now records each mapping in
+/// `seeded_role_permission` and applies it once.
 #[tokio::test]
 async fn revoked_builtin_permission_survives_reseed() {
     let app = TestApp::spawn().await;
