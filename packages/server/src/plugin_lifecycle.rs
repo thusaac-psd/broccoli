@@ -39,7 +39,10 @@ use crate::error::AppError;
 use crate::models::plugin::{ReloadAllResponse, ReloadFailure};
 use crate::plugin_fleet::{self, ReplicaPluginState, ReplicaPluginStatus, ReplicaReport};
 use crate::state::AppState;
-use crate::utils::plugin::{PluginActivationFailure, activate_plugin, purge_plugin_registrations};
+use crate::utils::plugin::{
+    self as plugin_utils, LoadFailure, PluginActivationFailure, PreviousVersion,
+    purge_plugin_registrations,
+};
 
 /// How often every replica re-reads the desired plugin state.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -64,14 +67,20 @@ pub struct PluginLifecycle {
     /// when, so an unchanged report is only re-touched every
     /// [`plugin_fleet::TOUCH_INTERVAL`].
     reported: std::sync::Mutex<Option<(ReplicaReport, Instant)>>,
+    /// Plugins still serving a previous version because the latest failed to
+    /// load here, with that error (for readiness).
+    outdated: RwLock<HashMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Applied {
     generation: i64,
     enabled: bool,
     /// Set while the last load of this generation failed.
     retry: Option<Retry>,
+    /// Set when that failed load was a reload and the previously loaded
+    /// version is still serving: the error the new version failed with.
+    kept_previous: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,8 +161,17 @@ pub fn not_ready(state: &AppState) -> Vec<PluginNotReady> {
         }];
     };
     for id in state.plugin_lifecycle.desired_enabled_ids() {
+        let outdated = state
+            .plugin_lifecycle
+            .outdated
+            .read()
+            .ok()
+            .and_then(|o| o.get(&id).cloned());
         let reason = match registry.get(&id).map(|e| &e.status) {
-            Some(PluginStatus::Loaded) => continue,
+            Some(PluginStatus::Loaded) => match outdated {
+                Some(error) => format!("still on the previous version: {error}"),
+                None => continue,
+            },
             Some(PluginStatus::Failed(error)) => error.clone(),
             Some(PluginStatus::Unloaded) => "not loaded yet".to_string(),
             None => "not installed on this replica".to_string(),
@@ -199,6 +217,12 @@ async fn with_applied<T>(
 ) -> T {
     let mut applied = state.plugin_lifecycle.applied.lock().await;
     let out = f(&mut applied).await;
+    if let Ok(mut outdated) = state.plugin_lifecycle.outdated.write() {
+        *outdated = applied
+            .iter()
+            .filter_map(|(id, a)| Some((id.clone(), a.kept_previous.clone()?)))
+            .collect();
+    }
     write_report(state, &applied).await;
     out
 }
@@ -217,7 +241,11 @@ fn build_report(
     ids.into_iter()
         .map(|id| {
             let a = applied.get(id);
+            let kept_previous = a.and_then(|a| a.kept_previous.clone());
             let (status, error) = match registry.get(id).map(|e| &e.status) {
+                Some(PluginStatus::Loaded) if kept_previous.is_some() => {
+                    (ReplicaPluginStatus::Outdated, kept_previous)
+                }
                 Some(PluginStatus::Loaded) => (ReplicaPluginStatus::Loaded, None),
                 Some(PluginStatus::Failed(e)) => (ReplicaPluginStatus::Failed, Some(e.clone())),
                 None if a.is_some_and(|a| a.enabled) => (ReplicaPluginStatus::NotInstalled, None),
@@ -346,6 +374,7 @@ async fn apply(
                 generation: desired.generation,
                 enabled: false,
                 retry: None,
+                kept_previous: None,
             },
         );
         return Ok(());
@@ -362,40 +391,58 @@ async fn apply(
     }
 
     let result = load_from_disk(state, plugin_id).await;
-    let retry = result.as_ref().err().map(|_| Retry::after(retry, now));
-    if let (Some(r), Err(e)) = (retry, &result) {
-        tracing::warn!(
-            plugin_id,
-            attempts = r.attempts,
-            retry_in_secs = retry_delay(r.attempts).as_secs(),
-            error = %e,
-            "Plugin failed to load on this replica; will retry"
-        );
-    }
+    let (retry, kept_previous) = match &result {
+        Ok(_) => (None, None),
+        Err(failure) => {
+            let r = Retry::after(retry, now);
+            tracing::warn!(
+                plugin_id,
+                attempts = r.attempts,
+                retry_in_secs = retry_delay(r.attempts).as_secs(),
+                kept_previous = failure.kept_previous,
+                error = %failure.error,
+                "Plugin failed to load on this replica; will retry"
+            );
+            (
+                Some(r),
+                failure.kept_previous.then(|| failure.error.to_string()),
+            )
+        }
+    };
     applied.insert(
         plugin_id.to_string(),
         Applied {
             generation: desired.generation,
             enabled: true,
             retry,
+            kept_previous,
         },
     );
-    result
+    result.map(drop).map_err(|f| f.error)
 }
 
-/// (Re)load a plugin from this replica's disk: re-read its manifest, rebuild
-/// its runtime, register its hooks and run `init()`. On any failure the
-/// plugin is left unloaded with status `Failed`, never half-registered.
-async fn load_from_disk(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
-    if !discover(state, plugin_id)? {
-        return Err(PluginError::NotFound(plugin_id.to_string()));
+/// (Re)load a plugin from this replica's disk, keeping a working loaded
+/// version if the new one fails (see [`plugin_utils::reload_from_disk`]).
+async fn load_from_disk(
+    state: &AppState,
+    plugin_id: &str,
+) -> Result<Option<PreviousVersion>, LoadFailure> {
+    match discover(state, plugin_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(LoadFailure {
+                error: PluginError::NotFound(plugin_id.to_string()),
+                kept_previous: false,
+            });
+        }
+        Err(error) => {
+            return Err(LoadFailure {
+                error,
+                kept_previous: false,
+            });
+        }
     }
-    purge_plugin_registrations(&state.registries, plugin_id).await;
-    if let Err(error) = state.plugins.reload_plugin(plugin_id) {
-        crate::utils::plugin::fail_plugin(state, plugin_id, &error).await;
-        return Err(error);
-    }
-    activate_plugin(state, plugin_id).await
+    plugin_utils::reload_from_disk(state, plugin_id).await
 }
 
 async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
@@ -493,21 +540,38 @@ async fn load_then_publish(
     applied: &mut HashMap<String, Applied>,
     plugin_id: &str,
 ) -> Result<(), ChangeError> {
-    if let Err(error) = load_from_disk(state, plugin_id).await {
-        if let Some(a) = applied.get_mut(plugin_id) {
-            a.retry = Some(Retry::after(a.retry, Instant::now()));
+    let previous = match load_from_disk(state, plugin_id).await {
+        Ok(previous) => previous,
+        Err(failure) => {
+            if let Some(a) = applied.get_mut(plugin_id) {
+                a.retry = Some(Retry::after(a.retry, Instant::now()));
+            }
+            return Err(ChangeError::Load(failure.error));
         }
-        return Err(ChangeError::Load(error));
-    }
-    let generation = publish(state, plugin_id, true)
-        .await
-        .map_err(ChangeError::Db)?;
+    };
+    let generation = match publish(state, plugin_id, true).await {
+        Ok(generation) => generation,
+        Err(e) => {
+            // Not published, so the rest of the fleet stays on the old
+            // version: so must this replica, or it alone runs the new code.
+            match previous {
+                Some(previous) => plugin_utils::roll_back(state, plugin_id, previous).await,
+                None => {
+                    if let Err(e) = deactivate(state, plugin_id).await {
+                        tracing::warn!(plugin_id, error = %e, "Failed to unload an unpublished plugin");
+                    }
+                }
+            }
+            return Err(ChangeError::Db(e));
+        }
+    };
     applied.insert(
         plugin_id.to_string(),
         Applied {
             generation,
             enabled: true,
             retry: None,
+            kept_previous: None,
         },
     );
     state.plugin_lifecycle.set_desired(plugin_id, true);

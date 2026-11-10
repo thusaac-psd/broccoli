@@ -398,3 +398,58 @@ async fn a_plugin_broken_on_the_serving_replica_can_still_be_disabled() {
     plugin_lifecycle::reconcile(&a.state).await.unwrap();
     assert_eq!(status(&a, PLUGIN), Some(PluginStatus::Unloaded));
 }
+
+/// A reload published by a peer must never turn a working plugin into a
+/// failed one: if the new version cannot load here, the old one keeps serving
+/// and the replica reports itself outdated.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_reload_that_fails_here_keeps_the_previous_version_serving() {
+    let a = TestApp::spawn_with_plugins().await;
+    let b_dir = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join(PLUGIN), &b_dir.path().join(PLUGIN));
+    let b = a
+        .spawn_replica(SpawnOptions {
+            plugins_dir: Some(b_dir.path().to_path_buf()),
+            allow_plugin_activation_failures: true,
+            ..Default::default()
+        })
+        .await;
+    let token = admin(&a).await;
+    assert_eq!(status(&b, PLUGIN), Some(PluginStatus::Loaded));
+
+    // B's copy breaks (say, a half-finished file sync), then A reloads.
+    std::fs::remove_file(b_dir.path().join(PLUGIN).join("server_plugin.wasm")).unwrap();
+    let res = a
+        .post_with_token(&routes::admin_plugin_reload(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    plugin_lifecycle::reconcile(&b.state).await.unwrap();
+
+    assert_eq!(
+        status(&b, PLUGIN),
+        Some(PluginStatus::Loaded),
+        "B must keep the version it had"
+    );
+    let route = routes::plugin_proxy_with_query(PLUGIN, "reflect/123", "page=1");
+    let res = b.get_without_token(&route).await;
+    assert_eq!(
+        res.status, 200,
+        "the old version still serves on B: {}",
+        res.text
+    );
+
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    let fleet = &find(&res.body, PLUGIN)["fleet"];
+    assert_eq!(fleet["state"], "failed", "{fleet}");
+    let b_entry = fleet["replicas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["server_id"] == b.state.config.server.id.as_str())
+        .unwrap();
+    assert_eq!(b_entry["status"], "outdated", "{b_entry}");
+    assert!(
+        b_entry["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{b_entry}"
+    );
+}

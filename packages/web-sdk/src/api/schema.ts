@@ -3634,7 +3634,12 @@ export interface components {
      * @description One plugin's state on one replica.
      * @enum {string}
      */
-    ReplicaPluginStatus: 'loaded' | 'failed' | 'not_installed' | 'unloaded';
+    ReplicaPluginStatus:
+      | 'loaded'
+      | 'failed'
+      | 'not_installed'
+      | 'outdated'
+      | 'unloaded';
     ReplyClarificationRequest: {
       /** @example Yes, the input is always sorted in ascending order. */
       content: string;

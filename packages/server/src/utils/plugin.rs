@@ -116,6 +116,170 @@ pub async fn fail_plugin(state: &AppState, plugin_id: &str, error: &PluginError)
     let _ = mark_plugin_failed(state.plugins.as_ref(), plugin_id, error);
 }
 
+/// Everything a loaded plugin contributes to the host besides its registry
+/// entry: what its `init()` registered, keyed by the plugin id. Hooks are not
+/// captured; they come from the manifest and are re-registered from it.
+#[derive(Default)]
+pub(crate) struct Registrations {
+    contest_types: Vec<(String, crate::registry::ContestTypeHandlers)>,
+    evaluators: Vec<(String, crate::registry::PluginHandler)>,
+    checker_stages: Vec<(String, crate::registry::CheckerStageHandlers)>,
+    language_resolvers: Vec<(String, crate::registry::LanguageResolverEntry)>,
+}
+
+impl Registrations {
+    pub(crate) async fn capture(registries: &RegistryState, plugin_id: &str) -> Self {
+        fn owned<T: Clone>(
+            map: &std::collections::HashMap<String, T>,
+            plugin_id: &str,
+            owner: impl Fn(&T) -> &str,
+        ) -> Vec<(String, T)> {
+            map.iter()
+                .filter(|(_, v)| owner(v) == plugin_id)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }
+        Self {
+            contest_types: owned(
+                &*registries.contest_type_registry.read().await,
+                plugin_id,
+                |h| &h.plugin_id,
+            ),
+            evaluators: owned(
+                &*registries.evaluator_registry.read().await,
+                plugin_id,
+                |h| &h.plugin_id,
+            ),
+            checker_stages: owned(
+                &*registries.checker_stage_registry.read().await,
+                plugin_id,
+                |h| &h.plugin_id,
+            ),
+            language_resolvers: owned(
+                &*registries.language_resolver_registry.read().await,
+                plugin_id,
+                |h| &h.plugin_id,
+            ),
+        }
+    }
+
+    async fn restore(self, registries: &RegistryState) {
+        registries
+            .contest_type_registry
+            .write()
+            .await
+            .extend(self.contest_types);
+        registries
+            .evaluator_registry
+            .write()
+            .await
+            .extend(self.evaluators);
+        registries
+            .checker_stage_registry
+            .write()
+            .await
+            .extend(self.checker_stages);
+        registries
+            .language_resolver_registry
+            .write()
+            .await
+            .extend(self.language_resolvers);
+    }
+}
+
+/// The version of a plugin that was loaded before a reload replaced it,
+/// kept until the new version is known to work everywhere it has to.
+pub(crate) struct PreviousVersion {
+    entry: plugin_core::registry::PluginEntry,
+    registrations: Registrations,
+}
+
+/// Why a reload did not take.
+#[derive(Debug)]
+pub(crate) struct LoadFailure {
+    pub error: PluginError,
+    /// The previously loaded version is still serving.
+    pub kept_previous: bool,
+}
+
+/// Load `plugin_id` afresh from its directory (re-reading the manifest,
+/// rebuilding the runtime, registering hooks, running `init()`) WITHOUT
+/// losing a version that is already loaded: the old registry entry and
+/// registrations are set aside first and put back if anything fails, so a
+/// reload that cannot load never turns a working plugin into a failed one.
+///
+/// On success the set-aside version is returned, so a caller that must
+/// still confirm the change (publish it to the fleet) can [`roll_back`] to it.
+pub(crate) async fn reload_from_disk(
+    state: &AppState,
+    plugin_id: &str,
+) -> Result<Option<PreviousVersion>, LoadFailure> {
+    let fail = |error, kept_previous| LoadFailure {
+        error,
+        kept_previous,
+    };
+    let registry = state.plugins.get_registry();
+    let lock_err = || PluginError::Internal("Failed to acquire plugin registry lock".into());
+
+    let (root_dir, was_loaded) = {
+        let reg = registry.read().map_err(|_| fail(lock_err(), false))?;
+        let entry = reg
+            .get(plugin_id)
+            .ok_or_else(|| fail(PluginError::NotFound(plugin_id.to_string()), false))?;
+        (
+            entry.root_dir.clone(),
+            entry.status == plugin_core::registry::PluginStatus::Loaded,
+        )
+    };
+    // Parse first: a broken manifest leaves everything as it was.
+    let fresh =
+        plugin_core::registry::PluginEntry::from_dir(&root_dir).map_err(|e| fail(e, was_loaded))?;
+
+    let registrations = if was_loaded {
+        Registrations::capture(&state.registries, plugin_id).await
+    } else {
+        Registrations::default()
+    };
+    purge_plugin_registrations(&state.registries, plugin_id).await;
+    let old = registry
+        .write()
+        .map_err(|_| fail(lock_err(), false))?
+        .insert(plugin_id.to_string(), fresh);
+    let previous = old.filter(|_| was_loaded).map(|entry| PreviousVersion {
+        entry,
+        registrations,
+    });
+
+    match activate_plugin(state, plugin_id).await {
+        Ok(()) => Ok(previous),
+        Err(error) => match previous {
+            Some(previous) => {
+                roll_back(state, plugin_id, previous).await;
+                Err(fail(error, true))
+            }
+            None => Err(fail(error, false)),
+        },
+    }
+}
+
+/// Put back the version [`reload_from_disk`] replaced.
+pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: PreviousVersion) {
+    purge_plugin_registrations(&state.registries, plugin_id).await;
+    let manifest = previous.entry.manifest.clone();
+    if let Ok(mut reg) = state.plugins.get_registry().write() {
+        reg.insert(plugin_id.to_string(), previous.entry);
+    }
+    previous.registrations.restore(&state.registries).await;
+    register_plugin_hooks(state, plugin_id, &manifest).await;
+    if let Err(e) = state.plugins.update_translations() {
+        tracing::warn!(plugin_id, error = %e, "Failed to restore translations after a rollback");
+    }
+    tracing::warn!(
+        plugin_id,
+        "Kept the previously loaded version of the plugin"
+    );
+}
+
 /// Activation outcome for a single plugin during [`sync_plugins`].
 ///
 /// Production startup logs and ignores failures so one broken plugin doesn't

@@ -474,6 +474,7 @@
 'plugins.status.loaded' = '已加载'
 'plugins.status.failed' = '失败'
 'plugins.status.not_installed' = '未安装'
+'plugins.status.outdated' = '仍在运行旧版本'
 'plugins.status.unloaded' = '未加载'
 'plugins.retry' = '重试'
 'plugins.reload' = '重新加载'

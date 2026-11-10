@@ -823,6 +823,7 @@ export const en: Record<string, string> = {
   'plugins.status.loaded': 'Loaded',
   'plugins.status.failed': 'Failed',
   'plugins.status.not_installed': 'Not installed',
+  'plugins.status.outdated': 'Running previous version',
   'plugins.status.unloaded': 'Not loaded',
   'plugins.config.title': 'Configure {name}',
   'plugins.config.description': 'Manage configuration for this plugin.',

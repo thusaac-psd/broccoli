@@ -40,8 +40,24 @@ pub enum ReplicaPluginStatus {
     Failed,
     /// Enabled, but the plugin's files are not on this replica's disk.
     NotInstalled,
+    /// The latest version failed to load here; the previously loaded version
+    /// is still serving, and the replica keeps retrying the new one.
+    Outdated,
     /// Not loaded (disabled, or not applied yet).
     Unloaded,
+}
+
+impl ReplicaPluginStatus {
+    /// Whether this state means the replica is not running the plugin's
+    /// latest version and will not converge without a retry.
+    pub fn is_failure(self) -> bool {
+        matches!(
+            self,
+            ReplicaPluginStatus::Failed
+                | ReplicaPluginStatus::NotInstalled
+                | ReplicaPluginStatus::Outdated
+        )
+    }
 }
 
 /// What one replica reports for one plugin (stored as JSON).
@@ -140,7 +156,7 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
 pub enum FleetPluginState {
     /// Enabled and loaded at the current generation on every live replica.
     Loaded,
-    /// Enabled, and failing (or not installed) on at least one replica.
+    /// Enabled, and failing, not installed or outdated on at least one replica.
     Failed,
     /// Converging: some replica has not applied the latest change yet.
     Pending,
@@ -170,7 +186,8 @@ pub struct PluginFleetResponse {
     pub replicas_total: u32,
     /// Live replicas with the plugin loaded at the latest generation.
     pub replicas_loaded: u32,
-    /// Live replicas where the plugin failed or is not installed.
+    /// Live replicas where the plugin failed, is not installed, or is still on
+    /// a previous version because the latest one failed to load.
     pub replicas_failed: u32,
     pub replicas: Vec<PluginReplicaResponse>,
 }
@@ -211,12 +228,7 @@ fn aggregate(enabled: bool, replicas: Vec<PluginReplicaResponse>) -> PluginFleet
     };
     let total = replicas.len() as u32;
     let loaded = count(&|r| r.status == ReplicaPluginStatus::Loaded && r.up_to_date);
-    let failed = count(&|r| {
-        matches!(
-            r.status,
-            ReplicaPluginStatus::Failed | ReplicaPluginStatus::NotInstalled
-        )
-    });
+    let failed = count(&|r| r.status.is_failure());
     let any_loaded = count(&|r| r.status == ReplicaPluginStatus::Loaded) > 0;
     let state = match (enabled, failed > 0) {
         (true, true) => FleetPluginState::Failed,

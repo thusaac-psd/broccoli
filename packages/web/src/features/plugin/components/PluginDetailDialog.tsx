@@ -112,6 +112,7 @@ const REPLICA_BADGE: Record<
   loaded: 'secondary',
   failed: 'destructive',
   not_installed: 'destructive',
+  outdated: 'destructive',
   unloaded: 'outline',
 };
 
