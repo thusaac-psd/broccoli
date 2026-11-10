@@ -16,6 +16,7 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::PermissionGrantRequest;
+use crate::services::privileges::{CeilingTarget, require_within_ceiling};
 use crate::state::AppState;
 
 #[utoipa::path(
@@ -87,14 +88,14 @@ pub async fn list_role_permissions(
     tag = "Roles",
     operation_id = "grantPermissionToRole",
     summary = "Grant a permission to a role",
-    description = "Grants a permission to a role. Requires `role:manage` permission.",
+    description = "Grants a permission to a role. Requires `role:manage` permission, and the caller must itself hold the permission being granted unless it holds `system:admin`.",
     params(("role" = String, Path, description = "Role name")),
     request_body = PermissionGrantRequest,
     responses(
         (status = 201, description = "Permission granted successfully"),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -105,6 +106,14 @@ pub async fn grant_permission_to_role(
     AppJson(req): AppJson<PermissionGrantRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::ROLE_MANAGE)?;
+    // `role:manage` is not root-equivalent; without the ceiling its holder
+    // could grant `system:admin` to its own role.
+    require_within_ceiling(
+        &state.db,
+        &auth_user,
+        CeilingTarget::Permission(&req.permission),
+    )
+    .await?;
 
     let existing = role_permission::Entity::find_by_id((role_name.clone(), req.permission.clone()))
         .one(&state.db)
@@ -136,7 +145,7 @@ pub async fn grant_permission_to_role(
     tag = "Roles",
     operation_id = "revokePermissionFromRole",
     summary = "Revoke a permission from a role",
-    description = "Revokes a permission from a role. Requires `role:manage` permission.",
+    description = "Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.",
     params(
         ("role" = String, Path, description = "Role name"),
         ("permission" = String, Path, description = "Permission name")
@@ -144,7 +153,7 @@ pub async fn grant_permission_to_role(
     responses(
         (status = 204, description = "Permission revoked successfully"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
         (status = 404, description = "Role permission not found (NOT_FOUND)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -155,6 +164,14 @@ pub async fn revoke_permission_from_role(
     AppPath((role_name, permission_name)): AppPath<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::ROLE_MANAGE)?;
+    // Before the 404 lookup, so a caller cannot probe which grants exist above
+    // its ceiling.
+    require_within_ceiling(
+        &state.db,
+        &auth_user,
+        CeilingTarget::Permission(&permission_name),
+    )
+    .await?;
 
     let existing =
         role_permission::Entity::find_by_id((role_name.clone(), permission_name.clone()))
