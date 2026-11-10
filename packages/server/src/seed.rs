@@ -122,7 +122,7 @@ pub async fn ensure_bootstrap_admin(
         let mut active: user::ActiveModel = existing.clone().into();
         active.password = Set(password_hash);
         active.update(db).await?;
-        ensure_user_role(db, existing.id, "admin").await?;
+        user_role::Entity::grant(db, existing.id, "admin").await?;
         info!(username, "Ensured bootstrap admin user");
         return Ok(());
     }
@@ -141,38 +141,11 @@ pub async fn ensure_bootstrap_admin(
     .insert(&txn)
     .await?;
 
-    ensure_user_role(&txn, created.id, "admin").await?;
+    user_role::Entity::grant(&txn, created.id, "admin").await?;
     txn.commit().await?;
 
     info!(username, "Created bootstrap admin user");
     Ok(())
-}
-
-async fn ensure_user_role<C>(db: &C, user_id: i32, role_name: &str) -> Result<(), DbErr>
-where
-    C: ConnectionTrait,
-{
-    let model = user_role::ActiveModel {
-        user_id: Set(user_id),
-        role: Set(role_name.to_string()),
-    };
-
-    let result = user_role::Entity::insert(model)
-        .on_conflict(
-            sea_orm::sea_query::OnConflict::columns([
-                user_role::Column::UserId,
-                user_role::Column::Role,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec_without_returning(db)
-        .await;
-
-    match result {
-        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-        Err(e) => Err(e),
-    }
 }
 
 pub async fn ensure_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {

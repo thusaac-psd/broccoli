@@ -289,10 +289,11 @@ pub async fn delete_user(
     tag = "Users",
     operation_id = "assignRole",
     summary = "Assign a role to a user",
-    description = "Assigns a role to the user. Requires `user:manage` permission.",
+    description = "Assigns a role to the user. Requires `user:manage` permission. Idempotent: assigning a role the user already holds changes nothing and returns 200.",
     params(("id" = i32, Path, description = "User ID")),
     request_body = RoleAssignmentRequest,
     responses(
+        (status = 200, description = "User already holds the role; nothing changed"),
         (status = 201, description = "Role assigned"),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -305,7 +306,7 @@ pub async fn assign_role(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
-    Json(payload): Json<RoleAssignmentRequest>,
+    AppJson(payload): AppJson<RoleAssignmentRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
 
@@ -315,17 +316,23 @@ pub async fn assign_role(
         .await?
         .ok_or_else(|| AppError::Validation("Invalid role name".into()))?;
 
-    let user_model = user::Entity::find_active_by_id(id)
+    if user::Entity::find_active_by_id(id)
         .one(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+        .is_none()
+    {
+        return Err(AppError::NotFound("User not found".into()));
+    }
 
     // USER_MANAGE governs accounts, not privilege definitions: without the
     // ceiling its holder could assign itself the `admin` role.
     require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_model.name)).await?;
 
     let txn = state.db.begin().await?;
-    user_model.assign_role(&txn, role_model.name).await?;
+    if !user_role::Entity::grant(&txn, id, &role_model.name).await? {
+        // Already held: nothing changed, so existing sessions stay valid.
+        return Ok(StatusCode::OK);
+    }
     refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
     user::Entity::touch_credentials_changed(&txn, id).await?;
     txn.commit().await?;

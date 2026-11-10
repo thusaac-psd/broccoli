@@ -856,3 +856,69 @@ mod user_update_validation {
         assert_eq!(login.status, 200, "{}", login.text);
     }
 }
+
+mod role_assignment_idempotency {
+    use super::*;
+
+    /// Assigning a role the user already holds (every new user holds `contestant`)
+    /// is an idempotent 200 that leaves the user's sessions intact, and a malformed
+    /// body is a `VALIDATION_ERROR`.
+    #[tokio::test]
+    async fn assigning_an_already_held_role_is_not_a_server_error() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        app.create_authenticated_user("aa_dave", "password123")
+            .await;
+        let dave = user_id(&app, "aa_dave").await;
+
+        let res = app
+            .post_with_token(
+                &routes::user_roles(dave),
+                &json!({"role": "contestant"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(
+            res.status, 200,
+            "duplicate role assignment -> {}: {}",
+            res.status, res.text
+        );
+
+        // A no-op does not end the user's sessions.
+        let dave_token = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "aa_dave", "password": "password123"}),
+            )
+            .await
+            .body["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = app
+            .post_with_token(
+                &routes::user_roles(dave),
+                &json!({"role": "contestant"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(again.status, 200, "{}", again.text);
+        let me = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &dave_token)
+            .await;
+        assert_eq!(
+            me.status, 200,
+            "no-op assignment invalidated the session: {}",
+            me.text
+        );
+
+        // A malformed body is a structured validation error.
+        let malformed = app
+            .post_with_token(&routes::user_roles(dave), &json!({"rol": "admin"}), &admin)
+            .await;
+        assert_eq!(malformed.status, 400, "{}", malformed.text);
+        assert_eq!(malformed.body["code"], "VALIDATION_ERROR");
+    }
+}
