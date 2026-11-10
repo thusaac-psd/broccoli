@@ -293,11 +293,8 @@ async fn apply(
 /// its runtime, register its hooks and run `init()`. On any failure the
 /// plugin is left unloaded with status `Failed`, never half-registered.
 async fn load_from_disk(state: &AppState, plugin_id: &str) -> Result<(), PluginError> {
-    if !state.plugins.has_plugin(plugin_id)? {
-        state.plugins.rediscover_plugins()?;
-        if !state.plugins.has_plugin(plugin_id)? {
-            return Err(PluginError::NotFound(plugin_id.to_string()));
-        }
+    if !discover(state, plugin_id)? {
+        return Err(PluginError::NotFound(plugin_id.to_string()));
     }
     purge_plugin_registrations(&state.registries, plugin_id).await;
     if let Err(error) = state.plugins.reload_plugin(plugin_id) {
@@ -423,12 +420,18 @@ async fn load_then_publish(
     Ok(())
 }
 
-fn require_known(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+/// Whether `plugin_id` is in this replica's registry, looking for newly added
+/// plugin directories first if it is not.
+fn discover(state: &AppState, plugin_id: &str) -> Result<bool, PluginError> {
     if state.plugins.has_plugin(plugin_id)? {
-        return Ok(());
+        return Ok(true);
     }
     state.plugins.rediscover_plugins()?;
-    if state.plugins.has_plugin(plugin_id)? {
+    state.plugins.has_plugin(plugin_id)
+}
+
+fn require_known(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+    if discover(state, plugin_id)? {
         Ok(())
     } else {
         Err(AppError::NotFound(format!(
