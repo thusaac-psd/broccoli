@@ -364,7 +364,7 @@ async fn supersede_current_judgement<C: ConnectionTrait>(
 
 /// Outcome of [`apply_judgement`].
 pub(crate) enum ApplyJudgement {
-    Applied(submission::Model),
+    Applied(Box<submission::Model>),
     SubmissionNotFound,
     JudgementNotFound,
     NotFinalized,
@@ -440,5 +440,5 @@ pub(crate) async fn apply_judgement<C: ConnectionTrait>(
     active.memory_used = Set(judgement.memory_used);
     active.judged_at = Set(judgement.finalized_at);
     active.target_worker_id = Set(judgement.target_worker_id);
-    Ok(ApplyJudgement::Applied(active.update(txn).await?))
+    Ok(ApplyJudgement::Applied(Box::new(active.update(txn).await?)))
 }

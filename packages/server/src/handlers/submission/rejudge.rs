@@ -78,7 +78,7 @@ pub async fn apply_submission_judgement(
 
     let txn = state.db.begin().await?;
     let updated = match apply_judgement(&txn, id, judgement_id).await? {
-        ApplyJudgement::Applied(updated) => updated,
+        ApplyJudgement::Applied(updated) => *updated,
         ApplyJudgement::SubmissionNotFound => {
             return Err(AppError::NotFound("Submission not found".into()));
         }
