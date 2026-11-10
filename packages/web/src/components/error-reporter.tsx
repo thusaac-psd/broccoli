@@ -6,7 +6,6 @@ import { reportError } from '@/lib/telemetry';
 
 interface Props {
   children: ReactNode;
-  fallback?: ReactNode;
 }
 
 interface State {
@@ -14,7 +13,7 @@ interface State {
 }
 
 /**
- * Last-resort error screen shown when no `fallback` prop is provided.
+ * Last-resort error screen.
  *
  * The root error boundary wraps its translated page (and the providers that
  * page needs) in this boundary, and the crash being reported may have
@@ -74,7 +73,7 @@ export class ErrorReporter extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      return this.props.fallback ?? defaultErrorFallback;
+      return defaultErrorFallback;
     }
     return this.props.children;
   }
