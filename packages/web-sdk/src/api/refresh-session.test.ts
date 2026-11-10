@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  LEASE_MS,
   REFRESH_RETRY_DELAY_MS,
   type RefreshDeps,
   refreshSession,
@@ -264,5 +265,68 @@ test('without Web Locks, tabs take turns through a storage lease', async () => {
     assert.equal(await withStorageLease(async () => 'ok'), 'ok');
   } finally {
     g.window = previous;
+  }
+});
+
+test('a lease is waited on no longer than a lease lasts, whatever the wall clock says', async (t) => {
+  const items = new Map<string, string>();
+  const fakeWindow = Object.assign(new EventTarget(), {
+    localStorage: {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => void items.set(key, value),
+      removeItem: (key: string) => void items.delete(key),
+    },
+  });
+  const g = globalThis as { window?: unknown };
+  const previous = g.window;
+  g.window = fakeWindow;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    const key = 'broccoli:auth:refresh-lease';
+    let wall = Date.parse('2026-11-10T09:00:00Z');
+    let monotonic = 0;
+    const clocks = { wallNow: () => wall, monotonicNow: () => monotonic };
+    // A peer took the lease, then the clock was set back an hour (and the
+    // peer closed before releasing it).
+    items.set(key, `othertab:${wall + LEASE_MS}`);
+    wall -= 3_600_000;
+
+    let ran = false;
+    const turn = withStorageLease(async () => {
+      ran = true;
+    }, clocks);
+    await flush();
+    t.mock.timers.tick(LEASE_MS - 1);
+    monotonic += LEASE_MS - 1;
+    await flush();
+    assert.equal(ran, false);
+
+    t.mock.timers.tick(1);
+    monotonic += 1;
+    // The wall clock still says the lease has an hour left.
+    await flush();
+    await turn;
+    assert.equal(ran, true);
+  } finally {
+    g.window = previous;
+  }
+});
+
+test('a backwards wall-clock jump does not stretch the backoff', async () => {
+  const url = freshUrl();
+  const d = deps([respond(502), respond(502)]);
+  // The real default clock, not the injected fake.
+  delete d.value.now;
+  const realDateNow = Date.now;
+  try {
+    assert.equal((await refreshSession(url, d.value)).status, 'unavailable');
+    // NTP sets the clock back an hour right after the failure.
+    Date.now = () => realDateNow() - 3_600_000;
+    const outcome = await refreshSession(url, d.value);
+    assert.equal(outcome.status, 'unavailable');
+    assert.ok(outcome.status === 'unavailable' && outcome.retryInMs <= 1_000);
+  } finally {
+    Date.now = realDateNow;
   }
 });
