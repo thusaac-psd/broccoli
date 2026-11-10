@@ -34,10 +34,13 @@ interface ProblemSamplesSectionProps {
   copiedKey: string | null;
   onCopySample: CopySampleHandler;
   onDownloadSample: DownloadSampleHandler;
+  /** Rewrites attachment URLs in sample descriptions (see `Markdown`). */
+  resolveUrl?: (url: string | undefined) => string | undefined;
 }
 
 export function ProblemSamplesSection({
   samples,
+  resolveUrl,
   sampleContents,
   copiedKey,
   onCopySample,
@@ -160,7 +163,9 @@ export function ProblemSamplesSection({
             </div>
             {sample.description && (
               <div className="rounded-md border bg-muted/20 px-4 py-3">
-                <Markdown>{sample.description}</Markdown>
+                <Markdown resolveUrl={resolveUrl}>
+                  {sample.description}
+                </Markdown>
               </div>
             )}
           </div>
