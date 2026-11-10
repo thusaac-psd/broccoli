@@ -76,8 +76,8 @@ async fn judgements(app: &TestApp, sid: i32) -> Vec<submission_judgement::Model>
 /// `mark_submission_system_error_with_epoch(sub, Some(E+1))` from the deferred
 /// run's dispatch failure then finalizes the LIVE immediate judgement as
 /// SystemError, and the `after_judging:{id}:{epoch}` hook dedupe collides.
-/// Location: handlers/submission/rejudge.rs (epoch = sub.judge_epoch + 1),
-/// handlers/submission/dispatch.rs, consumers/mod.rs.
+/// Fixed by the per-submission allocator `submission.max_judge_epoch`
+/// (services/judgement_lifecycle.rs).
 #[tokio::test]
 async fn rejudge_epochs_are_unique() {
     let app = TestApp::spawn().await;
@@ -175,7 +175,7 @@ async fn rejudge_epochs_are_unique() {
 /// version), so it never finalizes; the stuck detector re-runs it up to
 /// `max_stuck_retries` times and finally DLQs it. The stuck-retry path
 /// finalizes the judgement it supersedes; the rejudge path does not.
-/// Location: handlers/submission/dispatch.rs `open_rejudge_judgement`.
+/// Fixed in services/judgement_lifecycle.rs `supersede_current_judgement`.
 #[tokio::test]
 async fn rejudge_finalizes_the_superseded_inflight_judgement() {
     let app = TestApp::spawn().await;
@@ -256,7 +256,7 @@ async fn rejudge_finalizes_the_superseded_inflight_judgement() {
 /// after a normal first dispatch") and budgets steal/stuck retries, but no
 /// rejudge reset it. After 4 rejudges the first lease steal goes straight to
 /// DISPATCH_RETRY_EXHAUSTED + DLQ without a single retry.
-/// Location: handlers/submission/rejudge.rs; dispatcher/claim.rs increments.
+/// Fixed in services/judgement_lifecycle.rs `OpenJudgement::Rejudge`.
 #[tokio::test]
 async fn rejudge_resets_retry_budget() {
     let app = TestApp::spawn().await;
