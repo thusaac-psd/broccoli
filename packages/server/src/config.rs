@@ -5,7 +5,6 @@ use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
 };
-use tracing::{info, warn};
 
 pub use common::config::MqAppConfig;
 pub use common::storage::config::BlobStoreConfig;
@@ -128,12 +127,13 @@ pub struct ServerConfig {
     /// Logical identity of this replica. Used to derive the per-replica
     /// operation-result queue name so multiple servers behind a load balancer
     /// each receive their own plugin-dispatch results. Empty (the default)
-    /// resolves to the OS hostname; an unusable hostname falls back to a
-    /// random short ID. See [`resolve_server_id`].
+    /// resolves to an ID derived from the machine ID (hostname, then random,
+    /// as fallbacks). See [`resolve_server_id`]. Claimed in Redis at boot, so
+    /// a second live replica with the same ID refuses to start.
     #[serde(default)]
     pub id: String,
     /// Multi-replica deployments require a stable explicit server ID; when
-    /// true, hostname/random fallbacks are rejected.
+    /// true, the host-default fallback is rejected.
     #[serde(default)]
     pub expects_multi_replica: bool,
     /// Master switch for lease refresh, steal scanning, and reply-queue
@@ -701,19 +701,9 @@ fn default_batch_max_age_secs() -> u64 {
     7200
 }
 
-/// Returns true if `id` is a safe queue-suffix (alphanumeric + `-_.`,
-/// non-empty, <=128 chars). Mirrors the worker-id rules so the same
-/// validation applies to both sides of the MQ envelope.
-pub fn is_valid_server_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && !id.ends_with("_processing")
-        && !id.ends_with("_failed")
-        && !id.ends_with("_fairness_set")
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
+/// Returns true if `id` is a safe queue-suffix. The same rules apply to worker
+/// IDs; see [`common::node_identity::is_valid_node_id`].
+pub use common::node_identity::is_valid_node_id as is_valid_server_id;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ServerIdResolveError {
@@ -723,76 +713,19 @@ pub enum ServerIdResolveError {
     MultiReplicaServerIdRequired,
 }
 
-/// Resolves the effective server ID from a configured value:
-/// 1. If `configured` is non-empty and valid, use it.
-/// 2. If multi-replica mode is expected, reject missing/invalid configured IDs.
-/// 3. Else fall back to the OS hostname (sanitized - Windows hostnames may
-///    contain characters Redis dislikes in queue names).
-/// 4. Else generate an 8-char random ID and warn.
+/// Resolves the effective server ID: a valid configured value, else (unless
+/// multi-replica mode demands an explicit one) the host default from
+/// [`common::node_identity::default_node_id`].
 pub fn resolve_server_id(
     configured: &str,
     expects_multi_replica: bool,
 ) -> Result<String, ServerIdResolveError> {
-    let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        if is_valid_server_id(trimmed) {
-            info!(server_id = %trimmed, "Server ID resolved from explicit configuration");
-            return Ok(trimmed.to_string());
-        }
-        if expects_multi_replica {
-            return Err(ServerIdResolveError::MultiReplicaServerIdRequired);
-        }
-        warn!(
-            configured = %trimmed,
-            "Configured server.id failed validation; falling back to hostname"
-        );
-    } else if expects_multi_replica {
-        return Err(ServerIdResolveError::MultiReplicaServerIdRequired);
-    }
-
-    if let Ok(host) = hostname::get() {
-        let lossy = host.to_string_lossy();
-        let sanitized: String = lossy
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .take(128)
-            .collect();
-        if is_valid_server_id(&sanitized) {
-            warn!(
-                server_id = %sanitized,
-                "Server ID not configured; inferred from hostname. \
-                 Set BROCCOLI__SERVER__ID explicitly in multi-replica deployments \
-                 to avoid silent collisions between replicas with identical hostnames."
-            );
-            return Ok(sanitized);
-        }
-        warn!(
-            hostname = %lossy,
-            "OS hostname unsuitable as server.id; using random fallback"
-        );
-    } else {
-        warn!("Could not read OS hostname; using random server.id fallback");
-    }
-
-    let fallback: String = uuid::Uuid::new_v4()
-        .simple()
-        .to_string()
-        .chars()
-        .take(8)
-        .collect();
-    warn!(
-        server_id = %fallback,
-        "Server ID generated as random fallback because hostname was unobtainable or invalid. \
-         This ID changes every restart — set BROCCOLI__SERVER__ID explicitly so in-flight \
-         operation results route correctly across restarts."
-    );
-    Ok(fallback)
+    common::node_identity::resolve_node_id(
+        common::node_identity::NodeRole::Server,
+        configured,
+        expects_multi_replica,
+    )
+    .map_err(|_| ServerIdResolveError::MultiReplicaServerIdRequired)
 }
 
 /// Centralized derivation of the per-replica operation-result queue name.
@@ -888,14 +821,14 @@ mod tests {
 
     #[test]
     fn resolves_invalid_explicit_id_via_fallback() {
-        // "has space" is invalid; we expect a non-empty fallback (hostname or random).
+        // "has space" is invalid; we expect a non-empty host default.
         let resolved = resolve_server_id("has space", false).unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));
     }
 
     #[test]
-    fn resolves_empty_to_hostname_or_random_fallback() {
+    fn resolves_empty_to_a_host_default() {
         let resolved = resolve_server_id("", false).unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));
@@ -904,7 +837,7 @@ mod tests {
     #[test]
     fn resolves_whitespace_only_to_fallback() {
         // Whitespace-only configured value should behave like empty:
-        // produce a non-empty, well-formed ID via the hostname/random path.
+        // produce a non-empty, well-formed host default.
         let resolved = resolve_server_id("   ", false).unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));

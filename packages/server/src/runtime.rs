@@ -23,6 +23,7 @@ use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
+use common::node_identity::{NodeClaim, NodeHeartbeat, NodeRole};
 
 pub struct ServerRuntime {
     listener: tokio::net::TcpListener,
@@ -35,6 +36,8 @@ pub struct ServerRuntime {
     /// the OS on exit, so we hold the handle for ownership but never `join()`
     /// it - hence the underscore prefix to silence dead-code warnings.
     _healthz_handle: Option<std::thread::JoinHandle<()>>,
+    /// Keeps this replica's ID claim / heartbeat alive; released in [`Self::serve`].
+    node_heartbeat: Option<NodeHeartbeat>,
     _telemetry_guard: common::observability::TelemetryGuard,
 }
 
@@ -203,6 +206,42 @@ impl ServerRuntime {
             }
         } else {
             None
+        };
+
+        // Claim the server ID before consuming this replica's result queue or
+        // recovering leases under it: a second live replica with the same ID
+        // would eat its results and release its in-flight rows, so it refuses
+        // to start instead. The claim is the `broccoli:server:heartbeat:<id>`
+        // key the reply-queue sweeper reads; released on graceful shutdown.
+        let node_heartbeat = match redis_client.as_deref() {
+            Some(client) => {
+                let started_at = chrono::Utc::now();
+                let payload = {
+                    let server_id = server_id.clone();
+                    let hostname = hostname::get()
+                        .ok()
+                        .map(|h| h.to_string_lossy().into_owned());
+                    move || {
+                        serde_json::json!({
+                            "id": server_id,
+                            "started_at": started_at,
+                            "last_seen": chrono::Utc::now(),
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "hostname": hostname,
+                            "pid": std::process::id(),
+                        })
+                    }
+                };
+                let claim = NodeClaim::claim_at_boot(
+                    client.clone(),
+                    NodeRole::Server,
+                    &server_id,
+                    payload(),
+                )
+                .await?;
+                Some(claim.spawn_heartbeat(payload))
+            }
+            None => None,
         };
 
         if let Some(ref mq_arc) = mq {
@@ -521,6 +560,7 @@ impl ServerRuntime {
             addr,
             dispatcher,
             _healthz_handle: healthz_handle,
+            node_heartbeat,
             _telemetry_guard: telemetry_guard,
         })
     }
@@ -530,6 +570,9 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Server runtime error at http://{}", self.addr));
         self.dispatcher.shutdown().await;
+        if let Some(heartbeat) = self.node_heartbeat.as_mut() {
+            heartbeat.shutdown().await;
+        }
         serve_result
     }
 }
