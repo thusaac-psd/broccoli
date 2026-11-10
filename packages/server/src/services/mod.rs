@@ -1,3 +1,4 @@
+pub(crate) mod batch_wait;
 pub mod code_run_dispatch;
 pub mod evaluate_batch;
 pub mod operation_batch;

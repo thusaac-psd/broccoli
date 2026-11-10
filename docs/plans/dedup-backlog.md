@@ -45,6 +45,14 @@ Done already (for reference on the pattern):
   result-wait helpers shared (plugin id, batches, metrics, ops registry, batch
   id, verdict channel, pending count) are one borrowed context; the helpers are
   its methods, and their three `#[allow(clippy::too_many_arguments)]` are gone.
+- `services/batch_wait.rs` - one result-wait loop for operation and evaluate
+  batches, replacing the four `next_{operation,evaluate}_result[_async]`
+  skeletons. Tick receive, extend-while-pending, the give-up drain of a result
+  buffered in the send-before-decrement race, outcome metrics and drained-batch
+  cleanup exist once; each batch kind supplies a `WaitPolicy` (tick and ceiling,
+  extension rule, delivery bookkeeping), and the blocking and async drivers
+  differ only in their receive call. Supersedes the `EvaluateVerdictCtx` struct
+  above.
 
 ## Open items
 
@@ -64,14 +72,7 @@ Done already (for reference on the pattern):
    same day and have drifted in coverage (newer cases exist only in the mock
    suite). A harness generic over `SandboxManager` restores parity.
 
-3. **Sync/async result-wait loop skeletons**. `services/operation_batch.rs`
-   (`next_operation_result[_async]`) vs `services/evaluate_batch/result_wait.rs`
-   (`next_evaluate_result[_async]`) remain parallel ~300-line skeletons after
-   the windowed-session extraction, differing only in extension policy and
-   channel types. Both already carry a matching drain-delivered-result fix —
-   next shared fix should trigger the generic unification that was deferred.
-
-4. **Shared API-client auth/retry protocol** (defensible split, lowest
+3. **Shared API-client auth/retry protocol** (defensible split, lowest
    priority). `packages/cli-core/src/client.rs` (sync ureq) vs
    `packages/stress-test/src/client.rs` (async reqwest) both maintain login +
    token storage + retry-on-401 against the same server API.
