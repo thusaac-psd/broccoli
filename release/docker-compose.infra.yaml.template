@@ -145,16 +145,47 @@ services:
       timeout: 5s
       retries: 20
 
+  # Creates the blob bucket, then proves it exists. The master's health check
+  # says nothing about the filer this talks to, and `weed shell` exits 0 even
+  # when a command inside it fails, so the job waits for the filer itself and
+  # succeeds only once `s3.bucket.list` shows the bucket. Any other outcome
+  # exits nonzero, which the installers and `depends_on` report as a failure.
   seaweedfs-init:
     image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.15}
     depends_on:
       seaweedfs:
         condition: service_healthy
+    environment:
+      BUCKET: "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
     entrypoint: ["sh", "-c"]
     command:
-      [
-        "printf 's3.bucket.create -name ${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}\\n' | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888",
-      ]
+      - |
+        weed_shell() { weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888; }
+        tries=0
+        until wget -q -O /dev/null http://seaweedfs:8888/; do
+          tries=$$((tries + 1))
+          if [ "$$tries" -ge 60 ]; then
+            echo "seaweedfs-init: the filer at seaweedfs:8888 did not answer within 120s" >&2
+            exit 1
+          fi
+          sleep 2
+        done
+        tries=0
+        while :; do
+          printf 's3.bucket.create -name %s\n' "$$BUCKET" | weed_shell >/tmp/create.log 2>&1
+          if printf 's3.bucket.list\n' | weed_shell 2>/dev/null \
+            | awk -v b="$$BUCKET" '{ for (i = 1; i <= NF; i++) if ($$i == b) found = 1 } END { exit !found }'; then
+            echo "seaweedfs-init: bucket $$BUCKET is ready"
+            exit 0
+          fi
+          tries=$$((tries + 1))
+          if [ "$$tries" -ge 10 ]; then
+            cat /tmp/create.log >&2
+            echo "seaweedfs-init: bucket $$BUCKET is missing after s3.bucket.create" >&2
+            exit 1
+          fi
+          sleep 3
+        done
     restart: "no"
 
 volumes:
