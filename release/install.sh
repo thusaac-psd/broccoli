@@ -496,34 +496,57 @@ shared_env_files() {
   return 0
 }
 
+# Take each setting the infra node handed over, unless the operator set it in
+# the environment for this run: the operator's value wins.
 load_connection_env_if_present() {
-  local file
+  local file line key
   while IFS= read -r file; do
     echo "loading shared settings from $file"
-    set -a
-    # shellcheck disable=SC1090
-    source "$file"
-    set +a
-  done < <(shared_env_files)
-}
-
-# Re-runs keep an existing env file, but whatever the infra node handed over
-# must follow the infra node: after a rehearsal moves to the venue and infra
-# is re-installed with new addresses, copy each shared key into the env file.
-refresh_shared_settings() {
-  local file line key value
-  while IFS= read -r file; do
     while IFS= read -r line; do
       case "$line" in
         [A-Za-z_]*=*) ;;
         *) continue ;;
       esac
       key="${line%%=*}"
-      value="$(env_unquote "${line#*=}")"
+      if [ -n "${!key+set}" ]; then
+        echo "keeping $key from the environment instead of $file"
+        continue
+      fi
+      export "$key=$(env_unquote "${line#*=}")"
+    done < "$file"
+  done < <(shared_env_files)
+}
+
+# The shared settings that must follow the infra node on a re-run: where its
+# database, MQ and object storage are and how to log in to them, and what
+# every server must agree on. Anything else in the shared files, such as
+# BROCCOLI__AUTH__SECURE_COOKIES, is a per-node choice a re-run never reverts.
+SHARED_FOLLOW_KEYS=(
+  BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL
+  BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET
+  BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY
+  BROCCOLI__AUTH__JWT_SECRET BROCCOLI_BOOTSTRAP_ADMIN_USERNAME BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD
+)
+
+# Re-runs keep an existing env file, but whatever must follow the infra node
+# does: after a rehearsal moves to the venue and infra is re-installed with
+# new addresses, copy each SHARED_FOLLOW_KEYS value into the env file. A value
+# the operator sets in the environment for this run wins over the shared file.
+refresh_shared_settings() {
+  local file key value from
+  while IFS= read -r file; do
+    for key in "${SHARED_FOLLOW_KEYS[@]}"; do
+      grep -qE "^${key}=" "$file" || continue
+      if [ -n "${!key+set}" ]; then
+        value="${!key}" from="the environment"
+      else
+        value="$(env_get "$file" "$key")" from="$file"
+      fi
+      [ -n "$value" ] || continue
       [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] && continue
       env_set "$ENV_FILE" "$key" "$value"
-      echo "updated $key in $ENV_FILE from $file"
-    done < "$file"
+      echo "updated $key in $ENV_FILE from $from"
+    done
   done < <(shared_env_files)
 }
 

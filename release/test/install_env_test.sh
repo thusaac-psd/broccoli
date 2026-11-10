@@ -45,6 +45,22 @@ run server || fail "server re-run"
 [ "$(env_get .env.server BROCCOLI__AUTH__JWT_SECRET)" = 'rotated-jwt-secret-rotated-jwt-secret' ] \
   || fail "server re-run kept the old JWT secret"
 [ "$(env_get .env.server BROCCOLI__SERVER__ID)" = "$server_id" ] || fail "server re-run changed its own id"
+# Only what must follow the infra node is refreshed: a per-server choice such
+# as Secure cookies behind a TLS gateway survives a re-run.
+env_set server-secrets.env BROCCOLI__AUTH__SECURE_COOKIES false
+env_set .env.server BROCCOLI__AUTH__SECURE_COOKIES true
+run server || fail "server re-run with its own cookie policy"
+[ "$(env_get .env.server BROCCOLI__AUTH__SECURE_COOKIES)" = true ] || fail "a re-run reverted the server's SECURE_COOKIES"
+# A value the operator passes for this run wins over the shared file, on a
+# re-run and on a first run alike.
+BROCCOLI__DATABASE__URL='postgres://postgres:pw@10.7.7.7:5432/broccoli' run server || fail "server re-run with an operator URL"
+[ "$(env_get .env.server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:pw@10.7.7.7:5432/broccoli' ] \
+  || fail "a re-run preferred connection.env over the operator's database URL"
+mv .env.server .env.server.kept
+BROCCOLI__MQ__URL='redis://:pw@10.6.6.6:6379' run server || fail "first server run with an operator URL"
+[ "$(env_get .env.server BROCCOLI__MQ__URL)" = 'redis://:pw@10.6.6.6:6379' ] \
+  || fail "a first run preferred connection.env over the operator's MQ URL"
+mv .env.server.kept .env.server
 
 # Behind a gateway, a server trusts exactly the gateway for X-Forwarded-For,
 # and the gateway install says what to pass.
