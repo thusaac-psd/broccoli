@@ -58,7 +58,6 @@ async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) 
 /// Location: handlers/problem/test_cases.rs (create/update/reorder/bulk) and
 /// handlers/problem/upload.rs. `checker_source.rs` documents the same class.
 #[tokio::test]
-#[ignore = "BUG: test-case write endpoints parse the (up to 1 GiB) body before checking PROBLEM_EDIT"]
 async fn test_case_writes_check_permission_before_reading_body() {
     let app = TestApp::spawn().await;
     let admin = app
