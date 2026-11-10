@@ -360,18 +360,7 @@ pub async fn delete_test_case(
     let txn = state.db.begin().await?;
     find_problem_for_update(&txn, problem_id).await?;
     let tc = find_test_case_for_problem(&txn, problem_id, tc_id).await?;
-
-    let result_count = test_case_result::Entity::find()
-        .filter(test_case_result::Column::TestCaseId.eq(tc.id))
-        .count(&txn)
-        .await?;
-    if result_count > 0 {
-        return Err(AppError::Conflict(
-            "Cannot delete test case with existing judge results".into(),
-        ));
-    }
-
-    test_case::Entity::delete_by_id(tc.id).exec(&txn).await?;
+    delete_unjudged_test_cases(&txn, test_case::Column::Id.eq(tc.id)).await?;
     txn.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -496,37 +485,21 @@ pub async fn bulk_delete_test_cases(
         )));
     }
 
-    let ids_with_results: Vec<i32> = test_case_result::Entity::find()
-        .filter(test_case_result::Column::TestCaseId.is_in(payload.test_case_ids.clone()))
-        .select_only()
-        .column(test_case_result::Column::TestCaseId)
-        .distinct()
-        .into_tuple::<i32>()
-        .all(&txn)
-        .await?;
-
-    if !ids_with_results.is_empty() {
-        return Err(AppError::Conflict(format!(
-            "Cannot delete: test cases {ids_with_results:?} have judge results"
-        )));
-    }
-
-    let result = test_case::Entity::delete_many()
-        .filter(test_case::Column::Id.is_in(payload.test_case_ids))
-        .exec(&txn)
-        .await?;
+    let deleted =
+        delete_unjudged_test_cases(&txn, test_case::Column::Id.is_in(payload.test_case_ids))
+            .await?;
 
     txn.commit().await?;
 
     tracing::info!(
         problem_id,
-        deleted = result.rows_affected,
+        deleted,
         user_id = auth_user.user_id,
         "Bulk deleted test cases"
     );
 
     Ok(Json(BulkDeleteTestCasesResponse {
-        deleted: result.rows_affected as usize,
+        deleted: deleted as usize,
     }))
 }
 
@@ -549,6 +522,52 @@ async fn find_test_case_for_problem<C: ConnectionTrait>(
     }
 
     Ok(tc)
+}
+
+/// Delete the test cases matching `scope`, refusing with `409 CONFLICT` (and
+/// the offending IDs) if any of them has judge results.
+///
+/// The single source of the "never orphan a `test_case_result`" rule shared by
+/// single delete, bulk delete and ZIP `strategy=replace`: without it the
+/// `test_case_result.test_case_id` FK rejects the delete and the caller sees a
+/// 500 instead of an actionable conflict. The check is one `SELECT DISTINCT`
+/// over the same scope, so it costs a single extra statement however many test
+/// cases are involved. Callers hold the problem row lock (via
+/// `find_problem_for_update`) for the surrounding transaction.
+pub(super) async fn delete_unjudged_test_cases<C: ConnectionTrait>(
+    db: &C,
+    scope: impl sea_query::IntoCondition,
+) -> Result<u64, AppError> {
+    let scope = scope.into_condition();
+    let ids_with_results: Vec<i32> = test_case_result::Entity::find()
+        .filter(
+            test_case_result::Column::TestCaseId.in_subquery(
+                test_case::Entity::find()
+                    .select_only()
+                    .column(test_case::Column::Id)
+                    .filter(scope.clone())
+                    .into_query(),
+            ),
+        )
+        .select_only()
+        .column(test_case_result::Column::TestCaseId)
+        .distinct()
+        .order_by_asc(test_case_result::Column::TestCaseId)
+        .into_tuple::<i32>()
+        .all(db)
+        .await?;
+
+    if !ids_with_results.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "Cannot delete: test cases {ids_with_results:?} have judge results"
+        )));
+    }
+
+    let result = test_case::Entity::delete_many()
+        .filter(scope)
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
 }
 
 pub(super) async fn next_test_case_position<C: ConnectionTrait>(

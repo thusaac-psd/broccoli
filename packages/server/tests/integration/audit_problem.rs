@@ -101,7 +101,6 @@ async fn test_case_writes_check_permission_before_reading_body() {
 /// problem that has ever been judged can never be re-uploaded with replace.
 /// Location: handlers/problem/upload.rs (replace branch).
 #[tokio::test]
-#[ignore = "BUG: upload strategy=replace returns 500 (FK violation) once any test case has results"]
 async fn replace_upload_on_judged_problem_is_a_conflict_not_500() {
     let app = TestApp::spawn().await;
     let token = app

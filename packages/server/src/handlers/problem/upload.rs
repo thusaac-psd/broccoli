@@ -28,7 +28,7 @@ use crate::utils::test_case_body::prepare_test_case_body;
 use crate::utils::text::sanitize_db_text;
 
 use super::find_problem_for_update;
-use super::test_cases::{next_test_case_position, tc_to_list_item};
+use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
 
 #[utoipa::path(
     post,
@@ -45,7 +45,7 @@ use super::test_cases::{next_test_case_position, tc_to_list_item};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Duplicate label in problem (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -75,10 +75,7 @@ pub async fn upload_test_cases(
 
     let is_replace = matches!(data.strategy, UploadTestCasesMergeStrategy::Replace);
     if is_replace {
-        test_case::Entity::delete_many()
-            .filter(test_case::Column::ProblemId.eq(problem_id))
-            .exec(&txn)
-            .await?;
+        delete_unjudged_test_cases(&txn, test_case::Column::ProblemId.eq(problem_id)).await?;
     }
 
     let mut start_pos = if is_replace {
