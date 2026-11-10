@@ -364,7 +364,12 @@ impl ServerRuntime {
                 let mut interval = tokio::time::interval(Duration::from_secs(3600));
                 loop {
                     interval.tick().await;
-                    crate::middleware::idempotency::cleanup_expired_keys(&cleanup_db).await;
+                    common::deadline::bounded(
+                        "idempotency.cleanup",
+                        common::deadline::BACKGROUND_STEP,
+                        crate::middleware::idempotency::cleanup_expired_keys(&cleanup_db),
+                    )
+                    .await;
                 }
             });
         }

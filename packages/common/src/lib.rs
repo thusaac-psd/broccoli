@@ -10,6 +10,7 @@ pub mod cancel;
 pub mod config;
 #[cfg(feature = "sea-orm")]
 pub mod db;
+pub mod deadline;
 pub mod dlq;
 pub mod event;
 pub mod hook;
