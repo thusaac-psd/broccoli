@@ -176,7 +176,6 @@ async fn create_test_case_after_zip_upload_gets_a_free_label() {
 /// handlers/problem/mod.rs (stores `serde_json::to_value(sf)` raw),
 /// utils/judging.rs (`validate_submission_contract`).
 #[tokio::test]
-#[ignore = "BUG: submission_format validated trimmed but stored raw -> problem cannot accept submissions"]
 async fn submission_format_with_padded_filename_is_normalised_or_rejected() {
     let app = TestApp::spawn().await;
     let token = app

@@ -460,31 +460,38 @@ pub struct CheckerSourceResponse {
     pub files: Option<Vec<CheckerSourceFile>>,
 }
 
-pub fn validate_checker_source(req: &UploadCheckerSourceRequest) -> Result<(), AppError> {
+/// Parse an uploaded checker source into the files that get stored, with
+/// filenames normalised by `validate_flat_filename` (and duplicates detected
+/// on the normalised names), so what is stored is exactly what was validated.
+pub fn parse_checker_source(
+    req: UploadCheckerSourceRequest,
+) -> Result<Vec<CheckerSourceFile>, AppError> {
     if req.files.is_empty() {
         return Err(AppError::Validation("At least one file is required".into()));
     }
     if req.files.len() > 20 {
         return Err(AppError::Validation("Maximum 20 files allowed".into()));
     }
-    let mut seen = std::collections::HashSet::new();
-    for file in &req.files {
-        validate_flat_filename(&file.filename)
+    let mut files: Vec<CheckerSourceFile> = Vec::with_capacity(req.files.len());
+    for file in req.files {
+        let filename = validate_flat_filename(&file.filename)
             .map_err(|e| AppError::Validation(e.message().into()))?;
-        if !seen.insert(&file.filename) {
+        if files.iter().any(|seen| seen.filename == filename) {
             return Err(AppError::Validation(format!(
-                "Duplicate filename: {}",
-                file.filename
+                "Duplicate filename: {filename}"
             )));
         }
         if file.content.len() > 1_048_576 {
             return Err(AppError::Validation(format!(
-                "File '{}' exceeds 1 MB limit",
-                file.filename
+                "File '{filename}' exceeds 1 MB limit"
             )));
         }
+        files.push(CheckerSourceFile {
+            filename: filename.to_owned(),
+            content: file.content,
+        });
     }
-    Ok(())
+    Ok(files)
 }
 
 pub fn validate_update_problem(req: &UpdateProblemRequest) -> Result<(), AppError> {
@@ -514,52 +521,54 @@ pub fn validate_update_problem(req: &UpdateProblemRequest) -> Result<(), AppErro
     Ok(())
 }
 
-pub fn validate_submission_format(
-    submission_format: Option<&HashMap<String, Vec<String>>>,
+/// Parse a submission format into the normalised form that gets stored.
+///
+/// Language ids and filenames are trimmed (the same normalisation
+/// `validate_submission_contract` applies to submitted values) and the result
+/// is what the caller must persist: validating a trimmed copy but storing the
+/// raw map made a padded filename like `" solution.cpp"` impossible to submit.
+/// Ids or filenames that only differ by padding are rejected as duplicates.
+pub fn parse_submission_format(
+    submission_format: &HashMap<String, Vec<String>>,
     known_languages: &HashSet<String>,
-) -> Result<(), AppError> {
-    let Some(submission_format) = submission_format else {
-        return Ok(());
-    };
-
-    if submission_format.is_empty() {
-        return Ok(());
-    }
-
+) -> Result<HashMap<String, Vec<String>>, AppError> {
+    let mut parsed = HashMap::with_capacity(submission_format.len());
     for (language_id, filenames) in submission_format {
-        let trimmed_language_id = language_id.trim();
-        if trimmed_language_id.is_empty() {
+        let language_id = language_id.trim();
+        if language_id.is_empty() {
             return Err(AppError::Validation(
                 "submission_format language ids must be non-empty".into(),
             ));
         }
-        if !known_languages.is_empty() && !known_languages.contains(trimmed_language_id) {
+        if !known_languages.is_empty() && !known_languages.contains(language_id) {
             return Err(AppError::Validation(format!(
-                "submission_format contains unsupported language '{}'",
-                trimmed_language_id
+                "submission_format contains unsupported language '{language_id}'"
             )));
         }
         if filenames.is_empty() {
             return Err(AppError::Validation(format!(
-                "submission_format for '{}' must include at least one filename",
-                trimmed_language_id
+                "submission_format for '{language_id}' must include at least one filename"
             )));
         }
 
-        let mut seen = HashSet::with_capacity(filenames.len());
+        let mut normalized = Vec::with_capacity(filenames.len());
         for filename in filenames {
-            let normalized = validate_flat_filename(filename)
+            let filename = validate_flat_filename(filename)
                 .map_err(|e| AppError::Validation(e.message().into()))?;
-            if !seen.insert(normalized.to_string()) {
+            if normalized.iter().any(|seen| seen == filename) {
                 return Err(AppError::Validation(format!(
-                    "submission_format for '{}' contains duplicate filename '{}'",
-                    trimmed_language_id, normalized
+                    "submission_format for '{language_id}' contains duplicate filename '{filename}'"
                 )));
             }
+            normalized.push(filename.to_owned());
+        }
+        if parsed.insert(language_id.to_owned(), normalized).is_some() {
+            return Err(AppError::Validation(format!(
+                "submission_format contains duplicate language '{language_id}'"
+            )));
         }
     }
-
-    Ok(())
+    Ok(parsed)
 }
 
 /// Max length of a per-test-case description / sample explanation. Rendered as
@@ -739,5 +748,53 @@ mod checker_format_tests {
             }
             other => panic!("expected Validation error, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn parsed_submission_format_is_the_normalised_value() {
+        let raw = HashMap::from([(" cpp ".to_string(), vec![" solution.cpp".to_string()])]);
+        let parsed = parse_submission_format(&raw, &HashSet::new()).unwrap();
+        assert_eq!(
+            parsed,
+            HashMap::from([("cpp".to_string(), vec!["solution.cpp".to_string()])])
+        );
+    }
+
+    #[test]
+    fn submission_format_padding_cannot_hide_duplicates() {
+        let raw = HashMap::from([(
+            "cpp".to_string(),
+            vec!["a.cpp".to_string(), " a.cpp".to_string()],
+        )]);
+        assert!(parse_submission_format(&raw, &HashSet::new()).is_err());
+        let raw = HashMap::from([
+            ("cpp".to_string(), vec!["a.cpp".to_string()]),
+            ("cpp ".to_string(), vec!["b.cpp".to_string()]),
+        ]);
+        assert!(parse_submission_format(&raw, &HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn parsed_checker_source_has_normalised_filenames() {
+        let file = |name: &str| CheckerSourceFile {
+            filename: name.into(),
+            content: "x".into(),
+        };
+        let files = parse_checker_source(UploadCheckerSourceRequest {
+            files: vec![file(" checker.cpp ")],
+        })
+        .unwrap();
+        assert_eq!(files[0].filename, "checker.cpp");
+        assert!(
+            parse_checker_source(UploadCheckerSourceRequest {
+                files: vec![file("checker.cpp"), file(" checker.cpp")],
+            })
+            .is_err()
+        );
     }
 }
