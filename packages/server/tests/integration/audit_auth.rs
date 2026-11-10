@@ -243,7 +243,6 @@ async fn device_authorize_issues_a_token_from_current_roles() {
 /// them, or delete every admin.
 /// Location: handlers/user.rs `update_user`, `delete_user`.
 #[tokio::test]
-#[ignore = "BUG: USER_MANAGE-only principal can reset an admin's password (no privilege ceiling)"]
 async fn user_manager_cannot_take_over_an_admin() {
     let app = TestApp::spawn().await;
     let mgr = app
@@ -276,7 +275,6 @@ async fn user_manager_cannot_take_over_an_admin() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: USER_MANAGE-only principal can delete an admin (no privilege ceiling)"]
 async fn user_manager_cannot_delete_an_admin() {
     let app = TestApp::spawn().await;
     let mgr = app
@@ -292,6 +290,34 @@ async fn user_manager_cannot_delete_an_admin() {
         "user:manage deleted an admin: {}",
         res.text
     );
+}
+
+/// The ceiling allows what the caller does hold: a user manager can still
+/// reset a contestant's password and delete a contestant.
+#[tokio::test]
+async fn user_manager_can_manage_accounts_within_its_ceiling() {
+    let app = TestApp::spawn().await;
+    let mgr = app
+        .create_user_with_permissions(
+            "aa_mgr",
+            "password123",
+            &[perm::USER_MANAGE, perm::SUBMISSION_SUBMIT],
+        )
+        .await;
+    app.create_authenticated_user("aa_pupil", "password123")
+        .await;
+    let pupil = user_id(&app, "aa_pupil").await;
+
+    let res = app
+        .patch_with_token(
+            &routes::user(pupil),
+            &json!({"password": "newpass123"}),
+            &mgr,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app.delete_with_token(&routes::user(pupil), &mgr).await;
+    assert_eq!(res.status, 204, "{}", res.text);
 }
 
 /// BUG (med): `update_user` applies `username` raw: no trim/length/charset
