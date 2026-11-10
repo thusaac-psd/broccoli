@@ -69,6 +69,41 @@ fn forbids_storage(headers: &HeaderMap) -> bool {
         .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
 }
 
+/// The `idempotency_key.status` column. SQL literals use the same strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyStatus {
+    /// Claimed by an in-flight request.
+    Pending,
+    /// Finished; `response_body` holds the response to replay.
+    Completed,
+    /// Finished, but the body was over `MAX_RESPONSE_BODY_SIZE`.
+    CompletedTooLarge,
+    /// Finished, but the response forbade storing its body (`no-store`).
+    CompletedNotStored,
+}
+
+impl KeyStatus {
+    const ALL: [KeyStatus; 4] = [
+        KeyStatus::Pending,
+        KeyStatus::Completed,
+        KeyStatus::CompletedTooLarge,
+        KeyStatus::CompletedNotStored,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            KeyStatus::Pending => "pending",
+            KeyStatus::Completed => "completed",
+            KeyStatus::CompletedTooLarge => "completed_too_large",
+            KeyStatus::CompletedNotStored => "completed_not_stored",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|status| status.as_str() == s)
+    }
+}
+
 /// What a key is bound to. Two requests are "the same" iff all three match.
 struct RequestIdentity {
     method: String,
@@ -271,8 +306,8 @@ async fn replay_existing(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match existing.status.as_str() {
-        "completed" => {
+    match KeyStatus::parse(&existing.status) {
+        Some(KeyStatus::Completed) => {
             let status = existing
                 .response_status
                 .and_then(|s| StatusCode::from_u16(s as u16).ok())
@@ -285,11 +320,13 @@ async fn replay_existing(
                 .body(Body::from(body))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        "completed_too_large" => AppError::IdempotencyResponseTooLarge.into_response(),
-        "completed_not_stored" => AppError::IdempotencyResponseNotStored.into_response(),
+        Some(KeyStatus::CompletedTooLarge) => AppError::IdempotencyResponseTooLarge.into_response(),
+        Some(KeyStatus::CompletedNotStored) => {
+            AppError::IdempotencyResponseNotStored.into_response()
+        }
         // Not stale, or `try_claim_key` would have reclaimed it.
-        "pending" => AppError::IdempotencyKeyInProgress.into_response(),
-        _ => {
+        Some(KeyStatus::Pending) => AppError::IdempotencyKeyInProgress.into_response(),
+        None => {
             warn!(key = %key, status = %existing.status, "Unknown idempotency key status");
             next.run(request).await
         }
@@ -324,7 +361,7 @@ impl PendingClaim {
         } else if forbids_storage(response.headers()) {
             // The body carries a secret: record completion (so a retry is not
             // executed twice) but never the body itself.
-            if let Err(e) = self.mark("completed_not_stored", status, None).await {
+            if let Err(e) = self.mark(KeyStatus::CompletedNotStored, status, None).await {
                 error!(error = %e, "Failed to mark no-store idempotency key as completed");
             }
             response
@@ -339,7 +376,7 @@ impl PendingClaim {
                         cap = MAX_RESPONSE_BODY_SIZE,
                         "Response body too large to cache for idempotency; passing original body through, retries will be rejected"
                     );
-                    if let Err(e) = self.mark("completed_too_large", status, None).await {
+                    if let Err(e) = self.mark(KeyStatus::CompletedTooLarge, status, None).await {
                         error!(error = %e, "Failed to mark oversized idempotency key as completed_too_large");
                     }
                     Response::from_parts(parts, Body::from(bytes))
@@ -347,7 +384,10 @@ impl PendingClaim {
                 Ok(bytes) => {
                     match std::str::from_utf8(&bytes) {
                         Ok(body_str) => {
-                            if let Err(e) = self.mark("completed", status, Some(body_str)).await {
+                            if let Err(e) = self
+                                .mark(KeyStatus::Completed, status, Some(body_str))
+                                .await
+                            {
                                 error!(error = %e, "Failed to cache idempotency response");
                             }
                         }
@@ -371,7 +411,7 @@ impl PendingClaim {
 
     async fn mark(
         &self,
-        new_status: &'static str,
+        new_status: KeyStatus,
         response_status: StatusCode,
         response_body: Option<&str>,
     ) -> Result<(), DbErr> {
@@ -382,7 +422,7 @@ impl PendingClaim {
                    SET status = $1, response_status = $2, response_body = $3, completed_at = NOW()
                    WHERE key = $4 AND user_id = $5 AND status = 'pending' AND created_at = $6"#,
                 [
-                    new_status.into(),
+                    new_status.as_str().into(),
                     (response_status.as_u16() as i16).into(),
                     response_body.into(),
                     self.key.as_str().into(),
@@ -449,5 +489,18 @@ pub async fn cleanup_expired_keys(db: &DatabaseConnection) {
         Err(e) => {
             error!(error = %e, "Failed to cleanup expired idempotency keys");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_status_round_trips_through_its_column_value() {
+        for status in KeyStatus::ALL {
+            assert_eq!(KeyStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(KeyStatus::parse("bogus"), None);
     }
 }
