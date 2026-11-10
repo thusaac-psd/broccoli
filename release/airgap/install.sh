@@ -5,11 +5,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 . "$here/lib/runtime.sh"
-# In a bundle plugins.sh sits in lib/; in a repo checkout, in release/lib/.
-plugins_lib="$here/lib/plugins.sh"
-[ -f "$plugins_lib" ] || plugins_lib="$here/../lib/plugins.sh"
-# shellcheck source=/dev/null
-. "$plugins_lib"
+# shellcheck source=lib/release-lib.sh
+. "$here/lib/release-lib.sh"
 
 usage() {
   echo "Usage: install.sh --role {server|worker|contestant} --bundle DIR [--lan-host H] [--server-secret DIR] [--burn-ca-key]"

@@ -109,14 +109,14 @@ Copy `connection.env` from Box 1 into each worker's bundle dir, then:
 cd <bundle>
 # (connection.env from box 1 is in this dir)
 export BROCCOLI_SKIP_TIME_CHECK=1
-BROCCOLI__WORKER__ID=worker-2 ./install.sh worker     # worker-3, worker-4, ...
+./install.sh worker     # the worker id defaults to one unique to this machine
 #   choose the 'icpc' worker image (C/C++/Python) at the worker-image menu
 ```
 
 `bring-up-worker.sh` wraps this non-interactively for fleets:
 
 ```bash
-./contest/bring-up-worker.sh --id worker-2            # reads ./connection.env
+./contest/bring-up-worker.sh            # reads ./connection.env; --id NAME to pick the id
 ```
 
 ### Sanity check

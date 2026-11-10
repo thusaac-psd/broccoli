@@ -11,12 +11,9 @@ envgen_secret() {
   openssl rand -base64 "$bytes" | tr -d '/+=\n'
 }
 
-# env_get, env_set and url_encode come from the env-file helpers every
-# installer shares: next to this file in a bundle, release/lib/ in a checkout.
-_envgen_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
-[ -f "$_envgen_lib" ] || _envgen_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../lib" && pwd)/env.sh"
-# shellcheck source=../../lib/env.sh
-. "$_envgen_lib"
+# env_get, env_set, postgres_url and redis_url come from release/lib/env.sh.
+# shellcheck source=release-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-lib.sh"
 
 # envgen_write INFRA SERVER INFRA_EXAMPLE SERVER_EXAMPLE ADMIN_USER ADMIN_PASS
 envgen_write() {

@@ -7,6 +7,8 @@ cd "$ROOT"
 . "$ROOT/lib/plugins.sh"
 # shellcheck source=lib/env.sh
 . "$ROOT/lib/env.sh"
+# shellcheck source=lib/host.sh
+. "$ROOT/lib/host.sh"
 BUNDLE_VERSION_DEFAULT="v0.3.0"
 
 die() {
@@ -855,7 +857,7 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     server)
-      prompt_value BROCCOLI__SERVER__ID "Server ID" "$(hostname -s 2>/dev/null || echo server-1)"
+      prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$(node_id server)"
       prompt_value BROCCOLI_HTTP_BIND "Server HTTP bind address" "0.0.0.0:3000"
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
@@ -876,7 +878,7 @@ write_env_file() {
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(hostname -s 2>/dev/null || echo server-1)}"
+        env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(node_id server)}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
         env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
         env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
@@ -900,7 +902,7 @@ write_env_file() {
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
     worker)
-      prompt_value BROCCOLI__WORKER__ID "Worker ID" "$(hostname -s 2>/dev/null || echo worker-1)"
+      prompt_value BROCCOLI__WORKER__ID "Worker ID (unique per worker)" "$(node_id worker)"
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -917,7 +919,7 @@ write_env_file() {
         env_line COMPOSE_PROJECT_NAME broccoli-worker
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
-        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(hostname -s 2>/dev/null || echo worker-1)}"
+        env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(node_id worker)}"
         env_line BROCCOLI__WORKER__DEDUP_TTL_SECS "${BROCCOLI__WORKER__DEDUP_TTL_SECS:-600}"
         env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"

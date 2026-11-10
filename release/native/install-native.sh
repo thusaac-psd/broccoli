@@ -14,7 +14,7 @@
 # Usage:
 #   sudo BROCCOLI_INFRA_HOST=<box1-LAN-IP> ./install-native.sh infra-server
 #   # copy the generated connection.env to each worker box's bundle dir, then:
-#   sudo BROCCOLI__WORKER__ID=worker-2 ./install-native.sh worker
+#   sudo ./install-native.sh worker   # worker id defaults to one unique to this box
 set -euo pipefail
 
 BUNDLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,11 +24,14 @@ SVC_USER="${BROCCOLI_SVC_USER:-$(logname 2>/dev/null || echo ubuntu)}"
 DB_NAME="broccoli"; DB_USER="broccoli"
 SEAWEED_DATA="${BROCCOLI_SEAWEED_DATA:-/data/seaweed-data}"
 CONN_ENV="$BUNDLE/connection.env"
-# In a bundle plugins.sh sits in lib/; in a repo checkout, in release/lib/.
-plugins_lib="$BUNDLE/lib/plugins.sh"
-[ -f "$plugins_lib" ] || plugins_lib="$BUNDLE/../lib/plugins.sh"
-# shellcheck source=/dev/null
-. "$plugins_lib"
+# The helpers every release installer shares sit in lib/ in a bundle and in
+# release/lib/ in a repo checkout.
+release_lib="$BUNDLE/lib"
+[ -f "$release_lib/plugins.sh" ] || release_lib="$BUNDLE/../lib"
+for f in plugins env host; do
+  # shellcheck source=/dev/null
+  . "$release_lib/$f.sh"
+done
 
 die(){ echo "error: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" = 0 ] || die "run with sudo"; }
@@ -203,7 +206,7 @@ install_worker(){
   [ -f "$CONN_ENV" ] || die "connection.env not found in $BUNDLE (copy it from the infra box)"
   # shellcheck disable=SC1090
   set -a; . "$CONN_ENV"; set +a
-  local wid="${BROCCOLI__WORKER__ID:-worker-$(hostname -s)}"
+  local wid="${BROCCOLI__WORKER__ID:-$(node_id worker)}"
   require_ubuntu; install_common_dirs
   ensure_toolchain
 

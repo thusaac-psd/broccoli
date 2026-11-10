@@ -75,7 +75,7 @@ Copy `connection.env` from box 1 into each worker's bundle dir, then:
 
 ```bash
 cd broccoli-native-v1
-sudo BROCCOLI__WORKER__ID=worker-2 ./install-native.sh worker   # worker-3, ...
+sudo ./install-native.sh worker   # id unique to this box; BROCCOLI__WORKER__ID=... to choose one
 ```
 
 This installs `isolate` (setuid + cgroup-v2 delegation via the per-boot
