@@ -988,68 +988,62 @@ write_env_file() {
   echo "created $ENV_FILE for role '$ROLE'"
 }
 
-wait_http() {
-  local url label attempt
-  url="$1"
-  label="$2"
+# wait_until LABEL VERB CHECK [ARG...]: run CHECK every 5s until it succeeds,
+# for at most 120s, then die with "LABEL did not VERB within 120s". A CHECK
+# that sees a final failure dies itself.
+wait_until() {
+  local label="$1" verb="$2" attempt
+  shift 2
   echo "waiting for $label"
   for attempt in $(seq 1 24); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
+    "$@" && return 0
     if [ "$attempt" = 24 ]; then
       compose ps
-      die "$label did not become healthy within 120s"
+      die "$label did not $verb within 120s"
     fi
     sleep 5
   done
+}
+
+http_ok() {
+  curl -fsS "$1" >/dev/null 2>&1
+}
+
+service_healthy() {
+  local container status
+  container="$(compose ps -q "$1" || true)"
+  [ -n "$container" ] || return 1
+  status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
+  case "$status" in
+    healthy|running) return 0 ;;
+  esac
+  return 1
+}
+
+# service_completed SERVICE LABEL: a one-shot service exited 0; dies if it
+# exited with anything else.
+service_completed() {
+  local container status exit_code
+  container="$(compose ps -a -q "$1" || true)"
+  [ -n "$container" ] || return 1
+  status="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  [ "$status" = "exited" ] || return 1
+  exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
+  [ "$exit_code" = "0" ] && return 0
+  compose logs "$1" || true
+  die "$2 exited with status $exit_code"
+}
+
+wait_http() {
+  wait_until "$2" "become healthy" http_ok "$1"
 }
 
 wait_service_healthy() {
-  local service label attempt container status
-  service="$1"
-  label="$2"
-  echo "waiting for $label"
-  for attempt in $(seq 1 24); do
-    container="$(compose ps -q "$service" || true)"
-    if [ -n "$container" ]; then
-      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container" 2>/dev/null || true)"
-      case "$status" in
-        healthy|running) return 0 ;;
-      esac
-    fi
-    if [ "$attempt" = 24 ]; then
-      compose ps
-      die "$label did not become healthy within 120s"
-    fi
-    sleep 5
-  done
+  wait_until "$2" "become healthy" service_healthy "$1"
 }
 
 wait_service_completed() {
-  local service label attempt container status exit_code
-  service="$1"
-  label="$2"
-  echo "waiting for $label"
-  for attempt in $(seq 1 24); do
-    container="$(compose ps -a -q "$service" || true)"
-    if [ -n "$container" ]; then
-      status="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)"
-      exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || true)"
-      if [ "$status" = "exited" ] && [ "$exit_code" = "0" ]; then
-        return 0
-      fi
-      if [ "$status" = "exited" ]; then
-        compose logs "$service" || true
-        die "$label exited with status $exit_code"
-      fi
-    fi
-    if [ "$attempt" = 24 ]; then
-      compose ps
-      die "$label did not complete within 120s"
-    fi
-    sleep 5
-  done
+  wait_until "$2" complete service_completed "$1" "$2"
 }
 
 if [ "$#" -gt 1 ]; then
