@@ -23,6 +23,7 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::models::shared::PageWindow;
 use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
@@ -75,15 +76,12 @@ pub async fn create_problem(
         &state.registries.checker_stage_registry,
     )
     .await?;
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
-    validate_submission_format(payload.submission_format.as_ref(), &known_languages)?;
+    let known_languages = state.registries.known_language_ids().await;
+    let submission_format = payload
+        .submission_format
+        .as_ref()
+        .map(|sf| parse_submission_format(sf, &known_languages))
+        .transpose()?;
     validate_contest_type(
         "default_contest_type",
         &default_contest_type,
@@ -92,8 +90,7 @@ pub async fn create_problem(
     .await?;
 
     let now = chrono::Utc::now();
-    let submission_format_json = payload
-        .submission_format
+    let submission_format_json = submission_format
         .map(|sf| sanitize_db_json(serde_json::to_value(sf).unwrap_or(serde_json::Value::Null)));
     let new_problem = problem::ActiveModel {
         title: Set(sanitize_db_text(payload.title.trim())),
@@ -126,6 +123,7 @@ pub async fn create_problem(
     params(ProblemListQuery),
     responses(
         (status = 200, description = "List of problems", body = ProblemListResponse),
+        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
     ),
@@ -139,8 +137,7 @@ pub async fn list_problems(
 ) -> Result<Json<ProblemListResponse>, AppError> {
     auth_user.require_any_permission(&[perm::PROBLEM_CREATE, perm::PROBLEM_EDIT])?;
 
-    let page = Ord::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut select = problem::Entity::find_active();
 
@@ -171,42 +168,20 @@ pub async fn list_problems(
         }
     };
 
-    let total = select
-        .clone()
-        .paginate(&state.db, per_page)
-        .num_items()
-        .await?;
+    let total = select.clone().count(&state.db).await?;
 
     select = select.order_by(sort_column, sort_order);
-    let total_pages = total.div_ceil(per_page);
 
     let data = select
-        .select_only()
-        .column(problem::Column::Id)
-        .column(problem::Column::Title)
-        .column(problem::Column::TimeLimit)
-        .column(problem::Column::MemoryLimit)
-        .column(problem::Column::ProblemType)
-        .column(problem::Column::CheckerFormat)
-        .column(problem::Column::DefaultContestType)
-        .column(problem::Column::ShowTestDetails)
-        .column(problem::Column::IsPublic)
-        .column(problem::Column::CreatedAt)
-        .column(problem::Column::UpdatedAt)
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
-        .into_model::<ProblemListItem>()
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
+        .into_partial_model::<ProblemListItem>()
         .all(&state.db)
         .await?;
 
     Ok(Json(ProblemListResponse {
         data,
-        pagination: Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        pagination: window.pagination(total),
     }))
 }
 
@@ -303,17 +278,15 @@ pub async fn update_problem(
     if let Some(ref cf) = payload.checker_format {
         validate_checker_format(cf, &state.registries.checker_stage_registry).await?;
     }
-    if let Some(Some(ref sf)) = payload.submission_format {
-        let known_languages: std::collections::HashSet<String> = state
-            .registries
-            .language_resolver_registry
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        validate_submission_format(Some(sf), &known_languages)?;
-    }
+    // Parsed (normalised) once here; the parsed value is what gets stored.
+    let submission_format = match &payload.submission_format {
+        Some(Some(sf)) => {
+            let known_languages = state.registries.known_language_ids().await;
+            Some(Some(parse_submission_format(sf, &known_languages)?))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
     if let Some(ref ct) = payload.default_contest_type {
         validate_contest_type(
             "default_contest_type",
@@ -361,7 +334,7 @@ pub async fn update_problem(
     if let Some(is_public) = payload.is_public {
         active.is_public = Set(is_public);
     }
-    match payload.submission_format {
+    match submission_format {
         Some(Some(sf)) => {
             active.submission_format = Set(Some(sanitize_db_json(
                 serde_json::to_value(sf).unwrap_or(serde_json::Value::Null),

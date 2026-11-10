@@ -15,15 +15,16 @@ use tracing::instrument;
 // `Resource::Problem` decision before touching these types (see the kernel
 // call above), pinned by `contestant_can_access_sample_test_case_via_active_contest`
 // and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
-use crate::entity::{test_case, test_case_result};
+use crate::entity::{problem, test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
 use crate::utils::problem::find_problem;
+use crate::utils::soft_delete::find_active_child;
 use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
 };
@@ -51,15 +52,13 @@ use super::find_problem_for_update;
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id))]
 pub async fn create_test_case(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<CreateTestCaseRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     let txn = state.db.begin().await?;
     find_problem_for_update(&txn, problem_id).await?;
     validate_create_test_case(&payload)?;
@@ -69,13 +68,14 @@ pub async fn create_test_case(
         None => next_test_case_position(&txn, problem_id).await?,
     };
 
-    let label = payload
-        .label
-        .as_deref()
-        .map(str::trim)
-        .map(sanitize_db_text)
-        .unwrap_or_else(|| position.to_string());
-    ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
+    let label = match payload.label.as_deref() {
+        Some(label) => {
+            let label = sanitize_db_text(label.trim());
+            ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
+            label
+        }
+        None => first_free_test_case_label(&txn, problem_id, position).await?,
+    };
     let input_body = prepare_test_case_body(payload.input, state.blob_store.clone()).await?;
     let output_body =
         prepare_test_case_body(payload.expected_output, state.blob_store.clone()).await?;
@@ -263,14 +263,13 @@ pub async fn get_test_case(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id, tc_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id, tc_id))]
 pub async fn update_test_case(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<UpdateTestCaseRequest>,
 ) -> Result<Json<TestCaseResponse>, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_update_test_case(&payload)?;
 
     if payload == UpdateTestCaseRequest::default() {
@@ -363,18 +362,7 @@ pub async fn delete_test_case(
     let txn = state.db.begin().await?;
     find_problem_for_update(&txn, problem_id).await?;
     let tc = find_test_case_for_problem(&txn, problem_id, tc_id).await?;
-
-    let result_count = test_case_result::Entity::find()
-        .filter(test_case_result::Column::TestCaseId.eq(tc.id))
-        .count(&txn)
-        .await?;
-    if result_count > 0 {
-        return Err(AppError::Conflict(
-            "Cannot delete test case with existing judge results".into(),
-        ));
-    }
-
-    test_case::Entity::delete_by_id(tc.id).exec(&txn).await?;
+    delete_unjudged_test_cases(&txn, test_case::Column::Id.eq(tc.id)).await?;
     txn.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -398,14 +386,13 @@ pub async fn delete_test_case(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(problem_id))]
+#[instrument(skip(_auth, state, payload), fields(problem_id))]
 pub async fn reorder_test_cases(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<ReorderTestCasesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_reorder_test_cases(&payload)?;
 
     let txn = state.db.begin().await?;
@@ -468,12 +455,11 @@ pub async fn reorder_test_cases(
 )]
 #[instrument(skip(state, auth_user, payload), fields(problem_id))]
 pub async fn bulk_delete_test_cases(
-    auth_user: FreshAuthUser,
+    auth_user: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     AppJson(payload): AppJson<BulkDeleteTestCasesRequest>,
 ) -> Result<Json<BulkDeleteTestCasesResponse>, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     validate_bulk_delete_test_cases(&payload)?;
 
     let txn = state.db.begin().await?;
@@ -501,37 +487,21 @@ pub async fn bulk_delete_test_cases(
         )));
     }
 
-    let ids_with_results: Vec<i32> = test_case_result::Entity::find()
-        .filter(test_case_result::Column::TestCaseId.is_in(payload.test_case_ids.clone()))
-        .select_only()
-        .column(test_case_result::Column::TestCaseId)
-        .distinct()
-        .into_tuple::<i32>()
-        .all(&txn)
-        .await?;
-
-    if !ids_with_results.is_empty() {
-        return Err(AppError::Conflict(format!(
-            "Cannot delete: test cases {ids_with_results:?} have judge results"
-        )));
-    }
-
-    let result = test_case::Entity::delete_many()
-        .filter(test_case::Column::Id.is_in(payload.test_case_ids))
-        .exec(&txn)
-        .await?;
+    let deleted =
+        delete_unjudged_test_cases(&txn, test_case::Column::Id.is_in(payload.test_case_ids))
+            .await?;
 
     txn.commit().await?;
 
     tracing::info!(
         problem_id,
-        deleted = result.rows_affected,
+        deleted,
         user_id = auth_user.user_id,
         "Bulk deleted test cases"
     );
 
     Ok(Json(BulkDeleteTestCasesResponse {
-        deleted: result.rows_affected as usize,
+        deleted: deleted as usize,
     }))
 }
 
@@ -544,16 +514,60 @@ async fn find_test_case_for_problem<C: ConnectionTrait>(
     problem_id: i32,
     tc_id: i32,
 ) -> Result<test_case::Model, AppError> {
-    let tc = test_case::Entity::find_by_id(tc_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Test case not found".into()))?;
+    find_active_child::<problem::Entity, test_case::Entity, _, _>(
+        db,
+        test_case::Column::ProblemId,
+        problem_id,
+        tc_id,
+        "Test case",
+    )
+    .await
+}
 
-    if tc.problem_id != problem_id {
-        return Err(AppError::NotFound("Test case not found".into()));
+/// Delete the test cases matching `scope`, refusing with `409 CONFLICT` (and
+/// the offending IDs) if any of them has judge results.
+///
+/// The single source of the "never orphan a `test_case_result`" rule shared by
+/// single delete, bulk delete and ZIP `strategy=replace`: without it the
+/// `test_case_result.test_case_id` FK rejects the delete and the caller sees a
+/// 500 instead of an actionable conflict. The check is one `SELECT DISTINCT`
+/// over the same scope, so it costs a single extra statement however many test
+/// cases are involved. Callers hold the problem row lock (via
+/// `find_problem_for_update`) for the surrounding transaction.
+pub(super) async fn delete_unjudged_test_cases<C: ConnectionTrait>(
+    db: &C,
+    scope: impl sea_query::IntoCondition,
+) -> Result<u64, AppError> {
+    let scope = scope.into_condition();
+    let ids_with_results: Vec<i32> = test_case_result::Entity::find()
+        .filter(
+            test_case_result::Column::TestCaseId.in_subquery(
+                test_case::Entity::find()
+                    .select_only()
+                    .column(test_case::Column::Id)
+                    .filter(scope.clone())
+                    .into_query(),
+            ),
+        )
+        .select_only()
+        .column(test_case_result::Column::TestCaseId)
+        .distinct()
+        .order_by_asc(test_case_result::Column::TestCaseId)
+        .into_tuple::<i32>()
+        .all(db)
+        .await?;
+
+    if !ids_with_results.is_empty() {
+        return Err(AppError::Conflict(format!(
+            "Cannot delete: test cases {ids_with_results:?} have judge results"
+        )));
     }
 
-    Ok(tc)
+    let result = test_case::Entity::delete_many()
+        .filter(scope)
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
 }
 
 pub(super) async fn next_test_case_position<C: ConnectionTrait>(
@@ -572,6 +586,34 @@ pub(super) async fn next_test_case_position<C: ConnectionTrait>(
         .unwrap_or(-1)
         .checked_add(1)
         .ok_or_else(|| AppError::Validation("Position overflow".into()))
+}
+
+/// The first numeric label `>= start` that no test case of the problem uses.
+///
+/// A generated label must never be one the server then rejects as a
+/// duplicate: ZIP uploads number labels from `1` while positions start at
+/// `0`, so `position.to_string()` alone collides right after an upload. The
+/// caller holds the problem row lock, so the label stays free until insert.
+async fn first_free_test_case_label<C: ConnectionTrait>(
+    db: &C,
+    problem_id: i32,
+    start: i32,
+) -> Result<String, AppError> {
+    let taken: std::collections::HashSet<String> = test_case::Entity::find()
+        .filter(test_case::Column::ProblemId.eq(problem_id))
+        .select_only()
+        .column(test_case::Column::Label)
+        .into_tuple::<String>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    // At most `taken.len()` candidates can be occupied, so this terminates
+    // within `taken.len() + 1` steps.
+    (i64::from(start)..)
+        .map(|n| n.to_string())
+        .find(|label| !taken.contains(label))
+        .ok_or_else(|| AppError::Internal("no free test case label".into()))
 }
 
 async fn ensure_test_case_label_available<C: ConnectionTrait>(

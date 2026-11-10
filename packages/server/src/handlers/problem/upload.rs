@@ -6,7 +6,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum_typed_multipart::BaseMultipart;
-use broccoli_server_sdk::permissions as perm;
 use sea_orm::*;
 use tracing::instrument;
 
@@ -16,7 +15,7 @@ use tracing::instrument;
 // returns test case content to a viewer.
 use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::FreshAuthUser;
+use crate::extractors::auth::{Authorized, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
 use crate::state::AppState;
@@ -29,7 +28,7 @@ use crate::utils::test_case_body::prepare_test_case_body;
 use crate::utils::text::sanitize_db_text;
 
 use super::find_problem_for_update;
-use super::test_cases::{next_test_case_position, tc_to_list_item};
+use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
 
 #[utoipa::path(
     post,
@@ -37,7 +36,7 @@ use super::test_cases::{next_test_case_position, tc_to_list_item};
     tag = "Test Cases",
     operation_id = "uploadTestCases",
     summary = "Upload test cases from a ZIP file",
-    description = "Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.",
+    description = "Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.",
     params(("id" = i32, Path, description = "Problem ID")),
     request_body(content_type = "multipart/form-data", content = UploadTestCasesRequest),
     responses(
@@ -46,19 +45,17 @@ use super::test_cases::{next_test_case_position, tc_to_list_item};
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Duplicate label in problem (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, data), fields(problem_id))]
+#[instrument(skip(_auth, state, data), fields(problem_id))]
 pub async fn upload_test_cases(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     BaseMultipart { data, .. }: BaseMultipart<UploadTestCasesRequest, AppError>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     if data.input_format.matches('*').count() != 1 || data.output_format.matches('*').count() != 1 {
         return Err(AppError::Validation(
             "Formats must contain exactly one '*' wildcard".into(),
@@ -78,10 +75,7 @@ pub async fn upload_test_cases(
 
     let is_replace = matches!(data.strategy, UploadTestCasesMergeStrategy::Replace);
     if is_replace {
-        test_case::Entity::delete_many()
-            .filter(test_case::Column::ProblemId.eq(problem_id))
-            .exec(&txn)
-            .await?;
+        delete_unjudged_test_cases(&txn, test_case::Column::ProblemId.eq(problem_id)).await?;
     }
 
     let mut start_pos = if is_replace {
@@ -248,6 +242,47 @@ fn extract_label<'a>(filename: &'a str, format: &str) -> Option<&'a str> {
     }
 }
 
+/// What a ZIP entry is, given the input and output filename formats.
+#[derive(Debug, PartialEq, Eq)]
+enum ZipEntryRole<'a> {
+    Input(&'a str),
+    Output(&'a str),
+}
+
+/// Classify `filename` as an input or output file and extract its label.
+///
+/// Overlapping formats are legitimate (Polygon's `*` for inputs and `*.a` for
+/// answers), so a name matching both goes to the MORE SPECIFIC format, the one
+/// with more literal characters around the `*`: `01.a` is the answer for `01`,
+/// not an input labelled `01.a`. When both are equally specific there is no
+/// principled choice, so the upload is rejected instead of guessing.
+fn classify_zip_entry<'a>(
+    filename: &'a str,
+    input_format: &str,
+    output_format: &str,
+) -> Result<Option<ZipEntryRole<'a>>, AppError> {
+    match (
+        extract_label(filename, input_format),
+        extract_label(filename, output_format),
+    ) {
+        (None, None) => Ok(None),
+        (Some(label), None) => Ok(Some(ZipEntryRole::Input(label))),
+        (None, Some(label)) => Ok(Some(ZipEntryRole::Output(label))),
+        (Some(as_input), Some(as_output)) => {
+            // Both formats contain exactly one `*`, so `len - 1` is the
+            // number of literal characters.
+            match input_format.len().cmp(&output_format.len()) {
+                std::cmp::Ordering::Greater => Ok(Some(ZipEntryRole::Input(as_input))),
+                std::cmp::Ordering::Less => Ok(Some(ZipEntryRole::Output(as_output))),
+                std::cmp::Ordering::Equal => Err(AppError::Validation(format!(
+                    "File '{filename}' matches both input format '{input_format}' and \
+                     output format '{output_format}'; make one format more specific"
+                ))),
+            }
+        }
+    }
+}
+
 fn parse_zip_test_cases(
     data: &[u8],
     input_format: &str,
@@ -282,12 +317,9 @@ fn parse_zip_test_cases(
         }
 
         let is_sample = is_sample_directory(dir);
-        let label_as_input = extract_label(filename, input_format);
-        let label_as_output = extract_label(filename, output_format);
-
-        if label_as_input.is_none() && label_as_output.is_none() {
+        let Some(role) = classify_zip_entry(filename, input_format, output_format)? else {
             continue;
-        }
+        };
 
         let mut buf = Vec::new();
         file.take(MAX_DECOMPRESSED_FILE_SIZE + 1)
@@ -311,27 +343,27 @@ fn parse_zip_test_cases(
             .map_err(|_| AppError::Validation(format!("File '{name}' is not valid UTF-8")))?;
         let content = sanitize_db_text(content);
 
-        if let Some(label) = label_as_input {
-            let key = sanitize_db_text(label);
-            validate_label(&key)?;
-            if in_files.contains_key(&key) {
-                return Err(AppError::Validation(format!(
-                    "Duplicate input file for test case label '{key}'"
-                )));
+        match role {
+            ZipEntryRole::Input(label) => {
+                let key = sanitize_db_text(label);
+                validate_label(&key)?;
+                if in_files.contains_key(&key) {
+                    return Err(AppError::Validation(format!(
+                        "Duplicate input file for test case label '{key}'"
+                    )));
+                }
+                in_files.insert(key, (content, is_sample));
             }
-            in_files.insert(key, (content, is_sample));
-            continue;
-        }
-
-        if let Some(label) = label_as_output {
-            let key = sanitize_db_text(label);
-            validate_label(&key)?;
-            if ans_files.contains_key(&key) {
-                return Err(AppError::Validation(format!(
-                    "Duplicate output file for test case label '{key}'"
-                )));
+            ZipEntryRole::Output(label) => {
+                let key = sanitize_db_text(label);
+                validate_label(&key)?;
+                if ans_files.contains_key(&key) {
+                    return Err(AppError::Validation(format!(
+                        "Duplicate output file for test case label '{key}'"
+                    )));
+                }
+                ans_files.insert(key, content);
             }
-            ans_files.insert(key, content);
         }
     }
 
@@ -376,4 +408,33 @@ fn parse_zip_test_cases(
     entries.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
 
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_formats_prefer_the_more_specific_pattern() {
+        assert_eq!(
+            classify_zip_entry("01.a", "*", "*.a").unwrap(),
+            Some(ZipEntryRole::Output("01"))
+        );
+        assert_eq!(
+            classify_zip_entry("01", "*", "*.a").unwrap(),
+            Some(ZipEntryRole::Input("01"))
+        );
+        // Mirror image: the input format is the specific one.
+        assert_eq!(
+            classify_zip_entry("01.in", "*.in", "*").unwrap(),
+            Some(ZipEntryRole::Input("01"))
+        );
+        assert_eq!(classify_zip_entry("x.txt", "*.in", "*.ans").unwrap(), None);
+    }
+
+    #[test]
+    fn equally_specific_overlap_is_rejected() {
+        assert!(classify_zip_entry("ab", "a*", "*b").is_err());
+        assert!(classify_zip_entry("1.txt", "*.txt", "*.txt").is_err());
+    }
 }
