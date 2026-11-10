@@ -825,3 +825,76 @@ async fn a_dispatch_refused_at_shutdown_leaves_the_submission_for_a_peer() {
         .unwrap();
     assert_eq!(subs, 1, "released for a peer to steal");
 }
+
+/// The stuck-job detector re-dispatches what it recovers on the replica that
+/// runs it, so it leaves work to a live replica that can judge it, like
+/// every other dispatch path.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
+    use common::SubmissionStatus;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use server::entity::submission;
+
+    let a = TestApp::spawn().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+    let problem_id = a.create_problem(&token, "Stuck").await;
+    let user_id = a.get_with_token(routes::ME, &token).await.id();
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "fleet-only".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "__test__".into(),
+                submission_fn: "noop".into(),
+                code_run_fn: "noop".into(),
+                submission_admission: false,
+            },
+        );
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    // Owned by a dead server and dispatched long ago: past the in-flight cap,
+    // so the detector recovers it directly.
+    let long_ago = chrono::Utc::now() - chrono::Duration::hours(5);
+    let row = submission::ActiveModel {
+        files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(None),
+        contest_type: Set("fleet-only".into()),
+        status: Set(SubmissionStatus::Running),
+        owner_server_id: Set(Some("dead-server".into())),
+        lease_heartbeat_at: Set(Some(long_ago)),
+        leased_at: Set(Some(long_ago)),
+        judge_epoch: Set(0),
+        created_at: Set(long_ago),
+        ..Default::default()
+    }
+    .insert(&a.db)
+    .await
+    .unwrap();
+    let dlq = a.state.config.mq.dlq.clone();
+    let reload = async || {
+        submission::Entity::find_by_id(row.id)
+            .one(&a.db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+
+    server::dlq::detect_stuck_jobs_once(&b.state, &dlq)
+        .await
+        .unwrap();
+    let after_b = reload().await;
+    assert_eq!(after_b.judge_epoch, 0, "B must leave it: {after_b:?}");
+    assert_eq!(after_b.owner_server_id.as_deref(), Some("dead-server"));
+
+    server::dlq::detect_stuck_jobs_once(&a.state, &dlq)
+        .await
+        .unwrap();
+    let after_a = reload().await;
+    assert_ne!(after_a.judge_epoch, 0, "A recovers it: {after_a:?}");
+}

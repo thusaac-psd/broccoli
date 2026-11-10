@@ -41,6 +41,41 @@ pub async fn run_stuck_job_detector(state: AppState, config: DlqConfig) {
     }
 }
 
+/// One detection pass, as the detector loop runs it. `pub` so integration
+/// tests can drive it directly.
+pub async fn detect_once(state: &AppState, config: &DlqConfig) -> anyhow::Result<()> {
+    detect_and_handle_stuck_jobs(state, config, state.config.server.max_stuck_retries).await
+}
+
+/// Of the candidate `ids` of `table`, the ones this replica should recover:
+/// recovery re-dispatches here, so work whose contest type another live
+/// replica can judge (and this one cannot) is left to that replica's
+/// detector, exactly as the claim, steal and SystemError-retry selects do
+/// (see `dispatcher::prefer_local_handler`).
+async fn judgeable_here(
+    state: &AppState,
+    table: &str,
+    ids: Vec<i32>,
+    local: &[String],
+) -> Result<Vec<i32>, sea_orm::DbErr> {
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let sql = format!(
+        "SELECT id FROM {table} WHERE id = ANY($1) AND {}",
+        crate::dispatcher::prefer_local_handler_for(table, "$2")
+    );
+    let rows = state
+        .db
+        .query_all_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            sql,
+            [ids.into(), local.to_vec().into()],
+        ))
+        .await?;
+    rows.iter().map(|r| r.try_get::<i32>("", "id")).collect()
+}
+
 async fn observe_old_queued_backlog(
     db: &DatabaseConnection,
     queued_observability_threshold: chrono::DateTime<Utc>,
@@ -114,6 +149,7 @@ async fn detect_and_handle_stuck_jobs(
         .then(|| Utc::now() - chrono::Duration::seconds(config.max_inflight_secs as i64));
 
     observe_old_queued_backlog(db, queued_observability_threshold).await?;
+    let local = crate::dispatcher::local_contest_types(state).await;
 
     // Composite recovery predicate:
     // - Pending rows with no owner are orphaned after the 5-minute
@@ -149,6 +185,8 @@ async fn detect_and_handle_stuck_jobs(
         .into_tuple()
         .all(db)
         .await?;
+    let stuck_submission_ids =
+        judgeable_here(state, "submission", stuck_submission_ids, &local).await?;
 
     if !stuck_submission_ids.is_empty() {
         info!(
@@ -203,6 +241,7 @@ async fn detect_and_handle_stuck_jobs(
         .into_tuple()
         .all(db)
         .await?;
+    let stuck_code_run_ids = judgeable_here(state, "code_run", stuck_code_run_ids, &local).await?;
 
     if !stuck_code_run_ids.is_empty() {
         info!(
@@ -254,6 +293,8 @@ async fn detect_and_handle_stuck_jobs(
         .into_tuple()
         .all(db)
         .await?;
+    let stuck_judgement_ids =
+        judgeable_here(state, "submission_judgement", stuck_judgement_ids, &local).await?;
 
     if !stuck_judgement_ids.is_empty() {
         info!(
