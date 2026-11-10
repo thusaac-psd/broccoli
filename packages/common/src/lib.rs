@@ -13,6 +13,7 @@ pub mod event;
 pub mod hook;
 pub mod metrics;
 pub mod observability;
+pub mod redact;
 pub mod retry;
 pub mod rlimit;
 pub mod storage;
