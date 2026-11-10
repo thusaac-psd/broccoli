@@ -7,7 +7,12 @@ import React, {
   useState,
 } from 'react';
 
-import { useApiClient, useRefreshSession, useSetApiAccessToken } from '@/api';
+import {
+  type RefreshedSession,
+  useApiClient,
+  useRefreshSession,
+  useSetApiAccessToken,
+} from '@/api';
 import {
   AUTH_SESSION_EXPIRED_EVENT,
   type LoginRequest,
@@ -58,6 +63,23 @@ export function AuthProvider({
     [setApiAccessToken],
   );
 
+  // Starts (or renews) the session from a login or refresh response.
+  const startSession = useCallback(
+    (data: RefreshedSession) => {
+      updateAccessToken(data.token);
+      setUser({
+        id: data.id,
+        username: data.username,
+        display_name: data.display_name,
+        roles: data.roles,
+        permissions: data.permissions,
+      });
+      localStorage.setItem(sessionStatusKey, 'true');
+      setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
+    },
+    [updateAccessToken, sessionStatusKey],
+  );
+
   // Ends the session in this tab and, through the session hint, in every
   // other tab. Only for an explicit logout or a definitive auth rejection:
   // anything weaker would sign out tabs whose session is fine.
@@ -96,17 +118,7 @@ export function AuthProvider({
       return;
     }
 
-    const data = outcome.session;
-    updateAccessToken(data.token);
-    setUser({
-      id: data.id,
-      username: data.username,
-      display_name: data.display_name,
-      roles: data.roles,
-      permissions: data.permissions,
-    });
-    localStorage.setItem(sessionStatusKey, 'true');
-    setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
+    startSession(outcome.session);
 
     if (!settledRef.current) {
       settledRef.current = true;
@@ -115,13 +127,7 @@ export function AuthProvider({
       // and got a 401 because no Authorization header was attached.
       queryClient.invalidateQueries();
     }
-  }, [
-    refreshApiSession,
-    clearSession,
-    updateAccessToken,
-    sessionStatusKey,
-    queryClient,
-  ]);
+  }, [refreshApiSession, clearSession, startSession, queryClient]);
 
   const login = useCallback(
     async (data: LoginRequest) => {
@@ -132,20 +138,10 @@ export function AuthProvider({
       if (error) throw new Error(error.message);
       if (!resData) throw new Error('Unexpected login response');
 
-      updateAccessToken(resData.token);
-      setUser({
-        id: resData.id,
-        username: resData.username,
-        display_name: resData.display_name,
-        roles: resData.roles,
-        permissions: resData.permissions,
-      });
-
-      localStorage.setItem(sessionStatusKey, 'true');
-      setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
+      startSession(resData);
       queryClient.clear();
     },
-    [apiClient, updateAccessToken, sessionStatusKey, queryClient],
+    [apiClient, startSession, queryClient],
   );
 
   // Sync state with other tabs or infrastructure events
