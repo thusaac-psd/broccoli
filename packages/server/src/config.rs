@@ -49,6 +49,11 @@ pub struct DatabaseConfig {
     /// separate unbounded session. See `common::db`.
     #[serde(default = "common::db::default_statement_timeout_secs")]
     pub statement_timeout_secs: u64,
+    /// Send server-side TCP keepalive settings on every connection. Turn this
+    /// off (together with `statement_timeout_secs = 0`) behind a PgBouncer that
+    /// rejects the startup `options` parameter. See `common::db::PgSession`.
+    #[serde(default = "common::db::default_tcp_keepalives")]
+    pub tcp_keepalives: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -60,6 +65,7 @@ impl Default for DatabaseConfig {
             plugin_privileged_max_connections: default_plugin_privileged_max_connections(),
             plugin_url: None,
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
+            tcp_keepalives: common::db::default_tcp_keepalives(),
         }
     }
 }

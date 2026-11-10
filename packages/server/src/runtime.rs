@@ -75,7 +75,7 @@ impl ServerRuntime {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
-        let db_session = crate::database::app_session(app_config.database.statement_timeout_secs);
+        let db_session = crate::database::app_session(&app_config.database);
         // Boot-time schema work runs on one session holding a cluster-wide
         // advisory lock, so replicas booting together serialize instead of
         // racing each other's DDL and check-then-insert seeding. Indexes come

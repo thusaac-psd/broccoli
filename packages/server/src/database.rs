@@ -11,8 +11,12 @@ pub const APP_NAME: &str = "broccoli-server";
 pub const PLUGIN_APP_NAME: &str = "broccoli-server-plugin";
 
 /// The session every pooled server connection runs with.
-pub fn app_session(statement_timeout_secs: u64) -> PgSession {
-    PgSession::new(APP_NAME, statement_timeout_secs)
+pub fn app_session(config: &crate::config::DatabaseConfig) -> PgSession {
+    PgSession::new(
+        APP_NAME,
+        config.statement_timeout_secs,
+        config.tcp_keepalives,
+    )
 }
 
 /// The same bounds as [`app_session`], labelled as plugin traffic.
@@ -28,7 +32,7 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
     init_db_with_max_connections(
         db_url,
         100,
-        &app_session(common::db::DEFAULT_STATEMENT_TIMEOUT_SECS),
+        &app_session(&crate::config::DatabaseConfig::default()),
     )
     .await
 }
@@ -512,6 +516,11 @@ impl BootSession {
         )
         .await?;
         let boot = Self { db };
+        // Override any role- or database-level default too. A plain `SET` (not
+        // a startup option) also works through a PgBouncer in session mode.
+        boot.db
+            .execute_unprepared("SET statement_timeout = 0")
+            .await?;
         let held = boot
             .db
             .query_one_raw(boot.lock_stmt("SELECT pg_try_advisory_lock($1) AS held"))
@@ -578,7 +587,7 @@ mod tests {
     use std::time::Duration;
 
     fn test_session() -> PgSession {
-        app_session(common::db::DEFAULT_STATEMENT_TIMEOUT_SECS)
+        app_session(&crate::config::DatabaseConfig::default())
     }
 
     /// Pure classification of the restricted pool's end-state — the single input
@@ -658,6 +667,28 @@ mod tests {
         common::clock::check_clock_skew(&db, Some(&client), &strict)
             .await
             .expect("same-host clocks agree");
+    }
+
+    /// The boot session is unbounded even when the role carries a default
+    /// `statement_timeout` (it sets 0 explicitly instead of relying on startup
+    /// options, which a PgBouncer may strip).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_session_overrides_a_role_level_statement_timeout() {
+        let (_c, url) = fresh_postgres().await;
+        let admin = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        admin
+            .execute_unprepared("ALTER ROLE postgres SET statement_timeout = '1s'")
+            .await
+            .expect("role default");
+        admin.close().await.expect("close");
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.conn()
+            .execute_unprepared("SELECT pg_sleep(1.5)")
+            .await
+            .expect("boot DDL is not cut off by the role default");
+        boot.release().await.expect("release");
     }
 
     /// A second booter blocks on the boot lock until the first releases it.
@@ -757,7 +788,10 @@ mod tests {
         let port = container.get_host_port_ipv4(5432).await.expect("port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
-        let session = app_session(1);
+        let session = app_session(&crate::config::DatabaseConfig {
+            statement_timeout_secs: 1,
+            ..Default::default()
+        });
         let app = init_db_with_max_connections(&url, 2, &session)
             .await
             .expect("migrate + main pool");

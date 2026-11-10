@@ -216,7 +216,7 @@ async fn connect_fresh_single(
 ) -> Result<DatabaseConnection, sea_orm::DbErr> {
     let session = PLUGIN_DB_SESSION.get().cloned().unwrap_or_else(|| {
         crate::database::plugin_session(&crate::database::app_session(
-            common::db::DEFAULT_STATEMENT_TIMEOUT_SECS,
+            &crate::config::DatabaseConfig::default(),
         ))
     });
     let mut opts = common::db::pg_connect_options(url, &session)?;

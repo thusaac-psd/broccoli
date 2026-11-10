@@ -35,6 +35,11 @@ pub fn default_statement_timeout_secs() -> u64 {
     DEFAULT_STATEMENT_TIMEOUT_SECS
 }
 
+/// Serde default for the `database.tcp_keepalives` key of both binaries.
+pub fn default_tcp_keepalives() -> bool {
+    true
+}
+
 /// Server-side keepalive: first probe after 30 s idle, then every 10 s, give up
 /// after 3 misses. A vanished client is reaped in about 60 s.
 const TCP_KEEPALIVES: [(&str, &str); 3] = [
@@ -46,56 +51,77 @@ const TCP_KEEPALIVES: [(&str, &str); 3] = [
 /// Per-connection session settings applied at connect time (startup
 /// `options`), so they hold for every physical connection in the pool,
 /// including ones opened after a reconnect.
+///
+/// Only enabled settings are sent: with `statement_timeout_secs = 0` and
+/// `tcp_keepalives = false` no startup `options` parameter is sent at all,
+/// which is what a PgBouncer in front of Postgres needs unless it lists
+/// `options` in `ignore_startup_parameters` (configure the bounds on the
+/// Postgres role instead in that setup).
 #[derive(Debug, Clone)]
 pub struct PgSession {
     /// Shown in `pg_stat_activity.application_name`, e.g. `broccoli-server`.
     pub application_name: &'static str,
-    /// `None` disables the timeout explicitly (overriding any role default).
+    /// `None` sends no timeout (the server or role default applies).
     pub statement_timeout: Option<Duration>,
+    /// Send the server-side keepalive settings.
+    pub tcp_keepalives: bool,
 }
 
 impl PgSession {
-    /// A session bounded by the configured `statement_timeout_secs`
-    /// (`0` disables it).
-    pub fn new(application_name: &'static str, statement_timeout_secs: u64) -> Self {
+    /// A session bounded by the configured `statement_timeout_secs` (`0`
+    /// sends none), with keepalives when `tcp_keepalives` is set.
+    pub fn new(
+        application_name: &'static str,
+        statement_timeout_secs: u64,
+        tcp_keepalives: bool,
+    ) -> Self {
         Self {
             application_name,
             statement_timeout: (statement_timeout_secs > 0)
                 .then(|| Duration::from_secs(statement_timeout_secs)),
+            tcp_keepalives,
         }
     }
 
-    /// A session with no statement timeout, for known long statements such as
-    /// schema sync, migrations and boot backfills.
+    /// A session that sends no statement timeout, for known long statements
+    /// such as schema sync, migrations and boot backfills. Callers that must
+    /// also override a role-level default run `SET statement_timeout = 0`
+    /// themselves (see the server's boot session).
     pub fn unbounded(application_name: &'static str) -> Self {
         Self {
             application_name,
             statement_timeout: None,
+            tcp_keepalives: true,
         }
     }
 
-    fn statement_timeout_ms(&self) -> u128 {
-        self.statement_timeout.map_or(0, |d| d.as_millis())
+    /// The startup `options` to send; empty when every bound is disabled.
+    fn startup_options(&self) -> Vec<(String, String)> {
+        let keepalives = TCP_KEEPALIVES
+            .iter()
+            .filter(|_| self.tcp_keepalives)
+            .map(|(k, v)| (k.to_string(), v.to_string()));
+        let timeout = self
+            .statement_timeout
+            .map(|d| ("statement_timeout".to_string(), d.as_millis().to_string()));
+        keepalives.chain(timeout).collect()
     }
 }
 
 /// Parse `url` and apply the session settings. Statement logging is disabled
 /// (sqlx would otherwise log every statement at INFO).
 pub fn pg_connect_options(url: &str, session: &PgSession) -> Result<PgConnectOptions, DbErr> {
-    let options = url
+    let mut options = url
         .parse::<PgConnectOptions>()
         .map_err(sqlx_err)?
         .disable_statement_logging()
-        .application_name(session.application_name)
-        .options(
-            TCP_KEEPALIVES
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .chain(std::iter::once((
-                    "statement_timeout".to_string(),
-                    session.statement_timeout_ms().to_string(),
-                ))),
-        );
+        .application_name(session.application_name);
+    // `options()` creates the startup parameter even for an empty iterator, so
+    // only call it when there is something to send.
+    let startup = session.startup_options();
+    if !startup.is_empty() {
+        options = options.options(startup);
+    }
     Ok(options)
 }
 
@@ -186,7 +212,7 @@ mod tests {
     fn session_settings_reach_the_startup_options() {
         let o = pg_connect_options(
             "postgres://u:p@db:5432/x",
-            &PgSession::new("broccoli-test", 60),
+            &PgSession::new("broccoli-test", 60, true),
         )
         .unwrap();
         let s = startup_options(&o);
@@ -197,18 +223,28 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_unbounded_disable_the_statement_timeout_explicitly() {
-        for session in [PgSession::new("t", 0), PgSession::unbounded("t")] {
-            let o = pg_connect_options("postgres://db/x", &session).unwrap();
-            assert!(startup_options(&o).contains("statement_timeout=0"));
-        }
+    fn disabled_bounds_are_not_sent() {
+        let o = pg_connect_options("postgres://db/x", &PgSession::new("t", 0, true)).unwrap();
+        let s = startup_options(&o);
+        assert!(!s.contains("statement_timeout"), "{s}");
+        assert!(s.contains("tcp_keepalives_idle=30"), "{s}");
+        let o = pg_connect_options("postgres://db/x", &PgSession::unbounded("t")).unwrap();
+        assert!(!startup_options(&o).contains("statement_timeout"));
+    }
+
+    /// With every bound disabled no `options` startup parameter is sent, so a
+    /// PgBouncer that does not ignore it accepts the connection.
+    #[test]
+    fn nothing_enabled_sends_no_options_parameter() {
+        let o = pg_connect_options("postgres://db/x", &PgSession::new("t", 0, false)).unwrap();
+        assert_eq!(o.get_options(), None);
     }
 
     #[test]
     fn url_options_are_kept() {
         let o = pg_connect_options(
             "postgres://db/x?options=-c%20search_path%3Dfoo",
-            &PgSession::new("t", 5),
+            &PgSession::new("t", 5, true),
         )
         .unwrap();
         let s = startup_options(&o);
