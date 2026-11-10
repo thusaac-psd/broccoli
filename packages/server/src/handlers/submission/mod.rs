@@ -1059,7 +1059,7 @@ pub async fn list_contest_submissions(
 }
 
 pub fn submission_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(max_size + 4096)
+    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
 }
 
 #[cfg(test)]
