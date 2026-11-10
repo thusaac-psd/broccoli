@@ -252,8 +252,9 @@ require_json_safe() {
 # Each role is its own Compose project (COMPOSE_PROJECT_NAME, written into
 # new env files), so roles installed from one directory get separate networks
 # and never treat each other's containers as orphans. Env files written before
-# that keep Compose's default, the directory name, so an upgrade does not
-# attach an existing install to new, empty volumes.
+# that have no project name and run under Compose's default, the directory
+# name; guard_unpinned_project_name stops one from starting on empty volumes
+# after it was copied into a new bundle directory.
 compose() {
   if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
     docker compose -p "$COMPOSE_PROJECT_NAME" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"

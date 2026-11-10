@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Thin convenience wrapper for bringing up a worker box on the offline contest
-# LAN. It only sets the documented offline/LAN/worker-id environment and then
-# hands off to the bundle's ../install.sh worker -- it does NOT reimplement any
+# LAN. It only sets the worker id (when --id is given) and non-interactive mode
+# and then hands off to the bundle's ../install.sh worker -- it does NOT reimplement any
 # install.sh logic. For full control just call ../install.sh worker yourself
 # (see ./README.md).
 #
