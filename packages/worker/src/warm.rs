@@ -36,11 +36,34 @@ const PROGRESS_UPDATE_EVERY: u32 = 4;
 /// Delay before re-subscribing after the pub/sub stream drops.
 const RESUBSCRIBE_DELAY: Duration = Duration::from_secs(5);
 
-/// Spawn the pre-warm subscriber. Failures (e.g. cache/blob build error) disable
-/// warming but never crash the worker - judging continues regardless. The
-/// runtime holds the returned handle the same way it holds `_cleanup_handle`:
-/// this is an independent background helper, so shutdown drains the consume loop
-/// and heartbeat and lets this detached task die on process exit.
+/// Backoff between attempts to build the warm cacher (it needs the DB), capped
+/// at [`BUILD_RETRY_MAX`]. Warming is optional, so a failed build is retried
+/// rather than disabling pre-warm for the life of the process.
+const BUILD_RETRY_START: Duration = Duration::from_secs(5);
+const BUILD_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Liveness check for the idle subscription. A pub/sub connection only reads,
+/// so after the Redis host dies (power loss, partition) a half-open socket
+/// never errors and the subscriber would silently stop receiving warm jobs.
+/// After `interval` without a message the subscriber `PING`s and resubscribes
+/// unless the reply arrives within `timeout`.
+#[derive(Debug, Clone, Copy)]
+struct Keepalive {
+    interval: Duration,
+    timeout: Duration,
+}
+
+const KEEPALIVE: Keepalive = Keepalive {
+    interval: Duration::from_secs(30),
+    timeout: Duration::from_secs(5),
+};
+
+/// Spawn the pre-warm subscriber. Failures never crash the worker: building the
+/// cacher is retried with backoff and a dropped subscription is resubscribed,
+/// while judging continues regardless. The runtime holds the returned handle
+/// the same way it holds `_cleanup_handle`: this is an independent background
+/// helper, so shutdown drains the consume loop and heartbeat and lets this
+/// detached task die on process exit.
 pub fn spawn(config: WorkerAppConfig, metrics: Option<Metrics>) -> JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = run(config, metrics).await {
@@ -53,13 +76,25 @@ async fn run(config: WorkerAppConfig, metrics: Option<Metrics>) -> anyhow::Resul
     let redis_url = config.mq.url.clone();
     let worker_id = config.worker.id.clone();
 
-    let cacher = build_cacher(&config, metrics).await?;
+    // An invalid URL is a configuration error that no retry fixes.
     let client = redis::Client::open(redis_url.as_str())?;
+
+    let mut backoff = BUILD_RETRY_START;
+    let cacher = loop {
+        match build_cacher(&config, metrics.clone()).await {
+            Ok(cacher) => break cacher,
+            Err(e) => {
+                warn!(error = %e, retry_in_secs = backoff.as_secs(), "Pre-warm cacher unavailable; retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(BUILD_RETRY_MAX);
+            }
+        }
+    };
 
     info!(worker_id = %worker_id, channel = %WARM_CHANNEL, "Pre-warm subscriber started");
 
     loop {
-        if let Err(e) = subscribe_and_serve(&client, &worker_id, cacher.as_ref()).await {
+        if let Err(e) = subscribe_and_serve(&client, &worker_id, cacher.as_ref(), KEEPALIVE).await {
             warn!(error = %e, "Pre-warm subscription dropped; retrying");
         }
         tokio::time::sleep(RESUBSCRIBE_DELAY).await;
@@ -102,14 +137,27 @@ async fn subscribe_and_serve(
     client: &redis::Client,
     worker_id: &str,
     cacher: &dyn FileCacher,
+    keepalive: Keepalive,
 ) -> anyhow::Result<()> {
     let mut pubsub = client.get_async_pubsub().await?;
     pubsub.subscribe(WARM_CHANNEL).await?;
     // A separate connection for GET/SET - the pub/sub connection can't run cmds.
     let mut cmd = client.get_multiplexed_async_connection().await?;
 
-    let mut stream = pubsub.on_message();
-    while let Some(msg) = stream.next().await {
+    let (mut sink, mut stream) = pubsub.split();
+    loop {
+        let msg = match tokio::time::timeout(keepalive.interval, stream.next()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => return Ok(()),
+            Err(_idle) => match tokio::time::timeout(keepalive.timeout, sink.ping::<()>()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(e)) => anyhow::bail!("pub/sub keepalive ping failed: {e}"),
+                Err(_) => anyhow::bail!(
+                    "pub/sub keepalive ping got no reply within {:?}",
+                    keepalive.timeout
+                ),
+            },
+        };
         let job_id: String = match msg.get_payload() {
             Ok(p) => p,
             Err(e) => {
@@ -121,7 +169,6 @@ async fn subscribe_and_serve(
             warn!(error = %e, job_id = %job_id, "Warm job failed");
         }
     }
-    Ok(())
 }
 
 async fn handle_job(
@@ -227,5 +274,56 @@ async fn write_progress(cmd: &mut MultiplexedConnection, p: &WarmProgress) {
         .await;
     if let Err(e) = res {
         warn!(error = %e, "Failed to write warm progress");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::operation::file_cacher::NoopFileCacher;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::redis::Redis;
+
+    /// Regression: a subscription whose server stops answering (a half-open
+    /// socket after the Redis host dies, simulated with `CLIENT PAUSE`) used to
+    /// wait on the stream forever. The keepalive must notice and return so the
+    /// caller resubscribes.
+    #[tokio::test]
+    async fn unresponsive_server_ends_the_subscription_so_it_is_resubscribed() {
+        let redis = Redis::default().start().await.expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let keepalive = Keepalive {
+            interval: Duration::from_millis(300),
+            timeout: Duration::from_millis(300),
+        };
+        let serve = tokio::spawn({
+            let client = client.clone();
+            async move { subscribe_and_serve(&client, "w", &NoopFileCacher, keepalive).await }
+        });
+
+        // Healthy and idle: keepalive pings succeed, the subscription stays up.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(
+            !serve.is_finished(),
+            "an idle healthy subscription stays up"
+        );
+
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(5000)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let ended = tokio::time::timeout(Duration::from_secs(3), serve)
+            .await
+            .expect("the keepalive must end a subscription whose server stopped answering")
+            .unwrap();
+        assert!(
+            ended.is_err(),
+            "it ends with an error so the caller resubscribes"
+        );
     }
 }
