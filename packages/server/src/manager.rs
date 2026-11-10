@@ -15,6 +15,7 @@ pub struct ServerManager {
     host_functions: OnceLock<HostFunctionRegistry>,
     i18n: I18nRegistry,
     metrics: Option<common::metrics::Metrics>,
+    call_gate: plugin_core::call_gate::CallGate,
 }
 
 impl ServerManager {
@@ -28,6 +29,7 @@ impl ServerManager {
             host_functions: OnceLock::new(),
             i18n: I18nRegistry::new(),
             metrics,
+            call_gate: Default::default(),
         });
 
         let host_functions = host_funcs::init_host_functions(
@@ -53,6 +55,10 @@ impl PluginInvoker for ServerManager {
 
     fn get_metrics(&self) -> Option<&common::metrics::Metrics> {
         self.metrics.as_ref()
+    }
+
+    fn call_gate(&self) -> Option<&plugin_core::call_gate::CallGate> {
+        Some(&self.call_gate)
     }
 }
 

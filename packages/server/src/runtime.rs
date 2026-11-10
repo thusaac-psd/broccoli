@@ -32,6 +32,8 @@ pub struct ServerRuntime {
     /// To release this server's in-flight work after the dispatcher stops.
     db: sea_orm::DatabaseConnection,
     server_id: String,
+    /// To refuse and drain plugin calls before the runtime goes away.
+    plugins: Arc<dyn plugin_core::traits::PluginManager>,
     /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
     /// [`crate::healthz_runtime`] (UP#14e). `None` when `server.healthz_listen`
     /// is unset. The thread runs for the process lifetime and is reaped by
@@ -360,6 +362,7 @@ impl ServerRuntime {
             app_config.server.dispatcher_admission_queue_max as usize,
         );
 
+        let plugins_for_shutdown: Arc<dyn plugin_core::traits::PluginManager> = manager.clone();
         let state = AppState {
             plugins: manager,
             db: db.clone(),
@@ -504,6 +507,7 @@ impl ServerRuntime {
             dispatcher,
             db,
             server_id,
+            plugins: plugins_for_shutdown,
             _healthz_handle: healthz_handle,
             _telemetry_guard: telemetry_guard,
         })
@@ -514,6 +518,12 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Server runtime error at http://{}", self.addr));
         self.dispatcher.shutdown().await;
+        // From here on, plugin calls are refused (a clean error, not a call
+        // that outlives the runtime).
+        let gate = self.plugins.call_gate().cloned();
+        if let Some(gate) = &gate {
+            gate.close();
+        }
         // The drivers of this server's in-flight work die with the process:
         // hand the work to the rest of the fleet now instead of leaving it
         // owned by a server that is gone.
@@ -521,9 +531,24 @@ impl ServerRuntime {
         if let Err(e) = crate::plugin_fleet::retire(&self.db, &self.server_id).await {
             warn!(error = %e, "Shutdown: failed to remove this replica's plugin report");
         }
+        // Calls already running bridge back into this runtime from their
+        // blocking threads; let them finish before it is torn down.
+        if let Some(gate) = gate
+            && !gate.drain(PLUGIN_CALL_DRAIN).await
+        {
+            warn!(
+                in_flight = gate.in_flight(),
+                "Shutdown: plugin calls still running after {:?}; exiting anyway",
+                PLUGIN_CALL_DRAIN
+            );
+        }
         serve_result
     }
 }
+
+/// How long shutdown waits for running plugin calls. Inside the usual 10s
+/// stop grace of container supervisors, so a normal stop is not a SIGKILL.
+const PLUGIN_CALL_DRAIN: Duration = Duration::from_secs(8);
 
 /// Release every in-flight row this server owns so the fleet re-dispatches
 /// it (see [`crate::dispatcher::steal::release_owned_leases`]).

@@ -115,6 +115,13 @@ pub trait PluginInvoker: Send + Sync {
         None
     }
 
+    /// Gate every call passes through, so the host can refuse new calls and
+    /// wait for running ones before it shuts down (see [`crate::call_gate`]).
+    /// `None` for managers that never shut down mid-call (tests).
+    fn call_gate(&self) -> Option<&crate::call_gate::CallGate> {
+        None
+    }
+
     async fn call_raw(
         &self,
         plugin_id: &str,
@@ -163,12 +170,21 @@ pub trait PluginInvoker: Send + Sync {
         let plugin_id_owned = plugin_id.to_string();
         let func_name_owned = func_name.to_string();
         let parent_span = tracing::Span::current();
+        let guard = match self.call_gate() {
+            Some(gate) => Some(gate.enter().ok_or_else(|| {
+                PluginError::Internal("server is shutting down; plugin call refused".into())
+            })?),
+            None => None,
+        };
 
         let result = tokio::task::spawn_blocking({
             let plugin_id = plugin_id_owned.clone();
             let func_name = func_name_owned.clone();
             let metrics = metrics.clone();
             move || {
+                // Held until the guest returns, even if the awaiting task is
+                // cancelled: the blocking call keeps running regardless.
+                let _guard = guard;
                 let _span_guard = parent_span.enter();
                 crate::host_context::with_context(host_context, || {
                     let acquire_start = std::time::Instant::now();
