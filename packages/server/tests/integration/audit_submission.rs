@@ -10,7 +10,9 @@
 
 use chrono::Utc;
 use common::{SubmissionStatus, Verdict};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+};
 use serde_json::json;
 use server::entity::{submission, submission_judgement};
 
@@ -276,6 +278,13 @@ async fn idempotency_key_reuse_with_different_body_is_rejected() {
     assert_eq!(second.status().as_u16(), 422);
     let second: serde_json::Value = second.json().await.expect("json");
     assert_eq!(second["code"], "IDEMPOTENCY_KEY_MISMATCH");
+    // The mismatch is decided before the handler runs: nothing was submitted.
+    let submitted = submission::Entity::find()
+        .filter(submission::Column::ProblemId.eq(pid))
+        .count(&app.db)
+        .await
+        .expect("db");
+    assert_eq!(submitted, 1, "a mismatched request must not execute");
 
     // The identical body still replays the original submission.
     let replay = send("int main(){return 0;}").await.expect("send");
