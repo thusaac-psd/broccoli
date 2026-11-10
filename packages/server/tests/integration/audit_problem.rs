@@ -134,7 +134,6 @@ async fn replace_upload_on_judged_problem_is_a_conflict_not_500() {
 /// labels "1".."N") the next auto label is always taken.
 /// Location: handlers/problem/test_cases.rs (`create_test_case`).
 #[tokio::test]
-#[ignore = "BUG: auto-generated test-case label collides with ZIP-uploaded labels -> 409"]
 async fn create_test_case_after_zip_upload_gets_a_free_label() {
     let app = TestApp::spawn().await;
     let token = app

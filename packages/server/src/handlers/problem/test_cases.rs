@@ -67,13 +67,14 @@ pub async fn create_test_case(
         None => next_test_case_position(&txn, problem_id).await?,
     };
 
-    let label = payload
-        .label
-        .as_deref()
-        .map(str::trim)
-        .map(sanitize_db_text)
-        .unwrap_or_else(|| position.to_string());
-    ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
+    let label = match payload.label.as_deref() {
+        Some(label) => {
+            let label = sanitize_db_text(label.trim());
+            ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
+            label
+        }
+        None => first_free_test_case_label(&txn, problem_id, position).await?,
+    };
     let input_body = prepare_test_case_body(payload.input, state.blob_store.clone()).await?;
     let output_body =
         prepare_test_case_body(payload.expected_output, state.blob_store.clone()).await?;
@@ -586,6 +587,34 @@ pub(super) async fn next_test_case_position<C: ConnectionTrait>(
         .unwrap_or(-1)
         .checked_add(1)
         .ok_or_else(|| AppError::Validation("Position overflow".into()))
+}
+
+/// The first numeric label `>= start` that no test case of the problem uses.
+///
+/// A generated label must never be one the server then rejects as a
+/// duplicate: ZIP uploads number labels from `1` while positions start at
+/// `0`, so `position.to_string()` alone collides right after an upload. The
+/// caller holds the problem row lock, so the label stays free until insert.
+async fn first_free_test_case_label<C: ConnectionTrait>(
+    db: &C,
+    problem_id: i32,
+    start: i32,
+) -> Result<String, AppError> {
+    let taken: std::collections::HashSet<String> = test_case::Entity::find()
+        .filter(test_case::Column::ProblemId.eq(problem_id))
+        .select_only()
+        .column(test_case::Column::Label)
+        .into_tuple::<String>()
+        .all(db)
+        .await?
+        .into_iter()
+        .collect();
+    // At most `taken.len()` candidates can be occupied, so this terminates
+    // within `taken.len() + 1` steps.
+    (i64::from(start)..)
+        .map(|n| n.to_string())
+        .find(|label| !taken.contains(label))
+        .ok_or_else(|| AppError::Internal("no free test case label".into()))
 }
 
 async fn ensure_test_case_label_available<C: ConnectionTrait>(
