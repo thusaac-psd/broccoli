@@ -7,7 +7,8 @@
 #
 # Roles:
 #   infra-server   box 1: Postgres + Redis + SeaweedFS + broccoli-server.
-#                  Generates secrets and writes connection.env for workers.
+#                  Generates secrets on the first run and keeps them on re-runs
+#                  (--rotate-secrets for new ones); writes connection.env for workers.
 #   worker         box 2..N: isolate + compilers + broccoli-worker, pointed at
 #                  the infra box over the LAN (reads connection.env).
 #
@@ -36,6 +37,10 @@ done
 die(){ echo "error: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" = 0 ] || die "run with sudo"; }
 gen(){ head -c "${1:-24}" /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "${2:-32}"; }
+# toml_string FILE KEY: the first `KEY = "value"` in FILE.
+toml_string(){ sed -n "s/^$2 *= *\"\(.*\)\"\$/\1/p" "$1" | head -n 1; }
+# toml_url_password FILE SCHEME: the password in the first SCHEME:// url.
+toml_url_password(){ sed -n "s|^url *= *\"$2://[^:]*:\([^@]*\)@.*|\1|p" "$1" | head -n 1; }
 
 require_ubuntu(){
   . /etc/os-release 2>/dev/null || true
@@ -125,10 +130,22 @@ install_infra_server(){
   cp -a "$BUNDLE/web/client" "$DATA_DIR/packages/web/build/client"
   chown -R "$SVC_USER":"$SVC_USER" "$DATA_DIR/plugins" "$DATA_DIR/packages" "$DATA_DIR/tools"
 
-  # secrets
-  local db_pw s3_ak s3_sk jwt admin_pw
-  db_pw="$(gen)"; s3_ak="$(gen 16 18)"; s3_sk="$(gen 24 32)"; jwt="$(gen 48 64)"
-  admin_pw="${BROCCOLI_ADMIN_PASSWORD:-$(gen)}"
+  # secrets: a re-run (to update binaries, say) keeps the ones config.toml
+  # already holds, since new ones would lock every worker out of the DB, MQ and
+  # S3 mid-event and log every user out. --rotate-secrets makes new ones.
+  local db_pw s3_ak s3_sk jwt admin_pw redis_pw conf="$DATA_DIR/config/config.toml"
+  if [ "$ROTATE_SECRETS" = 0 ] && [ -f "$conf" ]; then
+    echo ">> reusing the secrets in $conf (pass --rotate-secrets for new ones)"
+    db_pw="$(toml_url_password "$conf" postgres)"; redis_pw="$(toml_url_password "$conf" redis)"
+    s3_ak="$(toml_string "$conf" access_key)"; s3_sk="$(toml_string "$conf" secret_key)"
+    jwt="$(toml_string "$conf" jwt_secret)"; admin_pw="$(toml_string "$conf" admin_password)"
+  fi
+  [ -n "${db_pw:-}" ] || db_pw="$(gen)"
+  [ -n "${redis_pw:-}" ] || redis_pw="$(gen)"
+  [ -n "${s3_ak:-}" ] || s3_ak="$(gen 16 18)"
+  [ -n "${s3_sk:-}" ] || s3_sk="$(gen 24 32)"
+  [ -n "${jwt:-}" ] || jwt="$(gen 48 64)"
+  admin_pw="${BROCCOLI_ADMIN_PASSWORD:-${admin_pw:-$(gen)}}"
 
   # postgres: role + db + LAN access (scram)
   echo ">> configuring postgres"
@@ -142,12 +159,14 @@ install_infra_server(){
   pghba="$(dirname "$pgconf")/pg_hba.conf"
   subnet="${BROCCOLI_LAN_CIDR:-${host%.*}.0/24}"
   grep -q "^listen_addresses *= *'\*'" "$pgconf" || sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$pgconf"
-  grep -q "broccoli-lan" "$pghba" || echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
+  # Replace the rule on every run, so a new LAN (rehearsal -> venue) is let in.
+  sed -i '/# broccoli-lan$/d' "$pghba"
+  echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
   systemctl restart postgresql
 
   # redis: LAN bind + auth
   echo ">> configuring redis"
-  local redis_pw rconf; redis_pw="$(gen)"; rconf=/etc/redis/redis.conf
+  local rconf=/etc/redis/redis.conf
   sed -i "s/^bind .*/bind 127.0.0.1 $host/" "$rconf"
   sed -i "s/^# *requirepass .*/requirepass $redis_pw/; s/^requirepass .*/requirepass $redis_pw/" "$rconf"
   grep -q "^requirepass " "$rconf" || echo "requirepass $redis_pw" >> "$rconf"
@@ -261,9 +280,17 @@ install_worker(){
   echo ">> worker '$wid' up, judging for infra at $BROCCOLI_INFRA_HOST"
 }
 
+ROTATE_SECRETS=0
+for arg in "${@:2}"; do
+  case "$arg" in
+    --rotate-secrets) ROTATE_SECRETS=1 ;;
+    *) die "unknown argument: $arg" ;;
+  esac
+done
+
 need_root
 case "$ROLE" in
   infra-server) install_infra_server ;;
   worker)       install_worker ;;
-  *) die "usage: sudo ./install-native.sh {infra-server|worker}" ;;
+  *) die "usage: sudo ./install-native.sh {infra-server [--rotate-secrets]|worker}" ;;
 esac

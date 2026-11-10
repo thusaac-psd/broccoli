@@ -62,7 +62,9 @@ only; the LAN reaches just the credentialed S3 API, which
 `broccoli-weed-s3.socket` forwards from `<box1-LAN-IP>:8333`. Postgres (5432),
 Redis (6379) and S3 (8333) still accept LAN connections with passwords, so
 on a venue LAN, firewall them from contestant subnets and allow only the
-worker boxes. It **generates all secrets**, prints the admin password, and
+worker boxes. It **generates all secrets** on the first run (a re-run, e.g. to update the
+binaries, keeps them; `--rotate-secrets` makes new ones and then every worker
+needs the new `connection.env`), prints the admin password, and
 writes `connection.env` for the workers. The server auto-creates its schema and
 loads the plugins on first boot.
 
