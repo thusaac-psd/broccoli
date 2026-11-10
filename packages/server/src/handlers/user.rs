@@ -397,18 +397,15 @@ pub async fn create_user(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<CreateUserRequest>,
-) -> Result<NoStore<(StatusCode, Json<CreatedUserResponse>)>, AppError> {
+) -> Result<(StatusCode, NoStore<Json<CreatedUserResponse>>), AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
     let created = create_accounts(&state, vec![payload]).await?;
-    Ok(NoStore((
+    Ok((
         StatusCode::CREATED,
-        Json(
-            created
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::Internal("Missing created account".into()))?,
-        ),
-    )))
+        NoStore(Json(created.into_iter().next().ok_or_else(|| {
+            AppError::Internal("Missing created account".into())
+        })?)),
+    ))
 }
 
 #[utoipa::path(
@@ -429,10 +426,10 @@ pub async fn bulk_create_users(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkCreateUsersRequest>,
-) -> Result<NoStore<(StatusCode, Json<Vec<CreatedUserResponse>>)>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
     let created = create_accounts(&state, payload.users).await?;
-    Ok(NoStore((StatusCode::CREATED, Json(created))))
+    Ok((StatusCode::CREATED, NoStore(Json(created))))
 }
 
 async fn create_accounts(
