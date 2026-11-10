@@ -113,7 +113,7 @@ async fn error_response_releases_the_key() {
 
 mod response_binding {
     use super::*;
-    use sea_orm::EntityTrait;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
     use server::entity::{idempotency_key, submission};
 
     /// A response that carries a generated password is marked `no-store`: the
@@ -194,6 +194,13 @@ mod response_binding {
         assert_eq!(second.status().as_u16(), 422);
         let second: serde_json::Value = second.json().await.expect("json");
         assert_eq!(second["code"], "IDEMPOTENCY_KEY_MISMATCH");
+        // The mismatch is decided before the handler runs: nothing was submitted.
+        let submitted = submission::Entity::find()
+            .filter(submission::Column::ProblemId.eq(pid))
+            .count(&app.db)
+            .await
+            .expect("db");
+        assert_eq!(submitted, 1, "a mismatched request must not execute");
 
         // The identical body still replays the original submission.
         let replay = send("int main(){return 0;}").await.expect("send");
