@@ -77,11 +77,15 @@ impl Reclaim {
     /// The `WHERE` predicate selecting reclaimable rows, binding `$1`.
     fn predicate(self) -> (&'static str, sea_orm::Value) {
         match self {
+            // Lease ages are measured on the database clock, which also
+            // stamps every refresh (see `lease::refresh_owned_leases`).
             Reclaim::Stale { lease_ttl_secs } => (
-                "((owner_server_id IS NULL AND created_at < $1) \
+                "((owner_server_id IS NULL \
+                   AND created_at < NOW() - make_interval(secs => $1)) \
                   OR (owner_server_id IS NOT NULL \
-                      AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1)))",
-                (chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64)).into(),
+                      AND (lease_heartbeat_at IS NULL \
+                           OR lease_heartbeat_at < NOW() - make_interval(secs => $1))))",
+                (lease_ttl_secs as f64).into(),
             ),
             Reclaim::Released => (
                 "owner_server_id LIKE '%' || $1",
@@ -583,9 +587,8 @@ async fn open_stolen_submission_judgements(
             // returns this existing id without setting either, the lease fiber
             // (owner = self) never refreshes it, and the steal sweeper re-claims it
             // (`owner_server_id IS NULL AND created_at < threshold`) mid-re-judge.
+            // Lease columns are stamped below, on the database clock.
             owner_server_id: Set(Some(server_id.to_string())),
-            lease_heartbeat_at: Set(Some(chrono::Utc::now())),
-            leased_at: Set(Some(chrono::Utc::now())),
             created_at: Set(chrono::Utc::now()),
             finalized_at: Set(None),
             ..Default::default()
@@ -593,6 +596,20 @@ async fn open_stolen_submission_judgements(
         .insert(txn)
         .await?;
     }
+
+    submission_judgement::Entity::update_many()
+        .col_expr(
+            submission_judgement::Column::LeaseHeartbeatAt,
+            sea_orm::sea_query::Expr::cust("NOW()"),
+        )
+        .col_expr(
+            submission_judgement::Column::LeasedAt,
+            sea_orm::sea_query::Expr::cust("NOW()"),
+        )
+        .filter(submission_judgement::Column::SubmissionId.is_in(submission_ids.to_vec()))
+        .filter(submission_judgement::Column::IsCurrent.eq(true))
+        .exec(txn)
+        .await?;
 
     Ok(())
 }
@@ -1828,6 +1845,41 @@ mod deferred_steal_db_tests {
                 .as_deref(),
             Some("dead-server"),
             "the stale-heartbeat judgement nobody released is left alone"
+        );
+    }
+
+    /// The lease refresh stamps the database clock, which is what the steal
+    /// scan compares against: an hour-old heartbeat becomes fresh by the
+    /// database's own `NOW()`, and so is no longer stealable.
+    #[tokio::test]
+    async fn lease_refresh_stamps_the_database_clock() {
+        let (_pg, db) = start_pg().await;
+        let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
+
+        let (_, _, judgements) = crate::dispatcher::lease::refresh_owned_leases(&db, "dead-server")
+            .await
+            .expect("refresh");
+        assert_eq!(judgements, 1);
+        let row = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT EXTRACT(EPOCH FROM (NOW() - lease_heartbeat_at))::float8 AS age \
+                 FROM submission_judgement WHERE is_current"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let age: f64 = row.try_get("", "age").unwrap();
+        assert!(age.abs() < 5.0, "heartbeat is fresh by the DB clock: {age}");
+
+        let claimed = claim_deferred_judgements(&db, "server-2", STALE_60, 10, 5)
+            .await
+            .expect("claim");
+        assert!(
+            claimed.is_empty(),
+            "a freshly refreshed lease is not stolen"
         );
     }
 }
