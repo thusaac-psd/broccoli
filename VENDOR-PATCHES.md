@@ -142,12 +142,12 @@ Patch:
   bounded at 1 s. That bound must stay below the pool's 2 s connection timeout:
   bb8 puts a connection whose validation was cancelled by that timeout back as
   healthy, so an unbounded `PING` on a dead socket would wedge every check-out
-  on it, whereas a `PING` that errors marks it invalid and bb8 replaces it.
-  The response timeout is generous on purpose: a command that times out may
-  still have executed (a consume script that already moved the message to
-  `_processing` would strand it; a publish would duplicate on retry), so it
-  must outlast ordinary stalls such as a fork or fsync while still bounding
-  the half-open socket case.
+  on it, whereas a `PING` that errors marks it invalid and bb8 replaces it. The
+  response timeout is generous on purpose: a command that times out may still
+  have executed (a consume script that already moved the message to
+  `_processing` would strand it; a publish would duplicate on retry), so it must
+  outlast ordinary stalls such as a fork or fsync while still bounding the
+  half-open socket case.
 - Because consume now errors instead of blocking, the per-task loop of
   `process_messages` sleeps 1 s after a consume error instead of spinning.
   `process_messages_with_handlers` is unused and left unpatched, as in patch 2.
