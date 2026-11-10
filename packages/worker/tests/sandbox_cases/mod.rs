@@ -3,9 +3,10 @@
 //! `worker_mock_sandbox.rs` and `worker_isolate_sandbox.rs` each implement
 //! [`Backend`] for their `SandboxManager` and instantiate the whole case list
 //! with [`sandbox_suite!`], so a case added here runs against both sandboxes.
-//! Only the backend's own concerns differ: how a fresh manager is built, how a
-//! step's shell command names a path mounted into its box, and the run options
-//! every step starts from.
+//! Only the backend's own concerns differ: how a fresh manager is built and how
+//! a step's command names a path mounted into its box. Every step runs on the
+//! default run options (one process per box, which isolate enforces) unless the
+//! case lifts the cap with [`multi_process`] because its shell must fork.
 
 #![allow(dead_code)]
 
@@ -32,15 +33,15 @@ use worker::models::worker::Worker;
 pub trait Backend {
     /// A fresh sandbox manager for one operation.
     fn manager() -> Box<dyn SandboxManager + Send + Sync>;
-    /// How a step's shell command names `path`, mounted at `/<path>` in its box.
+    /// How a step's command names `path`, mounted at `/<path>` in its box.
     fn mounted(path: &str) -> String;
-    /// The run options every step starts from.
-    fn run_options() -> RunOptions;
 }
 
 /// Instantiate every shared case as a `#[tokio::test]` for one backend. The
-/// attributes are applied to each generated test (e.g. the isolate suite's
-/// `#[ignore]` and `#[serial]`).
+/// `all` attributes are applied to every generated test (e.g. the isolate
+/// suite's `#[ignore]` and `#[serial]`); the `cpp` ones are added to the cases
+/// that need a C++ compiler on the host (e.g. an `#[ignore]` keeping them
+/// opt-in where the suite otherwise runs by default).
 #[macro_export]
 macro_rules! sandbox_suite {
     (@cases $backend:ty; $attrs:tt; $($case:ident),* $(,)?) => {
@@ -53,7 +54,11 @@ macro_rules! sandbox_suite {
             sandbox_cases::$case::<$backend>().await;
         }
     };
-    ($backend:ty $(, #[$attr:meta])* $(,)?) => {
+    ($backend:ty; all: [$(#[$attr:meta]),* $(,)?]; cpp: [$(#[$cpp:meta]),* $(,)?] $(,)?) => {
+        $crate::sandbox_suite!(@cases $backend; [$(#[$attr])* $(#[$cpp])*];
+            cpp_oi_pipeline_with_io_redirection,
+            cpp_compile_error_skips_dependent_step,
+        );
         $crate::sandbox_suite!(@cases $backend; [$(#[$attr])*];
             echo_succeeds,
             nonzero_exit_fails_the_step,
@@ -61,8 +66,6 @@ macro_rules! sandbox_suite {
             blob_input_fails_when_blob_storage_is_unavailable,
             platform_tool_mount_executes_tool_inside_box,
             platform_tool_mount_without_configured_tools_dir_fails_the_step,
-            cpp_oi_pipeline_with_io_redirection,
-            cpp_compile_error_skips_dependent_step,
             empty_pipe_name_fails_the_step,
             two_envs_share_a_mapped_directory,
             shared_channel_fifo_between_two_environments,
@@ -109,8 +112,13 @@ fn tools_dir() -> PathBuf {
     dir
 }
 
-/// An absolute path to a C++ compiler on PATH, if any.
-pub fn cpp_compiler() -> Option<String> {
+/// An absolute path to a C++ compiler on PATH. The C++ cases are opt-in on
+/// every backend, so a missing compiler is a misconfigured run, not a skip.
+pub fn cpp_compiler() -> String {
+    find_cpp_compiler().expect("no C++ compiler found on PATH")
+}
+
+fn find_cpp_compiler() -> Option<String> {
     ["c++", "clang++", "g++"].into_iter().find_map(|compiler| {
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -150,21 +158,29 @@ fn env(id: &str) -> Environment {
     }
 }
 
-/// A generic `/bin/sh -c <command>` step in `env_ref`, on the backend's
-/// default run options.
-fn sh<B: Backend>(id: &str, env_ref: &str, command: &str) -> Step {
+/// A generic `/bin/sh -c <command>` step in `env_ref`, on the default run
+/// options.
+fn sh(id: &str, env_ref: &str, command: &str) -> Step {
     Step {
         id: id.to_string(),
         kind: StepKind::Generic,
         env_ref: env_ref.to_string(),
         argv: vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()],
-        conf: B::run_options(),
+        conf: RunOptions::default(),
         io: IOConfig::default(),
         collect: vec![],
         depends_on: vec![],
         cache: None,
         mounts: vec![],
     }
+}
+
+/// Lift the one-process-per-box limit (0 means no cap) for a step whose shell
+/// must fork: a pipeline, a compiler, or an external command that is not the
+/// shell's last. The mock ignores the limit; isolate enforces it.
+fn multi_process(mut step: Step) -> Step {
+    step.conf.resource_limits.process_limit = Some(0);
+    step
 }
 
 fn operation(
@@ -184,10 +200,10 @@ fn operation(
 }
 
 /// A single `/bin/sh -c <command>` step in a single environment.
-fn single_step<B: Backend>(command: &str) -> OperationTask {
+fn single_step(command: &str) -> OperationTask {
     operation(
         vec![env("env-1")],
-        vec![sh::<B>("step-1", "env-1", command)],
+        vec![sh("step-1", "env-1", command)],
         vec![],
     )
 }
@@ -279,7 +295,7 @@ fn handler<B: Backend>(tools_dir: Option<PathBuf>) -> OperationHandler {
 
 pub async fn echo_succeeds<B: Backend>() {
     let (result, operation_result) =
-        run_task::<B>("task-success", single_step::<B>("echo sandbox-ok")).await;
+        run_task::<B>("task-success", single_step("echo sandbox-ok")).await;
     assert!(result.success, "task failed: {:?}", operation_result);
     assert!(
         operation_result.success,
@@ -294,8 +310,7 @@ pub async fn echo_succeeds<B: Backend>() {
 }
 
 pub async fn nonzero_exit_fails_the_step<B: Backend>() {
-    let (result, operation_result) =
-        run_task::<B>("task-failure", single_step::<B>("exit 17")).await;
+    let (result, operation_result) = run_task::<B>("task-failure", single_step("exit 17")).await;
     assert!(!result.success);
     assert!(!operation_result.success);
 
@@ -307,7 +322,7 @@ pub async fn nonzero_exit_fails_the_step<B: Backend>() {
 pub async fn large_stdout_is_returned_as_capped_preview<B: Backend>() {
     let command = "awk 'BEGIN { for (i = 0; i < 70000; i++) printf \"a\" }'";
     let (_result, operation_result) =
-        run_task::<B>("task-large-stdout", single_step::<B>(command)).await;
+        run_task::<B>("task-large-stdout", single_step(command)).await;
 
     let step_result = operation_result.task_results.get("step-1").unwrap();
     assert!(step_result.success);
@@ -330,7 +345,7 @@ pub async fn blob_input_fails_when_blob_storage_is_unavailable<B: Backend>() {
         metrics,
     );
 
-    let mut operation = single_step::<B>("cat input.txt");
+    let mut operation = single_step("cat input.txt");
     operation.environments[0].files_in.push((
         "input.txt".to_string(),
         SessionFile::Blob {
@@ -346,7 +361,7 @@ pub async fn blob_input_fails_when_blob_storage_is_unavailable<B: Backend>() {
 }
 
 pub async fn empty_pipe_name_fails_the_step<B: Backend>() {
-    let mut step = sh::<B>("pipe-invalid", "env-1", "echo hi");
+    let mut step = sh("pipe-invalid", "env-1", "echo hi");
     step.io.stdout = pipe("");
     let operation = operation(vec![env("env-1")], vec![step], vec![]);
 
@@ -373,9 +388,11 @@ pub async fn platform_tool_mount_executes_tool_inside_box<B: Backend>() {
     set_mode(&tool_path, 0o755);
     let handler = handler::<B>(Some(tools_dir.clone()));
 
-    // The step runs the tool via its in-box mount path; the worker resolves the
-    // PlatformTool name to <tools_dir>/mytool and mounts it read-only.
-    let mut operation = single_step::<B>(&B::mounted("tools/mytool"));
+    // The step execs the tool directly via its in-box mount path; the worker
+    // resolves the PlatformTool name to <tools_dir>/mytool and mounts it
+    // read-only.
+    let mut operation = single_step("");
+    operation.tasks[0].argv = vec![B::mounted("tools/mytool")];
     operation.tasks[0].mounts = vec![platform_tool("mytool")];
 
     let result = handler.execute(&operation).await.unwrap();
@@ -394,7 +411,7 @@ pub async fn platform_tool_mount_without_configured_tools_dir_fails_the_step<B: 
     // No tools dir: a PlatformTool mount cannot be resolved.
     let handler = handler::<B>(None);
 
-    let mut operation = single_step::<B>("true");
+    let mut operation = single_step("true");
     operation.tasks[0].mounts = vec![platform_tool("mytool")];
 
     let result = handler.execute(&operation).await.unwrap();
@@ -406,14 +423,12 @@ pub async fn platform_tool_mount_without_configured_tools_dir_fails_the_step<B: 
 }
 
 // ---------------------------------------------------------------------------
-// Compile-and-run pipelines (skip when no C++ compiler is on PATH)
+// Compile-and-run pipelines (opt-in: need a C++ compiler on the host, and
+// every step forks)
 // ---------------------------------------------------------------------------
 
 pub async fn cpp_oi_pipeline_with_io_redirection<B: Backend>() {
-    let Some(compiler) = cpp_compiler() else {
-        eprintln!("skipping: no C++ compiler on PATH");
-        return;
-    };
+    let compiler = cpp_compiler();
 
     let setup_script = r#"
 cat > main.cpp <<'CPP'
@@ -438,7 +453,7 @@ CPP
 printf '2 40\n' > input.txt
 "#;
 
-    let mut run = sh::<B>("run", "env-1", "");
+    let mut run = sh("run", "env-1", "");
     run.argv = vec!["./main".to_string()];
     run.io = IOConfig {
         stdin: file("input.txt"),
@@ -447,14 +462,14 @@ printf '2 40\n' > input.txt
     };
     run.depends_on = vec!["compile".to_string()];
 
-    let mut compile = sh::<B>(
+    let mut compile = sh(
         "compile",
         "env-1",
         &format!("{compiler} -std=c++17 -O2 main.cpp -o main"),
     );
     compile.depends_on = vec!["prepare".to_string()];
 
-    let mut verify = sh::<B>(
+    let mut verify = sh(
         "verify",
         "env-1",
         "test -x main; echo executable:$?; test -f output.txt; echo output_file:$?; \
@@ -465,12 +480,10 @@ printf '2 40\n' > input.txt
 
     let operation = operation(
         vec![env("env-1")],
-        vec![
-            sh::<B>("prepare", "env-1", setup_script),
-            compile,
-            run,
-            verify,
-        ],
+        [sh("prepare", "env-1", setup_script), compile, run, verify]
+            .into_iter()
+            .map(multi_process)
+            .collect(),
         vec![],
     );
 
@@ -508,10 +521,7 @@ printf '2 40\n' > input.txt
 }
 
 pub async fn cpp_compile_error_skips_dependent_step<B: Backend>() {
-    let Some(compiler) = cpp_compiler() else {
-        eprintln!("skipping: no C++ compiler on PATH");
-        return;
-    };
+    let compiler = cpp_compiler();
 
     let bad_cpp_script = r#"
 cat > bad.cpp <<'CPP'
@@ -523,22 +533,21 @@ int main() {
 CPP
 "#;
 
-    let mut compile = sh::<B>(
+    let mut compile = sh(
         "compile-bad",
         "env-1",
         &format!("{compiler} -std=c++17 bad.cpp -o bad"),
     );
     compile.depends_on = vec!["prepare-bad".to_string()];
-    let mut skipped = sh::<B>("run-should-skip", "env-1", "echo should-not-run");
+    let mut skipped = sh("run-should-skip", "env-1", "echo should-not-run");
     skipped.depends_on = vec!["compile-bad".to_string()];
 
     let operation = operation(
         vec![env("env-1")],
-        vec![
-            sh::<B>("prepare-bad", "env-1", bad_cpp_script),
-            compile,
-            skipped,
-        ],
+        [sh("prepare-bad", "env-1", bad_cpp_script), compile, skipped]
+            .into_iter()
+            .map(multi_process)
+            .collect(),
         vec![],
     );
 
@@ -579,13 +588,13 @@ pub async fn two_envs_share_a_mapped_directory<B: Backend>() {
     };
     let msg = B::mounted("shared/msg.txt");
 
-    let mut producer = sh::<B>(
+    let mut producer = sh(
         "producer",
         "env-a",
         &format!("printf 'hello-from-env-a' > {msg}"),
     );
     producer.conf.directory_rules = vec![shared_rule.clone()];
-    let mut consumer = sh::<B>(
+    let mut consumer = sh(
         "consumer",
         "env-b",
         &format!("test -f {msg} && grep -qx 'hello-from-env-a' {msg}"),
@@ -595,7 +604,8 @@ pub async fn two_envs_share_a_mapped_directory<B: Backend>() {
 
     let operation = operation(
         vec![env("env-a"), env("env-b")],
-        vec![producer, consumer],
+        // `test && grep` forks grep before the shell exits.
+        vec![producer, multi_process(consumer)],
         vec![],
     );
 
@@ -620,13 +630,16 @@ pub async fn shared_channel_fifo_between_two_environments<B: Backend>() {
     let operation = operation(
         vec![env("writer-env"), env("reader-env")],
         vec![
-            sh::<B>(
+            sh(
                 "writer",
                 "writer-env",
                 &format!("printf 'hello-via-fifo' > {fifo}"),
             ),
-            sh::<B>("reader", "reader-env", &format!("cat {fifo}")),
-        ],
+            sh("reader", "reader-env", &format!("cat {fifo}")),
+        ]
+        .into_iter()
+        .map(multi_process)
+        .collect(),
         vec![channel("pipe1")],
     );
 
@@ -648,14 +661,14 @@ pub async fn shared_channel_fifo_between_two_environments<B: Backend>() {
 }
 
 pub async fn channel_pipe_io_redirect_between_environments<B: Backend>() {
-    let mut producer = sh::<B>("producer", "producer-env", "echo channel-data-42");
+    let mut producer = sh("producer", "producer-env", "echo channel-data-42");
     producer.io.stdout = pipe("data_pipe");
-    let mut consumer = sh::<B>("consumer", "consumer-env", "head -n1");
+    let mut consumer = sh("consumer", "consumer-env", "head -n1");
     consumer.io.stdin = pipe("data_pipe");
 
     let operation = operation(
         vec![env("producer-env"), env("consumer-env")],
-        vec![producer, consumer],
+        vec![multi_process(producer), multi_process(consumer)],
         vec![channel("data_pipe")],
     );
 
@@ -674,14 +687,14 @@ pub async fn channel_pipe_io_redirect_between_environments<B: Backend>() {
 }
 
 pub async fn non_channel_pipe_still_works_with_channels_present<B: Backend>() {
-    let mut writer = sh::<B>("writer", "env-1", "echo local-pipe-data");
+    let mut writer = sh("writer", "env-1", "echo local-pipe-data");
     writer.io.stdout = pipe("local_pipe");
-    let mut reader = sh::<B>("reader", "env-1", "head -n1");
+    let mut reader = sh("reader", "env-1", "head -n1");
     reader.io.stdin = pipe("local_pipe");
 
     let operation = operation(
         vec![env("env-1")],
-        vec![writer, reader],
+        vec![multi_process(writer), multi_process(reader)],
         vec![channel("some_other_channel")],
     );
 
@@ -708,15 +721,16 @@ pub async fn non_channel_pipe_still_works_with_channels_present<B: Backend>() {
 pub async fn stdin_fifo_consumer_observes_eof_when_writer_closes<B: Backend>() {
     // Fail fast (kill -> success=false) instead of hanging the suite forever if
     // the consumer never sees EOF.
-    let guard = |mut step: Step| {
+    let guard = |step: Step| {
+        let mut step = multi_process(step);
         step.conf.resource_limits.wall_time_limit = Some(15.0);
         step
     };
-    let mut producer = sh::<B>("producer", "producer-env", "printf 'streamed-to-eof\\n'");
+    let mut producer = sh("producer", "producer-env", "printf 'streamed-to-eof\\n'");
     producer.io.stdout = pipe("s");
     // `cat` reads stdin to EOF: it only terminates once the writer closes AND
     // the consumer holds no write end of its own.
-    let mut consumer = sh::<B>("consumer", "consumer-env", "cat");
+    let mut consumer = sh("consumer", "consumer-env", "cat");
     consumer.io.stdin = pipe("s");
     consumer.io.stdout = file("got.txt");
 
@@ -754,8 +768,8 @@ fn step_output_op<B: Backend>(
     consumer_deps: Vec<String>,
 ) -> OperationTask {
     // out.txt is NOT collected -> it is never uploaded as a blob.
-    let producer = sh::<B>("producer", "a", producer_cmd);
-    let mut consumer = sh::<B>("consumer", "b", consumer_cmd);
+    let producer = sh("producer", "a", producer_cmd);
+    let mut consumer = sh("consumer", "b", consumer_cmd);
     consumer.depends_on = consumer_deps;
     // A step output is staged as a copy in the consumer's working dir, so its
     // mount point is box-relative on every backend.
@@ -774,7 +788,9 @@ pub async fn step_output_mount_exposes_only_that_file_to_dependent_step<B: Backe
     let operation = step_output_op::<B>(
         "printf payload-xyz > out.txt; printf SECRET > other.txt",
         // Read the mounted file, then prove the producer's OTHER files are absent.
-        "cat in.txt; if [ -e other.txt ] || [ -e out.txt ]; then printf ' LEAK'; fi",
+        // Shell builtins only, so the step needs no second process.
+        "IFS= read -r got < in.txt; printf %s \"$got\"; \
+         if [ -e other.txt ] || [ -e out.txt ]; then printf ' LEAK'; fi",
         vec!["producer".to_string()],
     );
 
@@ -849,10 +865,10 @@ fn fused_stream_op<B: Backend>(
     // Fail-fast guard: a wall-time limit turns any future FIFO deadlock into a
     // quick timeout (killed -> exit_code None -> AC assertion fails) instead of
     // an infinite hang that wedges the whole suite.
-    let mut guarded = B::run_options();
+    let mut guarded = RunOptions::default();
     guarded.resource_limits.wall_time_limit = Some(20.0);
 
-    let mut exec = sh::<B>("exec", "solution", solution_cmd);
+    let mut exec = sh("exec", "solution", solution_cmd);
     exec.conf = guarded.clone();
     // Solution output streams to the checker via a FIFO; the full output is
     // never written to a file or collected.

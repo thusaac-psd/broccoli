@@ -9,8 +9,8 @@ mod sandbox_cases;
 use sandbox_cases::Backend;
 use serial_test::serial;
 use worker::WorkerAppConfig;
+use worker::models::operation::sandbox::SandboxManager;
 use worker::models::operation::sandbox::isolate::IsolateSandboxManager;
-use worker::models::operation::sandbox::{ResourceLimits, RunOptions, SandboxManager};
 
 fn isolate_bin() -> String {
     WorkerAppConfig::load()
@@ -37,24 +37,15 @@ impl Backend for Isolate {
     fn mounted(path: &str) -> String {
         format!("/{path}")
     }
-
-    // The default limits allow one process per box, which isolate enforces;
-    // shells, pipelines and compilers need more (0 lifts the cap).
-    fn run_options() -> RunOptions {
-        RunOptions {
-            resource_limits: ResourceLimits {
-                process_limit: Some(0),
-                ..ResourceLimits::default()
-            },
-            ..RunOptions::default()
-        }
-    }
 }
 
 sandbox_suite!(
-    Isolate,
-    #[ignore = "requires Linux isolate sandbox installed and configured"],
-    #[serial],
+    Isolate;
+    all: [
+        #[ignore = "requires Linux isolate sandbox installed and configured"],
+        #[serial],
+    ];
+    cpp: [],
 );
 
 // Task 3 - live boot self-test: an over-limit allocation inside isolate MUST

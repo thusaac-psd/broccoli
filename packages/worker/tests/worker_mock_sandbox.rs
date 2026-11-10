@@ -31,13 +31,13 @@ impl Backend for Mock {
     fn mounted(path: &str) -> String {
         format!("./{path}")
     }
-
-    fn run_options() -> RunOptions {
-        RunOptions::default()
-    }
 }
 
-sandbox_suite!(Mock);
+sandbox_suite!(
+    Mock;
+    all: [];
+    cpp: [#[ignore = "requires a C++17 compiler available on PATH"]],
+);
 
 fn object_storage_env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
