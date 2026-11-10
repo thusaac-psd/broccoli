@@ -639,7 +639,7 @@ mod tests {
     async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
         let boot = BootSession::acquire(url).await?;
         boot.migrate().await?;
-        crate::seed::ensure_indexes(boot.conn()).await?;
+        crate::seed::ensure_indexes(boot.conn(), false).await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), "admin", "pw").await?;
         boot.release().await
@@ -761,13 +761,35 @@ mod tests {
                 .await
                 .expect("insert duplicate user");
         }
-        let err = crate::seed::ensure_indexes(boot.conn())
+        let err = crate::seed::ensure_indexes(boot.conn(), false)
             .await
             .expect_err("duplicate usernames must fail boot");
-        assert!(
-            err.to_string().contains("idx_user_username_active"),
-            "{err}"
-        );
+        let msg = err.to_string();
+        assert!(msg.contains("idx_user_username_active"), "{msg}");
+        assert!(msg.contains("ALLOW_MISSING_UNIQUE_INDEXES"), "{msg}");
+
+        // The reported query is runnable and lists exactly the offending key.
+        let find = msg
+            .split("Find the duplicate rows with: ")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("find query in the error");
+        let rows = boot
+            .conn()
+            .query_all_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                find.to_string(),
+            ))
+            .await
+            .expect("find query runs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<String>("", "username").unwrap(), "dup");
+        assert_eq!(rows[0].try_get::<i64>("", "rows").unwrap(), 2);
+
+        // The one-release opt-out lets boot continue with the index missing.
+        crate::seed::ensure_indexes(boot.conn(), true)
+            .await
+            .expect("opt-out starts anyway");
     }
 
     /// Every pooled connection carries the shared session settings: a slow

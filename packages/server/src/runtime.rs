@@ -83,7 +83,11 @@ impl ServerRuntime {
         // bootstrap admin is inserted, or a duplicate admin makes it uncreatable.
         let boot = crate::database::BootSession::acquire(&app_config.database.url).await?;
         boot.migrate().await?;
-        crate::seed::ensure_indexes(boot.conn()).await?;
+        crate::seed::ensure_indexes(
+            boot.conn(),
+            app_config.database.allow_missing_unique_indexes,
+        )
+        .await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(
             boot.conn(),

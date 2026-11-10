@@ -1,7 +1,7 @@
 use broccoli_server_sdk::permissions as perm;
 use common::storage::BlobStore;
 use sea_orm::*;
-use sea_query::{Expr, Index, IndexCreateStatement, PostgresQueryBuilder};
+use sea_query::{Expr, Index, IndexCreateStatement, PostgresQueryBuilder, Query, SelectStatement};
 use tracing::{error, info};
 
 use crate::entity::{
@@ -175,123 +175,197 @@ where
     }
 }
 
+/// One index created at boot. A UNIQUE index enforces an invariant the
+/// application relies on, so it carries the query that lists the rows violating
+/// it, built from the same table, columns and filter as the index itself.
+struct BootIndex {
+    create: IndexCreateStatement,
+    duplicates: Option<SelectStatement>,
+}
+
+impl BootIndex {
+    /// A performance aid: failing to create it only costs speed.
+    fn plain(create: &mut IndexCreateStatement) -> Self {
+        Self {
+            create: create.to_owned(),
+            duplicates: None,
+        }
+    }
+
+    /// A UNIQUE index on `cols` of `E`, optionally partial (`filter`).
+    fn unique<E: EntityTrait>(name: &str, cols: &[E::Column], filter: Option<Expr>) -> Self {
+        let mut create = Index::create();
+        create.unique().name(name).table(E::default());
+        let mut duplicates = Query::select();
+        duplicates
+            .columns(cols.iter().copied())
+            .expr_as(Expr::cust("COUNT(*)"), "rows")
+            .from(E::default())
+            .group_by_columns(cols.iter().copied())
+            .and_having(Expr::cust("COUNT(*) > 1"));
+        for &col in cols {
+            create.col(col);
+        }
+        if let Some(filter) = filter {
+            create.and_where(filter.clone());
+            duplicates.and_where(filter);
+        }
+        Self {
+            create,
+            duplicates: Some(duplicates),
+        }
+    }
+
+    fn name(&self) -> &str {
+        self.create
+            .get_index_spec()
+            .get_name()
+            .unwrap_or("<unnamed>")
+    }
+}
+
 /// Indexes the entity schema sync does not declare. UNIQUE ones enforce
 /// invariants the application relies on (one active account per username, one
 /// current judgement per submission, ...); the rest are performance aids.
-fn boot_indexes() -> Vec<IndexCreateStatement> {
+fn boot_indexes() -> Vec<BootIndex> {
     vec![
-        Index::create()
-            .name("idx_submission_user_created")
-            .table(submission::Entity)
-            .col(submission::Column::UserId)
-            .col(submission::Column::CreatedAt)
-            .to_owned(),
-        Index::create()
-            .name("idx_dlq_resolved_created")
-            .table(dead_letter_message::Entity)
-            .col(dead_letter_message::Column::Resolved)
-            .col(dead_letter_message::Column::CreatedAt)
-            .to_owned(),
-        Index::create()
-            .unique()
-            .name("idx_user_username_active")
-            .table(user::Entity)
-            .col(user::Column::Username)
-            .and_where(Expr::col(user::Column::DeletedAt).is_null())
-            .to_owned(),
-        Index::create()
-            .unique()
-            .name("idx_problem_attachment_problem_path_unique")
-            .table(problem_attachment::Entity)
-            .col(problem_attachment::Column::ProblemId)
-            .col(problem_attachment::Column::Path)
-            .to_owned(),
-        Index::create()
-            .name("idx_problem_attachment_problem_id")
-            .table(problem_attachment::Entity)
-            .col(problem_attachment::Column::ProblemId)
-            .to_owned(),
-        Index::create()
-            .unique()
-            .name("idx_additional_file_problem_lang_path_unique")
-            .table(additional_file::Entity)
-            .col(additional_file::Column::ProblemId)
-            .col(additional_file::Column::Language)
-            .col(additional_file::Column::Path)
-            .to_owned(),
-        Index::create()
-            .name("idx_additional_file_problem_id")
-            .table(additional_file::Entity)
-            .col(additional_file::Column::ProblemId)
-            .to_owned(),
-        Index::create()
-            .name("idx_clarification_contest_created")
-            .table(clarification::Entity)
-            .col(clarification::Column::ContestId)
-            .col(clarification::Column::CreatedAt)
-            .to_owned(),
-        Index::create()
-            .unique()
-            .name("idx_submission_judgement_version_unique")
-            .table(submission_judgement::Entity)
-            .col(submission_judgement::Column::SubmissionId)
-            .col(submission_judgement::Column::Version)
-            .to_owned(),
-        Index::create()
-            .unique()
-            .name("idx_submission_judgement_one_current")
-            .table(submission_judgement::Entity)
-            .col(submission_judgement::Column::SubmissionId)
-            .and_where(Expr::col(submission_judgement::Column::IsCurrent))
-            .to_owned(),
-        Index::create()
-            .name("idx_test_case_result_judgement")
-            .table(test_case_result::Entity)
-            .col(test_case_result::Column::JudgementId)
-            .to_owned(),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_submission_user_created")
+                .table(submission::Entity)
+                .col(submission::Column::UserId)
+                .col(submission::Column::CreatedAt),
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_dlq_resolved_created")
+                .table(dead_letter_message::Entity)
+                .col(dead_letter_message::Column::Resolved)
+                .col(dead_letter_message::Column::CreatedAt),
+        ),
+        BootIndex::unique::<user::Entity>(
+            "idx_user_username_active",
+            &[user::Column::Username],
+            Some(Expr::col(user::Column::DeletedAt).is_null()),
+        ),
+        BootIndex::unique::<problem_attachment::Entity>(
+            "idx_problem_attachment_problem_path_unique",
+            &[
+                problem_attachment::Column::ProblemId,
+                problem_attachment::Column::Path,
+            ],
+            None,
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_problem_attachment_problem_id")
+                .table(problem_attachment::Entity)
+                .col(problem_attachment::Column::ProblemId),
+        ),
+        BootIndex::unique::<additional_file::Entity>(
+            "idx_additional_file_problem_lang_path_unique",
+            &[
+                additional_file::Column::ProblemId,
+                additional_file::Column::Language,
+                additional_file::Column::Path,
+            ],
+            None,
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_additional_file_problem_id")
+                .table(additional_file::Entity)
+                .col(additional_file::Column::ProblemId),
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_clarification_contest_created")
+                .table(clarification::Entity)
+                .col(clarification::Column::ContestId)
+                .col(clarification::Column::CreatedAt),
+        ),
+        BootIndex::unique::<submission_judgement::Entity>(
+            "idx_submission_judgement_version_unique",
+            &[
+                submission_judgement::Column::SubmissionId,
+                submission_judgement::Column::Version,
+            ],
+            None,
+        ),
+        BootIndex::unique::<submission_judgement::Entity>(
+            "idx_submission_judgement_one_current",
+            &[submission_judgement::Column::SubmissionId],
+            Some(Expr::col(submission_judgement::Column::IsCurrent)),
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_test_case_result_judgement")
+                .table(test_case_result::Entity)
+                .col(test_case_result::Column::JudgementId),
+        ),
     ]
 }
 
 /// Create every [`boot_indexes`] entry that is missing.
 ///
-/// A UNIQUE index that cannot be created means its invariant is not enforced
-/// (typically because duplicate rows already exist), so boot fails loudly
-/// instead of running on silently. Callers run this under the boot lock (see
+/// A UNIQUE index that cannot be created means its invariant is not enforced,
+/// almost always because duplicate rows already exist (e.g. a duplicate
+/// bootstrap admin from the old first-boot race). Boot then fails with the
+/// index name and the SQL that lists the offending rows, so the operator can
+/// remove them (see the upgrade guide). `allow_missing_unique` (config
+/// `database.allow_missing_unique_indexes`) downgrades that failure to an error
+/// log for one release, to let an existing deployment start before cleanup.
+/// Callers run this under the boot lock (see
 /// [`crate::database::BootSession`]), so a failure is never a concurrent-create
 /// race with a peer. A failed performance index only costs speed and is logged.
-pub async fn ensure_indexes(db: &DatabaseConnection) -> Result<(), DbErr> {
+pub async fn ensure_indexes(
+    db: &DatabaseConnection,
+    allow_missing_unique: bool,
+) -> Result<(), DbErr> {
     for mut index in boot_indexes() {
-        ensure_index(db, index.if_not_exists()).await?;
+        index.create.if_not_exists();
+        ensure_index(db, &index, allow_missing_unique).await?;
     }
     Ok(())
 }
 
-async fn ensure_index(db: &DatabaseConnection, index: &IndexCreateStatement) -> Result<(), DbErr> {
-    let name = index.get_index_spec().get_name().unwrap_or("<unnamed>");
-    match db
-        .execute_unprepared(&index.to_string(PostgresQueryBuilder))
+async fn ensure_index(
+    db: &DatabaseConnection,
+    index: &BootIndex,
+    allow_missing_unique: bool,
+) -> Result<(), DbErr> {
+    let name = index.name();
+    let err = match db
+        .execute_unprepared(&index.create.to_string(PostgresQueryBuilder))
         .await
     {
         Ok(_) => {
             info!(index = name, "Ensured index exists");
-            Ok(())
+            return Ok(());
         }
-        Err(e) if index.is_unique_key() => {
-            error!(
-                index = name,
-                error = %e,
-                "Failed to create a UNIQUE index; refusing to start without the invariant \
-                 it enforces. Remove the duplicate rows it reports, then restart."
-            );
-            Err(DbErr::Custom(format!(
-                "failed to create unique index {name}: {e}"
-            )))
-        }
-        Err(e) => {
-            tracing::warn!(index = name, error = %e, "Failed to create index");
-            Ok(())
-        }
+        Err(e) => e,
+    };
+    let Some(duplicates) = &index.duplicates else {
+        tracing::warn!(index = name, error = %err, "Failed to create index");
+        return Ok(());
+    };
+    let find = duplicates.to_string(PostgresQueryBuilder);
+    error!(
+        index = name,
+        error = %err,
+        find_duplicates = %find,
+        allow_missing_unique,
+        "Failed to create a UNIQUE index, so its invariant is not enforced. List the \
+         duplicate rows with the find_duplicates query, remove or rename them, then restart"
+    );
+    if allow_missing_unique {
+        return Ok(());
     }
+    Err(DbErr::Custom(format!(
+        "failed to create unique index {name}: {err}. Find the duplicate rows with: {find}; \
+         to start anyway for one release, set database.allow_missing_unique_indexes = true \
+         (BROCCOLI__DATABASE__ALLOW_MISSING_UNIQUE_INDEXES=true)"
+    )))
 }
 
 /// One-shot migration that ensures every existing submission has a v1

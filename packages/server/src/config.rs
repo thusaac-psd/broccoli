@@ -54,6 +54,13 @@ pub struct DatabaseConfig {
     /// rejects the startup `options` parameter. See `common::db::PgSession`.
     #[serde(default = "common::db::default_tcp_keepalives")]
     pub tcp_keepalives: bool,
+    /// TEMPORARY (one release): start even when a boot-time UNIQUE index cannot
+    /// be built because duplicate rows already exist, logging the query that
+    /// lists them instead of refusing to boot. Lets a deployment carrying
+    /// duplicates from older releases start before the cleanup described in
+    /// the upgrade guide. The invariant stays unenforced while this is on.
+    #[serde(default)]
+    pub allow_missing_unique_indexes: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -66,6 +73,7 @@ impl Default for DatabaseConfig {
             plugin_url: None,
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
+            allow_missing_unique_indexes: false,
         }
     }
 }
