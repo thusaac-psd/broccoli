@@ -2672,6 +2672,43 @@ mod problem_contest_access {
     }
 }
 
+/// Insert a judged submission with one result row pointing at `tc_id`, the
+/// state every problem with real traffic is in.
+async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) {
+    use common::{SubmissionStatus, Verdict};
+    use sea_orm::{ActiveModelTrait, Set};
+    use server::entity::{submission, test_case_result};
+
+    let user_id = app.get_with_token(routes::ME, token).await.id();
+    let now = chrono::Utc::now();
+    let sub = submission::ActiveModel {
+        files: Set(json!([{"filename": "main.cpp", "content": "int main(){}"}])),
+        language: Set("cpp".into()),
+        status: Set(SubmissionStatus::Judged),
+        verdict: Set(Some(Verdict::Accepted)),
+        score: Set(Some(100.0)),
+        user_id: Set(user_id),
+        problem_id: Set(pid),
+        created_at: Set(now),
+        judged_at: Set(Some(now)),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert submission");
+    test_case_result::ActiveModel {
+        submission_id: Set(sub.id),
+        test_case_id: Set(Some(tc_id)),
+        verdict: Set(Verdict::Accepted),
+        score: Set(10.0),
+        created_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert test_case_result");
+}
+
 mod write_permission_before_body {
     use super::*;
 
@@ -2713,6 +2750,40 @@ mod write_permission_before_body {
         assert_eq!(
             res.status, 403,
             "contestant upload got {} (body parsed before permission check): {}",
+            res.status, res.text
+        );
+    }
+}
+
+mod zip_upload_interplay {
+    use super::*;
+
+    /// A `strategy=replace` ZIP upload on a problem whose test cases have judge
+    /// results is refused with 409, the same as single and bulk delete.
+    #[tokio::test]
+    async fn replace_upload_on_judged_problem_is_a_conflict_not_500() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let tc_id = app.create_test_case(pid, &token).await;
+        insert_judged_result(&app, &token, pid, tc_id).await;
+
+        let res = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "t.zip",
+                build_zip(&[("1.in", "a"), ("1.ans", "b")]),
+                Some("*.in"),
+                Some("*.ans"),
+                Some("replace"),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 409,
+            "expected 409 CONFLICT like delete/bulk-delete, got {}: {}",
             res.status, res.text
         );
     }

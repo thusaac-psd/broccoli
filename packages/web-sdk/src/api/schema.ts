@@ -10240,7 +10240,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
