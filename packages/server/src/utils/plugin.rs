@@ -116,6 +116,70 @@ pub async fn fail_plugin(state: &AppState, plugin_id: &str, error: &PluginError)
     let _ = mark_plugin_failed(state.plugins.as_ref(), plugin_id, error);
 }
 
+/// What a replica would run for a plugin: its manifest version plus a hash
+/// of the files the host loads (see [`PluginManifest::loaded_paths`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Fingerprint {
+    pub version: String,
+    pub hash: String,
+}
+
+/// Fingerprint the plugin as it is on this replica's disk now. Blocking file
+/// reads, so it runs off the async runtime. A referenced file that is missing
+/// hashes as missing rather than failing, so a half-copied plugin simply
+/// fingerprints differently.
+pub(crate) async fn fingerprint(state: &AppState, plugin_id: &str) -> Option<Fingerprint> {
+    let (root, manifest) = {
+        let registry = state.plugins.get_registry().read().ok()?;
+        let entry = registry.get(plugin_id)?;
+        (entry.root_dir.clone(), entry.manifest.clone())
+    };
+    tokio::task::spawn_blocking(move || {
+        // Re-read the manifest: the registry's copy may predate the files.
+        let manifest = plugin_core::registry::PluginEntry::from_dir(&root)
+            .map(|e| e.manifest)
+            .unwrap_or(manifest);
+        let mut files = vec![std::path::PathBuf::from("plugin.toml")];
+        for path in manifest.loaded_paths() {
+            collect_files(&root, std::path::Path::new(path), &mut files);
+        }
+        files.sort();
+        files.dedup();
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        for rel in &files {
+            hasher.update(rel.to_string_lossy().as_bytes());
+            match std::fs::read(root.join(rel)) {
+                Ok(bytes) => {
+                    hasher.update([1]);
+                    hasher.update((bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                }
+                Err(_) => hasher.update([0]),
+            }
+        }
+        Fingerprint {
+            version: manifest.version,
+            hash: hex::encode(hasher.finalize()),
+        }
+    })
+    .await
+    .ok()
+}
+
+/// `rel` itself if it is a file (or missing), else every file below it.
+fn collect_files(root: &std::path::Path, rel: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let full = root.join(rel);
+    match std::fs::read_dir(&full) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                collect_files(root, &rel.join(entry.file_name()), out);
+            }
+        }
+        Err(_) => out.push(rel.to_path_buf()),
+    }
+}
+
 /// Everything a loaded plugin contributes to the host besides its registry
 /// entry: what its `init()` registered, keyed by the plugin id. Hooks are not
 /// captured; they come from the manifest and are re-registered from it.

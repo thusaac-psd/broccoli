@@ -38,7 +38,7 @@ use crate::models::plugin::{ReloadAllResponse, ReloadFailure};
 use crate::plugin_fleet::{self, ReplicaPluginState, ReplicaPluginStatus, ReplicaReport};
 use crate::state::AppState;
 use crate::utils::plugin::{
-    self as plugin_utils, LoadFailure, PluginActivationFailure, PreviousVersion,
+    self as plugin_utils, Fingerprint, LoadFailure, PluginActivationFailure, PreviousVersion,
     purge_plugin_registrations,
 };
 
@@ -79,6 +79,11 @@ struct Applied {
     /// Set when that failed load was a reload and the previously loaded
     /// version is still serving: the error the new version failed with.
     kept_previous: Option<String>,
+    /// What is loaded here.
+    fingerprint: Option<Fingerprint>,
+    /// Set when what is loaded here is not what the fleet published (loaded
+    /// anyway because nothing else was running here).
+    mismatch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,10 +92,40 @@ struct Retry {
     at: Instant,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Desired {
     enabled: bool,
     generation: i64,
+    /// What the fleet published for this plugin, if anything yet.
+    published: Option<Fingerprint>,
+}
+
+impl Desired {
+    fn of(row: &plugin_entity::Model) -> Self {
+        Self {
+            enabled: row.is_enabled,
+            generation: row.generation,
+            published: row
+                .version
+                .clone()
+                .zip(row.content_hash.clone())
+                .map(|(version, hash)| Fingerprint { version, hash }),
+        }
+    }
+}
+
+/// Why `local` is not what the fleet published, if it is not.
+fn mismatch(published: Option<&Fingerprint>, local: Option<&Fingerprint>) -> Option<String> {
+    let (published, local) = (published?, local?);
+    (published.hash != local.hash).then(|| {
+        format!(
+            "this server's files (v{}, {}) differ from the published version (v{}, {})",
+            local.version,
+            &local.hash[..12.min(local.hash.len())],
+            published.version,
+            &published.hash[..12.min(published.hash.len())],
+        )
+    })
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
@@ -244,6 +279,10 @@ fn build_report(
                 Some(PluginStatus::Loaded) if kept_previous.is_some() => {
                     (ReplicaPluginStatus::Outdated, kept_previous)
                 }
+                Some(PluginStatus::Loaded) if a.is_some_and(|a| a.mismatch.is_some()) => (
+                    ReplicaPluginStatus::Mismatched,
+                    a.and_then(|a| a.mismatch.clone()),
+                ),
                 Some(PluginStatus::Loaded) => (ReplicaPluginStatus::Loaded, None),
                 Some(PluginStatus::Failed(e)) => (ReplicaPluginStatus::Failed, Some(e.clone())),
                 None if a.is_some_and(|a| a.enabled) => (ReplicaPluginStatus::NotInstalled, None),
@@ -258,6 +297,17 @@ fn build_report(
                 error,
                 generation: a.map_or(0, |a| a.generation),
                 retry_in_ms,
+                version: a
+                    .and_then(|a| a.fingerprint.as_ref())
+                    .filter(|_| {
+                        matches!(
+                            status,
+                            ReplicaPluginStatus::Loaded
+                                | ReplicaPluginStatus::Outdated
+                                | ReplicaPluginStatus::Mismatched
+                        )
+                    })
+                    .map(|f| f.version.clone()),
             };
             (id.clone(), state)
         })
@@ -297,6 +347,7 @@ fn same_report(a: &ReplicaReport, b: &ReplicaReport) -> bool {
                 && va.status == vb.status
                 && va.error == vb.error
                 && va.generation == vb.generation
+                && va.version == vb.version
                 && va.retry_in_ms.is_some() == vb.retry_in_ms.is_some()
         })
 }
@@ -336,10 +387,7 @@ async fn reconcile_locked(
     let now = Instant::now();
     let mut failures = Vec::new();
     for row in rows {
-        let desired = Desired {
-            enabled: row.is_enabled,
-            generation: row.generation,
-        };
+        let desired = Desired::of(&row);
         // Record the desired state BEFORE applying it: while an enabled
         // plugin is still loading here, the visibility kernel must already
         // treat it as enabled-but-not-loaded (fail closed), not as disabled.
@@ -376,6 +424,8 @@ async fn apply(
                 enabled: false,
                 retry: None,
                 kept_previous: None,
+                fingerprint: None,
+                mismatch: None,
             },
         );
         return Ok(());
@@ -391,9 +441,30 @@ async fn apply(
         _ => {}
     }
 
-    let result = load_from_disk(state, plugin_id).await;
-    let (retry, kept_previous) = match &result {
-        Ok(_) => (None, None),
+    let running = applied.get(plugin_id).and_then(|a| a.fingerprint.clone());
+    // Never swap a running version for files that are not what the fleet
+    // published: this replica's copy may be stale or half-synced. With
+    // nothing running here, load them anyway and flag the difference, so a
+    // fleet restarted onto new files without a Reload still serves.
+    let _ = discover(state, plugin_id);
+    let local = plugin_utils::fingerprint(state, plugin_id).await;
+    let differs = mismatch(desired.published.as_ref(), local.as_ref());
+    let result = match &differs {
+        Some(reason) if loaded => Err(LoadFailure {
+            error: PluginError::LoadFailed(reason.clone()),
+            kept_previous: true,
+        }),
+        _ => load_from_disk(state, plugin_id).await.map(drop),
+    };
+    let entry = match &result {
+        Ok(()) => Applied {
+            generation: desired.generation,
+            enabled: true,
+            retry: None,
+            kept_previous: None,
+            fingerprint: local,
+            mismatch: differs,
+        },
         Err(failure) => {
             let r = Retry::after(retry, now);
             tracing::warn!(
@@ -404,22 +475,18 @@ async fn apply(
                 error = %failure.error,
                 "Plugin failed to load on this replica; will retry"
             );
-            (
-                Some(r),
-                failure.kept_previous.then(|| failure.error.to_string()),
-            )
+            Applied {
+                generation: desired.generation,
+                enabled: true,
+                retry: Some(r),
+                kept_previous: failure.kept_previous.then(|| failure.error.to_string()),
+                fingerprint: if failure.kept_previous { running } else { None },
+                mismatch: None,
+            }
         }
     };
-    applied.insert(
-        plugin_id.to_string(),
-        Applied {
-            generation: desired.generation,
-            enabled: true,
-            retry,
-            kept_previous,
-        },
-    );
-    result.map(drop).map_err(|f| f.error)
+    applied.insert(plugin_id.to_string(), entry);
+    result.map_err(|f| f.error)
 }
 
 /// (Re)load a plugin from this replica's disk, keeping a working loaded
@@ -464,6 +531,7 @@ async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
         is_enabled: Set(true),
         generation: Set(0),
         updated_at: Set(chrono::Utc::now()),
+        ..Default::default()
     }))
     .on_conflict_do_nothing_on([plugin_entity::Column::Id])
     .exec(&state.db)
@@ -497,25 +565,46 @@ enum Change {
 /// Record `change` for one plugin and bump its generation, so every replica
 /// re-applies it. Returns the new generation, or `None` for a `Reload` of a
 /// plugin that is not enabled.
-async fn publish(state: &AppState, plugin_id: &str, change: Change) -> Result<Option<i64>, DbErr> {
+///
+/// `fingerprint` is what the serving replica loaded; it becomes the version
+/// every other replica checks its own files against. `None` (a disable)
+/// keeps the recorded one.
+async fn publish(
+    state: &AppState,
+    plugin_id: &str,
+    change: Change,
+    fingerprint: Option<&Fingerprint>,
+) -> Result<Option<i64>, DbErr> {
+    let version = fingerprint.map(|f| f.version.clone());
+    let hash = fingerprint.map(|f| f.hash.clone());
     let statement = match change {
         Change::Enable | Change::Disable => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at)
-               VALUES ($1, $2, 1, NOW())
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash)
+               VALUES ($1, $2, 1, NOW(), $3, $4)
                ON CONFLICT (id) DO UPDATE
                  SET is_enabled = EXCLUDED.is_enabled,
                      generation = plugin.generation + 1,
-                     updated_at = NOW()
+                     updated_at = NOW(),
+                     version = COALESCE(EXCLUDED.version, plugin.version),
+                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
                RETURNING generation"#,
-            [plugin_id.into(), (change == Change::Enable).into()],
+            [
+                plugin_id.into(),
+                (change == Change::Enable).into(),
+                version.into(),
+                hash.into(),
+            ],
         ),
         Change::Reload => Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"UPDATE plugin SET generation = generation + 1, updated_at = NOW()
+            r#"UPDATE plugin
+                  SET generation = generation + 1, updated_at = NOW(),
+                      version = COALESCE($2, version),
+                      content_hash = COALESCE($3, content_hash)
                WHERE id = $1 AND is_enabled
                RETURNING generation"#,
-            [plugin_id.into()],
+            [plugin_id.into(), version.into(), hash.into()],
         ),
     };
     match state.db.query_one_raw(statement).await? {
@@ -579,7 +668,8 @@ async fn load_then_publish(
             return Err(ChangeError::Load(failure.error));
         }
     };
-    let published = match publish(state, plugin_id, change).await {
+    let fingerprint = plugin_utils::fingerprint(state, plugin_id).await;
+    let published = match publish(state, plugin_id, change, fingerprint.as_ref()).await {
         Ok(Some(generation)) => Ok(generation),
         Ok(None) => Err(ChangeError::NotEnabled(plugin_id.to_string())),
         Err(e) => Err(ChangeError::Db(e)),
@@ -607,6 +697,8 @@ async fn load_then_publish(
             enabled: true,
             retry: None,
             kept_previous: None,
+            fingerprint,
+            mismatch: None,
         },
     );
     state.plugin_lifecycle.set_desired(plugin_id, true);
@@ -661,13 +753,14 @@ pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
                 "Plugin '{plugin_id}' is not currently enabled"
             )));
         }
-        let generation = publish(state, plugin_id, Change::Disable)
+        let generation = publish(state, plugin_id, Change::Disable, None)
             .await?
             .ok_or_else(|| AppError::Internal("plugin upsert returned no row".into()))?;
         state.plugin_lifecycle.set_desired(plugin_id, false);
         let desired = Desired {
             enabled: false,
             generation,
+            published: None,
         };
         apply(state, applied, plugin_id, desired, Instant::now()).await?;
         if let Err(e) =
@@ -747,10 +840,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
         let now = Instant::now();
         for row in rows.into_iter().filter(|r| new_ids.contains(&r.id)) {
-            let desired = Desired {
-                enabled: row.is_enabled,
-                generation: row.generation,
-            };
+            let desired = Desired::of(&row);
             if let Err(e) = apply(state, applied, &row.id, desired, now).await {
                 tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
                 failed.push(ReloadFailure {

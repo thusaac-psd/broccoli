@@ -3385,6 +3385,11 @@ export interface components {
       status: components['schemas']['ReplicaPluginStatus'];
       /** @description Whether this replica has applied the latest lifecycle change. */
       up_to_date: boolean;
+      /**
+       * @description Manifest version of what is loaded on this replica.
+       * @example 1.2.0
+       */
+      version?: string | null;
     };
     /** @enum {string} */
     PluginStatusResponse: 'Unloaded' | 'Loaded' | 'Failed';
@@ -3627,6 +3632,7 @@ export interface components {
       | 'failed'
       | 'not_installed'
       | 'outdated'
+      | 'mismatched'
       | 'unloaded';
     ReplyClarificationRequest: {
       /** @example Yes, the input is always sorted in ascending order. */

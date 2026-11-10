@@ -494,3 +494,80 @@ async fn a_reload_never_re_enables_a_plugin_disabled_through_a_peer() {
         .unwrap();
     assert!(!row.is_enabled, "the disable must stand");
 }
+
+/// Peers reload whatever is on their own disk, so each publish records what
+/// the serving replica loaded. A replica whose files differ is flagged, and
+/// never swaps a running version for them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replica_with_different_files_is_flagged_and_keeps_its_running_version() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    // Publish A's files as the fleet's version.
+    let res = a
+        .post_with_token(&routes::admin_plugin_reload(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    // B's copy loads fine but is not the same plugin build.
+    let b_dir = tempfile::tempdir().unwrap();
+    let b_plugin = b_dir.path().join(PLUGIN);
+    copy_dir(&fixtures_dir().join(PLUGIN), &b_plugin);
+    let manifest = std::fs::read_to_string(b_plugin.join("plugin.toml")).unwrap();
+    let patched = manifest.replacen("version = \"", "version = \"9", 1);
+    assert_ne!(manifest, patched, "the fixture declares a version");
+    std::fs::write(b_plugin.join("plugin.toml"), patched).unwrap();
+    let b = a
+        .spawn_replica(SpawnOptions {
+            plugins_dir: Some(b_dir.path().to_path_buf()),
+            allow_plugin_activation_failures: true,
+            ..Default::default()
+        })
+        .await;
+    let b_id = b.state.config.server.id.clone();
+    let b_status = |body: &serde_json::Value| {
+        find(body, PLUGIN)["fleet"]["replicas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["server_id"] == b_id.as_str())
+            .cloned()
+            .unwrap()
+    };
+
+    // Nothing was running on B, so it serves its files, flagged.
+    assert_eq!(status(&b, PLUGIN), Some(PluginStatus::Loaded));
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    let entry = b_status(&res.body);
+    assert_eq!(entry["status"], "mismatched", "{entry}");
+    assert!(
+        entry["error"].as_str().unwrap().contains("differ"),
+        "{entry}"
+    );
+    assert_eq!(find(&res.body, PLUGIN)["fleet"]["state"], "failed");
+
+    // Another reload of A's version: B keeps what it runs, now outdated.
+    let res = a
+        .post_with_token(&routes::admin_plugin_reload(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    plugin_lifecycle::reconcile(&b.state).await.unwrap();
+    assert_eq!(status(&b, PLUGIN), Some(PluginStatus::Loaded));
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    assert_eq!(b_status(&res.body)["status"], "outdated");
+
+    // Bring B's files in line: the next retry picks the version up.
+    copy_dir(&fixtures_dir().join(PLUGIN), &b_plugin);
+    let res = b
+        .post_with_token(&routes::admin_plugin_reload(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    assert_eq!(
+        find(&res.body, PLUGIN)["fleet"]["state"],
+        "loaded",
+        "{}",
+        res.text
+    );
+}

@@ -824,6 +824,7 @@ export const en: Record<string, string> = {
   'plugins.status.failed': 'Failed',
   'plugins.status.not_installed': 'Not installed',
   'plugins.status.outdated': 'Running previous version',
+  'plugins.status.mismatched': 'Different files',
   'plugins.status.unloaded': 'Not loaded',
   'plugins.config.title': 'Configure {name}',
   'plugins.config.description': 'Manage configuration for this plugin.',

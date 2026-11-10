@@ -475,6 +475,7 @@
 'plugins.status.failed' = '失败'
 'plugins.status.not_installed' = '未安装'
 'plugins.status.outdated' = '仍在运行旧版本'
+'plugins.status.mismatched' = '文件不一致'
 'plugins.status.unloaded' = '未加载'
 'plugins.retry' = '重试'
 'plugins.reload' = '重新加载'

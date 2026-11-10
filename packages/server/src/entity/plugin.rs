@@ -12,6 +12,14 @@ pub struct Model {
     /// each replica knows to re-apply this row. See `crate::plugin_lifecycle`.
     #[sea_orm(default_value = 0)]
     pub generation: i64,
+    /// Manifest version and content hash of the plugin as published (by the
+    /// replica that served the last enable or reload). A replica whose files
+    /// fingerprint differently does not swap its running version for them.
+    /// `None` until first published.
+    #[sea_orm(nullable)]
+    pub version: Option<String>,
+    #[sea_orm(nullable)]
+    pub content_hash: Option<String>,
     pub updated_at: DateTimeUtc,
 }
 

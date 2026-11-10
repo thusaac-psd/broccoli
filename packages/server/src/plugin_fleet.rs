@@ -43,6 +43,9 @@ pub enum ReplicaPluginStatus {
     /// The latest version failed to load here; the previously loaded version
     /// is still serving, and the replica keeps retrying the new one.
     Outdated,
+    /// Loaded, but this replica's files are not the version the fleet
+    /// published (they were loaded because nothing else was running here).
+    Mismatched,
     /// Not loaded (disabled, or not applied yet).
     Unloaded,
 }
@@ -56,6 +59,7 @@ impl ReplicaPluginStatus {
             ReplicaPluginStatus::Failed
                 | ReplicaPluginStatus::NotInstalled
                 | ReplicaPluginStatus::Outdated
+                | ReplicaPluginStatus::Mismatched
         )
     }
 }
@@ -72,6 +76,9 @@ pub struct ReplicaPluginState {
     /// (the report is rewritten on every attempt, so this stays accurate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_in_ms: Option<u64>,
+    /// Manifest version of what is loaded here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 pub type ReplicaReport = BTreeMap<String, ReplicaPluginState>;
@@ -176,6 +183,9 @@ pub struct PluginReplicaResponse {
     pub up_to_date: bool,
     /// When this replica next retries a failed load.
     pub retry_at: Option<DateTime<Utc>>,
+    /// Manifest version of what is loaded on this replica.
+    #[schema(example = "1.2.0")]
+    pub version: Option<String>,
 }
 
 /// A plugin's state across all live server replicas.
@@ -186,8 +196,9 @@ pub struct PluginFleetResponse {
     pub replicas_total: u32,
     /// Live replicas with the plugin loaded at the latest generation.
     pub replicas_loaded: u32,
-    /// Live replicas where the plugin failed, is not installed, or is still on
-    /// a previous version because the latest one failed to load.
+    /// Live replicas where the plugin failed, is not installed, is still on a
+    /// previous version because the latest one failed to load, or runs files
+    /// that differ from the published version.
     pub replicas_failed: u32,
     pub replicas: Vec<PluginReplicaResponse>,
 }
@@ -217,6 +228,7 @@ impl FleetView {
                     status: reported.map_or(ReplicaPluginStatus::Unloaded, |s| s.status),
                     error: reported.and_then(|s| s.error.clone()),
                     up_to_date: reported.is_some_and(|s| s.generation == generation),
+                    version: reported.and_then(|s| s.version.clone()),
                     retry_at: reported.and_then(|s| s.retry_in_ms).map(|ms| {
                         r.state_at + chrono::Duration::milliseconds(ms.min(i64::MAX as u64) as i64)
                     }),
@@ -262,6 +274,7 @@ mod tests {
             error: None,
             up_to_date,
             retry_at: None,
+            version: None,
         }
     }
 

@@ -113,6 +113,7 @@ const REPLICA_BADGE: Record<
   failed: 'destructive',
   not_installed: 'destructive',
   outdated: 'destructive',
+  mismatched: 'destructive',
   unloaded: 'outline',
 };
 
@@ -134,6 +135,11 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
             <li key={r.server_id} className="px-3 py-2 space-y-1">
               <div className="flex items-center gap-2">
                 <span className="font-mono">{r.server_id}</span>
+                {r.version && (
+                  <span className="text-muted-foreground font-mono">
+                    v{r.version}
+                  </span>
+                )}
                 <Badge variant={REPLICA_BADGE[r.status]} className="text-xs">
                   {t(`plugins.status.${r.status}`)}
                 </Badge>
