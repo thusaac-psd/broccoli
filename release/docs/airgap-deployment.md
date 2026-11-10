@@ -384,7 +384,9 @@ it with `update-ca-certificates` on Debian/Ubuntu/SUSE or `update-ca-trust` on
 RHEL/Rocky/Fedora/Arch, as root or through `sudo`;
 `macos.sh` adds it to the System keychain via `security add-trusted-cert`).
 Finally, if `cli/broccoli` is present in the bundle, it installs the musl-static
-CLI to `/usr/local/bin/broccoli`.
+CLI to `/usr/local/bin/broccoli`. The CLI trusts the OS certificate store by
+default (alongside its bundled public roots), so `broccoli login` and
+`broccoli submit` to `https://<host-or-ip>` work with no `BROCCOLI_TLS` setting.
 
 ### Windows
 
