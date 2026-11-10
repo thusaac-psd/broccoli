@@ -486,7 +486,6 @@ async fn created_user_password_is_not_persisted_by_idempotency_cache() {
 /// the next restart. Either persist the revoke or reject edits to built-ins.
 /// Location: seed.rs, called unconditionally from runtime.rs.
 #[tokio::test]
-#[ignore = "BUG: revoking a built-in role permission is silently undone on restart (re-seed)"]
 async fn revoked_builtin_permission_survives_reseed() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -516,4 +515,46 @@ async fn revoked_builtin_permission_survives_reseed() {
         "revoked permission came back after restart: {}",
         perms.text
     );
+}
+
+/// A built-in mapping that seeding has never applied (one added by a later
+/// release) is still seeded once, then follows the same rule.
+#[tokio::test]
+async fn builtin_mapping_new_to_this_release_is_seeded_once() {
+    use server::entity::{role_permission, seeded_role_permission};
+
+    let app = TestApp::spawn().await;
+    // Simulate a database from before this mapping existed.
+    for table in ["seeded_role_permission", "role_permission"] {
+        app.db
+            .execute_raw(Statement::from_string(
+                app.db.get_database_backend(),
+                format!(
+                    "DELETE FROM {table} WHERE role = 'problem_setter' AND permission = '{}'",
+                    perm::PROBLEM_EDIT
+                ),
+            ))
+            .await
+            .expect("delete mapping");
+    }
+
+    server::seed::seed_role_permissions(&app.db)
+        .await
+        .expect("reseed (upgrade boot)");
+    let granted = role_permission::Entity::find_by_id((
+        "problem_setter".to_string(),
+        perm::PROBLEM_EDIT.to_string(),
+    ))
+    .one(&app.db)
+    .await
+    .expect("db");
+    assert!(granted.is_some(), "new built-in mapping was not seeded");
+    let recorded = seeded_role_permission::Entity::find_by_id((
+        "problem_setter".to_string(),
+        perm::PROBLEM_EDIT.to_string(),
+    ))
+    .one(&app.db)
+    .await
+    .expect("db");
+    assert!(recorded.is_some(), "seeding was not recorded");
 }
