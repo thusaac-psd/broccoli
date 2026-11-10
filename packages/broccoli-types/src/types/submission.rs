@@ -45,8 +45,11 @@ fn default_fire_after_judging() -> bool {
 
 /// What a contest-type plugin's submission handler reports back. Build it
 /// with [`OnSubmissionOutput::ok`], [`OnSubmissionOutput::failed`] or
-/// [`OnSubmissionOutput::refused`].
+/// [`OnSubmissionOutput::refused`]: the struct is `#[non_exhaustive]`, so
+/// plugins cannot write it as a struct literal and keep compiling when a
+/// field is added. Read its fields as usual.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OnSubmissionOutput {
     pub success: bool,
     pub error_message: Option<String>,
@@ -67,6 +70,7 @@ fn is_retryable(retryable: &bool) -> bool {
     *retryable
 }
 
+/// The only way to build an [`OnSubmissionOutput`] outside this crate.
 impl OnSubmissionOutput {
     /// The submission was handled.
     pub fn ok() -> Self {
