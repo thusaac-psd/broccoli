@@ -272,6 +272,13 @@ pub async fn revoke_presented(db: &DatabaseConnection, presented: &str) -> Resul
     Ok(())
 }
 
+/// [`refresh_token::LOCK_OWNER_SQL`], addressed by the presented selector.
+const LOCK_OWNER_BY_SELECTOR_SQL: &str = r#"
+SELECT 1 FROM "user"
+WHERE id = (SELECT user_id FROM refresh_tokens WHERE selector = $1)
+FOR NO KEY UPDATE
+"#;
+
 /// Exchange a presented refresh token for a new access token and a new
 /// refresh token, retiring the presented one. Shared by the cookie
 /// (`/auth/refresh`) and body (`/auth/cli-refresh`) endpoints.
@@ -284,6 +291,17 @@ pub async fn rotate_refresh_token(
     presented: &str,
 ) -> Result<(AccessGrant, String), AppError> {
     let txn = db.begin().await?;
+
+    // Take the owner lock before the token row lock, the same order as
+    // `revoke_all_for_user` (see `refresh_token::LOCK_OWNER_SQL`).
+    if let Ok((selector, _)) = refresh::parse_refresh_token(presented) {
+        txn.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            LOCK_OWNER_BY_SELECTOR_SQL,
+            [selector.into()],
+        ))
+        .await?;
+    }
 
     let token = find_presented(&txn, presented, true)
         .await?

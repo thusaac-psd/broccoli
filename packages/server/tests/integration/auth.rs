@@ -521,6 +521,92 @@ mod refresh_validator_format {
     }
 }
 
+mod refresh_vs_credential_change {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
+    use std::time::Duration;
+
+    /// A refresh that races a password reset (which locks the user row, then
+    /// deletes the user's refresh rows) must not leave a fresh refresh row
+    /// behind that the reset's DELETE did not see.
+    #[tokio::test]
+    async fn refresh_waits_for_a_concurrent_session_revocation() {
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "racer", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let login = app.post_without_token(routes::LOGIN, &body).await;
+        let uid = login.body["id"].as_i64().unwrap() as i32;
+
+        let other = Database::connect(&app.state.config.database.url)
+            .await
+            .unwrap();
+        let reset = other.begin().await.unwrap();
+        reset
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"SELECT 1 FROM "user" WHERE id = $1 FOR UPDATE"#,
+                [uid.into()],
+            ))
+            .await
+            .unwrap();
+
+        let empty = json!({});
+        let refresh = app.post_without_token(routes::REFRESH, &empty);
+        tokio::pin!(refresh);
+        let waiting = async {
+            loop {
+                let n: i64 = other
+                    .query_one_raw(Statement::from_string(
+                        DbBackend::Postgres,
+                        "SELECT count(*) AS n FROM pg_stat_activity \
+                         WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .try_get("", "n")
+                    .unwrap();
+                if n >= 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            res = &mut refresh => panic!("refresh did not wait for the reset: {}", res.text),
+            r = tokio::time::timeout(Duration::from_secs(15), waiting) => {
+                r.expect("refresh should queue behind the user row lock");
+            }
+        }
+
+        reset
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM refresh_tokens WHERE user_id = $1",
+                [uid.into()],
+            ))
+            .await
+            .unwrap();
+        reset.commit().await.unwrap();
+
+        let res = refresh.await;
+        assert_eq!(res.status, 401, "{}", res.text);
+        let left: i64 = other
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM refresh_tokens WHERE user_id = $1",
+                [uid.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "n")
+            .unwrap();
+        assert_eq!(left, 0, "a refresh row survived the revocation");
+        other.close().await.unwrap();
+    }
+}
+
 mod logout {
     use super::*;
 
