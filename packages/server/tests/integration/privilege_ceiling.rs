@@ -31,6 +31,18 @@ async fn role_grants(app: &TestApp, role: &str) -> Vec<String> {
     grants
 }
 
+/// Logs `username` in again and returns the fresh access token.
+async fn login(app: &TestApp, username: &str) -> String {
+    let res = app
+        .post_without_token(
+            routes::LOGIN,
+            &json!({"username": username, "password": PASSWORD}),
+        )
+        .await;
+    assert_eq!(res.status, 200, "re-login failed: {}", res.text);
+    res.body["token"].as_str().unwrap().to_string()
+}
+
 /// Logs `username` in again and returns the permissions in the fresh token.
 async fn login_permissions(app: &TestApp, username: &str) -> Vec<Value> {
     let login = app
@@ -472,4 +484,57 @@ mod unknown_role {
             .await;
         assert_permission_denied(&res, "granting without role:manage");
     }
+}
+
+/// With built-in roles only: an admin delegates
+/// `role:manage` to `problem_setter`; a problem setter must not be able to
+/// strip `role:manage` from `admin` and lock the admins out of role
+/// management.
+#[tokio::test]
+async fn delegated_role_manager_cannot_lock_admins_out_of_role_management() {
+    let app = TestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("delegating_admin", PASSWORD, "admin")
+        .await;
+    let res = app
+        .post_with_token(
+            &routes::role_permissions("problem_setter"),
+            &json!({"permission": "role:manage"}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 201, "delegation: {}", res.text);
+
+    let m_token = app.create_authenticated_user("qa_m", PASSWORD).await;
+    let m = app.get_with_token(routes::ME, &m_token).await.id();
+    let admin = login(&app, "delegating_admin").await;
+    let res = app
+        .post_with_token(
+            &routes::user_roles(m),
+            &json!({"role": "problem_setter"}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 201, "assign problem_setter: {}", res.text);
+
+    let m_token = login(&app, "qa_m").await;
+    let res = app
+        .delete_with_token(&routes::role_permission("admin", "role:manage"), &m_token)
+        .await;
+    assert_permission_denied(&res, "problem setter stripping role:manage from admin");
+
+    // The admin can still manage roles.
+    let admin = login(&app, "delegating_admin").await;
+    let res = app
+        .delete_with_token(
+            &routes::role_permission("problem_setter", "role:manage"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 204, "admin role management: {}", res.text);
+    assert!(
+        role_grants(&app, "admin")
+            .await
+            .contains(&"role:manage".to_string())
+    );
 }
