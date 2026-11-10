@@ -16,7 +16,7 @@ use tracing::instrument;
 // (tests/integration/user.rs). `contest`/`contest_user` here are only used
 // internally by `delete_user` to drop the deleted user's future contest
 // registrations - never returned to a response body.
-use crate::entity::{contest, contest_user, refresh_token, role, role_permission, user, user_role};
+use crate::entity::{contest, contest_user, refresh_token, role, user, user_role};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
@@ -26,6 +26,7 @@ use crate::models::user::{
     validate_create_users,
 };
 use crate::models::user::{RoleAssignmentRequest, UpdateUserRequest, UserResponse};
+use crate::services::privileges::{CeilingTarget, require_within_ceiling};
 use crate::state::AppState;
 use crate::utils::hash;
 use crate::utils::soft_delete::SoftDeletable;
@@ -248,39 +249,6 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Privilege ceiling for adding or removing a role: a caller may only touch a role
-/// whose permission set is a SUBSET of the caller's own (SYSTEM_ADMIN bypasses).
-/// USER_MANAGE governs user accounts, not privilege definitions (that is
-/// ROLE_MANAGE); without this ceiling a USER_MANAGE-only principal could assign
-/// itself the all-powerful `admin` role (escalation) or strip `admin` from other
-/// admins (lockout). Mirrors "you cannot grant or revoke what you do not hold".
-async fn require_role_within_ceiling(
-    state: &AppState,
-    auth_user: &FreshAuthUser,
-    role_name: &str,
-) -> Result<(), AppError> {
-    if auth_user.has_permission(perm::SYSTEM_ADMIN) {
-        return Ok(());
-    }
-    let role_permissions = role_permission::Entity::find()
-        .filter(role_permission::Column::Role.eq(role_name.to_string()))
-        .all(&state.db)
-        .await?;
-    if let Some(rp) = role_permissions
-        .iter()
-        .find(|rp| !auth_user.has_permission(&rp.permission))
-    {
-        tracing::warn!(
-            actor = auth_user.user_id,
-            role = %role_name,
-            missing_permission = %rp.permission,
-            "Refused role change crossing the caller's privilege ceiling"
-        );
-        return Err(AppError::PermissionDenied);
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     post,
     path = "/{id}/roles",
@@ -318,7 +286,9 @@ pub async fn assign_role(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
-    require_role_within_ceiling(&state, &auth_user, &role_model.name).await?;
+    // USER_MANAGE governs accounts, not privilege definitions: without the
+    // ceiling its holder could assign itself the `admin` role.
+    require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_model.name)).await?;
 
     let txn = state.db.begin().await?;
     user_model.assign_role(&txn, role_model.name).await?;
@@ -359,7 +329,7 @@ pub async fn revoke_role(
     // USER_MANAGE/ROLE_MANAGE boundary. Without it, a USER_MANAGE-only principal
     // could strip `admin` (system:admin/role:manage) from every other admin - an
     // administrative lockout, the inverse of the self-escalation assign_role guards.
-    require_role_within_ceiling(&state, &auth_user, &role_name).await?;
+    require_within_ceiling(&state.db, &auth_user, CeilingTarget::Role(&role_name)).await?;
 
     let active = user_role::Entity::find_by_id((id, role_name))
         .one(&state.db)

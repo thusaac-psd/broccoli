@@ -1689,7 +1689,7 @@ export interface paths {
     put?: never;
     /**
      * Grant a permission to a role
-     * @description Grants a permission to a role. Requires `role:manage` permission.
+     * @description Grants a permission to a role. Requires `role:manage` permission, and the caller must itself hold the permission being granted unless it holds `system:admin`.
      */
     post: operations['grantPermissionToRole'];
     delete?: never;
@@ -1710,7 +1710,7 @@ export interface paths {
     post?: never;
     /**
      * Revoke a permission from a role
-     * @description Revokes a permission from a role. Requires `role:manage` permission.
+     * @description Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.
      */
     delete: operations['revokePermissionFromRole'];
     options?: never;
@@ -10529,7 +10529,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10570,7 +10570,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;
