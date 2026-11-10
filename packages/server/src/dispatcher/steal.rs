@@ -1125,30 +1125,6 @@ mod deferred_steal_db_tests {
     use super::*;
     use crate::entity::{problem, user};
     use sea_orm::{ActiveModelTrait, Set};
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    /// Boot a fresh Postgres container and migrate the schema into it. The
-    /// returned container guard must be kept alive for the duration of the test
-    /// (its `Drop` tears the container down).
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
 
     /// Insert a `submission` (plus the `user`/`problem` it references) in the
     /// given status/epoch and return its id.
@@ -1298,7 +1274,7 @@ mod deferred_steal_db_tests {
     /// the submission hangs in `Running` forever.
     #[tokio::test]
     async fn deferred_redispatch_advances_parent_submission_epoch() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
@@ -1340,7 +1316,7 @@ mod deferred_steal_db_tests {
     /// results under one judgement.
     #[tokio::test]
     async fn deferred_redispatch_wipes_stale_testcase_results() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
         let jid = current_judgement(&db, sub_id).await.id;
@@ -1394,7 +1370,7 @@ mod deferred_steal_db_tests {
     /// hanging.
     #[tokio::test]
     async fn exhausted_deferred_judgement_finalizes_parent_submission() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         // retry_count + 1 > max_dispatch_retries(5) => exhausted.
         seed_stale_deferred_judgement(&db, sub_id, 0, 5).await;
@@ -1428,7 +1404,7 @@ mod deferred_steal_db_tests {
     /// reclaims and re-dispatches it.
     #[tokio::test]
     async fn recover_orphaned_leases_makes_own_fresh_inflight_stealable() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-1").await;
         set_submission_owner(&db, sub_id, "server-1").await;
@@ -1477,7 +1453,7 @@ mod deferred_steal_db_tests {
     /// release must stay strictly scoped to `owner_server_id = <self>`.
     #[tokio::test]
     async fn recover_orphaned_leases_releases_own_non_current_inflight() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         let now = chrono::Utc::now();
         submission_judgement::ActiveModel {
@@ -1526,7 +1502,7 @@ mod deferred_steal_db_tests {
     /// and gets re-claimed by the steal sweeper mid-re-judge.
     #[tokio::test]
     async fn stolen_submission_judgement_insert_stamps_owner_and_heartbeat() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
         let abandoned = current_judgement(&db, sub_id).await.id;
@@ -1595,7 +1571,7 @@ mod deferred_steal_db_tests {
     /// fires its after-judging hooks (scoreboard recompute, notifications).
     #[tokio::test]
     async fn deferred_redispatch_reports_current_for_fire_after_judging() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
@@ -1619,7 +1595,7 @@ mod deferred_steal_db_tests {
     /// runs its boot recovery.
     #[tokio::test]
     async fn recover_orphaned_leases_leaves_other_servers_alone() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-2").await;
         set_submission_owner(&db, sub_id, "server-2").await;

@@ -216,27 +216,6 @@ mod tests {
     use super::*;
     use crate::entity::{problem, submission, user};
     use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
 
     async fn seed_submission(db: &DatabaseConnection) -> i32 {
         let now = chrono::Utc::now();
@@ -314,7 +293,7 @@ mod tests {
     /// exhausted/superseded rows untouched.
     #[tokio::test]
     async fn reaper_selects_only_retryable_system_errors() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
 
         // SHOULD be selected: current, finalized, Judged + SystemError, budget.
         let s_ok = seed_submission(&db).await;

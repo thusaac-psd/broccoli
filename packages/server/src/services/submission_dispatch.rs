@@ -1062,27 +1062,6 @@ async fn resolve_body_ref(
 mod tests {
     use super::*;
     use crate::entity::user;
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
 
     /// Seed an owned, in-flight submission whose `created_at` is deliberately an
     /// hour old (mirroring a submission that has been judging for a while).
@@ -1135,7 +1114,7 @@ mod tests {
     /// after creation regardless of active progress.
     #[tokio::test]
     async fn ensure_active_judgement_inherits_submission_owner_and_heartbeat() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
 
         let before = Utc::now();
@@ -1239,7 +1218,7 @@ mod tests {
     /// attempt's results wiped.
     #[tokio::test]
     async fn finalized_system_error_judgement_is_requeued_for_retry() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1315,7 +1294,7 @@ mod tests {
     /// still requeues it: no system condition stands as the contestant's verdict.
     #[tokio::test]
     async fn stuck_terminal_system_error_status_is_requeued_within_system_error_budget() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(&db, &sub, 0, 5, SubmissionStatus::SystemError, None).await;
         seed_tcr(&db, sub.id, jid, 0).await;
@@ -1346,7 +1325,7 @@ mod tests {
     /// flapping submission a fresh steal/stuck budget on every SE retry.
     #[tokio::test]
     async fn system_error_requeue_never_lowers_submission_retry_count() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1374,7 +1353,7 @@ mod tests {
     /// Bounded: once the retry budget is exhausted, the SystemError stands.
     #[tokio::test]
     async fn exhausted_system_error_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         // retry_count + 1 > max(5) => exhausted.
         let jid = finalize_judgement(
@@ -1404,7 +1383,7 @@ mod tests {
     /// Safety: a contestant verdict (here WrongAnswer) must never be retried.
     #[tokio::test]
     async fn non_system_error_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1427,7 +1406,7 @@ mod tests {
     /// must keep it final and unretried.
     #[tokio::test]
     async fn compile_error_status_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1452,7 +1431,7 @@ mod tests {
     /// dispatched) must not be requeued.
     #[tokio::test]
     async fn superseded_epoch_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1509,7 +1488,7 @@ mod tests {
     /// result to a spurious SystemError.
     #[tokio::test]
     async fn stale_epoch_dispatch_failure_does_not_clobber_readvanced_judgement() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         // The age-cap recovery advanced BOTH rows to epoch 1 in lockstep, and
         // the judgement is judging afresh (current, un-finalized, Running).
@@ -1575,7 +1554,7 @@ mod tests {
     /// SystemError, exactly as the pre-guard by-id write did.
     #[tokio::test]
     async fn matching_epoch_dispatch_failure_finalizes_judgement_as_system_error() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = seed_current_inflight_judgement(&db, &sub, 0, SubmissionStatus::Running).await;
 
