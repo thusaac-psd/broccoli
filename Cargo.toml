@@ -5,6 +5,7 @@ members = [
   "packages/mq",
   "packages/plugin-core",
   "packages/server",
+  "packages/test-support",
   "packages/worker",
   "packages/dev-cli",
   "packages/stress-test",

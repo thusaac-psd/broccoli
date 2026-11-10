@@ -23,6 +23,8 @@ system.
 - `packages/mq`
 - `packages/plugin-core`
 - `packages/server`
+- `packages/test-support` (dev-dependency harness shared by the server's
+  `tests/integration` and `tests/e2e` trees)
 - `packages/worker`
 - `packages/cli`
 
