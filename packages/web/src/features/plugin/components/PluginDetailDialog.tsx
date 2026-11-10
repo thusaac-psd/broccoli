@@ -3,6 +3,7 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { PluginFullDetail } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
+  Button,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -11,7 +12,18 @@ import {
   Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import { AlertCircle, Cpu, Globe, Server } from 'lucide-react';
+import {
+  AlertCircle,
+  Cpu,
+  Globe,
+  Loader2,
+  RefreshCw,
+  Server,
+  ServerCog,
+} from 'lucide-react';
+
+import type { PluginFleet } from '../fleet';
+import { PluginFleetBadge } from './PluginFleetBadge';
 
 // -- Section wrapper --
 
@@ -89,6 +101,67 @@ function MiniTable({
   );
 }
 
+// -- Per-server load state --
+
+type ReplicaStatus = PluginFleet['replicas'][number]['status'];
+
+const REPLICA_BADGE: Record<
+  ReplicaStatus,
+  'secondary' | 'destructive' | 'outline'
+> = {
+  loaded: 'secondary',
+  failed: 'destructive',
+  not_installed: 'destructive',
+  unloaded: 'outline',
+};
+
+function FleetSection({ fleet }: { fleet: PluginFleet }) {
+  const { t, locale } = useTranslation();
+
+  return (
+    <Section
+      title={t('plugins.detail.servers')}
+      icon={<ServerCog className="h-4 w-4" />}
+    >
+      {fleet.replicas.length === 0 ? (
+        <p className="text-xs text-muted-foreground italic">
+          {t('plugins.detail.noServers')}
+        </p>
+      ) : (
+        <ul className="rounded-md border divide-y text-xs">
+          {fleet.replicas.map((r) => (
+            <li key={r.server_id} className="px-3 py-2 space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="font-mono">{r.server_id}</span>
+                <Badge variant={REPLICA_BADGE[r.status]} className="text-xs">
+                  {t(`plugins.status.${r.status}`)}
+                </Badge>
+                {!r.up_to_date && (
+                  <span className="text-muted-foreground">
+                    {t('plugins.detail.outdated')}
+                  </span>
+                )}
+              </div>
+              {r.error && (
+                <pre className="whitespace-pre-wrap break-words font-mono text-destructive">
+                  {r.error}
+                </pre>
+              )}
+              {r.retry_at && (
+                <p className="text-muted-foreground">
+                  {t('plugins.detail.retryAt', {
+                    time: new Date(r.retry_at).toLocaleTimeString(locale),
+                  })}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
 // -- Detail content --
 
 function PluginDetailContent({ plugin }: { plugin: PluginFullDetail }) {
@@ -96,6 +169,8 @@ function PluginDetailContent({ plugin }: { plugin: PluginFullDetail }) {
 
   return (
     <div className="space-y-5">
+      <FleetSection fleet={plugin.fleet} />
+
       {/* Server section */}
       {plugin.server && (
         <Section
@@ -256,10 +331,15 @@ export function PluginDetailDialog({
   pluginId,
   open,
   onOpenChange,
+  onRetry,
+  retrying = false,
 }: {
   pluginId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Reload the plugin on every server (the retry for a failed load). */
+  onRetry?: (pluginId: string) => void;
+  retrying?: boolean;
 }) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
@@ -290,13 +370,29 @@ export function PluginDetailDialog({
           <DialogDescription asChild>
             <div className="text-sm text-muted-foreground">
               {plugin && (
-                <span className="font-mono text-xs">
-                  {plugin.id} · v{plugin.version}
-                  {plugin.status !== 'Loaded' && (
-                    <Badge variant="outline" className="ml-2 text-xs">
-                      {plugin.status}
-                    </Badge>
-                  )}
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs">
+                    {plugin.id} · v{plugin.version}
+                  </span>
+                  <PluginFleetBadge fleet={plugin.fleet} />
+                  {plugin.enabled &&
+                    plugin.fleet.state === 'failed' &&
+                    onRetry && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-6 text-xs"
+                        disabled={retrying}
+                        onClick={() => onRetry(plugin.id)}
+                      >
+                        {retrying ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3 w-3 mr-1" />
+                        )}
+                        {t('plugins.retry')}
+                      </Button>
+                    )}
                 </span>
               )}
             </div>

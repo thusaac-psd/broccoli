@@ -64,12 +64,22 @@ export default function PluginsPage() {
   } = useQuery({
     queryKey: ['admin-plugins'],
     enabled: canManagePlugins,
+    // Other servers apply a change within a few seconds: keep polling while
+    // any plugin is still converging, so the page settles on its own.
+    refetchInterval: (query) =>
+      query.state.data?.some((p) => p.fleet.state === 'pending') ? 3000 : false,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins');
       if (error) throw error;
       return data;
     },
   });
+
+  const invalidatePluginQueries = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['admin-plugins'] });
+    queryClient.invalidateQueries({ queryKey: ['admin-plugin-detail'] });
+    queryClient.invalidateQueries({ queryKey: ['i18n'] });
+  }, [queryClient]);
 
   const handleToggle = useCallback(
     async (plugin: PluginDetail, enable: boolean) => {
@@ -83,14 +93,13 @@ export default function PluginsPage() {
           params: { path: { id: plugin.id } },
         });
 
+        // Refresh either way: a rejected toggle may mean the page was stale.
+        invalidatePluginQueries();
         if (error) {
           toast.error(
             getErrorMessage(error, t('validation.pluginToggleError')),
           );
         } else {
-          queryClient.invalidateQueries({ queryKey: ['admin-plugins'] });
-          queryClient.invalidateQueries({ queryKey: ['i18n'] });
-
           // Unnecessary to load the plugin immediately, as it will be lazily
           // loaded when the user navigates to a page that uses it.
           if (!enable && plugin.has_web) {
@@ -105,31 +114,35 @@ export default function PluginsPage() {
         });
       }
     },
-    [apiClient, queryClient, unloadPlugin, t],
+    [apiClient, invalidatePluginQueries, unloadPlugin, t],
   );
 
+  // Reload on every server. Also the retry for a plugin that failed to load:
+  // it is accepted while the plugin is enabled, wherever it failed.
   const handleReload = useCallback(
-    async (plugin: PluginDetail) => {
-      setReloadingIds((prev) => new Set(prev).add(plugin.id));
+    async (pluginId: string) => {
+      setReloadingIds((prev) => new Set(prev).add(pluginId));
       try {
         const { error } = await apiClient.POST('/admin/plugins/{id}/reload', {
-          params: { path: { id: plugin.id } },
+          params: { path: { id: pluginId } },
         });
 
-        if (!error) {
-          await reloadPlugin(plugin.id);
-          queryClient.invalidateQueries({ queryKey: ['admin-plugins'] });
-          queryClient.invalidateQueries({ queryKey: ['i18n'] });
+        if (error) {
+          toast.error(getErrorMessage(error, t('plugins.reloadError')));
+        } else {
+          await reloadPlugin(pluginId);
         }
+        // Refresh either way: a failed reload changes the reported state too.
+        invalidatePluginQueries();
       } finally {
         setReloadingIds((prev) => {
           const next = new Set(prev);
-          next.delete(plugin.id);
+          next.delete(pluginId);
           return next;
         });
       }
     },
-    [apiClient, queryClient, reloadPlugin],
+    [apiClient, invalidatePluginQueries, reloadPlugin, t],
   );
 
   const handleReloadAll = useCallback(async () => {
@@ -137,15 +150,16 @@ export default function PluginsPage() {
     try {
       const { error } = await apiClient.POST('/admin/plugins/reload-all', {});
 
-      if (!error) {
+      if (error) {
+        toast.error(getErrorMessage(error, t('plugins.reloadError')));
+      } else {
         await reloadAllPlugins();
-        queryClient.invalidateQueries({ queryKey: ['admin-plugins'] });
-        queryClient.invalidateQueries({ queryKey: ['i18n'] });
       }
+      invalidatePluginQueries();
     } finally {
       setIsReloadingAll(false);
     }
-  }, [apiClient, queryClient, reloadAllPlugins]);
+  }, [apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
 
   if (!canManagePlugins) {
     return <Unauthorized />;
@@ -217,7 +231,7 @@ export default function PluginsPage() {
               toggling={togglingIds.has(plugin.id)}
               reloading={reloadingIds.has(plugin.id)}
               onToggle={handleToggle}
-              onReload={handleReload}
+              onReload={(p) => handleReload(p.id)}
               onClick={(p) => setDetailPluginId(p.id)}
             />
           ))}
@@ -226,6 +240,8 @@ export default function PluginsPage() {
       <PluginDetailDialog
         pluginId={detailPluginId}
         open={!!detailPluginId}
+        onRetry={handleReload}
+        retrying={!!detailPluginId && reloadingIds.has(detailPluginId)}
         onOpenChange={(open) => {
           if (!open) {
             setDetailPluginId(null);
