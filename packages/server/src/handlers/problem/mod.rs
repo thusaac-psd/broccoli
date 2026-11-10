@@ -23,6 +23,7 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
+use crate::models::shared::PageWindow;
 use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
@@ -126,6 +127,7 @@ pub async fn create_problem(
     params(ProblemListQuery),
     responses(
         (status = 200, description = "List of problems", body = ProblemListResponse),
+        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
     ),
@@ -139,8 +141,7 @@ pub async fn list_problems(
 ) -> Result<Json<ProblemListResponse>, AppError> {
     auth_user.require_any_permission(&[perm::PROBLEM_CREATE, perm::PROBLEM_EDIT])?;
 
-    let page = Ord::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut select = problem::Entity::find_active();
 
@@ -171,14 +172,9 @@ pub async fn list_problems(
         }
     };
 
-    let total = select
-        .clone()
-        .paginate(&state.db, per_page)
-        .num_items()
-        .await?;
+    let total = select.clone().count(&state.db).await?;
 
     select = select.order_by(sort_column, sort_order);
-    let total_pages = total.div_ceil(per_page);
 
     let data = select
         .select_only()
@@ -193,20 +189,15 @@ pub async fn list_problems(
         .column(problem::Column::IsPublic)
         .column(problem::Column::CreatedAt)
         .column(problem::Column::UpdatedAt)
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .into_model::<ProblemListItem>()
         .all(&state.db)
         .await?;
 
     Ok(Json(ProblemListResponse {
         data,
-        pagination: Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        pagination: window.pagination(total),
     }))
 }
 

@@ -2635,6 +2635,10 @@ mod page_window_bounds {
     /// `page` large enough that `(page - 1) * 20` overflows `u64`.
     const OVERFLOWING_PAGE: &str = "18446744073709551615";
 
+    /// `page` whose offset fits in `u64` but not in Postgres' `bigint`:
+    /// `(page - 1) * 2 = 2^63`, one past `i64::MAX`.
+    const BIGINT_OVERFLOW_PAGE: &str = "4611686018427387905";
+
     /// Send a GET and return the status, or `None` if the server closed the
     /// connection without answering (what a panicking handler looks like).
     async fn status_of(app: &TestApp, path: &str, token: &str) -> Option<u16> {
@@ -2645,6 +2649,21 @@ mod page_window_bounds {
             .await
             .ok()
             .map(|r| r.status().as_u16())
+    }
+
+    /// Assert that an out-of-range page got a 4xx answer, not a dropped
+    /// connection or a 5xx.
+    fn assert_client_error(path: &str, status: Option<u16>) {
+        match status {
+            None => panic!(
+                "{path}: server dropped the connection without a response \
+             (handler panicked on u64 overflow in `(page - 1) * per_page`)"
+            ),
+            Some(s) => assert!(
+                (400..500).contains(&s),
+                "{path}: expected a 4xx for an out-of-range page, got {s}"
+            ),
+        }
     }
 
     async fn admin(app: &TestApp) -> String {
@@ -2675,5 +2694,66 @@ mod page_window_bounds {
             status.unwrap() < 500,
             "{path}: got {status:?}, expected a non-5xx"
         );
+    }
+
+    /// Every paginated list derives its offset through `PageWindow`, so a `page`
+    /// whose offset overflows `u64` or exceeds Postgres' `bigint` OFFSET is a 4xx.
+    /// This one covers `GET /problems`.
+    #[tokio::test]
+    async fn list_problems_rejects_overflowing_page() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
+            let path = format!("{}?page={page}&per_page=2", routes::PROBLEMS);
+            assert_client_error(&path, status_of(&app, &path, &token).await);
+        }
+    }
+
+    /// `GET /contests` answers an out-of-range `page` with a 4xx.
+    #[tokio::test]
+    async fn list_contests_rejects_overflowing_page() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
+            let path = format!("{}?page={page}&per_page=2", routes::CONTESTS);
+            assert_client_error(&path, status_of(&app, &path, &token).await);
+        }
+    }
+
+    /// `GET /submissions` answers an out-of-range `page` with a 4xx.
+    #[tokio::test]
+    async fn list_submissions_rejects_overflowing_page() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
+            let path = format!("{}?page={page}&per_page=2", routes::SUBMISSIONS);
+            assert_client_error(&path, status_of(&app, &path, &token).await);
+        }
+    }
+
+    /// The contest submissions list answers an out-of-range `page` with a 4xx.
+    #[tokio::test]
+    async fn list_contest_submissions_rejects_overflowing_page() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        let cid = app.create_contest(&token, "C", true, true).await;
+        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
+            let path = format!(
+                "{}?page={page}&per_page=2",
+                routes::contest_submissions(cid)
+            );
+            assert_client_error(&path, status_of(&app, &path, &token).await);
+        }
+    }
+
+    /// The dead-letter queue list answers an out-of-range `page` with a 4xx.
+    #[tokio::test]
+    async fn list_dlq_rejects_overflowing_page() {
+        let app = TestApp::spawn().await;
+        let token = admin(&app).await;
+        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
+            let path = format!("{}?page={page}&per_page=2", routes::DLQ);
+            assert_client_error(&path, status_of(&app, &path, &token).await);
+        }
     }
 }

@@ -5620,6 +5620,15 @@ export interface operations {
           'application/json': components['schemas']['ContestListResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -7703,6 +7712,15 @@ export interface operations {
           'application/json': components['schemas']['DlqListResponse'];
         };
       };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
         headers: {
@@ -8702,6 +8720,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ProblemListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
