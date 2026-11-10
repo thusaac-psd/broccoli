@@ -340,8 +340,9 @@ async fn run_consume_loop<F, Fut>(
 
         let Some((queue, message)) = taken else {
             // Nothing ready (or a transient consume error): release the permit and
-            // idle briefly, still responsive to shutdown. The broker's own
-            // connection layer self-heals, so a consume error just backs off.
+            // idle briefly, still responsive to shutdown. The broker returns a
+            // connection error after a few bounded retries, so a consume error
+            // backs off here and the next poll reconnects.
             drop(permit);
             let backoff = if had_error {
                 consume_backoff
