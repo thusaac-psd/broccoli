@@ -31,8 +31,6 @@ use std::time::{Duration, Instant};
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
-use serde::Serialize;
-use utoipa::ToSchema;
 
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
@@ -96,7 +94,7 @@ struct Desired {
 }
 
 /// A plugin that is enabled fleet-wide but not loaded on this replica.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginNotReady {
     /// Plugin id.
     pub id: String,

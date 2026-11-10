@@ -3084,11 +3084,6 @@ export interface components {
        */
       plugins: string;
       /**
-       * @description The enabled plugins that are not loaded on this replica, and why.
-       *     This replica keeps retrying them with backoff.
-       */
-      plugins_not_ready: components['schemas']['PluginNotReady'][];
-      /**
        * @description Aggregate status: `"ok"` when every probed component is healthy,
        *     `"degraded"` otherwise.
        * @example ok
@@ -3375,13 +3370,6 @@ export interface components {
       version: string;
       web?: null | components['schemas']['WebDetailResponse'];
       worker?: null | components['schemas']['WorkerDetailResponse'];
-    };
-    /** @description A plugin that is enabled fleet-wide but not loaded on this replica. */
-    PluginNotReady: {
-      /** @description Plugin id. */
-      id: string;
-      /** @description Why it is not loaded here. */
-      reason: string;
     };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {

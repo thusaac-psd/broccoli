@@ -68,11 +68,12 @@ pass them in order:
 ./install.sh infra server
 ```
 
-Each role runs as its own Compose project (`COMPOSE_PROJECT_NAME=broccoli-<role>`
-in its env file), so roles on one host get separate networks, just as they
-would on separate machines. Env files written by earlier releases have no
-project name and keep the directory name; leave them that way, because a
-role's volumes (including the database) are named after its project.
+Each role runs as its own Compose project
+(`COMPOSE_PROJECT_NAME=broccoli-<role>` in its env file), so roles on one host
+get separate networks, just as they would on separate machines. Env files
+written by earlier releases have no project name and keep the directory name;
+leave them that way, because a role's volumes (including the database) are named
+after its project.
 
 ## Optional plugins
 
@@ -92,8 +93,9 @@ or on a running install, then select **Reload All** on the admin Plugins page:
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
 a plugin on every server node first, then select **Reload All** once: it reaches
 every server replica within a few seconds, not only the one that served the
-click. A replica that is missing an enabled plugin reports it in `/healthz`
-(`"plugins": "degraded"` and `plugins_not_ready`) and keeps retrying.
+click. A replica that is missing an enabled plugin, or failed to load one, keeps
+retrying and reports `"plugins": "degraded"` in `/healthz`; the admin Plugins
+page shows which server and why.
 
 For server redundancy, install a gateway node with:
 

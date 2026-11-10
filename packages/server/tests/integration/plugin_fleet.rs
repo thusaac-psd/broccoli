@@ -114,14 +114,20 @@ async fn a_replica_missing_a_plugin_reports_it_and_converges_after_reload() {
     let res = b.get_without_token("/healthz").await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(res.body["plugins"], "degraded", "{}", res.text);
-    let not_ready = res.body["plugins_not_ready"].as_array().unwrap();
-    assert!(
-        not_ready
-            .iter()
-            .any(|p| p["id"] == PLUGIN && p["reason"] == "not installed on this replica"),
-        "{}",
-        res.text
-    );
+    // The public body says only that something is wrong, never which plugin
+    // or why (errors carry paths and database messages)...
+    assert!(!res.text.contains(PLUGIN), "{}", res.text);
+    assert!(res.body.get("plugins_not_ready").is_none(), "{}", res.text);
+    // ...which the authenticated admin API reports instead.
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    let fleet = &find(&res.body, PLUGIN)["fleet"];
+    let b_entry = fleet["replicas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["server_id"] == b.state.config.server.id.as_str())
+        .unwrap();
+    assert_eq!(b_entry["status"], "not_installed", "{b_entry}");
     let res = a.get_without_token("/healthz").await;
     assert_eq!(res.body["plugins"], "ok", "{}", res.text);
 

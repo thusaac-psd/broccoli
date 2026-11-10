@@ -39,11 +39,11 @@ pub struct HealthResponse {
     /// does not change `status` or the HTTP code, so one plugin that fails
     /// everywhere cannot take the whole fleet out of rotation; a load
     /// balancer that should drain such a replica can match on this field.
+    /// Which plugins and why is in the authenticated admin plugin API
+    /// (`fleet`), not here: this endpoint is public, and load errors carry
+    /// file paths and database messages.
     #[schema(example = "ok")]
     pub plugins: String,
-    /// The enabled plugins that are not loaded on this replica, and why.
-    /// This replica keeps retrying them with backoff.
-    pub plugins_not_ready: Vec<crate::plugin_lifecycle::PluginNotReady>,
 }
 
 /// Probes the database and MQ backends and returns a populated
@@ -95,7 +95,7 @@ pub async fn compute_health(state: &AppState) -> HealthResponse {
         "degraded"
     };
 
-    let plugins_not_ready = crate::plugin_lifecycle::not_ready(state);
+    let plugins_ready = crate::plugin_lifecycle::not_ready(state).is_empty();
 
     HealthResponse {
         status: status.to_string(),
@@ -105,13 +105,7 @@ pub async fn compute_health(state: &AppState) -> HealthResponse {
         git_sha: option_env!("BROCCOLI_GIT_SHA")
             .unwrap_or("unknown")
             .to_string(),
-        plugins: if plugins_not_ready.is_empty() {
-            "ok"
-        } else {
-            "degraded"
-        }
-        .to_string(),
-        plugins_not_ready,
+        plugins: if plugins_ready { "ok" } else { "degraded" }.to_string(),
     }
 }
 
