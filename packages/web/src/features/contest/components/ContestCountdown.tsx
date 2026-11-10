@@ -21,6 +21,19 @@ function getTimeLeft(targetMs: number, now: number) {
   };
 }
 
+/** The digit groups to show: days only when at least a day is left. */
+function countdownSegments(
+  tl: ReturnType<typeof getTimeLeft>,
+  t: (key: string) => string,
+) {
+  return [
+    ...(tl.days > 0 ? [{ value: tl.days, label: t('countdown.days') }] : []),
+    { value: tl.hours, label: t('countdown.hours') },
+    { value: tl.minutes, label: t('countdown.minutes') },
+    { value: tl.seconds, label: t('countdown.seconds') },
+  ];
+}
+
 // CSS-variable-based color tokens - respond to any theme automatically
 const ACCENT = 'hsl(var(--sidebar-ring))';
 
@@ -71,19 +84,7 @@ export function ContestCountdown() {
   const { contest, phase, tl, progress } = d;
 
   const active = phase !== 'ended';
-  const segments =
-    tl.days > 0
-      ? [
-          { value: tl.days, label: t('countdown.days') },
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ]
-      : [
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ];
+  const segments = countdownSegments(tl, t);
 
   const phaseLabel =
     phase === 'upcoming'
@@ -201,19 +202,7 @@ export function ContestCountdownMini() {
   if (!contestId || !d || d.phase === 'ended') return null;
   const { phase, tl } = d;
 
-  const segments =
-    tl.days > 0
-      ? [
-          { value: tl.days, label: t('countdown.days') },
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ]
-      : [
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ];
+  const segments = countdownSegments(tl, t);
 
   const phaseLabel =
     phase === 'upcoming' ? t('countdown.startsIn') : t('countdown.endsIn');
