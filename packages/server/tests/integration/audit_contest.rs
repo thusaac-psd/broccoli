@@ -105,7 +105,6 @@ async fn list_contests_includes_contest_type() {
 /// standings implementation builds rows from `contest_user`.
 /// Location: handlers/contest/participants.rs `unregister_from_contest`.
 #[tokio::test]
-#[ignore = "BUG: participant can unregister after the contest ended (vanishes from standings)"]
 async fn cannot_unregister_after_contest_end() {
     let app = TestApp::spawn().await;
     let admin = app
