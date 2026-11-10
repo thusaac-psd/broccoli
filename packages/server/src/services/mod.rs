@@ -1,3 +1,4 @@
+pub mod auth_tokens;
 pub mod code_run_dispatch;
 pub mod evaluate_batch;
 pub mod operation_batch;

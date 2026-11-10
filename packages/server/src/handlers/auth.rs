@@ -27,18 +27,19 @@ use crate::config::ServerConfig;
 // (`authenticated_user_can_retrieve_their_profile`) - all in
 // tests/integration/auth.rs. There is no `Resource::User` in the kernel this
 // could route through.
-use crate::entity::{refresh_token, role, role_permission, user};
+use crate::entity::{refresh_token, user};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::AuthUser;
+use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::models::auth::{
     CliRefreshRequest, CliTokenResponse, DeviceAuthorizeRequest, DeviceCodeRequest,
     DeviceCodeResponse, DeviceTokenRequest, LoginRequest, LoginResponse, MeResponse,
     RegisterRequest, RegisterResponse, validate_login_request, validate_register_request,
 };
+use crate::services::auth_tokens::issue_access_token;
 use crate::state::AppState;
 use crate::utils::soft_delete::SoftDeletable;
-use crate::utils::{hash, jwt, refresh};
+use crate::utils::{hash, refresh};
 
 /// Seconds after a refresh token is rotated during which a replay of it is
 /// treated as a benign concurrent-refresh race (two in-flight requests carried
@@ -176,25 +177,7 @@ pub async fn login(
         state.login_throttle.clear(username, ip);
     }
 
-    let role_models = user.find_related(role::Entity).all(&state.db).await?;
-    let roles: Vec<String> = role_models.iter().map(|r| r.name.clone()).collect();
-
-    let permissions: Vec<String> = role_models
-        .load_many(role_permission::Entity, &state.db)
-        .await?
-        .into_iter()
-        .flatten()
-        .map(|rp| rp.permission)
-        .collect();
-
-    let access_token = jwt::sign_access_token(
-        user.id,
-        &user.username,
-        roles.clone(),
-        permissions.clone(),
-        &state.config.auth.jwt_secret,
-    )
-    .map_err(|e| AppError::Internal(format!("JWT sign error: {}", e)))?;
+    let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
 
     let now = chrono::Utc::now();
     let expiry = now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS);
@@ -218,17 +201,7 @@ pub async fn login(
     let cookie =
         refresh::build_refresh_cookie(&selector, &validator, state.config.auth.secure_cookies);
 
-    Ok((
-        jar.add(cookie),
-        Json(LoginResponse {
-            token: access_token,
-            id: user.id,
-            username: user.username,
-            display_name: user.display_name,
-            roles,
-            permissions,
-        }),
-    ))
+    Ok((jar.add(cookie), Json(LoginResponse::from(grant))))
 }
 
 #[utoipa::path(
@@ -302,25 +275,7 @@ pub async fn refresh(
         }
     };
 
-    let role_models = user.find_related(role::Entity).all(&txn).await?;
-    let roles: Vec<String> = role_models.iter().map(|r| r.name.clone()).collect();
-
-    let permissions: Vec<String> = role_models
-        .load_many(role_permission::Entity, &txn)
-        .await?
-        .into_iter()
-        .flatten()
-        .map(|rp| rp.permission)
-        .collect();
-
-    let new_access_token = jwt::sign_access_token(
-        user.id,
-        &user.username,
-        roles.clone(),
-        permissions.clone(),
-        &state.config.auth.jwt_secret,
-    )
-    .map_err(|e| AppError::Internal(format!("JWT sign error: {}", e)))?;
+    let grant = issue_access_token(&txn, &state.config.auth.jwt_secret, user.id).await?;
 
     let now = chrono::Utc::now();
     let new_expiry = now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS);
@@ -363,17 +318,7 @@ pub async fn refresh(
         state.config.auth.secure_cookies,
     );
 
-    Ok((
-        jar.add(new_cookie),
-        Json(LoginResponse {
-            token: new_access_token,
-            id: user.id,
-            username: user.username,
-            display_name: user.display_name,
-            roles,
-            permissions,
-        }),
-    ))
+    Ok((jar.add(new_cookie), Json(LoginResponse::from(grant))))
 }
 
 #[utoipa::path(
@@ -657,10 +602,16 @@ pub async fn request_device_code(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn authorize_device(
-    auth_user: AuthUser,
+    auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<DeviceAuthorizeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Minted before the `device_codes` entry guard is taken below, so the
+    // shard lock is never held across a DB await.
+    let token = issue_access_token(&state.db, &state.config.auth.jwt_secret, auth_user.user_id)
+        .await?
+        .token;
+
     let normalized_input = normalize_user_code(&payload.user_code);
     let now = Instant::now();
 
@@ -687,15 +638,6 @@ pub async fn authorize_device(
             "Code has already been authorized".into(),
         ));
     }
-
-    let token = jwt::sign_access_token(
-        auth_user.user_id,
-        &auth_user.username,
-        auth_user.roles,
-        auth_user.permissions,
-        &state.config.auth.jwt_secret,
-    )
-    .map_err(|e| AppError::Internal(format!("JWT sign error: {}", e)))?;
 
     entry.token = Some(token);
 
@@ -806,19 +748,15 @@ async fn mint_refresh_token<C: ConnectionTrait>(db: &C, user_id: i32) -> Result<
 )]
 #[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
 pub async fn issue_cli_token(
-    auth_user: AuthUser,
+    auth_user: FreshAuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<CliTokenResponse>, AppError> {
+    // `FreshAuthUser` refused a stale or deleted caller; the access token is
+    // built from current grants before any refresh row exists for it.
+    let token = issue_access_token(&state.db, &state.config.auth.jwt_secret, auth_user.user_id)
+        .await?
+        .token;
     let refresh_token = mint_refresh_token(&state.db, auth_user.user_id).await?;
-
-    let token = jwt::sign_access_token(
-        auth_user.user_id,
-        &auth_user.username,
-        auth_user.roles,
-        auth_user.permissions,
-        &state.config.auth.jwt_secret,
-    )
-    .map_err(|e| AppError::Internal(format!("JWT sign error: {}", e)))?;
 
     Ok(Json(CliTokenResponse {
         token,
@@ -889,24 +827,9 @@ pub async fn cli_refresh(
         }
     };
 
-    let role_models = user.find_related(role::Entity).all(&txn).await?;
-    let roles: Vec<String> = role_models.iter().map(|r| r.name.clone()).collect();
-    let permissions: Vec<String> = role_models
-        .load_many(role_permission::Entity, &txn)
+    let new_access_token = issue_access_token(&txn, &state.config.auth.jwt_secret, user.id)
         .await?
-        .into_iter()
-        .flatten()
-        .map(|rp| rp.permission)
-        .collect();
-
-    let new_access_token = jwt::sign_access_token(
-        user.id,
-        &user.username,
-        roles,
-        permissions,
-        &state.config.auth.jwt_secret,
-    )
-    .map_err(|e| AppError::Internal(format!("JWT sign error: {}", e)))?;
+        .token;
 
     // Rotate: retain the old token (mark revoked) so a replay is detectable as
     // reuse, then mint a new one and drop this user's now-expired rows.

@@ -537,3 +537,234 @@ mod token_freshness {
         );
     }
 }
+
+mod token_reissue {
+    use super::*;
+    use crate::common::routes::CLI_TOKEN;
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement,
+    };
+    use server::entity::user_role;
+
+    /// Looks up the id of the user named `username`.
+    async fn user_id(app: &TestApp, username: &str) -> i32 {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use server::entity::user;
+
+        user::Entity::find()
+            .filter(user::Column::Username.eq(username))
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("user exists")
+            .id
+    }
+
+    /// Makes every token minted so far for `uid` stale, the same way a role revoke
+    /// or password reset does. Setting `credentials_changed_at` an hour ahead keeps
+    /// the check clear of same-second timing.
+    async fn invalidate_sessions(app: &TestApp, uid: i32) {
+        app.db
+        .execute_raw(Statement::from_string(
+            app.db.get_database_backend(),
+            format!(
+                "UPDATE \"user\" SET credentials_changed_at = now() + interval '1 hour' WHERE id = {uid}"
+            ),
+        ))
+        .await
+        .expect("bump credentials_changed_at");
+    }
+
+    /// Replaces a user's roles directly in the database without bumping
+    /// `credentials_changed_at`, so their existing access token still counts as
+    /// fresh. This stands in for a role change landing in the same second the token
+    /// was minted, which `FreshAuthUser` tolerates by design.
+    async fn replace_roles_without_bump(app: &TestApp, uid: i32, role: &str) {
+        user_role::Entity::delete_many()
+            .filter(user_role::Column::UserId.eq(uid))
+            .exec(&app.db)
+            .await
+            .expect("clear user roles");
+        user_role::ActiveModel {
+            user_id: Set(uid),
+            role: Set(role.to_string()),
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert user role");
+    }
+
+    /// Roles and permissions a token carries, as `/auth/me` echoes its claims.
+    async fn token_grants(app: &TestApp, token: &str) -> (serde_json::Value, Vec<String>) {
+        let me = app.get_with_token(routes::ME, token).await;
+        assert_eq!(me.status, 200, "/me with minted token: {}", me.text);
+        let permissions = me.body["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .map(|p| p.as_str().expect("permission string").to_string())
+            .collect();
+        (me.body["roles"].clone(), permissions)
+    }
+
+    /// Starts a device-flow login and returns `(device_code, user_code)`.
+    async fn start_device_flow(app: &TestApp) -> (String, String) {
+        let res = app
+            .post_without_token(routes::DEVICE_CODE, &json!({}))
+            .await;
+        assert_eq!(res.status, 200, "device-code: {}", res.text);
+        (
+            res.body["device_code"].as_str().unwrap().to_string(),
+            res.body["user_code"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// `/auth/cli-token` refuses an access token minted before the user's
+    /// `credentials_changed_at`. Exchanging it would turn a session revoked by a role
+    /// change or password reset into a fresh token plus a new refresh token.
+    #[tokio::test]
+    async fn cli_token_refuses_a_stale_access_token() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_admin").await;
+        invalidate_sessions(&app, uid).await;
+
+        // Control: the stale token is already refused on a guarded mutation.
+        let guarded = app
+            .post_with_token(
+                &routes::user_roles(uid),
+                &json!({"role": "contestant"}),
+                &token,
+            )
+            .await;
+        assert_eq!(guarded.status, 401, "control: {}", guarded.text);
+
+        let res = app.post_with_token(CLI_TOKEN, &json!({}), &token).await;
+        assert_eq!(
+            res.status, 401,
+            "stale token was exchanged for a fresh one: {}",
+            res.text
+        );
+    }
+
+    /// `/auth/cli-token` refuses the token of a soft-deleted user, so a deleted
+    /// account cannot keep minting fresh tokens.
+    #[tokio::test]
+    async fn cli_token_refuses_a_deleted_user() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let victim = app
+            .create_user_with_role("aa_gone", "password123", "contestant")
+            .await;
+        let vid = user_id(&app, "aa_gone").await;
+        let del = app.delete_with_token(&routes::user(vid), &admin).await;
+        assert_eq!(del.status, 204, "{}", del.text);
+
+        let res = app.post_with_token(CLI_TOKEN, &json!({}), &victim).await;
+        assert_eq!(res.status, 401, "deleted user minted a token: {}", res.text);
+    }
+
+    /// A token minted by `/auth/cli-token` carries the user's current roles and
+    /// permissions from the database, not the claims of the presented token, and its
+    /// refresh token works.
+    #[tokio::test]
+    async fn cli_token_reissues_from_current_roles_not_the_presented_claims() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("aa_demoted", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_demoted").await;
+        replace_roles_without_bump(&app, uid, "contestant").await;
+
+        let res = app
+            .post_with_token(CLI_TOKEN, &json!({}), &admin_token)
+            .await;
+        assert_eq!(res.status, 200, "cli-token: {}", res.text);
+
+        let (roles, permissions) = token_grants(&app, res.body["token"].as_str().unwrap()).await;
+        assert_eq!(roles, json!(["contestant"]));
+        assert!(
+            !permissions.iter().any(|p| p == perm::USER_MANAGE),
+            "minted token must not carry the revoked admin permissions: {permissions:?}"
+        );
+
+        let refreshed = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": res.body["refresh_token"] }),
+            )
+            .await;
+        assert_eq!(refreshed.status, 200, "cli-refresh: {}", refreshed.text);
+    }
+
+    /// `/auth/device-authorize` refuses a stale access token with `TOKEN_INVALID`
+    /// and leaves the device code pending.
+    #[tokio::test]
+    async fn device_authorize_refuses_a_stale_access_token() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("aa_stale_dev", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_stale_dev").await;
+        invalidate_sessions(&app, uid).await;
+
+        let (device_code, user_code) = start_device_flow(&app).await;
+        let res = app
+            .post_with_token(
+                routes::DEVICE_AUTHORIZE,
+                &json!({ "user_code": user_code }),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 401,
+            "stale token authorized a device: {}",
+            res.text
+        );
+        assert_eq!(res.body["code"], "TOKEN_INVALID");
+
+        let poll = app
+            .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+            .await;
+        assert_eq!(poll.status, 400, "device-token: {}", poll.text);
+        assert_eq!(poll.body["error"], "authorization_pending");
+    }
+
+    /// The token a device poll receives carries the approving user's current roles
+    /// and permissions, not the claims of the token that approved the device.
+    #[tokio::test]
+    async fn device_authorize_issues_a_token_from_current_roles() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("aa_dev_demoted", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_dev_demoted").await;
+        replace_roles_without_bump(&app, uid, "contestant").await;
+
+        let (device_code, user_code) = start_device_flow(&app).await;
+        let res = app
+            .post_with_token(
+                routes::DEVICE_AUTHORIZE,
+                &json!({ "user_code": user_code }),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 200, "device-authorize: {}", res.text);
+
+        let poll = app
+            .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+            .await;
+        assert_eq!(poll.status, 200, "device-token: {}", poll.text);
+
+        let (roles, permissions) = token_grants(&app, poll.body["token"].as_str().unwrap()).await;
+        assert_eq!(roles, json!(["contestant"]));
+        assert!(
+            !permissions.iter().any(|p| p == perm::USER_MANAGE),
+            "device token must not carry the revoked admin permissions: {permissions:?}"
+        );
+    }
+}
