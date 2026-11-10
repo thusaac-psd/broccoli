@@ -3030,7 +3030,7 @@ export interface components {
       /**
        * @description Machine-readable error code. Any POST sent with an `Idempotency-Key`
        *     can also answer: 422 `IDEMPOTENCY_KEY_MISMATCH` (key reused for a
-       *     different method, path or body); 409 `IDEMPOTENCY_KEY_IN_PROGRESS`
+       *     different method, path, query or body); 409 `IDEMPOTENCY_KEY_IN_PROGRESS`
        *     (the original is still running); 409 `IDEMPOTENCY_RESPONSE_NOT_STORED`
        *     (the original succeeded but its response carried credentials and was not
        *     kept); 409 `IDEMPOTENCY_RESPONSE_TOO_LARGE` (the original succeeded but

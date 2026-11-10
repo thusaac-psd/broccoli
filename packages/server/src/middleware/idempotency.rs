@@ -1,7 +1,7 @@
 //! `Idempotency-Key` support for authenticated POSTs.
 //!
-//! A key is bound to the request that first claimed it: method, path and a
-//! SHA-256 fingerprint of the body. Reusing the key for a different request
+//! A key is bound to the request that first claimed it: method, path with
+//! query, and a SHA-256 fingerprint of the body. Reusing the key for a different request
 //! answers 422 `IDEMPOTENCY_KEY_MISMATCH`; retrying the same request replays
 //! the stored 2xx response (or 409 when the response was deliberately not
 //! stored, see [`NoStore`]).
@@ -143,6 +143,7 @@ impl KeyStatus {
 /// What a key is bound to. Two requests are "the same" iff all three match.
 struct RequestIdentity {
     method: String,
+    /// Path and query, stored in `idempotency_key.request_path`.
     path: String,
     fingerprint: String,
 }
@@ -225,7 +226,13 @@ pub async fn idempotency_middleware(
     };
     let identity = RequestIdentity {
         method: parts.method.to_string(),
-        path: parts.uri.path().to_string(),
+        // The query is part of the request: `?target=a` and `?target=b` are
+        // different requests even with identical bodies.
+        path: parts
+            .uri
+            .path_and_query()
+            .map_or_else(|| parts.uri.path(), |pq| pq.as_str())
+            .to_string(),
         fingerprint,
     };
     let request = Request::from_parts(parts, Body::from(body));

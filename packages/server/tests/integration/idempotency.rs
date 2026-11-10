@@ -312,6 +312,34 @@ async fn client_error_releases_the_key_for_a_corrected_retry() {
     assert_eq!(key_status(&app, "idem-4xx", user_id).await, None);
 }
 
+/// The query string is part of the request a key is bound to,
+/// so reusing a key with a different query is a mismatch, not a replay.
+#[tokio::test]
+async fn reusing_a_key_with_a_different_query_is_a_mismatch() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let send = |query: &'static str| {
+        app.client
+            .post(format!("http://{}{}?{query}", app.addr, routes::PROBLEMS))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Idempotency-Key", "idem-query")
+            .json(&problem_body("P"))
+            .send()
+    };
+    let first = send("target=a").await.expect("send");
+    assert_eq!(first.status().as_u16(), 201);
+
+    let second = send("target=b").await.expect("send");
+    assert_eq!(second.status().as_u16(), 422);
+    let second: serde_json::Value = second.json().await.expect("json");
+    assert_eq!(second["code"], "IDEMPOTENCY_KEY_MISMATCH");
+
+    let replay = send("target=a").await.expect("send");
+    assert_eq!(replay.status().as_u16(), 201);
+}
+
 mod response_binding {
     use super::*;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
