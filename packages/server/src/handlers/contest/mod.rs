@@ -58,7 +58,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::contest::*;
 use crate::models::problem::validate_contest_type;
-use crate::models::shared::{Pagination, escape_like};
+use crate::models::shared::{PageWindow, escape_like};
 use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
@@ -139,6 +139,7 @@ pub async fn create_contest(
     params(ContestListQuery),
     responses(
         (status = 200, description = "List of contests", body = ContestListResponse),
+        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -149,8 +150,7 @@ pub async fn list_contests(
     State(state): State<AppState>,
     Query(query): Query<ContestListQuery>,
 ) -> Result<Json<ContestListResponse>, AppError> {
-    let page = Ord::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut select = contest::Entity::find_active();
 
@@ -215,14 +215,9 @@ pub async fn list_contests(
         }
     };
 
-    let total = select
-        .clone()
-        .paginate(&state.db, per_page)
-        .num_items()
-        .await?;
+    let total = select.clone().count(&state.db).await?;
 
     select = select.order_by_with_nulls(sort_column, sort_order, sea_query::NullOrdering::Last);
-    let total_pages = total.div_ceil(per_page);
 
     let data = select
         .select_only()
@@ -238,8 +233,8 @@ pub async fn list_contests(
         .column(contest::Column::ShowParticipantsList)
         .column(contest::Column::CreatedAt)
         .column(contest::Column::UpdatedAt)
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .into_model::<ContestListItem>()
         .all(&state.db)
         .await?;
@@ -266,12 +261,7 @@ pub async fn list_contests(
 
     Ok(Json(ContestListResponse {
         data,
-        pagination: Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        pagination: window.pagination(total),
     }))
 }
 #[utoipa::path(

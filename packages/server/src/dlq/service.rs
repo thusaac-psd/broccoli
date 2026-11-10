@@ -8,6 +8,7 @@ use sea_orm::{
 };
 
 use crate::entity::dead_letter_message;
+use crate::models::shared::PageWindow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveResult {
@@ -134,8 +135,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         &self,
         message_type: Option<DlqMessageType>,
         resolved: Option<bool>,
-        page: u64,
-        per_page: u64,
+        window: PageWindow,
     ) -> Result<(Vec<dead_letter_message::Model>, u64), DbErr> {
         let mut query = dead_letter_message::Entity::find();
 
@@ -151,8 +151,8 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
 
         let messages = query
             .order_by_desc(dead_letter_message::Column::CreatedAt)
-            .offset((page.saturating_sub(1)) * per_page)
-            .limit(per_page)
+            .offset(window.offset())
+            .limit(window.limit())
             .all(self.conn)
             .await?;
 

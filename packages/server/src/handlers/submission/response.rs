@@ -17,7 +17,7 @@ use crate::entity::{
 };
 use crate::error::AppError;
 use crate::extractors::auth::AuthUser;
-use crate::models::shared::Pagination;
+use crate::models::shared::{PageWindow, Pagination};
 use crate::models::submission::*;
 use crate::utils::judging::files_from_json;
 use crate::utils::test_case_body::{
@@ -160,25 +160,19 @@ fn output_preview(text: String, full: bool) -> String {
     preview
 }
 
-fn result_selection(query: &SubmissionResultQuery) -> Result<(u64, u64, u64, Vec<i32>), AppError> {
+fn result_selection(query: &SubmissionResultQuery) -> Result<(PageWindow, Vec<i32>), AppError> {
     if query.full_output && query.result_id.is_none() {
         return Err(AppError::Validation(
             "full_output requires result_id".into(),
         ));
     }
-    let page = std::cmp::max(query.page.unwrap_or(1), 1);
-    let size = if query.result_id.is_some() {
-        1
+    // A single selected result is always a one-row window.
+    let per_page = if query.result_id.is_some() {
+        Some(1)
     } else {
-        query
-            .per_page
-            .unwrap_or(RESULT_PAGE_SIZE)
-            .clamp(1, RESULT_PAGE_SIZE)
+        query.per_page
     };
-    let offset = (page - 1)
-        .checked_mul(size)
-        .filter(|n| *n <= i64::MAX as u64)
-        .ok_or_else(|| AppError::Validation("Testcase page is too large".into()))?;
+    let window = PageWindow::with_bounds(query.page, per_page, RESULT_PAGE_SIZE, RESULT_PAGE_SIZE)?;
     let ids = match query.test_case_ids.as_deref() {
         None => vec![],
         Some(raw) => {
@@ -203,7 +197,7 @@ fn result_selection(query: &SubmissionResultQuery) -> Result<(u64, u64, u64, Vec
             ids
         }
     };
-    Ok((page, size, offset, ids))
+    Ok((window, ids))
 }
 
 async fn load_result_page(
@@ -215,7 +209,7 @@ async fn load_result_page(
     query: Option<&SubmissionResultQuery>,
 ) -> Result<(Vec<TestCaseResultResponse>, Pagination), AppError> {
     let default_query = SubmissionResultQuery::default();
-    let (page, size, offset, ids) = result_selection(query.unwrap_or(&default_query))?;
+    let (window, ids) = result_selection(query.unwrap_or(&default_query))?;
     let mut select = test_case_result::Entity::find()
         .filter(test_case_result::Column::SubmissionId.eq(submission_id));
     if let Some(id) = judgement_id {
@@ -228,12 +222,7 @@ async fn load_result_page(
         select = select.filter(test_case_result::Column::Id.eq(id));
     }
     let total = select.clone().count(db).await?;
-    let pagination = Pagination {
-        page,
-        per_page: size,
-        total,
-        total_pages: total.div_ceil(size),
-    };
+    let pagination = window.pagination(total);
     // Version history loads summaries only, without reading any testcase text.
     let Some(query) = query else {
         return Ok((vec![], pagination));
@@ -272,8 +261,8 @@ async fn load_result_page(
     let rows = select
         .order_by_asc(test_case::Column::Position)
         .order_by_asc(test_case_result::Column::Id)
-        .offset(offset)
-        .limit(size)
+        .offset(window.offset())
+        .limit(window.limit())
         .into_model::<ResultRow>()
         .all(db)
         .await?;
@@ -595,7 +584,10 @@ mod result_page_tests {
             per_page: Some(u64::MAX),
             ..Default::default()
         };
-        assert_eq!(result_selection(&query).unwrap().1, RESULT_PAGE_SIZE);
+        assert_eq!(
+            result_selection(&query).unwrap().0.limit(),
+            RESULT_PAGE_SIZE
+        );
         let query = SubmissionResultQuery {
             page: Some(u64::MAX),
             ..Default::default()
@@ -612,7 +604,7 @@ mod result_page_tests {
             per_page: Some(1000),
             ..Default::default()
         };
-        assert_eq!(result_selection(&query).unwrap().1, 1);
+        assert_eq!(result_selection(&query).unwrap().0.limit(), 1);
         let query = SubmissionResultQuery {
             test_case_ids: Some(
                 (1..=21)

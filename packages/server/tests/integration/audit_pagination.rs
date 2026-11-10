@@ -93,7 +93,6 @@ async fn submission_result_page_overflow_is_a_validation_error() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_problems computes (page - 1) * per_page unchecked on u64"]
 async fn list_problems_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -104,7 +103,6 @@ async fn list_problems_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_contests computes (page - 1) * per_page unchecked on u64"]
 async fn list_contests_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -115,7 +113,6 @@ async fn list_contests_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_submissions computes (page - 1) * per_page unchecked on u64"]
 async fn list_submissions_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -126,7 +123,6 @@ async fn list_submissions_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: list_contest_submissions computes (page - 1) * per_page unchecked on u64"]
 async fn list_contest_submissions_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
@@ -141,7 +137,6 @@ async fn list_contest_submissions_rejects_overflowing_page() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: DlqService::list computes page.saturating_sub(1) * per_page unchecked on u64"]
 async fn list_dlq_rejects_overflowing_page() {
     let app = TestApp::spawn().await;
     let token = admin(&app).await;
