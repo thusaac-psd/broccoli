@@ -340,6 +340,29 @@ async fn reusing_a_key_with_a_different_query_is_a_mismatch() {
     assert_eq!(replay.status().as_u16(), 201);
 }
 
+/// A status this build does not know (written by a newer
+/// server during a rolling deploy) must not let the request run again.
+#[tokio::test]
+async fn unknown_key_status_fails_closed() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+    let user_id = app.get_with_token(routes::ME, &token).await.id();
+    app.db
+        .execute_unprepared(&format!(
+            "INSERT INTO idempotency_key (key, user_id, request_path, request_method, status, created_at) \
+             VALUES ('idem-future', {user_id}, '/v1/problems', 'POST', 'some_future_status', NOW())"
+        ))
+        .await
+        .expect("seed key");
+
+    let res = post_problem(&app, &token, "idem-future", &problem_body("P")).await;
+    assert_eq!(res.status().as_u16(), 409);
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(body["code"], "IDEMPOTENCY_OUTCOME_UNKNOWN");
+}
+
 mod response_binding {
     use super::*;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};

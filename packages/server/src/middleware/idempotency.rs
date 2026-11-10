@@ -19,6 +19,10 @@
 //! Retries must resend a byte-identical body. JSON clients do this naturally;
 //! a multipart client must reuse its boundary.
 //!
+//! A status this build does not recognise fails closed (409). Upgrade every
+//! server replica together: an older server passes unknown statuses through
+//! and would re-execute a request a newer server already settled.
+//!
 //! Every timestamp comparison runs in SQL against the database clock, so
 //! replicas with skewed clocks agree on when a pending claim went stale.
 
@@ -246,7 +250,7 @@ pub async fn idempotency_middleware(
             if let Some(msg) = identity.mismatch(&existing) {
                 return AppError::IdempotencyKeyMismatch(msg).into_response();
             }
-            replay_existing(existing, &key, request, next).await
+            replay_existing(existing, &key)
         }
         Err(e) => {
             warn!(error = %e, key = %key, "Idempotency middleware DB error, passing through");
@@ -343,12 +347,7 @@ async fn try_claim_key(
 }
 
 /// Answer a retry of a request that already holds the key.
-async fn replay_existing(
-    existing: idempotency_key::Model,
-    key: &str,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+fn replay_existing(existing: idempotency_key::Model, key: &str) -> Response {
     match KeyStatus::parse(&existing.status) {
         Some(KeyStatus::Completed) => {
             let status = existing
@@ -370,9 +369,11 @@ async fn replay_existing(
         Some(KeyStatus::OutcomeUnknown) => AppError::IdempotencyOutcomeUnknown.into_response(),
         // Not stale, or `try_claim_key` would have reclaimed it.
         Some(KeyStatus::Pending) => AppError::IdempotencyKeyInProgress.into_response(),
+        // Written by a newer server (servers must be upgraded together). Its
+        // meaning is unknown, so never run the request again on its account.
         None => {
             warn!(key = %key, status = %existing.status, "Unknown idempotency key status");
-            next.run(request).await
+            AppError::IdempotencyOutcomeUnknown.into_response()
         }
     }
 }
