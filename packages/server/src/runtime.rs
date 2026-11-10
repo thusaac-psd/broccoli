@@ -518,6 +518,9 @@ impl ServerRuntime {
         // hand the work to the rest of the fleet now instead of leaving it
         // owned by a server that is gone.
         release_own_inflight(&self.db, &self.server_id, "Shutdown").await;
+        if let Err(e) = crate::plugin_fleet::retire(&self.db, &self.server_id).await {
+            warn!(error = %e, "Shutdown: failed to remove this replica's plugin report");
+        }
         serve_result
     }
 }

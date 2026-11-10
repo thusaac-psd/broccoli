@@ -1,3 +1,4 @@
+use crate::plugin_fleet::{FleetView, PluginFleetResponse};
 use plugin_core::manifest::{ComponentMap, ServerRouteConfig, WebRouteConfig, WebSlotConfig};
 use plugin_core::registry::{PluginInfo, PluginStatus};
 use serde::Serialize;
@@ -136,8 +137,15 @@ pub struct ActivePluginResponse {
 pub struct PluginDetailResponse {
     #[schema(example = "plugin-123")]
     pub id: String,
+    /// Load state on the replica that served this request only. Prefer
+    /// `enabled` and `fleet`, which cover every server replica.
     #[schema(example = "Loaded")]
     pub status: PluginStatusResponse,
+    /// Whether the plugin is enabled (the fleet-wide desired state).
+    #[schema(example = true)]
+    pub enabled: bool,
+    /// The plugin's load state on every live server replica.
+    pub fleet: PluginFleetResponse,
 
     #[schema(example = "An Awesome Plugin")]
     pub name: String,
@@ -170,8 +178,15 @@ pub struct ConfigSchemaResponse {
 pub struct PluginFullDetailResponse {
     #[schema(example = "plugin-123")]
     pub id: String,
+    /// Load state on the replica that served this request only. Prefer
+    /// `enabled` and `fleet`, which cover every server replica.
     #[schema(example = "Loaded")]
     pub status: PluginStatusResponse,
+    /// Whether the plugin is enabled (the fleet-wide desired state).
+    #[schema(example = true)]
+    pub enabled: bool,
+    /// The plugin's load state on every live server replica.
+    pub fleet: PluginFleetResponse,
 
     #[schema(example = "An Awesome Plugin")]
     pub name: String,
@@ -299,8 +314,11 @@ pub struct ReloadFailure {
     pub error: String,
 }
 
-impl From<PluginInfo> for PluginDetailResponse {
-    fn from(info: PluginInfo) -> Self {
+impl PluginDetailResponse {
+    /// `fleet` supplies the desired state and the per-replica load states.
+    pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
+        let enabled = fleet.is_enabled(&info.id);
+        let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
         let has_worker = info.manifest.has_worker();
         let has_web = info.manifest.has_web();
@@ -321,6 +339,8 @@ impl From<PluginInfo> for PluginDetailResponse {
         Self {
             id: info.id,
             status: info.status.into(),
+            enabled,
+            fleet,
             name: info.manifest.name,
             version: info.manifest.version,
             description: info.manifest.description,
@@ -332,8 +352,11 @@ impl From<PluginInfo> for PluginDetailResponse {
     }
 }
 
-impl From<PluginInfo> for PluginFullDetailResponse {
-    fn from(info: PluginInfo) -> Self {
+impl PluginFullDetailResponse {
+    /// `fleet` supplies the desired state and the per-replica load states.
+    pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
+        let enabled = fleet.is_enabled(&info.id);
+        let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
         let has_worker = info.manifest.has_worker();
         let has_web = info.manifest.has_web();
@@ -371,6 +394,8 @@ impl From<PluginInfo> for PluginFullDetailResponse {
         Self {
             id: info.id,
             status: info.status.into(),
+            enabled,
+            fleet,
             name: info.manifest.name,
             version: info.manifest.version,
             description: info.manifest.description,

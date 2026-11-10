@@ -30,7 +30,7 @@ use crate::upload_limits::{LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB};
     tag = "Admin",
     operation_id = "listAllPlugins",
     summary = "List all discovered plugins",
-    description = "Returns a list of all plugins that have been discovered on disk, along with their manifest information and current status. Requires `plugin:manage` permission.",
+    description = "Returns a list of all plugins that have been discovered on disk, along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.",
     responses(
         (status = 200, description = "List of plugins retrieved successfully", body = Vec<PluginDetailResponse>),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -45,12 +45,13 @@ pub async fn list_all_plugins(
 ) -> Result<Json<Vec<PluginDetailResponse>>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
+    let fleet = crate::plugin_fleet::read(&state.db).await?;
     let plugins = state
         .plugins
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .map(PluginDetailResponse::from)
+        .map(|info| PluginDetailResponse::new(info, &fleet))
         .collect();
 
     Ok(Json(plugins))
@@ -62,7 +63,7 @@ pub async fn list_all_plugins(
     tag = "Admin",
     operation_id = "getPluginDetails",
     summary = "Get details of a specific plugin",
-    description = "Returns detailed information about a specific plugin, including its manifest and current status. Requires `plugin:manage` permission.",
+    description = "Returns detailed information about a specific plugin, including its manifest, whether it is enabled, and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin details retrieved successfully", body = PluginFullDetailResponse),
@@ -88,7 +89,8 @@ pub async fn get_plugin_details(
         .find(|p| p.id == id)
         .ok_or_else(|| AppError::NotFound(format!("Plugin '{}' not found", id)))?;
 
-    Ok(Json(PluginFullDetailResponse::from(plugin)))
+    let fleet = crate::plugin_fleet::read(&state.db).await?;
+    Ok(Json(PluginFullDetailResponse::new(plugin, &fleet)))
 }
 
 #[utoipa::path(
@@ -161,14 +163,14 @@ pub async fn disable_plugin(
     tag = "Admin",
     operation_id = "reloadPlugin",
     summary = "Reload a plugin",
-    description = "Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.",
+    description = "Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin reloaded successfully", body = serde_json::Value),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "Plugin not currently loaded (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "Plugin not enabled (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]

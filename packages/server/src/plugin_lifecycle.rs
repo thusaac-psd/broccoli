@@ -37,6 +37,7 @@ use utoipa::ToSchema;
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
 use crate::models::plugin::{ReloadAllResponse, ReloadFailure};
+use crate::plugin_fleet::{self, ReplicaPluginState, ReplicaPluginStatus, ReplicaReport};
 use crate::state::AppState;
 use crate::utils::plugin::{PluginActivationFailure, activate_plugin, purge_plugin_registrations};
 
@@ -59,6 +60,10 @@ pub struct PluginLifecycle {
     /// The desired `is_enabled` per plugin as of the last apply. Read on hot
     /// paths (visibility, health), so it is a plain lock over a small map.
     desired: RwLock<HashMap<String, bool>>,
+    /// The last report written to this replica's `plugin_replica` row, and
+    /// when, so an unchanged report is only re-touched every
+    /// [`plugin_fleet::TOUCH_INTERVAL`].
+    reported: std::sync::Mutex<Option<(ReplicaReport, Instant)>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -171,14 +176,103 @@ pub async fn boot(state: &AppState) -> anyhow::Result<Vec<PluginActivationFailur
         .map(|p| p.id)
         .collect();
     register_rows(state, &ids).await?;
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    Ok(reconcile_locked(state, &mut applied).await?)
+    Ok(with_applied(state, async |applied| {
+        reconcile_locked(state, applied).await
+    })
+    .await?)
 }
 
 /// Converge this replica onto the desired state once.
 pub async fn reconcile(state: &AppState) -> Result<Vec<PluginActivationFailure>, DbErr> {
+    with_applied(state, async |applied| {
+        reconcile_locked(state, applied).await
+    })
+    .await
+}
+
+/// Run `f` with this replica's applied state locked, then write the
+/// replica's report. Every load and unload goes through here, so the report
+/// the admin pages read can never lag a local change by more than one write.
+async fn with_applied<T>(
+    state: &AppState,
+    f: impl AsyncFnOnce(&mut HashMap<String, Applied>) -> T,
+) -> T {
     let mut applied = state.plugin_lifecycle.applied.lock().await;
-    reconcile_locked(state, &mut applied).await
+    let out = f(&mut applied).await;
+    write_report(state, &applied).await;
+    out
+}
+
+/// What this replica reports for each plugin it knows (see
+/// [`crate::plugin_fleet`]).
+fn build_report(
+    state: &AppState,
+    applied: &HashMap<String, Applied>,
+    now: Instant,
+) -> ReplicaReport {
+    let Ok(registry) = state.plugins.get_registry().read() else {
+        return ReplicaReport::new();
+    };
+    let ids: std::collections::BTreeSet<&String> = applied.keys().chain(registry.keys()).collect();
+    ids.into_iter()
+        .map(|id| {
+            let a = applied.get(id);
+            let (status, error) = match registry.get(id).map(|e| &e.status) {
+                Some(PluginStatus::Loaded) => (ReplicaPluginStatus::Loaded, None),
+                Some(PluginStatus::Failed(e)) => (ReplicaPluginStatus::Failed, Some(e.clone())),
+                None if a.is_some_and(|a| a.enabled) => (ReplicaPluginStatus::NotInstalled, None),
+                _ => (ReplicaPluginStatus::Unloaded, None),
+            };
+            let retry_in_ms = a
+                .and_then(|a| a.retry)
+                .filter(|_| status != ReplicaPluginStatus::Loaded)
+                .map(|r| r.at.saturating_duration_since(now).as_millis() as u64);
+            let state = ReplicaPluginState {
+                status,
+                error,
+                generation: a.map_or(0, |a| a.generation),
+                retry_in_ms,
+            };
+            (id.clone(), state)
+        })
+        .collect()
+}
+
+/// Write the report if it changed, or touch it if the last write is getting
+/// old. Best-effort: a failed write only makes the admin view stale.
+async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
+    let now = Instant::now();
+    let report = build_report(state, applied, now);
+    let due = match state.plugin_lifecycle.reported.lock() {
+        Ok(last) => !matches!(&*last, Some((r, at))
+            if same_report(r, &report) && now.duration_since(*at) < plugin_fleet::TOUCH_INTERVAL),
+        Err(_) => true,
+    };
+    if !due {
+        return;
+    }
+    match plugin_fleet::report(&state.db, &state.config.server.id, &report).await {
+        Ok(()) => {
+            if let Ok(mut last) = state.plugin_lifecycle.reported.lock() {
+                *last = Some((report, now));
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to write this replica's plugin report"),
+    }
+}
+
+/// Reports are equal for write purposes when they differ at most in how long
+/// is left until a retry: that shrinks on every call, and is only rewritten
+/// along with a real change (a new attempt).
+fn same_report(a: &ReplicaReport, b: &ReplicaReport) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|((ka, va), (kb, vb))| {
+            ka == kb
+                && va.status == vb.status
+                && va.error == vb.error
+                && va.generation == vb.generation
+                && va.retry_in_ms.is_some() == vb.retry_in_ms.is_some()
+        })
 }
 
 /// The per-replica reconcile loop. Runs for the process lifetime.
@@ -441,123 +535,138 @@ fn require_known(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 }
 
 /// Enable a plugin fleet-wide.
+///
+/// Also the retry for a plugin that is enabled but failed on this replica.
 pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    require_known(state, plugin_id)?;
-    if state.plugins.is_plugin_loaded(plugin_id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{plugin_id}' is already enabled"
-        )));
-    }
-    Ok(load_then_publish(state, &mut applied, plugin_id).await?)
+    with_applied(state, async |applied| {
+        require_known(state, plugin_id)?;
+        if state.plugins.is_plugin_loaded(plugin_id)? {
+            return Err(AppError::Conflict(format!(
+                "Plugin '{plugin_id}' is already enabled"
+            )));
+        }
+        Ok(load_then_publish(state, applied, plugin_id).await?)
+    })
+    .await
 }
 
 /// Disable a plugin fleet-wide. Its pending timers are deleted: the plugin is
 /// off everywhere, so they can never be delivered.
+///
+/// Keyed on the desired state, not on this replica's load state, so a plugin
+/// that failed to load here can still be turned off.
 pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    if !state.plugins.is_plugin_loaded(plugin_id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{plugin_id}' is not currently enabled"
-        )));
-    }
-    let generation = publish(state, plugin_id, false).await?;
-    state.plugin_lifecycle.set_desired(plugin_id, false);
-    let desired = Desired {
-        enabled: false,
-        generation,
-    };
-    apply(state, &mut applied, plugin_id, desired, Instant::now()).await?;
-    if let Err(e) =
-        crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id).await
-    {
-        tracing::error!(
-            plugin_id,
-            error = %e,
-            "Failed to delete pending timers for a disabled plugin"
-        );
-    }
-    Ok(())
+    with_applied(state, async |applied| {
+        if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
+            return Err(AppError::Conflict(format!(
+                "Plugin '{plugin_id}' is not currently enabled"
+            )));
+        }
+        let generation = publish(state, plugin_id, false).await?;
+        state.plugin_lifecycle.set_desired(plugin_id, false);
+        let desired = Desired {
+            enabled: false,
+            generation,
+        };
+        apply(state, applied, plugin_id, desired, Instant::now()).await?;
+        if let Err(e) =
+            crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, plugin_id).await
+        {
+            tracing::error!(
+                plugin_id,
+                error = %e,
+                "Failed to delete pending timers for a disabled plugin"
+            );
+        }
+        Ok(())
+    })
+    .await
 }
 
-/// Reload a loaded plugin from disk, fleet-wide.
+/// Reload an enabled plugin from disk, fleet-wide. This is also the retry
+/// for a plugin that failed to load: it is accepted whatever this replica's
+/// own load state, and a successful load here bumps the generation, so every
+/// failing replica retries at once instead of waiting out its backoff.
 pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    if !state.plugins.has_plugin(plugin_id)? {
-        return Err(AppError::NotFound(format!(
-            "Plugin '{plugin_id}' not found"
-        )));
-    }
-    if !state.plugins.is_plugin_loaded(plugin_id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{plugin_id}' is not currently loaded. Use enable instead."
-        )));
-    }
-    Ok(load_then_publish(state, &mut applied, plugin_id).await?)
+    with_applied(state, async |applied| {
+        require_known(state, plugin_id)?;
+        if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
+            return Err(AppError::Conflict(format!(
+                "Plugin '{plugin_id}' is not enabled. Use enable instead."
+            )));
+        }
+        Ok(load_then_publish(state, applied, plugin_id).await?)
+    })
+    .await
 }
 
 /// (Re)load a plugin whose files were just written to this replica's disk
 /// (admin upload), and enable it fleet-wide.
 pub async fn install(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    Ok(load_then_publish(state, &mut applied, plugin_id).await?)
+    with_applied(state, async |applied| {
+        Ok(load_then_publish(state, applied, plugin_id).await?)
+    })
+    .await
 }
 
-/// Reload every loaded plugin and pick up new plugin directories, fleet-wide.
+/// Reload every enabled plugin (including ones that failed to load here)
+/// and pick up new plugin directories, fleet-wide.
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
-    let mut applied = state.plugin_lifecycle.applied.lock().await;
-    let loaded_ids: Vec<String> = state
-        .plugins
-        .list_plugins()?
-        .into_iter()
-        .filter(|p| p.status == PluginStatus::Loaded)
-        .map(|p| p.id)
-        .collect();
+    with_applied(state, async |applied| {
+        let enabled_ids: Vec<String> = state
+            .plugins
+            .list_plugins()?
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|id| state.plugin_lifecycle.is_desired_enabled(id))
+            .collect();
 
-    let mut reloaded = Vec::new();
-    let mut failed = Vec::new();
-    for id in loaded_ids {
-        match load_then_publish(state, &mut applied, &id).await {
-            Ok(()) => reloaded.push(id),
-            Err(e) => {
-                tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
+        let mut reloaded = Vec::new();
+        let mut failed = Vec::new();
+        for id in enabled_ids {
+            match load_then_publish(state, applied, &id).await {
+                Ok(()) => reloaded.push(id),
+                Err(e) => {
+                    tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
+                    failed.push(ReloadFailure {
+                        id,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        let new_ids = state.plugins.rediscover_plugins().unwrap_or_else(|e| {
+            tracing::error!("Failed to rediscover plugins: {}", e);
+            Vec::new()
+        });
+        register_rows(state, &new_ids).await?;
+        // A new row starts enabled unless an operator already recorded it as
+        // disabled; apply whatever the table says.
+        let rows = plugin_entity::Entity::find().all(&state.db).await?;
+        let now = Instant::now();
+        for row in rows.into_iter().filter(|r| new_ids.contains(&r.id)) {
+            let desired = Desired {
+                enabled: row.is_enabled,
+                generation: row.generation,
+            };
+            if let Err(e) = apply(state, applied, &row.id, desired, now).await {
+                tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
                 failed.push(ReloadFailure {
-                    id,
+                    id: row.id.clone(),
                     error: e.to_string(),
                 });
             }
+            state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
         }
-    }
 
-    let new_ids = state.plugins.rediscover_plugins().unwrap_or_else(|e| {
-        tracing::error!("Failed to rediscover plugins: {}", e);
-        Vec::new()
-    });
-    register_rows(state, &new_ids).await?;
-    // A new row starts enabled unless an operator already recorded it as
-    // disabled; apply whatever the table says.
-    let rows = plugin_entity::Entity::find().all(&state.db).await?;
-    let now = Instant::now();
-    for row in rows.into_iter().filter(|r| new_ids.contains(&r.id)) {
-        let desired = Desired {
-            enabled: row.is_enabled,
-            generation: row.generation,
-        };
-        if let Err(e) = apply(state, &mut applied, &row.id, desired, now).await {
-            tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
-            failed.push(ReloadFailure {
-                id: row.id.clone(),
-                error: e.to_string(),
-            });
-        }
-        state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
-    }
-
-    Ok(ReloadAllResponse {
-        reloaded,
-        new: new_ids,
-        failed,
+        Ok(ReloadAllResponse {
+            reloaded,
+            new: new_ids,
+            failed,
+        })
     })
+    .await
 }
 
 #[cfg(test)]

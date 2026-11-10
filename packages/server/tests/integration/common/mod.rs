@@ -691,7 +691,12 @@ impl TestApp {
                 frontend_dist: PathBuf::from("/srv/dist"),
                 trusted_proxies: vec![],
                 rate_limit_auth: false,
-                id: String::new(),
+                // Unique per spawned app: replicas sharing a database
+                // (`spawn_replica`) must report under distinct server ids.
+                id: format!(
+                    "test-{db_name}-{}",
+                    DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+                ),
                 expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
