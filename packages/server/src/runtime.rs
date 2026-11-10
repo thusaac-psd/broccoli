@@ -76,7 +76,24 @@ impl ServerRuntime {
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
         let db_session = crate::database::app_session(app_config.database.statement_timeout_secs);
-        let db = crate::database::init_db_with_max_connections(
+        // Boot-time schema work runs on one session holding a cluster-wide
+        // advisory lock, so replicas booting together serialize instead of
+        // racing each other's DDL and check-then-insert seeding. Indexes come
+        // before seeding: the unique username index must exist before the
+        // bootstrap admin is inserted, or a duplicate admin makes it uncreatable.
+        let boot = crate::database::BootSession::acquire(&app_config.database.url).await?;
+        boot.migrate().await?;
+        crate::seed::ensure_indexes(boot.conn()).await?;
+        crate::seed::seed_role_permissions(boot.conn()).await?;
+        crate::seed::ensure_bootstrap_admin(
+            boot.conn(),
+            &app_config.bootstrap.admin_username,
+            &app_config.bootstrap.admin_password,
+        )
+        .await?;
+        crate::seed::backfill_submission_judgements(boot.conn()).await?;
+
+        let db = crate::database::connect_main_pool(
             &app_config.database.url,
             app_config.database.max_connections,
             &db_session,
@@ -94,14 +111,17 @@ impl ServerRuntime {
         // `broccoli_plugin_login`, degrading to app-role auth + the SQL text guard
         // if neither is available. It returns the fresh-connection fallback target
         // so the 0x00 fallback authenticates the same way the pool did.
+        // Provisioning the dedicated plugin login (CREATE ROLE, the shared
+        // secret row) is boot-time DDL too, so it runs on the locked session.
         let restricted = crate::database::resolve_restricted_plugin_pool(
-            &db,
+            boot.conn(),
             &app_config.database.url,
             app_config.database.plugin_url.as_deref(),
             app_config.database.plugin_max_connections,
             &db_session,
         )
         .await?;
+        boot.release().await?;
         let plugin_db = restricted.pool;
         let restricted_fb_url = restricted.fallback_url;
         let restricted_fb_login = restricted.fallback_login;
@@ -165,15 +185,6 @@ impl ServerRuntime {
             app_config.storage.backend
         );
 
-        crate::seed::seed_role_permissions(&db).await?;
-        crate::seed::ensure_bootstrap_admin(
-            &db,
-            &app_config.bootstrap.admin_username,
-            &app_config.bootstrap.admin_password,
-        )
-        .await?;
-        crate::seed::ensure_indexes(&db).await?;
-        crate::seed::backfill_submission_judgements(&db).await?;
         crate::seed::spawn_large_test_case_body_backfill(db.clone(), Arc::clone(&blob_store));
 
         let mq = if app_config.mq.enabled {

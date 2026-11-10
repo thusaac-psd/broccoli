@@ -1,5 +1,5 @@
 use common::db::{PgPoolSpec, PgSession};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
 use sea_orm_migration::MigratorTrait;
 
 use crate::migration::Migrator;
@@ -96,7 +96,7 @@ pub struct PluginLoginOverride {
 pub async fn provision_restricted_plugin_login(
     privileged: &DatabaseConnection,
 ) -> Option<PluginLoginOverride> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use sea_orm::{DbBackend, Statement};
 
     // A fresh candidate secret; only the FIRST writer's value persists (ON
     // CONFLICT DO NOTHING), so every replica ends up reading the same stored
@@ -445,13 +445,26 @@ pub async fn init_plugin_db_privileged(
     .await
 }
 
-/// Bring the schema up to date, then open the main pool with `session`.
+/// Bring the schema up to date (under the boot lock), then open the main pool.
+/// For tests and tools; the server binary drives [`BootSession`] itself so
+/// seeding runs under the same lock.
 pub async fn init_db_with_max_connections(
     db_url: &str,
     max_connections: u32,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    migrate(db_url).await?;
+    let boot = BootSession::acquire(db_url).await?;
+    boot.migrate().await?;
+    boot.release().await?;
+    connect_main_pool(db_url, max_connections, session).await
+}
+
+/// The main pool (handlers, dispatcher, background loops). No schema work.
+pub async fn connect_main_pool(
+    db_url: &str,
+    max_connections: u32,
+    session: &PgSession,
+) -> Result<DatabaseConnection, DbErr> {
     // `test_before_acquire` (on by default in `PgPoolSpec`) matters here: a
     // plugin DB host call can be cancelled mid-flight (e.g. a detached evaluate
     // timeout aborts the Extism call while it is inside
@@ -463,39 +476,106 @@ pub async fn init_db_with_max_connections(
     common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
 }
 
-/// Schema sync and versioned migrations, on a dedicated single session with no
-/// `statement_timeout`: DDL on a large table (an index build, a backfill) may
-/// legitimately run longer than any request-sized bound.
-pub async fn migrate(db_url: &str) -> Result<(), DbErr> {
-    let db = common::db::connect(
-        db_url,
-        &PgPoolSpec::single_session(),
-        &PgSession::unbounded(APP_NAME),
-    )
-    .await?;
+/// Session-level advisory lock key that serializes boot-time schema work
+/// (schema sync, migrations, seeding, plugin-login provisioning) across every
+/// server booting against the same database. The value is arbitrary but fixed
+/// ("broccoli" in ASCII); it only has to be unique among this database's
+/// advisory locks.
+pub const BOOT_LOCK_KEY: i64 = 0x6272_6f63_636f_6c69;
 
-    crate::migration::prepare_user_display_name(&db).await?;
+/// One dedicated database session holding [`BOOT_LOCK_KEY`] for the duration
+/// of boot-time schema work.
+///
+/// Without it, servers booting together on a fresh database race each other's
+/// check-then-insert seeding and DDL: losers fail and restart, and a duplicate
+/// bootstrap admin inserted before the unique username index exists makes that
+/// index impossible to create, so the invariant is lost for good.
+///
+/// The session is a single never-recycled connection (so the session-level
+/// lock and the work run on the same backend) with no `statement_timeout`
+/// (DDL and backfills on a large database legitimately run long). If this
+/// process dies while holding the lock, Postgres releases it when the session
+/// ends; the server-side keepalive in [`common::db`] bounds that to about a
+/// minute even when the host vanishes without closing the socket.
+pub struct BootSession {
+    db: DatabaseConnection,
+}
 
-    // Create/update the core tables from the entity definitions.
-    db.get_schema_registry("server::entity::*")
-        .sync(&db)
+impl BootSession {
+    /// Open the session and take the boot lock, waiting for a peer that is
+    /// booting to finish first.
+    pub async fn acquire(db_url: &str) -> Result<Self, DbErr> {
+        let db = common::db::connect(
+            db_url,
+            &PgPoolSpec::single_session(),
+            &PgSession::unbounded(APP_NAME),
+        )
         .await?;
+        let boot = Self { db };
+        let held = boot
+            .db
+            .query_one_raw(boot.lock_stmt("SELECT pg_try_advisory_lock($1) AS held"))
+            .await?
+            .map(|r| r.try_get::<bool>("", "held"))
+            .transpose()?
+            .unwrap_or(false);
+        if !held {
+            tracing::info!(
+                lock_key = BOOT_LOCK_KEY,
+                "Another server is running boot-time schema work; waiting for it to finish"
+            );
+            boot.db
+                .execute_raw(boot.lock_stmt("SELECT pg_advisory_lock($1)"))
+                .await?;
+        }
+        tracing::info!("Acquired the boot lock");
+        Ok(boot)
+    }
 
-    // Apply the versioned, tracked supplementary DDL (column evolutions, the
-    // one-time data backfill, and the `broccoli_plugin` least-privilege role +
-    // read-narrowing grants/view) that the entity `sync()` above does not cover.
-    // Recorded in `seaql_migrations` so each runs once and its failures surface
-    // instead of being swallowed; idempotent, so an existing deployment records
-    // them as no-ops on first run. See `crate::migration`.
-    Migrator::up(&db, None).await?;
+    fn lock_stmt(&self, sql: &str) -> sea_orm::Statement {
+        sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [BOOT_LOCK_KEY.into()],
+        )
+    }
 
-    db.close().await
+    /// The locked session, for seeding and provisioning.
+    pub fn conn(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
+    /// Schema sync and versioned migrations.
+    pub async fn migrate(&self) -> Result<(), DbErr> {
+        let db = &self.db;
+        crate::migration::prepare_user_display_name(db).await?;
+
+        // Create/update the core tables from the entity definitions.
+        db.get_schema_registry("server::entity::*").sync(db).await?;
+
+        // Apply the versioned, tracked supplementary DDL (column evolutions, the
+        // one-time data backfill, and the `broccoli_plugin` least-privilege role +
+        // read-narrowing grants/view) that the entity `sync()` above does not
+        // cover. Recorded in `seaql_migrations` so each runs once and its failures
+        // surface instead of being swallowed; idempotent, so an existing
+        // deployment records them as no-ops on first run. See `crate::migration`.
+        Migrator::up(db, None).await
+    }
+
+    /// Release the lock and close the session. Dropping a `BootSession`
+    /// without calling this also releases the lock, once the pool closes.
+    pub async fn release(self) -> Result<(), DbErr> {
+        self.db
+            .execute_raw(self.lock_stmt("SELECT pg_advisory_unlock($1)"))
+            .await?;
+        self.db.close().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::ConnectionTrait;
+    use std::time::Duration;
 
     fn test_session() -> PgSession {
         app_session(common::db::DEFAULT_STATEMENT_TIMEOUT_SECS)
@@ -527,6 +607,111 @@ mod tests {
         assert_eq!(
             classify_restricted_auth(false, false),
             RestrictedPluginAuth::AppRoleDegraded
+        );
+    }
+
+    async fn fresh_postgres() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        String,
+    ) {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        (container, url)
+    }
+
+    /// The server's boot sequence as `ServerRuntime::build` runs it.
+    async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
+        let boot = BootSession::acquire(url).await?;
+        boot.migrate().await?;
+        crate::seed::ensure_indexes(boot.conn()).await?;
+        crate::seed::seed_role_permissions(boot.conn()).await?;
+        crate::seed::ensure_bootstrap_admin(boot.conn(), "admin", "pw").await?;
+        boot.release().await
+    }
+
+    /// A second booter blocks on the boot lock until the first releases it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_lock_serializes_booters() {
+        let (_c, url) = fresh_postgres().await;
+        let first = BootSession::acquire(&url).await.expect("first acquire");
+        let second_url = url.clone();
+        let mut second = tokio::spawn(async move { BootSession::acquire(&second_url).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut second)
+                .await
+                .is_err(),
+            "second booter must wait while the first holds the lock"
+        );
+        first.release().await.expect("release");
+        let second = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("second booter proceeds once the lock is released")
+            .expect("join")
+            .expect("second acquire");
+        second.release().await.expect("release");
+    }
+
+    /// Servers booting together on a fresh database all succeed, and exactly
+    /// one bootstrap admin exists, guarded by the unique username index.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_first_boots_converge() {
+        let (_c, url) = fresh_postgres().await;
+        let boots: Vec<_> = (0..4)
+            .map(|_| {
+                let url = url.clone();
+                tokio::spawn(async move { boot_like_the_server(&url).await })
+            })
+            .collect();
+        for b in boots {
+            b.await
+                .expect("join")
+                .expect("every concurrent boot succeeds");
+        }
+        let db = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        let row = db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "SELECT (SELECT COUNT(*) FROM \"user\" WHERE username = 'admin')::bigint AS admins, \
+                 EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_user_username_active') AS idx",
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+        assert_eq!(row.try_get::<i64>("", "admins").unwrap(), 1);
+        assert!(row.try_get::<bool>("", "idx").unwrap());
+    }
+
+    /// A unique index that cannot be built (duplicates already present) fails
+    /// boot instead of leaving the invariant silently unenforced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uncreatable_unique_index_fails_boot() {
+        let (_c, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.migrate().await.expect("migrate");
+        for _ in 0..2 {
+            boot.conn()
+                .execute_unprepared(
+                    "INSERT INTO \"user\" (username, display_name, password, created_at, credentials_changed_at) \
+                     VALUES ('dup', 'dup', 'x', now(), now())",
+                )
+                .await
+                .expect("insert duplicate user");
+        }
+        let err = crate::seed::ensure_indexes(boot.conn())
+            .await
+            .expect_err("duplicate usernames must fail boot");
+        assert!(
+            err.to_string().contains("idx_user_username_active"),
+            "{err}"
         );
     }
 
