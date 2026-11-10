@@ -3,7 +3,6 @@ export * from '@/api/ApiClientProvider';
 export * from '@/api/errors';
 export type { RefreshedSession, RefreshOutcome } from '@/api/refresh-session';
 export {
-  fetchWithServerClock,
   serverNow,
   useServerNow,
   useServerTimeReached,
