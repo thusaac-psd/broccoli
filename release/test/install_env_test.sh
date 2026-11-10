@@ -72,6 +72,13 @@ BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=
   ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run"
 grep -q "BROCCOLI_GATEWAY_HOSTS='.*' ./install.sh server" "$T/gateway.log" \
   || fail "gateway install does not say how to trust it on the servers"
+grep -q 'runs on this machine' "$T/gateway.log" && fail "a LAN upstream was taken for one on the gateway host"
+# A server on the gateway's own host sees the gateway by its bridge address,
+# so the LAN address printed would not match; say so.
+rm -f .env.gateway
+BROCCOLI_UPSTREAMS='127.0.0.1:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+  ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run with a local upstream"
+grep -q 'runs on this machine' "$T/gateway.log" || fail "no warning about a server on the gateway host"
 
 rm -f .env.worker
 if BROCCOLI_PLUGINS="no-such-plugin" run worker; then

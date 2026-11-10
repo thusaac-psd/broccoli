@@ -105,7 +105,9 @@ ge="$T/gw/compose/.env.gateway"
 [ "$(env_get "$ge" LAN_HOST)" = contest.lan ] && [ "$(env_get "$ge" LAN_HOST_ALIASES)" = 10.0.0.5 ] \
   || fail "gateway LAN hosts: $(cat "$ge")"
 [ "$(env_get "$ge" BROCCOLI_UPSTREAMS)" = '10.0.0.10 localhost:3001' ] || fail "gateway upstreams: $(cat "$ge")"
-plan="$(bash "$install" --role gateway --bundle "$T/gw" --dry-run)" || fail "gateway install dry run: $plan"
+plan="$(bash "$install" --role gateway --bundle "$T/gw" --dry-run 2>"$T/gw.err")" || fail "gateway install dry run: $plan"
+# localhost:3001 is this machine, which would see the gateway by its bridge address.
+grep -q 'runs on this machine' "$T/gw.err" || fail "no warning about an upstream on the gateway host"
 [ "$(plan_get "$plan" BROCCOLI_UPSTREAMS)" = '10.0.0.10:3000 127.0.0.1:3001' ] || fail "gateway upstream list: $(plan_get "$plan" BROCCOLI_UPSTREAMS)"
 [ "$(plan_get "$plan" LAN_HOST)" = contest.lan ] && [ "$(plan_get "$plan" LAN_HOST_ALIASES)" = 10.0.0.5 ] || fail "gateway TLS hosts"
 [ "$(plan_get "$plan" BROCCOLI_TLS_KEY)" = "$sec/server.key" ] || fail "gateway leaf path"
@@ -132,7 +134,7 @@ bundle single
 mkdir -p "$T/single.server-secret"; echo k > "$T/single.server-secret/root.key"
 run_setup --role server --bundle "$T/single" --lan-host contest.lan --admin-pass pw >/dev/null || fail "single-host setup"
 plan="$(bash "$install" --role server --bundle "$T/single" --lan-host contest.lan --dry-run)" || fail "single-host dry run: $plan"
-[ "$(plan_get "$plan" BROCCOLI_GATEWAY_TRUSTED_PROXIES)" = '["172.31.250.0/28"]' ] || fail "single host trust list"
+[ "$(plan_get "$plan" BROCCOLI_GATEWAY_TRUSTED_PROXIES)" = '["172.31.250.2/32"]' ] || fail "single host trust list"
 [ "$(plan_get "$plan" BROCCOLI_HTTP_BIND)" = 127.0.0.1:3000 ] || fail "single host :3000 not on loopback"
 printf '%s\n' "$plan" | grep -q 'docker-compose.gateway-airgap.yaml.template' || fail "single host lost its gateway"
 case "$(env_get "$T/single/compose/.env.server" BROCCOLI__SERVER__ID)" in

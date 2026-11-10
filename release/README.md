@@ -131,6 +131,11 @@ BROCCOLI_GATEWAY_HOSTS='10.0.0.5' ./install.sh server
 This sets `BROCCOLI__SERVER__TRUSTED_PROXIES` to exactly those addresses, also
 on a server that is already installed.
 
+Run the gateway on a machine with no server. A server on the gateway's own
+machine sees the gateway's Docker bridge address rather than its LAN address,
+so the printed command would not cover it; the gateway install warns when an
+upstream is on its own machine.
+
 ## Files
 
 - `docker-compose.infra.yaml.template`: PostgreSQL, Redis, optional SeaweedFS.

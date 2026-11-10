@@ -118,15 +118,21 @@ upstream_list() {
 # gateway_source_addrs "UPSTREAM ...": the addresses the upstream servers see
 # this machine's connections come from, space-separated, which is what each
 # of them must trust for X-Forwarded-For. Falls back to this machine's first
-# address when there is no route to an upstream yet.
+# address when there is no route to an upstream yet. An upstream on this very
+# machine sees the gateway container's Docker bridge address instead, which
+# no LAN address covers, so that case is warned about on stderr.
 gateway_source_addrs() {
-  local u host addr out="" list
+  local u host addr out="" list local_upstream=""
   read -r -d "" -a list <<< "$1" || true
   for u in "${list[@]}"; do
     host="${u%:*}"
     host="${host#[}"
     host="${host%]}"
     addr="$(source_ip_for "$host")"
+    case "$host" in
+      127.* | ::1 | localhost) local_upstream="$u" ;;
+      *) [ "$addr" != "$host" ] || local_upstream="$u" ;;
+    esac
     [ -n "$addr" ] || addr="$(hostname -I 2>/dev/null | awk '{print $1}')" || addr=""
     [ -n "$addr" ] || continue
     case " $out " in
@@ -134,5 +140,8 @@ gateway_source_addrs() {
       *) out="$out${out:+ }$addr" ;;
     esac
   done
+  if [ -n "$local_upstream" ]; then
+    echo "warning: upstream $local_upstream runs on this machine; it sees this gateway as a Docker bridge address, not a LAN one. Run the gateway on a host of its own." >&2
+  fi
   printf '%s\n' "$out"
 }

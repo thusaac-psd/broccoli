@@ -33,10 +33,12 @@ services:
       - "${BROCCOLI_TLS_KEY:?BROCCOLI_TLS_KEY must point at the server TLS leaf key}:/etc/broccoli-tls/server.key:ro"
       - caddy_data:/data
       - caddy_config:/config
-    # Only on the edge network, which holds nothing but the gateway and the
-    # server, so the server can trust this whole subnet for X-Forwarded-For.
+    # Only on the edge network, at a fixed address outside the range Docker
+    # hands out, so a server on this host trusts exactly that one address
+    # for X-Forwarded-For (not the subnet, which also holds the bridge).
     networks:
-      - edge
+      edge:
+        ipv4_address: "${BROCCOLI_GATEWAY_EDGE_IP:-172.31.250.2}"
 
 networks:
   # Keep in step with docker-compose.server-airgap.yaml.template.
@@ -44,6 +46,7 @@ networks:
     ipam:
       config:
         - subnet: "${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
+          ip_range: "${BROCCOLI_EDGE_RANGE:-172.31.250.8/29}"
 
 volumes:
   caddy_data:

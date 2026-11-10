@@ -306,8 +306,11 @@ This:
    `SECURE_COOKIES=true`, and the server trusts `X-Forwarded-For` only from the
    gateway, so auth rate limiting sees each contestant's real IP rather than
    the gateway's. The gateway and the server share a small `edge` network
-   (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else,
-   and that subnet is the whole trust list; no LAN range is ever trusted.
+   (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else.
+   The gateway sits at a fixed address on it (`BROCCOLI_GATEWAY_EDGE_IP`,
+   default `172.31.250.2`, outside the `BROCCOLI_EDGE_RANGE` Docker hands out),
+   and that one address is the whole trust list: not the subnet, which also
+   holds the Docker bridge, and never a LAN range.
 
    To run several servers behind one gateway-only node instead, see
    "Multi-server topology" below.

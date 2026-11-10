@@ -82,6 +82,23 @@ gateway_tls_issue() {
   if [ "$BURN" = "1" ]; then rm -f "$SECRET/root.key"; echo "burned $SECRET/root.key"; fi
 }
 
+# edge_network: settle the edge network the gateway shares with a server on
+# its host. The gateway sits at a fixed address (subnet base + 2) outside the
+# range Docker hands out (base + 8, a /29), so a server can trust exactly that
+# address. BROCCOLI_EDGE_SUBNET must be an IPv4 /28 or wider.
+edge_network() {
+  local base
+  export BROCCOLI_EDGE_SUBNET="${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
+  base="${BROCCOLI_EDGE_SUBNET%/*}"
+  case "$base" in
+    *[!0-9.]* | *.*.*.*.* | [!0-9]* ) echo "BROCCOLI_EDGE_SUBNET must be an IPv4 network, /28 or wider" >&2; exit 2 ;;
+    *.*.*.*) ;;
+    *) echo "BROCCOLI_EDGE_SUBNET must be an IPv4 network, /28 or wider" >&2; exit 2 ;;
+  esac
+  export BROCCOLI_GATEWAY_EDGE_IP="${BROCCOLI_GATEWAY_EDGE_IP:-${base%.*}.$((${base##*.} + 2))}"
+  export BROCCOLI_EDGE_RANGE="${BROCCOLI_EDGE_RANGE:-${base%.*}.$((${base##*.} + 8))/29}"
+}
+
 # dry_run_plan VAR...: with --dry-run, print the exported settings and the
 # compose command this role would run, then stop before loading images,
 # issuing a leaf or starting anything. Both lines are shell-quoted, so a test
@@ -123,7 +140,7 @@ case "$ROLE" in
     for f in "${env_files[@]}"; do compose_args+=(--env-file "$f"); done
     [ -n "$INFRA_HOST" ] || compose_args+=(-f docker-compose.infra.yaml.template)
     compose_args+=(-f docker-compose.server.yaml.template -f docker-compose.server-airgap.yaml.template)
-    export BROCCOLI_EDGE_SUBNET="${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
+    edge_network
     if [ -z "$GATEWAY_HOSTS" ]; then
       # The TLS gateway runs here. Validate the host BEFORE any heavy work
       # (bundle load, leaf issuance).
@@ -137,9 +154,9 @@ case "$ROLE" in
       # versions (an override `ports: !reset []` would hard-fail below Compose
       # v2.24, no offline remedy).
       export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-127.0.0.1:3000}"
-      # Trust X-Forwarded-For only from the edge network this server shares
-      # with the gateway. The subnet default matches the templates'.
-      trust="$BROCCOLI_EDGE_SUBNET"
+      # Trust X-Forwarded-For only from the gateway's fixed address on the
+      # edge network: not the whole subnet, which also holds the bridge.
+      trust="$BROCCOLI_GATEWAY_EDGE_IP"
       echo "server plaintext :3000 bound to host loopback ($BROCCOLI_HTTP_BIND); 443 is the only LAN entrypoint"
     else
       # The gateway runs on its own host and reaches this server over the LAN,
@@ -155,7 +172,7 @@ case "$ROLE" in
     echo "server trusts forwarded client addresses only from $BROCCOLI_GATEWAY_TRUSTED_PROXIES"
     [ -z "$INFRA_HOST" ] || echo "server uses the infra node at $INFRA_HOST; no db/redis/seaweedfs here"
     dry_run_plan LAN_HOST LAN_HOST_ALIASES BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_UPSTREAMS \
-      BROCCOLI_HTTP_BIND BROCCOLI_EDGE_SUBNET BROCCOLI_GATEWAY_TRUSTED_PROXIES
+      BROCCOLI_HTTP_BIND BROCCOLI_EDGE_SUBNET BROCCOLI_EDGE_RANGE BROCCOLI_GATEWAY_EDGE_IP BROCCOLI_GATEWAY_TRUSTED_PROXIES
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
     [ -n "$GATEWAY_HOSTS" ] || gateway_tls_issue
@@ -197,6 +214,7 @@ case "$ROLE" in
       || { echo "BROCCOLI_UPSTREAMS in $gateway_env must list the servers as HOST or HOST:PORT" >&2; exit 2; }
     export BROCCOLI_UPSTREAMS
     gateway_tls_plan
+    edge_network
     echo "gateway balances across $BROCCOLI_UPSTREAMS, health-checked on /livez"
     trust="$(gateway_source_addrs "$BROCCOLI_UPSTREAMS")"
     cat <<EOF
@@ -206,7 +224,8 @@ contestant shares one login rate limit. Install each server with:
 EOF
     # Its own Compose project, so it never collides with a server stack.
     compose_args=(-p broccoli-gateway --env-file .env.gateway -f docker-compose.gateway-airgap.yaml.template)
-    dry_run_plan LAN_HOST LAN_HOST_ALIASES BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_UPSTREAMS
+    dry_run_plan LAN_HOST LAN_HOST_ALIASES BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_UPSTREAMS \
+      BROCCOLI_EDGE_SUBNET BROCCOLI_EDGE_RANGE BROCCOLI_GATEWAY_EDGE_IP
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
     gateway_tls_issue

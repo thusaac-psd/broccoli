@@ -129,7 +129,17 @@ render_plan "airgap server" --role server --bundle "$T/ag-single" --lan-host con
 # The quoted env-file value reaches the container as itself, ' #1' included.
 [ "$(planned_env server BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD)" = 'Admin pass #1' ] || fail "admin password mangled"
 # The override wins over .env.server's TRUSTED_PROXIES and trusts the gateway only.
-[ "$(planned_env server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["172.31.250.0/28"]' ] || fail "airgap server trusts more than the gateway"
+[ "$(planned_env server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["172.31.250.2/32"]' ] || fail "airgap server trusts more than the gateway"
+# ...which is the gateway's own fixed address, outside Docker's dynamic range.
+( cd "${last_render[1]}" && docker compose "${last_render[@]:2}" config --format json 2>/dev/null ) | python3 -c '
+import ipaddress, json, sys
+c = json.load(sys.stdin)
+ip = c["services"]["gateway"]["networks"]["edge"]["ipv4_address"]
+pool = c["networks"]["edge"]["ipam"]["config"][0]
+assert ip == "172.31.250.2", ip
+assert ipaddress.ip_address(ip) in ipaddress.ip_network(pool["subnet"]), pool
+assert ipaddress.ip_address(ip) not in ipaddress.ip_network(pool["ip_range"]), pool
+' || fail "the airgap gateway does not sit at the one edge address its server trusts"
 
 # Several servers: the infra node, a server joining it, and a gateway-only
 # node in front of both.
