@@ -197,7 +197,10 @@ impl ServerRuntime {
             .await
             {
                 Ok(queue) => {
-                    info!("MQ connected to {}", app_config.mq.url);
+                    info!(
+                        "MQ connected to {}",
+                        common::redact::redact_url(&app_config.mq.url)
+                    );
                     Some(Arc::new(queue))
                 }
                 Err(e) => {
