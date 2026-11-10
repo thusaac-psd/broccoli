@@ -423,3 +423,53 @@ mod user_role_assignment {
         assert_permission_denied(&res, "revoking contestant from an admin");
     }
 }
+
+mod unknown_role {
+    use super::*;
+
+    /// Roles are not created through the API: granting into an unknown role is
+    /// a 404, not a foreign-key failure (500).
+    #[tokio::test]
+    async fn granting_into_an_unknown_role_is_not_found() {
+        let app = TestApp::spawn().await;
+        let admin = app.create_user_with_role("adm", PASSWORD, "admin").await;
+        let res = app
+            .post_with_token(
+                &routes::role_permissions("no_such_role"),
+                &json!({"permission": "problem:create"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn revoking_from_an_unknown_role_is_not_found() {
+        let app = TestApp::spawn().await;
+        let admin = app.create_user_with_role("adm", PASSWORD, "admin").await;
+        let res = app
+            .delete_with_token(
+                &routes::role_permission("no_such_role", "problem:create"),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+    }
+
+    /// Callers without `role:manage` learn nothing about which roles exist.
+    #[tokio::test]
+    async fn the_gate_comes_before_the_existence_check() {
+        let app = TestApp::spawn().await;
+        let token = app.create_authenticated_user("nobody", PASSWORD).await;
+        let res = app
+            .post_with_token(
+                &routes::role_permissions("no_such_role"),
+                &json!({"permission": "problem:create"}),
+                &token,
+            )
+            .await;
+        assert_permission_denied(&res, "granting without role:manage");
+    }
+}

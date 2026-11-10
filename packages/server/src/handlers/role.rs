@@ -98,6 +98,7 @@ pub async fn list_role_permissions(
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling", body = ErrorBody),
+        (status = 404, description = "Role not found (NOT_FOUND)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -108,10 +109,29 @@ pub async fn grant_permission_to_role(
     AppJson(req): AppJson<PermissionGrantRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::ROLE_MANAGE)?;
+
+    // Grant + invalidate the in-flight access tokens of everyone holding this
+    // role in one transaction, so the new permission cannot be exercised by a
+    // stale token from before the grant.
+    let txn = state.db.begin().await?;
+
+    // Roles are not created through the API, so an unknown role is a 404
+    // rather than a foreign-key failure on the insert below. It comes before
+    // the ceiling: role names are no secret to a `role:manage` holder
+    // (`GET /roles` lists them), and the ceiling of a role that does not
+    // exist is meaningless.
+    if role::Entity::find_by_id(role_name.clone())
+        .one(&txn)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::NotFound("Role not found".into()));
+    }
+
     // `role:manage` is not root-equivalent; without the ceiling its holder
     // could grant `system:admin` to its own role.
     require_within_ceiling(
-        &state.db,
+        &txn,
         &auth_user,
         CeilingTarget::RolePermission {
             role: &role_name,
@@ -121,7 +141,7 @@ pub async fn grant_permission_to_role(
     .await?;
 
     let existing = role_permission::Entity::find_by_id((role_name.clone(), req.permission.clone()))
-        .one(&state.db)
+        .one(&txn)
         .await?;
     if existing.is_some() {
         return Err(AppError::Validation(
@@ -129,15 +149,12 @@ pub async fn grant_permission_to_role(
         ));
     }
 
-    let new_grant = role_permission::ActiveModel {
+    role_permission::ActiveModel {
         role: Set(role_name.clone()),
         permission: Set(req.permission),
-    };
-    // Grant + invalidate the in-flight access tokens of everyone holding this
-    // role in one transaction, so the new permission cannot be exercised by a
-    // stale token from before the grant.
-    let txn = state.db.begin().await?;
-    new_grant.insert(&txn).await?;
+    }
+    .insert(&txn)
+    .await?;
     user::Entity::touch_credentials_changed_for_role(&txn, &role_name).await?;
     txn.commit().await?;
 
