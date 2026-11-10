@@ -46,6 +46,23 @@ pub async fn is_problem_in_contest<C: sea_orm::ConnectionTrait>(
     Ok(exists)
 }
 
+/// Self-registration and self-unregistration are only offered for active
+/// public contests. Anything else is a 404 for both, so the two endpoints
+/// cannot be told apart for a contest the caller may not see (no existence
+/// oracle), and a caller can never leave a contest it could not rejoin.
+pub fn ensure_self_service_contest(
+    contest: &contest::Model,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AppError> {
+    if contest.activate_time.is_none_or(|at| at > now)
+        || contest.deactivate_time.is_some_and(|dt| dt <= now)
+        || !contest.is_public
+    {
+        return Err(AppError::NotFound("Contest not found".into()));
+    }
+    Ok(())
+}
+
 pub async fn find_contest<C: sea_orm::ConnectionTrait>(
     db: &C,
     id: i32,
