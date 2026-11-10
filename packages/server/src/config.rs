@@ -44,6 +44,11 @@ pub struct DatabaseConfig {
     /// its way back to the privileged app role.
     #[serde(default)]
     pub plugin_url: Option<String>,
+    /// Server-side `statement_timeout` for every pooled connection, in seconds
+    /// (`0` disables it). Boot-time schema sync, migrations and seeding run on a
+    /// separate unbounded session. See `common::db`.
+    #[serde(default = "common::db::default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
 }
 
 impl Default for DatabaseConfig {
@@ -54,6 +59,7 @@ impl Default for DatabaseConfig {
             plugin_max_connections: default_plugin_max_connections(),
             plugin_privileged_max_connections: default_plugin_privileged_max_connections(),
             plugin_url: None,
+            statement_timeout_secs: common::db::default_statement_timeout_secs(),
         }
     }
 }

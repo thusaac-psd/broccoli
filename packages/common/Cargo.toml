@@ -17,7 +17,7 @@ chrono.workspace = true
 config.workspace = true
 rand.workspace = true
 rust-s3 = { workspace = true, optional = true }
-sea-orm = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true, features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 tokio-util = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 serde.workspace = true

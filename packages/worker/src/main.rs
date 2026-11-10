@@ -47,22 +47,20 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_healthcheck() -> anyhow::Result<()> {
-    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
     let config = WorkerAppConfig::load().context("Failed to load config")?;
 
-    let mut db_options = sea_orm::ConnectOptions::new(config.database.url.clone());
-    db_options
-        .max_connections(1)
-        .min_connections(0)
-        .connect_timeout(Duration::from_secs(5))
-        .acquire_timeout(Duration::from_secs(5))
-        .idle_timeout(Duration::from_secs(30))
-        .max_lifetime(Duration::from_secs(60))
-        .sqlx_logging(false);
-    let db = Database::connect(db_options)
-        .await
-        .context("Failed to connect to database")?;
+    let db = common::db::connect(
+        &config.database.url,
+        &common::db::PgPoolSpec {
+            acquire_timeout: Duration::from_secs(5),
+            ..common::db::PgPoolSpec::new(1, 0)
+        },
+        &config.database.session(),
+    )
+    .await
+    .context("Failed to connect to database")?;
     db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         "SELECT 1".to_string(),

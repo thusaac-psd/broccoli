@@ -521,6 +521,7 @@ impl E2eTestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "e2e-test-jwt-secret".to_string(),

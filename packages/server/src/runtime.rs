@@ -75,9 +75,11 @@ impl ServerRuntime {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
+        let db_session = crate::database::app_session(app_config.database.statement_timeout_secs);
         let db = crate::database::init_db_with_max_connections(
             &app_config.database.url,
             app_config.database.max_connections,
+            &db_session,
         )
         .await?;
         // Dedicated pool for plugin host-function DB calls, isolated from the
@@ -97,6 +99,7 @@ impl ServerRuntime {
             &app_config.database.url,
             app_config.database.plugin_url.as_deref(),
             app_config.database.plugin_max_connections,
+            &db_session,
         )
         .await?;
         let plugin_db = restricted.pool;
@@ -131,6 +134,7 @@ impl ServerRuntime {
         let privileged_plugin_db = crate::database::init_plugin_db_privileged(
             &app_config.database.url,
             app_config.database.plugin_privileged_max_connections,
+            &db_session,
         )
         .await?;
         info!(
@@ -145,7 +149,10 @@ impl ServerRuntime {
         // RESTRICTED fallback (raw `sql`) uses whatever auth the restricted pool
         // ended up on, so an escape that survives the SQL text guard lands on a
         // non-privileged role on the fallback path too, not just the pool.
-        crate::host_funcs::sql::set_plugin_db_fallback_url(app_config.database.url.clone());
+        crate::host_funcs::sql::set_plugin_db_fallback_url(
+            app_config.database.url.clone(),
+            db_session.clone(),
+        );
         crate::host_funcs::sql::set_plugin_db_restricted_fallback(
             restricted_fb_url,
             restricted_fb_login,

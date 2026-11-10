@@ -79,12 +79,12 @@ async fn build_cacher(
     config: &WorkerAppConfig,
     metrics: Option<Metrics>,
 ) -> anyhow::Result<Arc<dyn FileCacher>> {
-    let mut opts = sea_orm::ConnectOptions::new(config.database.url.clone());
-    opts.max_connections(2)
-        .min_connections(1)
-        .connect_timeout(Duration::from_secs(30))
-        .acquire_timeout(Duration::from_secs(30));
-    let db = sea_orm::Database::connect(opts).await?;
+    let db = common::db::connect(
+        &config.database.url,
+        &common::db::PgPoolSpec::new(2, 1),
+        &config.database.session(),
+    )
+    .await?;
 
     let blob_store = create_blob_store(&config.storage.blob_store, db, metrics.clone()).await?;
     let cacher = BlobStoreFileCacher::new(
