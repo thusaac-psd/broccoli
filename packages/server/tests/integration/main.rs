@@ -6,6 +6,7 @@ mod audit_pagination;
 mod audit_problem;
 mod audit_submission;
 mod auth;
+mod bootstrap_admin;
 mod claim_in_flight;
 mod clarification;
 mod code_run;
