@@ -15,6 +15,14 @@
 //! computed locally as `epoch + 1`. Local `+ 1` arithmetic was how a deferred
 //! rejudge and a later immediate rejudge both picked `judge_epoch + 1`.
 //!
+//! A judgement's `test_case_result` rows always carry the judgement's own
+//! epoch: results are written under it (the host's judgement write fence),
+//! plugins join results to their judgement on it (IOI's
+//! `sj.judge_epoch = tcr.judge_epoch`), and every in-place re-dispatch wipes
+//! the old attempt's rows. The one path that moves a judgement to a new epoch
+//! while keeping its results, [`apply_judgement`], re-stamps them in the same
+//! transaction.
+//!
 //! Every path that starts a new judgement row (admin rejudge, deferred
 //! rejudge, DLQ retry, stuck-job retry and lease steal) goes through
 //! [`open_judgement`], so the epoch, the supersede step and the submission
@@ -29,7 +37,7 @@ use sea_orm::{
 };
 
 use crate::entity::judgement_reset::ClearJudgementColumns;
-use crate::entity::{submission, submission_judgement};
+use crate::entity::{submission, submission_judgement, test_case_result};
 
 /// The next epoch of a `submission` row. `GREATEST` with `judge_epoch` keeps
 /// allocation above the current epoch even for a row whose
@@ -127,7 +135,7 @@ pub(crate) enum RedispatchReason {
 /// `error_code`/`error_message` a still-in-flight judgement is finalized with
 /// (see [`supersede_current_judgement`]).
 #[derive(Clone, Copy)]
-pub(crate) enum SupersededBy {
+enum SupersededBy {
     /// An admin rejudge or DLQ retry opened a new current judgement.
     Rejudge,
     /// An admin applied another, finalized judgement.
@@ -327,7 +335,7 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
 /// scanner, its worker's late writes are rejected (`submission_update`
 /// requires `is_finalized = FALSE`), and `discard` accepts it. An already
 /// finalized judgement keeps its verdict untouched as version history.
-pub(crate) async fn supersede_current_judgement<C: ConnectionTrait>(
+async fn supersede_current_judgement<C: ConnectionTrait>(
     txn: &C,
     submission_id: i32,
     reason: SupersededBy,
@@ -352,4 +360,85 @@ pub(crate) async fn supersede_current_judgement<C: ConnectionTrait>(
     ))
     .await?;
     Ok(())
+}
+
+/// Outcome of [`apply_judgement`].
+pub(crate) enum ApplyJudgement {
+    Applied(submission::Model),
+    SubmissionNotFound,
+    JudgementNotFound,
+    NotFinalized,
+}
+
+/// Makes a finalized judgement the submission's current one and copies its
+/// result onto the submission's cache columns, in the caller's transaction.
+///
+/// The judgement becomes current under a FRESH epoch, never its own older
+/// one: copying it back would move `judge_epoch` backwards, hand the next
+/// rejudge an epoch another judgement already holds, and reuse an
+/// `after_judging:{id}:{epoch}` dedupe key that already fired. Its kept
+/// `test_case_result` rows move to the new epoch with it, so plugins that
+/// join results to their judgement on the epoch still find them. A current
+/// judgement still in flight is superseded.
+pub(crate) async fn apply_judgement<C: ConnectionTrait>(
+    txn: &C,
+    submission_id: i32,
+    judgement_id: i32,
+) -> Result<ApplyJudgement, DbErr> {
+    // Allocating first also locks the submission row for the rest of the
+    // transaction, serializing this against rejudge, discard and steal.
+    let Some(sub) = submission::Entity::update_many()
+        .advance_judge_epoch()
+        .filter(submission::Column::Id.eq(submission_id))
+        .exec_with_returning(txn)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(ApplyJudgement::SubmissionNotFound);
+    };
+
+    let Some(judgement) = submission_judgement::Entity::find_by_id(judgement_id)
+        .filter(submission_judgement::Column::SubmissionId.eq(submission_id))
+        .one(txn)
+        .await?
+    else {
+        return Ok(ApplyJudgement::JudgementNotFound);
+    };
+    if !judgement.is_finalized {
+        return Ok(ApplyJudgement::NotFinalized);
+    }
+
+    supersede_current_judgement(txn, submission_id, SupersededBy::AppliedJudgement).await?;
+
+    submission_judgement::Entity::update_many()
+        .col_expr(submission_judgement::Column::IsCurrent, Expr::value(true))
+        .col_expr(
+            submission_judgement::Column::JudgeEpoch,
+            Expr::value(sub.judge_epoch),
+        )
+        .filter(submission_judgement::Column::Id.eq(judgement_id))
+        .exec(txn)
+        .await?;
+    test_case_result::Entity::update_many()
+        .col_expr(
+            test_case_result::Column::JudgeEpoch,
+            Expr::value(sub.judge_epoch),
+        )
+        .filter(test_case_result::Column::JudgementId.eq(judgement_id))
+        .exec(txn)
+        .await?;
+
+    let mut active: submission::ActiveModel = sub.into();
+    active.status = Set(judgement.status);
+    active.verdict = Set(judgement.verdict);
+    active.compile_output = Set(judgement.compile_output);
+    active.error_code = Set(judgement.error_code);
+    active.error_message = Set(judgement.error_message);
+    active.score = Set(judgement.score);
+    active.time_used = Set(judgement.time_used);
+    active.memory_used = Set(judgement.memory_used);
+    active.judged_at = Set(judgement.finalized_at);
+    active.target_worker_id = Set(judgement.target_worker_id);
+    Ok(ApplyJudgement::Applied(active.update(txn).await?))
 }

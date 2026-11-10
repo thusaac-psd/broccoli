@@ -36,7 +36,7 @@ use crate::extractors::path::AppPath;
 use crate::models::problem::validate_contest_type;
 use crate::models::submission::*;
 use crate::services::judgement_lifecycle::{
-    AllocateJudgeEpoch, OpenJudgement, SupersededBy, open_judgement, supersede_current_judgement,
+    ApplyJudgement, OpenJudgement, apply_judgement, open_judgement,
 };
 use crate::services::submission_dispatch::fire_after_judging_hooks;
 use crate::state::AppState;
@@ -77,53 +77,20 @@ pub async fn apply_submission_judgement(
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    // Applying makes the judgement current under a FRESH epoch, never its own
-    // older one: copying it back would move `judge_epoch` backwards, hand the
-    // next rejudge an epoch another judgement already holds, and reuse an
-    // `after_judging:{id}:{epoch}` dedupe key that already fired. Allocating
-    // first also locks the submission row for the rest of the transaction.
-    let sub = submission::Entity::update_many()
-        .advance_judge_epoch()
-        .filter(submission::Column::Id.eq(id))
-        .exec_with_returning(&txn)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::NotFound("Submission not found".into()))?;
-
-    let judgement = submission_judgement::Entity::find_by_id(judgement_id)
-        .filter(submission_judgement::Column::SubmissionId.eq(id))
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Judgement not found".into()))?;
-
-    if !judgement.is_finalized {
-        return Err(AppError::Validation(
-            "Cannot apply a judgement that is not finalized".into(),
-        ));
-    }
-
-    // A current judgement still in flight is finalized as superseded rather
-    // than left running unfinalized for the stuck detector to retry.
-    supersede_current_judgement(&txn, id, SupersededBy::AppliedJudgement).await?;
-
-    let mut active_judgement: submission_judgement::ActiveModel = judgement.clone().into();
-    active_judgement.is_current = Set(true);
-    active_judgement.judge_epoch = Set(sub.judge_epoch);
-    active_judgement.update(&txn).await?;
-
-    let mut active_submission: submission::ActiveModel = sub.into();
-    active_submission.status = Set(judgement.status);
-    active_submission.verdict = Set(judgement.verdict);
-    active_submission.compile_output = Set(judgement.compile_output);
-    active_submission.error_code = Set(judgement.error_code);
-    active_submission.error_message = Set(judgement.error_message);
-    active_submission.score = Set(judgement.score);
-    active_submission.time_used = Set(judgement.time_used);
-    active_submission.memory_used = Set(judgement.memory_used);
-    active_submission.judged_at = Set(judgement.finalized_at);
-    active_submission.target_worker_id = Set(judgement.target_worker_id);
-    let updated = active_submission.update(&txn).await?;
+    let updated = match apply_judgement(&txn, id, judgement_id).await? {
+        ApplyJudgement::Applied(updated) => updated,
+        ApplyJudgement::SubmissionNotFound => {
+            return Err(AppError::NotFound("Submission not found".into()));
+        }
+        ApplyJudgement::JudgementNotFound => {
+            return Err(AppError::NotFound("Judgement not found".into()));
+        }
+        ApplyJudgement::NotFinalized => {
+            return Err(AppError::Validation(
+                "Cannot apply a judgement that is not finalized".into(),
+            ));
+        }
+    };
     txn.commit().await?;
 
     fire_after_judging_hooks(

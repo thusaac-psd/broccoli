@@ -2785,6 +2785,99 @@ mod rejudge_lifecycle {
         );
     }
 
+    /// Applying a deferred judgement re-stamps it with a fresh epoch, and its
+    /// `test_case_result` rows move to that epoch with it. Plugins such as IOI join
+    /// results to their judgement on the epoch, so stale result epochs would score the
+    /// applied judgement as 0.
+    #[tokio::test]
+    async fn applied_judgement_results_keep_matching_its_epoch() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        use server::entity::test_case_result;
+
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("rejudge_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let sid = seed_judged(&app, &token, pid, 1).await;
+
+        let deferred = app
+            .post_with_token(
+                &routes::submission_rejudge(sid),
+                &json!({"apply_immediately": false}),
+                &token,
+            )
+            .await;
+        assert!(deferred.status < 300, "deferred rejudge: {}", deferred.text);
+        let rows = judgements(&app, sid).await;
+        let j2 = rows.last().expect("deferred judgement").clone();
+        assert!(!j2.is_current);
+
+        // The deferred run writes its results under its own epoch and finishes.
+        for _ in 0..2 {
+            test_case_result::ActiveModel {
+                submission_id: Set(sid),
+                judgement_id: Set(Some(j2.id)),
+                judge_epoch: Set(j2.judge_epoch),
+                verdict: Set(Verdict::Accepted),
+                score: Set(50.0),
+                created_at: Set(Utc::now()),
+                ..Default::default()
+            }
+            .insert(&app.db)
+            .await
+            .expect("result");
+        }
+        let mut finalize: submission_judgement::ActiveModel = j2.clone().into();
+        finalize.is_finalized = Set(true);
+        finalize.status = Set(SubmissionStatus::Judged);
+        finalize.verdict = Set(Some(Verdict::Accepted));
+        finalize.score = Set(Some(100.0));
+        finalize.finalized_at = Set(Some(Utc::now()));
+        finalize.update(&app.db).await.expect("finalize deferred");
+
+        let applied = app
+            .post_with_token(
+                &routes::submission_judgement_apply(sid, j2.id),
+                &json!({}),
+                &token,
+            )
+            .await;
+        assert_eq!(applied.status, 200, "apply: {}", applied.text);
+        let current = judgements(&app, sid)
+            .await
+            .into_iter()
+            .find(|j| j.is_current)
+            .expect("current judgement");
+        assert_eq!(current.id, j2.id);
+        assert!(
+            current.judge_epoch > j2.judge_epoch,
+            "apply takes a fresh epoch"
+        );
+
+        // IOI's join (`plugins/ioi/src/score.rs`), minus its contest filter.
+        let row = app
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT COUNT(*) AS n FROM test_case_result tcr \
+             JOIN submission_judgement sj \
+               ON sj.id = tcr.judgement_id \
+              AND sj.submission_id = tcr.submission_id \
+              AND sj.judge_epoch = tcr.judge_epoch \
+             WHERE tcr.submission_id = $1 AND sj.is_current AND sj.is_finalized",
+                [sid.into()],
+            ))
+            .await
+            .expect("db")
+            .expect("row");
+        let matched: i64 = row.try_get("", "n").expect("n");
+        assert_eq!(
+            matched, 2,
+            "the applied judgement's results do not join on its epoch"
+        );
+    }
+
     /// Rejudging an in-flight submission finalizes the judgement it supersedes as a
     /// `SUPERSEDED` system error. A superseded judgement left unfinalized can never
     /// finish, so the stuck detector would re-run it until it lands in the DLQ.
