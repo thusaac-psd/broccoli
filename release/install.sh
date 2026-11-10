@@ -198,6 +198,40 @@ resolve_infra_host() {
   BROCCOLI_INFRA_HOST="$1"
 }
 
+# Behind a gateway every request reaches a server from the gateway's address.
+# Unless the server trusts the gateway's X-Forwarded-For, login and register
+# limits key on that one address and the whole venue shares one budget.
+# BROCCOLI_GATEWAY_HOSTS names the gateway(s); trust exactly those.
+gateway_trusted_proxies() {
+  [ -n "${BROCCOLI_GATEWAY_HOSTS:-}" ] || return 0
+  BROCCOLI__SERVER__TRUSTED_PROXIES="$(trusted_proxies_json "$BROCCOLI_GATEWAY_HOSTS")" \
+    || die "BROCCOLI_GATEWAY_HOSTS must list IP addresses or CIDRs, separated by spaces"
+}
+
+# Tell the operator which address each upstream server sees this gateway as,
+# and how to make that server trust it.
+print_gateway_trust_hint() {
+  local upstream host addr addrs=""
+  for upstream in $BROCCOLI_UPSTREAMS; do
+    host="${upstream%:*}"
+    host="${host#[}"
+    host="${host%]}"
+    addr="$(source_ip_for "$host")"
+    [ -n "$addr" ] || addr="$(primary_ip)"
+    [ -n "$addr" ] || continue
+    case " $addrs " in
+      *" $addr "*) ;;
+      *) addrs="$addrs${addrs:+ }$addr" ;;
+    esac
+  done
+  [ -n "$addrs" ] || addrs="<this gateway's LAN address>"
+  cat <<EOF
+Servers behind this gateway must trust it for X-Forwarded-For, or every
+contestant shares one login rate limit. On each server node run:
+  BROCCOLI_GATEWAY_HOSTS='$addrs' ./install.sh server
+EOF
+}
+
 bind_port() {
   local bind
   bind="$1"
@@ -859,6 +893,8 @@ write_env_file() {
     server)
       prompt_value BROCCOLI__SERVER__ID "Server ID (unique per server)" "$(node_id server)"
       prompt_value BROCCOLI_HTTP_BIND "Server HTTP bind address" "0.0.0.0:3000"
+      prompt_value BROCCOLI_GATEWAY_HOSTS "Gateway addresses in front of this server, space-separated (blank if none)" ""
+      gateway_trusted_proxies
       prompt_value BROCCOLI__DATABASE__URL "PostgreSQL URL from connection.env" ""
       prompt_value BROCCOLI__MQ__URL "Redis URL from connection.env" ""
       if using_object_storage; then
@@ -1058,6 +1094,10 @@ if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
   refresh_shared_settings
   refresh_bundled_image_tags
+  if [ "$ROLE" = "server" ] && [ -n "${BROCCOLI_GATEWAY_HOSTS:-}" ]; then
+    gateway_trusted_proxies
+    env_set_if_changed BROCCOLI__SERVER__TRUSTED_PROXIES "$BROCCOLI__SERVER__TRUSTED_PROXIES"
+  fi
 else
   write_env_file
 fi
@@ -1098,6 +1138,10 @@ case "$ROLE" in
 esac
 
 check_clock_sync
+
+if [ "$ROLE" = "gateway" ]; then
+  print_gateway_trust_hint
+fi
 
 if is_dry_run; then
   echo "dry run complete; Docker containers were not started"

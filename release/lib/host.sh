@@ -25,3 +25,33 @@ node_id() {
   hash="$(printf 'broccoli-node-id:%s' "$seed" | openssl dgst -sha256 | sed 's/^.*= *//' | cut -c1-8)"
   printf '%s-%s%s\n' "$prefix" "${host:+$host-}" "$hash"
 }
+
+# trusted_proxies_json "ADDR..." : the server.trusted_proxies value trusting
+# exactly the gateways given as IPs or CIDRs, e.g. "10.0.0.5" becomes
+# ["10.0.0.5/32"]. A server trusts X-Forwarded-For only from these peers, so
+# behind a gateway this must name the gateway, and nothing wider: any client
+# inside a trusted range can forge its own address.
+trusted_proxies_json() {
+  local addr out=""
+  for addr in $1; do
+    case "$addr" in
+      *[!0-9A-Fa-f.:/]* | "")
+        echo "error: '$addr' is not an IP address or CIDR" >&2
+        return 1
+        ;;
+      */*) ;;
+      *:*) addr="$addr/128" ;;
+      *) addr="$addr/32" ;;
+    esac
+    out="$out${out:+,}\"$addr\""
+  done
+  printf '[%s]\n' "$out"
+}
+
+# source_ip_for HOST: this machine's address on the route to HOST, which is
+# the peer address HOST sees for connections from here. Empty if unknown.
+source_ip_for() {
+  command -v ip >/dev/null 2>&1 || return 0
+  { ip route get "$1" 2>/dev/null || true; } \
+    | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}

@@ -110,6 +110,18 @@ For server redundancy, install a gateway node with:
 BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' ./install.sh gateway
 ```
 
+Each server must then trust the gateway's address for `X-Forwarded-For`;
+otherwise every contestant's login counts against the gateway's single rate
+limit. The gateway install prints the command to run on each server, for
+example:
+
+```bash
+BROCCOLI_GATEWAY_HOSTS='10.0.0.5' ./install.sh server
+```
+
+This sets `BROCCOLI__SERVER__TRUSTED_PROXIES` to exactly those addresses, also
+on a server that is already installed.
+
 ## Files
 
 - `docker-compose.infra.yaml.template`: PostgreSQL, Redis, optional SeaweedFS.

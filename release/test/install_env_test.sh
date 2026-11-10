@@ -46,6 +46,17 @@ run server || fail "server re-run"
   || fail "server re-run kept the old JWT secret"
 [ "$(env_get .env.server BROCCOLI__SERVER__ID)" = "$server_id" ] || fail "server re-run changed its own id"
 
+# Behind a gateway, a server trusts exactly the gateway for X-Forwarded-For,
+# and the gateway install says what to pass.
+BROCCOLI_GATEWAY_HOSTS='10.0.0.5 10.0.0.6' run server || fail "server run with gateway hosts"
+[ "$(env_get .env.server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["10.0.0.5/32","10.0.0.6/32"]' ] \
+  || fail "server does not trust exactly the gateways"
+if BROCCOLI_GATEWAY_HOSTS='10.0.0.5;rm' run server; then fail "a malformed gateway address was accepted"; fi
+BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+  ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run"
+grep -q "BROCCOLI_GATEWAY_HOSTS='.*' ./install.sh server" "$T/gateway.log" \
+  || fail "gateway install does not say how to trust it on the servers"
+
 rm -f .env.worker
 if BROCCOLI_PLUGINS="no-such-plugin" run worker; then
   fail "an unknown plugin in BROCCOLI_PLUGINS was accepted"
