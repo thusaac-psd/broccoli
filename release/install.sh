@@ -363,28 +363,50 @@ server_secrets_env_file() {
   printf '%s\n' "${BROCCOLI_SERVER_SECRETS_ENV_FILE:-server-secrets.env}"
 }
 
-load_connection_env_if_present() {
-  local file secrets_file
-  file="$(connection_env_file)"
+# The files the infra install hands to this role: connection.env for servers
+# and workers, plus server-secrets.env for servers. Prints those present.
+shared_env_files() {
+  local file
   case "$ROLE" in
-    server|worker)
-      [ -f "$file" ] || return 0
-      echo "loading shared LAN connection settings from $file"
-      set -a
-      # shellcheck disable=SC1090
-      source "$file"
-      set +a
-      ;;
+    server) set -- "$(connection_env_file)" "$(server_secrets_env_file)" ;;
+    worker) set -- "$(connection_env_file)" ;;
+    *) return 0 ;;
   esac
-  if [ "$ROLE" = "server" ]; then
-    secrets_file="$(server_secrets_env_file)"
-    [ -f "$secrets_file" ] || return 0
-    echo "loading server-only settings from $secrets_file"
+  for file in "$@"; do
+    [ -f "$file" ] && printf '%s\n' "$file"
+  done
+  return 0
+}
+
+load_connection_env_if_present() {
+  local file
+  while IFS= read -r file; do
+    echo "loading shared settings from $file"
     set -a
     # shellcheck disable=SC1090
-    source "$secrets_file"
+    source "$file"
     set +a
-  fi
+  done < <(shared_env_files)
+}
+
+# Re-runs keep an existing env file, but whatever the infra node handed over
+# must follow the infra node: after a rehearsal moves to the venue and infra
+# is re-installed with new addresses, copy each shared key into the env file.
+refresh_shared_settings() {
+  local file line key value
+  while IFS= read -r file; do
+    while IFS= read -r line; do
+      case "$line" in
+        [A-Za-z_]*=*) ;;
+        *) continue ;;
+      esac
+      key="${line%%=*}"
+      value="$(env_unquote "${line#*=}")"
+      [ "$(env_get "$ENV_FILE" "$key")" = "$value" ] && continue
+      env_set "$ENV_FILE" "$key" "$value"
+      echo "updated $key in $ENV_FILE from $file"
+    done < "$file"
+  done < <(shared_env_files)
 }
 
 print_env_review() {
@@ -935,6 +957,7 @@ fi
 
 if [ -f "$ENV_FILE" ]; then
   echo "$ENV_FILE already exists; preserving existing secrets"
+  refresh_shared_settings
 else
   write_env_file
 fi

@@ -12,6 +12,8 @@ mkdir -p plugins plugins-available/codelink-bracket
 printf 'name = "codelink-bracket"\n' > plugins-available/codelink-bracket/plugin.toml
 
 fail() { echo "FAIL: $*"; exit 1; }
+# shellcheck source=../lib/env.sh
+. ./lib/env.sh
 run() { BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
 
 BROCCOLI__AUTH__SECURE_COOKIES=true \
@@ -32,6 +34,18 @@ grep -qx "COMPOSE_PROJECT_NAME='broccoli-server'" .env.server || fail "server ha
 grep -qx "BROCCOLI__AUTH__SECURE_COOKIES='true'" .env.server || fail "server lost SECURE_COOKIES"
 [ -f plugins/codelink-bracket/plugin.toml ] || fail "BROCCOLI_PLUGINS did not enable codelink-bracket"
 
+# Re-running a role after infra moved (rehearsal -> venue) keeps the env file
+# but takes the infra node's new connection settings.
+env_set connection.env BROCCOLI__DATABASE__URL 'postgres://postgres:pw@10.9.9.9:5432/broccoli'
+env_set server-secrets.env BROCCOLI__AUTH__JWT_SECRET 'rotated-jwt-secret-rotated-jwt-secret'
+server_id="$(env_get .env.server BROCCOLI__SERVER__ID)"
+run server || fail "server re-run"
+[ "$(env_get .env.server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:pw@10.9.9.9:5432/broccoli' ] \
+  || fail "server re-run kept the old database URL"
+[ "$(env_get .env.server BROCCOLI__AUTH__JWT_SECRET)" = 'rotated-jwt-secret-rotated-jwt-secret' ] \
+  || fail "server re-run kept the old JWT secret"
+[ "$(env_get .env.server BROCCOLI__SERVER__ID)" = "$server_id" ] || fail "server re-run changed its own id"
+
 rm -f .env.worker
 if BROCCOLI_PLUGINS="no-such-plugin" run worker; then
   fail "an unknown plugin in BROCCOLI_PLUGINS was accepted"
@@ -39,7 +53,6 @@ fi
 
 # Operator passwords survive as themselves: single-quoted in env files (no
 # Compose interpolation, no ' #' comment) and percent-encoded inside URLs.
-. ./lib/env.sh
 mkdir quoting && cp -r install.sh lib docker-compose.*.template quoting/ && cd quoting
 POSTGRES_PASSWORD='p@ss #1/$x?' REDIS_PASSWORD='r%d' BROCCOLI_ADMIN_PASSWORD='Adm$n #1' \
   BROCCOLI_INFRA_HOST=10.0.0.10 run infra || fail "infra dry run with punctuated passwords"
