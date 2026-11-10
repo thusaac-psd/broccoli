@@ -31,11 +31,24 @@ trap 'rm -rf "$T"' EXIT
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
   -subj /CN=contest.lan -keyout "$T/server.key" -out "$T/server.crt" >/dev/null 2>&1
 chmod 0644 "$T/server.key"
-for cf in "${files[@]}"; do
-  docker run --rm -v "$cf:/etc/caddy/Caddyfile:ro" -v "$T:/tls:ro" \
+# validate CADDYFILE ALIASES: caddy validate with the gateway's container env.
+validate() {
+  docker run --rm -v "$1:/etc/caddy/Caddyfile:ro" -v "$T:/tls:ro" \
     -e BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' -e LAN_HOST=contest.lan \
-    -e TLS_CERT=/tls/server.crt -e TLS_KEY=/tls/server.key \
+    -e LAN_HOST_ALIASES="$2" -e TLS_CERT=/tls/server.crt -e TLS_KEY=/tls/server.key \
     "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$T/validate.log" 2>&1 \
-    || { cat "$T/validate.log"; fail "$(basename "$cf") does not validate"; }
-done
+    || { cat "$T/validate.log"; fail "$(basename "$1") does not validate (aliases '$2')"; }
+}
+for cf in "${files[@]}"; do validate "$cf" ""; done
+# A gateway reached by several names and addresses serves all of them.
+validate "$rel/airgap/caddy/Caddyfile.airgap" "10.0.0.5 gw.contest.lan"
+docker run --rm -v "$rel/airgap/caddy/Caddyfile.airgap:/etc/caddy/Caddyfile:ro" \
+  -e BROCCOLI_UPSTREAMS=10.0.0.21:3000 -e LAN_HOST=contest.lan -e LAN_HOST_ALIASES=10.0.0.5 \
+  -e TLS_CERT=/tls/server.crt -e TLS_KEY=/tls/server.key \
+  "$image" caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null \
+  | python3 -c '
+import json, sys
+srv = json.load(sys.stdin)["apps"]["http"]["servers"]["srv0"]
+assert srv["routes"][0]["match"][0]["host"] == ["contest.lan", "10.0.0.5"], srv["routes"][0]["match"]
+' || fail "Caddyfile.airgap does not serve LAN_HOST_ALIASES"
 echo "PASS: gateway Caddyfiles probe /livez and validate with $image"

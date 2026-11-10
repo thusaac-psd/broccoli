@@ -211,19 +211,8 @@ gateway_trusted_proxies() {
 # Tell the operator which address each upstream server sees this gateway as,
 # and how to make that server trust it.
 print_gateway_trust_hint() {
-  local upstream host addr addrs=""
-  for upstream in $BROCCOLI_UPSTREAMS; do
-    host="${upstream%:*}"
-    host="${host#[}"
-    host="${host%]}"
-    addr="$(source_ip_for "$host")"
-    [ -n "$addr" ] || addr="$(primary_ip)"
-    [ -n "$addr" ] || continue
-    case " $addrs " in
-      *" $addr "*) ;;
-      *) addrs="$addrs${addrs:+ }$addr" ;;
-    esac
-  done
+  local addrs
+  addrs="$(gateway_source_addrs "$BROCCOLI_UPSTREAMS")"
   [ -n "$addrs" ] || addrs="<this gateway's LAN address>"
   cat <<EOF
 Servers behind this gateway must trust it for X-Forwarded-For, or every

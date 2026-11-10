@@ -5,10 +5,11 @@ ins="$here/../install.sh"
 [ -f "$ins" ] || { echo "FAIL: install.sh missing"; exit 1; }
 bash -n "$ins" || { echo "FAIL: install.sh does not parse"; exit 1; }
 
-# dispatches all three roles + rejects unknown
+# dispatches every role + rejects unknown
 grep -q 'server)'      "$ins" || { echo "FAIL: no server role"; exit 1; }
 grep -q 'worker)'      "$ins" || { echo "FAIL: no worker role"; exit 1; }
 grep -q 'contestant)'  "$ins" || { echo "FAIL: no contestant role"; exit 1; }
+grep -q '^  gateway)' "$ins" || { echo "FAIL: no gateway role"; exit 1; }
 
 # composes the TLS gateway (serves the airgap leaf) and honors --pull never
 grep -q 'docker-compose.gateway-airgap.yaml.template' "$ins" || { echo "FAIL: server role does not compose the TLS gateway"; exit 1; }
@@ -24,7 +25,7 @@ grep -Eq -- '--bundle "\$BUNDLE" --verify-only --pristine' "$ins" \
   || { echo "FAIL: contestant path must verify --pristine (planted host-env guard)"; exit 1; }
 
 # an existing leaf is reused only while it still fits --lan-host (venue moved)
-grep -q 'issue-leaf.sh" --check --ca-dir "\$SECRET" --host "\$LAN_HOST"' "$ins" \
+grep -q 'issue-leaf.sh" --check --ca-dir "\$SECRET" "\${hosts\[@\]}"' "$ins" \
   || { echo "FAIL: server role reuses a leaf without checking it covers --lan-host"; exit 1; }
 
 # unknown role exits nonzero

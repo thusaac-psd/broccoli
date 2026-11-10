@@ -9,17 +9,19 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/lib/release-lib.sh"
 
 usage() {
-  echo "Usage: install.sh --role {server|worker|contestant} --bundle DIR [--lan-host H] [--server-secret DIR] [--burn-ca-key]"
+  echo "Usage: install.sh --role {server|gateway|worker|contestant} --bundle DIR [--lan-host H ...] [--server-secret DIR] [--burn-ca-key] [--dry-run]"
 }
 
-ROLE="" BUNDLE="" LAN_HOST="" BURN=0 SECRET=""
+ROLE="" BUNDLE="" BURN=0 SECRET="" DRY_RUN=0
+LAN_HOSTS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --role) ROLE="$2"; shift 2 ;;
     --bundle) BUNDLE="$2"; shift 2 ;;
-    --lan-host) LAN_HOST="$2"; shift 2 ;;
+    --lan-host) LAN_HOSTS+=("$2"); shift 2 ;;
     --server-secret) SECRET="$2"; shift 2 ;;
     --burn-ca-key) BURN=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -27,9 +29,9 @@ done
 [ -n "$ROLE" ] && [ -n "$BUNDLE" ] || { echo "--role and --bundle are required" >&2; usage; exit 2; }
 
 # Resolve the container engine + compose provider once for deploy roles
-# (server/worker). Reuse setup.sh's export when present; else self-resolve
+# (server/gateway/worker). Reuse setup.sh's export when present; else self-resolve
 # (standalone use). Contestant does not deploy, so an empty result here is only
-# fatal inside server/worker. ENGINE is also what gates the SELinux relabel below.
+# fatal inside the deploy roles. ENGINE is also what gates the SELinux relabel below.
 ENGINE="${BROCCOLI_ENGINE:-$(runtime_engine)}"
 COMPOSE="${COMPOSE:-$(runtime_compose "$ENGINE")}"
 
@@ -41,60 +43,122 @@ os_helper() {
   esac
 }
 
+# gateway_tls_plan: point the gateway at the TLS leaf for LAN_HOSTS in the
+# server-secret dir (default: the "<bundle>.server-secret" sibling
+# build-bundle.sh writes). The gateway mounts caddy/Caddyfile.airgap
+# UN-rendered and Caddy expands the {$VAR}s from its container env, so never
+# shell-render that file. Pass the leaf cert+key as individual file paths, not
+# the secret dir, so the contestant-facing gateway never bind-mounts root.key
+# (the CA signing key that shares this dir).
+gateway_tls_plan() {
+  local h abs_bundle
+  [ "${#LAN_HOSTS[@]}" -gt 0 ] || { echo "the TLS gateway needs --lan-host" >&2; exit 2; }
+  for h in "${LAN_HOSTS[@]}"; do
+    case "$h" in
+      "" | *[!A-Za-z0-9.:-]*) echo "invalid LAN host '$h': only letters, digits, dot, colon, hyphen allowed" >&2; exit 2 ;;
+    esac
+  done
+  abs_bundle="$(cd "$BUNDLE" && pwd)"
+  SECRET="${SECRET:-${abs_bundle}.server-secret}"
+  [ -d "$SECRET" ] || { echo "server-secret dir not found: $SECRET — deliver the '<bundle>.server-secret' dir to this host, or pass --server-secret DIR" >&2; exit 2; }
+  abs_secret="$(cd "$SECRET" && pwd)"
+  export LAN_HOST="${LAN_HOSTS[0]}" LAN_HOST_ALIASES="${LAN_HOSTS[*]:1}"
+  export BROCCOLI_TLS_CERT="$abs_secret/server.crt" BROCCOLI_TLS_KEY="$abs_secret/server.key"
+  echo "TLS gateway will serve https://$LAN_HOST${LAN_HOST_ALIASES:+ (also $LAN_HOST_ALIASES)} using leaf in $abs_secret"
+}
+
+# gateway_tls_issue: make the secret dir hold a current leaf for LAN_HOSTS.
+# Keep a pre-issued or earlier one only if it chains to this CA, covers every
+# host and is not about to expire; otherwise issue one now from the CA key that
+# lives only here. A venue whose address moved therefore gets a new leaf.
+gateway_tls_issue() {
+  local h hosts=()
+  for h in "${LAN_HOSTS[@]}"; do hosts+=(--host "$h"); done
+  [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
+  if ! bash "$here/ca/issue-leaf.sh" --check --ca-dir "$SECRET" "${hosts[@]}" --out "$SECRET"; then
+    [ -f "$SECRET/root.key" ] || { echo "the leaf in $SECRET is missing, expiring, or does not cover ${LAN_HOSTS[*]}, and there is no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host ${LAN_HOSTS[0]}, or place root.key in the server-secret dir (TLS gateway host only)" >&2; exit 2; }
+    bash "$here/ca/issue-leaf.sh" --ca-dir "$SECRET" "${hosts[@]}" --out "$SECRET"
+  fi
+  if [ "$BURN" = "1" ]; then rm -f "$SECRET/root.key"; echo "burned $SECRET/root.key"; fi
+}
+
+# dry_run_plan VAR...: with --dry-run, print the exported settings and the
+# compose command this role would run, then stop before loading images,
+# issuing a leaf or starting anything. Both lines are shell-quoted, so a test
+# can replay them.
+dry_run_plan() {
+  local v
+  [ "$DRY_RUN" = 1 ] || return 0
+  echo "== plan (dry-run) =="
+  for v in "$@"; do printf 'export %s=%q\n' "$v" "${!v-}"; done
+  printf 'compose dir: %q\n' "$BUNDLE/compose"
+  printf 'compose:'; printf ' %q' "${compose_args[@]}" up -d --pull never; printf '\n'
+  exit 0
+}
+
 case "$ROLE" in
   server)
-    # Validate the host BEFORE any heavy work (bundle load, leaf issuance).
-    [ -n "$LAN_HOST" ] || { echo "server role requires --lan-host" >&2; exit 2; }
     # Secrets are operator-supplied: the bundle ships .env.*.example only.
     infra_env="$BUNDLE/compose/.env.infra"
     server_env="$BUNDLE/compose/.env.server"
-    for f in "$infra_env" "$server_env"; do
-      [ -f "$f" ] || { echo "missing ${f} — copy ${f}.example to ${f} and fill in secrets (see release/docs/airgap-deployment.md)" >&2; exit 2; }
+    # Two settings in .env.server (written by setup.sh, or by hand) shape a
+    # multi-server deployment, so a re-run keeps the same shape:
+    #   BROCCOLI_INFRA_HOST    this server joins that infra node's DB/MQ/S3 and
+    #                          runs no infra of its own;
+    #   BROCCOLI_GATEWAY_HOSTS the TLS gateway runs on those hosts (the
+    #                          gateway role), not here.
+    # The environment wins over the file.
+    INFRA_HOST="${BROCCOLI_INFRA_HOST:-$(env_get "$server_env" BROCCOLI_INFRA_HOST)}"
+    GATEWAY_HOSTS="${BROCCOLI_GATEWAY_HOSTS:-$(env_get "$server_env" BROCCOLI_GATEWAY_HOSTS)}"
+    env_files=(.env.infra .env.server)
+    [ -z "$INFRA_HOST" ] || env_files=(.env.server)
+    for f in "${env_files[@]}"; do
+      [ -f "$BUNDLE/compose/$f" ] || { echo "missing $BUNDLE/compose/$f — run setup.sh --role server, or copy $f.example to $f and fill in secrets (see release/docs/airgap-deployment.md)" >&2; exit 2; }
     done
-    # Server-only secrets (CA + leaf private keys) live OUTSIDE the manifested
-    # bundle tree. Default to the sidecar build-bundle.sh writes as a SIBLING of
-    # the bundle dir ("<bundle>.server-secret"); override with --server-secret.
-    abs_bundle="$(cd "$BUNDLE" && pwd)"
-    SECRET="${SECRET:-${abs_bundle}.server-secret}"
-    [ -d "$SECRET" ] || { echo "server-secret dir not found: $SECRET — deliver the '<bundle>.server-secret' dir to this host, or pass --server-secret DIR" >&2; exit 2; }
-    bash "$here/load-bundle.sh" --bundle "$BUNDLE"
-    # Ensure the secret dir holds a current TLS leaf for --lan-host: keep a
-    # pre-issued or earlier one only if it chains to this CA, covers LAN_HOST
-    # and is not about to expire; otherwise issue one now from the CA key that
-    # lives only here. A venue whose address moved therefore gets a new leaf.
-    [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
-    if ! bash "$here/ca/issue-leaf.sh" --check --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"; then
-      [ -f "$SECRET/root.key" ] || { echo "the leaf in $SECRET is missing, expiring, or does not cover $LAN_HOST, and there is no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host $LAN_HOST, or place root.key in the server-secret dir (server host only)" >&2; exit 2; }
-      bash "$here/ca/issue-leaf.sh" --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"
-    fi
-    if [ "$BURN" = "1" ]; then rm -f "$SECRET/root.key"; echo "burned $SECRET/root.key"; fi
-    # The gateway mounts caddy/Caddyfile.airgap UN-rendered; Caddy expands the
-    # {$VAR}s from its container env. Never shell-render this file first — that
-    # would corrupt Caddy's {$VAR} placeholder syntax.
-    export LAN_HOST
-    export BROCCOLI_UPSTREAMS="${BROCCOLI_UPSTREAMS:-server:3000}"
-    # Pass the leaf cert+key as individual file paths — NOT the secret dir — so
-    # the contestant-facing gateway never bind-mounts root.key (the CA signing
-    # key that shares this dir). See docker-compose.gateway-airgap.yaml.template.
-    abs_secret="$(cd "$SECRET" && pwd)"
-    export BROCCOLI_TLS_CERT="$abs_secret/server.crt"
-    export BROCCOLI_TLS_KEY="$abs_secret/server.key"
-    # The 443 gateway is the only LAN ingress: bind the server's plaintext :3000
-    # to host loopback so no contestant on the LAN can bypass TLS. Host-local
-    # operator ops still reach it. Universal across Compose versions (an override
-    # `ports: !reset []` would hard-fail below Compose v2.24, no offline remedy).
-    export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-127.0.0.1:3000}"
-    # The server trusts X-Forwarded-For only from the gateway: the edge network
-    # it shares with the gateway here, or BROCCOLI_GATEWAY_HOSTS when the
-    # gateway runs on its own host. The subnet default matches the templates'.
+    # The server stack keeps the project name it has always had (Compose's
+    # default for this directory), so existing installs keep their volumes.
+    # Pinned rather than defaulted so a COMPOSE_PROJECT_NAME in .env.infra or
+    # .env.server cannot move it.
+    compose_args=(-p compose)
+    for f in "${env_files[@]}"; do compose_args+=(--env-file "$f"); done
+    [ -n "$INFRA_HOST" ] || compose_args+=(-f docker-compose.infra.yaml.template)
+    compose_args+=(-f docker-compose.server.yaml.template -f docker-compose.server-airgap.yaml.template)
     export BROCCOLI_EDGE_SUBNET="${BROCCOLI_EDGE_SUBNET:-172.31.250.0/28}"
-    BROCCOLI_GATEWAY_TRUSTED_PROXIES="$(trusted_proxies_json "${BROCCOLI_GATEWAY_HOSTS:-$BROCCOLI_EDGE_SUBNET}")" \
-      || { echo "BROCCOLI_GATEWAY_HOSTS must list IP addresses or CIDRs" >&2; exit 2; }
+    if [ -z "$GATEWAY_HOSTS" ]; then
+      # The TLS gateway runs here. Validate the host BEFORE any heavy work
+      # (bundle load, leaf issuance).
+      [ "${#LAN_HOSTS[@]}" -gt 0 ] || { echo "server role requires --lan-host (or a gateway-only node: set BROCCOLI_GATEWAY_HOSTS, see setup.sh --gateway-host)" >&2; exit 2; }
+      gateway_tls_plan
+      compose_args+=(-f docker-compose.gateway-airgap.yaml.template)
+      export BROCCOLI_UPSTREAMS="${BROCCOLI_UPSTREAMS:-server:3000}"
+      # The 443 gateway is the only LAN ingress: bind the server's plaintext
+      # :3000 to host loopback so no contestant on the LAN can bypass TLS.
+      # Host-local operator ops still reach it. Universal across Compose
+      # versions (an override `ports: !reset []` would hard-fail below Compose
+      # v2.24, no offline remedy).
+      export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-127.0.0.1:3000}"
+      # Trust X-Forwarded-For only from the edge network this server shares
+      # with the gateway. The subnet default matches the templates'.
+      trust="$BROCCOLI_EDGE_SUBNET"
+      echo "server plaintext :3000 bound to host loopback ($BROCCOLI_HTTP_BIND); 443 is the only LAN entrypoint"
+    else
+      # The gateway runs on its own host and reaches this server over the LAN,
+      # so publish :3000 there and trust exactly the gateway's addresses.
+      # Names resolve here: the server only ever sees the gateway's address.
+      export BROCCOLI_HTTP_BIND="${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
+      trust="$GATEWAY_HOSTS"
+      echo "server :3000 published on $BROCCOLI_HTTP_BIND for the gateway at $GATEWAY_HOSTS; firewall it to the gateway"
+    fi
+    BROCCOLI_GATEWAY_TRUSTED_PROXIES="$(gateway_trust_json "$trust")" \
+      || { echo "BROCCOLI_GATEWAY_HOSTS must list IP addresses, CIDRs or resolvable names" >&2; exit 2; }
     export BROCCOLI_GATEWAY_TRUSTED_PROXIES
     echo "server trusts forwarded client addresses only from $BROCCOLI_GATEWAY_TRUSTED_PROXIES"
-    echo "TLS gateway will serve https://$LAN_HOST using leaf in $abs_secret"
-    echo "server plaintext :3000 bound to host loopback ($BROCCOLI_HTTP_BIND); 443 is the only LAN entrypoint"
+    [ -z "$INFRA_HOST" ] || echo "server uses the infra node at $INFRA_HOST; no db/redis/seaweedfs here"
+    dry_run_plan LAN_HOST LAN_HOST_ALIASES BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_UPSTREAMS \
+      BROCCOLI_HTTP_BIND BROCCOLI_EDGE_SUBNET BROCCOLI_GATEWAY_TRUSTED_PROXIES
     [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
+    bash "$here/load-bundle.sh" --bundle "$BUNDLE"
+    [ -n "$GATEWAY_HOSTS" ] || gateway_tls_issue
     # Relabel every bind-mount SOURCE for rootless Podman under SELinux Enforcing
     # (no-op off podman+SELinux): the TLS leaf dir, the un-rendered Caddyfile, and
     # the ./plugins tree the server mounts read-only. Without the plugins relabel,
@@ -102,21 +166,13 @@ case "$ROLE" in
     # — infra HEALTHY but nothing judges. Runs before compose up so labels are set
     # before the containers mount them.
     enable_requested_plugins "$BUNDLE/compose"
-    runtime_relabel "$ENGINE" "$abs_secret" "$here/caddy/Caddyfile.airgap" "$BUNDLE/compose/plugins" 2>/dev/null || true
+    if [ -z "$GATEWAY_HOSTS" ]; then
+      runtime_relabel "$ENGINE" "$abs_secret" "$here/caddy/Caddyfile.airgap" "$BUNDLE/compose/plugins" 2>/dev/null || true
+    else
+      runtime_relabel "$ENGINE" "$BUNDLE/compose/plugins" 2>/dev/null || true
+    fi
     (
       cd "$BUNDLE/compose"
-      # The server stack keeps the project name it has always had (Compose's
-      # default for this directory), so existing installs keep their volumes.
-      # Pinned rather than defaulted so a COMPOSE_PROJECT_NAME in .env.infra or
-      # .env.server cannot move it.
-      compose_args=(
-        -p compose
-        --env-file .env.infra --env-file .env.server
-        -f docker-compose.infra.yaml.template
-        -f docker-compose.server.yaml.template
-        -f docker-compose.server-airgap.yaml.template
-        -f docker-compose.gateway-airgap.yaml.template
-      )
       $COMPOSE "${compose_args[@]}" up -d --pull never
       # Reload the gateway's leaf. `up -d` recreates a container only when its
       # spec changes; a re-issued or rotated leaf is written to the SAME
@@ -125,6 +181,40 @@ case "$ROLE" in
       # cert files. Restart just the gateway so every server bring-up, including
       # a leaf/CA rotation, serves the current cert immediately. Cheap and
       # offline; no image swap, no data-volume touch.
+      [ -n "$GATEWAY_HOSTS" ] || $COMPOSE "${compose_args[@]}" restart gateway
+    )
+    ;;
+  gateway)
+    # A gateway-only node: the internal-CA TLS gateway alone, balancing across
+    # the servers in .env.gateway (setup.sh --role gateway writes it). It holds
+    # the server-secret dir; servers behind it need none.
+    gateway_env="$BUNDLE/compose/.env.gateway"
+    [ -f "$gateway_env" ] || { echo "missing $gateway_env — run setup.sh --role gateway (or write LAN_HOST, LAN_HOST_ALIASES and BROCCOLI_UPSTREAMS there)" >&2; exit 2; }
+    if [ "${#LAN_HOSTS[@]}" -eq 0 ]; then
+      read -r -a LAN_HOSTS <<< "$(env_get "$gateway_env" LAN_HOST) $(env_get "$gateway_env" LAN_HOST_ALIASES)"
+    fi
+    BROCCOLI_UPSTREAMS="$(upstream_list "${BROCCOLI_UPSTREAMS:-$(env_get "$gateway_env" BROCCOLI_UPSTREAMS)}")" \
+      || { echo "BROCCOLI_UPSTREAMS in $gateway_env must list the servers as HOST or HOST:PORT" >&2; exit 2; }
+    export BROCCOLI_UPSTREAMS
+    gateway_tls_plan
+    echo "gateway balances across $BROCCOLI_UPSTREAMS, health-checked on /livez"
+    trust="$(gateway_source_addrs "$BROCCOLI_UPSTREAMS")"
+    cat <<EOF
+Servers behind this gateway must trust it for X-Forwarded-For, or every
+contestant shares one login rate limit. Install each server with:
+  ./setup.sh --role server --gateway-host '${trust:-<this gateway LAN address>}' ...
+EOF
+    # Its own Compose project, so it never collides with a server stack.
+    compose_args=(-p broccoli-gateway --env-file .env.gateway -f docker-compose.gateway-airgap.yaml.template)
+    dry_run_plan LAN_HOST LAN_HOST_ALIASES BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_UPSTREAMS
+    [ -n "$COMPOSE" ] || { echo "no working docker/podman compose provider found" >&2; exit 2; }
+    bash "$here/load-bundle.sh" --bundle "$BUNDLE"
+    gateway_tls_issue
+    runtime_relabel "$ENGINE" "$abs_secret" "$here/caddy/Caddyfile.airgap" 2>/dev/null || true
+    (
+      cd "$BUNDLE/compose"
+      $COMPOSE "${compose_args[@]}" up -d --pull never
+      # Load a re-issued leaf; see the server role.
       $COMPOSE "${compose_args[@]}" restart gateway
     )
     ;;

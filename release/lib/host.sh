@@ -48,6 +48,17 @@ trusted_proxies_json() {
   printf '[%s]\n' "$out"
 }
 
+# gateway_trust_json "HOST ...": trusted_proxies_json for gateways given as
+# IPs, CIDRs or names. A name is resolved here, since the server only ever
+# sees the gateway's address.
+gateway_trust_json() {
+  local h out="" list
+  read -r -d "" -a list <<< "$1" || true
+  for h in "${list[@]}"; do out="$out${out:+ }$(host_address "$h")"; done
+  [ -n "$out" ] || { echo "error: no gateway address given" >&2; return 1; }
+  trusted_proxies_json "$out"
+}
+
 # host_address HOST: HOST as an IPv4 address, resolved here when it is a name.
 # Containers do not read the host's /etc/hosts, so a name listed only there
 # (a typical venue LAN name) must reach them as an address. Prints HOST as
@@ -66,4 +77,55 @@ source_ip_for() {
   command -v ip >/dev/null 2>&1 || return 0
   { ip route get "$1" 2>/dev/null || true; } \
     | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
+
+# upstream_list "HOST[:PORT] ...": a gateway's upstream servers as one
+# space-separated ADDR:PORT line. The port defaults to 3000, and a name is
+# resolved here (host_address), since the gateway container cannot read this
+# host's /etc/hosts. Caddy splices the list into its Caddyfile before parsing
+# it, so anything other than a host and a port is refused.
+upstream_list() {
+  local u host port out="" list
+  read -r -d "" -a list <<< "$1" || true
+  for u in "${list[@]}"; do
+    case "$u" in
+      *[!]A-Za-z0-9.:[-]*) echo "error: upstream '$u' is not HOST or HOST:PORT" >&2; return 1 ;;
+      \[*\]:*) host="${u%:*}" port="${u##*:}" ;;
+      \[*\]) host="$u" port=3000 ;;
+      *:*:*) echo "error: write the IPv6 upstream '$u' as [ADDR]:PORT" >&2; return 1 ;;
+      *:*) host="${u%:*}" port="${u##*:}" ;;
+      *) host="$u" port=3000 ;;
+    esac
+    case "$port" in
+      "" | *[!0-9]*) host="" ;;
+    esac
+    [ -n "$host" ] && [ "$host" != "[]" ] \
+      || { echo "error: upstream '$u' is not HOST or HOST:PORT" >&2; return 1; }
+    case "$host" in \[*) ;; *) host="$(host_address "$host")" ;; esac
+    out="$out${out:+ }$host:$port"
+  done
+  [ -n "$out" ] || { echo "error: no upstream servers given" >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+# gateway_source_addrs "UPSTREAM ...": the addresses the upstream servers see
+# this machine's connections come from, space-separated, which is what each
+# of them must trust for X-Forwarded-For. Falls back to this machine's first
+# address when there is no route to an upstream yet.
+gateway_source_addrs() {
+  local u host addr out="" list
+  read -r -d "" -a list <<< "$1" || true
+  for u in "${list[@]}"; do
+    host="${u%:*}"
+    host="${host#[}"
+    host="${host%]}"
+    addr="$(source_ip_for "$host")"
+    [ -n "$addr" ] || addr="$(hostname -I 2>/dev/null | awk '{print $1}')" || addr=""
+    [ -n "$addr" ] || continue
+    case " $out " in
+      *" $addr "*) ;;
+      *) out="$out${out:+ }$addr" ;;
+    esac
+  done
+  printf '%s\n' "$out"
 }

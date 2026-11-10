@@ -203,7 +203,7 @@ cat > "$B/bundle.json" <<JSON
   "version": "$VERSION",
   "git_sha": "$git_sha",
   "created": "$created",
-  "roles": ["server", "worker", "contestant"]
+  "roles": ["server", "gateway", "worker", "contestant"]
 }
 JSON
 manifest_generate "$B"

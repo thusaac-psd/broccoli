@@ -64,31 +64,83 @@ BROCCOLI_ENV_FILE=.env.single-host-db BROCCOLI__STORAGE__BACKEND=database instal
 render "single-host (database)" --env-file .env.single-host-db \
   -f docker-compose.single-host.yaml.template
 
-# --- release/airgap roles (env files from the airgap generators) ---
+# --- release/airgap roles: env files from setup.sh, the compose command and
+# exported settings from install.sh --dry-run, rendered exactly as planned ---
 mkdir -p "$T/ag"
 # shellcheck source=../airgap/lib/envgen.sh
 . "$rel/airgap/lib/envgen.sh"
-envgen_write "$T/ag/.env.infra" "$T/ag/.env.server" \
-  "$rel/.env.infra.example" "$rel/.env.server.example" admin 'Admin pass #1'
-# What release/airgap/install.sh exports for the server role.
-export LAN_HOST=contest.lan BROCCOLI_TLS_CERT=/tmp/server.crt BROCCOLI_TLS_KEY=/tmp/server.key
-export BROCCOLI_GATEWAY_TRUSTED_PROXIES='["172.31.250.0/28"]'
-airgap_server=(--env-file "$T/ag/.env.infra" --env-file "$T/ag/.env.server"
-  -f docker-compose.infra.yaml.template -f docker-compose.server.yaml.template
-  -f docker-compose.server-airgap.yaml.template -f docker-compose.gateway-airgap.yaml.template)
-render "airgap server" "${airgap_server[@]}"
-server_env() {
-  docker compose "${airgap_server[@]}" config --format json 2>/dev/null \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["server"]["environment"][sys.argv[1]])' "$1"
+# agb NAME: an airgap bundle laid out as build-bundle.sh stages one.
+agb() {
+  local b="$T/$1"
+  mkdir -p "$b/compose/plugins" "$b/caddy"
+  cp "$T"/docker-compose.*.yaml.template "$T"/.env.*.example "$b/compose/"
+  cp "$rel/airgap/caddy/Caddyfile.airgap" "$b/caddy/"
+  ( . "$rel/airgap/lib/manifest.sh" && manifest_generate "$b" )
+  mkdir -p "$b.server-secret"
+  echo key > "$b.server-secret/root.key"
 }
+airgap_setup() {
+  bash "$rel/airgap/setup.sh" --non-interactive --dry-run "$@" >"$T/setup.log" 2>&1 \
+    || { cat "$T/setup.log"; fail "airgap setup.sh $*"; }
+}
+# render_plan LABEL INSTALL_ARGS...: render what install.sh would bring up.
+# Leaves the plan's settings exported, for checks, until the next call.
+plan_vars=()
+render_plan() {
+  local label="$1" plan dir args
+  shift
+  [ "${#plan_vars[@]}" -eq 0 ] || unset "${plan_vars[@]}"
+  plan="$(bash "$rel/airgap/install.sh" --dry-run "$@" 2>&1)" \
+    || { printf '%s\n' "$plan"; fail "airgap install.sh $* --dry-run"; }
+  eval "$(printf '%s\n' "$plan" | grep '^export ')"
+  read -r -a plan_vars <<< "$(printf '%s\n' "$plan" | sed -n 's/^export \([A-Z_]*\)=.*/\1/p' | tr '\n' ' ')"
+  eval "dir=$(printf '%s\n' "$plan" | sed -n 's/^compose dir: //p')"
+  eval "args=($(printf '%s\n' "$plan" | sed -n 's/^compose: //p'))"
+  args=("${args[@]:0:${#args[@]}-4}")   # drop "up -d --pull never"
+  last_render=(--project-directory "$dir" "${args[@]}")
+  cd "$dir"
+  render "$label" "${args[@]}"
+  cd "$T"
+}
+# planned_env SERVICE KEY: KEY in SERVICE's environment as last rendered.
+planned_env() {
+  ( cd "${last_render[1]}" && docker compose "${last_render[@]:2}" config --format json 2>/dev/null ) \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["environment"][sys.argv[2]])' "$1" "$2"
+}
+
+# One host: infra, server and the TLS gateway.
+agb ag-single
+airgap_setup --role server --bundle "$T/ag-single" --lan-host contest.lan --admin-pass 'Admin pass #1'
+render_plan "airgap server" --role server --bundle "$T/ag-single" --lan-host contest.lan
 # The quoted env-file value reaches the container as itself, ' #1' included.
-[ "$(server_env BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD)" = 'Admin pass #1' ] || fail "admin password mangled"
+[ "$(planned_env server BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD)" = 'Admin pass #1' ] || fail "admin password mangled"
 # The override wins over .env.server's TRUSTED_PROXIES and trusts the gateway only.
-[ "$(server_env BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["172.31.250.0/28"]' ] || fail "airgap server trusts more than the gateway"
-# A gateway on a host of its own: the gateway template alone.
-BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' render "airgap gateway alone" \
-  -f docker-compose.gateway-airgap.yaml.template
-unset LAN_HOST BROCCOLI_TLS_CERT BROCCOLI_TLS_KEY BROCCOLI_GATEWAY_TRUSTED_PROXIES
+[ "$(planned_env server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["172.31.250.0/28"]' ] || fail "airgap server trusts more than the gateway"
+
+# Several servers: the infra node, a server joining it, and a gateway-only
+# node in front of both.
+agb ag-infra
+airgap_setup --role server --bundle "$T/ag-infra" --gateway-host 10.0.0.5 --admin-pass 'Admin pass #1'
+render_plan "airgap infra node behind a gateway" --role server --bundle "$T/ag-infra"
+[ "$(planned_env server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["10.0.0.5/32"]' ] || fail "infra node trusts more than its gateway"
+agb ag-join
+cp "$T/ag-infra/compose/server-join.env" "$T/ag-join/compose/"
+airgap_setup --role server --bundle "$T/ag-join" --infra-host 10.0.0.10 --gateway-host 10.0.0.5
+render_plan "airgap joining server" --role server --bundle "$T/ag-join"
+[ "$(planned_env server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["10.0.0.5/32"]' ] || fail "joining server trusts more than its gateway"
+case "$(planned_env server BROCCOLI__DATABASE__URL)" in
+  *@10.0.0.10:5432/broccoli) ;;
+  *) fail "joining server does not reach the infra node's database" ;;
+esac
+[ "$(planned_env server BROCCOLI__AUTH__JWT_SECRET)" = "$(env_get "$T/ag-infra/compose/.env.server" BROCCOLI__AUTH__JWT_SECRET)" ] \
+  || fail "joining server signs tokens with another secret"
+agb ag-gw
+airgap_setup --role gateway --bundle "$T/ag-gw" --lan-host contest.lan --lan-host 10.0.0.5 \
+  --upstream 10.0.0.10 --upstream 10.0.0.11:3000
+render_plan "airgap gateway-only node" --role gateway --bundle "$T/ag-gw"
+[ "$(planned_env gateway BROCCOLI_UPSTREAMS)" = '10.0.0.10:3000 10.0.0.11:3000' ] || fail "gateway upstream list"
+[ "$(planned_env gateway LAN_HOST_ALIASES)" = 10.0.0.5 ] || fail "gateway LAN host aliases"
+[ "${#plan_vars[@]}" -eq 0 ] || unset "${plan_vars[@]}"
 
 printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=a\nBROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=s\n' \
   > "$T/ag/cluster-secrets.env"

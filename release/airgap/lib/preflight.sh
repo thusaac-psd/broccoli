@@ -61,9 +61,18 @@ _pf_contestant() {
   esac
 }
 
-# preflight_run ROLE BUNDLE [SECRET] [CLUSTER]
+_pf_join() {
+  if [ -f "$1" ]; then _pf_pass "server-join.env from the infra node present"
+  else _pf_bad "a server joining an infra node needs its server-join.env — copy compose/server-join.env from the infra node, or pass --server-join (got: $1)"; fi
+}
+
+# preflight_run ROLE BUNDLE [SECRET] [CLUSTER] [JOIN] [REMOTE_GATEWAY]
+# For the server role, JOIN names the infra node's server-join.env when this
+# server joins an infra node instead of running infra itself, and
+# REMOTE_GATEWAY=1 means the TLS gateway runs on another host, so this one
+# needs no TLS material.
 preflight_run() {
-  local role="$1" bundle="$2" secret="${3:-}" cluster="${4:-}"
+  local role="$1" bundle="$2" secret="${3:-}" cluster="${4:-}" join="${5:-}" remote_gw="${6:-}"
   _pf_fail=0
   local engine compose=""
   engine="$(runtime_engine)"
@@ -76,7 +85,11 @@ preflight_run() {
   else _pf_bad "bundle integrity check failed for ${bundle:-none}"; fi
   _pf_disk "$bundle"
   case "$role" in
-    server)     _pf_server "$secret"; _pf_cluster "$cluster" server ;;
+    server)
+      [ "$remote_gw" = 1 ] || _pf_server "$secret"
+      if [ -n "$join" ]; then _pf_join "$join"; else _pf_cluster "$cluster" server; fi
+      ;;
+    gateway)    _pf_server "$secret" ;;
     worker)     _pf_worker; _pf_cluster "$cluster" worker ;;
     contestant) _pf_contestant ;;
     *)          _pf_bad "unknown role: $role" ;;

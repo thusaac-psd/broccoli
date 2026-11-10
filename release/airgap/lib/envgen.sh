@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Generate consistent, idempotent secrets + topology-correct endpoints for the
-# air-gap server role. Secrets from local `openssl rand` (no network). Shared
-# values are written identically into .env.infra and .env.server so the server
-# reaches its co-located infra by compose service name (db/redis/seaweedfs).
+# air-gap roles. Secrets from local `openssl rand` (no network). On the infra
+# node, shared values are written identically into .env.infra and .env.server
+# so the server reaches its co-located infra by compose service name
+# (db/redis/seaweedfs); every other server and worker reaches that infra by
+# its LAN address.
 set -euo pipefail
 
 # URL-safe alphanumeric secret (base64 stripped of +/=).
@@ -37,7 +39,7 @@ envgen_write() {
   env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
   env_set "$infra" BROCCOLI__AUTH__JWT_SECRET "$jwt"
-  env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${BROCCOLI_S3_HOST:-seaweedfs}:8333"
+  env_set "$infra" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://seaweedfs:8333"
   env_set "$infra" BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
   env_set "$infra" BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
 
@@ -45,9 +47,9 @@ envgen_write() {
   env_set "$server" BROCCOLI__AUTH__JWT_SECRET "$jwt"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
   env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
-  env_set "$server" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" "${BROCCOLI_DB_HOST:-db}" 5432 broccoli)"
-  env_set "$server" BROCCOLI__MQ__URL "$(redis_url "$redis" "${BROCCOLI_MQ_HOST:-redis}" 6379)"
-  env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${BROCCOLI_S3_HOST:-seaweedfs}:8333"
+  env_set "$server" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" db 5432 broccoli)"
+  env_set "$server" BROCCOLI__MQ__URL "$(redis_url "$redis" redis 6379)"
+  env_set "$server" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://seaweedfs:8333"
   env_set "$server" BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
   env_set "$server" BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
 }
@@ -81,17 +83,80 @@ workergen_write() {
   [ -n "$server_host" ] || { echo "workergen: server host required (--lan-host or sidecar BROCCOLI_SERVER_HOST)" >&2; return 2; }
   [ -f "$sidecar" ] || { echo "workergen: cluster-secret file not found: $sidecar" >&2; return 2; }
   [ -f "$worker" ] || cp "$worker_ex" "$worker"
-  local pg redis s3a s3s
-  pg="$(env_get "$sidecar" POSTGRES_PASSWORD)"
-  redis="$(env_get "$sidecar" REDIS_PASSWORD)"
-  s3a="$(env_get "$sidecar" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY)"
-  s3s="$(env_get "$sidecar" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)"
-  [ -n "$pg" ] && [ -n "$redis" ] && [ -n "$s3a" ] && [ -n "$s3s" ] \
-    || { echo "workergen: cluster-secret missing a PG/REDIS/S3 key: $sidecar" >&2; return 2; }
-  env_set "$worker" BROCCOLI__DATABASE__URL "$(postgres_url postgres "$pg" "$server_host" 5432 broccoli)"
-  env_set "$worker" BROCCOLI__MQ__URL "$(redis_url "$redis" "$server_host" 6379)"
-  env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${server_host}:8333"
-  env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3a"
-  env_set "$worker" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3s"
+  _envgen_infra_endpoints "$worker" "$sidecar" "$server_host" || return 2
   env_set "$worker" BROCCOLI__WORKER__ID "$worker_id"
+}
+
+# The settings a server or worker needs to reach the infra node's Postgres,
+# Redis and S3. The cluster-secret sidecar and server-join.env both carry
+# them under these names.
+_ENVGEN_INFRA_KEYS=(POSTGRES_PASSWORD REDIS_PASSWORD
+  BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)
+# What every server must share besides that: a token one server signs must
+# verify on the others, and each server resets the bootstrap admin to its own
+# setting whenever it boots.
+_ENVGEN_SERVER_KEYS=(BROCCOLI__AUTH__JWT_SECRET
+  BROCCOLI_BOOTSTRAP_ADMIN_USERNAME BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD)
+
+# _envgen_infra_endpoints ENV SECRETS HOST: point ENV's database, MQ and S3
+# settings at the infra node HOST, with the credentials in SECRETS.
+_envgen_infra_endpoints() {
+  local env="$1" secrets="$2" host="$3" k
+  for k in "${_ENVGEN_INFRA_KEYS[@]}"; do
+    [ -n "$(env_get "$secrets" "$k")" ] || { echo "envgen: $secrets has no $k" >&2; return 2; }
+  done
+  env_set "$env" BROCCOLI__DATABASE__URL \
+    "$(postgres_url postgres "$(env_get "$secrets" POSTGRES_PASSWORD)" "$host" 5432 broccoli)"
+  env_set "$env" BROCCOLI__MQ__URL "$(redis_url "$(env_get "$secrets" REDIS_PASSWORD)" "$host" 6379)"
+  env_set "$env" BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "http://${host}:8333"
+  env_set "$env" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY \
+    "$(env_get "$secrets" BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY)"
+  env_set "$env" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY \
+    "$(env_get "$secrets" BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY)"
+}
+
+# joingen_write INFRA SERVER JOIN
+# On the infra node: write JOIN (server-join.env), what a further server needs
+# to join this deployment: the infra credentials exactly as this node runs
+# them, and the settings every server shares. Rewritten on every run, so it
+# follows a rotated secret.
+joingen_write() {
+  local infra="$1" server="$2" join="$3" k
+  [ -f "$join" ] || { : > "$join"; chmod 0600 "$join"; }
+  for k in "${_ENVGEN_INFRA_KEYS[@]}"; do env_set "$join" "$k" "$(env_get "$infra" "$k")"; done
+  for k in "${_ENVGEN_SERVER_KEYS[@]}"; do env_set "$join" "$k" "$(env_get "$server" "$k")"; done
+}
+
+# servergen_join SERVER SERVER_EXAMPLE JOIN INFRA_HOST
+# On a further server: render .env.server from the shipped example and the
+# infra node's server-join.env, with DB/MQ/S3 at INFRA_HOST. Such a server
+# runs no infra of its own; BROCCOLI_INFRA_HOST in .env.server tells
+# install.sh so on every later run.
+servergen_join() {
+  local server="$1" server_ex="$2" join="$3" infra_host="$4" k v
+  [ -n "$infra_host" ] || { echo "servergen: infra host required (--infra-host)" >&2; return 2; }
+  [ -f "$join" ] || { echo "servergen: $join not found; copy compose/server-join.env from the infra node" >&2; return 2; }
+  [ -f "$server" ] || cp "$server_ex" "$server"
+  _envgen_infra_endpoints "$server" "$join" "$infra_host" || return 2
+  for k in "${_ENVGEN_SERVER_KEYS[@]}"; do
+    v="$(env_get "$join" "$k")"
+    [ -n "$v" ] || { echo "servergen: $join has no $k" >&2; return 2; }
+    env_set "$server" "$k" "$v"
+  done
+  env_set "$server" BROCCOLI_INFRA_HOST "$infra_host"
+}
+
+# gatewaygen_write GATEWAY "LAN_HOST ..." "UPSTREAM ..."
+# Render a gateway-only node's .env.gateway: the names and addresses
+# contestants reach it by (the first is the TLS default), and the servers it
+# balances across. install.sh resolves and checks both on every run.
+gatewaygen_write() {
+  local gateway="$1" upstreams="$3" hosts
+  read -r -d "" -a hosts <<< "$2" || true
+  [ "${#hosts[@]}" -gt 0 ] || { echo "gatewaygen: at least one LAN host required (--lan-host)" >&2; return 2; }
+  [ -n "${upstreams//[[:space:]]/}" ] || { echo "gatewaygen: at least one upstream server required (--upstream)" >&2; return 2; }
+  [ -f "$gateway" ] || { : > "$gateway"; chmod 0600 "$gateway"; }
+  env_set "$gateway" LAN_HOST "${hosts[0]}"
+  env_set "$gateway" LAN_HOST_ALIASES "${hosts[*]:1}"
+  env_set "$gateway" BROCCOLI_UPSTREAMS "$(printf '%s' "$upstreams" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 }
