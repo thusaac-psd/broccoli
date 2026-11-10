@@ -101,6 +101,10 @@ PATH="$tmp/bin:$PATH" bash "$here/../setup.sh" --role worker --bundle "$tmp/bund
   --lan-host localhost --worker-id worker-9 --reconfigure --non-interactive --dry-run >/dev/null
 grep -qx "BROCCOLI__MQ__URL='redis://:rdpw@127.0.0.1:6379'" "$wenv" \
   || { echo "FAIL: worker env names the server by a host-only name"; cat "$wenv"; exit 1; }
+# A re-run without --worker-id keeps the worker's id.
+PATH="$tmp/bin:$PATH" bash "$here/../setup.sh" --role worker --bundle "$tmp/bundle" \
+  --reconfigure --non-interactive --dry-run >/dev/null
+grep -qx "BROCCOLI__WORKER__ID='worker-9'" "$wenv" || { echo "FAIL: a worker re-run changed its id"; cat "$wenv"; exit 1; }
 
 # --- server role + cluster-secret sidecar: .env.infra must NOT be corrupted ---
 # Regression guard: cluster_seed_infra used to run before envgen_write ever

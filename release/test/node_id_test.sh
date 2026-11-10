@@ -28,6 +28,19 @@ case "$a1" in *[!A-Za-z0-9._-]*) fail "id has characters a server id may not: $a
 [ "${#a1}" -le 128 ] || fail "id longer than 128 characters"
 [ "$(BROCCOLI_MACHINE_ID_FILE="$T/machine-a" node_id server)" != "$a1" ] || fail "server and worker ids collide"
 
+# Disk-cloned boxes share a machine-id but not a network card: the first
+# physical card's MAC tells them apart. Virtual interfaces have no device link
+# and do not count, so a new bridge or veth leaves the id alone.
+nic() { mkdir -p "$T/$1/$2"; printf '%s\n' "$3" > "$T/$1/$2/address"; [ -z "${4:-}" ] || ln -s / "$T/$1/$2/device"; }
+nic net-a docker0 02:42:00:00:00:01
+nic net-a eth0 52:54:00:aa:aa:aa phys
+nic net-b eth0 52:54:00:bb:bb:bb phys
+nic net-a2 eth0 52:54:00:aa:aa:aa phys
+nic net-a2 veth9 02:42:00:00:00:09
+id_on() { BROCCOLI_MACHINE_ID_FILE="$T/machine-a" BROCCOLI_SYS_NET_DIR="$T/$1" node_id worker; }
+[ "$(id_on net-a)" != "$(id_on net-b)" ] || fail "two clones with one machine-id got the same id"
+[ "$(id_on net-a)" = "$(id_on net-a2)" ] || fail "a virtual interface changed the id"
+
 cp -r "$rel/." "$T/bundle"
 cd "$T/bundle"
 run() { BROCCOLI_MACHINE_ID_FILE="$T/machine-a" BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \

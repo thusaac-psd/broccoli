@@ -177,7 +177,9 @@ if [ "$ROLE" = gateway ]; then
 fi
 
 if [ "$ROLE" = worker ]; then
-  WORKER_ID="$(answer WORKER_ID 'Worker id (unique per worker)' "$(node_id worker)" 0)"
+  # A re-run keeps the id this worker already has.
+  default_id="$(env_get "$BUNDLE/compose/.env.worker" BROCCOLI__WORKER__ID)"
+  WORKER_ID="$(answer WORKER_ID 'Worker id (unique per worker)' "${default_id:-$(node_id worker)}" 0)"
   # server LAN host: explicit --lan-host wins, else the sidecar's baked host
   SERVER_HOST="${FLAG_LAN_HOST:-$(env_get "$cluster_dir/cluster-secrets.env" BROCCOLI_SERVER_HOST)}"
   [ -n "$SERVER_HOST" ] || { echo "worker role needs the server LAN host: pass --lan-host, or build the bundle with --lan-host" >&2; exit 2; }
