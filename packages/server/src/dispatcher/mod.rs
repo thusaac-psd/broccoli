@@ -143,7 +143,9 @@ impl Dispatcher {
             handles.push(tokio::spawn(steal::run(
                 deps.state.clone(),
                 deps.server_id.clone(),
-                deps.config.lease_ttl_secs,
+                steal::Reclaim::Stale {
+                    lease_ttl_secs: deps.config.lease_ttl_secs,
+                },
                 deps.config.steal_scan_interval_secs,
                 deps.config.steal_batch_size,
                 deps.config.max_dispatch_retries,
@@ -162,7 +164,23 @@ impl Dispatcher {
                 info!("Reply-queue sweeper disabled because Redis client is unavailable");
             }
         } else {
-            info!("Lease refresh and steal scanning disabled by config");
+            // Without lease refresh a live peer's heartbeat goes stale too, so
+            // stealing by lease age is off. Work a server explicitly released
+            // (graceful shutdown, or a restart's boot recovery) is owned by
+            // no one, though, and is still re-dispatched promptly.
+            handles.push(tokio::spawn(steal::run(
+                deps.state.clone(),
+                deps.server_id.clone(),
+                steal::Reclaim::Released,
+                deps.config.steal_scan_interval_secs,
+                deps.config.steal_batch_size,
+                deps.config.max_dispatch_retries,
+                cancel_rx.clone(),
+            )));
+            info!(
+                "Lease refresh and steal scanning disabled by config; only released work \
+                 is reclaimed"
+            );
         }
 
         if deps.config.operation_reaper_enabled {

@@ -52,10 +52,49 @@ impl ClaimPlan {
     }
 }
 
+/// Which in-flight rows a scan may take over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaim {
+    /// The lease/steal sweeper: any row whose lease lapsed (heartbeat older
+    /// than the TTL, or never stamped), whoever owns it. Needs every live
+    /// owner to refresh its leases, so it only runs with lease/steal on.
+    Stale { lease_ttl_secs: u64 },
+    /// Only rows a server explicitly gave up with [`recover_orphaned_leases`]
+    /// (on graceful shutdown, or at boot for a previous instance's work). No
+    /// live server owns those, so this is safe without lease refresh: it is
+    /// how released work is recovered when lease/steal is off.
+    Released,
+}
+
+#[cfg(test)]
+const STALE_60: Reclaim = Reclaim::Stale { lease_ttl_secs: 60 };
+
+/// Suffix of the owner sentinel [`recover_orphaned_leases`] stamps. Cannot
+/// collide with a real server id.
+const RELEASED_OWNER_SUFFIX: &str = "#orphaned";
+
+impl Reclaim {
+    /// The `WHERE` predicate selecting reclaimable rows, binding `$1`.
+    fn predicate(self) -> (&'static str, sea_orm::Value) {
+        match self {
+            Reclaim::Stale { lease_ttl_secs } => (
+                "((owner_server_id IS NULL AND created_at < $1) \
+                  OR (owner_server_id IS NOT NULL \
+                      AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1)))",
+                (chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64)).into(),
+            ),
+            Reclaim::Released => (
+                "owner_server_id LIKE '%' || $1",
+                RELEASED_OWNER_SUFFIX.into(),
+            ),
+        }
+    }
+}
+
 pub async fn run(
     state: AppState,
     server_id: String,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     interval_secs: u64,
     batch_size: u32,
     max_dispatch_retries: u32,
@@ -64,7 +103,7 @@ pub async fn run(
     if let Err(e) = scan_once(
         state.clone(),
         &server_id,
-        lease_ttl_secs,
+        reclaim,
         batch_size,
         max_dispatch_retries,
     )
@@ -84,7 +123,7 @@ pub async fn run(
                 if let Err(e) = scan_once(
                     state.clone(),
                     &server_id,
-                    lease_ttl_secs,
+                    reclaim,
                     batch_size,
                     max_dispatch_retries,
                 ).await {
@@ -159,7 +198,7 @@ where
 async fn scan_once(
     state: AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<()> {
@@ -169,7 +208,7 @@ async fn scan_once(
             claim_submissions(
                 &state,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 submission_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -190,7 +229,7 @@ async fn scan_once(
             claim_deferred_judgements(
                 &state.db,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 deferred_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -224,7 +263,7 @@ async fn scan_once(
             claim_code_runs(
                 &state,
                 server_id,
-                lease_ttl_secs,
+                reclaim,
                 code_run_slots.len() as u32,
                 max_dispatch_retries,
             )
@@ -242,8 +281,12 @@ async fn scan_once(
     Ok(())
 }
 
-/// Release this server's OWN in-flight leases at startup so the steal sweeper
-/// can reclaim them.
+/// Release this server's OWN in-flight leases so the rest of the fleet (or this
+/// server after a restart) re-dispatches them. Called at boot, for work a
+/// previous instance of this `server_id` left behind, and on graceful
+/// shutdown, for the work whose drivers are about to die with the process.
+/// Released rows are reclaimed by the steal sweeper with lease/steal on, and
+/// by the [`Reclaim::Released`] scan with it off.
 ///
 /// A restarted coordinator keeps the **same** `server_id`, so every submission,
 /// code-run, and unfinalized in-flight judgement (current OR not) it owned
@@ -275,7 +318,7 @@ pub async fn recover_orphaned_leases(
     // reclaims it on the first scan with no `created_at` aging, and (b) differs
     // from `server_id` so the lease fiber's `owner = server_id` refresh skips
     // it. The `#orphaned` suffix cannot collide with a real server id.
-    let orphan_owner = format!("{server_id}#orphaned");
+    let orphan_owner = format!("{server_id}{RELEASED_OWNER_SUFFIX}");
     let leased = || {
         [
             SubmissionStatus::Pending,
@@ -376,12 +419,12 @@ fn reserve_redispatch_slots(
 async fn claim_submissions(
     state: &AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "submission", lease_ttl_secs, batch_size).await?;
+    let rows = claim_rows(&txn, "submission", reclaim, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -598,12 +641,12 @@ async fn clear_current_submission_results(
 async fn claim_deferred_judgements(
     db: &DatabaseConnection,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<(submission::Model, i32, bool)>> {
     let txn = db.begin().await?;
-    let rows = claim_deferred_judgement_rows(&txn, lease_ttl_secs, batch_size).await?;
+    let rows = claim_deferred_judgement_rows(&txn, reclaim, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -841,12 +884,12 @@ async fn claim_deferred_judgements(
 async fn claim_code_runs(
     state: &AppState,
     server_id: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
     max_dispatch_retries: u32,
 ) -> anyhow::Result<Vec<code_run::Model>> {
     let txn = state.db.begin().await?;
-    let rows = claim_rows(&txn, "code_run", lease_ttl_secs, batch_size).await?;
+    let rows = claim_rows(&txn, "code_run", reclaim, batch_size).await?;
     let plan = ClaimPlan::from_rows(rows, max_dispatch_retries);
 
     if !plan.redispatch_ids.is_empty() {
@@ -930,18 +973,15 @@ async fn claim_code_runs(
 async fn claim_rows(
     txn: &DatabaseTransaction,
     table: &str,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
-    let threshold = chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64);
+    let (reclaimable, bound) = reclaim.predicate();
     let sql = format!(
         r#"SELECT id, judge_epoch, retry_count
            FROM {table}
            WHERE status IN ('Pending', 'Compiling', 'Running')
-             AND (
-               (owner_server_id IS NULL AND created_at < $1)
-               OR (owner_server_id IS NOT NULL AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1))
-             )
+             AND {reclaimable}
            ORDER BY created_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#
@@ -950,7 +990,7 @@ async fn claim_rows(
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [threshold.into(), i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into()],
         ))
         .await?;
 
@@ -959,27 +999,26 @@ async fn claim_rows(
 
 async fn claim_deferred_judgement_rows(
     txn: &DatabaseTransaction,
-    lease_ttl_secs: u64,
+    reclaim: Reclaim,
     batch_size: u32,
 ) -> Result<Vec<ClaimedRow>, sea_orm::DbErr> {
-    let threshold = chrono::Utc::now() - chrono::Duration::seconds(lease_ttl_secs as i64);
-    let sql = r#"SELECT id, judge_epoch, retry_count
-                 FROM submission_judgement
-                 WHERE is_current = TRUE
-                   AND is_finalized = FALSE
-                   AND status IN ('Pending', 'Compiling', 'Running')
-                   AND (
-                     (owner_server_id IS NULL AND created_at < $1)
-                     OR (owner_server_id IS NOT NULL AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < $1))
-                   )
-                 ORDER BY created_at
-                 LIMIT $2
-                 FOR UPDATE SKIP LOCKED"#;
+    let (reclaimable, bound) = reclaim.predicate();
+    let sql = format!(
+        r#"SELECT id, judge_epoch, retry_count
+           FROM submission_judgement
+           WHERE is_current = TRUE
+             AND is_finalized = FALSE
+             AND status IN ('Pending', 'Compiling', 'Running')
+             AND {reclaimable}
+           ORDER BY created_at
+           LIMIT $2
+           FOR UPDATE SKIP LOCKED"#
+    );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [threshold.into(), i64::from(batch_size).into()],
+            [bound, i64::from(batch_size).into()],
         ))
         .await?;
 
@@ -1247,9 +1286,15 @@ mod tests {
             )),
         };
 
-        scan_once(state, "server-b", 1, 8, 5)
-            .await
-            .expect("full dispatcher queue should skip steal claims");
+        scan_once(
+            state,
+            "server-b",
+            Reclaim::Stale { lease_ttl_secs: 1 },
+            8,
+            5,
+        )
+        .await
+        .expect("full dispatcher queue should skip steal claims");
 
         drop(held_slot);
     }
@@ -1441,7 +1486,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1499,7 +1544,7 @@ mod deferred_steal_db_tests {
         .await
         .expect("seed stale test_case_result");
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1538,7 +1583,7 @@ mod deferred_steal_db_tests {
         // retry_count + 1 > max_dispatch_retries(5) => exhausted.
         seed_stale_deferred_judgement(&db, sub_id, 0, 5).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1574,7 +1619,7 @@ mod deferred_steal_db_tests {
 
         // Before recovery: the steal cannot reclaim it (own, fresh lease) -
         // this is the restart-orphan hang.
-        let pre = claim_deferred_judgements(&db, "server-1", 60, 10, 5)
+        let pre = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
             .await
             .expect("pre-recovery claim");
         assert_eq!(
@@ -1591,7 +1636,7 @@ mod deferred_steal_db_tests {
         assert_eq!(subs, 1, "the parent submission lease is released");
 
         // After recovery: the steal reclaims and re-dispatches it.
-        let post = claim_deferred_judgements(&db, "server-1", 60, 10, 5)
+        let post = claim_deferred_judgements(&db, "server-1", STALE_60, 10, 5)
             .await
             .expect("post-recovery claim");
         assert_eq!(post.len(), 1, "released judgement is now stealable");
@@ -1699,7 +1744,7 @@ mod deferred_steal_db_tests {
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_stale_deferred_judgement(&db, sub_id, 0, 0).await;
 
-        let claimed = claim_deferred_judgements(&db, "live-server", 60, 10, 5)
+        let claimed = claim_deferred_judgements(&db, "live-server", STALE_60, 10, 5)
             .await
             .expect("claim deferred judgements");
         assert_eq!(
@@ -1739,6 +1784,50 @@ mod deferred_steal_db_tests {
         assert!(
             judgement.lease_heartbeat_at.is_some(),
             "sibling replica's lease is left intact"
+        );
+    }
+
+    /// With lease/steal off, nothing refreshes leases, so a live peer's
+    /// heartbeat looks just as stale as a dead one's. The `Released` scan must
+    /// therefore take only work a server explicitly released, never a peer's
+    /// row merely because its heartbeat is old.
+    #[tokio::test]
+    async fn released_scan_takes_released_work_and_leaves_live_peers_alone() {
+        let (_pg, db) = start_pg().await;
+        let released = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_owned_fresh_judgement(&db, released, 0, 0, "server-1").await;
+        set_submission_owner(&db, released, "server-1").await;
+        let peer = seed_submission(&db, SubmissionStatus::Running, 0).await;
+        seed_stale_deferred_judgement(&db, peer, 0, 0).await;
+        set_submission_owner(&db, peer, "server-2").await;
+
+        let before = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
+            .await
+            .expect("claim before release");
+        assert!(before.is_empty(), "nothing has been released yet");
+
+        recover_orphaned_leases(&db, "server-1")
+            .await
+            .expect("release server-1's work");
+        let claimed = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
+            .await
+            .expect("claim released work");
+        let ids: Vec<i32> = claimed.iter().map(|(sub, _, _)| sub.id).collect();
+        assert_eq!(ids, vec![released], "only the released submission is taken");
+        assert_eq!(
+            current_judgement(&db, released)
+                .await
+                .owner_server_id
+                .as_deref(),
+            Some("server-3")
+        );
+        assert_eq!(
+            current_judgement(&db, peer)
+                .await
+                .owner_server_id
+                .as_deref(),
+            Some("dead-server"),
+            "the stale-heartbeat judgement nobody released is left alone"
         );
     }
 }

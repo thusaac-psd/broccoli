@@ -29,6 +29,9 @@ pub struct ServerRuntime {
     app: axum::Router,
     addr: SocketAddr,
     dispatcher: crate::dispatcher::Dispatcher,
+    /// To release this server's in-flight work after the dispatcher stops.
+    db: sea_orm::DatabaseConnection,
+    server_id: String,
     /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
     /// [`crate::healthz_runtime`] (UP#14e). `None` when `server.healthz_listen`
     /// is unset. The thread runs for the process lifetime and is reaped by
@@ -419,39 +422,14 @@ impl ServerRuntime {
         tokio::spawn(crate::plugin_lifecycle::run(state.clone()));
 
         // Boot-time orphan recovery: a restart leaves this server's in-flight
-        // submissions/judgements/code-runs tagged with our own `server_id` and a
-        // fresh lease the (now-dead) driver can no longer honor. The lease fiber
-        // would keep refreshing those leases, so the steal sweeper could never
-        // reclaim them and the work would hang in `Running` forever. Release them
-        // BEFORE spawning the dispatcher so the steal sweeper's first scan picks
-        // them up. Best-effort: a failure here must not block startup. Gated on
-        // lease/steal being enabled - without the sweeper nothing would reclaim
-        // the released rows.
-        if app_config.server.dispatcher_lease_steal_enabled {
-            match crate::dispatcher::steal::recover_orphaned_leases(&db, &server_id).await {
-                Ok((subs, code_runs, judgements)) => {
-                    if subs > 0 || code_runs > 0 || judgements > 0 {
-                        info!(
-                            server_id = %server_id,
-                            submissions = subs,
-                            code_runs,
-                            judgements,
-                            "Startup recovery released own orphaned in-flight leases for steal"
-                        );
-                    } else {
-                        info!(server_id = %server_id, "Startup recovery: no orphaned leases to release");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server_id = %server_id,
-                        error = %e,
-                        "Startup orphan-lease recovery failed; in-flight work owned by a prior \
-                         instance of this server_id may hang until manually reclaimed"
-                    );
-                }
-            }
-        }
+        // submissions/judgements/code-runs tagged with our own `server_id`,
+        // but the drivers judging them died with the old process. Release
+        // them BEFORE spawning the dispatcher, whose first reclaim scan then
+        // re-dispatches them: the steal sweeper with lease/steal on, the
+        // released-work scan with it off. Releasing also stops them from
+        // counting against this server's in-flight budget. Best-effort: a
+        // failure here must not block startup.
+        release_own_inflight(&db, &server_id, "Startup recovery").await;
 
         let dispatcher = crate::dispatcher::Dispatcher::spawn(crate::dispatcher::DispatcherDeps {
             state: state.clone(),
@@ -524,6 +502,8 @@ impl ServerRuntime {
             app,
             addr,
             dispatcher,
+            db,
+            server_id,
             _healthz_handle: healthz_handle,
             _telemetry_guard: telemetry_guard,
         })
@@ -534,6 +514,27 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Server runtime error at http://{}", self.addr));
         self.dispatcher.shutdown().await;
+        // The drivers of this server's in-flight work die with the process:
+        // hand the work to the rest of the fleet now instead of leaving it
+        // owned by a server that is gone.
+        release_own_inflight(&self.db, &self.server_id, "Shutdown").await;
         serve_result
+    }
+}
+
+/// Release every in-flight row this server owns so the fleet re-dispatches
+/// it (see [`crate::dispatcher::steal::recover_orphaned_leases`]).
+async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str, phase: &str) {
+    match crate::dispatcher::steal::recover_orphaned_leases(db, server_id).await {
+        Ok((submissions, code_runs, judgements)) => info!(
+            server_id,
+            submissions, code_runs, judgements, "{phase}: released own in-flight work"
+        ),
+        Err(e) => warn!(
+            server_id,
+            error = %e,
+            "{phase}: failed to release own in-flight work; it is recovered at this \
+             server's next boot or by the stuck-job detector"
+        ),
     }
 }
