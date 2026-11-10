@@ -85,9 +85,44 @@ docker compose --env-file .env.infra -f docker-compose.infra.yaml exec db \
 
 Env files written by this release set `COMPOSE_PROJECT_NAME=broccoli-<role>`,
 so each role is its own Compose project. Env files from earlier releases have
-no project name, and Compose uses the directory name instead. Do not add one to
-a role that is already running: its volumes, including the database, are named
-after the project, and a new name would start it on new, empty volumes.
+no project name, and Compose uses the bundle directory's name instead, for
+example `broccoli-platform-v020` for `broccoli-platform-v0.2.0/`. A role's
+volumes, including the database, are named after its project, so the same env
+file in a new release's directory would start on new, empty volumes.
+
+Before moving such an env file, pin the project it runs as today. On the node,
+in the old bundle directory:
+
+```bash
+docker compose ls          # the NAME column is the project
+docker volume ls --filter label=com.docker.compose.volume=postgres_data \
+  --format '{{.Label "com.docker.compose.project"}}'
+echo "COMPOSE_PROJECT_NAME='broccoli-platform-v020'" >> .env.infra
+```
+
+Never rename the project of a role that is already running. `install.sh`
+refuses to start a role whose env file has no project name while that role's
+data volume exists only under a different project, and prints the name to pin.
+
+## Upgrading from a new bundle offline
+
+To move a node to a newly extracted bundle without a registry:
+
+1. Pin the project name as above if the env file has none.
+2. Copy the role's env file (and `connection.env`, plus `server-secrets.env` on
+   server nodes) from the old bundle directory into the new one.
+3. Run `./install.sh <role>` in the new directory. It loads the bundled images
+   (`images/*.tar.gz`), keeps the env file's secrets, takes any changed
+   settings from `connection.env` and `server-secrets.env`, and points
+   `BROCCOLI_SERVER_IMAGE`, `BROCCOLI_WORKER_IMAGE` (same variant) or
+   `CADDY_IMAGE` at the images it just loaded. It leaves infra image tags
+   alone.
+
+To load the images by hand instead, then edit the image tag in the env file:
+
+```bash
+for f in images/*.tar.gz; do gzip -dc "$f" | docker load; done
+```
 
 ## Rollback
 

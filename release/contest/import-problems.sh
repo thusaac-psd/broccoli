@@ -8,7 +8,9 @@
 # Prerequisites on the target:
 #   - the Broccoli server has started at least once (it auto-creates the schema
 #     and registers its plugins on boot)
-#   - the target's config.toml points at the contest Postgres + SeaweedFS
+#   - the target's config.toml (native) or connection.env (Docker, via
+#     --env-file) points at the contest Postgres + SeaweedFS
+#   - psql on this host (postgresql-client)
 #
 # Credential safety: a contest bundle's user rows are restored with
 # ON CONFLICT (username) WHERE deleted_at IS NULL DO NOTHING, so an existing
@@ -18,7 +20,7 @@
 #
 # Usage:
 #   ./import-problems.sh (ARCHIVE.tar.gz | --bundle DIR)
-#                        [--config /data/broccoli/config/config.toml]
+#                        [--config /data/broccoli/config/config.toml | --env-file connection.env]
 #                        [--truncate] [--wipe-dependents] [--yes]
 #                        [--with-secrets] [--dry-run]
 #   ARCHIVE.tar.gz    : a tarball made by export-problems.sh (mutually
@@ -49,18 +51,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCHIVE=""
 BUNDLE_DIR=""
 CONFIG="/data/broccoli/config/config.toml"
+ENV_FILE=""
 TRUNCATE=0
 WIPE_DEPENDENTS=0
 YES=0
 WITH_SECRETS=0
 DRY_RUN=0
-usage() { echo "usage: ./import-problems.sh (ARCHIVE.tar.gz | --bundle DIR) [--config C] [--truncate] [--wipe-dependents] [--yes] [--with-secrets] [--dry-run]" >&2; }
+usage() { echo "usage: ./import-problems.sh (ARCHIVE.tar.gz | --bundle DIR) [--config C | --env-file F] [--truncate] [--wipe-dependents] [--yes] [--with-secrets] [--dry-run]" >&2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --bundle) BUNDLE_DIR="$2"; shift 2 ;;
     --with-secrets) WITH_SECRETS=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --config) CONFIG="$2"; shift 2 ;;
+    --env-file) ENV_FILE="$2"; shift 2 ;;
     --truncate) TRUNCATE=1; shift ;;
     --wipe-dependents) WIPE_DEPENDENTS=1; shift ;;
     --yes) YES=1; shift ;;
@@ -127,15 +131,27 @@ CONTEST_BUNDLE=0
 grep -q 'broccoli-contest/v1' <<<"$MANIFEST_JSON" && CONTEST_BUNDLE=1
 
 if [ "$DRY_RUN" != 1 ]; then
-  [ -f "$CONFIG" ] || { echo "config not found: $CONFIG" >&2; exit 2; }
-  command -v psql >/dev/null || { echo "psql not found" >&2; exit 2; }
+  command -v psql >/dev/null || { echo "psql not found (install postgresql-client on this host)" >&2; exit 2; }
 
-  dburl="$(awk '/^\[database\]/{f=1;next} /^\[/{f=0} f' "$CONFIG" | grep -E '^[[:space:]]*url' | head -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^"//; s/"$//')"
-  s3sec="$(awk '/^\[storage.object_storage\]/{f=1;next} /^\[/{f=0} f' "$CONFIG")"
-  s3val(){ printf '%s\n' "$s3sec" | grep -E "^[[:space:]]*$1[[:space:]]*=" | head -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^"//; s/"$//'; }
+  if [ -n "$ENV_FILE" ]; then
+    # A Docker install has no config.toml; its connection.env (or .env.infra)
+    # carries the same settings.
+    [ -f "$ENV_FILE" ] || { echo "env file not found: $ENV_FILE" >&2; exit 2; }
+    # shellcheck source=../lib/env.sh
+    . "$HERE/../lib/env.sh"
+    dburl="$(env_get "$ENV_FILE" BROCCOLI__DATABASE__URL)"
+    s3val(){ env_get "$ENV_FILE" "BROCCOLI__STORAGE__OBJECT_STORAGE__$(printf '%s' "$1" | tr 'a-z' 'A-Z')"; }
+    src="$ENV_FILE"
+  else
+    [ -f "$CONFIG" ] || { echo "config not found: $CONFIG (pass --env-file connection.env on a Docker install)" >&2; exit 2; }
+    dburl="$(awk '/^\[database\]/{f=1;next} /^\[/{f=0} f' "$CONFIG" | grep -E '^[[:space:]]*url' | head -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^"//; s/"$//')"
+    s3sec="$(awk '/^\[storage.object_storage\]/{f=1;next} /^\[/{f=0} f' "$CONFIG")"
+    s3val(){ printf '%s\n' "$s3sec" | grep -E "^[[:space:]]*$1[[:space:]]*=" | head -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^"//; s/"$//'; }
+    src="$CONFIG"
+  fi
   export S3_ENDPOINT="$(s3val endpoint)" S3_BUCKET="$(s3val bucket)" S3_REGION="$(s3val region)"
   export S3_ACCESS_KEY="$(s3val access_key)" S3_SECRET_KEY="$(s3val secret_key)"
-  [ -n "$dburl" ] || { echo "could not read [database].url from $CONFIG" >&2; exit 2; }
+  [ -n "$dburl" ] || { echo "could not read the database URL from $src" >&2; exit 2; }
 
   PSQL=(psql "$dburl" -v ON_ERROR_STOP=1 -At)
 

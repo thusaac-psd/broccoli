@@ -35,14 +35,25 @@ mkdir -p "$OUT"
 # dir 0755, so the private key would be briefly group/world-readable.
 chmod 700 "$OUT"
 
+case "$DAYS" in ""|*[!0-9]*) echo "--days must be a whole number" >&2; exit 2 ;; esac
+# shellcheck source=sign.sh
+. "$(cd "$(dirname "$0")" && pwd)/sign.sh"
+
 umask 077
 openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/root.key"
 chmod 0600 "$OUT/root.key"
 
-openssl req -x509 -new -key "$OUT/root.key" -sha256 -days "$DAYS" \
-  -out "$OUT/root.crt" \
-  -subj "/O=${ORG}/CN=${CN}" \
-  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-  -addext "keyUsage=critical,keyCertSign,cRLSign"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+openssl req -new -key "$OUT/root.key" -subj "/O=${ORG}/CN=${CN}" -out "$work/root.csr"
+cat > "$work/ext" <<EXT
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+EXT
+# Backdated a day like the leaf (sign.sh): a root that is "not yet valid" on a
+# slow-clocked machine fails the whole chain.
+sign_csr "$work/root.csr" "$OUT/root.crt" "$(backdated_start)" \
+  "$(utc_time $(($(date -u +%s) + DAYS * 86400)))" "$work/ext" "$OUT/root.key"
+chmod 0644 "$OUT/root.crt"
 
 echo "minted CA: $OUT/root.crt (key: $OUT/root.key, mode 0600)"
