@@ -271,7 +271,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh a CLI access token using a stored refresh token
-     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated.
+     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated, with the same 30-second replay grace as POST /auth/refresh.
      */
     post: operations['cliRefreshToken'];
     delete?: never;
@@ -351,7 +351,7 @@ export interface paths {
     put?: never;
     /**
      * Poll for device authorization token
-     * @description Polling endpoint for the device code flow. Returns the JWT token once the user has authorized the device. Returns 400 with 'authorization_pending' while waiting.
+     * @description Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).
      */
     post: operations['pollDeviceToken'];
     delete?: never;
@@ -431,7 +431,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh access token
-     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token. Fails if the user is banned or the token is expired/revoked.
+     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it revokes every refresh token of the user.
      */
     post: operations['refreshToken'];
     delete?: never;
@@ -1689,7 +1689,7 @@ export interface paths {
     put?: never;
     /**
      * Grant a permission to a role
-     * @description Grants a permission to a role. Requires `role:manage` permission.
+     * @description Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.
      */
     post: operations['grantPermissionToRole'];
     delete?: never;
@@ -1710,7 +1710,9 @@ export interface paths {
     post?: never;
     /**
      * Revoke a permission from a role
-     * @description Revokes a permission from a role. Requires `role:manage` permission.
+     * @description Revokes a permission from a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold every permission of the role, including the one being revoked.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokePermissionFromRole'];
     options?: never;
@@ -1975,16 +1977,16 @@ export interface paths {
     post?: never;
     /**
      * Soft-delete a user by ID
-     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission.
+     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;
     head?: never;
     /**
      * Update user information
-     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.
+     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name. Without `system:admin`, the target user may not hold any permission the caller lacks.
      */
     patch: operations['updateUser'];
     trace?: never;
@@ -2000,7 +2002,7 @@ export interface paths {
     put?: never;
     /**
      * Assign a role to a user
-     * @description Assigns a role to the user. Requires `user:manage` permission.
+     * @description Assigns a role to the user. Requires `user:manage` permission. Idempotent: assigning a role the user already holds changes nothing and returns 200.
      */
     post: operations['assignRole'];
     delete?: never;
@@ -2021,7 +2023,9 @@ export interface paths {
     post?: never;
     /**
      * Revoke a role from a user
-     * @description Revokes a role from the user. Requires `user:manage` permission.
+     * @description Revokes a role from the user. Requires `user:manage` permission; without `system:admin`, neither the role nor the target user may hold a permission the caller lacks.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokeRole'];
     options?: never;
@@ -10529,8 +10533,17 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Role not found (NOT_FOUND) */
+      404: {
         headers: {
           [name: string]: unknown;
         };
@@ -10570,7 +10583,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10581,6 +10594,15 @@ export interface operations {
       };
       /** @description Role permission not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -11410,7 +11432,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11428,7 +11450,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description User is in an active or under-judgement contest (CONFLICT) */
+      /** @description User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11482,7 +11504,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11493,6 +11515,15 @@ export interface operations {
       };
       /** @description User not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Username taken (USERNAME_TAKEN) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -11518,6 +11549,13 @@ export interface operations {
       };
     };
     responses: {
+      /** @description User already holds the role; nothing changed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Role assigned */
       201: {
         headers: {
@@ -11604,6 +11642,15 @@ export interface operations {
       };
       /** @description User role not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };

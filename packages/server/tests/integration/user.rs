@@ -692,3 +692,316 @@ mod user_creation {
         assert_ne!(response.id(), id);
     }
 }
+
+/// Looks up the id of the user named `username`.
+async fn user_id(app: &TestApp, username: &str) -> i32 {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("db")
+        .expect("user exists")
+        .id
+}
+
+mod account_management_ceiling {
+    use super::*;
+    use broccoli_server_sdk::permissions as perm;
+
+    /// A `user:manage` holder cannot reset the password of a user whose roles exceed
+    /// its own permissions, so it cannot log in as an admin. Update and delete apply
+    /// the same privilege ceiling as role assignment.
+    #[tokio::test]
+    async fn user_manager_cannot_take_over_an_admin() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions("aa_mgr", "password123", &[perm::USER_MANAGE])
+            .await;
+        app.create_user_with_role("aa_boss", "password123", "admin")
+            .await;
+        let boss = user_id(&app, "aa_boss").await;
+
+        let res = app
+            .patch_with_token(
+                &routes::user(boss),
+                &json!({"password": "takeover123"}),
+                &mgr,
+            )
+            .await;
+        assert_eq!(
+            res.status, 403,
+            "user:manage reset an admin's password: {}",
+            res.text
+        );
+
+        let login = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "aa_boss", "password": "takeover123"}),
+            )
+            .await;
+        assert_ne!(login.status, 200, "attacker logged in as the admin");
+    }
+
+    /// A `user:manage` holder cannot delete a user whose roles exceed its own
+    /// permissions.
+    #[tokio::test]
+    async fn user_manager_cannot_delete_an_admin() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions("aa_mgr", "password123", &[perm::USER_MANAGE])
+            .await;
+        app.create_user_with_role("aa_boss", "password123", "admin")
+            .await;
+        let boss = user_id(&app, "aa_boss").await;
+
+        let res = app.delete_with_token(&routes::user(boss), &mgr).await;
+        assert_eq!(
+            res.status, 403,
+            "user:manage deleted an admin: {}",
+            res.text
+        );
+    }
+
+    /// The ceiling allows what the caller does hold: a user manager can still
+    /// reset a contestant's password and delete a contestant.
+    #[tokio::test]
+    async fn user_manager_can_manage_accounts_within_its_ceiling() {
+        let app = TestApp::spawn().await;
+        let mgr = app
+            .create_user_with_permissions(
+                "aa_mgr",
+                "password123",
+                &[perm::USER_MANAGE, perm::SUBMISSION_SUBMIT],
+            )
+            .await;
+        app.create_authenticated_user("aa_pupil", "password123")
+            .await;
+        let pupil = user_id(&app, "aa_pupil").await;
+
+        let res = app
+            .patch_with_token(
+                &routes::user(pupil),
+                &json!({"password": "newpass123"}),
+                &mgr,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let res = app.delete_with_token(&routes::user(pupil), &mgr).await;
+        assert_eq!(res.status, 204, "{}", res.text);
+    }
+}
+
+mod user_update_validation {
+    use super::*;
+
+    /// Renaming a user to a username another account holds is a 409
+    /// `USERNAME_TAKEN`, not a server error.
+    #[tokio::test]
+    async fn update_user_to_taken_username_is_a_conflict() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        app.create_authenticated_user("aa_alice", "password123")
+            .await;
+        app.create_authenticated_user("aa_bob", "password123").await;
+        let bob = user_id(&app, "aa_bob").await;
+
+        let res = app
+            .patch_with_token(&routes::user(bob), &json!({"username": "aa_alice"}), &admin)
+            .await;
+        assert_eq!(res.status, 409, "{}", res.text);
+        assert_eq!(res.body["code"], "USERNAME_TAKEN");
+    }
+
+    /// `PATCH /users/{id}` validates the username and password with the same rules
+    /// as registration and trims surrounding whitespace from the username.
+    #[tokio::test]
+    async fn update_user_validates_like_registration() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        app.create_authenticated_user("aa_carol", "password123")
+            .await;
+        let carol = user_id(&app, "aa_carol").await;
+
+        for body in [json!({"password": "x"}), json!({"username": "has space!"})] {
+            let res = app
+                .patch_with_token(&routes::user(carol), &body, &admin)
+                .await;
+            assert_eq!(res.status, 400, "{body} accepted: {}", res.text);
+        }
+
+        // Surrounding whitespace is trimmed, as at registration and login.
+        let res = app
+            .patch_with_token(
+                &routes::user(carol),
+                &json!({"username": " aa_carol2 "}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["username"], "aa_carol2");
+        let login = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "aa_carol2", "password": "password123"}),
+            )
+            .await;
+        assert_eq!(login.status, 200, "{}", login.text);
+    }
+}
+
+mod role_assignment_idempotency {
+    use super::*;
+
+    /// Assigning a role the user already holds (every new user holds `contestant`)
+    /// is an idempotent 200 that leaves the user's sessions intact, and a malformed
+    /// body is a `VALIDATION_ERROR`.
+    #[tokio::test]
+    async fn assigning_an_already_held_role_is_not_a_server_error() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        app.create_authenticated_user("aa_dave", "password123")
+            .await;
+        let dave = user_id(&app, "aa_dave").await;
+
+        let res = app
+            .post_with_token(
+                &routes::user_roles(dave),
+                &json!({"role": "contestant"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(
+            res.status, 200,
+            "duplicate role assignment -> {}: {}",
+            res.status, res.text
+        );
+
+        // A no-op does not end the user's sessions.
+        let dave_token = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "aa_dave", "password": "password123"}),
+            )
+            .await
+            .body["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let again = app
+            .post_with_token(
+                &routes::user_roles(dave),
+                &json!({"role": "contestant"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(again.status, 200, "{}", again.text);
+        let me = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &dave_token)
+            .await;
+        assert_eq!(
+            me.status, 200,
+            "no-op assignment invalidated the session: {}",
+            me.text
+        );
+
+        // A malformed body is a structured validation error.
+        let malformed = app
+            .post_with_token(&routes::user_roles(dave), &json!({"rol": "admin"}), &admin)
+            .await;
+        assert_eq!(malformed.status, 400, "{}", malformed.text);
+        assert_eq!(malformed.body["code"], "VALIDATION_ERROR");
+    }
+}
+
+mod builtin_role_permission_seeding {
+    use super::*;
+    use broccoli_server_sdk::permissions as perm;
+
+    /// Seeding applies each built-in role permission once and records it in
+    /// `seeded_role_permission`, so an admin's revoke of a built-in permission
+    /// survives a restart.
+    #[tokio::test]
+    async fn revoked_builtin_permission_survives_reseed() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let res = app
+            .delete_with_token(
+                &routes::role_permission("contestant", perm::SUBMISSION_SUBMIT),
+                &admin,
+            )
+            .await;
+        if res.status == 400 || res.status == 403 || res.status == 409 {
+            // Refusing to edit built-in mappings is also acceptable.
+            return;
+        }
+        assert!(res.status < 300, "revoke failed: {}", res.text);
+
+        server::seed::seed_role_permissions(&app.db)
+            .await
+            .expect("reseed (simulated restart)");
+
+        let perms = app
+            .get_with_token(&routes::role_permissions("contestant"), &admin)
+            .await;
+        assert!(
+            !perms.text.contains(perm::SUBMISSION_SUBMIT),
+            "revoked permission came back after restart: {}",
+            perms.text
+        );
+    }
+
+    /// A built-in mapping that seeding has never applied, such as one added by a
+    /// later release, is still seeded and recorded on the next boot.
+    #[tokio::test]
+    async fn builtin_mapping_new_to_this_release_is_seeded_once() {
+        use sea_orm::{ConnectionTrait, EntityTrait, Statement};
+        use server::entity::{role_permission, seeded_role_permission};
+
+        let app = TestApp::spawn().await;
+        // Simulate a database from before this mapping existed.
+        for table in ["seeded_role_permission", "role_permission"] {
+            app.db
+                .execute_raw(Statement::from_string(
+                    app.db.get_database_backend(),
+                    format!(
+                        "DELETE FROM {table} WHERE role = 'problem_setter' AND permission = '{}'",
+                        perm::PROBLEM_EDIT
+                    ),
+                ))
+                .await
+                .expect("delete mapping");
+        }
+
+        server::seed::seed_role_permissions(&app.db)
+            .await
+            .expect("reseed (upgrade boot)");
+        let granted = role_permission::Entity::find_by_id((
+            "problem_setter".to_string(),
+            perm::PROBLEM_EDIT.to_string(),
+        ))
+        .one(&app.db)
+        .await
+        .expect("db");
+        assert!(granted.is_some(), "new built-in mapping was not seeded");
+        let recorded = seeded_role_permission::Entity::find_by_id((
+            "problem_setter".to_string(),
+            perm::PROBLEM_EDIT.to_string(),
+        ))
+        .one(&app.db)
+        .await
+        .expect("db");
+        assert!(recorded.is_some(), "seeding was not recorded");
+    }
+}

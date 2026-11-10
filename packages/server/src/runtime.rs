@@ -92,12 +92,7 @@ impl ServerRuntime {
         )
         .await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
-        crate::seed::ensure_bootstrap_admin(
-            boot.conn(),
-            &app_config.bootstrap.admin_username,
-            &app_config.bootstrap.admin_password,
-        )
-        .await?;
+        crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
         crate::seed::backfill_submission_judgements(boot.conn()).await?;
 
         let db = crate::database::connect_main_pool(
@@ -389,20 +384,6 @@ impl ServerRuntime {
         )
         .context("Failed to initialize plugin manager")?;
 
-        let device_codes: crate::state::DeviceCodeStore = Arc::new(DashMap::new());
-
-        {
-            let codes = device_codes.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let now = std::time::Instant::now();
-                    codes.retain(|_code, entry| entry.expires_at > now);
-                }
-            });
-        }
-
         {
             let cleanup_db = db.clone();
             tokio::spawn(async move {
@@ -442,7 +423,6 @@ impl ServerRuntime {
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
             },
-            device_codes,
             metrics,
             prometheus_registry,
             dispatcher_permits,

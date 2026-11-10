@@ -32,6 +32,16 @@ operation-result queues are introduced. The legacy `operation_results` queue is
 kept for one release for compatibility and is scheduled for removal in the next
 release.
 
+### Upgrading to the release with SHA-256 refresh tokens
+
+This release stores refresh-token validators as SHA-256 digests instead of
+argon2 hashes. A new server still accepts the old format, so sessions issued
+before the upgrade keep working. An older server cannot read the new format
+and answers a refresh with 500. Upgrade every server node together (or drain
+the old ones from the gateway first) rather than mixing versions for long; a
+contestant whose refresh reaches an old node during the overlap is retried by
+the web client but can be signed out.
+
 ## Rolling-Upgrade Rehearsal
 
 Rehearse the upgrade on the same role topology as production: infra node, server
@@ -182,6 +192,15 @@ for f in images/*.tar.gz; do gzip -dc "$f" | docker load; done
 
 Roll back server nodes one at a time when a gateway is present. Roll back
 workers before servers when both roles were upgraded.
+
+Rolling the server back past the release with SHA-256 refresh tokens signs
+everyone out: the older server cannot read the new refresh tokens and answers
+every refresh with 500. After rolling back, delete those tokens so clients get
+a clean 401 and go to the login page instead:
+
+```sql
+DELETE FROM refresh_tokens WHERE validator LIKE 'sha256$%';
+```
 
 ## Worker Image Variants
 
