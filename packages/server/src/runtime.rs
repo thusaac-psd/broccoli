@@ -523,9 +523,9 @@ impl ServerRuntime {
 }
 
 /// Release every in-flight row this server owns so the fleet re-dispatches
-/// it (see [`crate::dispatcher::steal::recover_orphaned_leases`]).
+/// it (see [`crate::dispatcher::steal::release_owned_leases`]).
 async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str, phase: &str) {
-    match crate::dispatcher::steal::recover_orphaned_leases(db, server_id).await {
+    match crate::dispatcher::steal::release_owned_leases(db, server_id).await {
         Ok((submissions, code_runs, judgements)) => info!(
             server_id,
             submissions, code_runs, judgements, "{phase}: released own in-flight work"

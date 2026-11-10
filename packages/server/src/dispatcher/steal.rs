@@ -59,7 +59,7 @@ pub enum Reclaim {
     /// than the TTL, or never stamped), whoever owns it. Needs every live
     /// owner to refresh its leases, so it only runs with lease/steal on.
     Stale { lease_ttl_secs: u64 },
-    /// Only rows a server explicitly gave up with [`recover_orphaned_leases`]
+    /// Only rows a server explicitly gave up with [`release_owned_leases`]
     /// (on graceful shutdown, or at boot for a previous instance's work). No
     /// live server owns those, so this is safe without lease refresh: it is
     /// how released work is recovered when lease/steal is off.
@@ -69,7 +69,7 @@ pub enum Reclaim {
 #[cfg(test)]
 const STALE_60: Reclaim = Reclaim::Stale { lease_ttl_secs: 60 };
 
-/// Suffix of the owner sentinel [`recover_orphaned_leases`] stamps. Cannot
+/// Suffix of the owner sentinel [`release_owned_leases`] stamps. Cannot
 /// collide with a real server id.
 const RELEASED_OWNER_SUFFIX: &str = "#orphaned";
 
@@ -302,8 +302,9 @@ async fn scan_once(
 /// forever; the steal sweeper's `lease_heartbeat_at < threshold` test then never
 /// trips and the work hangs in `Running` until a human intervenes.
 ///
-/// Boot-time recovery breaks the cycle: re-tag every own-owned in-flight row with
-/// an `#orphaned` owner sentinel and NULL its heartbeat. That makes the rows look
+/// Releasing breaks the cycle: re-tag every own-owned in-flight row with an
+/// `#orphaned` owner sentinel (kept under that name so rows released by older
+/// versions are still recognized) and NULL its heartbeat. That makes the rows look
 /// exactly like a **dead foreign server's** expired lease
 /// (`owner_server_id IS NOT NULL AND lease_heartbeat_at IS NULL`), which the steal
 /// sweeper reclaims on its very first scan - no `created_at` aging required - and
@@ -313,7 +314,7 @@ async fn scan_once(
 /// Strictly scoped to `owner_server_id = <self>`: a sibling replica's in-flight
 /// work (different `server_id`, live lease) is left untouched, preserving
 /// multi-replica safety. Returns `(submissions, code_runs, judgements)` released.
-pub async fn recover_orphaned_leases(
+pub async fn release_owned_leases(
     db: &DatabaseConnection,
     server_id: &str,
 ) -> Result<(u64, u64, u64), sea_orm::DbErr> {
@@ -322,7 +323,7 @@ pub async fn recover_orphaned_leases(
     // reclaims it on the first scan with no `created_at` aging, and (b) differs
     // from `server_id` so the lease fiber's `owner = server_id` refresh skips
     // it. The `#orphaned` suffix cannot collide with a real server id.
-    let orphan_owner = format!("{server_id}{RELEASED_OWNER_SUFFIX}");
+    let released_owner = format!("{server_id}{RELEASED_OWNER_SUFFIX}");
     let leased = || {
         [
             SubmissionStatus::Pending,
@@ -334,7 +335,7 @@ pub async fn recover_orphaned_leases(
     let submissions = submission::Entity::update_many()
         .col_expr(
             submission::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             submission::Column::LeaseHeartbeatAt,
@@ -353,7 +354,7 @@ pub async fn recover_orphaned_leases(
     let code_runs = code_run::Entity::update_many()
         .col_expr(
             code_run::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             code_run::Column::LeaseHeartbeatAt,
@@ -372,7 +373,7 @@ pub async fn recover_orphaned_leases(
     let judgements = submission_judgement::Entity::update_many()
         .col_expr(
             submission_judgement::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(orphan_owner.clone())),
+            sea_orm::sea_query::Expr::value(Some(released_owner.clone())),
         )
         .col_expr(
             submission_judgement::Column::LeaseHeartbeatAt,
@@ -1625,10 +1626,10 @@ mod deferred_steal_db_tests {
     /// in-flight judgement is still owned by `server-1` with a FRESH lease (the
     /// lease fiber keeps refreshing it), so the steal sweeper can never reclaim
     /// it and the submission hangs in `Running` forever.
-    /// `recover_orphaned_leases` must release that lease so the steal then
+    /// `release_owned_leases` must release that lease so the steal then
     /// reclaims and re-dispatches it.
     #[tokio::test]
-    async fn recover_orphaned_leases_makes_own_fresh_inflight_stealable() {
+    async fn release_owned_leases_makes_own_fresh_inflight_stealable() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-1").await;
@@ -1646,9 +1647,9 @@ mod deferred_steal_db_tests {
         );
 
         // Recovery releases the lease on both the judgement and its parent.
-        let (subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(judg, 1, "the current unfinalized judgement is released");
         assert_eq!(subs, 1, "the parent submission lease is released");
 
@@ -1677,7 +1678,7 @@ mod deferred_steal_db_tests {
     /// `is_current = TRUE` filter left it hanging until the 6-hour ceiling. The
     /// release must stay strictly scoped to `owner_server_id = <self>`.
     #[tokio::test]
-    async fn recover_orphaned_leases_releases_own_non_current_inflight() {
+    async fn release_owned_leases_releases_own_non_current_inflight() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         let now = chrono::Utc::now();
@@ -1698,9 +1699,9 @@ mod deferred_steal_db_tests {
         .await
         .expect("insert non-current owned judgement");
 
-        let (_subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (_subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(
             judg, 1,
             "a non-current in-flight judgement owned by self is released"
@@ -1780,15 +1781,15 @@ mod deferred_steal_db_tests {
     /// `server_id`, live lease) must be left strictly alone when THIS server
     /// runs its boot recovery.
     #[tokio::test]
-    async fn recover_orphaned_leases_leaves_other_servers_alone() {
+    async fn release_owned_leases_leaves_other_servers_alone() {
         let (_pg, db) = start_pg().await;
         let sub_id = seed_submission(&db, SubmissionStatus::Running, 0).await;
         seed_owned_fresh_judgement(&db, sub_id, 0, 0, "server-2").await;
         set_submission_owner(&db, sub_id, "server-2").await;
 
-        let (subs, _cr, judg) = recover_orphaned_leases(&db, "server-1")
+        let (subs, _cr, judg) = release_owned_leases(&db, "server-1")
             .await
-            .expect("recover orphaned leases");
+            .expect("release owned leases");
         assert_eq!(judg, 0, "another server's judgement is untouched");
         assert_eq!(subs, 0, "another server's submission is untouched");
 
@@ -1823,7 +1824,7 @@ mod deferred_steal_db_tests {
             .expect("claim before release");
         assert!(before.is_empty(), "nothing has been released yet");
 
-        recover_orphaned_leases(&db, "server-1")
+        release_owned_leases(&db, "server-1")
             .await
             .expect("release server-1's work");
         let claimed = claim_deferred_judgements(&db, "server-3", Reclaim::Released, 10, 5)
