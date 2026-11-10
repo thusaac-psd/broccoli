@@ -1,11 +1,9 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header};
-use axum_client_ip::ClientIpSource;
+use axum::http::{HeaderValue, Method, Request, Response, StatusCode, header};
 use serde_json::json;
 use tower_governor::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -13,6 +11,7 @@ use tower_governor::key_extractor::KeyExtractor;
 use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use crate::client_ip::ClientIp;
 use crate::config::AppConfig;
 use crate::handlers;
 use crate::state::AppState;
@@ -140,6 +139,8 @@ fn auth_routes(rate_limit_auth: bool) -> OpenApiRouter<AppState> {
         ))
 }
 
+/// Keys the governor limiters on the client IP that `client_ip` resolved for
+/// this request, the same value the login throttle sees.
 #[derive(Clone, Copy, Debug)]
 struct ConfiguredClientIpKeyExtractor;
 
@@ -147,36 +148,8 @@ impl KeyExtractor for ConfiguredClientIpKeyExtractor {
     type Key = IpAddr;
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        match req.extensions().get::<ClientIpSource>() {
-            Some(ClientIpSource::RightmostXForwardedFor) => {
-                rightmost_x_forwarded_for(req.headers()).ok_or(GovernorError::UnableToExtractKey)
-            }
-            Some(ClientIpSource::ConnectInfo) | None => {
-                connect_info_ip(req).ok_or(GovernorError::UnableToExtractKey)
-            }
-            _ => connect_info_ip(req).ok_or(GovernorError::UnableToExtractKey),
-        }
+        ClientIp::of(req).ok_or(GovernorError::UnableToExtractKey)
     }
-}
-
-fn connect_info_ip<T>(req: &Request<T>) -> Option<IpAddr> {
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip())
-}
-
-fn rightmost_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .next_back()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value
-                .split(',')
-                .next_back()
-                .and_then(|part| part.trim().parse::<IpAddr>().ok())
-        })
 }
 
 fn auth_rate_limit_error_response(error: GovernorError) -> Response<Body> {
@@ -577,7 +550,9 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::routing::post;
+    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -624,5 +599,52 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    #[tokio::test]
+    async fn auth_governor_keys_on_the_resolved_client_behind_a_trusted_proxy() {
+        let mut builder = GovernorConfigBuilder::default();
+        builder
+            .period(AUTH_RATE_LIMIT_PERIOD)
+            .burst_size(1)
+            .methods(vec![Method::POST]);
+        let mut builder = builder.key_extractor(ConfiguredClientIpKeyExtractor);
+        let app = Router::new()
+            .route("/login", post(|| async { StatusCode::UNAUTHORIZED }))
+            .layer(
+                tower_governor::GovernorLayer::new(Arc::new(builder.finish().unwrap()))
+                    .error_handler(auth_rate_limit_error_response),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                crate::client_ip::parse_trusted_proxy_networks(&["10.0.0.0/8".into()]),
+                crate::client_ip::client_ip_source_middleware,
+            ));
+        let send = |xff: &'static str| {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo("10.0.0.4:1".parse::<SocketAddr>().unwrap()));
+            app.clone().oneshot(request)
+        };
+
+        // Two clients behind the same gateway each get their own budget, and
+        // a port-suffixed hop keys on the same client as the bare address.
+        assert_eq!(
+            send("203.0.113.1").await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send("203.0.113.2").await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send("6.6.6.6, 203.0.113.1:443").await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 }

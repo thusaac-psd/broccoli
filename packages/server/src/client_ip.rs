@@ -1,6 +1,14 @@
+//! The one place the server decides who the client is.
+//!
+//! [`client_ip_source_middleware`] resolves the client IP once per request and
+//! stores it as a [`ClientIp`] extension. Every consumer that keys on client IP
+//! (the governor rate limiters, the login throttle) reads that extension, so
+//! they can never disagree about which address a request came from.
+
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::HeaderMap;
@@ -13,15 +21,31 @@ use tracing::warn;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 
-/// Best-effort client IP for handler-side use (e.g. login throttling), honoring
-/// the trusted-proxy [`ClientIpSource`] chosen by [`client_ip_source_middleware`].
+/// The resolved client IP for this request, set by
+/// [`client_ip_source_middleware`].
 ///
-/// The rejection is [`Infallible`] and the value is an `Option`: when the IP
-/// cannot be determined the extractor yields `None` so callers FAIL OPEN rather
-/// than break the request. This is deliberately NOT `axum_client_ip::ClientIp`,
+/// As an extractor the rejection is [`Infallible`] and the value is an
+/// `Option`: when the IP cannot be determined callers FAIL OPEN rather than
+/// break the request. This is deliberately NOT `axum_client_ip::ClientIp`,
 /// whose extraction failure rejects the request - a login endpoint must never
 /// 4xx merely because a proxy header was missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientIp(pub Option<IpAddr>);
+
+impl ClientIp {
+    /// The resolved IP of a request that went through the middleware, or the
+    /// socket peer for one that did not (unit-tested routers).
+    pub fn of<B>(request: &axum::http::Request<B>) -> Option<IpAddr> {
+        Self::from_extensions(request.extensions())
+    }
+
+    fn from_extensions(extensions: &axum::http::Extensions) -> Option<IpAddr> {
+        match extensions.get::<ClientIp>() {
+            Some(ClientIp(ip)) => *ip,
+            None => peer_ip(extensions),
+        }
+    }
+}
 
 impl<S> FromRequestParts<S> for ClientIp
 where
@@ -30,50 +54,67 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Infallible> {
-        let source = parts
-            .extensions
-            .get::<ClientIpSource>()
-            .cloned()
-            .unwrap_or(ClientIpSource::ConnectInfo);
-        let connect_ip = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip());
-        Ok(ClientIp(resolve_client_ip(
-            &source,
-            &parts.headers,
-            connect_ip,
-        )))
+        Ok(ClientIp(ClientIp::from_extensions(&parts.extensions)))
     }
 }
 
-/// Resolve the effective client IP from the chosen source. Only the two sources
-/// [`client_ip_source_middleware`] ever sets are honored; anything else falls
-/// back to the socket peer address.
+fn peer_ip(extensions: &axum::http::Extensions) -> Option<IpAddr> {
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
+fn is_trusted(ip: &IpAddr, trusted_proxies: &[IpNet]) -> bool {
+    trusted_proxies.iter().any(|net| net.contains(ip))
+}
+
+/// Resolve the client IP of a request whose socket peer is `peer`.
+///
+/// Forwarded headers are believed only when the peer is a trusted proxy. The
+/// `X-Forwarded-For` hops (all header lines, in order) are then walked
+/// right-to-left: each hop that is itself a trusted proxy is skipped, and the
+/// first untrusted hop is the client. If a hop cannot be parsed, the walk stops
+/// at the last address it could vouch for (a trusted proxy), never at an entry
+/// further left, which the client may have written. If every hop is trusted,
+/// the leftmost one is the best answer.
 fn resolve_client_ip(
-    source: &ClientIpSource,
     headers: &HeaderMap,
-    connect_ip: Option<IpAddr>,
+    peer: Option<IpAddr>,
+    trusted_proxies: &[IpNet],
 ) -> Option<IpAddr> {
-    match source {
-        ClientIpSource::RightmostXForwardedFor => rightmost_x_forwarded_for(headers).or(connect_ip),
-        _ => connect_ip,
+    let mut client = peer?;
+    if !is_trusted(&client, trusted_proxies) {
+        return Some(client);
     }
-}
-
-fn rightmost_x_forwarded_for(headers: &HeaderMap) -> Option<IpAddr> {
-    // Consider EVERY X-Forwarded-For header line, not just the first. HTTP treats
-    // repeated headers as one ordered list, and a proxy that appends the real
-    // client puts it rightmost; reading only `headers.get()` (the FIRST line) lets
-    // a client spoof the throttle/audit key by sending their own XFF line ahead of
-    // the proxy's. The rightmost valid IP across all lines is the last-appended.
-    headers
+    let lines: Vec<&str> = headers
         .get_all(X_FORWARDED_FOR)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|line| line.split(','))
-        .filter_map(|part| part.trim().parse::<IpAddr>().ok())
-        .next_back()
+        .map(|value| value.to_str().unwrap_or(""))
+        .collect();
+    for hop in lines.iter().rev().flat_map(|line| line.rsplit(',')) {
+        let Some(ip) = parse_hop(hop) else {
+            break;
+        };
+        client = ip;
+        if !is_trusted(&ip, trusted_proxies) {
+            break;
+        }
+    }
+    Some(client)
+}
+
+/// Parse one `X-Forwarded-For` hop. Besides a bare address, accept the
+/// unambiguous `ip:port`, `[v6]` and `[v6]:port` forms some proxies emit.
+fn parse_hop(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    hop.parse::<IpAddr>()
+        .or_else(|_| hop.parse::<SocketAddr>().map(|addr| addr.ip()))
+        .ok()
+        .or_else(|| {
+            hop.strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .and_then(|h| h.parse::<IpAddr>().ok())
+        })
 }
 
 pub fn parse_trusted_proxy_networks(entries: &[String]) -> Arc<Vec<IpNet>> {
@@ -107,13 +148,21 @@ fn parse_trusted_proxy_entry(entry: &str) -> Result<IpNet, String> {
         .map_err(|error| format!("{error}"))
 }
 
+/// Resolve the client IP once and record it (and whether the peer is a trusted
+/// proxy, which also governs other forwarded headers) on the request.
 pub async fn client_ip_source_middleware(
     State(trusted_proxies): State<Arc<Vec<IpNet>>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let source = select_client_ip_source(&request, trusted_proxies.as_slice());
+    let peer = peer_ip(request.extensions());
+    let client = resolve_client_ip(request.headers(), peer, &trusted_proxies);
+    let source = select_client_ip_source(&request, &trusted_proxies);
+    if source == ClientIpSource::ConnectInfo && request.headers().contains_key(X_FORWARDED_FOR) {
+        warn_once_if_untrusted_private_proxy(peer);
+    }
     request.extensions_mut().insert(source);
+    request.extensions_mut().insert(ClientIp(client));
     next.run(request).await
 }
 
@@ -121,20 +170,38 @@ fn select_client_ip_source<B>(
     request: &axum::http::Request<B>,
     trusted_proxies: &[IpNet],
 ) -> ClientIpSource {
-    if trusted_proxies.is_empty() || !request.headers().contains_key(X_FORWARDED_FOR) {
+    if !request.headers().contains_key(X_FORWARDED_FOR) {
         return ClientIpSource::ConnectInfo;
     }
-
-    let remote_ip = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip());
-
-    match remote_ip {
-        Some(ip) if trusted_proxies.iter().any(|net| net.contains(&ip)) => {
-            ClientIpSource::RightmostXForwardedFor
-        }
+    match peer_ip(request.extensions()) {
+        Some(ip) if is_trusted(&ip, trusted_proxies) => ClientIpSource::RightmostXForwardedFor,
         _ => ClientIpSource::ConnectInfo,
+    }
+}
+
+/// A forwarded header from a private-network peer that is not trusted usually
+/// means `TRUSTED_PROXIES` is missing the gateway, so every client is keyed on
+/// the gateway's IP. Say so once per process; it is not worth more than an
+/// atomic load per request.
+fn warn_once_if_untrusted_private_proxy(peer: Option<IpAddr>) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let Some(peer) = peer else { return };
+    if !is_private(&peer) || WARNED.load(Ordering::Relaxed) || WARNED.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    warn!(
+        peer = %peer,
+        "Received X-Forwarded-For from an untrusted private-network peer; if this is your \
+         reverse proxy or gateway, add it to server.trusted_proxies, otherwise every client \
+         behind it shares one IP for rate limiting and login throttling"
+    );
+}
+
+fn is_private(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
     }
 }
 
@@ -211,76 +278,136 @@ mod tests {
         );
     }
 
-    fn headers(xff: Option<&str>) -> HeaderMap {
+    fn headers(lines: &[&str]) -> HeaderMap {
         let mut h = HeaderMap::new();
-        if let Some(v) = xff {
-            h.insert(X_FORWARDED_FOR, v.parse().unwrap());
+        for line in lines {
+            h.append(X_FORWARDED_FOR, line.parse().unwrap());
         }
         h
     }
 
-    #[test]
-    fn resolve_connect_info_source_uses_socket_peer() {
-        let connect = Some("198.51.100.9".parse::<IpAddr>().unwrap());
-        assert_eq!(
-            resolve_client_ip(
-                &ClientIpSource::ConnectInfo,
-                &headers(Some("203.0.113.10")),
-                connect
-            ),
-            connect,
-            "ConnectInfo source ignores the forwarded header"
-        );
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn nets(entries: &[&str]) -> Vec<IpNet> {
+        entries.iter().map(|e| e.parse().unwrap()).collect()
+    }
+
+    const PROXY: &str = "10.0.0.4";
+
+    fn resolve(lines: &[&str], trusted: &[&str]) -> Option<IpAddr> {
+        resolve_client_ip(&headers(lines), Some(ip(PROXY)), &nets(trusted))
     }
 
     #[test]
-    fn resolve_xff_source_takes_the_rightmost_entry() {
-        // Rightmost is the entry appended by the closest trusted proxy.
-        let connect = Some("10.0.0.4".parse::<IpAddr>().unwrap());
-        assert_eq!(
-            resolve_client_ip(
-                &ClientIpSource::RightmostXForwardedFor,
-                &headers(Some("203.0.113.10, 198.51.100.5")),
-                connect,
-            ),
-            Some("198.51.100.5".parse().unwrap())
-        );
-    }
-
-    #[test]
-    fn resolve_xff_source_falls_back_to_peer_when_header_unparseable() {
-        let connect = Some("10.0.0.4".parse::<IpAddr>().unwrap());
-        assert_eq!(
-            resolve_client_ip(
-                &ClientIpSource::RightmostXForwardedFor,
-                &headers(Some("not-an-ip")),
-                connect,
-            ),
-            connect,
-            "a malformed forwarded header must not lose the client IP entirely"
-        );
-    }
-
-    /// Kernel audit (Nov 2026): `filter_map(parse().ok()).next_back()` SKIPS an
-    /// unparseable rightmost hop and falls through to the next token to the
-    /// left, which the client wrote. A trusted proxy that appends `ip:port`
-    /// (Azure App Gateway / ARR style) therefore makes the login throttle key
-    /// on a spoofed address; rotating it gives unlimited guesses. The
-    /// rightmost hop is the only one the proxy vouches for, so if it does not
-    /// parse the resolver must fall back to the peer, never look further left.
-    #[test]
-    #[ignore = "BUG: unparseable rightmost XFF hop falls back to a client-controlled token"]
-    fn unparseable_rightmost_hop_does_not_trust_client_supplied_entries() {
-        let connect = Some("10.0.0.4".parse::<IpAddr>().unwrap());
+    fn untrusted_peer_ignores_the_forwarded_header() {
         let resolved = resolve_client_ip(
-            &ClientIpSource::RightmostXForwardedFor,
-            &headers(Some("6.6.6.6, 203.0.113.5:443")),
-            connect,
+            &headers(&["203.0.113.10"]),
+            Some(ip("198.51.100.9")),
+            &nets(&["10.0.0.0/8"]),
         );
-        assert_ne!(
-            resolved,
-            Some("6.6.6.6".parse::<IpAddr>().unwrap()),
-            "client-supplied XFF entry was used as the client IP"
+        assert_eq!(resolved, Some(ip("198.51.100.9")));
+        assert_eq!(resolve(&["203.0.113.10"], &[]), Some(ip(PROXY)));
+    }
+
+    #[test]
+    fn trusted_peer_takes_the_rightmost_untrusted_hop() {
+        assert_eq!(
+            resolve(&["203.0.113.10, 198.51.100.5"], &["10.0.0.0/8"]),
+            Some(ip("198.51.100.5"))
+        );
+    }
+
+    #[test]
+    fn trusted_hops_are_skipped_right_to_left() {
+        // client -> edge proxy (10.0.0.7) -> gateway (peer): the gateway
+        // appends the edge proxy, which must be skipped, not used as the key.
+        assert_eq!(
+            resolve(&["6.6.6.6, 198.51.100.5, 10.0.0.7"], &["10.0.0.0/8"]),
+            Some(ip("198.51.100.5"))
+        );
+        // Across header lines too: lines are one ordered list.
+        assert_eq!(
+            resolve(&["6.6.6.6, 198.51.100.5", "10.0.0.7"], &["10.0.0.0/8"]),
+            Some(ip("198.51.100.5"))
+        );
+    }
+
+    #[test]
+    fn all_trusted_hops_yield_the_leftmost() {
+        assert_eq!(
+            resolve(&["10.0.0.8, 10.0.0.7"], &["10.0.0.0/8"]),
+            Some(ip("10.0.0.8"))
+        );
+    }
+
+    #[test]
+    fn ports_and_brackets_are_stripped() {
+        let trusted = &["10.0.0.0/8"];
+        assert_eq!(
+            resolve(&["203.0.113.5:443"], trusted),
+            Some(ip("203.0.113.5"))
+        );
+        assert_eq!(
+            resolve(&["[2001:db8::1]:443"], trusted),
+            Some(ip("2001:db8::1"))
+        );
+        assert_eq!(
+            resolve(&["[2001:db8::1]"], trusted),
+            Some(ip("2001:db8::1"))
+        );
+        assert_eq!(resolve(&["2001:db8::1"], trusted), Some(ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn unparseable_header_falls_back_to_peer() {
+        assert_eq!(resolve(&["not-an-ip"], &["10.0.0.0/8"]), Some(ip(PROXY)));
+    }
+
+    /// Kernel audit (Nov 2026, #75): an unparseable rightmost hop used to be
+    /// SKIPPED, falling through to the next token to the left, which the
+    /// client wrote; rotating it gave unlimited login guesses. The walk now
+    /// stops at the last address it can vouch for.
+    #[test]
+    fn unparseable_rightmost_hop_does_not_trust_client_supplied_entries() {
+        let resolved = resolve(&["6.6.6.6, unknown"], &["10.0.0.0/8"]);
+        assert_eq!(resolved, Some(ip(PROXY)));
+        // The audit's original input: the port is now stripped instead.
+        let resolved = resolve(&["6.6.6.6, 203.0.113.5:443"], &["10.0.0.0/8"]);
+        assert_eq!(resolved, Some(ip("203.0.113.5")));
+        // An unparseable hop behind a trusted hop stops at that trusted hop.
+        let resolved = resolve(&["6.6.6.6, _hidden, 10.0.0.7"], &["10.0.0.0/8"]);
+        assert_eq!(resolved, Some(ip("10.0.0.7")));
+    }
+
+    #[tokio::test]
+    async fn middleware_records_the_resolved_ip_for_every_consumer() {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(|ClientIp(ip): ClientIp| async move {
+                    ip.map(|ip| ip.to_string()).unwrap_or_default()
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                parse_trusted_proxy_networks(&["10.0.0.0/8".to_string()]),
+                client_ip_source_middleware,
+            ));
+        let req = request(
+            SocketAddr::new(ip(PROXY), 1),
+            Some("6.6.6.6, 203.0.113.5:443"),
+        );
+        let res = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"203.0.113.5");
+
+        let bare = request("192.0.2.4:1".parse().unwrap(), None);
+        assert_eq!(
+            ClientIp::of(&bare),
+            Some(ip("192.0.2.4")),
+            "falls back to the peer"
         );
     }
 }
