@@ -9,8 +9,6 @@ use axum::{
     response::IntoResponse,
 };
 use broccoli_server_sdk::permissions as perm;
-use plugin_core::registry::PluginEntry;
-use sea_orm::*;
 use tracing::instrument;
 
 // visibility-bypass-audited: every handler in this module (list_all_plugins,
@@ -19,16 +17,12 @@ use tracing::instrument;
 // tests/integration/plugin.rs's `contestant_cannot_manage_plugins`. This is
 // operator tooling over the plugin registry, never a per-row
 // Contest/Problem/Submission/Clarification view the kernel governs.
-use crate::entity::plugin as plugin_entity;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::path::AppPath;
-use crate::models::plugin::{
-    PluginDetailResponse, PluginFullDetailResponse, ReloadAllResponse, ReloadFailure,
-};
+use crate::models::plugin::{PluginDetailResponse, PluginFullDetailResponse, ReloadAllResponse};
 use crate::state::AppState;
 use crate::upload_limits::{LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB};
-use crate::utils::plugin::{activate_plugin, purge_plugin_registrations};
 
 #[utoipa::path(
     get,
@@ -103,7 +97,7 @@ pub async fn get_plugin_details(
     tag = "Admin",
     operation_id = "enablePlugin",
     summary = "Enable a plugin",
-    description = "Enables a plugin by its ID. Requires `plugin:manage` permission.",
+    description = "Enables a plugin by its ID on every server replica. Loads it on the serving replica first and records it as enabled only if that succeeds; the other replicas follow within a few seconds. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin enabled successfully", body = serde_json::Value),
@@ -122,21 +116,7 @@ pub async fn enable_plugin(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
-    if state.plugins.is_plugin_loaded(&id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{}' is already enabled",
-            id
-        )));
-    }
-
-    activate_plugin(&state, &id).await.map_err(AppError::from)?;
-
-    let plugin_model = plugin_entity::ActiveModel {
-        id: Unchanged(id.clone()),
-        is_enabled: Set(true),
-        updated_at: Set(chrono::Utc::now()),
-    };
-    plugin_model.update(&state.db).await?;
+    crate::plugin_lifecycle::enable(&state, &id).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Plugin '{}' enabled successfully", id)
@@ -149,7 +129,7 @@ pub async fn enable_plugin(
     tag = "Admin",
     operation_id = "disablePlugin",
     summary = "Disable a plugin",
-    description = "Disables a plugin by its ID. Requires `plugin:manage` permission.",
+    description = "Disables a plugin by its ID on every server replica and deletes its pending timers. The other replicas follow within a few seconds. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin disabled successfully", body = serde_json::Value),
@@ -168,31 +148,7 @@ pub async fn disable_plugin(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
-    if !state.plugins.is_plugin_loaded(&id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{}' is not currently enabled",
-            id
-        )));
-    }
-
-    purge_plugin_registrations(&state.registries, &id).await;
-    state.plugins.unload_plugin(&id)?;
-    state.plugins.update_translations()?;
-    if let Err(e) = crate::dispatcher::plugin_timer::delete_timers_for_plugin(&state.db, &id).await
-    {
-        tracing::error!(
-            plugin_id = %id,
-            error = %e,
-            "Failed to delete pending timers for a disabled plugin"
-        );
-    }
-
-    let plugin_model = plugin_entity::ActiveModel {
-        id: Unchanged(id.clone()),
-        is_enabled: Set(false),
-        updated_at: Set(chrono::Utc::now()),
-    };
-    plugin_model.update(&state.db).await?;
+    crate::plugin_lifecycle::disable(&state, &id).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Plugin '{}' disabled successfully", id)
@@ -205,7 +161,7 @@ pub async fn disable_plugin(
     tag = "Admin",
     operation_id = "reloadPlugin",
     summary = "Reload a plugin",
-    description = "Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Requires `plugin:manage` permission.",
+    description = "Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.",
     params(("id" = String, Path, description = "Plugin ID")),
     responses(
         (status = 200, description = "Plugin reloaded successfully", body = serde_json::Value),
@@ -224,20 +180,7 @@ pub async fn reload_plugin(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
-    if !state.plugins.has_plugin(&id)? {
-        return Err(AppError::NotFound(format!("Plugin '{}' not found", id)));
-    }
-
-    if !state.plugins.is_plugin_loaded(&id)? {
-        return Err(AppError::Conflict(format!(
-            "Plugin '{}' is not currently loaded. Use enable instead.",
-            id
-        )));
-    }
-
-    purge_plugin_registrations(&state.registries, &id).await;
-    state.plugins.reload_plugin(&id)?;
-    activate_plugin(&state, &id).await.map_err(AppError::from)?;
+    crate::plugin_lifecycle::reload(&state, &id).await?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Plugin '{}' reloaded successfully", id)
@@ -250,7 +193,7 @@ pub async fn reload_plugin(
     tag = "Admin",
     operation_id = "reloadAllPlugins",
     summary = "Reload all plugins and discover new ones",
-    description = "Reloads all currently loaded plugins and discovers any new plugins in the plugins directory. Requires `plugin:manage` permission.",
+    description = "Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.",
     responses(
         (status = 200, description = "Reload results", body = ReloadAllResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -265,82 +208,7 @@ pub async fn reload_all_plugins(
 ) -> Result<Json<ReloadAllResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
-    let loaded_ids: Vec<String> = state
-        .plugins
-        .list_plugins()
-        .map_err(AppError::from)?
-        .into_iter()
-        .filter(|p| p.status == plugin_core::registry::PluginStatus::Loaded)
-        .map(|p| p.id)
-        .collect();
-
-    let mut reloaded = Vec::new();
-    let mut failed = Vec::new();
-
-    for id in &loaded_ids {
-        purge_plugin_registrations(&state.registries, id).await;
-        match state.plugins.reload_plugin(id) {
-            Ok(()) => {
-                if let Err(e) = activate_plugin(&state, id).await {
-                    tracing::error!("Failed to activate plugin '{}' after reload: {}", id, e);
-                    failed.push(ReloadFailure {
-                        id: id.clone(),
-                        error: e.to_string(),
-                    });
-                } else {
-                    reloaded.push(id.clone());
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to reload plugin '{}': {}", id, e);
-                failed.push(ReloadFailure {
-                    id: id.clone(),
-                    error: e.to_string(),
-                });
-            }
-        }
-    }
-
-    let new_ids = state.plugins.rediscover_plugins().unwrap_or_else(|e| {
-        tracing::error!("Failed to rediscover plugins: {}", e);
-        Vec::new()
-    });
-
-    for id in &new_ids {
-        let existing = plugin_entity::Entity::find_by_id(id.clone())
-            .one(&state.db)
-            .await
-            .ok()
-            .flatten();
-        if existing.is_none() {
-            let new_plugin = plugin_entity::ActiveModel {
-                id: Set(id.clone()),
-                is_enabled: Set(true),
-                updated_at: Set(chrono::Utc::now()),
-            };
-            if let Err(e) = new_plugin.insert(&state.db).await {
-                tracing::error!("Failed to insert DB record for new plugin '{}': {}", id, e);
-                continue;
-            }
-        }
-
-        match activate_plugin(&state, id).await {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!("Failed to load new plugin '{}': {}", id, e);
-                failed.push(ReloadFailure {
-                    id: id.clone(),
-                    error: e.to_string(),
-                });
-            }
-        }
-    }
-
-    Ok(Json(ReloadAllResponse {
-        reloaded,
-        new: new_ids,
-        failed,
-    }))
+    Ok(Json(crate::plugin_lifecycle::reload_all(&state).await?))
 }
 
 pub fn upload_body_limit() -> DefaultBodyLimit {
@@ -374,7 +242,7 @@ const MAX_AGGREGATE_SIZE: u64 = 2 * LARGE_UPLOAD_LIMIT_BYTES as u64;
     tag = "Admin",
     operation_id = "uploadPlugin",
     summary = "Upload a plugin archive",
-    description = "Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload. Requires `plugin:manage` permission.",
+    description = "Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.",
     request_body(content_type = "multipart/form-data", content = Vec<u8>, description = "tar.gz archive with a single top-level directory containing plugin.toml"),
     responses(
         (status = 200, description = "Plugin uploaded and loaded successfully", body = serde_json::Value),
@@ -581,49 +449,14 @@ pub async fn upload_plugin(
     .await
     .map_err(|e| AppError::Internal(format!("Extraction task panicked: {}", e)))??;
 
-    let was_loaded = state.plugins.is_plugin_loaded(&plugin_id).unwrap_or(false);
-    if was_loaded {
-        purge_plugin_registrations(&state.registries, &plugin_id).await;
-    }
-
-    let new_entry = PluginEntry::from_dir(&dest_root).map_err(|e| {
-        AppError::Internal(format!("Failed to parse uploaded plugin manifest: {}", e))
-    })?;
-
-    {
-        let mut registry = state
-            .plugins
-            .get_registry()
-            .write()
-            .map_err(|_| AppError::Internal("Failed to acquire registry write lock".into()))?;
-        registry.insert(plugin_id.clone(), new_entry);
-    }
-
-    activate_plugin(&state, &plugin_id).await.map_err(|e| {
-        AppError::Internal(format!("Failed to activate plugin after upload: {}", e))
-    })?;
-
-    let existing = plugin_entity::Entity::find_by_id(plugin_id.clone())
-        .one(&state.db)
-        .await?;
-    match existing {
-        Some(_) => {
-            let model = plugin_entity::ActiveModel {
-                id: Unchanged(plugin_id.clone()),
-                is_enabled: Set(true),
-                updated_at: Set(chrono::Utc::now()),
-            };
-            model.update(&state.db).await?;
-        }
-        None => {
-            let model = plugin_entity::ActiveModel {
-                id: Set(plugin_id.clone()),
-                is_enabled: Set(true),
-                updated_at: Set(chrono::Utc::now()),
-            };
-            model.insert(&state.db).await?;
-        }
-    }
+    crate::plugin_lifecycle::install(&state, &plugin_id)
+        .await
+        .map_err(|e| match e {
+            AppError::Internal(detail) => {
+                AppError::Internal(format!("Failed to activate plugin after upload: {detail}"))
+            }
+            other => other,
+        })?;
 
     Ok((
         StatusCode::OK,

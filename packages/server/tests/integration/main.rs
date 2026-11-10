@@ -21,6 +21,7 @@ mod meta;
 mod permission_fixture;
 mod plugin;
 mod plugin_config;
+mod plugin_fleet;
 mod plugin_timer;
 mod problem;
 mod regression_guards;

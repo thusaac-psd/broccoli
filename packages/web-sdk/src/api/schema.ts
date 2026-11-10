@@ -35,7 +35,7 @@ export interface paths {
     put?: never;
     /**
      * Reload all plugins and discover new ones
-     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory. Requires `plugin:manage` permission.
+     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.
      */
     post: operations['reloadAllPlugins'];
     delete?: never;
@@ -55,7 +55,7 @@ export interface paths {
     put?: never;
     /**
      * Upload a plugin archive
-     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload. Requires `plugin:manage` permission.
+     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.
      */
     post: operations['uploadPlugin'];
     delete?: never;
@@ -131,7 +131,7 @@ export interface paths {
     put?: never;
     /**
      * Disable a plugin
-     * @description Disables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Disables a plugin by its ID on every server replica and deletes its pending timers. The other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['disablePlugin'];
     delete?: never;
@@ -151,7 +151,7 @@ export interface paths {
     put?: never;
     /**
      * Enable a plugin
-     * @description Enables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Enables a plugin by its ID on every server replica. Loads it on the serving replica first and records it as enabled only if that succeeds; the other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['enablePlugin'];
     delete?: never;
@@ -171,7 +171,7 @@ export interface paths {
     put?: never;
     /**
      * Reload a plugin
-     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Requires `plugin:manage` permission.
+     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['reloadPlugin'];
     delete?: never;
@@ -3070,6 +3070,18 @@ export interface components {
        */
       mq: string;
       /**
+       * @description Plugin readiness on this replica: `"ok"` when every plugin enabled in
+       *     the shared desired state is loaded here, `"degraded"` otherwise. It
+       *     does not change `status` or the HTTP code, so one plugin that fails
+       *     everywhere cannot take the whole fleet out of rotation; a load
+       *     balancer that should drain such a replica can match on this field.
+       * @example ok
+       */
+      plugins: string;
+      /** @description The enabled plugins that are not loaded on this replica, and why.
+       *     This replica keeps retrying them with backoff. */
+      plugins_not_ready: components['schemas']['PluginNotReady'][];
+      /**
        * @description Aggregate status: `"ok"` when every probed component is healthy,
        *     `"degraded"` otherwise.
        * @example ok
@@ -3314,6 +3326,13 @@ export interface components {
       version: string;
       web?: null | components['schemas']['WebDetailResponse'];
       worker?: null | components['schemas']['WorkerDetailResponse'];
+    };
+    /** @description A plugin that is enabled fleet-wide but not loaded on this replica. */
+    PluginNotReady: {
+      /** @description Plugin id. */
+      id: string;
+      /** @description Why it is not loaded here. */
+      reason: string;
     };
     /** @enum {string} */
     PluginStatusResponse: 'Unloaded' | 'Loaded' | 'Failed';
