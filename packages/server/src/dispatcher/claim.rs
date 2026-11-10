@@ -132,7 +132,10 @@ pub async fn run(
 /// claim from dispatch. Don't introduce a bounded join-set or `await`
 /// here without re-thinking that contract: an inline `await` would make
 /// the claim fiber the bottleneck for dispatch throughput.
-async fn claim_once(
+///
+/// `pub` so integration tests can drive one cycle directly, like
+/// `plugin_timer::tick_once`.
+pub async fn claim_once(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
@@ -144,8 +147,18 @@ async fn claim_once(
         count_in_flight(state, server_id).await?
     };
     let budget = claim_budget(batch_size, max_in_flight, in_flight);
+    // The contest types this replica can judge right now; see
+    // `select_queued_rows`.
+    let contest_types: Vec<String> = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect();
     let submission_models = if budget > 0 {
-        claim_queued_submissions(state, server_id, budget).await?
+        claim_queued_submissions(state, server_id, budget, &contest_types).await?
     } else {
         Vec::new()
     };
@@ -159,7 +172,8 @@ async fn claim_once(
         });
     }
 
-    let code_run_models = claim_queued_code_runs(state, server_id, batch_size).await?;
+    let code_run_models =
+        claim_queued_code_runs(state, server_id, batch_size, &contest_types).await?;
     for model in code_run_models {
         let state_clone = state.clone();
         tokio::spawn(async move {
@@ -175,7 +189,7 @@ async fn claim_once(
     // own status is unchanged for these rows, so the submission scan
     // above doesn't reach them - the judgement scan does.
     let judgement_pairs = if rejudge_budget > 0 {
-        claim_queued_judgements(state, server_id, rejudge_budget).await?
+        claim_queued_judgements(state, server_id, rejudge_budget, &contest_types).await?
     } else {
         Vec::new()
     };
@@ -266,9 +280,10 @@ async fn claim_queued_submissions(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission", batch_size).await?;
+    let rows = select_queued_rows(&txn, "submission", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -332,9 +347,10 @@ async fn claim_queued_code_runs(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<code_run::Model>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "code_run", batch_size).await?;
+    let rows = select_queued_rows(&txn, "code_run", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -402,9 +418,10 @@ async fn claim_queued_judgements(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<(submission::Model, submission_judgement::Model)>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission_judgement", batch_size).await?;
+    let rows = select_queued_rows(&txn, "submission_judgement", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -601,6 +618,7 @@ async fn select_queued_rows(
     txn: &DatabaseTransaction,
     table: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> Result<Vec<QueuedRow>, sea_orm::DbErr> {
     // Spawn-time validation (see `dispatcher::Dispatcher::spawn`) asserts
     // `batch_size > 0`, so we should never see a 0 here. Keep a defensive
@@ -612,19 +630,48 @@ async fn select_queued_rows(
         r#"SELECT id
            FROM {table}
            WHERE status = 'Queued'
+             AND ({handled} OR created_at < NOW() - make_interval(secs => $3))
            ORDER BY created_at
            LIMIT $1
-           FOR UPDATE SKIP LOCKED"#
+           FOR UPDATE SKIP LOCKED"#,
+        handled = handled_predicate(table),
     );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
-            [i64::from(limit).into()],
+            [
+                i64::from(limit).into(),
+                contest_types.to_vec().into(),
+                (UNHANDLED_CLAIM_GRACE_SECS as f64).into(),
+            ],
         ))
         .await?;
 
     rows.into_iter().map(row_to_queued).collect()
+}
+
+/// How long a `Queued` row whose contest type no handler on this replica
+/// serves is left for a replica that has one. Replicas do not always agree on
+/// which plugins are loaded (one is still converging onto an enable, or
+/// failed to load a plugin its peers run fine), and judging the row here
+/// would only fail it with `NO_HANDLER_REGISTERED`. Past the grace any
+/// replica claims it, so work no replica can judge still fails visibly
+/// instead of queueing forever. Measured against the row's `created_at`, so
+/// a server clock skewed against the database only shifts this fallback.
+const UNHANDLED_CLAIM_GRACE_SECS: u64 = 60;
+
+/// SQL predicate: the row's contest type is in `$2`, the contest types this
+/// replica has a handler for. A judgement row carries no contest type of
+/// its own; it takes its parent submission's.
+fn handled_predicate(table: &str) -> &'static str {
+    if table == "submission_judgement" {
+        "EXISTS (SELECT 1 FROM submission s \
+                 WHERE s.id = submission_judgement.submission_id \
+                   AND s.contest_type = ANY($2))"
+    } else {
+        "contest_type = ANY($2)"
+    }
 }
 
 fn row_to_queued(row: QueryResult) -> Result<QueuedRow, sea_orm::DbErr> {
