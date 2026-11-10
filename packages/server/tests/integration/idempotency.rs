@@ -360,7 +360,7 @@ mod response_binding {
         let replay = send().await.expect("send");
         assert_eq!(replay.status().as_u16(), 409);
         let replay: serde_json::Value = replay.json().await.expect("json");
-        assert_eq!(replay["code"], "CONFLICT");
+        assert_eq!(replay["code"], "IDEMPOTENCY_RESPONSE_NOT_STORED");
         assert!(replay.get("password").is_none());
     }
 
