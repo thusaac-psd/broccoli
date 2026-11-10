@@ -2824,6 +2824,35 @@ mod zip_upload_interplay {
             res.text
         );
     }
+
+    /// A ZIP filename that matches both formats is classified by the more specific
+    /// one, so overlapping patterns such as Polygon's `*` / `*.a` pair `01` with
+    /// `01.a` into one test case.
+    #[tokio::test]
+    async fn zip_upload_with_overlapping_formats_pairs_files() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let res = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "t.zip",
+                build_zip(&[("01", "in"), ("01.a", "out")]),
+                Some("*"),
+                Some("*.a"),
+                Some("abort"),
+                &token,
+            )
+            .await;
+        assert!(
+            res.status < 300,
+            "expected one test case `01`, got {}: {}",
+            res.status,
+            res.text
+        );
+    }
 }
 
 mod submission_format_normalisation {
