@@ -360,10 +360,13 @@ fn decide_visibility_decisions(
 
     // -- Submission resources: owner + the owning contest's type, in ONE
     // batched SQL query for the whole request. --
+    // A submission outside any contest (`contest_id: None`, which the host
+    // resolves from the submission row itself) can never belong to a
+    // bracket, so it is not looked up at all.
     let mut submission_ids: Vec<i32> = req
         .resources
         .iter()
-        .filter(|r| r.kind == "submission")
+        .filter(|r| r.kind == "submission" && r.contest_id.is_some())
         .filter_map(|r| r.id.parse::<i32>().ok())
         .collect();
     submission_ids.sort_unstable();
@@ -451,6 +454,10 @@ fn decide_visibility_decisions(
                 }
             }
             "submission" => {
+                if resource.contest_id.is_none() {
+                    // Standalone practice submission: not ours to judge.
+                    return WireDecision::Allow {};
+                }
                 let Ok(sub_id) = resource.id.parse::<i32>() else {
                     return WireDecision::Allow {};
                 };
@@ -1265,5 +1272,29 @@ mod tests {
             "no bracket-contest attachment at all: expected Allow, got {:?}",
             decisions[2]
         );
+    }
+
+    /// A standalone submission (no contest) is never one of this plugin's,
+    /// so its owner must keep seeing it while the plugin is enabled. The
+    /// lookup query joins `contest`, so a standalone submission never comes
+    /// back from it; it is allowed outright rather than falling into the
+    /// "cannot resolve, fail hidden" arm, which would hide every practice
+    /// submission from its owner.
+    #[test]
+    fn standalone_submissions_are_allowed_without_a_lookup() {
+        let host = Host::mock();
+        let req = VisibilityQueryInput {
+            subject: subject(Some(7), false),
+            action: "read".to_string(),
+            context: QueryContext { contest_id: None },
+            resources: vec![QueryResource {
+                kind: "submission".to_string(),
+                id: "42".to_string(),
+                contest_id: None,
+                problem_id: Some(3),
+            }],
+        };
+        let decisions = decide_visibility_decisions(&host, &req).unwrap();
+        assert!(matches!(decisions.as_slice(), [WireDecision::Allow {}]));
     }
 }
