@@ -98,14 +98,14 @@ const SHIM_PREFIX = 'shared-dep:';
 const RESOLVED_SHIM_PREFIX = '\0' + SHIM_PREFIX;
 
 /**
- * Sentinel string embedded in the client build's virtual module.
- * Replaced with the real import map in `generateBundle`, after chunk
- * filenames (with content hashes) are finalized.
- *
- * We match any quote style (double, single, backtick) because Rolldown
- * may output template literals instead of regular strings.
+ * Free identifier the client build's virtual map module exports. `renderChunk`
+ * swaps it for the map of shim URLs before Rollup hashes the chunk, so the
+ * host chunk's file name covers the shim file names it embeds. An identifier
+ * (rather than a string) survives codegen without any quote-style guessing,
+ * and a missed replacement fails loudly instead of yielding an empty map.
  */
-const PLACEHOLDER_RE = /(["`'])__SHARED_DEPS_MAP__\1/;
+const MAP_PLACEHOLDER = '__BROCCOLI_SHARED_DEPS_MAP__';
+const MAP_PLACEHOLDER_RE = new RegExp(`\\b${MAP_PLACEHOLDER}\\b`, 'g');
 
 const MANIFEST_FILENAME = 'shared-deps-map.json';
 
@@ -318,6 +318,20 @@ function generateDevShim(dep: string, browserHash: string): string {
 export function sharedDepsPlugin(): Plugin {
   let isDev = false;
   let config: ResolvedConfig;
+  /** Reference ids of the emitted shim chunks, keyed by dep. */
+  const shimRefs = new Map<string, string>();
+
+  /** Maps each bare specifier to its shim URL, root-relative to `config.base`. */
+  function sharedDepsImports(
+    ctx: Rollup.PluginContext,
+  ): Record<string, string> {
+    const base = config.base || '/';
+    const imports: Record<string, string> = {};
+    for (const [dep, referenceId] of shimRefs) {
+      imports[dep] = `${base}${ctx.getFileName(referenceId)}`;
+    }
+    return imports;
+  }
 
   return {
     name: 'broccoli:shared-deps',
@@ -457,13 +471,8 @@ export function sharedDepsPlugin(): Plugin {
           return `export default ${JSON.stringify(imports)};`;
         }
 
-        // For production:
-        // embed a placeholder that generateBundle will replace
-        // with the actual hashed chunk URLs.
-        return [
-          `var _m = "__SHARED_DEPS_MAP__";`,
-          `export default typeof _m === "string" ? {} : _m;`,
-        ].join('\n');
+        // Filled in by renderChunk once shim file names are known.
+        return `export default ${MAP_PLACEHOLDER};`;
       }
 
       if (id.startsWith(RESOLVED_SHIM_PREFIX)) {
@@ -498,47 +507,71 @@ export function sharedDepsPlugin(): Plugin {
     },
 
     buildStart() {
+      shimRefs.clear();
       if (isDev) return;
 
       for (const dep of SHARED_DEPS) {
-        this.emitFile({
-          type: 'chunk',
-          id: `${SHIM_PREFIX}${dep}`,
-          name: `shared-${flattenId(dep)}`,
-        });
+        shimRefs.set(
+          dep,
+          this.emitFile({
+            type: 'chunk',
+            id: `${SHIM_PREFIX}${dep}`,
+            name: `shared-${flattenId(dep)}`,
+          }),
+        );
       }
+    },
+
+    renderChunk(code, chunk) {
+      if (isDev || config.build.ssr) return null;
+      if (!chunk.moduleIds.includes(RESOLVED_MAP_ID)) return null;
+
+      // During renderChunk, getFileName returns each shim's name with a hash
+      // placeholder. Rollup resolves those placeholders after this hook and
+      // folds the referenced chunks' hashes into this chunk's hash, so the
+      // map's chunk gets a new name whenever any shim does.
+      const replacement = JSON.stringify(sharedDepsImports(this));
+      let replaced = false;
+      const patched = code.replace(MAP_PLACEHOLDER_RE, () => {
+        replaced = true;
+        return replacement;
+      });
+      if (!replaced) {
+        this.error(
+          `${MAP_PLACEHOLDER} not found in ${chunk.fileName}, which contains ${VIRTUAL_MAP_ID}`,
+        );
+      }
+      return { code: patched, map: null };
     },
 
     generateBundle(_, bundle) {
       if (isDev) return;
 
       const base = config.base || '/';
-      const imports: Record<string, string> = {};
+      const imports = sharedDepsImports(this);
 
-      for (const [filename, chunk] of Object.entries(bundle)) {
-        if (chunk.type !== 'chunk' || !chunk.facadeModuleId) continue;
-        if (!chunk.facadeModuleId.startsWith(RESOLVED_SHIM_PREFIX)) continue;
-
-        const dep = chunk.facadeModuleId.slice(RESOLVED_SHIM_PREFIX.length);
-        imports[dep] = `${base}${filename}`;
+      for (const referenceId of shimRefs.values()) {
+        const fileName = this.getFileName(referenceId);
+        const chunk = bundle[fileName];
+        if (chunk?.type !== 'chunk') continue;
 
         // Plugins enter shims through the import map, bypassing Vite's
         // preload helper that normally attaches a chunk's CSS (e.g. Monaco's
         // editor styles), so the shim links its static graph's CSS itself.
-        const cssHrefs = collectStaticCss(bundle, filename).map(
+        //
+        // This runs after hashing, like Vite's own preload-list rewrite, since
+        // the CSS names of imported chunks are only final once every chunk
+        // has rendered. The shim's name still pins these bytes: Vite folds
+        // each chunk's imported CSS names into that chunk's hash, and the
+        // shim's hash covers the hashes of the chunks it imports, so a
+        // different CSS list always means a different shim name.
+        const cssHrefs = collectStaticCss(bundle, fileName).map(
           (css) => `${base}${css}`,
         );
         if (cssHrefs.length > 0) {
           chunk.code =
             `for(const h of ${JSON.stringify(cssHrefs)})if(!document.querySelector('link[rel="stylesheet"][href="'+h+'"]')){const l=document.createElement('link');l.rel='stylesheet';l.href=h;document.head.appendChild(l)}\n` +
             chunk.code;
-        }
-      }
-
-      const replacement = JSON.stringify(imports);
-      for (const chunk of Object.values(bundle)) {
-        if (chunk.type === 'chunk' && PLACEHOLDER_RE.test(chunk.code)) {
-          chunk.code = chunk.code.replace(PLACEHOLDER_RE, () => replacement);
         }
       }
 
