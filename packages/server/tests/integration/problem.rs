@@ -2787,4 +2787,41 @@ mod zip_upload_interplay {
             res.status, res.text
         );
     }
+
+    /// Creating a test case without a `label` picks the first free label, so it
+    /// does not collide with the "1".."N" labels a 1-based ZIP upload assigns.
+    #[tokio::test]
+    async fn create_test_case_after_zip_upload_gets_a_free_label() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+
+        let up = app
+            .upload_with_token(
+                &routes::test_cases_upload(pid),
+                "t.zip",
+                build_zip(&[("1.in", "a"), ("1.ans", "b")]),
+                Some("*.in"),
+                Some("*.ans"),
+                Some("abort"),
+                &token,
+            )
+            .await;
+        assert!(up.status < 300, "upload failed: {}", up.text);
+
+        let res = app
+            .post_with_token(
+                &routes::test_cases(pid),
+                &json!({"input": "x", "expected_output": "y", "score": 1, "is_sample": false}),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 201,
+            "server rejected a label it generated itself: {}",
+            res.text
+        );
+    }
 }
