@@ -193,3 +193,110 @@ async fn a_local_load_failure_keeps_fleet_timers() {
         "the failure must be visible in readiness"
     );
 }
+
+/// Any replica may claim a due timer. One that does not have the plugin
+/// loaded must leave it for one that does, instead of dropping it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replica_without_the_plugin_leaves_due_timers_for_one_that_has_it() {
+    use server::dispatcher::plugin_timer::{TimerConfig, tick_once};
+
+    let a = TestApp::spawn_with_plugins().await;
+    let b_dir = tempfile::tempdir().unwrap();
+    let b = a
+        .spawn_replica(SpawnOptions {
+            plugins_dir: Some(b_dir.path().to_path_buf()),
+            allow_plugin_activation_failures: true,
+            ..Default::default()
+        })
+        .await;
+    let fire_at_ms = chrono::Utc::now().timestamp_millis();
+    let res = a
+        .post_without_token(
+            &routes::plugin_proxy(PLUGIN, "timer/schedule"),
+            &json!({ "key": "k", "fire_at_ms": fire_at_ms, "payload": "{}" }),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+
+    let config = TimerConfig::default();
+    let on_b = tick_once(&b.state, &config).await.unwrap();
+    assert_eq!(on_b.claimed, 0, "B cannot deliver it, so must not claim it");
+    let on_a = tick_once(&a.state, &config).await.unwrap();
+    assert_eq!(on_a.claimed, 1, "A still finds the timer and delivers it");
+}
+
+/// The claim fiber of a replica that has no handler for a submission's
+/// contest type leaves the submission `Queued` for a replica that has one,
+/// instead of claiming it only to fail it with `NO_HANDLER_REGISTERED`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replica_without_the_contest_type_leaves_queued_work_for_one_that_has_it() {
+    use common::SubmissionStatus;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+    use server::entity::submission;
+
+    let a = TestApp::spawn().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+    let problem_id = a.create_problem(&token, "Fleet claim").await;
+    let user_id = {
+        use sea_orm::{ColumnTrait, QueryFilter};
+        server::entity::user::Entity::find()
+            .filter(server::entity::user::Column::Username.eq("fleet_admin"))
+            .one(&a.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    // Only A can judge this contest type (B's plugin set lacks it).
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "fleet-only".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "__test__".into(),
+                submission_fn: "noop".into(),
+                code_run_fn: "noop".into(),
+                submission_admission: false,
+            },
+        );
+    let row = submission::ActiveModel {
+        files: Set(json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(None),
+        contest_type: Set("fleet-only".into()),
+        status: Set(SubmissionStatus::Queued),
+        judge_epoch: Set(0),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&a.db)
+    .await
+    .unwrap();
+
+    server::dispatcher::claim::claim_once(&b.state, "replica-b", 32, 0)
+        .await
+        .unwrap();
+    let after_b = submission::Entity::find_by_id(row.id)
+        .one(&a.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_b.status, SubmissionStatus::Queued);
+    assert_eq!(after_b.owner_server_id, None, "B must not claim it");
+
+    server::dispatcher::claim::claim_once(&a.state, "replica-a", 32, 0)
+        .await
+        .unwrap();
+    let after_a = submission::Entity::find_by_id(row.id)
+        .one(&a.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_a.owner_server_id.as_deref(), Some("replica-a"));
+}
