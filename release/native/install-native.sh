@@ -67,6 +67,19 @@ start_worker_units(){
   systemctl restart broccoli-worker
 }
 
+# weed_drop_unknown_flags UNIT: the bundle pins the SeaweedFS release the unit
+# was written for, but a bundle built with another one may not know
+# -s3.port.iceberg, and weed refuses to start on an unknown flag. A weed that
+# lacks the flag opens no Iceberg port either, so drop it there.
+weed_drop_unknown_flags(){
+  local help
+  # `weed server -h` exits nonzero, so read its text before matching.
+  help="$("$BUNDLE/bin/weed" server -h 2>&1 || true)"
+  case "$help" in *-s3.port.iceberg*) return 0 ;; esac
+  sed -i 's/ -s3\.port\.iceberg=0//' "$1"
+  echo ">> this weed has no -s3.port.iceberg (and no Iceberg port); dropped the flag"
+}
+
 require_ubuntu(){
   . /etc/os-release 2>/dev/null || true
   [ "${ID:-}" = ubuntu ] || echo "warning: not Ubuntu (ID=${ID:-?}); proceeding anyway" >&2
@@ -212,6 +225,7 @@ install_infra_server(){
     sed -e "s|@WEED_IP@|$host|; s|@SEAWEED_DATA@|$SEAWEED_DATA|; s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|; s|@SOCKET_PROXYD@|$proxyd|" \
       "$BUNDLE/systemd/$unit.tmpl" > "/etc/systemd/system/$unit"
   done
+  weed_drop_unknown_flags /etc/systemd/system/broccoli-weed.service
 
   # config.toml
   sed -e "s|@DB_URL@|postgres://$DB_USER:$db_pw@$host:5432/$DB_NAME|" \
