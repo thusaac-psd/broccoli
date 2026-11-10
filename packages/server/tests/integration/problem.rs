@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::common::{TestApp, routes};
 
-fn build_zip(files: &[(&str, &str)]) -> Vec<u8> {
+pub(crate) fn build_zip(files: &[(&str, &str)]) -> Vec<u8> {
     use std::io::Write;
     let buf = Vec::new();
     let cursor = std::io::Cursor::new(buf);

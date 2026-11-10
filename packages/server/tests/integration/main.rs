@@ -1,5 +1,10 @@
 mod additional_file;
 mod attachment;
+mod audit_auth;
+mod audit_contest;
+mod audit_pagination;
+mod audit_problem;
+mod audit_submission;
 mod auth;
 mod claim_in_flight;
 mod clarification;
