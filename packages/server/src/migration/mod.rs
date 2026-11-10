@@ -12,7 +12,7 @@
 //! migrations as no-ops on first run.
 //!
 //! `sync()` still creates/updates the core tables from the entities; the
-//! migrator runs AFTER it (see [`crate::database::init_db_with_max_connections`]).
+//! migrator runs AFTER it (see [`crate::database::BootSession::migrate`]).
 
 use sea_orm_migration::prelude::*;
 

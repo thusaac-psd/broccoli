@@ -357,12 +357,12 @@ async fn connect_restricted_pool_with_fallback(
 ///    the same pool (see docs/plans/2026-06-25-nul-byte-root-cause.md). Plugin
 ///    host functions always run their DB call to completion (sync `block_on` on
 ///    a blocking thread, never cancelled), so a pool used ONLY by them stays
-///    clean. No schema-sync/seeding here - the main pool already ran it.
+///    clean. No schema-sync/seeding here - [`BootSession`] already ran it.
 ///
 /// 2. **Bounded privilege** - every connection runs `SET ROLE broccoli_plugin`
 ///    before the plugin can use it, via sqlx's per-connection `after_connect`
-///    hook. `broccoli_plugin` is a NOLOGIN role (created + granted in
-///    [`init_db_with_max_connections`]) that the app role is a MEMBER of. By
+///    hook. `broccoli_plugin` is a NOLOGIN role (created + granted by the
+///    migrations in [`BootSession::migrate`]) that the app role is a MEMBER of. By
 ///    product decision (migrations m0003/m0004) it has full read + write DML
 ///    (SELECT/INSERT/UPDATE/DELETE) on every table, so raw plugin SQL can freely
 ///    read and mutate contest DATA. What it still CANNOT do, and what this role
