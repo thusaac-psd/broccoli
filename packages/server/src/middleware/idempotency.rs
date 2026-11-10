@@ -7,6 +7,9 @@
 //! stored, see [`NoStore`]). Error responses are never stored, so a failed
 //! request can be retried with the same key.
 //!
+//! Only JSON-sized bodies are covered (see [`max_request_body_bytes`]); a keyed
+//! request with a larger body is refused with 413 before it is read.
+//!
 //! Retries must resend a byte-identical body. JSON clients do this naturally;
 //! a multipart client must reuse its boundary.
 //!
@@ -29,14 +32,36 @@ use tracing::{error, warn};
 use crate::entity::idempotency_key;
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
+use crate::upload_limits::{MIB, source_request_limit_bytes};
 
 const MAX_RESPONSE_BODY_SIZE: usize = 4 * 1_048_576;
 
-/// Upper bound on a request body buffered for fingerprinting: the largest
-/// limit any route accepts, so the middleware never rejects a body its route
-/// would take. Each route's own body limit still applies to the handler.
-const MAX_REQUEST_BODY_SIZE: usize = LARGE_UPLOAD_LIMIT_BYTES;
+/// axum's `DefaultBodyLimit`, which every JSON route without its own limit uses.
+const DEFAULT_JSON_BODY_LIMIT: usize = 2 * MIB;
+
+/// Upper bound on a request body buffered for fingerprinting: the largest JSON
+/// body a keyed route accepts (submissions and code runs carry source files).
+/// The body is buffered before the route's own limit applies, so this bound is
+/// what keeps an authenticated client from making the server hold an upload in
+/// memory. Uploads are not idempotent and must not send a key: a larger body
+/// is refused with 413.
+fn max_request_body_bytes(state: &AppState) -> usize {
+    DEFAULT_JSON_BODY_LIMIT.max(source_request_limit_bytes(state.config.submission.max_size))
+}
+
+/// The declared `Content-Length`, when present and well-formed.
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn body_too_large() -> AppError {
+    AppError::PayloadTooLarge("Request body too large for an idempotent request".into())
+}
 
 const STALE_PENDING_SECS: i64 = 120;
 
@@ -172,14 +197,16 @@ pub async fn idempotency_middleware(
         None => return next.run(request).await,
     };
 
+    let limit = max_request_body_bytes(&state);
+    if declared_length(request.headers()).is_some_and(|len| len > limit as u64) {
+        return body_too_large().into_response();
+    }
+
     let (parts, body) = request.into_parts();
     // Buffering now happens before the handler's own timeout starts, so bound
     // it by the same budget: a trickling client cannot hold the claim open.
-    let buffered = tokio::time::timeout(
-        crate::REQUEST_TIMEOUT,
-        buffer_and_fingerprint(body, MAX_REQUEST_BODY_SIZE),
-    )
-    .await;
+    let buffered =
+        tokio::time::timeout(crate::REQUEST_TIMEOUT, buffer_and_fingerprint(body, limit)).await;
     let (body, fingerprint) = match buffered {
         Ok(Ok(buffered)) => buffered,
         Ok(Err(e)) => return e.into_response(),
@@ -226,9 +253,7 @@ async fn buffer_and_fingerprint(body: Body, limit: usize) -> Result<(Bytes, Stri
         let chunk =
             chunk.map_err(|e| AppError::Validation(format!("Failed to read request body: {e}")))?;
         if buffered.len() + chunk.len() > limit {
-            return Err(AppError::PayloadTooLarge(
-                "Request body too large for an idempotent request".into(),
-            ));
+            return Err(body_too_large());
         }
         hasher.update(&chunk);
         buffered.extend_from_slice(&chunk);
@@ -502,5 +527,22 @@ mod tests {
             assert_eq!(KeyStatus::parse(status.as_str()), Some(status));
         }
         assert_eq!(KeyStatus::parse("bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn streamed_body_over_the_bound_is_refused_mid_stream() {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from(vec![b'a'; 6])),
+            Ok(Bytes::from(vec![b'b'; 6])),
+        ];
+        let body = Body::from_stream(futures::stream::iter(chunks));
+        assert!(matches!(
+            buffer_and_fingerprint(body, 10).await,
+            Err(AppError::PayloadTooLarge(_))
+        ));
+
+        let (bytes, fingerprint) = buffer_and_fingerprint(Body::from("abc"), 10).await.unwrap();
+        assert_eq!(&bytes[..], b"abc");
+        assert_eq!(fingerprint, hex::encode(Sha256::digest(b"abc")));
     }
 }

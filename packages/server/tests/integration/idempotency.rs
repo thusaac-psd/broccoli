@@ -111,6 +111,43 @@ async fn error_response_releases_the_key() {
     assert_eq!(res.status().as_u16(), 201);
 }
 
+/// A keyed POST must not make the server buffer an arbitrarily
+/// large body. A declared `Content-Length` over the bound is refused before
+/// any of the body is read, so this request (which never sends its body)
+/// gets an immediate 413 instead of hanging while the server waits to buffer.
+#[tokio::test]
+async fn oversized_keyed_body_is_refused_before_buffering() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_user_with_role("idem_admin", "password123", "admin")
+        .await;
+
+    let mut stream = tokio::net::TcpStream::connect(app.addr)
+        .await
+        .expect("connect");
+    let head = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\n\
+         Idempotency-Key: idem-huge\r\nContent-Type: application/json\r\n\
+         Content-Length: 1000000000\r\n\r\n{{",
+        routes::PROBLEMS,
+        app.addr
+    );
+    stream.write_all(head.as_bytes()).await.expect("write");
+
+    let mut response = vec![0u8; 512];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read(&mut response),
+    )
+    .await
+    .expect("server waited for the body instead of refusing it")
+    .expect("read");
+    let response = String::from_utf8_lossy(&response[..read]);
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+}
+
 mod response_binding {
     use super::*;
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
