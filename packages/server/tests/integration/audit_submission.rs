@@ -242,15 +242,13 @@ async fn bulk_rejudge_enforces_documented_cap() {
     assert_eq!(res.status, 400, "{}", res.text);
 }
 
-/// BUG (med): the idempotency key stores only (method, path), not a body
-/// fingerprint, so reusing a key with a DIFFERENT body silently replays the
-/// first response. The web client keeps the key across a failed POST, so an
-/// edited resubmission after a network error is dropped and the old code's
-/// submission id is returned. A path mismatch already yields 422
-/// IDEMPOTENCY_KEY_MISMATCH; a body mismatch should too.
-/// Location: middleware/idempotency.rs.
+/// Regression (#59): the idempotency key used to store only (method, path),
+/// so reusing a key with a DIFFERENT body silently replayed the first
+/// response: an edited resubmission after a network error was dropped and the
+/// old code's submission id returned. The key is now bound to a body
+/// fingerprint and a body mismatch answers 422 IDEMPOTENCY_KEY_MISMATCH, like
+/// a path mismatch.
 #[tokio::test]
-#[ignore = "BUG: Idempotency-Key reuse with a different body silently replays the first response"]
 async fn idempotency_key_reuse_with_different_body_is_rejected() {
     let app = TestApp::spawn().await;
     let token = app
@@ -275,11 +273,13 @@ async fn idempotency_key_reuse_with_different_body_is_rejected() {
     let first: serde_json::Value = first.json().await.expect("json");
 
     let second = send("int main(){return 1;}").await.expect("send");
-    let status = second.status().as_u16();
-    let second: serde_json::Value = second.json().await.unwrap_or_default();
-    assert!(
-        status >= 400 || second["id"] != first["id"],
-        "different body under the same key replayed submission {} ({status})",
-        first["id"]
-    );
+    assert_eq!(second.status().as_u16(), 422);
+    let second: serde_json::Value = second.json().await.expect("json");
+    assert_eq!(second["code"], "IDEMPOTENCY_KEY_MISMATCH");
+
+    // The identical body still replays the original submission.
+    let replay = send("int main(){return 0;}").await.expect("send");
+    assert_eq!(replay.status().as_u16(), 201);
+    let replay: serde_json::Value = replay.json().await.expect("json");
+    assert_eq!(replay["id"], first["id"]);
 }
