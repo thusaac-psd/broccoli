@@ -118,7 +118,15 @@ async fn a_replica_missing_a_plugin_reports_it_and_converges_after_reload() {
     // or why (errors carry paths and database messages)...
     assert!(!res.text.contains(PLUGIN), "{}", res.text);
     assert!(res.body.get("plugins_not_ready").is_none(), "{}", res.text);
-    // ...which the authenticated admin API reports instead.
+    // ...which the authenticated admin API reports instead, whichever
+    // replica serves it: B lists the plugin it lacks the files for, too.
+    let res = b.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    assert_eq!(find(&res.body, PLUGIN)["enabled"], true, "{}", res.text);
+    let res = b
+        .get_with_token(&routes::admin_plugin_details(PLUGIN), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["fleet"]["state"], "failed", "{}", res.text);
     let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
     let fleet = &find(&res.body, PLUGIN)["fleet"];
     let b_entry = fleet["replicas"]

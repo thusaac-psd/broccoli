@@ -30,7 +30,7 @@ use crate::upload_limits::{LARGE_UPLOAD_LIMIT_BYTES, LARGE_UPLOAD_LIMIT_MIB};
     tag = "Admin",
     operation_id = "listAllPlugins",
     summary = "List all discovered plugins",
-    description = "Returns a list of all plugins that have been discovered on disk, along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.",
+    description = "Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.",
     responses(
         (status = 200, description = "List of plugins retrieved successfully", body = Vec<PluginDetailResponse>),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -46,13 +46,26 @@ pub async fn list_all_plugins(
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
     let fleet = crate::plugin_fleet::read(&state.db).await?;
-    let plugins = state
+    let mut plugins: Vec<PluginDetailResponse> = state
         .plugins
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
         .map(|info| PluginDetailResponse::new(info, &fleet))
         .collect();
+    // Plugins installed on other replicas but not on this one: still listed,
+    // so the page shows the same set whichever replica serves it.
+    let local: std::collections::HashSet<String> = plugins.iter().map(|p| p.id.clone()).collect();
+    let mut remote: Vec<&str> = fleet
+        .plugin_ids()
+        .filter(|id| !local.contains(*id))
+        .collect();
+    remote.sort_unstable();
+    plugins.extend(
+        remote
+            .into_iter()
+            .map(|id| PluginDetailResponse::without_manifest(id, &fleet)),
+    );
 
     Ok(Json(plugins))
 }
@@ -86,11 +99,15 @@ pub async fn get_plugin_details(
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .find(|p| p.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("Plugin '{}' not found", id)))?;
-
+        .find(|p| p.id == id);
     let fleet = crate::plugin_fleet::read(&state.db).await?;
-    Ok(Json(PluginFullDetailResponse::new(plugin, &fleet)))
+    match plugin {
+        Some(plugin) => Ok(Json(PluginFullDetailResponse::new(plugin, &fleet))),
+        None if fleet.plugin_ids().any(|known| known == id) => Ok(Json(
+            PluginFullDetailResponse::without_manifest(&id, &fleet),
+        )),
+        None => Err(AppError::NotFound(format!("Plugin '{}' not found", id))),
+    }
 }
 
 #[utoipa::path(

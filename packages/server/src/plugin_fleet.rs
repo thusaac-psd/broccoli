@@ -193,6 +193,11 @@ pub struct PluginFleetResponse {
 }
 
 impl FleetView {
+    /// Every plugin the fleet knows about (has a desired-state row for).
+    pub fn plugin_ids(&self) -> impl Iterator<Item = &str> {
+        self.desired.keys().map(String::as_str)
+    }
+
     /// Whether `plugin_id` is enabled in the desired state.
     pub fn is_enabled(&self, plugin_id: &str) -> bool {
         self.desired

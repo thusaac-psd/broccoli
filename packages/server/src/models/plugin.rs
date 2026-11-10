@@ -315,6 +315,25 @@ pub struct ReloadFailure {
 }
 
 impl PluginDetailResponse {
+    /// A plugin the fleet knows about but whose files are not on the replica
+    /// serving the request, so there is no manifest to describe it: only its
+    /// id, desired state and per-replica states are known.
+    pub fn without_manifest(id: &str, fleet: &FleetView) -> Self {
+        Self {
+            id: id.to_string(),
+            status: PluginStatusResponse::Unloaded,
+            enabled: fleet.is_enabled(id),
+            fleet: fleet.plugin(id),
+            name: id.to_string(),
+            version: String::new(),
+            description: None,
+            has_server: false,
+            has_worker: false,
+            has_web: false,
+            config_schemas: Vec::new(),
+        }
+    }
+
     /// `fleet` supplies the desired state and the per-replica load states.
     pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
         let enabled = fleet.is_enabled(&info.id);
@@ -353,6 +372,27 @@ impl PluginDetailResponse {
 }
 
 impl PluginFullDetailResponse {
+    /// See [`PluginDetailResponse::without_manifest`].
+    pub fn without_manifest(id: &str, fleet: &FleetView) -> Self {
+        Self {
+            id: id.to_string(),
+            status: PluginStatusResponse::Unloaded,
+            enabled: fleet.is_enabled(id),
+            fleet: fleet.plugin(id),
+            name: id.to_string(),
+            version: String::new(),
+            description: None,
+            has_server: false,
+            has_worker: false,
+            has_web: false,
+            server: None,
+            worker: None,
+            web: None,
+            translations: Vec::new(),
+            config_schemas: Vec::new(),
+        }
+    }
+
     /// `fleet` supplies the desired state and the per-replica load states.
     pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
         let enabled = fleet.is_enabled(&info.id);

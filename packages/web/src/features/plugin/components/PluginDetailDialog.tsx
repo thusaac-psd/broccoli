@@ -373,7 +373,8 @@ export function PluginDetailDialog({
               {plugin && (
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-xs">
-                    {plugin.id} · v{plugin.version}
+                    {plugin.id}
+                    {plugin.version && ` · v${plugin.version}`}
                   </span>
                   <PluginFleetBadge fleet={plugin.fleet} />
                   {plugin.enabled &&

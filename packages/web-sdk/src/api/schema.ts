@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * List all discovered plugins
-     * @description Returns a list of all plugins that have been discovered on disk, along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
+     * @description Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['listAllPlugins'];
     put?: never;
