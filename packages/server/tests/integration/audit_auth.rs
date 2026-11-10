@@ -326,7 +326,6 @@ async fn user_manager_can_manage_accounts_within_its_ceiling() {
 /// USERNAME_TAKEN). The password is not length-checked either.
 /// Location: handlers/user.rs `update_user`.
 #[tokio::test]
-#[ignore = "BUG: update_user with a taken username returns 500 instead of 409 USERNAME_TAKEN"]
 async fn update_user_to_taken_username_is_a_conflict() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -345,7 +344,6 @@ async fn update_user_to_taken_username_is_a_conflict() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: update_user accepts usernames/passwords that registration rejects"]
 async fn update_user_validates_like_registration() {
     let app = TestApp::spawn().await;
     let admin = app
@@ -357,7 +355,6 @@ async fn update_user_validates_like_registration() {
 
     for body in [
         json!({"password": "x"}),
-        json!({"username": " padded"}),
         json!({"username": "has space!"}),
     ] {
         let res = app
@@ -365,6 +362,24 @@ async fn update_user_validates_like_registration() {
             .await;
         assert_eq!(res.status, 400, "{body} accepted: {}", res.text);
     }
+
+    // Surrounding whitespace is trimmed, as at registration and login.
+    let res = app
+        .patch_with_token(
+            &routes::user(carol),
+            &json!({"username": " aa_carol2 "}),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["username"], "aa_carol2");
+    let login = app
+        .post_without_token(
+            routes::LOGIN,
+            &json!({"username": "aa_carol2", "password": "password123"}),
+        )
+        .await;
+    assert_eq!(login.status, 200, "{}", login.text);
 }
 
 /// BUG (med): assigning a role the user already holds (every new user holds
