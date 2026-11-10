@@ -48,6 +48,18 @@ const TCP_KEEPALIVES: [(&str, &str); 3] = [
     ("tcp_keepalives_count", "3"),
 ];
 
+/// Every session setting the host may enforce through startup `options`. A
+/// session-level `SET` of one of these from untrusted SQL (plugin raw SQL)
+/// would outlive the call on a pooled connection and silently lift the bound
+/// for whoever reuses it, so the plugin SQL guard refuses it (see
+/// `server::host_funcs::sql`).
+pub const ENFORCED_SESSION_SETTINGS: [&str; 4] = [
+    "statement_timeout",
+    TCP_KEEPALIVES[0].0,
+    TCP_KEEPALIVES[1].0,
+    TCP_KEEPALIVES[2].0,
+];
+
 /// Per-connection session settings applied at connect time (startup
 /// `options`), so they hold for every physical connection in the pool,
 /// including ones opened after a reconnect.
