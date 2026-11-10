@@ -7,6 +7,7 @@ pub mod contest;
 pub mod contest_problem;
 pub mod contest_user;
 pub mod dead_letter_message;
+pub mod device_authorization;
 pub mod idempotency_key;
 pub mod judgement_reset;
 pub mod plugin;

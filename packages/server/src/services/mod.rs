@@ -1,5 +1,6 @@
 pub mod auth_tokens;
 pub mod code_run_dispatch;
+pub mod device_auth;
 pub mod evaluate_batch;
 pub mod operation_batch;
 pub mod plugin_config;

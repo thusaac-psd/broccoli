@@ -351,7 +351,7 @@ export interface paths {
     put?: never;
     /**
      * Poll for device authorization token
-     * @description Polling endpoint for the device code flow. Returns the JWT token once the user has authorized the device. Returns 400 with 'authorization_pending' while waiting.
+     * @description Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).
      */
     post: operations['pollDeviceToken'];
     delete?: never;

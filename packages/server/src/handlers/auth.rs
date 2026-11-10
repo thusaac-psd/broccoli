@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use axum::{
     Extension, Json,
     extract::State,
@@ -39,6 +37,7 @@ use crate::models::auth::{
 use crate::services::auth_tokens::{
     issue_access_token, mint_refresh_token, revoke_presented, rotate_refresh_token,
 };
+use crate::services::device_auth::{self, PollOutcome};
 use crate::state::AppState;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::{hash, refresh};
@@ -247,7 +246,6 @@ const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LEN: usize = 8;
 const DEVICE_CODE_EXPIRY_SECS: u64 = 900;
 const POLL_INTERVAL_SECS: u64 = 5;
-const MAX_PENDING_DEVICE_CODES: usize = 1000;
 
 fn generate_device_code() -> String {
     use rand::Rng;
@@ -378,46 +376,13 @@ pub async fn request_device_code(
     source: Option<Extension<ClientIpSource>>,
     AppJson(_payload): AppJson<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, AppError> {
-    if state.device_codes.len() >= MAX_PENDING_DEVICE_CODES {
-        return Err(AppError::RateLimited { retry_after: 60 });
-    }
-
-    let device_code = generate_device_code();
-
-    let user_code = {
-        let mut attempts = 0;
-        loop {
-            let candidate = generate_user_code();
-            let normalized = normalize_user_code(&candidate);
-            let collision = state
-                .device_codes
-                .iter()
-                .any(|entry| normalize_user_code(&entry.value().user_code) == normalized);
-            if !collision {
-                break candidate;
-            }
-            attempts += 1;
-            if attempts >= 10 {
-                return Err(AppError::Internal(
-                    "Failed to generate unique user code".into(),
-                ));
-            }
-        }
-    };
-
-    let now = Instant::now();
-    let expires_at = now + Duration::from_secs(DEVICE_CODE_EXPIRY_SECS);
-
-    state.device_codes.insert(
-        device_code.clone(),
-        crate::state::PendingDeviceAuth {
-            user_code: user_code.clone(),
-            token: None,
-            created_at: now,
-            expires_at,
-            last_poll: None,
-        },
-    );
+    let (device_code, user_code) = device_auth::create(
+        &state.db,
+        DEVICE_CODE_EXPIRY_SECS,
+        || (generate_device_code(), generate_user_code()),
+        normalize_user_code,
+    )
+    .await?;
 
     let forwarded_trusted = matches!(
         source,
@@ -456,40 +421,15 @@ pub async fn authorize_device(
     State(state): State<AppState>,
     AppJson(payload): AppJson<DeviceAuthorizeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // Minted before the `device_codes` entry guard is taken below, so the
-    // shard lock is never held across a DB await.
-    let token = issue_access_token(&state.db, &state.config.auth.jwt_secret, auth_user.user_id)
-        .await?
-        .token;
-
-    let normalized_input = normalize_user_code(&payload.user_code);
-    let now = Instant::now();
-
-    let mut found_key: Option<String> = None;
-    for entry in state.device_codes.iter() {
-        if normalize_user_code(&entry.value().user_code) == normalized_input
-            && entry.value().expires_at > now
-        {
-            found_key = Some(entry.key().clone());
-            break;
-        }
-    }
-
-    let device_code =
-        found_key.ok_or_else(|| AppError::NotFound("Code not found or expired".into()))?;
-
-    let mut entry = state
-        .device_codes
-        .get_mut(&device_code)
-        .ok_or_else(|| AppError::NotFound("Code not found or expired".into()))?;
-
-    if entry.token.is_some() {
-        return Err(AppError::Conflict(
-            "Code has already been authorized".into(),
-        ));
-    }
-
-    entry.token = Some(token);
+    // `FreshAuthUser` refused a stale or deleted caller. Only the approving
+    // user is recorded; the CLI's token is minted from that user's current
+    // grants when it collects it.
+    device_auth::authorize(
+        &state.db,
+        &normalize_user_code(&payload.user_code),
+        auth_user.user_id,
+    )
+    .await?;
 
     Ok(Json(serde_json::json!({
         "message": "Device authorized successfully"
@@ -502,7 +442,7 @@ pub async fn authorize_device(
     tag = "Auth",
     operation_id = "pollDeviceToken",
     summary = "Poll for device authorization token",
-    description = "Polling endpoint for the device code flow. Returns the JWT token once the user has authorized the device. Returns 400 with 'authorization_pending' while waiting.",
+    description = "Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).",
     request_body = DeviceTokenRequest,
     responses(
         (status = 200, description = "Token granted", body = serde_json::Value),
@@ -514,49 +454,33 @@ pub async fn poll_device_token(
     State(state): State<AppState>,
     AppJson(payload): AppJson<DeviceTokenRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let now = Instant::now();
-
-    let mut entry = match state.device_codes.get_mut(&payload.device_code) {
-        Some(entry) => entry,
-        None => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "expired_token" })),
-            ));
-        }
+    let outcome = device_auth::poll(
+        &state.db,
+        &state.config.auth.jwt_secret,
+        &payload.device_code,
+        POLL_INTERVAL_SECS,
+    )
+    .await?;
+    let (status, body) = match outcome {
+        PollOutcome::Token(token) => (StatusCode::OK, serde_json::json!({ "token": token })),
+        PollOutcome::Pending => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "authorization_pending" }),
+        ),
+        PollOutcome::SlowDown => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "slow_down" }),
+        ),
+        PollOutcome::Expired => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "expired_token" }),
+        ),
+        PollOutcome::Denied => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "access_denied" }),
+        ),
     };
-
-    if entry.expires_at <= now {
-        drop(entry);
-        state.device_codes.remove(&payload.device_code);
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "expired_token" })),
-        ));
-    }
-
-    if entry
-        .last_poll
-        .is_some_and(|lp| now.duration_since(lp) < Duration::from_secs(POLL_INTERVAL_SECS))
-    {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "slow_down" })),
-        ));
-    }
-    entry.last_poll = Some(now);
-
-    if let Some(ref token) = entry.token {
-        let token = token.clone();
-        drop(entry);
-        state.device_codes.remove(&payload.device_code);
-        return Ok((StatusCode::OK, Json(serde_json::json!({ "token": token }))));
-    }
-
-    Ok((
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": "authorization_pending" })),
-    ))
+    Ok((status, Json(body)))
 }
 
 #[utoipa::path(
