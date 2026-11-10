@@ -146,13 +146,9 @@ export function AuthProvider({
 
   // Sync state with other tabs or infrastructure events
   useEffect(() => {
-    const handleTokenCleared = (event: Event) => {
-      const key = (event as CustomEvent<{ key?: string }>).detail?.key;
-      // If no key provided, clear all. Otherwise, check if it matches our session hint key.
-      if (!key || key === sessionStatusKey) {
-        clearSession();
-      }
-    };
+    // The API client announces that the server definitively rejected the
+    // refresh cookie (see `recoverSession`).
+    const handleSessionExpired = () => clearSession();
 
     const handleStorage = (event: StorageEvent) => {
       // Another tab signalled logout: `clearSession` writes the string 'false'
@@ -164,7 +160,7 @@ export function AuthProvider({
       }
     };
 
-    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleTokenCleared);
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired);
     window.addEventListener('storage', handleStorage);
 
     const initAuth = async () => {
@@ -188,7 +184,7 @@ export function AuthProvider({
     return () => {
       window.removeEventListener(
         AUTH_SESSION_EXPIRED_EVENT,
-        handleTokenCleared,
+        handleSessionExpired,
       );
       window.removeEventListener('storage', handleStorage);
     };
