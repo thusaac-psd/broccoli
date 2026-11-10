@@ -225,7 +225,6 @@ async fn submission_format_with_padded_filename_is_normalised_or_rejected() {
 /// output". Both patterns pass format validation.
 /// Location: handlers/problem/upload.rs (`label_as_input` checked first).
 #[tokio::test]
-#[ignore = "BUG: overlapping input/output formats (`*` and `*.a`) misclassify answer files as inputs"]
 async fn zip_upload_with_overlapping_formats_pairs_files() {
     let app = TestApp::spawn().await;
     let token = app
