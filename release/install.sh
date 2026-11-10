@@ -173,6 +173,29 @@ primary_ip() {
   hostname -I 2>/dev/null | awk '{print $1}' || true
 }
 
+# Settle BROCCOLI_INFRA_HOST, the address servers and workers dial for DB, MQ
+# and S3. A guess is never silent: several addresses make the installer say
+# which one it took, and none at all stops an infra install, since 127.0.0.1
+# would point every other machine at itself. Called directly, not in $(...),
+# so that die stops the install.
+resolve_infra_host() {
+  local addrs
+  [ -z "${BROCCOLI_INFRA_HOST:-}" ] || return 0
+  addrs="$(hostname -I 2>/dev/null || true)"
+  # shellcheck disable=SC2086
+  set -- $addrs
+  if [ "$#" -eq 0 ]; then
+    [ "$ROLE" = "single-host" ] || die "cannot detect this machine's LAN address; set BROCCOLI_INFRA_HOST to the address servers and workers will use"
+    BROCCOLI_INFRA_HOST=127.0.0.1
+    return 0
+  fi
+  if [ "$#" -gt 1 ]; then
+    echo "warning: this machine has several addresses ($*); servers and workers will be told to use $1." >&2
+    echo "warning: set BROCCOLI_INFRA_HOST to choose another one." >&2
+  fi
+  BROCCOLI_INFRA_HOST="$1"
+}
+
 bind_port() {
   local bind
   bind="$1"
@@ -537,6 +560,11 @@ require_env() {
   local name
   for name in "$@"; do
     [ -n "${!name:-}" ] || die "set $name before installing role '$ROLE'"
+    # The .env.*.example files mark every value an operator must supply with
+    # change-me (a forgeable JWT secret, a phantom infra address, ...).
+    case "${!name}" in
+      *change-me*) die "$name still holds a change-me placeholder from an example file; set a real value" ;;
+    esac
   done
 }
 
@@ -596,8 +624,8 @@ populate_connection_defaults() {
     *) return 0 ;;
   esac
 
-  infra_host="${BROCCOLI_INFRA_HOST:-$(primary_ip)}"
-  infra_host="${infra_host:-127.0.0.1}"
+  resolve_infra_host
+  infra_host="$BROCCOLI_INFRA_HOST"
   postgres_port="$(bind_port "${POSTGRES_BIND:-0.0.0.0:5432}")"
   redis_port="$(bind_port "${REDIS_BIND:-0.0.0.0:6379}")"
   s3_port="$(bind_port "${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}")"
@@ -690,8 +718,8 @@ write_env_file() {
       prompt_value SEAWEEDFS_MASTER_BIND "SeaweedFS master bind address" "127.0.0.1:9333"
       prompt_value BROCCOLI_ADMIN_USERNAME "Initial admin username" "admin"
       prompt_secret BROCCOLI_ADMIN_PASSWORD "Initial admin password" generate
-      infra_host="${BROCCOLI_INFRA_HOST:-$(primary_ip)}"
-      infra_host="${infra_host:-127.0.0.1}"
+      resolve_infra_host
+      infra_host="$BROCCOLI_INFRA_HOST"
       postgres_bind="${POSTGRES_BIND:-0.0.0.0:5432}"
       redis_bind="${REDIS_BIND:-0.0.0.0:6379}"
       s3_bind="${SEAWEEDFS_S3_BIND:-0.0.0.0:8333}"

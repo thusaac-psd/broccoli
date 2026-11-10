@@ -69,4 +69,24 @@ if BROCCOLI_ADMIN_PASSWORD="it's" run infra; then fail "a single quote in a valu
 [ ! -e .env.infra ] && [ ! -e .env.infra.tmp ] || fail "a refused value left a partial .env.infra"
 if BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY='a"b' run infra; then fail "a quote in an S3 key was accepted"; fi
 cd ..
+
+# An env file copied from an example still holds change-me placeholders.
+cp .env.server.example refused/.env.server
+cd refused
+if run server; then fail "a server env file full of change-me placeholders was accepted"; fi
+cd ..
+
+# The infra address is never guessed silently: no address stops an infra
+# install, several make it name the one it picked.
+mkdir -p fakebin addr && cp -r install.sh lib docker-compose.*.template addr/
+printf '#!/bin/sh\n[ "$1" = -I ] && printf "%%s\\n" "$FAKE_ADDRS"\n' > fakebin/hostname
+chmod +x fakebin/hostname
+cd addr
+if FAKE_ADDRS="" PATH="$T/fakebin:$PATH" run infra; then fail "infra install guessed 127.0.0.1"; fi
+FAKE_ADDRS="192.168.1.5 10.0.0.7" PATH="$T/fakebin:$PATH" BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+  ./install.sh infra </dev/null >"$T/addr.log" 2>&1 || fail "infra dry run with two addresses"
+grep -q 'several addresses (192.168.1.5 10.0.0.7)' "$T/addr.log" || fail "no warning about the guessed infra address"
+[ "$(env_get connection.env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = 'http://192.168.1.5:8333' ] \
+  || fail "infra address not taken from the first address"
+cd ..
 echo PASS
