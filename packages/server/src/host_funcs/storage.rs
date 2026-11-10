@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use extism::host_fn;
 use sea_orm::sea_query::OnConflict;
@@ -20,12 +21,9 @@ struct StoreGetInput {
     keys: Vec<String>,
 }
 
-host_fn!(pub store_get(user_data: (String, DatabaseConnection); input: String) -> String {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("store_get", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub store_get(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "store_get")?;
+    let (plugin_id, db) = &*call;
 
     let mut parsed: StoreGetInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid store_get input: {e}")))?;
@@ -69,12 +67,9 @@ struct StoreSetInput {
     entries: Vec<StoreSetEntry>,
 }
 
-host_fn!(pub store_set(user_data: (String, DatabaseConnection); input: String) -> () {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("store_set", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub store_set(user_data: Arc<(String, DatabaseConnection)>; input: String) -> () {
+    let call = super::HostCall::enter(&user_data, "store_set")?;
+    let (plugin_id, db) = &*call;
 
     let mut parsed: StoreSetInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid store_set input: {e}")))?;
@@ -132,12 +127,9 @@ struct StoreDeleteInput {
     keys: Vec<String>,
 }
 
-host_fn!(pub store_delete(user_data: (String, DatabaseConnection); input: String) -> () {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("store_delete", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub store_delete(user_data: Arc<(String, DatabaseConnection)>; input: String) -> () {
+    let call = super::HostCall::enter(&user_data, "store_delete")?;
+    let (plugin_id, db) = &*call;
 
     let mut parsed: StoreDeleteInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid store_delete input: {e}")))?;
@@ -172,12 +164,9 @@ struct StoreCasInput {
     expected_revision: Option<i64>,
 }
 
-host_fn!(pub store_compare_and_set(user_data: (String, DatabaseConnection); input: String) -> String {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("store_compare_and_set", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub store_compare_and_set(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "store_compare_and_set")?;
+    let (plugin_id, db) = &*call;
 
     let mut parsed: StoreCasInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid store_compare_and_set input: {e}")))?;
@@ -204,18 +193,15 @@ struct StoreScanInput {
     after: Option<String>,
 }
 
-host_fn!(pub store_scan(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let guard = user_data.get()?;
-        let data = super::lock_or_poison(&guard)?;
-        data.clone()
-    };
+host_fn!(pub store_scan(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "store_scan")?;
+    let (plugin_id, db) = &*call;
     let input: StoreScanInput = serde_json::from_str(&input)?;
     let rows = tokio::runtime::Handle::current().block_on(db.query_all_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT key, data FROM plugin_storage WHERE plugin_id = $1 AND collection = $2
          AND starts_with(key, $3) AND ($4::text IS NULL OR key > $4) ORDER BY key LIMIT 100",
-        [plugin_id.into(), DEFAULT_COLLECTION.into(), input.prefix.into(), input.after.into()])))?;
+        [plugin_id.as_str().into(), DEFAULT_COLLECTION.into(), input.prefix.into(), input.after.into()])))?;
     let mut entries = HashMap::new();
     for row in rows {
         let key: String = row.try_get("", "key")?;

@@ -13,22 +13,26 @@ struct ResolveLanguageContext {
     plugin_manager: Arc<dyn PluginInvoker>,
 }
 
+impl super::HostFnContext for ResolveLanguageContext {
+    fn plugin_id(&self) -> &str {
+        &self.caller_plugin_id
+    }
+}
+
 pub fn create_resolve_language_function(
     plugin_id: String,
     resolver_registry: LanguageResolverRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    let user_data: UserData<ResolveLanguageContext> = UserData::new(ResolveLanguageContext {
-        caller_plugin_id: plugin_id,
-        resolver_registry,
-        plugin_manager,
-    });
-
     Function::new(
         "resolve_language",
         [ValType::I64],
         [ValType::I64],
-        user_data,
+        super::host_data(ResolveLanguageContext {
+            caller_plugin_id: plugin_id,
+            resolver_registry,
+            plugin_manager,
+        }),
         resolve_language_fn,
     )
 }
@@ -37,18 +41,10 @@ fn resolve_language_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<ResolveLanguageContext>,
+    user_data: UserData<Arc<ResolveLanguageContext>>,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: ResolveLanguageInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
-
-    let guard = user_data.get()?;
-    let ctx = guard
-        .lock()
-        .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-    let span = super::host_fn_span("resolve_language", &ctx.caller_plugin_id);
-    let _enter = span.enter();
+    let input: ResolveLanguageInput = super::read_json(plugin, inputs, "input")?;
+    let ctx = super::HostCall::enter(&user_data, "resolve_language")?;
 
     let resolver = tokio::runtime::Handle::current().block_on(async {
         let registry = ctx.resolver_registry.read().await;
@@ -97,10 +93,5 @@ fn resolve_language_fn(
         }
     }
 
-    let output_bytes = serde_json::to_vec(&result)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize output: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-
-    Ok(())
+    super::write_json(plugin, outputs, &result, "output")
 }

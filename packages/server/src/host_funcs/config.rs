@@ -4,6 +4,7 @@ use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
 use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::utils::text::sanitize_db_json;
 
@@ -98,7 +99,7 @@ pub fn create_config_get_function(
         "config_get",
         [ValType::I64],
         [ValType::I64],
-        UserData::new((plugin_id, db, registry)),
+        super::host_data((plugin_id, db, registry)),
         config_get_fn,
     )
 }
@@ -108,7 +109,7 @@ pub fn create_config_set_function(plugin_id: String, db: DatabaseConnection) -> 
         "config_set",
         [ValType::I64],
         [],
-        UserData::new((plugin_id, db)),
+        super::host_data((plugin_id, db)),
         config_set_fn,
     )
 }
@@ -117,22 +118,11 @@ fn config_get_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<ConfigGetUserData>,
+    user_data: UserData<Arc<ConfigGetUserData>>,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: ConfigGetInput = serde_json::from_slice(&input_bytes).map_err(|e| {
-        extism::Error::msg(format!("Failed to deserialize config_get input: {}", e))
-    })?;
-
-    let (plugin_id, db, registry) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        data.clone()
-    };
-    let span = super::host_fn_span("config_get", &plugin_id);
-    let _enter = span.enter();
+    let input: ConfigGetInput = super::read_json(plugin, inputs, "config_get input")?;
+    let call = super::HostCall::enter(&user_data, "config_get")?;
+    let (plugin_id, db, registry) = &*call;
 
     let raw_namespace = input.namespace.clone();
 
@@ -143,13 +133,13 @@ fn config_get_fn(
     };
 
     validate_raw_namespace(&raw_namespace)?;
-    let namespace = resolve_namespace(&input.scope, &plugin_id, &raw_namespace);
+    let namespace = resolve_namespace(&input.scope, plugin_id, &raw_namespace);
     validate_config_input(&input.scope, &ref_id, &namespace)?;
 
     let result = tokio::runtime::Handle::current()
         .block_on(async {
             plugin_config::Entity::find_by_id((input.scope, ref_id, namespace))
-                .one(&db)
+                .one(db)
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("DB error in config_get: {}", e)))?;
@@ -163,7 +153,7 @@ fn config_get_fn(
                 .read()
                 .ok()
                 .and_then(|reg| {
-                    reg.get(&plugin_id)
+                    reg.get(plugin_id)
                         .and_then(|entry| entry.manifest.config.get(&raw_namespace))
                         .map(|ns| ns.defaults())
                 })
@@ -173,34 +163,18 @@ fn config_get_fn(
         }
     };
 
-    let output_bytes = serde_json::to_vec(&output_value)
-        .map_err(|e| extism::Error::msg(format!("Failed to serialize config_get output: {}", e)))?;
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-
-    Ok(())
+    super::write_json(plugin, outputs, &output_value, "config_get output")
 }
 
 fn config_set_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<ConfigSetUserData>,
+    user_data: UserData<Arc<ConfigSetUserData>>,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: ConfigSetInput = serde_json::from_slice(&input_bytes).map_err(|e| {
-        extism::Error::msg(format!("Failed to deserialize config_set input: {}", e))
-    })?;
-
-    let (plugin_id, db) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        data.clone()
-    };
-    let span = super::host_fn_span("config_set", &plugin_id);
-    let _enter = span.enter();
+    let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
+    let call = super::HostCall::enter(&user_data, "config_set")?;
+    let (plugin_id, db) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -209,7 +183,7 @@ fn config_set_fn(
     };
 
     validate_raw_namespace(&input.namespace)?;
-    let namespace = resolve_namespace(&input.scope, &plugin_id, &input.namespace);
+    let namespace = resolve_namespace(&input.scope, plugin_id, &input.namespace);
     validate_config_input(&input.scope, &ref_id, &namespace)?;
 
     tokio::runtime::Handle::current()
@@ -237,7 +211,7 @@ fn config_set_fn(
                     ])
                     .to_owned(),
                 )
-                .exec(&db)
+                .exec(db)
                 .await?;
 
             Ok::<_, sea_orm::DbErr>(())

@@ -893,26 +893,16 @@ fn parse_args(
         .collect())
 }
 
-host_fn!(pub db_execute(user_data: (String, DatabaseConnection); sql: String, args: String) -> String {
-    // Clone the connection handle out of the UserData lock and release the lock
-    // BEFORE the blocking DB call. `DatabaseConnection` is a cheap pool handle;
-    // holding the std `Mutex` across `block_on(execute_raw)` serializes every
-    // plugin DB call on one mutex AND pins the lock across an await point - an
-    // anti-pattern. `db_begin` already clones-then-releases; match it here.
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("db_execute", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_execute")?;
+    let (plugin_id, db) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), &plugin_id)?;
-    let sql = sanitize_sql_text("sql", &plugin_id, sql);
-    reject_role_escalation(&plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", &plugin_id, args);
-    let mut values = parse_args(&args, &plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, &plugin_id, &sql);
+    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
+    let sql = sanitize_sql_text("sql", plugin_id, sql);
+    reject_role_escalation(plugin_id, &sql)?;
+    let args = sanitize_sql_text("args", plugin_id, args);
+    let mut values = parse_args(&args, plugin_id, &sql)?;
+    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
     if stripped > 0 {
         tracing::warn!(
             plugin_id = %plugin_id,
@@ -964,20 +954,15 @@ host_fn!(pub db_execute(user_data: (String, DatabaseConnection); sql: String, ar
     }
 });
 
-host_fn!(pub db_query(user_data: (String, DatabaseConnection); sql: String, args: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("db_query", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_query")?;
+    let (plugin_id, db) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), &plugin_id)?;
-    let sql = sanitize_sql_text("sql", &plugin_id, sql);
-    reject_role_escalation(&plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", &plugin_id, args);
-    let values = parse_args(&args, &plugin_id, &sql)?;
+    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
+    let sql = sanitize_sql_text("sql", plugin_id, sql);
+    reject_role_escalation(plugin_id, &sql)?;
+    let args = sanitize_sql_text("args", plugin_id, args);
+    let values = parse_args(&args, plugin_id, &sql)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
@@ -1029,16 +1014,11 @@ host_fn!(pub db_query(user_data: (String, DatabaseConnection); sql: String, args
     }
 });
 
-host_fn!(pub db_begin(user_data: (String, DatabaseConnection, TransactionMap); _input: String) -> String {
-    let (plugin_id, db, txn_map) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone(), ctx.2.clone())
-    };
-    let span = super::host_fn_span("db_begin", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_begin(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; _input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_begin")?;
+    let (plugin_id, db, txn_map) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), &plugin_id)?;
+    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
 
     // Per-plugin cap on concurrently open transactions, checked BEFORE
     // checking out a pool connection: each open transaction pins one plugin
@@ -1047,7 +1027,7 @@ host_fn!(pub db_begin(user_data: (String, DatabaseConnection, TransactionMap); _
     {
         let map_guard = txn_map.lock()
             .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
-        let open = map_guard.values().filter(|t| t.plugin_id == plugin_id).count();
+        let open = map_guard.values().filter(|t| t.plugin_id == *plugin_id).count();
         if open >= MAX_OPEN_TXNS_PER_PLUGIN {
             tracing::warn!(
                 plugin_id = %plugin_id,
@@ -1082,20 +1062,15 @@ host_fn!(pub db_begin(user_data: (String, DatabaseConnection, TransactionMap); _
     HostDbResponse::ok(serde_json::json!({"txn_id": txn_id})).to_json_string()
 });
 
-host_fn!(pub db_query_in(user_data: (String, DatabaseConnection, TransactionMap); txn_id: String, sql: String, args: String) -> String {
-    let (plugin_id, txn_map) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.2.clone())
-    };
-    let span = super::host_fn_span("db_query_in", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_query_in")?;
+    let (plugin_id, _, txn_map) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), &plugin_id)?;
-    let sql = sanitize_sql_text("sql", &plugin_id, sql);
-    reject_role_escalation(&plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", &plugin_id, args);
-    let values = parse_args(&args, &plugin_id, &sql)?;
+    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
+    let sql = sanitize_sql_text("sql", plugin_id, sql);
+    reject_role_escalation(plugin_id, &sql)?;
+    let args = sanitize_sql_text("args", plugin_id, args);
+    let values = parse_args(&args, plugin_id, &sql)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
@@ -1104,7 +1079,7 @@ host_fn!(pub db_query_in(user_data: (String, DatabaseConnection, TransactionMap)
 
     let mut map_guard = txn_map.lock()
         .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
-    let entry = lookup_owned_txn(&mut map_guard, &txn_id, &plugin_id, "db_query_in")?;
+    let entry = lookup_owned_txn(&mut map_guard, &txn_id, plugin_id, "db_query_in")?;
     entry.last_used = Instant::now();
 
     let query_result = tokio::runtime::Handle::current().block_on(entry.txn.query_one_raw(stmt));
@@ -1124,21 +1099,16 @@ host_fn!(pub db_query_in(user_data: (String, DatabaseConnection, TransactionMap)
     }
 });
 
-host_fn!(pub db_execute_in(user_data: (String, DatabaseConnection, TransactionMap); txn_id: String, sql: String, args: String) -> String {
-    let (plugin_id, txn_map) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.2.clone())
-    };
-    let span = super::host_fn_span("db_execute_in", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_execute_in")?;
+    let (plugin_id, _, txn_map) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), &plugin_id)?;
-    let sql = sanitize_sql_text("sql", &plugin_id, sql);
-    reject_role_escalation(&plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", &plugin_id, args);
-    let mut values = parse_args(&args, &plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, &plugin_id, &sql);
+    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
+    let sql = sanitize_sql_text("sql", plugin_id, sql);
+    reject_role_escalation(plugin_id, &sql)?;
+    let args = sanitize_sql_text("args", plugin_id, args);
+    let mut values = parse_args(&args, plugin_id, &sql)?;
+    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
     if stripped > 0 {
         tracing::warn!(
             plugin_id = %plugin_id,
@@ -1151,7 +1121,7 @@ host_fn!(pub db_execute_in(user_data: (String, DatabaseConnection, TransactionMa
 
     let mut map_guard = txn_map.lock()
         .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
-    let entry = lookup_owned_txn(&mut map_guard, &txn_id, &plugin_id, "db_execute_in")?;
+    let entry = lookup_owned_txn(&mut map_guard, &txn_id, plugin_id, "db_execute_in")?;
     entry.last_used = Instant::now();
 
     let exec_result = tokio::runtime::Handle::current().block_on(entry.txn.execute_raw(stmt));
@@ -1166,20 +1136,15 @@ host_fn!(pub db_execute_in(user_data: (String, DatabaseConnection, TransactionMa
     }
 });
 
-host_fn!(pub db_commit(user_data: (String, DatabaseConnection, TransactionMap); txn_id: String) -> String {
-    let (plugin_id, txn_map) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.2.clone())
-    };
-    let span = super::host_fn_span("db_commit", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_commit(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_commit")?;
+    let (plugin_id, _, txn_map) = &*call;
 
     let entry = {
         let mut map_guard = txn_map.lock()
             .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?;
         // Ownership check first; only the opening plugin may commit.
-        lookup_owned_txn(&mut map_guard, &txn_id, &plugin_id, "db_commit")?;
+        lookup_owned_txn(&mut map_guard, &txn_id, plugin_id, "db_commit")?;
         map_guard.remove(&txn_id)
             .ok_or_else(|| extism::Error::msg(format!("Transaction not found: {txn_id}")))?
     };
@@ -1195,14 +1160,9 @@ host_fn!(pub db_commit(user_data: (String, DatabaseConnection, TransactionMap); 
     }
 });
 
-host_fn!(pub db_rollback(user_data: (String, DatabaseConnection, TransactionMap); txn_id: String) -> String {
-    let (plugin_id, txn_map) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.2.clone())
-    };
-    let span = super::host_fn_span("db_rollback", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub db_rollback(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String) -> String {
+    let call = super::HostCall::enter(&user_data, "db_rollback")?;
+    let (plugin_id, _, txn_map) = &*call;
 
     let entry = {
         let mut map_guard = txn_map.lock()
@@ -1211,7 +1171,7 @@ host_fn!(pub db_rollback(user_data: (String, DatabaseConnection, TransactionMap)
             // A foreign transaction must behave exactly like a missing one
             // (rollback of a missing txn is an idempotent no-op success), so
             // one plugin can neither roll back nor probe another's txn.
-            Some(entry) if entry.plugin_id != plugin_id => {
+            Some(entry) if entry.plugin_id != *plugin_id => {
                 tracing::warn!(
                     plugin_id = %plugin_id,
                     owner = %entry.plugin_id,
