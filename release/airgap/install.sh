@@ -58,11 +58,13 @@ case "$ROLE" in
     SECRET="${SECRET:-${abs_bundle}.server-secret}"
     [ -d "$SECRET" ] || { echo "server-secret dir not found: $SECRET — deliver the '<bundle>.server-secret' dir to this host, or pass --server-secret DIR" >&2; exit 2; }
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
-    # Ensure a TLS leaf exists in the secret dir: pre-issued at assembly, or
-    # issue it now from the CA key that lives only here.
-    if [ ! -f "$SECRET/server.crt" ] || [ ! -f "$SECRET/server.key" ]; then
-      [ -f "$SECRET/root.key" ] || { echo "no leaf and no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host, or place root.key in the server-secret dir (server host only)" >&2; exit 2; }
-      [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
+    # Ensure the secret dir holds a current TLS leaf for --lan-host: keep a
+    # pre-issued or earlier one only if it chains to this CA, covers LAN_HOST
+    # and is not about to expire; otherwise issue one now from the CA key that
+    # lives only here. A venue whose address moved therefore gets a new leaf.
+    [ -f "$SECRET/root.crt" ] || cp "$BUNDLE/ca/root.crt" "$SECRET/root.crt"
+    if ! bash "$here/ca/issue-leaf.sh" --check --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"; then
+      [ -f "$SECRET/root.key" ] || { echo "the leaf in $SECRET is missing, expiring, or does not cover $LAN_HOST, and there is no $SECRET/root.key to issue one — re-run build-bundle.sh --lan-host $LAN_HOST, or place root.key in the server-secret dir (server host only)" >&2; exit 2; }
       bash "$here/ca/issue-leaf.sh" --ca-dir "$SECRET" --host "$LAN_HOST" --out "$SECRET"
     fi
     if [ "$BURN" = "1" ]; then rm -f "$SECRET/root.key"; echo "burned $SECRET/root.key"; fi

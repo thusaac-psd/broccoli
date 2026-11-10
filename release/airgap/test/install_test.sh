@@ -23,6 +23,10 @@ grep -q 'docker pull' "$ins" && { echo "FAIL: docker pull present"; exit 1; }
 grep -Eq -- '--bundle "\$BUNDLE" --verify-only --pristine' "$ins" \
   || { echo "FAIL: contestant path must verify --pristine (planted host-env guard)"; exit 1; }
 
+# an existing leaf is reused only while it still fits --lan-host (venue moved)
+grep -q 'issue-leaf.sh" --check --ca-dir "\$SECRET" --host "\$LAN_HOST"' "$ins" \
+  || { echo "FAIL: server role reuses a leaf without checking it covers --lan-host"; exit 1; }
+
 # unknown role exits nonzero
 if bash "$ins" --role bogus --bundle /tmp/nope 2>/dev/null; then
   echo "FAIL: unknown role accepted"; exit 1

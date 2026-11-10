@@ -277,9 +277,14 @@ This:
 
 1. Runs `load-bundle.sh --bundle .` to re-verify `manifest.sha256` and
    `docker load` every tarball in `images/`.
-2. Ensures the TLS leaf exists in the server-secret dir (pre-issued at assembly,
-   or issued now via `ca/issue-leaf.sh` from the CA key that lives only in the
-   sidecar) — the leaf's SAN covers `<host-or-ip>`.
+2. Ensures the server-secret dir holds a current TLS leaf for `<host-or-ip>`.
+   A pre-issued or earlier leaf is kept only while it chains to the bundle's
+   CA, its SAN covers `<host-or-ip>`, and it is valid for at least another
+   day; otherwise `ca/issue-leaf.sh` issues a new one from the CA key that
+   lives only in the sidecar, so a venue whose address moved gets a matching
+   leaf. The root and the leaf are both backdated a day, so a contestant
+   machine whose clock runs behind does not reject them as not yet valid, and
+   the leaf never outlives the CA.
 3. If `--burn-ca-key` was passed, deletes `root.key` from the server-secret
    sidecar right after the leaf is issued (see §8).
 4. Brings up infra, server, AND the Caddy TLS gateway (443, serving the
@@ -438,8 +443,8 @@ to keep it off the venue entirely:
 2. **Pre-issue at assembly** — pass `--lan-host <host-or-ip>` to
    `build-bundle.sh` on the staging box (step 2) when you already know the
    venue's address ahead of time. The leaf is issued into the sidecar during
-   assembly, so `install.sh --role server` finds `server.crt`/`server.key`
-   already present and skips leaf issuance entirely — you may then withhold
+   assembly, so `install.sh --role server` finds a leaf that already covers
+   that address and skips leaf issuance — you may then withhold
    `root.key` from the venue completely (deliver only `server.crt`/`server.key`
    in the sidecar, or drop `root.key` from it before copying to media).
 
@@ -518,9 +523,16 @@ unchanged, so **no worker or contestant needs to do anything.** On the server,
 with `root.key` still in the sidecar (do this before burning it):
 
 ```
+./install.sh --role server --lan-host <host-or-ip> --bundle .
+```
+
+`install.sh` re-issues the leaf by itself when the address changed or the leaf
+expires within a day. To force a new leaf (e.g. a few weeks before expiry),
+issue it first:
+
+```
 ./ca/issue-leaf.sh --ca-dir <server-secret-dir> --host <host-or-ip> \
   --out <server-secret-dir>
-./install.sh --role server --lan-host <host-or-ip> --bundle .
 ```
 
 The re-issued leaf gets a new serial, still chains to the unchanged `root.crt`,
