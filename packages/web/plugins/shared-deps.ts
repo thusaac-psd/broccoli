@@ -102,7 +102,10 @@ const RESOLVED_SHIM_PREFIX = '\0' + SHIM_PREFIX;
  * swaps it for the map of shim URLs before Rollup hashes the chunk, so the
  * host chunk's file name covers the shim file names it embeds. An identifier
  * (rather than a string) survives codegen without any quote-style guessing,
- * and a missed replacement fails loudly instead of yielding an empty map.
+ * and a missed replacement fails loudly instead of yielding an empty map:
+ * `generateBundle` fails the build if any emitted chunk still contains it,
+ * since the bare identifier would throw a ReferenceError when the root chunk
+ * loads.
  */
 const MAP_PLACEHOLDER = '__BROCCOLI_SHARED_DEPS_MAP__';
 const MAP_PLACEHOLDER_RE = new RegExp(`\\b${MAP_PLACEHOLDER}\\b`, 'g');
@@ -524,7 +527,14 @@ export function sharedDepsPlugin(): Plugin {
 
     renderChunk(code, chunk) {
       if (isDev || config.build.ssr) return null;
-      if (!chunk.moduleIds.includes(RESOLVED_MAP_ID)) return null;
+      // Keyed on the placeholder, not only on `moduleIds`, so a change in how
+      // the bundler spells virtual module ids cannot skip the replacement.
+      if (
+        !code.includes(MAP_PLACEHOLDER) &&
+        !chunk.moduleIds.includes(RESOLVED_MAP_ID)
+      ) {
+        return null;
+      }
 
       // During renderChunk, getFileName returns each shim's name with a hash
       // placeholder. Rollup resolves those placeholders after this hook and
@@ -546,6 +556,20 @@ export function sharedDepsPlugin(): Plugin {
 
     generateBundle(_, bundle) {
       if (isDev) return;
+
+      // The client build's root chunk would throw at load, and `/assets/*`
+      // is cached `immutable`, so never ship it.
+      const unreplaced = Object.values(bundle)
+        .filter(
+          (output) =>
+            output.type === 'chunk' && output.code.includes(MAP_PLACEHOLDER),
+        )
+        .map((output) => output.fileName);
+      if (unreplaced.length > 0) {
+        this.error(
+          `${MAP_PLACEHOLDER} was left unreplaced in ${unreplaced.join(', ')}; the shared-deps import map would be missing at runtime`,
+        );
+      }
 
       const base = config.base || '/';
       const imports = sharedDepsImports(this);

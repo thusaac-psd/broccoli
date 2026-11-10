@@ -21,6 +21,8 @@
  * Run from the repo root (takes a couple of minutes; set VERBOSE=1 to list
  * the new file names of each scenario):
  *   node --experimental-strip-types packages/web/scripts/check-asset-hashes.ts
+ * or, as the CI frontend job does, run the web package's
+ * `check:asset-hashes` script.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
