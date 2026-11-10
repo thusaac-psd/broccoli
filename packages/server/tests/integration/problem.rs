@@ -2904,3 +2904,62 @@ mod submission_format_normalisation {
         );
     }
 }
+
+mod soft_deleted_problem_children {
+    use super::*;
+
+    /// A soft-deleted problem's individual test cases 404, like its test case
+    /// list, so hidden test data is not served after deletion.
+    #[tokio::test]
+    async fn soft_deleted_problem_hides_individual_test_cases() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let tc_id = app.create_test_case(pid, &token).await;
+
+        let del = app.delete_with_token(&routes::problem(pid), &token).await;
+        assert_eq!(del.status, 204, "{}", del.text);
+
+        let list = app.get_with_token(&routes::test_cases(pid), &token).await;
+        assert_eq!(list.status, 404, "control: list already 404s");
+
+        let one = app
+            .get_with_token(&routes::test_case(pid, tc_id), &token)
+            .await;
+        assert_eq!(
+            one.status, 404,
+            "sibling endpoints disagree: list=404 but get={}",
+            one.status
+        );
+    }
+
+    /// Every problem child lookup requires an active problem, so additional files
+    /// of a soft-deleted problem 404 for both download and delete.
+    #[tokio::test]
+    async fn soft_deleted_problem_hides_additional_files() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let pid = app.create_problem(&token, "P").await;
+        let up = app
+            .upload_additional_file(pid, "extra.txt", b"data".to_vec(), "cpp", &token)
+            .await;
+        assert_eq!(up.status, 201, "{}", up.text);
+        let ref_id = up.body["id"].as_str().unwrap().to_string();
+
+        let del = app.delete_with_token(&routes::problem(pid), &token).await;
+        assert_eq!(del.status, 204, "{}", del.text);
+
+        let download = app
+            .get_with_token(&routes::additional_file(pid, &ref_id), &token)
+            .await;
+        assert_eq!(download.status, 404, "{}", download.text);
+        let delete = app
+            .delete_with_token(&routes::additional_file(pid, &ref_id), &token)
+            .await;
+        assert_eq!(delete.status, 404, "{}", delete.text);
+    }
+}

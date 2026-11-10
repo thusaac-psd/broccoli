@@ -15,7 +15,7 @@ use tracing::instrument;
 // `Resource::Problem` decision before touching these types (see the kernel
 // call above), pinned by `contestant_can_access_sample_test_case_via_active_contest`
 // and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
-use crate::entity::{test_case, test_case_result};
+use crate::entity::{problem, test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::json::AppJson;
@@ -24,6 +24,7 @@ use crate::models::problem::*;
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
 use crate::utils::problem::find_problem;
+use crate::utils::soft_delete::find_active_child;
 use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
 };
@@ -513,16 +514,14 @@ async fn find_test_case_for_problem<C: ConnectionTrait>(
     problem_id: i32,
     tc_id: i32,
 ) -> Result<test_case::Model, AppError> {
-    let tc = test_case::Entity::find_by_id(tc_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Test case not found".into()))?;
-
-    if tc.problem_id != problem_id {
-        return Err(AppError::NotFound("Test case not found".into()));
-    }
-
-    Ok(tc)
+    find_active_child::<problem::Entity, test_case::Entity, _, _>(
+        db,
+        test_case::Column::ProblemId,
+        problem_id,
+        tc_id,
+        "Test case",
+    )
+    .await
 }
 
 /// Delete the test cases matching `scope`, refusing with `409 CONFLICT` (and
