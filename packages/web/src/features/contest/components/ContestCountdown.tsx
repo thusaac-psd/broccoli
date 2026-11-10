@@ -10,14 +10,12 @@ import { contestPhase } from '@/features/contest/utils/status';
 // -- helpers ------------------------------------------------------------------
 
 function getTimeLeft(targetMs: number, now: number) {
-  const ms = Math.max(0, targetMs - now);
-  const totalSecs = Math.floor(ms / 1000);
+  const totalSecs = Math.floor(Math.max(0, targetMs - now) / 1000);
   return {
     days: Math.floor(totalSecs / 86400),
     hours: Math.floor((totalSecs % 86400) / 3600),
     minutes: Math.floor((totalSecs % 3600) / 60),
     seconds: totalSecs % 60,
-    ms,
   };
 }
 
