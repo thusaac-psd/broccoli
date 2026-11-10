@@ -18,7 +18,7 @@ use crate::system_info::SystemInfo;
 
 const KEY_PREFIX: &str = common::worker::WORKER_HEARTBEAT_KEY_PREFIX;
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
-const KEY_TTL_SECS: u64 = 15;
+const KEY_TTL_SECS: u64 = common::worker::WORKER_HEARTBEAT_TTL_SECS;
 
 #[derive(Clone)]
 pub struct InFlightCounter(Arc<AtomicU32>);
