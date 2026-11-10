@@ -289,10 +289,10 @@ pub struct ServerConfig {
     #[serde(default = "default_operation_batch_publish_concurrency")]
     pub operation_batch_publish_concurrency: u32,
     /// Address (e.g. `"0.0.0.0:9091"`) for an **optional** dedicated TCP
-    /// listener that serves only `/healthz` and `/metrics` on its own tokio
-    /// runtime + OS thread (UP#14e). When `None`, behavior is identical to
-    /// the legacy setup: the two endpoints are served only on the main
-    /// router and therefore share the main runtime's scheduler.
+    /// listener that serves only `/livez`, `/healthz` (both liveness-only
+    /// there) and `/metrics` on its own tokio runtime + OS thread (UP#14e).
+    /// When `None`, these endpoints are served only on the main router and
+    /// therefore share the main runtime's scheduler.
     ///
     /// Setting this is **opt-in**: it lets liveness probes and metrics
     /// scrapes survive even when the api runtime is saturated by submission

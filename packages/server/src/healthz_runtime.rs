@@ -1,11 +1,11 @@
-//! Dedicated tokio runtime + listener for `/healthz` and `/metrics` (UP#14e).
+//! Dedicated tokio runtime + listener for `/livez`, `/healthz` and `/metrics` (UP#14e).
 //!
 //! Under deliberate api-runtime saturation (large submission bursts, scheduler
 //! thrash, blocking work pinned to the main runtime's worker threads), the
 //! liveness probe served on the main router can stall well past any sensible
 //! probe timeout - defeating its entire purpose as an out-of-band signal. To
-//! sidestep that, this module hosts a tiny axum app with only `/healthz` and
-//! `/metrics` on its **own** `tokio::runtime::Runtime` running on its **own**
+//! sidestep that, this module hosts a tiny axum app with only `/livez`,
+//! `/healthz` (both liveness-only) and `/metrics` on its **own** `tokio::runtime::Runtime` running on its **own**
 //! `std::thread`, bound to its **own** TCP listener (and therefore its own
 //! port).
 //!
@@ -16,8 +16,8 @@
 //! pin themselves to a specific runtime.
 //!
 //! Activation is opt-in via `server.healthz_listen`. When `None`, this module
-//! is unused and `/healthz` + `/metrics` are served only on the main router
-//! (legacy behavior).
+//! is unused and `/livez`, `/healthz` and `/metrics` are served only on the
+//! main router (where `/healthz` is the deep dependency check).
 
 use std::net::SocketAddr;
 use std::thread::{self, JoinHandle};
@@ -31,7 +31,7 @@ use crate::metrics_handler;
 use crate::state::AppState;
 
 /// Spawns a dedicated tokio runtime on a separate OS thread that serves a
-/// minimal axum app (only `/healthz` and `/metrics`) on `addr`.
+/// minimal axum app (only `/livez`, `/healthz` and `/metrics`) on `addr`.
 ///
 /// The TCP listener is **bound synchronously on the calling runtime** so
 /// startup failures (port already in use, insufficient permissions) surface
@@ -61,7 +61,7 @@ pub fn spawn_healthz_runtime(
     info!(
         addr = %bound_addr,
         worker_threads,
-        "Starting dedicated /healthz + /metrics runtime (UP#14e)"
+        "Starting dedicated /livez + /healthz + /metrics runtime (UP#14e)"
     );
 
     let handle = thread::Builder::new()
@@ -97,13 +97,12 @@ pub fn spawn_healthz_runtime(
                     }
                 };
 
-                // The dedicated `/healthz` is intentionally a liveness-only
-                // probe (no DB/Redis ping). See `healthz_liveness` rationale.
+                // Both probe paths are liveness-only here (no DB/Redis ping);
+                // `/healthz` keeps its historical meaning on this listener. See
+                // `handlers::health::livez` for the rationale.
                 let app = axum::Router::new()
-                    .route(
-                        "/healthz",
-                        axum::routing::get(handlers::health::healthz_liveness),
-                    )
+                    .route("/livez", axum::routing::get(handlers::health::livez))
+                    .route("/healthz", axum::routing::get(handlers::health::livez))
                     .route("/metrics", axum::routing::get(metrics_handler))
                     .with_state(app_state);
 
