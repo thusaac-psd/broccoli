@@ -432,7 +432,11 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
     };
     let key = format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}");
     let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");
-    let _: () = conn.set(&key, &value).await.expect("write heartbeat key");
+    // Mirror the worker's writer: the key's TTL is what makes it live.
+    let _: () = conn
+        .set_ex(&key, &value, common::worker::WORKER_HEARTBEAT_TTL_SECS)
+        .await
+        .expect("write heartbeat key");
 }
 
 #[tokio::test]
