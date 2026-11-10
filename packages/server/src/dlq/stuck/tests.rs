@@ -616,3 +616,63 @@ async fn direct_deferred_judgement_recovery_sql_claims_detector_lease() {
     );
     assert_log_sets_detector_lease(&log, "submission_judgement");
 }
+
+/// In-place recovery of a stuck CURRENT judgement never lowers the
+/// submission's dispatch-retry count. The judgement's own count is usually
+/// lower (a judgement opened by a rejudge starts at 0); copying it over used
+/// to hand a flapping submission a fresh steal/stuck budget.
+#[tokio::test]
+async fn current_judgement_recovery_never_lowers_submission_retry_count() {
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (user_id, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
+    let now = Utc::now();
+    let sub = submission::ActiveModel {
+        files: Set(serde_json::json!({})),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        status: Set(SubmissionStatus::Running),
+        judge_epoch: Set(5),
+        max_judge_epoch: Set(5),
+        retry_count: Set(4),
+        created_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("submission");
+    let judgement = submission_judgement::ActiveModel {
+        submission_id: Set(sub.id),
+        version: Set(1),
+        is_current: Set(true),
+        is_finalized: Set(false),
+        status: Set(SubmissionStatus::Running),
+        judge_epoch: Set(5),
+        retry_count: Set(0),
+        created_at: Set(now),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("judgement");
+
+    let txn = db.begin().await.expect("begin");
+    let recovery = recover_stuck_judgement_without_steal(&txn, &judgement, "server-1")
+        .await
+        .expect("recover");
+    txn.commit().await.expect("commit");
+    assert!(matches!(
+        recovery,
+        StuckRecovery::RedispatchJudgement { .. }
+    ));
+
+    let sub = submission::Entity::find_by_id(sub.id)
+        .one(&db)
+        .await
+        .expect("db")
+        .expect("submission");
+    assert_eq!(sub.retry_count, 4, "submission retry budget kept");
+    assert_eq!(sub.judge_epoch, 6, "re-dispatched at a fresh epoch");
+}

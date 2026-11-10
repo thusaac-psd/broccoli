@@ -142,9 +142,15 @@ pub(super) async fn recover_stuck_judgement_without_steal(
                 submission::Column::Status,
                 sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
             )
+            // Never LOWER the submission's dispatch-retry count: the
+            // judgement's own count is usually below it. Same rule as the
+            // deferred steal and the SystemError retry.
             .col_expr(
                 submission::Column::RetryCount,
-                sea_orm::sea_query::Expr::value(new_retry_count),
+                sea_orm::sea_query::Expr::cust_with_values(
+                    "GREATEST(retry_count, $1)",
+                    [new_retry_count],
+                ),
             )
             .col_expr(
                 submission::Column::OwnerServerId,
@@ -215,7 +221,7 @@ pub(super) async fn recover_stuck_judgement_without_steal(
     // row's own (current) epoch, which stays untouched in the database.
     sub.status = SubmissionStatus::Pending;
     sub.judge_epoch = redispatched.judge_epoch;
-    sub.retry_count = new_retry_count;
+    sub.retry_count = sub.retry_count.max(new_retry_count);
     sub.owner_server_id = owner_server_id;
     sub.lease_heartbeat_at = lease_heartbeat_at;
     sub.leased_at = lease_heartbeat_at;
