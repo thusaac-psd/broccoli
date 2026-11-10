@@ -1,4 +1,4 @@
-import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
+import { parseApiError, serverNow, useApiClient } from '@broccoli/web-sdk/api';
 import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -87,9 +87,7 @@ export function useContestEnroll({
 
   const hasMyInfo = myInfo !== undefined;
   const isRegistered = Boolean(myInfo?.is_registered);
-  const hasEnded = contest
-    ? Date.now() >= new Date(contest.end_time).getTime()
-    : true;
+  const hasEnded = contest ? serverNow() >= Date.parse(contest.end_time) : true;
 
   const canShowEnrollCard =
     !!contest &&

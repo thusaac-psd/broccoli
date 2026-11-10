@@ -1,14 +1,14 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useServerNow } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment } from 'react';
 import { useParams } from 'react-router';
 
 // -- helpers ------------------------------------------------------------------
 
-function getTimeLeft(target: Date) {
-  const ms = Math.max(0, target.getTime() - Date.now());
+function getTimeLeft(targetMs: number, now: number) {
+  const ms = Math.max(0, targetMs - now);
   const totalSecs = Math.floor(ms / 1000);
   return {
     days: Math.floor(totalSecs / 86400),
@@ -27,12 +27,8 @@ const ACCENT = 'hsl(var(--sidebar-ring))';
 function useCountdownData(contestId: number) {
   const apiClient = useApiClient();
   const authReady = useAuthReady();
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const timer = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // The server enforces the window by its clock, so count down by it too.
+  const now = useServerNow(1000);
 
   const { data: contest } = useQuery({
     queryKey: ['contest', contestId],
@@ -49,26 +45,17 @@ function useCountdownData(contestId: number) {
 
   if (!contest) return null;
 
-  const now = Date.now();
   const startMs = new Date(contest.start_time).getTime();
   const endMs = new Date(contest.end_time).getTime();
 
   const phase: 'upcoming' | 'running' | 'ended' =
     now < startMs ? 'upcoming' : now <= endMs ? 'running' : 'ended';
 
-  const target =
-    phase === 'upcoming'
-      ? new Date(contest.start_time)
-      : new Date(contest.end_time);
-
-  const tl = getTimeLeft(target);
+  const tl = getTimeLeft(phase === 'upcoming' ? startMs : endMs, now);
   const totalDuration = endMs - startMs;
   const elapsed = Math.max(0, now - startMs);
   const progress =
     phase === 'running' ? Math.min(100, (elapsed / totalDuration) * 100) : 0;
-
-  // suppress unused tick warning - it drives re-renders
-  void tick;
 
   return { contest, phase, tl, progress };
 }

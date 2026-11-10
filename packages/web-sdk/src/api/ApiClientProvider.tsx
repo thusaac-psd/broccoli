@@ -4,6 +4,7 @@ import { type ReactNode, useCallback, useMemo, useRef } from 'react';
 import { ApiClientContext } from '@/api/api-client-context';
 import { refreshSession as refreshSharedSession } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
+import { fetchWithServerClock } from '@/api/server-clock';
 import { AUTH_SESSION_EXPIRED_EVENT } from '@/auth/types';
 
 interface ApiClientProviderProps {
@@ -82,7 +83,7 @@ export function ApiClientProvider({
   );
 
   const refreshSession = useCallback(
-    () => refreshSharedSession(refreshUrl),
+    () => refreshSharedSession(refreshUrl, { fetch: fetchWithServerClock }),
     [refreshUrl],
   );
 
@@ -105,6 +106,7 @@ export function ApiClientProvider({
     const client = createClient<paths>({
       baseUrl: resolvedBaseUrl,
       credentials: 'include',
+      fetch: fetchWithServerClock,
     });
 
     // Pristine clones of in-flight requests (keyed by middleware request id)
@@ -151,7 +153,7 @@ export function ApiClientProvider({
         }
 
         retryRequest.headers.set('Authorization', `Bearer ${token}`);
-        return fetch(retryRequest);
+        return fetchWithServerClock(retryRequest);
       },
     });
 
@@ -168,7 +170,7 @@ export function ApiClientProvider({
       }
 
       const url = new URL(input, resolvedBaseUrl);
-      const response = await fetch(url, {
+      const response = await fetchWithServerClock(url, {
         ...init,
         headers,
       });
@@ -192,7 +194,7 @@ export function ApiClientProvider({
 
       const retryHeaders = new Headers(init?.headers);
       retryHeaders.set('Authorization', `Bearer ${token}`);
-      return fetch(url, {
+      return fetchWithServerClock(url, {
         ...init,
         headers: retryHeaders,
       });
