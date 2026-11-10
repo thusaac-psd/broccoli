@@ -42,6 +42,31 @@ toml_string(){ sed -n "s/^$2 *= *\"\(.*\)\"\$/\1/p" "$1" | head -n 1; }
 # toml_url_password FILE SCHEME: the password in the first SCHEME:// url.
 toml_url_password(){ sed -n "s|^url *= *\"$2://[^:]*:\([^@]*\)@.*|\1|p" "$1" | head -n 1; }
 
+# (Re)start a role's units after their config and unit files are written. A
+# re-run (upgrade, --rotate-secrets, a new LAN) must restart what is already
+# running: `systemctl enable --now` leaves an active unit as it is. An old weed
+# would then keep its old flags, including the LAN-wide bind that still holds
+# :8333, so the S3 socket could not bind and the install would stop before the
+# server unit and connection.env were written; and weed, the server and the
+# worker would keep their old config and credentials.
+start_infra_units(){
+  systemctl daemon-reload
+  # Free :8333 for the socket first; on a first install there is nothing to stop.
+  systemctl stop broccoli-weed-s3.socket broccoli-weed-s3.service broccoli-weed 2>/dev/null || true
+  systemctl enable broccoli-weed broccoli-weed-s3.socket broccoli-server
+  systemctl restart broccoli-weed
+  systemctl restart broccoli-weed-s3.socket
+  sleep 3
+  systemctl restart broccoli-server
+}
+
+start_worker_units(){
+  systemctl daemon-reload
+  systemctl enable broccoli-isolate-setup broccoli-worker
+  systemctl restart broccoli-isolate-setup
+  systemctl restart broccoli-worker
+}
+
 require_ubuntu(){
   . /etc/os-release 2>/dev/null || true
   [ "${ID:-}" = ubuntu ] || echo "warning: not Ubuntu (ID=${ID:-?}); proceeding anyway" >&2
@@ -205,10 +230,7 @@ install_infra_server(){
   sed -e "s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|" \
     "$BUNDLE/systemd/broccoli-server.service.tmpl" > /etc/systemd/system/broccoli-server.service
 
-  systemctl daemon-reload
-  systemctl enable --now broccoli-weed broccoli-weed-s3.socket
-  sleep 3
-  systemctl enable --now broccoli-server
+  start_infra_units
 
   # connection.env for workers (S3 endpoint + DB/MQ on the LAN)
   umask 077
@@ -274,9 +296,7 @@ install_worker(){
   install -d /etc/systemd/system/broccoli-worker.service.d
   cp "$BUNDLE/systemd/10-isolate.conf" /etc/systemd/system/broccoli-worker.service.d/10-isolate.conf
 
-  systemctl daemon-reload
-  systemctl enable --now broccoli-isolate-setup
-  systemctl enable --now broccoli-worker
+  start_worker_units
   echo ">> worker '$wid' up, judging for infra at $BROCCOLI_INFRA_HOST"
 }
 

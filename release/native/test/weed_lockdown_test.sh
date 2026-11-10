@@ -17,5 +17,5 @@ grep -q '^ExecStart=@SOCKET_PROXYD@ .*127.0.0.1:8334$' "$sd/broccoli-weed-s3.ser
   || fail "S3 forwarder does not target S3 on 127.0.0.1:8334"
 inst="$here/../install-native.sh"
 grep -q 'broccoli-weed.service broccoli-weed-s3.socket broccoli-weed-s3.service' "$inst" || fail "installer does not render all three units"
-grep -q 'enable --now broccoli-weed broccoli-weed-s3.socket' "$inst" || fail "installer does not enable the S3 socket"
+grep -q 'systemctl enable broccoli-weed broccoli-weed-s3.socket' "$inst" || fail "installer does not enable the S3 socket"
 echo "PASS: native SeaweedFS listens on loopback; only S3 reaches the LAN"
