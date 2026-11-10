@@ -114,7 +114,8 @@ pub struct SampleTestCaseMeta {
     pub description: Option<String>,
 }
 
-/// A `problem` projection; see `ContestListItem` for why it is a partial model.
+// A `problem` projection; see `ContestListItem` for why it is a partial model.
+/// One problem in a problem list.
 #[derive(Serialize, DerivePartialModel, utoipa::ToSchema)]
 #[sea_orm(entity = "crate::entity::problem::Entity")]
 pub struct ProblemListItem {

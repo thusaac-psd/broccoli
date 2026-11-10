@@ -143,10 +143,11 @@ pub struct ContestResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A `contest` projection. `DerivePartialModel` derives the selected columns
-/// from these fields (via `into_partial_model`), so a field can never silently
-/// read as `None` because someone forgot to add its column to a hand-written
-/// `select_only()` list.
+// A `contest` projection. `DerivePartialModel` derives the selected columns
+// from these fields (via `into_partial_model`), so a field can never silently
+// read as `None` because someone forgot to add its column to a hand-written
+// `select_only()` list.
+/// One contest in a contest list.
 #[derive(Serialize, DerivePartialModel, utoipa::ToSchema)]
 #[sea_orm(entity = "crate::entity::contest::Entity")]
 pub struct ContestListItem {

@@ -2531,6 +2531,7 @@ export interface components {
       namespace: string;
       scopes: string[];
     };
+    /** @description One contest in a contest list. */
     ContestListItem: {
       /**
        * Format: date-time
@@ -3339,6 +3340,7 @@ export interface components {
        */
       total_blobs: number;
     };
+    /** @description One problem in a problem list. */
     ProblemListItem: {
       /** @example exact */
       checker_format: string;
