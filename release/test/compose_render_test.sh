@@ -68,6 +68,12 @@ single_env() {
 [ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
   || fail "single-host database URL: $(single_env server BROCCOLI__DATABASE__URL)"
 [ "$(single_env worker BROCCOLI__MQ__URL)" = 'redis://:r%25d@redis:6379' ] || fail "single-host MQ URL"
+# The clock-skew escape hatch reaches both single-host binaries.
+printf 'BROCCOLI__CLOCK__MAX_SKEW_MS=0\n' >> .env.single-host
+for svc in server worker; do
+  [ "$(single_env "$svc" BROCCOLI__CLOCK__MAX_SKEW_MS)" = 0 ] || fail "single-host $svc ignores BROCCOLI__CLOCK__MAX_SKEW_MS"
+done
+sed -i '/^BROCCOLI__CLOCK__MAX_SKEW_MS=/d' .env.single-host
 # An env file from before these URLs existed gets them on a re-run.
 sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
 install_dry single-host
