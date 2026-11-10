@@ -21,10 +21,16 @@ pub struct Claims {
     pub iat: u64,
 }
 
-/// Sign a 5-minute access token. `issued_at` comes from the database clock
-/// (see `services::auth_tokens`), the same clock that stamps
-/// `user.credentials_changed_at`, so `FreshAuthUser`'s `iat` comparison does
-/// not depend on clock agreement between server replicas.
+/// Sign a 5-minute access token.
+///
+/// The two timestamps deliberately use different clocks, each matching the
+/// one it is compared against:
+/// - `iat` is `issued_at`, from the database clock (see
+///   `services::auth_tokens`). `FreshAuthUser` compares it with
+///   `user.credentials_changed_at`, which the database stamps.
+/// - `exp` is this server's clock plus five minutes. Every replica checks it
+///   against its own clock, so deriving it from the database clock would hand
+///   out already-expired tokens on a server running ahead of the database.
 pub fn sign_access_token(
     user_id: i32,
     username: &str,
@@ -33,7 +39,7 @@ pub fn sign_access_token(
     issued_at: DateTime<Utc>,
     secret: &str,
 ) -> Result<String> {
-    let expiration = issued_at
+    let expiration = Utc::now()
         .checked_add_signed(Duration::minutes(5))
         .expect("valid timestamp")
         .timestamp();
@@ -64,4 +70,19 @@ pub fn verify(token: &str, secret: &str) -> Result<Claims> {
         &Validation::default(),
     )?;
     Ok(token_data.claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A server whose clock runs an hour ahead of the database still issues
+    /// tokens it accepts itself.
+    #[test]
+    fn expiry_follows_the_local_clock_not_the_database_clock() {
+        let db_now = Utc::now() - Duration::hours(1);
+        let token = sign_access_token(1, "u", vec![], vec![], db_now, "secret").unwrap();
+        let claims = verify(&token, "secret").expect("token must not be born expired");
+        assert_eq!(claims.iat, db_now.timestamp() as u64);
+    }
 }
