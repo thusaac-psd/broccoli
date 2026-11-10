@@ -508,7 +508,8 @@ impl ServerRuntime {
 
 /// CORS for a split frontend origin. `expose_headers` lists every response
 /// header the web client reads cross-origin: download filenames, rate-limit
-/// backoff and the request id for error reports.
+/// backoff, the request id for error reports and `Date` for the server clock
+/// offset.
 fn cors_layer(cors: &crate::config::CorsConfig) -> anyhow::Result<CorsLayer> {
     let allow_origins = cors
         .allow_origins
@@ -537,6 +538,7 @@ fn cors_layer(cors: &crate::config::CorsConfig) -> anyhow::Result<CorsLayer> {
         ])
         .expose_headers([
             header::CONTENT_DISPOSITION,
+            header::DATE,
             header::RETRY_AFTER,
             HeaderName::from_static("x-request-id"),
         ])
@@ -575,7 +577,7 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        for name in ["content-disposition", "retry-after", "x-request-id"] {
+        for name in ["content-disposition", "date", "retry-after", "x-request-id"] {
             assert!(exposed.contains(name), "{name} not exposed: {exposed}");
         }
     }
