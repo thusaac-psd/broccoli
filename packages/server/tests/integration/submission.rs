@@ -2238,7 +2238,9 @@ mod claim_fiber {
             user_id: Set(user_id),
             problem_id: Set(problem_id),
             contest_id: Set(None),
-            contest_type: Set("ioi".to_string()),
+            // A contest type this replica has a handler for; the claim fiber
+            // leaves unhandled ones to a replica that can judge them.
+            contest_type: Set("standard".to_string()),
             created_at: Set(now),
             ..Default::default()
         }
@@ -2289,7 +2291,8 @@ mod claim_fiber {
             user_id: Set(user_id),
             problem_id: Set(problem_id),
             contest_id: Set(None),
-            contest_type: Set("ioi".to_string()),
+            // A contest type this replica has a handler for (see above).
+            contest_type: Set("standard".to_string()),
             created_at: Set(now),
             judge_epoch: Set(1),
             ..Default::default()
