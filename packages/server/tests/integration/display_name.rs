@@ -232,6 +232,12 @@ async fn legacy_database_upgrade_and_restarts_preserve_account_names() {
     let upgraded = server::database::init_db(&app.state.config.database.url)
         .await
         .unwrap();
+    // A real upgrade restarts the server, so no connection carries a plan
+    // prepared against the pre-upgrade `user` columns. This server keeps its
+    // pool; wait for the fixture's 2 s idle timeout to retire those
+    // connections, or Postgres refuses the stale plans with "cached plan must
+    // not change result type" depending on which connection a request gets.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let profile = app.get_with_token(routes::ME, &token).await;
     assert_eq!(profile.status, 200, "{}", profile.text);
     assert_eq!(profile.body["display_name"], "legacy");
