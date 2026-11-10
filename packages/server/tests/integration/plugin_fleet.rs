@@ -453,3 +453,30 @@ async fn a_peer_reload_that_fails_here_keeps_the_previous_version_serving() {
         "{b_entry}"
     );
 }
+
+/// A Reload served by a replica that has not yet seen another admin's
+/// disable must not quietly re-enable the plugin fleet-wide.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_never_re_enables_a_plugin_disabled_through_a_peer() {
+    let a = TestApp::spawn_with_plugins().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+
+    let res = a
+        .post_with_token(&routes::admin_plugin_disable(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    // B has not reconciled yet: it still has the plugin loaded and enabled.
+    let res = b
+        .post_with_token(&routes::admin_plugin_reload(PLUGIN), &json!({}), &token)
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+
+    use sea_orm::EntityTrait;
+    let row = server::entity::plugin::Entity::find_by_id(PLUGIN.to_string())
+        .one(&a.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!row.is_enabled, "the disable must stand");
+}

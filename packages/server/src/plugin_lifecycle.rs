@@ -481,12 +481,24 @@ async fn register_new_dirs(state: &AppState) -> Result<bool, DbErr> {
     Ok(!new_ids.is_empty())
 }
 
-/// Write the desired state for one plugin and bump its generation, so every
-/// replica re-applies it. Returns the new generation.
-async fn publish(state: &AppState, plugin_id: &str, enabled: bool) -> Result<i64, DbErr> {
-    let row = state
-        .db
-        .query_one_raw(Statement::from_sql_and_values(
+/// A lifecycle change to record in the desired state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    /// Enable (creating the row if needed).
+    Enable,
+    /// Disable.
+    Disable,
+    /// Re-apply an enabled plugin. Never enables: if another admin disabled
+    /// the plugin meanwhile, the reload is refused instead of undoing that.
+    Reload,
+}
+
+/// Record `change` for one plugin and bump its generation, so every replica
+/// re-applies it. Returns the new generation, or `None` for a `Reload` of a
+/// plugin that is not enabled.
+async fn publish(state: &AppState, plugin_id: &str, change: Change) -> Result<Option<i64>, DbErr> {
+    let statement = match change {
+        Change::Enable | Change::Disable => Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO plugin (id, is_enabled, generation, updated_at)
                VALUES ($1, $2, 1, NOW())
@@ -495,11 +507,20 @@ async fn publish(state: &AppState, plugin_id: &str, enabled: bool) -> Result<i64
                      generation = plugin.generation + 1,
                      updated_at = NOW()
                RETURNING generation"#,
-            [plugin_id.into(), enabled.into()],
-        ))
-        .await?
-        .ok_or_else(|| DbErr::Custom("plugin upsert returned no row".into()))?;
-    row.try_get("", "generation")
+            [plugin_id.into(), (change == Change::Enable).into()],
+        ),
+        Change::Reload => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE plugin SET generation = generation + 1, updated_at = NOW()
+               WHERE id = $1 AND is_enabled
+               RETURNING generation"#,
+            [plugin_id.into()],
+        ),
+    };
+    match state.db.query_one_raw(statement).await? {
+        Some(row) => Ok(Some(row.try_get("", "generation")?)),
+        None => Ok(None),
+    }
 }
 
 /// Why a lifecycle change did not go through.
@@ -508,9 +529,12 @@ enum ChangeError {
     /// The plugin could not be loaded on this replica, so nothing was
     /// published.
     Load(PluginError),
-    /// Loaded here, but writing the desired state failed; the next reconcile
-    /// returns this replica to the old desired state.
+    /// Loaded here, but writing the desired state failed; this replica was
+    /// returned to the old version.
     Db(DbErr),
+    /// A reload of a plugin that is no longer enabled (disabled through
+    /// another replica since this one last looked).
+    NotEnabled(String),
 }
 
 impl std::fmt::Display for ChangeError {
@@ -518,6 +542,7 @@ impl std::fmt::Display for ChangeError {
         match self {
             ChangeError::Load(e) => e.fmt(f),
             ChangeError::Db(e) => e.fmt(f),
+            ChangeError::NotEnabled(id) => write!(f, "Plugin '{id}' is not enabled"),
         }
     }
 }
@@ -527,6 +552,9 @@ impl From<ChangeError> for AppError {
         match e {
             ChangeError::Load(e) => e.into(),
             ChangeError::Db(e) => e.into(),
+            ChangeError::NotEnabled(id) => {
+                AppError::Conflict(format!("Plugin '{id}' is not enabled. Use enable instead."))
+            }
         }
     }
 }
@@ -539,6 +567,7 @@ async fn load_then_publish(
     state: &AppState,
     applied: &mut HashMap<String, Applied>,
     plugin_id: &str,
+    change: Change,
 ) -> Result<(), ChangeError> {
     let previous = match load_from_disk(state, plugin_id).await {
         Ok(previous) => previous,
@@ -549,7 +578,12 @@ async fn load_then_publish(
             return Err(ChangeError::Load(failure.error));
         }
     };
-    let generation = match publish(state, plugin_id, true).await {
+    let published = match publish(state, plugin_id, change).await {
+        Ok(Some(generation)) => Ok(generation),
+        Ok(None) => Err(ChangeError::NotEnabled(plugin_id.to_string())),
+        Err(e) => Err(ChangeError::Db(e)),
+    };
+    let generation = match published {
         Ok(generation) => generation,
         Err(e) => {
             // Not published, so the rest of the fleet stays on the old
@@ -562,7 +596,7 @@ async fn load_then_publish(
                     }
                 }
             }
-            return Err(ChangeError::Db(e));
+            return Err(e);
         }
     };
     applied.insert(
@@ -609,7 +643,7 @@ pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
                 "Plugin '{plugin_id}' is already enabled"
             )));
         }
-        Ok(load_then_publish(state, applied, plugin_id).await?)
+        Ok(load_then_publish(state, applied, plugin_id, Change::Enable).await?)
     })
     .await
 }
@@ -626,7 +660,9 @@ pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
                 "Plugin '{plugin_id}' is not currently enabled"
             )));
         }
-        let generation = publish(state, plugin_id, false).await?;
+        let generation = publish(state, plugin_id, Change::Disable)
+            .await?
+            .ok_or_else(|| AppError::Internal("plugin upsert returned no row".into()))?;
         state.plugin_lifecycle.set_desired(plugin_id, false);
         let desired = Desired {
             enabled: false,
@@ -659,7 +695,7 @@ pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
                 "Plugin '{plugin_id}' is not enabled. Use enable instead."
             )));
         }
-        Ok(load_then_publish(state, applied, plugin_id).await?)
+        Ok(load_then_publish(state, applied, plugin_id, Change::Reload).await?)
     })
     .await
 }
@@ -668,7 +704,7 @@ pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 /// (admin upload), and enable it fleet-wide.
 pub async fn install(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
     with_applied(state, async |applied| {
-        Ok(load_then_publish(state, applied, plugin_id).await?)
+        Ok(load_then_publish(state, applied, plugin_id, Change::Enable).await?)
     })
     .await
 }
@@ -688,7 +724,7 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
         let mut reloaded = Vec::new();
         let mut failed = Vec::new();
         for id in enabled_ids {
-            match load_then_publish(state, applied, &id).await {
+            match load_then_publish(state, applied, &id, Change::Reload).await {
                 Ok(()) => reloaded.push(id),
                 Err(e) => {
                     tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
