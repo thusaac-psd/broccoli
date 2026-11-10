@@ -358,7 +358,7 @@ host_fn!(pub submission_query_test_cases(user_data: (String, DatabaseConnection)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::{problem, submission, submission_judgement, test_case_result, user};
+    use crate::entity::{submission, submission_judgement, test_case_result};
     use crate::services::judgement_lifecycle::{OpenJudgement, open_judgement};
     use broccoli_server_sdk::types::Verdict;
     use chrono::Utc;
@@ -437,33 +437,12 @@ mod tests {
     /// A judged submission with a finalized current v1 at epoch 3.
     async fn seed_judged(db: &DatabaseConnection) -> (submission::Model, i32) {
         let now = Utc::now();
-        let u = user::ActiveModel {
-            username: Set("fence-user".into()),
-            display_name: Set("fence-user".into()),
-            password: Set("x".into()),
-            created_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("user");
-        let p = problem::ActiveModel {
-            title: Set("fence-problem".into()),
-            content: Set("c".into()),
-            time_limit: Set(1000),
-            memory_limit: Set(262_144),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("problem");
+        let (user_id, problem_id) = crate::test_support::seed_user_and_problem(db).await;
         let sub = submission::ActiveModel {
             files: Set(serde_json::json!({})),
             language: Set("cpp".into()),
-            user_id: Set(u.id),
-            problem_id: Set(p.id),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
             status: Set(common::SubmissionStatus::Judged),
             verdict: Set(Some(common::Verdict::Accepted)),
             score: Set(Some(100.0)),
