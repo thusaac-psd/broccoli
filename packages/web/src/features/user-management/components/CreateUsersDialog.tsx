@@ -1,6 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import type { CreatedUser } from '@broccoli/web-sdk/auth';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -47,6 +47,9 @@ export function CreateUsersDialog({
   const [jsonText, setJsonText] = useState('');
   const [preview, setPreview] = useState<ParsedBulkUser[] | null>(null);
   const [created, setCreated] = useState<CreatedUser[] | null>(null);
+  // An earlier attempt created the users, but its response (with their
+  // passwords) was lost and the server does not keep passwords to replay.
+  const [alreadyCreated, setAlreadyCreated] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -71,12 +74,19 @@ export function CreateUsersDialog({
     setErrorMsg(t(key));
   }
 
+  function refreshUserLists() {
+    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+    queryClient.invalidateQueries({
+      queryKey: ['all-users-for-participants'],
+    });
+  }
+
   async function submit(users: ParsedBulkUser[]) {
-    if (busy || created) return;
+    if (busy || created || alreadyCreated) return;
     setBusy(true);
     setErrorMsg('');
     try {
-      let result: CreatedUser[];
+      let result: CreatedUser[] | null;
       if (tab === 'single') {
         const body = users[0];
         const { data, error } = await sendIdempotent(
@@ -87,8 +97,8 @@ export function CreateUsersDialog({
               body,
             }),
         );
-        if (error) throw error;
-        result = [data];
+        if (error && !isAlreadyDone(error)) throw error;
+        result = data ? [data] : null;
       } else {
         const body = { users };
         const { data, error } = await sendIdempotent(
@@ -99,17 +109,19 @@ export function CreateUsersDialog({
               body,
             }),
         );
-        if (error) throw error;
-        result = data;
+        if (error && !isAlreadyDone(error)) throw error;
+        result = data ?? null;
+      }
+      refreshUserLists();
+      if (!result) {
+        setAlreadyCreated(true);
+        toast.success(t('users.create.alreadyCreatedTitle'));
+        return;
       }
       setCreated(result);
       toast.success(
         t('users.create.success', { count: String(result.length) }),
       );
-      queryClient.invalidateQueries({ queryKey: ['admin-users'] });
-      queryClient.invalidateQueries({
-        queryKey: ['all-users-for-participants'],
-      });
     } catch (error) {
       setErrorMsg(getErrorMessage(error, t('users.create.error')));
     } finally {
@@ -151,7 +163,23 @@ export function CreateUsersDialog({
             )}
           </DialogDescription>
         </DialogHeader>
-        {created ? (
+        {alreadyCreated ? (
+          <div className="space-y-4">
+            <div role="status" className="space-y-2">
+              <p className="font-medium">
+                {t('users.create.alreadyCreatedTitle')}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {t('users.create.alreadyCreatedDesc')}
+              </p>
+            </div>
+            <DialogFooter>
+              <Button onClick={() => onOpenChange(false)}>
+                {t('users.create.done')}
+              </Button>
+            </DialogFooter>
+          </div>
+        ) : created ? (
           <div className="space-y-4">
             <p role="status">
               {t('users.create.success', { count: String(created.length) })}

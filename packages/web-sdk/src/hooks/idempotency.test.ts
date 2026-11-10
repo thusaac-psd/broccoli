@@ -5,6 +5,9 @@ import {
   createIdempotencyKeys,
   fingerprint,
   IDEMPOTENCY_KEY_MISMATCH,
+  IDEMPOTENCY_RESPONSE_NOT_STORED,
+  IDEMPOTENCY_RESPONSE_TOO_LARGE,
+  isAlreadyDone,
   sendIdempotent,
 } from './idempotency.ts';
 
@@ -130,4 +133,50 @@ test('a key mismatch is resent once with a fresh key', async () => {
     (error) => error === mismatch,
   );
   assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-4']);
+});
+
+test('a replay whose response is gone counts as done and retires the key', async () => {
+  for (const code of [
+    IDEMPOTENCY_RESPONSE_NOT_STORED,
+    IDEMPOTENCY_RESPONSE_TOO_LARGE,
+  ]) {
+    const keys = counterKeys();
+    const sent: string[] = [];
+    const gone = { code, message: 'already succeeded' };
+
+    const replay = await sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(409, gone);
+    });
+    // Passed on once, not resent, so the caller can tell the user.
+    assert.equal(replay.error, gone);
+    assert.ok(isAlreadyDone(replay.error));
+    // Sending the same thing again on purpose is a new operation.
+    await sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(201);
+    });
+
+    // Thrown (mutationFn style) too.
+    await assert.rejects(
+      sendIdempotent(keys, submission('v2'), async (key) => {
+        sent.push(key);
+        throw gone;
+      }),
+      (error) => error === gone,
+    );
+    await sendIdempotent(keys, submission('v2'), async (key) => {
+      sent.push(key);
+      return result(201);
+    });
+    assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-4'], code);
+  }
+});
+
+test('only the replay codes mean already done', () => {
+  assert.ok(isAlreadyDone({ code: IDEMPOTENCY_RESPONSE_NOT_STORED }));
+  assert.ok(!isAlreadyDone({ code: 'IDEMPOTENCY_KEY_IN_PROGRESS' }));
+  assert.ok(!isAlreadyDone({ code: 'CONFLICT' }));
+  assert.ok(!isAlreadyDone(IDEMPOTENCY_RESPONSE_NOT_STORED));
+  assert.ok(!isAlreadyDone(null));
 });

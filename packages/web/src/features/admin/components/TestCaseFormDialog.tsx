@@ -1,5 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -161,7 +161,7 @@ export function TestCaseFormDialog({
         );
 
     setLoading(false);
-    if (result.error) {
+    if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(
           result.error,

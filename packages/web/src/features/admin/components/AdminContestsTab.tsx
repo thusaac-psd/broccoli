@@ -5,6 +5,7 @@ import {
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem, ContestSummary } from '@broccoli/web-sdk/contest';
 import {
+  isAlreadyDone,
   type ServerTableParams,
   useIdempotentRequest,
   useRegistries,
@@ -262,7 +263,7 @@ export function ContestFormDialog({
         );
 
     setLoading(false);
-    if (result.error) {
+    if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(
           result.error,
@@ -538,7 +539,7 @@ export function ContestProblemsDialog({
         }),
     );
     setAddingId(null);
-    if (apiError) {
+    if (apiError && !isAlreadyDone(apiError)) {
       toast.error(getErrorMessage(apiError, t('toast.problem.addError')));
     } else {
       toast.success(t('toast.problem.added'));

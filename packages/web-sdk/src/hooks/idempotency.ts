@@ -12,6 +12,32 @@
 
 export const IDEMPOTENCY_KEY_MISMATCH = 'IDEMPOTENCY_KEY_MISMATCH';
 
+// The request under this key already succeeded, but the server cannot replay
+// its response: it was never stored (it held secrets such as generated
+// passwords) or was too large to store. Both are 409s.
+export const IDEMPOTENCY_RESPONSE_NOT_STORED =
+  'IDEMPOTENCY_RESPONSE_NOT_STORED';
+export const IDEMPOTENCY_RESPONSE_TOO_LARGE = 'IDEMPOTENCY_RESPONSE_TOO_LARGE';
+
+const ALREADY_DONE_CODES: ReadonlySet<unknown> = new Set([
+  IDEMPOTENCY_RESPONSE_NOT_STORED,
+  IDEMPOTENCY_RESPONSE_TOO_LARGE,
+]);
+
+/**
+ * Whether `error` is the server saying an earlier send of this very request
+ * already succeeded, though its response is gone. The operation is done: tell
+ * the user so (and refetch whatever it changed) instead of reporting a
+ * failure, which would invite sending it again as a new operation.
+ */
+export function isAlreadyDone(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    ALREADY_DONE_CODES.has((error as { code?: unknown }).code)
+  );
+}
+
 /** How many unaccepted operations keep their key (oldest forgotten first). */
 const MAX_PENDING_KEYS = 32;
 
@@ -121,7 +147,7 @@ export function createIdempotencyKeys(
   };
 }
 
-type Verdict = 'accepted' | 'mismatch' | 'failed';
+type Verdict = 'accepted' | 'already-done' | 'mismatch' | 'failed';
 
 function isMismatch(error: unknown): boolean {
   return (
@@ -139,9 +165,9 @@ function verdictOf(result: unknown): Verdict {
     return 'accepted';
   }
   if (response.ok) return 'accepted';
-  return isMismatch((result as { error?: unknown }).error)
-    ? 'mismatch'
-    : 'failed';
+  const error = (result as { error?: unknown }).error;
+  if (isAlreadyDone(error)) return 'already-done';
+  return isMismatch(error) ? 'mismatch' : 'failed';
 }
 
 /**
@@ -149,6 +175,9 @@ function verdictOf(result: unknown): Verdict {
  * defines the request: its target and body).
  *
  * - Accepted: the key is retired; sending the same operation again is new.
+ * - Already done (`isAlreadyDone(error)`): an earlier send succeeded but its
+ *   response cannot be replayed. The key is retired as if accepted and the
+ *   error is passed on, so the caller reports success without the data.
  * - Failed (network error, 5xx, validation): the key is kept, so a retry of
  *   the identical operation lets the server replay a result that was lost.
  * - IDEMPOTENCY_KEY_MISMATCH: the server holds a different request under this
@@ -169,6 +198,7 @@ export async function sendIdempotent<T>(
       result = await request(key);
       verdict = verdictOf(result);
     } catch (error) {
+      if (isAlreadyDone(error)) keys.retire(id, key);
       if (!isMismatch(error)) throw error;
       keys.retire(id, key);
       if (attempt > 0) throw error;

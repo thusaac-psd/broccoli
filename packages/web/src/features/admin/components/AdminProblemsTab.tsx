@@ -1,6 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
@@ -194,7 +194,7 @@ export function ProblemFormDialog({
         body,
       }),
     );
-    return !error;
+    return !error || isAlreadyDone(error);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -249,7 +249,7 @@ export function ProblemFormDialog({
           }),
         );
 
-    if (result.error) {
+    if (result.error && !isAlreadyDone(result.error)) {
       setLoading(false);
       toast.error(
         getErrorMessage(
@@ -261,8 +261,10 @@ export function ProblemFormDialog({
     }
 
     let attachFailed = false;
-    if (!isEdit && contestId && result.data) {
-      attachFailed = !(await attachToContest(result.data.id));
+    if (!isEdit && contestId) {
+      // Without data an earlier attempt created the problem, but its id was
+      // lost with the response, so it cannot be attached from here.
+      attachFailed = !result.data || !(await attachToContest(result.data.id));
     }
     setLoading(false);
 

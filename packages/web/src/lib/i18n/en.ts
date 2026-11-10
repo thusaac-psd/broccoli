@@ -469,6 +469,10 @@ export const en: Record<string, string> = {
     'Save these credentials before closing. Passwords cannot be retrieved later.',
   'users.create.download': 'Download credentials',
   'users.create.done': 'Done',
+  'users.create.alreadyCreatedTitle':
+    'These users were already created by an earlier attempt.',
+  'users.create.alreadyCreatedDesc':
+    'Its response, with their passwords, was lost and cannot be shown again. Reset their passwords in the user list before handing out credentials.',
   'users.users.empty': 'No users found.',
   'users.users.noRoles': 'No roles assigned.',
   'users.users.manageRoles': 'Manage Roles',
@@ -603,6 +607,8 @@ export const en: Record<string, string> = {
   'admin.bulkParticipantsNotFound': 'Not Found',
   'admin.bulkParticipantsError':
     'Bulk enrollment failed. Please check the data and try again.',
+  'admin.bulkParticipantsAlreadyDoneDesc':
+    'Its response was lost and cannot be shown again, so the passwords of any users it created are unknown. Reset those passwords in the user list before handing out credentials.',
   'admin.addProblem': 'Add Problem',
   'admin.field.label': 'Label',
   'admin.field.password': 'Password',
@@ -798,7 +804,11 @@ export const en: Record<string, string> = {
   'toast.participant.removeError': 'Failed to remove participant.',
   'toast.participant.bulkSuccess': 'Bulk enrollment completed successfully.',
   'toast.participant.bulkError': 'Bulk enrollment failed.',
+  'toast.participant.bulkAlreadyDone':
+    'This import already went through on an earlier attempt.',
   'toast.submission.submitted': 'Code submitted successfully.',
+  'toast.submission.alreadySubmitted':
+    'This code was already submitted by an earlier attempt; find it in your submissions.',
   'toast.submission.fannedOut':
     'Code pinned to {count} worker(s). Comparing results below.',
   'toast.submission.fanOutWithheld':

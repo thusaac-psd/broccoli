@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type CodeRun,
@@ -337,7 +337,9 @@ export function useSubmissions({
       setActiveEntryId(entryId);
 
       try {
-        let data: Submission;
+        // Null when an earlier send of this very submission was accepted but
+        // its response is gone (`isAlreadyDone`).
+        let data: Submission | null;
 
         if (contestId) {
           const body = { files, language };
@@ -355,8 +357,8 @@ export function useSubmissions({
                 },
               ),
           );
-          if (res.error) throw res.error;
-          data = res.data;
+          if (res.error && !isAlreadyDone(res.error)) throw res.error;
+          data = res.data ?? null;
         } else {
           const body = { files, language, contest_type: contestType };
           const res = await sendIdempotent({ problemId, body }, (key) =>
@@ -366,17 +368,9 @@ export function useSubmissions({
               headers: { 'Idempotency-Key': key },
             }),
           );
-          if (res.error) throw res.error;
-          data = res.data;
+          if (res.error && !isAlreadyDone(res.error)) throw res.error;
+          data = res.data ?? null;
         }
-
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, submission: data, status: 'polling' as const }
-              : e,
-          ),
-        );
 
         invalidateSubmissionLists();
         if (contestId) {
@@ -385,8 +379,25 @@ export function useSubmissions({
           });
         }
 
+        if (!data) {
+          // It is in the submissions list; there is nothing to poll here.
+          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          setActiveEntryId(null);
+          toast.success(t('toast.submission.alreadySubmitted'));
+          return;
+        }
+        const submission = data;
+
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? { ...e, submission, status: 'polling' as const }
+              : e,
+          ),
+        );
+
         toast.success(t('toast.submission.submitted'));
-        startSubmissionPolling(entryId, data.id);
+        startSubmissionPolling(entryId, submission.id);
       } catch (err) {
         console.error('Submission failed:', err);
         const submissionError = parseSubmissionError(err);

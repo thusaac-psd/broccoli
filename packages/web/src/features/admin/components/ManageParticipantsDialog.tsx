@@ -4,7 +4,7 @@ import {
   useApiClient,
 } from '@broccoli/web-sdk/api';
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -277,7 +277,7 @@ function AddParticipantsTab({
         }),
     );
     setAddingId(null);
-    if (error) {
+    if (error && !isAlreadyDone(error)) {
       toast.error(getErrorMessage(error, t('toast.participant.addError')));
     } else {
       toast.success(t('toast.participant.added'));
@@ -442,12 +442,18 @@ function BulkImportTab({
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [result, setResult] = useState<{
-    added: ParticipantIdentity[];
-    created: (ParticipantIdentity & { password: string })[];
-    already_enrolled: ParticipantIdentity[];
-    not_found: string[];
-  } | null>(null);
+  // `already-done`: an earlier attempt went through, but its response (with
+  // the created users' passwords) was lost and cannot be replayed.
+  const [result, setResult] = useState<
+    | {
+        added: ParticipantIdentity[];
+        created: (ParticipantIdentity & { password: string })[];
+        already_enrolled: ParticipantIdentity[];
+        not_found: string[];
+      }
+    | 'already-done'
+    | null
+  >(null);
   const [preview, setPreview] = useState<{
     willCreate: ParsedBulkUser[];
     willAdd: UserPreviewItem[];
@@ -599,15 +605,20 @@ function BulkImportTab({
     );
     setSubmitting(false);
 
-    if (error || !data) {
+    if (isAlreadyDone(error)) {
+      // Nothing left to confirm: sending it again would be a new import.
+      setPreview(null);
+      setResult('already-done');
+      toast.success(t('toast.participant.bulkAlreadyDone'));
+    } else if (error || !data) {
       const msg = getErrorMessage(error, t('admin.bulkParticipantsError'));
       setErrorMsg(msg);
       toast.error(msg);
       return;
+    } else {
+      setResult(data);
+      toast.success(t('toast.participant.bulkSuccess'));
     }
-
-    setResult(data);
-    toast.success(t('toast.participant.bulkSuccess'));
     queryClient.invalidateQueries({
       queryKey: ['contest-participants', contest.id],
     });
@@ -764,7 +775,18 @@ function BulkImportTab({
         </div>
       )}
 
-      {result && (
+      {result === 'already-done' && (
+        <div role="status" className="space-y-1 rounded-md border p-4">
+          <p className="text-sm font-medium">
+            {t('toast.participant.bulkAlreadyDone')}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {t('admin.bulkParticipantsAlreadyDoneDesc')}
+          </p>
+        </div>
+      )}
+
+      {result && result !== 'already-done' && (
         <div className="space-y-3 rounded-md border p-4">
           <Label className="text-sm font-medium">
             {t('admin.bulkParticipantsResultTitle')}
