@@ -57,7 +57,12 @@ sudo BROCCOLI_INFRA_HOST=<box1-LAN-IP> ./install-native.sh infra-server
 
 This installs Postgres (creates the `broccoli` role/DB + LAN access), Redis (LAN
 bind + password), SeaweedFS (`weed`, S3 on `:8333`), and `broccoli-server`
-(systemd, port 80). It **generates all secrets**, prints the admin password, and
+(systemd, port 80). SeaweedFS's master, volume and filer listen on loopback
+only; the LAN reaches just the credentialed S3 API, which
+`broccoli-weed-s3.socket` forwards from `<box1-LAN-IP>:8333`. Postgres (5432),
+Redis (6379) and S3 (8333) still accept LAN connections with passwords, so
+on a venue LAN, firewall them from contestant subnets and allow only the
+worker boxes. It **generates all secrets**, prints the admin password, and
 writes `connection.env` for the workers. The server auto-creates its schema and
 loads the plugins on first boot.
 

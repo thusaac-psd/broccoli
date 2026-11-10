@@ -153,13 +153,21 @@ install_infra_server(){
   grep -q "^requirepass " "$rconf" || echo "requirepass $redis_pw" >> "$rconf"
   systemctl restart redis-server
 
-  # seaweedfs s3 identity + service (bind LAN so workers can fetch blobs)
+  # seaweedfs s3 identity + service. SeaweedFS itself listens on loopback
+  # only; workers reach just its credentialed S3 API, forwarded from
+  # $host:8333 by a systemd socket (the filer would otherwise hand any
+  # contestant on the LAN every testcase without credentials).
   echo ">> configuring seaweedfs"
+  local proxyd
+  proxyd="$(ls /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd 2>/dev/null | head -n 1)" || true
+  [ -n "$proxyd" ] || die "systemd-socket-proxyd not found (it ships with systemd); needed to expose only S3 on the LAN"
   install -d -o "$SVC_USER" -g "$SVC_USER" "$SEAWEED_DATA"
   sed -e "s/@ACCESS_KEY@/$s3_ak/; s/@SECRET_KEY@/$s3_sk/" \
     "$BUNDLE/config/seaweedfs-s3.json.tmpl" > "$DATA_DIR/config/seaweedfs-s3.json"
-  sed -e "s|@WEED_IP@|$host|; s|@SEAWEED_DATA@|$SEAWEED_DATA|; s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|" \
-    "$BUNDLE/systemd/broccoli-weed.service.tmpl" > /etc/systemd/system/broccoli-weed.service
+  for unit in broccoli-weed.service broccoli-weed-s3.socket broccoli-weed-s3.service; do
+    sed -e "s|@WEED_IP@|$host|; s|@SEAWEED_DATA@|$SEAWEED_DATA|; s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|; s|@SOCKET_PROXYD@|$proxyd|" \
+      "$BUNDLE/systemd/$unit.tmpl" > "/etc/systemd/system/$unit"
+  done
 
   # config.toml
   sed -e "s|@DB_URL@|postgres://$DB_USER:$db_pw@$host:5432/$DB_NAME|" \
@@ -179,7 +187,7 @@ install_infra_server(){
     "$BUNDLE/systemd/broccoli-server.service.tmpl" > /etc/systemd/system/broccoli-server.service
 
   systemctl daemon-reload
-  systemctl enable --now broccoli-weed
+  systemctl enable --now broccoli-weed broccoli-weed-s3.socket
   sleep 3
   systemctl enable --now broccoli-server
 
