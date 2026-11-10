@@ -1,0 +1,19 @@
+[package]
+name = "test-support"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Shared harness for the server's integration and e2e test trees"
+
+[dependencies]
+libc = "0.2"
+reqwest = { version = "0.12", features = ["cookies", "json", "multipart"] }
+sea-orm = { workspace = true }
+serde_json.workspace = true
+server = { path = "../server" }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+testcontainers = { version = "0.23", features = ["watchdog"] }

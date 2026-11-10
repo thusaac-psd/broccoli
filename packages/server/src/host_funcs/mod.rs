@@ -15,22 +15,121 @@ pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
 use common::metrics::Metrics;
-use extism::{Function, UserData, ValType};
+use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use opentelemetry::KeyValue;
 use plugin_core::host::HostFunctionRegistry;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Semaphore;
 use tracing::Span;
+use tracing::span::EnteredSpan;
 
-/// Acquire a `std::sync::Mutex` guard, mapping a poison error to an Extism host
-/// error. Deduplicates the
-/// `.lock().map_err(|_| extism::Error::msg("Lock poisoned"))?` idiom repeated
-/// across the raw host functions.
-pub(crate) fn lock_or_poison<T>(
-    m: &StdMutex<T>,
-) -> Result<std::sync::MutexGuard<'_, T>, extism::Error> {
-    m.lock().map_err(|_| extism::Error::msg("Lock poisoned"))
+/// Per-plugin state carried in a host fn's `UserData`.
+///
+/// Every host fn's context is fixed at registration time and names the plugin
+/// it was resolved for, which is all the shared prologue needs to open the
+/// `host_fn` span.
+pub(crate) trait HostFnContext {
+    fn plugin_id(&self) -> &str;
+}
+
+impl HostFnContext for String {
+    fn plugin_id(&self) -> &str {
+        self
+    }
+}
+
+impl<A> HostFnContext for (String, A) {
+    fn plugin_id(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<A, B> HostFnContext for (String, A, B) {
+    fn plugin_id(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Wrap a host fn context for `Function::new`.
+///
+/// extism's `UserData` is an `Arc<Mutex<T>>` shared by every pooled instance of
+/// the plugin. The context is immutable, so it is stored behind an `Arc`: the
+/// prologue holds the mutex only long enough to bump the refcount, never across
+/// the body's blocking DB or plugin call, and never clones the context itself.
+pub(crate) fn host_data<C>(ctx: C) -> UserData<Arc<C>> {
+    UserData::new(Arc::new(ctx))
+}
+
+/// An in-flight host fn call: the snapshot of its context plus the entered
+/// `host_fn` span, which closes when the guard is dropped at the end of the
+/// body. Derefs to the context.
+#[must_use = "dropping the guard closes the host_fn span"]
+pub(crate) struct HostCall<C> {
+    ctx: Arc<C>,
+    _span: EnteredSpan,
+}
+
+impl<C: HostFnContext> HostCall<C> {
+    /// The shared host fn prologue: snapshot the context out of `UserData`
+    /// and enter the `host_fn` span named `host_fn` for its plugin.
+    pub(crate) fn enter(
+        user_data: &UserData<Arc<C>>,
+        host_fn: &'static str,
+    ) -> Result<Self, extism::Error> {
+        let ctx = user_data
+            .get()?
+            .lock()
+            .map_err(|_| extism::Error::msg("Lock poisoned"))?
+            .clone();
+        let span = host_fn_span(host_fn, ctx.plugin_id()).entered();
+        Ok(Self { ctx, _span: span })
+    }
+}
+
+impl<C> std::ops::Deref for HostCall<C> {
+    type Target = C;
+
+    fn deref(&self) -> &C {
+        &self.ctx
+    }
+}
+
+/// Read a raw host fn's JSON input from guest memory at `inputs[0]`. `what`
+/// names the input in the guest-visible error.
+pub(crate) fn read_json<T: DeserializeOwned>(
+    plugin: &mut CurrentPlugin,
+    inputs: &[Val],
+    what: &str,
+) -> Result<T, extism::Error> {
+    let bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| extism::Error::msg(format!("Failed to deserialize {what}: {e}")))
+}
+
+/// Serialize `value` and hand it to the guest as a raw host fn's output.
+pub(crate) fn write_json<T: Serialize + ?Sized>(
+    plugin: &mut CurrentPlugin,
+    outputs: &mut [Val],
+    value: &T,
+    what: &str,
+) -> Result<(), extism::Error> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|e| extism::Error::msg(format!("Failed to serialize {what}: {e}")))?;
+    write_bytes(plugin, outputs, &bytes)
+}
+
+/// Hand already-encoded bytes to the guest as a raw host fn's output.
+pub(crate) fn write_bytes(
+    plugin: &mut CurrentPlugin,
+    outputs: &mut [Val],
+    bytes: &[u8],
+) -> Result<(), extism::Error> {
+    let handle = plugin.memory_new(bytes)?;
+    outputs[0] = Val::I64(handle.offset() as i64);
+    Ok(())
 }
 
 // regression guard, see UP#14g
@@ -82,7 +181,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_feedback_query",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), feedback_db.clone())),
+            host_data((plugin_id.to_string(), feedback_db.clone())),
             feedback::submission_feedback_query,
         )
     });
@@ -93,7 +192,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_feedback_update",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), feedback_db.clone())),
+            host_data((plugin_id.to_string(), feedback_db.clone())),
             feedback::submission_feedback_update,
         )
     });
@@ -104,7 +203,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_slot_observe",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), slot_db.clone())),
+            host_data((plugin_id.to_string(), slot_db.clone())),
             feedback::submission_slot_observe,
         )
     });
@@ -115,7 +214,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "store_scan",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), scan_db.clone())),
+            host_data((plugin_id.to_string(), scan_db.clone())),
             storage::store_scan,
         )
     });
@@ -125,7 +224,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "log_info",
             [ValType::I64],
             [],
-            UserData::new(plugin_id.to_string()),
+            host_data(plugin_id.to_string()),
             logger::log_info,
         )
     });
@@ -136,7 +235,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "store_set",
             [ValType::I64],
             [],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             storage::store_set,
         )
     });
@@ -147,7 +246,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "store_get",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             storage::store_get,
         )
     });
@@ -158,7 +257,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "store_compare_and_set",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             storage::store_compare_and_set,
         )
     });
@@ -169,7 +268,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "store_delete",
             [ValType::I64],
             [],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             storage::store_delete,
         )
     });
@@ -186,7 +285,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "timer_schedule",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             timer::timer_schedule,
         )
     });
@@ -197,7 +296,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "timer_cancel",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             timer::timer_cancel,
         )
     });
@@ -208,7 +307,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_execute",
             [ValType::I64, ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             sql::db_execute,
         )
     });
@@ -219,7 +318,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_query",
             [ValType::I64, ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             sql::db_query,
         )
     });
@@ -233,7 +332,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_begin",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((
+            host_data((
                 plugin_id.to_string(),
                 db_clone.clone(),
                 txn_map_clone.clone(),
@@ -249,7 +348,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_query_in",
             [ValType::I64, ValType::I64, ValType::I64],
             [ValType::I64],
-            UserData::new((
+            host_data((
                 plugin_id.to_string(),
                 db_clone.clone(),
                 txn_map_clone.clone(),
@@ -265,7 +364,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_execute_in",
             [ValType::I64, ValType::I64, ValType::I64],
             [ValType::I64],
-            UserData::new((
+            host_data((
                 plugin_id.to_string(),
                 db_clone.clone(),
                 txn_map_clone.clone(),
@@ -281,7 +380,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_commit",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((
+            host_data((
                 plugin_id.to_string(),
                 db_clone.clone(),
                 txn_map_clone.clone(),
@@ -297,7 +396,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "db_rollback",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((
+            host_data((
                 plugin_id.to_string(),
                 db_clone.clone(),
                 txn_map_clone.clone(),
@@ -317,7 +416,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_update",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_update,
         )
     });
@@ -328,7 +427,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_insert_results",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_insert_results,
         )
     });
@@ -339,7 +438,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_delete_results",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_delete_results,
         )
     });
@@ -350,7 +449,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
             "submission_query_test_cases",
             [ValType::I64],
             [ValType::I64],
-            UserData::new((plugin_id.to_string(), db_clone.clone())),
+            host_data((plugin_id.to_string(), db_clone.clone())),
             submissions::submission_query_test_cases,
         )
     });
@@ -473,6 +572,17 @@ mod tests {
         let _guard = crate::metrics_test_lock();
         let (metrics, _registry) = common::observability::init_metrics("broccoli-test");
         record_block_in_place_regression(&Some(metrics), "test_host_fn");
+    }
+
+    #[test]
+    fn host_call_snapshots_context_and_releases_the_lock() {
+        let user_data = host_data(("test-plugin".to_string(), 7u32));
+        let call = HostCall::enter(&user_data, "db_query").expect("prologue");
+        assert_eq!(call.plugin_id(), "test-plugin");
+        assert_eq!(call.1, 7);
+        // The UserData mutex is not held for the body of the call.
+        let shared = user_data.get().expect("rust user data");
+        assert!(shared.try_lock().is_ok());
     }
 
     #[test]
