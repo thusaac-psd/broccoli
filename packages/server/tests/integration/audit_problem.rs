@@ -93,6 +93,20 @@ async fn test_case_writes_check_permission_before_reading_body() {
         "contestant upload got {} (body parsed before permission check): {}",
         res.status, res.text
     );
+
+    // The checker-source JSON body (32 MiB limit) is gated the same way.
+    let res = app
+        .put_with_token(
+            &format!("{}/checker-source", routes::problem(pid)),
+            &json!({}),
+            &contestant,
+        )
+        .await;
+    assert_eq!(
+        res.status, 403,
+        "contestant checker-source upload got {} (body parsed before permission check): {}",
+        res.status, res.text
+    );
 }
 
 /// BUG (med): ZIP upload with `strategy=replace` deletes every test case with

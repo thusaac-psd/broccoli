@@ -5,7 +5,7 @@ use broccoli_server_sdk::permissions as perm;
 use tracing::instrument;
 
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
@@ -31,14 +31,13 @@ use crate::utils::text::sanitize_db_json;
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, payload), fields(id))]
+#[instrument(skip(_auth, state, payload), fields(id))]
 pub async fn upload_checker_source(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
     AppJson(payload): AppJson<UploadCheckerSourceRequest>,
 ) -> Result<Json<CheckerSourceResponse>, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
     let files = parse_checker_source(payload)?;
 
     // Existence check: 404 for a missing problem, as before.
