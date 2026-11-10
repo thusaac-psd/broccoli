@@ -68,6 +68,17 @@ export const en: Record<string, string> = {
   'error.title.default': 'Unknown Error',
   'error.desc.default': 'Something went wrong.',
 
+  // Root error page
+  'error.crash.title': 'Something went wrong',
+  'error.crash.desc':
+    'The page hit an unexpected error. Your submissions and contest data are safe on the server; reloading usually fixes it.',
+  'error.chunk.title': 'Part of the page did not load',
+  'error.chunk.desc':
+    'The connection may have dropped, or the site was just updated. Your submissions and contest data are safe on the server; check your connection and reload.',
+  'error.chunk.reloading': 'Reloading to get the latest version…',
+  'error.action.reload': 'Reload page',
+  'error.action.back': 'Go back',
+
   // Overview
   'overview.title': 'Overview',
   'overview.problems': 'Problems',
