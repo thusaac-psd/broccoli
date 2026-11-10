@@ -2,12 +2,27 @@ import '@/App.css';
 
 import { LOCALE_STORAGE_KEY } from '@broccoli/web-sdk/i18n';
 import { THEME_STORAGE_KEY } from '@broccoli/web-sdk/theme';
-import { useEffect } from 'react';
-import { Links, Meta, Outlet, Scripts, ScrollRestoration } from 'react-router';
+import { useEffect, useMemo } from 'react';
+import {
+  isRouteErrorResponse,
+  Links,
+  Meta,
+  Outlet,
+  Scripts,
+  ScrollRestoration,
+  useRouteError,
+} from 'react-router';
 import sharedDepsMap from 'virtual:shared-deps-map';
 
+import { AppErrorPage } from '@/components/AppErrorPage';
+import { BaseProviders } from '@/components/BaseProviders';
 import { ErrorReporter } from '@/components/error-reporter';
 import { getSubmissionScrollKey } from '@/features/submission/utils/navigation';
+import {
+  canReloadForFreshChunks,
+  isChunkLoadError,
+  reloadForFreshChunks,
+} from '@/lib/chunk-reload';
 import { reportError, reportVitals } from '@/lib/telemetry';
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -39,9 +54,18 @@ export function Layout({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener('error', onError);
 
+    // Vite's preload helper failed to fetch a chunk's dependencies. Reload
+    // for fresh chunks; if that was just tried, let the import fail into the
+    // error boundary instead of looping.
+    const onPreloadError = (event: Event) => {
+      if (reloadForFreshChunks()) event.preventDefault();
+    };
+    window.addEventListener('vite:preloadError', onPreloadError);
+
     return () => {
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       window.removeEventListener('error', onError);
+      window.removeEventListener('vite:preloadError', onPreloadError);
     };
   }, []);
 
@@ -88,9 +112,44 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function Root() {
+  return <Outlet />;
+}
+
+/**
+ * Every error no route handles lands here: a render crash, or code that
+ * failed to load (offline for a moment, or a redeploy removed the chunks this
+ * page points at). The latter reloads once for fresh code; anything else gets
+ * a translated error page.
+ */
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const chunkLoad = isChunkLoadError(error);
+  const reloading = useMemo(
+    () => chunkLoad && canReloadForFreshChunks(),
+    [chunkLoad],
+  );
+
+  useEffect(() => {
+    if (reloading) {
+      reloadForFreshChunks();
+      return;
+    }
+    reportError(
+      isRouteErrorResponse(error)
+        ? { message: `${error.status} ${error.statusText}` }
+        : error instanceof Error
+          ? { message: error.message, stack: error.stack }
+          : { message: String(error) },
+    );
+  }, [error, reloading]);
+
+  // The translated page needs the providers the crash may have come from;
+  // should they fail again, ErrorReporter falls back to plain English.
   return (
     <ErrorReporter>
-      <Outlet />
+      <BaseProviders>
+        <AppErrorPage chunkLoad={chunkLoad} reloading={reloading} />
+      </BaseProviders>
     </ErrorReporter>
   );
 }

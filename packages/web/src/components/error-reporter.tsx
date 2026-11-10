@@ -6,7 +6,6 @@ import { reportError } from '@/lib/telemetry';
 
 interface Props {
   children: ReactNode;
-  fallback?: ReactNode;
 }
 
 interface State {
@@ -14,13 +13,13 @@ interface State {
 }
 
 /**
- * Last-resort error screen shown when no `fallback` prop is provided.
+ * Last-resort error screen.
  *
- * This boundary sits above every provider mounted in `_app.tsx` (i18n,
- * router data, query client), and the crash it catches may have originated
- * inside one of them. It therefore deliberately uses no app context: strings
- * are plain English and navigation uses raw window APIs, so the fallback
- * can never crash itself. It visually mirrors ErrorCatcher's 500 page.
+ * The root error boundary wraps its translated page (and the providers that
+ * page needs) in this boundary, and the crash being reported may have
+ * originated inside one of those providers. It therefore deliberately uses no
+ * app context: strings are plain English and navigation uses raw window APIs,
+ * so the fallback can never crash itself. It visually mirrors AppErrorPage.
  */
 const defaultErrorFallback = (
   <div className="flex flex-col items-center justify-center min-h-[60vh] px-4 text-center space-y-6">
@@ -74,7 +73,7 @@ export class ErrorReporter extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      return this.props.fallback ?? defaultErrorFallback;
+      return defaultErrorFallback;
     }
     return this.props.children;
   }

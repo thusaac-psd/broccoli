@@ -1,3 +1,4 @@
+import { useServerTimeReached } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
@@ -7,10 +8,7 @@ import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router';
 
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
-import {
-  useContestProblems,
-  usePassed,
-} from '@/features/contest/hooks/use-contest-problems';
+import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 
 export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
@@ -19,8 +17,8 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { contest } = useContestInfo(contestId);
 
   const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
-  const started = usePassed(
-    contest ? new Date(contest.start_time).getTime() : null,
+  const started = useServerTimeReached(
+    contest ? Date.parse(contest.start_time) : null,
   );
   const contestNotStarted = !!contest && !started;
   const shouldBlockByStartTime = contestNotStarted && !canManageContest;

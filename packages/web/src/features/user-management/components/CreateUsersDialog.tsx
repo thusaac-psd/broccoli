@@ -1,6 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import type { CreatedUser } from '@broccoli/web-sdk/auth';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -38,7 +38,7 @@ export function CreateUsersDialog({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
   const formId = useId();
   const [tab, setTab] = useState('single');
   const [username, setUsername] = useState('');
@@ -51,7 +51,6 @@ export function CreateUsersDialog({
   const [errorMsg, setErrorMsg] = useState('');
 
   function clearRequest() {
-    resetKey();
     setErrorMsg('');
     setPreview(null);
   }
@@ -77,25 +76,33 @@ export function CreateUsersDialog({
     setBusy(true);
     setErrorMsg('');
     try {
-      const options = { headers: { 'Idempotency-Key': getKey() } };
       let result: CreatedUser[];
       if (tab === 'single') {
-        const { data, error } = await apiClient.POST('/users', {
-          ...options,
-          body: users[0],
-        });
+        const body = users[0];
+        const { data, error } = await sendIdempotent(
+          { path: '/users', body },
+          (key) =>
+            apiClient.POST('/users', {
+              headers: { 'Idempotency-Key': key },
+              body,
+            }),
+        );
         if (error) throw error;
         result = [data];
       } else {
-        const { data, error } = await apiClient.POST('/users/bulk', {
-          ...options,
-          body: { users },
-        });
+        const body = { users };
+        const { data, error } = await sendIdempotent(
+          { path: '/users/bulk', body },
+          (key) =>
+            apiClient.POST('/users/bulk', {
+              headers: { 'Idempotency-Key': key },
+              body,
+            }),
+        );
         if (error) throw error;
         result = data;
       }
       setCreated(result);
-      resetKey();
       toast.success(
         t('users.create.success', { count: String(result.length) }),
       );

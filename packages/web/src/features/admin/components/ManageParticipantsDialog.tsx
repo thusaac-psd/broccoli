@@ -4,7 +4,7 @@ import {
   useApiClient,
 } from '@broccoli/web-sdk/api';
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -235,7 +235,7 @@ function AddParticipantsTab({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
   const [search, setSearch] = useState('');
   const [addingId, setAddingId] = useState<number | null>(null);
 
@@ -266,16 +266,20 @@ function AddParticipantsTab({
 
   async function handleAdd(userId: number) {
     setAddingId(userId);
-    const { error } = await apiClient.POST('/contests/{id}/participants', {
-      headers: { 'Idempotency-Key': getKey() },
-      params: { path: { id: contest.id } },
-      body: { user_id: userId },
-    });
+    const body = { user_id: userId };
+    const { error } = await sendIdempotent(
+      { contestId: contest.id, body },
+      (key) =>
+        apiClient.POST('/contests/{id}/participants', {
+          headers: { 'Idempotency-Key': key },
+          params: { path: { id: contest.id } },
+          body,
+        }),
+    );
     setAddingId(null);
     if (error) {
       toast.error(getErrorMessage(error, t('toast.participant.addError')));
     } else {
-      resetKey();
       toast.success(t('toast.participant.added'));
       queryClient.invalidateQueries({
         queryKey: ['contest-participants', contest.id],
@@ -433,7 +437,7 @@ function BulkImportTab({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
   const [jsonText, setJsonText] = useState('');
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -576,20 +580,22 @@ function BulkImportTab({
 
     setSubmitting(true);
     setErrorMsg('');
-    const { data, error } = await apiClient.POST(
-      '/contests/{id}/participants/bulk',
-      {
-        headers: { 'Idempotency-Key': getKey() },
-        params: { path: { id: contest.id } },
-        body: {
-          usernames: preview.willAdd.map((user) => user.username),
-          create_users: preview.willCreate.map((entry) => ({
-            username: entry.username,
-            display_name: entry.display_name,
-            password: entry.password,
-          })),
-        },
-      },
+    const body = {
+      usernames: preview.willAdd.map((user) => user.username),
+      create_users: preview.willCreate.map((entry) => ({
+        username: entry.username,
+        display_name: entry.display_name,
+        password: entry.password,
+      })),
+    };
+    const { data, error } = await sendIdempotent(
+      { contestId: contest.id, body },
+      (key) =>
+        apiClient.POST('/contests/{id}/participants/bulk', {
+          headers: { 'Idempotency-Key': key },
+          params: { path: { id: contest.id } },
+          body,
+        }),
     );
     setSubmitting(false);
 
@@ -600,7 +606,6 @@ function BulkImportTab({
       return;
     }
 
-    resetKey();
     setResult(data);
     toast.success(t('toast.participant.bulkSuccess'));
     queryClient.invalidateQueries({
