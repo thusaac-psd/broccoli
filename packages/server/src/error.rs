@@ -52,6 +52,9 @@ pub enum AppError {
     IdempotencyKeyMismatch(String),
     /// Idempotent response was too large to cache and cannot be replayed.
     IdempotencyResponseTooLarge,
+    /// Idempotent response carried credentials (`Cache-Control: no-store`),
+    /// so only its completion was recorded and it cannot be replayed.
+    IdempotencyResponseNotStored,
     Internal(String),
 }
 
@@ -154,6 +157,15 @@ impl AppError {
                     "CONFLICT",
                     "Idempotent response too large to replay; original request \
                      succeeded but cannot be safely re-issued"
+                        .into(),
+                ),
+            ),
+            AppError::IdempotencyResponseNotStored => (
+                StatusCode::CONFLICT,
+                simple(
+                    "CONFLICT",
+                    "Idempotent response carries credentials and is never stored; \
+                     original request succeeded but cannot be replayed"
                         .into(),
                 ),
             ),

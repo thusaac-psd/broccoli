@@ -69,42 +69,65 @@ fn into_hook_action(response: HookResponse, original_topic: &str) -> GenericHook
     }
 }
 
+/// The fail-closed rejection used whenever a hook cannot produce a trustworthy
+/// answer (payload serialization, WASM call failure, malformed output). One
+/// constructor so every fail-closed path carries the same code and status.
+fn runtime_error_reject(plugin_id: &str, function_name: &str, reason: &str) -> GenericHookAction {
+    let detail = serde_json::json!({
+        "code": PLUGIN_RUNTIME_ERROR_CODE,
+        "message": format!("Plugin '{plugin_id}' hook '{function_name}' failed: {reason}"),
+        "status_code": 500,
+    });
+    GenericHookAction::Reject(detail.to_string())
+}
+
 /// Interpret a hook guest's raw output bytes into a host action.
 ///
-/// Fail-closed on unparseable bytes (a broken guest must not silently pass a
-/// Blocking gate); a valid-JSON wrong-shape response is a pass, since not every
-/// plugin implements every hook.
+/// The only output that passes without being a valid `HookResponse` is a JSON
+/// object with no `action` key at all (a plugin that declines to answer). Once
+/// a guest names an action it has committed to the contract, so anything that
+/// then fails to deserialize (a mistyped `status_code`, an unknown action, a
+/// `null` message) fails closed exactly like non-JSON output: a Blocking gate
+/// must never turn a malformed reject into an allow.
 fn interpret_hook_output(
     output_bytes: &[u8],
     topic: &str,
     plugin_id: &str,
     function_name: &str,
 ) -> GenericHookAction {
-    match serde_json::from_slice::<serde_json::Value>(output_bytes) {
+    let value = match serde_json::from_slice::<serde_json::Value>(output_bytes) {
+        Ok(value) => value,
         Err(e) => {
             tracing::error!(
                 plugin_id = %plugin_id,
                 function = %function_name,
                 "Hook returned non-JSON output (fail-closed): {e}",
             );
-            let detail = serde_json::json!({
-                "code": PLUGIN_RUNTIME_ERROR_CODE,
-                "message": format!("Plugin '{plugin_id}' hook '{function_name}' returned a non-JSON response"),
-                "status_code": 500,
-            });
-            GenericHookAction::Reject(detail.to_string())
+            return runtime_error_reject(plugin_id, function_name, "returned a non-JSON response");
         }
-        Ok(value) => match serde_json::from_value::<HookResponse>(value) {
-            Ok(hook_response) => into_hook_action(hook_response, topic),
-            Err(e) => {
-                tracing::warn!(
-                    plugin_id = %plugin_id,
-                    function = %function_name,
-                    "Hook returned a wrong-shape response, treating as pass: {e}",
-                );
-                GenericHookAction::Pass
-            }
-        },
+    };
+    if value.get("action").is_none() {
+        tracing::warn!(
+            plugin_id = %plugin_id,
+            function = %function_name,
+            "Hook returned a response without an `action`, treating as pass",
+        );
+        return GenericHookAction::Pass;
+    }
+    match serde_json::from_value::<HookResponse>(value) {
+        Ok(hook_response) => into_hook_action(hook_response, topic),
+        Err(e) => {
+            tracing::error!(
+                plugin_id = %plugin_id,
+                function = %function_name,
+                "Hook returned a malformed response (fail-closed): {e}",
+            );
+            runtime_error_reject(
+                plugin_id,
+                function_name,
+                &format!("returned a malformed response: {e}"),
+            )
+        }
     }
 }
 
@@ -170,12 +193,11 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
                     function = %self.function_name,
                     "Failed to serialize hook payload (fail-closed): {e}",
                 );
-                let detail = serde_json::json!({
-                    "code": PLUGIN_RUNTIME_ERROR_CODE,
-                    "message": format!("Plugin '{}' hook '{}' failed: {e}", self.plugin_id, self.function_name),
-                    "status_code": 500,
-                });
-                return Ok(GenericHookAction::Reject(detail.to_string()));
+                return Ok(runtime_error_reject(
+                    &self.plugin_id,
+                    &self.function_name,
+                    &e.to_string(),
+                ));
             }
         };
 
@@ -206,12 +228,11 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
                     function = %self.function_name,
                     "Hook WASM call failed (fail-closed): {e}",
                 );
-                let detail = serde_json::json!({
-                    "code": PLUGIN_RUNTIME_ERROR_CODE,
-                    "message": format!("Plugin '{}' hook '{}' failed: {e}", self.plugin_id, self.function_name),
-                    "status_code": 500,
-                });
-                Ok(GenericHookAction::Reject(detail.to_string()))
+                Ok(runtime_error_reject(
+                    &self.plugin_id,
+                    &self.function_name,
+                    &e.to_string(),
+                ))
             }
         }
     }
@@ -261,21 +282,18 @@ mod tests {
         assert!(matches!(action, GenericHookAction::Pass));
     }
 
-    // Kernel audit (Nov 2026): the wrong-shape -> Pass arm above exists for
-    // JSON with no `action` tag at all, but it also swallows responses that
-    // clearly say `"action":"reject"` and merely mistype a field. Those must
-    // not turn a Blocking gate (cooldown / submission-limit) into an allow.
-    // Expected: Reject (either the plugin's own or a 500 PLUGIN_RUNTIME_ERROR,
-    // matching the non-JSON fail-closed arm). Actual today: Pass.
+    // Kernel audit (Nov 2026, #55): a response that names an action but
+    // mistypes a field must not turn a Blocking gate (cooldown /
+    // submission-limit) into an allow; it fails closed like non-JSON output.
     const MISTYPED_REJECTS: &[&[u8]] = &[
         br#"{"action":"reject","status_code":"429"}"#,
         br#"{"action":"reject","status_code":70000}"#,
         br#"{"action":"reject","message":null}"#,
         br#"{"action":"reject","code":42}"#,
+        br#"{"action":"rejected"}"#,
     ];
 
     #[test]
-    #[ignore = "BUG: interpret_hook_output fails OPEN on a reject with a mistyped field"]
     fn mistyped_reject_fails_closed() {
         for raw in MISTYPED_REJECTS {
             let action = interpret_hook_output(raw, TOPIC, "p", "f");
@@ -287,13 +305,14 @@ mod tests {
         }
     }
 
-    /// Pins today's (buggy) behaviour so a fix is a deliberate, visible change:
-    /// delete this test together with the `#[ignore]` above when fixing.
     #[test]
-    fn mistyped_reject_currently_passes() {
-        for raw in MISTYPED_REJECTS {
-            let action = interpret_hook_output(raw, TOPIC, "p", "f");
-            assert!(matches!(action, GenericHookAction::Pass));
-        }
+    fn malformed_output_reject_carries_runtime_error_code() {
+        let action = interpret_hook_output(MISTYPED_REJECTS[0], TOPIC, "p", "f");
+        let GenericHookAction::Reject(detail) = action else {
+            panic!("expected reject");
+        };
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["code"], PLUGIN_RUNTIME_ERROR_CODE);
+        assert_eq!(detail["status_code"], 500);
     }
 }

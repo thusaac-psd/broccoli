@@ -125,6 +125,9 @@ pub struct ServerConfig {
     pub frontend_dist: PathBuf,
     /// CIDR ranges for trusted L7 proxies. Empty means no proxy headers are
     /// trusted and client IP extraction falls back to the socket address.
+    /// When the peer is trusted, `X-Forwarded-For` is walked right to left
+    /// past every trusted hop; the first untrusted hop is the client (see
+    /// `client_ip`). List every proxy in the chain, and only proxies.
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub trusted_proxies: Vec<String>,
     /// Enables IP-based throttling on `/api/v1/auth/login`.
