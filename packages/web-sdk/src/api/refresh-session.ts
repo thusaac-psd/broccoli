@@ -27,7 +27,8 @@ export type RefreshOutcome =
 const REFRESH_LOCK = 'broccoli:auth:refresh';
 
 // A TOKEN_INVALID can still come from a refresh that raced with a tab running
-// an older build without the lock. By the time this delay has passed the
+// an older build without the lock, or with a tab that took the storage lease
+// (below) in the same instant. By the time this delay has passed the
 // winner's rotated cookie is in place, so one retry tells a lost race from a
 // session that has really ended. A transient failure gets the same single
 // quick retry, which rides out a momentary blip.
@@ -38,9 +39,9 @@ export const REFRESH_RETRY_DELAY_MS = 1_000;
 // Generous, so a slow but working server is not cut off mid-rotation.
 const REFRESH_TIMEOUT_MS = 20_000;
 
-// After that, transient failures back off exponentially up to this cap. The
-// jitter keeps a room full of contestants from all retrying at the instant
-// the server comes back.
+// After the quick retry, transient failures back off exponentially up to
+// this cap. The jitter keeps a room full of contestants from all retrying at
+// the instant the server comes back.
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 30_000;
 
