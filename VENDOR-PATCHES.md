@@ -8,7 +8,7 @@ re-vendor.
 
 ## `broccoli_queue` 0.4.6 (`third_party/broccoli_queue`)
 
-Patches 1, 2, 4 and 5 fix bugs in the Redis broker path; patch 3 is a lint
+Patches 1, 2 and 4 to 6 fix bugs in the Redis broker path; patch 3 is a lint
 fix. The first two are message-loss bugs. Both silently drop a message
 that the queue is supposed to retry or dead-letter, and neither is reachable
 from our own code (they live inside `reject` / `process_messages`), so they can
@@ -114,9 +114,43 @@ code is consumed normally (it is still gated by its old publisher's clock that
 one time). `TIME` before a write is fine on Redis >= 5, which replicates script
 effects rather than script bodies.
 
+### 6. A Redis outage blocks every MQ call silently, for up to 300 s past recovery
+
+`src/brokers/redis/utils.rs` (`RedisBroker::get_redis_connection`, new
+`TimeoutRedisConnectionManager`), `src/brokers/redis/broker.rs` (the pool
+type), `src/queue.rs` (the `Some(concurrency)` branch of `process_messages`).
+
+When a pool check-out failed, upstream rebuilt the pool (bb8's `build` is lazy,
+so that never fails), constructed a `BroccoliError` and discarded it unlogged,
+then slept 1, 2, 4, ... up to 300 s and retried forever. Publish, consume, ack
+and reject therefore blocked instead of erroring, callers' own backoff and
+health logic never ran, and after an 80 s Redis restart consumers resumed only
+at about 141 s (271 s for a 150 s outage). Separately, `bb8_redis`'s manager
+opens connections with no response timeout, so a command in flight on a
+half-open socket (the Redis host lost power) waited for TCP retransmission,
+about 15 minutes.
+
+Patch:
+- `get_redis_connection` makes at most 3 check-out attempts (250 ms, then
+  500 ms backoff, each attempt bounded by the pool's 2 s connection timeout),
+  logs every failure, and returns the error. The pointless pool rebuild is
+  gone.
+- The pool uses `TimeoutRedisConnectionManager`, identical to
+  `bb8_redis::RedisConnectionManager` except that connections carry a 2 s
+  connect timeout and a 5 s response timeout, and the check-out `PING` is
+  bounded at 1 s. That bound must stay below the pool's 2 s connection
+  timeout: bb8 puts a connection whose validation was cancelled by that timeout
+  back as healthy, so an unbounded `PING` on a dead socket would wedge every
+  check-out on it, whereas a `PING` that errors marks it invalid and bb8
+  replaces it.
+- Because consume now errors instead of blocking, the per-task loop of
+  `process_messages` sleeps 1 s after a consume error instead of spinning.
+  `process_messages_with_handlers` is unused and left unpatched, as in patch 2.
+
 ### Re-vendoring
 
 To pull a new upstream version: replace `third_party/broccoli_queue`, bump the
-version here and in `[patch.crates-io]`, and re-apply all five patches (grep for
-`BROCCOLI VENDOR PATCH`). If upstream fixes the message-loss and clock bugs, drop the vendor and the `[patch.crates-io]` entry (the lint patch is only
+version here and in `[patch.crates-io]`, and re-apply all six patches (grep for
+`BROCCOLI VENDOR PATCH`). If upstream fixes the message-loss, clock and outage
+bugs, drop the vendor and the `[patch.crates-io]` entry (the lint patch is only
 needed while we vendor).

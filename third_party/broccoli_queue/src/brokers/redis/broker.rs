@@ -8,9 +8,9 @@ use crate::{
     queue::{ConsumeOptions, PublishOptions},
 };
 
-use super::utils::OptionalInternalBrokerMessage;
+use super::utils::{OptionalInternalBrokerMessage, TimeoutRedisConnectionManager};
 
-pub(crate) type RedisPool = bb8_redis::bb8::Pool<bb8_redis::RedisConnectionManager>;
+pub(crate) type RedisPool = bb8_redis::bb8::Pool<TimeoutRedisConnectionManager>;
 
 #[derive(Default)]
 /// A message broker implementation for Redis.
@@ -31,7 +31,7 @@ impl Broker for RedisBroker {
     /// # Returns
     /// A `Result` indicating success or failure.
     async fn connect(&mut self, broker_url: &str) -> Result<(), BroccoliError> {
-        let redis_manager = bb8_redis::RedisConnectionManager::new(broker_url)
+        let redis_manager = TimeoutRedisConnectionManager::new(broker_url)
             .map_err(|e| BroccoliError::Broker(format!("Failed to create redis manager: {e:?}")))?;
 
         let redis_pool = bb8_redis::bb8::Pool::builder()

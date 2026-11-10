@@ -3,7 +3,7 @@
 //! This module provides helper methods for managing Redis message operations,
 //! including message parsing and manipulation of message metadata.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use super::broker::{RedisBroker, RedisPool};
 use crate::{
@@ -156,82 +156,107 @@ impl RedisBroker {
         Ok(popped_message)
     }
 
-    /// Retrieves a Redis connection from the pool, retrying with exponential backoff if necessary.
+    /// Retrieves a Redis connection from the pool, retrying a few times with a
+    /// short, bounded backoff.
     ///
-    /// # Arguments
-    /// * `redis_pool` - A reference to the Redis connection pool.
+    /// BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): upstream retried forever
+    /// with a backoff growing to 300 s, rebuilt the (lazy, so never failing)
+    /// pool on every miss and discarded the error unlogged, so during a Redis
+    /// outage every publish/consume/ack silently blocked for minutes past the
+    /// recovery. Each failure is now logged and the error is returned after
+    /// [`GET_CONNECTION_ATTEMPTS`], so callers' own backoff and health logic run.
     ///
     /// # Returns
     /// A `Result` containing a `RedisConnection` on success, or a `BroccoliError` on failure.
     pub(crate) async fn get_redis_connection(
         &self,
     ) -> Result<MultiplexedConnection, BroccoliError> {
-        let mut redis_conn_sleep = std::time::Duration::from_secs(1);
-
         let redis_pool = self.ensure_pool()?;
-
-        #[allow(unused_assignments)]
-        let mut opt_redis_connection = None;
-
+        let mut backoff = GET_CONNECTION_BACKOFF_START;
+        let mut attempt = 1;
         loop {
-            let borrowed_redis_connection = match redis_pool.get().await {
-                Ok(redis_connection) => Some(redis_connection),
-                Err(err) => {
-                    let redis_manager = bb8_redis::RedisConnectionManager::new(
-                        self.broker_url.clone(),
-                    )
-                    .map_err(|e| {
-                        BroccoliError::Broker(format!("Failed to create redis manager: {e:?}"))
-                    })?;
-
-                    let redis_pool = bb8_redis::bb8::Pool::builder()
-                        .max_size(
-                            self.config
-                                .as_ref()
-                                .map_or(10, |config| config.pool_connections.unwrap_or(10))
-                                .into(),
-                        )
-                        .connection_timeout(std::time::Duration::from_secs(2))
-                        .build(redis_manager)
-                        .await
-                        .map_err(|e| {
-                            BroccoliError::Broker(format!("Failed to create redis pool: {e:?}"))
-                        })?;
-
-                    {
-                        let mut pool_write = self
-                            .redis_pool
-                            .as_ref()
-                            .ok_or_else(|| {
-                                BroccoliError::Broker("Redis pool not initialized".to_string())
-                            })?
-                            .write()
-                            .map_err(|_| {
-                                BroccoliError::Broker(
-                                    "Failed to acquire write lock on redis pool".to_string(),
-                                )
-                            })?;
-                        *pool_write = redis_pool;
-                    }
-                    BroccoliError::Broker(format!("Failed to get redis connection: {err:?}"));
-                    None
+            match redis_pool.get().await {
+                Ok(redis_connection) => return Ok(redis_connection.clone()),
+                Err(err) if attempt >= GET_CONNECTION_ATTEMPTS => {
+                    log::error!("Failed to get redis connection after {attempt} attempts: {err:?}");
+                    return Err(BroccoliError::Broker(format!(
+                        "Failed to get redis connection after {attempt} attempts: {err:?}"
+                    )));
                 }
-            };
-
-            if borrowed_redis_connection.is_some() {
-                opt_redis_connection = borrowed_redis_connection;
-                break;
+                Err(err) => {
+                    log::warn!(
+                        "Failed to get redis connection (attempt {attempt}/{GET_CONNECTION_ATTEMPTS}), retrying in {backoff:?}: {err:?}"
+                    );
+                }
             }
-
-            tokio::time::sleep(redis_conn_sleep).await;
-            redis_conn_sleep =
-                std::cmp::min(redis_conn_sleep * 2, std::time::Duration::from_secs(300));
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff * 2, GET_CONNECTION_BACKOFF_MAX);
+            attempt += 1;
         }
+    }
+}
 
-        let redis_connection = opt_redis_connection
-            .ok_or_else(|| BroccoliError::Broker("Failed to get redis connection".to_string()))?;
+/// Attempts per [`RedisBroker::get_redis_connection`] call before the error is
+/// returned. Each attempt is itself bounded by the pool's 2 s connection timeout.
+const GET_CONNECTION_ATTEMPTS: u32 = 3;
+const GET_CONNECTION_BACKOFF_START: Duration = Duration::from_millis(250);
+const GET_CONNECTION_BACKOFF_MAX: Duration = Duration::from_secs(2);
 
-        Ok(redis_connection.clone())
+/// Bound on connecting a new pooled connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound on waiting for the reply to any command. Without it a command in
+/// flight on a half-open socket (e.g. the Redis host lost power) waits for TCP
+/// retransmission to give up, about 15 minutes.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on the check-out `PING`. It must stay below the pool's connection
+/// timeout: bb8 puts a connection whose validation was cancelled by that
+/// timeout back as healthy, so an unbounded `PING` on a dead socket would wedge
+/// every check-out on the same connection. A `PING` that errors instead marks
+/// the connection invalid and bb8 replaces it.
+const VALIDATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): `bb8_redis::RedisConnectionManager`
+/// opens connections with no connection or response timeout. This manager is
+/// identical except that every connection carries [`CONNECT_TIMEOUT`] and
+/// [`RESPONSE_TIMEOUT`], and validation is bounded by [`VALIDATE_TIMEOUT`].
+#[derive(Clone, Debug)]
+pub struct TimeoutRedisConnectionManager {
+    client: redis::Client,
+}
+
+impl TimeoutRedisConnectionManager {
+    pub(crate) fn new(url: &str) -> Result<Self, redis::RedisError> {
+        Ok(Self {
+            client: redis::Client::open(url)?,
+        })
+    }
+}
+
+impl bb8_redis::bb8::ManageConnection for TimeoutRedisConnectionManager {
+    type Connection = MultiplexedConnection;
+    type Error = redis::RedisError;
+
+    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        let config = redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(CONNECT_TIMEOUT)
+            .set_response_timeout(RESPONSE_TIMEOUT);
+        self.client
+            .get_multiplexed_async_connection_with_config(&config)
+            .await
+    }
+
+    async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        let ping = redis::cmd("PING");
+        match tokio::time::timeout(VALIDATE_TIMEOUT, ping.query_async::<String>(conn)).await {
+            Ok(Ok(pong)) if pong == "PONG" => Ok(()),
+            Ok(Ok(_)) => Err((redis::ErrorKind::ResponseError, "ping request").into()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err((redis::ErrorKind::IoError, "ping timed out").into()),
+        }
+    }
+
+    fn has_broken(&self, _: &mut Self::Connection) -> bool {
+        false
     }
 }
 
