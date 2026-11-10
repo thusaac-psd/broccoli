@@ -32,8 +32,9 @@ pub struct ServerRuntime {
     /// To release this server's in-flight work after the dispatcher stops.
     db: sea_orm::DatabaseConnection,
     server_id: String,
-    /// To refuse and drain plugin calls before the runtime goes away.
-    plugins: Arc<dyn plugin_core::traits::PluginManager>,
+    /// For shutdown: refusing and draining plugin calls, stopping the plugin
+    /// lifecycle before its replica row is retired.
+    state: AppState,
     /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
     /// [`crate::healthz_runtime`] (UP#14e). `None` when `server.healthz_listen`
     /// is unset. The thread runs for the process lifetime and is reaped by
@@ -362,7 +363,6 @@ impl ServerRuntime {
             app_config.server.dispatcher_admission_queue_max as usize,
         );
 
-        let plugins_for_shutdown: Arc<dyn plugin_core::traits::PluginManager> = manager.clone();
         let state = AppState {
             plugins: manager,
             db: db.clone(),
@@ -452,6 +452,7 @@ impl ServerRuntime {
         }
 
         let healthz_state = state.clone();
+        let shutdown_state = state.clone();
         let app = build_router(state).layer(
             CorsLayer::new()
                 .allow_origin(allow_origins)
@@ -507,7 +508,7 @@ impl ServerRuntime {
             dispatcher,
             db,
             server_id,
-            plugins: plugins_for_shutdown,
+            state: shutdown_state,
             _healthz_handle: healthz_handle,
             _telemetry_guard: telemetry_guard,
         })
@@ -520,7 +521,7 @@ impl ServerRuntime {
         self.dispatcher.shutdown().await;
         // From here on, plugin calls are refused (a clean error, not a call
         // that outlives the runtime).
-        let gate = self.plugins.call_gate().cloned();
+        let gate = self.state.plugins.call_gate().cloned();
         if let Some(gate) = &gate {
             gate.close();
         }
@@ -528,6 +529,7 @@ impl ServerRuntime {
         // hand the work to the rest of the fleet now instead of leaving it
         // owned by a server that is gone.
         release_own_inflight(&self.db, &self.server_id, "Shutdown").await;
+        crate::plugin_lifecycle::stop(&self.state).await;
         if let Err(e) = crate::plugin_fleet::retire(&self.db, &self.server_id).await {
             warn!(error = %e, "Shutdown: failed to remove this replica's plugin report");
         }

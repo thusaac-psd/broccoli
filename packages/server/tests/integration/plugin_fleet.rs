@@ -898,3 +898,42 @@ async fn the_stuck_detector_leaves_work_to_a_replica_that_can_judge_it() {
     let after_a = reload().await;
     assert_ne!(after_a.judge_epoch, 0, "A recovers it: {after_a:?}");
 }
+
+/// Once shutdown has retired this replica's row, nothing may write it back
+/// (a ghost replica would count as live for a minute).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retired_replica_row_stays_retired() {
+    use sea_orm::{EntityTrait, PaginatorTrait};
+
+    let a = TestApp::spawn().await;
+    let id = a.state.config.server.id.clone();
+    let rows = || async {
+        server::entity::plugin_replica::Entity::find()
+            .count(&a.db)
+            .await
+            .unwrap()
+    };
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    assert_eq!(rows().await, 1);
+
+    // Shutdown order: stop the lifecycle, then retire the row.
+    plugin_lifecycle::stop(&a.state).await;
+    server::plugin_fleet::retire(&a.db, &id).await.unwrap();
+    // A reconcile tick that would otherwise write (the report changed).
+    a.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "late".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "__test__".into(),
+                submission_fn: "noop".into(),
+                code_run_fn: "noop".into(),
+                submission_admission: false,
+            },
+        );
+    plugin_lifecycle::reconcile(&a.state).await.unwrap();
+    assert_eq!(rows().await, 0, "no ghost row after retire");
+}

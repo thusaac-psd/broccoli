@@ -70,6 +70,8 @@ pub struct PluginLifecycle {
     outdated: RwLock<HashMap<String, String>>,
     /// The recorded [`Governs`] per plugin, as of the last reconcile.
     governs: RwLock<HashMap<String, Governs>>,
+    /// Set by [`stop`] at shutdown: no further report writes.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +339,13 @@ fn build_report(
 /// Write the report if it changed, or touch it if the last write is getting
 /// old. Best-effort: a failed write only makes the admin view stale.
 async fn write_report(state: &AppState, applied: &HashMap<String, Applied>) {
+    if state
+        .plugin_lifecycle
+        .stopped
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
     let now = Instant::now();
     let report = build_report(state, applied, now);
     let contest_types = crate::dispatcher::local_contest_types(state).await;
@@ -375,7 +384,20 @@ fn same_report(a: &ReplicaReport, b: &ReplicaReport) -> bool {
         })
 }
 
-/// The per-replica reconcile loop. Runs for the process lifetime.
+/// Stop writing this replica's report, for shutdown: once this returns, no
+/// write is in progress and none will follow, so the row can be retired
+/// without a reconcile tick re-creating it.
+pub async fn stop(state: &AppState) {
+    state
+        .plugin_lifecycle
+        .stopped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Every write happens under this lock (`with_applied`): taking it waits
+    // out one already under way.
+    drop(state.plugin_lifecycle.applied.lock().await);
+}
+
+/// The per-replica reconcile loop. Runs until [`stop`].
 pub async fn run(state: AppState) {
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -383,6 +405,13 @@ pub async fn run(state: AppState) {
     interval.tick().await;
     loop {
         interval.tick().await;
+        if state
+            .plugin_lifecycle
+            .stopped
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         if let Err(e) = reconcile(&state).await {
             tracing::warn!(error = %e, "Plugin reconcile failed; retrying next tick");
         }
