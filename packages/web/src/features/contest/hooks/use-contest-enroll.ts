@@ -23,6 +23,13 @@ export function useContestEnroll({
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
 
+  const invalidateEnrollment = () => {
+    queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
+    queryClient.invalidateQueries({
+      queryKey: ['contest-my-info', contestId],
+    });
+  };
+
   const enrollMutation = useMutation({
     mutationFn: async () => {
       const { error } = await sendIdempotent({ contestId }, (key) =>
@@ -35,19 +42,13 @@ export function useContestEnroll({
     },
     onSuccess: () => {
       toast.success(t('toast.contest.enrolled'));
-      queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-      queryClient.invalidateQueries({
-        queryKey: ['contest-my-info', contestId],
-      });
+      invalidateEnrollment();
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
     onError: (error: unknown) => {
       if (parseApiError(error)?.code === 'CONFLICT') {
         toast.success(t('toast.contest.enrolled'));
-        queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-        queryClient.invalidateQueries({
-          queryKey: ['contest-my-info', contestId],
-        });
+        invalidateEnrollment();
         return;
       }
       toast.error(t('toast.contest.enrollError'));
@@ -63,10 +64,7 @@ export function useContestEnroll({
     },
     onSuccess: () => {
       toast.success(t('toast.contest.unregistered'));
-      queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-      queryClient.invalidateQueries({
-        queryKey: ['contest-my-info', contestId],
-      });
+      invalidateEnrollment();
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
     onError: () => {
