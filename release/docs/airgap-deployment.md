@@ -323,27 +323,23 @@ cd <bundle-dir>
 ./install.sh --role worker --bundle .
 ```
 
-This loads the worker image via `load-bundle.sh`, then runs the sandbox go/no-go
-check staged inside the bundle at `native/live-boot-preflight.sh` (arch/OS,
-cgroup-v2 controllers, isolate setuid + cgroup delegation, live MLE/TLE probes,
-and a real C/C++/Python compile). `install.sh` locates that preflight script
+This loads the worker image via `load-bundle.sh`, then runs the host half of
+the go/no-go check staged inside the bundle at `native/live-boot-preflight.sh
+--host-only` (arch/OS, systemd, cgroup-v2 controllers). isolate and the
+compilers ship inside the worker image, so the host is not checked for them.
+`install.sh` locates that preflight script
 relative to its own path, so this step only fires when you run the bundle's own
 `install.sh` as shown above — running a repo checkout's `install.sh` against the
 same bundle directory makes `native/live-boot-preflight.sh` resolve to a
 nonexistent path relative to the repo, and the check silently skips instead of
 running. A failed preflight only warns
-(`WARN: worker sandbox preflight reported issues`) — inspect its `[FAIL]` lines
+(`WARN: worker host preflight reported issues`) — inspect its `[FAIL]` lines
 and fix them before trusting the box for judging, but it does not by itself
 abort the install.
 
-The installer then trusts the bundle's `ca/root.crt` using the matching
-`trust-ca/` helper for the host OS (`trust-ca/linux.sh` or `trust-ca/macos.sh`,
-selected automatically from `uname -s`). Unlike the preflight, **a genuine
-CA-trust failure aborts the install** — the script prints
-`ERROR: CA trust failed` and exits non-zero, because a worker that doesn't trust
-the server's certificate can't reliably fetch submissions over HTTPS. An
-unsupported OS (neither Linux nor macOS) is only a warning; in that case trust
-`ca/root.crt` manually using your OS's certificate tooling.
+A worker does not trust the bundle's `ca/root.crt`: it talks plain Postgres,
+Redis and S3 to the server host and never connects to the TLS gateway, so the
+install works the same on Debian, RHEL-family and other hosts.
 
 ## Worker host (one-click)
 
@@ -384,7 +380,8 @@ This re-runs `load-bundle.sh --bundle . --verify-only` first — a second,
 independent `manifest.sha256` check at the point the media reaches the
 contestant machine, since the trust boundary crosses again here. It then trusts
 `ca/root.crt` via the appropriate per-OS `trust-ca/` helper (`linux.sh` installs
-into `/usr/local/share/ca-certificates` and runs `update-ca-certificates`;
+it with `update-ca-certificates` on Debian/Ubuntu/SUSE or `update-ca-trust` on
+RHEL/Rocky/Fedora/Arch, as root or through `sudo`;
 `macos.sh` adds it to the System keychain via `security add-trusted-cert`).
 Finally, if `cli/broccoli` is present in the bundle, it installs the musl-static
 CLI to `/usr/local/bin/broccoli`.
@@ -545,8 +542,8 @@ it holds the new `root.crt`, it rejects the server.
 3. On the **server**, deliver the new sidecar and re-run
    `./install.sh --role server --lan-host <host-or-ip> --bundle .`. The gateway
    restarts onto the new leaf.
-4. Re-distribute the new `ca/root.crt` to **every worker and contestant** and
-   re-run their trust step: `install.sh --role worker` / `--role contestant`
+4. Re-distribute the new `ca/root.crt` to **every contestant machine** and
+   re-run their trust step: `install.sh --role contestant`
    re-trust from the bundle's `ca/root.crt`; Firefox users re-import it (step 7).
 
 A client still holding only the old `root.crt` fails the handshake with an

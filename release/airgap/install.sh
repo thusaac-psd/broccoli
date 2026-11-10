@@ -129,19 +129,16 @@ case "$ROLE" in
   worker)
     bash "$here/load-bundle.sh" --bundle "$BUNDLE"
     # build-bundle.sh stages the preflight into the bundle at native/.
+    # --host-only: isolate and the compilers live in the worker image, so only
+    # the host's kernel side (cgroup v2, systemd) is checked here.
     preflight="$here/native/live-boot-preflight.sh"
     if [ -x "$preflight" ]; then
-      bash "$preflight" || echo "WARN: worker sandbox preflight reported issues"
+      bash "$preflight" --host-only || echo "WARN: worker host preflight reported issues"
     else
       echo "WARN: sandbox preflight not found at $preflight — skipping go/no-go check" >&2
     fi
-    # Surface a genuine trust failure; only unsupported-OS is a soft warning.
-    helper="$(os_helper)"
-    if [ -n "$helper" ]; then
-      bash "$helper" "$BUNDLE/ca/root.crt" || { echo "ERROR: CA trust failed" >&2; exit 1; }
-    else
-      echo "WARN: unsupported OS for CA trust helper; trust $BUNDLE/ca/root.crt manually" >&2
-    fi
+    # No CA trust step: a worker talks plain Postgres, Redis and S3 to the
+    # server host and never makes a TLS connection to the gateway.
     # Bring the worker up against the server's LAN infra. .env.worker is
     # rendered by setup.sh (secrets from the cluster-secret sidecar).
     worker_env="$BUNDLE/compose/.env.worker"
