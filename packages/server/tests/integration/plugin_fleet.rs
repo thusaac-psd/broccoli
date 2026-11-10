@@ -677,3 +677,61 @@ async fn a_contest_submission_without_a_local_handler_is_a_retryable_503() {
         "nothing was inserted"
     );
 }
+
+/// What a missing visibility plugin governs includes resources reached
+/// outside its contests' routes: a problem that belongs to a governed
+/// contest is just as hidden through the standalone problem route. A problem
+/// in no governed contest stays readable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_visibility_plugin_also_hides_its_contests_problems_outside_the_contest() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    // No plugin loads anywhere here (so plain problems can be created); the
+    // fleet just has the plugin enabled, recorded as governing `fleet-only`.
+    let a = TestApp::spawn().await;
+    let b_dir = tempfile::tempdir().unwrap();
+    let b = a
+        .spawn_replica(SpawnOptions {
+            plugins_dir: Some(b_dir.path().to_path_buf()),
+            allow_plugin_activation_failures: true,
+            ..Default::default()
+        })
+        .await;
+    let token = admin(&a).await;
+    let outsider = a.create_authenticated_user("outsider", "pass1234").await;
+    let governed = a.create_contest(&token, "Governed", true, true).await;
+    let in_contest = a.create_problem(&token, "In a governed contest").await;
+    a.add_problem_to_contest(governed, in_contest, &token).await;
+    let standalone = a.create_problem(&token, "Standalone").await;
+
+    for sql in [
+        format!(
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at, governs) VALUES \
+             ('{PLUGIN}', TRUE, 1, NOW(), \
+              '{{\"visibility\": true, \"contest_types\": [\"fleet-only\"]}}')"
+        ),
+        format!("UPDATE contest SET contest_type = 'fleet-only' WHERE id = {governed}"),
+    ] {
+        a.db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    plugin_lifecycle::reconcile(&b.state).await.unwrap();
+
+    let res = a
+        .get_with_token(&routes::problem(standalone), &outsider)
+        .await;
+    assert_eq!(
+        res.status, 200,
+        "control: problems are readable here: {}",
+        res.text
+    );
+    let res = b
+        .get_with_token(&routes::problem(in_contest), &outsider)
+        .await;
+    assert_eq!(res.status, 404, "the plugin governs it: {}", res.text);
+    let res = b
+        .get_with_token(&routes::problem(standalone), &outsider)
+        .await;
+    assert_eq!(res.status, 200, "outside the plugin's scope: {}", res.text);
+}

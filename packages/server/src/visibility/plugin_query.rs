@@ -155,44 +155,101 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
     Ok((queriers, blind))
 }
 
-/// Deny the resources in contests of `types`; leave the rest to the queriers.
-/// One small lookup, made only while a visibility plugin is down here. A
-/// lookup failure denies everything (fail closed).
+/// Deny the resources the missing plugins govern; leave the rest to the
+/// queriers. A resource is governed when it sits in a contest of one of
+/// `types`, judged from the core schema the host owns:
+///
+/// - with a contest (`resource_contest_ids`): that contest's type;
+/// - a problem, sample or attachment reached outside a contest: any contest
+///   the problem belongs to (`contest_problem`), since a contest plugin may
+///   hide its problems wherever they are read from;
+/// - a submission outside a contest: the contests its problem belongs to;
+/// - anything else without a contest: unknown, so denied.
+///
+/// One small query per kind present, made only while a visibility plugin is
+/// down on this replica. A lookup failure denies the whole batch.
 async fn blind_decisions(
     state: &AppState,
     types: &std::collections::BTreeSet<String>,
+    resources: &[Resource],
     resource_contest_ids: &[Option<i32>],
 ) -> Vec<Decision> {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let mut ids: Vec<i32> = resource_contest_ids.iter().flatten().copied().collect();
-    ids.sort_unstable();
-    ids.dedup();
-    if ids.is_empty() {
-        return vec![Decision::Allow; resource_contest_ids.len()];
+    let types: Vec<String> = types.iter().cloned().collect();
+    let mut contests = Vec::new();
+    let mut problems = Vec::new();
+    let mut submissions = Vec::new();
+    for (resource, contest_id) in resources.iter().zip(resource_contest_ids) {
+        match (contest_id, resource) {
+            (Some(c), _) => contests.push(*c),
+            (None, Resource::Submission(id)) => submissions.push(*id),
+            (None, r) => problems.extend(r.wire_problem_id()),
+        }
     }
-    let rows: Result<Vec<(i32, Option<String>)>, _> = crate::entity::contest::Entity::find()
-        .select_only()
-        .column(crate::entity::contest::Column::Id)
-        .column(crate::entity::contest::Column::ContestType)
-        .filter(crate::entity::contest::Column::Id.is_in(ids))
-        .into_tuple()
-        .all(&state.db)
-        .await;
-    let types_by_contest: std::collections::HashMap<i32, String> = match rows {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|(id, t)| Some((id, t?)))
-            .collect(),
+    let governed = async |sql: &str,
+                          ids: Vec<i32>|
+           -> Result<std::collections::HashSet<i32>, sea_orm::DbErr> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let rows = sea_orm::ConnectionTrait::query_all_raw(
+            &state.db,
+            sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                sql,
+                [ids.into(), types.clone().into()],
+            ),
+        )
+        .await?;
+        rows.iter().map(|r| r.try_get::<i32>("", "id")).collect()
+    };
+    let lookups = async {
+        Ok::<_, sea_orm::DbErr>((
+            governed(
+                "SELECT id FROM contest WHERE id = ANY($1) AND contest_type = ANY($2)",
+                contests,
+            )
+            .await?,
+            governed(
+                "SELECT DISTINCT cp.problem_id AS id FROM contest_problem cp \
+                   JOIN contest c ON c.id = cp.contest_id \
+                  WHERE cp.problem_id = ANY($1) AND c.contest_type = ANY($2)",
+                problems,
+            )
+            .await?,
+            governed(
+                "SELECT DISTINCT s.id FROM submission s \
+                   JOIN contest_problem cp ON cp.problem_id = s.problem_id \
+                   JOIN contest c ON c.id = cp.contest_id \
+                  WHERE s.id = ANY($1) AND c.contest_type = ANY($2)",
+                submissions,
+            )
+            .await?,
+        ))
+    };
+    let (contests, problems, submissions) = match lookups.await {
+        Ok(found) => found,
         Err(e) => {
-            tracing::error!(error = %e, "contest type lookup failed; denying batch");
-            return vec![Decision::Deny; resource_contest_ids.len()];
+            tracing::error!(error = %e, "governed-resource lookup failed; denying batch");
+            return vec![Decision::Deny; resources.len()];
         }
     };
-    resource_contest_ids
+    resources
         .iter()
-        .map(|cid| match cid.and_then(|c| types_by_contest.get(&c)) {
-            Some(t) if types.contains(t) => Decision::Deny,
-            _ => Decision::Allow,
+        .zip(resource_contest_ids)
+        .map(|(resource, contest_id)| {
+            let denied = match (contest_id, resource) {
+                (Some(c), _) => contests.contains(c),
+                (None, Resource::Submission(id)) => submissions.contains(id),
+                (None, r) => match r.wire_problem_id() {
+                    Some(p) => problems.contains(&p),
+                    None => true,
+                },
+            };
+            if denied {
+                Decision::Deny
+            } else {
+                Decision::Allow
+            }
         })
         .collect()
 }
@@ -393,7 +450,7 @@ pub(crate) async fn query_plugins(
         Blind::Everything => return vec![Decision::Deny; resources.len()],
         Blind::Nothing => None,
         Blind::ContestTypes(types) => {
-            Some(blind_decisions(state, &types, resource_contest_ids).await)
+            Some(blind_decisions(state, &types, resources, resource_contest_ids).await)
         }
     };
 
