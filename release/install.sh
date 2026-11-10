@@ -626,26 +626,23 @@ PY
   fi
 }
 
-host_health_url() {
-  local bind host port
-  bind="${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
-  port="${bind##*:}"
-  host="${bind%:*}"
+# health_url BIND: the /healthz URL of a port published on BIND, reached from
+# this host (a wildcard bind is reached on loopback).
+health_url() {
+  local host
+  host="${1%:*}"
   case "$host" in
     ""|"0.0.0.0"|"::"|"[::]") host="127.0.0.1" ;;
   esac
-  printf 'http://%s:%s/healthz\n' "$host" "$port"
+  printf 'http://%s:%s/healthz\n' "$host" "$(bind_port "$1")"
+}
+
+host_health_url() {
+  health_url "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
 }
 
 gateway_health_url() {
-  local bind host port
-  bind="${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
-  port="${bind##*:}"
-  host="${bind%:*}"
-  case "$host" in
-    ""|"0.0.0.0"|"::"|"[::]") host="127.0.0.1" ;;
-  esac
-  printf 'http://%s:%s/healthz\n' "$host" "$port"
+  health_url "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
 }
 
 should_run_stress_smoke() {
