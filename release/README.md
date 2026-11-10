@@ -86,14 +86,23 @@ Plugins for particular events, such as the Codelink contest formats, ship in
 BROCCOLI_PLUGINS="codelink-qualifier codelink-bracket" ./install.sh server
 ```
 
-or on a running install, then select **Reload All** on the admin Plugins page:
+or on a running install:
 
 ```bash
 ./enable-plugin.sh codelink-qualifier codelink-bracket
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server node.
+a plugin on every server and worker node, then restart every server. **Reload
+All** on the admin Plugins page reloads only the server that handled the
+click, so with several servers the others keep running without the plugin.
+
+Uploading a plugin archive from the admin Plugins page does not work with these
+templates, by design: servers and workers mount `./plugins` read-only. An
+upload would reach only the one server that handled it, never the workers or
+the other servers, and a read-only mount means a stolen admin session cannot
+install code on contest machines. Ship plugins in the bundle's `plugins/` or
+`plugins-available/` directory on every node instead.
 
 For server redundancy, install a gateway node with:
 

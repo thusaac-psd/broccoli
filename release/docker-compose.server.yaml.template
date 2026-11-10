@@ -51,6 +51,8 @@ services:
       BROCCOLI__OBSERVABILITY__LOG_FORMAT: "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
       BROCCOLI__OBSERVABILITY__LOG_FILTER: "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
     volumes:
+      # Read-only on purpose: plugins ship in the bundle to every node, and
+      # admin plugin upload is unsupported here (see README.md).
       - ./plugins:/plugins:ro
       - server_data:/data
     healthcheck:
