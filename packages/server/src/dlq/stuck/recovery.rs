@@ -10,7 +10,8 @@ use crate::entity::{
 
 use super::{STUCK_RECOVERY_STATUSES, StuckRecovery, detector_retry_lease};
 use crate::services::judgement_lifecycle::{
-    AllocateJudgeEpoch, OpenJudgement, RedispatchReason, allocated_epoch, open_judgement,
+    AllocateJudgeEpoch, OpenJudgement, RedispatchReason, RetryBudget, allocated_epoch,
+    open_judgement, redispatch_current_submission,
 };
 
 pub(super) async fn recover_stuck_submission_without_steal(
@@ -133,42 +134,18 @@ pub(super) async fn recover_stuck_judgement_without_steal(
     // lockstep (epoch-gated); a non-current (deferred) judgement only
     // reserves one, leaving the current judgement's fence alone. The
     // judgement row then copies the allocated epoch below.
-    let parent = submission::Entity::update_many()
-        .filter(submission::Column::Id.eq(judgement.submission_id));
     let parent = if judgement.is_current {
-        parent
-            .advance_judge_epoch()
-            .col_expr(
-                submission::Column::Status,
-                sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-            )
-            // Never LOWER the submission's dispatch-retry count: the
-            // judgement's own count is usually below it. Same rule as the
-            // deferred steal and the SystemError retry.
-            .col_expr(
-                submission::Column::RetryCount,
-                sea_orm::sea_query::Expr::cust_with_values(
-                    "GREATEST(retry_count, $1)",
-                    [new_retry_count],
-                ),
-            )
-            .col_expr(
-                submission::Column::OwnerServerId,
-                sea_orm::sea_query::Expr::value(owner_server_id.clone()),
-            )
-            .col_expr(
-                submission::Column::LeaseHeartbeatAt,
-                sea_orm::sea_query::Expr::value(lease_heartbeat_at),
-            )
-            .col_expr(
-                submission::Column::LeasedAt,
-                sea_orm::sea_query::Expr::value(lease_heartbeat_at),
-            )
-            .clear_judgement_columns()
-            .filter(submission::Column::JudgeEpoch.eq(judgement.judge_epoch))
-            .filter(submission::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        redispatch_current_submission(
+            judgement.submission_id,
+            server_id,
+            RetryBudget::AtLeast(new_retry_count),
+        )
+        .filter(submission::Column::JudgeEpoch.eq(judgement.judge_epoch))
+        .filter(submission::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
     } else {
-        parent.reserve_judge_epoch()
+        submission::Entity::update_many()
+            .filter(submission::Column::Id.eq(judgement.submission_id))
+            .reserve_judge_epoch()
     };
     let Some(mut sub) = parent.exec_with_returning(txn).await?.into_iter().next() else {
         return Ok(StuckRecovery::Skip);

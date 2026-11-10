@@ -15,7 +15,9 @@ use crate::entity::{
     test_case_result,
 };
 use crate::hooks;
-use crate::services::judgement_lifecycle::{AllocateJudgeEpoch, allocated_epoch};
+use crate::services::judgement_lifecycle::{
+    RetryBudget, allocated_epoch, redispatch_current_submission,
+};
 use crate::state::AppState;
 use crate::utils::test_case_body::{
     AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES, select_inline_within_budget,
@@ -441,32 +443,14 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
     // concurrent steal/retry that already advanced this attempt wins and we
     // abandon (rows == 0). The submission goes first: its UPDATE allocates
     // the epoch and holds the row lock while the judgement copies it.
-    let submission_rows = submission::Entity::update_many()
-        .advance_judge_epoch()
-        .col_expr(
-            submission::Column::Status,
-            Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .clear_judgement_columns()
-        // Never LOWER the submission's dispatch-retry budget: the judgement's
-        // SystemError-retry count is a separate, larger budget and is often
-        // below the submission's dispatch count. Same rule as the deferred
-        // steal in `dispatcher/steal.rs`.
-        .col_expr(
-            submission::Column::RetryCount,
-            Expr::cust_with_values("GREATEST(retry_count, $1)", [new_retry]),
-        )
-        .col_expr(
-            submission::Column::OwnerServerId,
-            Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
-        .col_expr(submission::Column::LeasedAt, Expr::value(Some(now)))
-        .filter(submission::Column::Id.eq(submission_id))
-        .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
-        .exec(&txn)
-        .await?
-        .rows_affected;
+    // `AtLeast`: the judgement's SystemError-retry count is a separate,
+    // larger budget and is often below the submission's dispatch count.
+    let submission_rows =
+        redispatch_current_submission(submission_id, server_id, RetryBudget::AtLeast(new_retry))
+            .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
+            .exec(&txn)
+            .await?
+            .rows_affected;
     if submission_rows == 0 {
         txn.rollback().await.ok();
         return Ok(None);

@@ -16,7 +16,8 @@ use crate::entity::{
     test_case_result,
 };
 use crate::services::judgement_lifecycle::{
-    AllocateJudgeEpoch, OpenJudgement, RedispatchReason, allocated_epoch, open_judgement,
+    OpenJudgement, RedispatchReason, RetryBudget, allocated_epoch, open_judgement,
+    redispatch_current_submission,
 };
 use crate::state::AppState;
 
@@ -640,41 +641,16 @@ async fn claim_deferred_judgements(
     // desynced pair. Reset the denormalized result cache the same way the
     // submission-lease steal does.
     for judgement in &judgements {
-        submission::Entity::update_many()
-            .advance_judge_epoch()
-            .col_expr(
-                submission::Column::Status,
-                sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-            )
-            .col_expr(
-                submission::Column::OwnerServerId,
-                sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-            )
-            .col_expr(
-                submission::Column::LeaseHeartbeatAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            .col_expr(
-                submission::Column::LeasedAt,
-                sea_orm::sea_query::Expr::cust("NOW()"),
-            )
-            // Never LOWER the submission's dispatch-retry count: claim_submissions
-            // accumulates it on the submission row and terminalizes when it exceeds
-            // the cap, but a deferred judgement carries its own (often fresh, 0)
-            // count. Overwriting the submission's with the judgement's would reset
-            // an already-flapping submission's budget every deferred steal, so it
-            // would never hit max_dispatch_retries. GREATEST keeps it monotonic.
-            .col_expr(
-                submission::Column::RetryCount,
-                sea_orm::sea_query::Expr::cust_with_values(
-                    "GREATEST(retry_count, $1)",
-                    [judgement.retry_count],
-                ),
-            )
-            .clear_judgement_columns()
-            .filter(submission::Column::Id.eq(judgement.submission_id))
-            .exec(&txn)
-            .await?;
+        // `AtLeast`: claim_submissions accumulates the dispatch-retry count on
+        // the submission row and terminalizes past the cap, but a deferred
+        // judgement carries its own (often fresh, 0) count.
+        redispatch_current_submission(
+            judgement.submission_id,
+            server_id,
+            RetryBudget::AtLeast(judgement.retry_count),
+        )
+        .exec(&txn)
+        .await?;
     }
 
     let judgements = if judgements.is_empty() {

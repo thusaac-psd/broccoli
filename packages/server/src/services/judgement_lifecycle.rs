@@ -84,6 +84,52 @@ pub(crate) fn allocated_epoch() -> SimpleExpr {
     )
 }
 
+/// How a re-dispatch counts against the submission's dispatch-retry budget.
+#[derive(Clone, Copy)]
+pub(crate) enum RetryBudget {
+    /// Spend one attempt: `retry_count + 1`.
+    Spend,
+    /// Carry a judgement's own attempt count over without ever LOWERING the
+    /// submission's: `GREATEST(retry_count, n)`. A judgement's count is
+    /// usually below its submission's (a judgement opened by a rejudge starts
+    /// at 0), so copying it over would hand a flapping submission a fresh
+    /// steal/stuck budget.
+    AtLeast(i32),
+}
+
+/// The submission row of every re-dispatch of its CURRENT judgement by
+/// `owner_server_id`: a freshly allocated epoch, `Pending`, judged output
+/// cleared, this server's lease stamped with the database clock, and the
+/// retry budget per `retry`. The one place these columns are written
+/// together, so the lease steal, the stuck detector and the SystemError retry
+/// cannot drift apart again. Callers add their own guards (expected epoch,
+/// in-flight status) and execute it.
+pub(crate) fn redispatch_current_submission(
+    submission_id: i32,
+    owner_server_id: &str,
+    retry: RetryBudget,
+) -> UpdateMany<submission::Entity> {
+    let retry_count = match retry {
+        RetryBudget::Spend => Expr::col(submission::Column::RetryCount).add(1),
+        RetryBudget::AtLeast(n) => Expr::cust_with_values("GREATEST(retry_count, $1)", [n]),
+    };
+    submission::Entity::update_many()
+        .filter(submission::Column::Id.eq(submission_id))
+        .advance_judge_epoch()
+        .col_expr(
+            submission::Column::Status,
+            Expr::value(SubmissionStatus::Pending.to_string()),
+        )
+        .clear_judgement_columns()
+        .col_expr(submission::Column::RetryCount, retry_count)
+        .col_expr(
+            submission::Column::OwnerServerId,
+            Expr::value(Some(owner_server_id.to_string())),
+        )
+        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
+        .col_expr(submission::Column::LeasedAt, Expr::cust("NOW()"))
+}
+
 /// Statuses of a judgement that is still being dispatched or judged.
 const IN_FLIGHT: [SubmissionStatus; 3] = [
     SubmissionStatus::Pending,
@@ -224,23 +270,7 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
             expected_epoch,
             owner_server_id,
             ..
-        } => update
-            .advance_judge_epoch()
-            .col_expr(
-                submission::Column::Status,
-                Expr::value(SubmissionStatus::Pending.to_string()),
-            )
-            .clear_judgement_columns()
-            .col_expr(
-                submission::Column::RetryCount,
-                Expr::col(submission::Column::RetryCount).add(1),
-            )
-            .col_expr(
-                submission::Column::OwnerServerId,
-                Expr::value(Some(owner_server_id.clone())),
-            )
-            .col_expr(submission::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
-            .col_expr(submission::Column::LeasedAt, Expr::cust("NOW()"))
+        } => redispatch_current_submission(submission_id, owner_server_id, RetryBudget::Spend)
             .filter(submission::Column::JudgeEpoch.eq(*expected_epoch))
             .filter(submission::Column::Status.is_in(IN_FLIGHT)),
     };
