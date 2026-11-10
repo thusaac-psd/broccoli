@@ -37,6 +37,19 @@ pub struct RegistryState {
     pub hook_registry: SharedHookRegistry,
 }
 
+impl RegistryState {
+    /// Snapshot of the language ids currently registered by plugins, for
+    /// validating a request's language or submission format against.
+    pub async fn known_language_ids(&self) -> std::collections::HashSet<String> {
+        self.language_resolver_registry
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub plugins: Arc<dyn PluginManager>,

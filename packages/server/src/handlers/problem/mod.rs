@@ -76,14 +76,7 @@ pub async fn create_problem(
         &state.registries.checker_stage_registry,
     )
     .await?;
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages = state.registries.known_language_ids().await;
     let submission_format = payload
         .submission_format
         .as_ref()
@@ -288,14 +281,7 @@ pub async fn update_problem(
     // Parsed (normalised) once here; the parsed value is what gets stored.
     let submission_format = match &payload.submission_format {
         Some(Some(sf)) => {
-            let known_languages: std::collections::HashSet<String> = state
-                .registries
-                .language_resolver_registry
-                .read()
-                .await
-                .keys()
-                .cloned()
-                .collect();
+            let known_languages = state.registries.known_language_ids().await;
             Some(Some(parse_submission_format(sf, &known_languages)?))
         }
         Some(None) => Some(None),
