@@ -199,8 +199,11 @@ const GET_CONNECTION_BACKOFF_MAX: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on waiting for the reply to any command. Without it a command in
 /// flight on a half-open socket (e.g. the Redis host lost power) waits for TCP
-/// retransmission to give up, about 15 minutes.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// retransmission to give up, about 15 minutes. It is deliberately generous: a
+/// command that times out may still have run (a consume script that already
+/// moved the message to `_processing`, a publish that already enqueued it), so
+/// the bound must outlast ordinary Redis stalls such as a fork or fsync.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound on the check-out `PING`. It must stay below the pool's connection
 /// timeout: bb8 puts a connection whose validation was cancelled by that
 /// timeout back as healthy, so an unbounded `PING` on a dead socket would wedge
