@@ -34,6 +34,7 @@ fn base_submission(id: i32, now: chrono::DateTime<Utc>) -> submission::Model {
         time_used: None,
         memory_used: None,
         judge_epoch: 4,
+        max_judge_epoch: 0,
         target_worker_id: None,
         owner_server_id: None,
         lease_heartbeat_at: None,
@@ -436,9 +437,23 @@ async fn direct_submission_recovery_sql_claims_detector_lease() {
         finalized_at: None,
     };
 
+    // The guarded submission UPDATE ... RETURNING, as the database answers it.
+    let mut redispatched = submission.clone();
+    redispatched.status = SubmissionStatus::Pending;
+    redispatched.retry_count = submission.retry_count + 1;
+    redispatched.judge_epoch = submission.judge_epoch + 1;
+    redispatched.max_judge_epoch = submission.judge_epoch + 1;
+    redispatched.owner_server_id = Some("server-1".to_string());
+    redispatched.lease_heartbeat_at = Some(now);
+    redispatched.leased_at = Some(now);
+
+    // Queries: submission UPDATE ... RETURNING, latest-version lookup,
+    // judgement INSERT ... RETURNING. Execs: finalize + demote of the
+    // superseded judgement.
     let db = MockDatabase::new(DbBackend::Postgres)
-        .append_exec_results([mock_exec(), mock_exec()])
+        .append_query_results([vec![redispatched]])
         .append_query_results([vec![inserted_judgement.clone()], vec![inserted_judgement]])
+        .append_exec_results([mock_exec(), mock_exec()])
         .into_connection();
     let txn = db.begin().await.expect("begin mock transaction");
 
@@ -544,9 +559,16 @@ async fn direct_deferred_judgement_recovery_sql_claims_detector_lease() {
     let now = Utc::now();
     let submission = base_submission(42, now);
     let judgement = base_judgement(88, submission.id, now);
+    let mut reserved = submission.clone();
+    reserved.max_judge_epoch = judgement.judge_epoch + 1;
+    let mut redispatched = judgement.clone();
+    redispatched.judge_epoch = judgement.judge_epoch + 1;
+    // Queries: the parent's epoch reservation and the judgement update, both
+    // UPDATE ... RETURNING. Exec: the test_case_result wipe.
     let db = MockDatabase::new(DbBackend::Postgres)
-        .append_query_results([vec![submission.clone()]])
-        .append_exec_results([mock_exec(), mock_exec()])
+        .append_query_results([vec![reserved]])
+        .append_query_results([vec![redispatched.clone()]])
+        .append_exec_results([mock_exec()])
         .into_connection();
     let txn = db.begin().await.expect("begin mock transaction");
 
@@ -575,10 +597,22 @@ async fn direct_deferred_judgement_recovery_sql_claims_detector_lease() {
         "redispatch stamps leased_at anchor"
     );
 
+    assert_eq!(
+        model.judge_epoch, redispatched.judge_epoch,
+        "the dispatch is fenced by the judgement's freshly allocated epoch"
+    );
+
     let log = format!("{:?}", db.into_transaction_log());
+    let parent_update = log
+        .split("UPDATE \\\"submission\\\" SET ")
+        .nth(1)
+        .and_then(|rest| rest.split(" WHERE ").next())
+        .unwrap_or_else(|| panic!("expected the parent epoch reservation:\n{log}"));
     assert!(
-        !log.contains("UPDATE \\\"submission\\\" SET"),
-        "deferred judgement recovery should not mutate parent submission directly:\n{log}"
+        parent_update.starts_with("\\\"max_judge_epoch\\\" = GREATEST")
+            && parent_update.matches("\\\" = ").count() == 1,
+        "deferred judgement recovery may only reserve an epoch on the parent \
+         submission, never touch its status or current epoch: {parent_update}"
     );
     assert_log_sets_detector_lease(&log, "submission_judgement");
 }

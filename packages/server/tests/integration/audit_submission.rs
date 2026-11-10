@@ -69,8 +69,8 @@ async fn judgements(app: &TestApp, sid: i32) -> Vec<submission_judgement::Model>
         .expect("db")
 }
 
-/// BUG (med, found independently by two reviewers): a new judgement's epoch is
-/// `sub.judge_epoch + 1`, but a DEFERRED rejudge (`apply_immediately:false`)
+/// B5 (#56, med, found independently by two reviewers): a new judgement's
+/// epoch was `sub.judge_epoch + 1`, but a DEFERRED rejudge (`apply_immediately:false`)
 /// creates its judgement at E+1 without advancing `sub.judge_epoch`. A later
 /// immediate rejudge therefore also picks E+1. Epoch is the fencing token:
 /// `mark_submission_system_error_with_epoch(sub, Some(E+1))` from the deferred
@@ -79,7 +79,6 @@ async fn judgements(app: &TestApp, sid: i32) -> Vec<submission_judgement::Model>
 /// Location: handlers/submission/rejudge.rs (epoch = sub.judge_epoch + 1),
 /// handlers/submission/dispatch.rs, consumers/mod.rs.
 #[tokio::test]
-#[ignore = "BUG: deferred + immediate rejudge allocate the same judge_epoch (fencing token collision)"]
 async fn rejudge_epochs_are_unique() {
     let app = TestApp::spawn().await;
     let token = app
@@ -114,6 +113,59 @@ async fn rejudge_epochs_are_unique() {
         dedup.len(),
         epochs.len(),
         "duplicate judge_epoch across judgements: {epochs:?}"
+    );
+
+    // Applying the (finalized) deferred judgement must not move the
+    // submission's epoch backwards, and the next rejudge must still get an
+    // epoch no other judgement holds.
+    let before = submission::Entity::find_by_id(sid)
+        .one(&app.db)
+        .await
+        .expect("db")
+        .expect("submission")
+        .judge_epoch;
+    let deferred_id = rows[1].id;
+    assert!(!rows[1].is_current, "control: v2 is the deferred judgement");
+    let mut finalize: submission_judgement::ActiveModel = rows[1].clone().into();
+    finalize.is_finalized = Set(true);
+    finalize.status = Set(SubmissionStatus::Judged);
+    finalize.verdict = Set(Some(Verdict::WrongAnswer));
+    finalize.finalized_at = Set(Some(Utc::now()));
+    finalize.update(&app.db).await.expect("finalize deferred");
+    let applied = app
+        .post_with_token(
+            &routes::submission_judgement_apply(sid, deferred_id),
+            &json!({}),
+            &token,
+        )
+        .await;
+    assert_eq!(applied.status, 200, "apply: {}", applied.text);
+    let after = submission::Entity::find_by_id(sid)
+        .one(&app.db)
+        .await
+        .expect("db")
+        .expect("submission");
+    assert!(
+        after.judge_epoch > before,
+        "apply moved judge_epoch from {before} to {}",
+        after.judge_epoch
+    );
+    let again = app
+        .post_with_token(&routes::submission_rejudge(sid), &json!({}), &token)
+        .await;
+    assert!(again.status < 300, "rejudge after apply: {}", again.text);
+    let epochs: Vec<i32> = judgements(&app, sid)
+        .await
+        .iter()
+        .map(|j| j.judge_epoch)
+        .collect();
+    let mut dedup = epochs.clone();
+    dedup.sort_unstable();
+    dedup.dedup();
+    assert_eq!(
+        dedup.len(),
+        epochs.len(),
+        "duplicate judge_epoch after apply + rejudge: {epochs:?}"
     );
 }
 

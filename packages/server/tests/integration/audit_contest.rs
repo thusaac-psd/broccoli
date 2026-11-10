@@ -14,10 +14,6 @@ use serde_json::{Value, json};
 use crate::codelink_bracket::visible_problem_ids;
 use crate::common::{TestApp, routes};
 
-async fn user_id(app: &TestApp, token: &str) -> i32 {
-    app.get_with_token(routes::ME, token).await.id()
-}
-
 // -- B1 (#52): `POST /problems/{id}/submissions` and the sibling standalone
 // `POST /problems/{id}/code-runs` decide `Action::Submit` on
 // `Resource::Problem { contest_id: None }`. They used to be decided by the

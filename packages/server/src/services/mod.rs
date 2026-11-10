@@ -1,5 +1,6 @@
 pub mod code_run_dispatch;
 pub mod evaluate_batch;
+pub mod judgement_lifecycle;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod plugin_storage;
