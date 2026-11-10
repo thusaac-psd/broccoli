@@ -162,7 +162,7 @@ pub async fn login(
     tag = "Auth",
     operation_id = "refreshToken",
     summary = "Refresh access token",
-    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token. Fails if the user is banned or the token is expired/revoked.",
+    description = "Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered with a new token pair; presented later, it revokes every refresh token of the user.",
     responses(
         (status = 200, description = "Token refreshed", body = LoginResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -596,7 +596,7 @@ pub async fn issue_cli_token(
     tag = "Auth",
     operation_id = "cliRefreshToken",
     summary = "Refresh a CLI access token using a stored refresh token",
-    description = "Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated.",
+    description = "Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated, with the same 30-second replay grace as POST /auth/refresh.",
     request_body = CliRefreshRequest,
     responses(
         (status = 200, description = "Token refreshed", body = CliTokenResponse),

@@ -8,10 +8,8 @@
 //! `FreshAuthUser` rejects (revoked role, reset password, deleted account)
 //! into one it accepts.
 
-use sea_orm::sea_query::LockType;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
-    ModelTrait, QueryFilter, QuerySelect, Set, Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement, TransactionTrait,
 };
 
 use crate::entity::refresh_token;
@@ -31,8 +29,14 @@ pub struct AccessGrant {
 /// The active user's profile plus their roles and the union of those roles'
 /// permissions, in one round-trip. No row means the user does not exist or is
 /// soft-deleted.
+///
+/// `issued_at` is the DB clock that also stamps `credentials_changed_at`
+/// (`now()` of the writer's transaction). A statement that sees a committed
+/// credential change starts after that commit, so its `statement_timestamp()`
+/// is never earlier than the stamp.
 const GRANT_SQL: &str = r#"
 SELECT
+    statement_timestamp() AS issued_at,
     u.username,
     u.display_name,
     to_jsonb(ARRAY(
@@ -67,6 +71,7 @@ pub async fn issue_access_token<C: ConnectionTrait>(
         .await?
         .ok_or(AppError::TokenInvalid)?;
 
+    let issued_at: chrono::DateTime<chrono::Utc> = row.try_get("", "issued_at")?;
     let username: String = row.try_get("", "username")?;
     let display_name: String = row.try_get("", "display_name")?;
     let roles: Vec<String> = json_strings(row.try_get("", "roles")?)?;
@@ -77,6 +82,7 @@ pub async fn issue_access_token<C: ConnectionTrait>(
         &username,
         roles.clone(),
         permissions.clone(),
+        issued_at,
         jwt_secret,
     )
     .map_err(|e| AppError::Internal(format!("JWT sign error: {e}")))?;
@@ -122,73 +128,156 @@ async fn validator_matches(presented: &str, stored: &str) -> Result<bool, AppErr
     }
 }
 
+/// Seconds after a refresh token is rotated during which presenting it again
+/// is a benign race rather than theft: two tabs refreshing with the same
+/// cookie, or a client retrying after the response carrying its new cookie
+/// was lost in a network blip or gateway failover. Such a replay is answered
+/// like a normal rotation (a sibling token), so the client stays logged in.
+/// Past the window, a replay is treated as a stolen refresh chain. The window
+/// stays far below the clients' 4.5 minute refresh interval, so a token
+/// stolen and replayed later is still detected.
+const REFRESH_REUSE_GRACE_SECS: i32 = 30;
+
+/// Insert a new refresh-token row for `$3` and, when `$1` names a live row,
+/// retire it in the same statement. Expired rows of the user are purged on the
+/// way, which bounds retention; revoked-but-unexpired rows are kept so a
+/// replay stays detectable for the token's whole lifetime. Every timestamp is
+/// the DB clock.
+const ISSUE_REFRESH_SQL: &str = r#"
+WITH retired AS (
+    UPDATE refresh_tokens SET revoked_at = now()
+    WHERE selector = $1 AND revoked_at IS NULL
+),
+purged AS (
+    DELETE FROM refresh_tokens WHERE user_id = $3 AND expires_at < now()
+)
+INSERT INTO refresh_tokens (selector, validator, user_id, expires_at, created_at, revoked_at)
+VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL)
+"#;
+
+async fn issue_refresh_token<C: ConnectionTrait>(
+    db: &C,
+    user_id: i32,
+    retire: Option<&str>,
+) -> Result<String, AppError> {
+    let selector = hash::generate_random_string();
+    let validator = hash::generate_random_string();
+    db.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        ISSUE_REFRESH_SQL,
+        [
+            retire.map(str::to_owned).into(),
+            selector.clone().into(),
+            user_id.into(),
+            hash_validator(&validator).into(),
+            (refresh::REFRESH_TOKEN_EXPIRY_DAYS as i32).into(),
+        ],
+    ))
+    .await?;
+    Ok(refresh::construct_refresh_token(&selector, &validator))
+}
+
 /// Create a refresh-token row for `user_id` and return the opaque token
 /// (`selector:validator`) the client stores.
 pub async fn mint_refresh_token<C: ConnectionTrait>(
     db: &C,
     user_id: i32,
 ) -> Result<String, AppError> {
-    let now = chrono::Utc::now();
-    let selector = hash::generate_random_string();
-    let validator = hash::generate_random_string();
-
-    refresh_token::ActiveModel {
-        selector: Set(selector.clone()),
-        validator: Set(hash_validator(&validator)),
-        user_id: Set(user_id),
-        expires_at: Set(now + chrono::Duration::days(refresh::REFRESH_TOKEN_EXPIRY_DAYS)),
-        created_at: Set(now),
-        revoked_at: Set(None),
-    }
-    .insert(db)
-    .await?;
-
-    Ok(refresh::construct_refresh_token(&selector, &validator))
+    issue_refresh_token(db, user_id, None).await
 }
+
+/// A presented refresh token whose validator matched its row, classified with
+/// the DB clock.
+struct PresentedToken {
+    selector: String,
+    user_id: i32,
+    state: TokenState,
+}
+
+enum TokenState {
+    Live,
+    Expired,
+    /// Already rotated out; `in_grace` when within [`REFRESH_REUSE_GRACE_SECS`].
+    Rotated {
+        in_grace: bool,
+    },
+}
+
+const FIND_PRESENTED_SQL: &str = r#"
+SELECT selector, validator, user_id,
+       expires_at <= now() AS expired,
+       revoked_at IS NOT NULL AS rotated,
+       revoked_at IS NOT NULL
+           AND now() - revoked_at <= make_interval(secs => $2::int) AS in_grace
+FROM refresh_tokens
+WHERE selector = $1
+"#;
 
 /// Find the refresh-token row a presented `selector:validator` names, if the
 /// validator matches. A malformed token, unknown selector and wrong validator
-/// are indistinguishable to the caller.
+/// are indistinguishable to the caller. `lock` takes the row lock for a
+/// rotation.
 async fn find_presented<C: ConnectionTrait>(
     db: &C,
     presented: &str,
     lock: bool,
-) -> Result<Option<refresh_token::Model>, AppError> {
+) -> Result<Option<PresentedToken>, AppError> {
     let Ok((selector, validator)) = refresh::parse_refresh_token(presented) else {
         return Ok(None);
     };
-    let mut query = refresh_token::Entity::find_by_id(selector.to_owned());
-    if lock {
-        query = query.lock(LockType::Update);
+    let sql = if lock {
+        format!("{FIND_PRESENTED_SQL} FOR UPDATE")
+    } else {
+        FIND_PRESENTED_SQL.to_owned()
+    };
+    let Some(row) = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [selector.into(), REFRESH_REUSE_GRACE_SECS.into()],
+        ))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let stored: String = row.try_get("", "validator")?;
+    if !validator_matches(validator, &stored).await? {
+        return Ok(None);
     }
-    match query.one(db).await? {
-        Some(row) if validator_matches(validator, &row.validator).await? => Ok(Some(row)),
-        _ => Ok(None),
-    }
+    let state = if row.try_get("", "rotated")? {
+        TokenState::Rotated {
+            in_grace: row.try_get("", "in_grace")?,
+        }
+    } else if row.try_get("", "expired")? {
+        TokenState::Expired
+    } else {
+        TokenState::Live
+    };
+    Ok(Some(PresentedToken {
+        selector: row.try_get("", "selector")?,
+        user_id: row.try_get("", "user_id")?,
+        state,
+    }))
 }
 
 /// Delete the refresh-token row a presented token names (logout). Returns
 /// `TokenInvalid` when it names none.
 pub async fn revoke_presented(db: &DatabaseConnection, presented: &str) -> Result<(), AppError> {
-    let row = find_presented(db, presented, false)
+    let token = find_presented(db, presented, false)
         .await?
         .ok_or(AppError::TokenInvalid)?;
-    row.delete(db).await?;
+    refresh_token::Entity::delete_by_id(token.selector)
+        .exec(db)
+        .await?;
     Ok(())
 }
-
-/// Seconds after a refresh token is rotated during which a replay of it is
-/// treated as a benign concurrent-refresh race (two in-flight requests carried
-/// the same pre-rotation cookie) rather than theft. Past this window, replaying
-/// an already-rotated token is treated as a stolen refresh chain.
-const REFRESH_REUSE_GRACE_SECS: i64 = 10;
 
 /// Exchange a presented refresh token for a new access token and a new
 /// refresh token, retiring the presented one. Shared by the cookie
 /// (`/auth/refresh`) and body (`/auth/cli-refresh`) endpoints.
 ///
-/// Errors: `TokenInvalid` for a malformed, unknown, expired or rotated token;
-/// `PermissionDenied` when the user was soft-deleted.
+/// Errors: `TokenInvalid` for a malformed, unknown, expired, or rotated (past
+/// the grace window) token; `PermissionDenied` when the user was soft-deleted.
 pub async fn rotate_refresh_token(
     db: &DatabaseConnection,
     jwt_secret: &str,
@@ -196,61 +285,58 @@ pub async fn rotate_refresh_token(
 ) -> Result<(AccessGrant, String), AppError> {
     let txn = db.begin().await?;
 
-    let row = find_presented(&txn, presented, true)
+    let token = find_presented(&txn, presented, true)
         .await?
         .ok_or(AppError::TokenInvalid)?;
 
-    // Reuse detection: the validator matched, but the row was already rotated
-    // out. A mismatched validator never reaches here, so nobody can trip a
-    // victim's family kill by guessing a revoked selector.
-    if let Some(revoked_at) = row.revoked_at {
-        let elapsed = chrono::Utc::now() - revoked_at;
-        if elapsed > chrono::Duration::seconds(REFRESH_REUSE_GRACE_SECS) {
+    match token.state {
+        TokenState::Live => {}
+        // A benign race; answered with a sibling of the token that won it.
+        // The retire step below is a no-op for an already-rotated row.
+        TokenState::Rotated { in_grace: true } => {
+            tracing::debug!(
+                user_id = token.user_id,
+                "Refresh token replayed inside the grace window; issuing a sibling"
+            );
+        }
+        // The validator matched, so this is the token's real holder or a
+        // thief: kill the whole family so a stolen chain cannot outlive
+        // detection. A mismatched validator never reaches here, so nobody can
+        // trip a victim's family kill by guessing a revoked selector.
+        TokenState::Rotated { in_grace: false } => {
             tracing::warn!(
-                user_id = row.user_id,
+                user_id = token.user_id,
                 "Refresh token reuse detected past the grace window; revoking all refresh tokens for the user"
             );
-            refresh_token::Entity::revoke_all_for_user(&txn, row.user_id).await?;
+            refresh_token::Entity::revoke_all_for_user(&txn, token.user_id).await?;
             txn.commit().await?;
+            return Err(AppError::TokenInvalid);
         }
-        return Err(AppError::TokenInvalid);
+        TokenState::Expired => {
+            refresh_token::Entity::delete_by_id(token.selector)
+                .exec(&txn)
+                .await?;
+            txn.commit().await?;
+            return Err(AppError::TokenInvalid);
+        }
     }
 
-    if row.expires_at < chrono::Utc::now() {
-        row.delete(&txn).await?;
-        txn.commit().await?;
-        return Err(AppError::TokenInvalid);
-    }
-
-    let user_id = row.user_id;
-    let grant = match issue_access_token(&txn, jwt_secret, user_id).await {
+    let grant = match issue_access_token(&txn, jwt_secret, token.user_id).await {
         Ok(grant) => grant,
         Err(AppError::TokenInvalid) => {
             // The user was soft-deleted after this token was issued.
-            row.delete(&txn).await?;
+            refresh_token::Entity::delete_by_id(token.selector)
+                .exec(&txn)
+                .await?;
             txn.commit().await?;
             return Err(AppError::PermissionDenied);
         }
         Err(e) => return Err(e),
     };
 
-    // Retain the rotated row (mark revoked) instead of deleting it, so a later
-    // replay is detectable as reuse rather than an unknown selector.
-    let now = chrono::Utc::now();
-    let mut rotated: refresh_token::ActiveModel = row.into();
-    rotated.revoked_at = Set(Some(now));
-    rotated.update(&txn).await?;
-    let new_refresh_token = mint_refresh_token(&txn, user_id).await?;
-
-    // Bound retention: drop this user's expired rows (rotated or not).
-    // Revoked-but-unexpired rows are kept so a replay stays detectable for the
-    // token's whole lifetime.
-    refresh_token::Entity::delete_many()
-        .filter(refresh_token::Column::UserId.eq(user_id))
-        .filter(refresh_token::Column::ExpiresAt.lt(now))
-        .exec(&txn)
-        .await?;
-
+    // The rotated row is retained (marked revoked) instead of deleted, so a
+    // later replay is detectable as reuse rather than an unknown selector.
+    let new_refresh_token = issue_refresh_token(&txn, token.user_id, Some(&token.selector)).await?;
     txn.commit().await?;
     Ok((grant, new_refresh_token))
 }
