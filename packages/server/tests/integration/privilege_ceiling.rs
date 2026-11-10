@@ -120,7 +120,11 @@ mod role_permission_grant {
     async fn role_manager_can_grant_permission_it_holds() {
         let app = TestApp::spawn().await;
         let token = app
-            .create_user_with_permissions("holder", PASSWORD, &["role:manage", "problem:create"])
+            .create_user_with_permissions(
+                "holder",
+                PASSWORD,
+                &["role:manage", "problem:create", "submission:submit"],
+            )
             .await;
 
         let res = app
@@ -228,7 +232,17 @@ mod role_permission_revoke {
     async fn role_manager_can_revoke_permission_it_holds() {
         let app = TestApp::spawn().await;
         let token = app
-            .create_user_with_permissions("trimmer", PASSWORD, &["role:manage", "problem:edit"])
+            .create_user_with_permissions(
+                "trimmer",
+                PASSWORD,
+                &[
+                    "role:manage",
+                    "problem:edit",
+                    "problem:create",
+                    "submission:submit",
+                    "submission:view_all",
+                ],
+            )
             .await;
 
         let res = app
@@ -243,6 +257,48 @@ mod role_permission_revoke {
                 .await
                 .contains(&"problem:edit".to_string())
         );
+    }
+
+    /// Holding the permission being revoked is not enough: the caller must
+    /// hold the whole role. Otherwise a `role:manage` holder could strip
+    /// `role:manage` itself from `admin`, and the admins (who still hold
+    /// `system:admin`) could no longer pass the `role:manage` gate to repair it.
+    #[tokio::test]
+    async fn role_manager_cannot_strip_a_role_above_its_ceiling() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_permissions("stripper", PASSWORD, &["role:manage", "user:manage"])
+            .await;
+
+        for permission in ["role:manage", "user:manage"] {
+            let res = app
+                .delete_with_token(&routes::role_permission("admin", permission), &token)
+                .await;
+            assert_permission_denied(&res, &format!("revoking {permission} from admin"));
+            assert!(
+                role_grants(&app, "admin")
+                    .await
+                    .contains(&permission.to_string())
+            );
+        }
+    }
+
+    /// Granting into a role above the caller is refused too, even when the
+    /// caller holds the granted permission.
+    #[tokio::test]
+    async fn role_manager_cannot_grant_into_a_role_above_its_ceiling() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_permissions("granter", PASSWORD, &["role:manage", "problem:create"])
+            .await;
+        let res = app
+            .post_with_token(
+                &routes::role_permissions("contestant"),
+                &json!({"permission": "problem:create"}),
+                &token,
+            )
+            .await;
+        assert_permission_denied(&res, "granting into contestant without submission:submit");
     }
 
     #[tokio::test]

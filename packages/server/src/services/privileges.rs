@@ -35,8 +35,10 @@ use crate::utils::advisory_lock;
 /// What a privilege change is measured against.
 #[derive(Debug, Clone, Copy)]
 pub enum CeilingTarget<'a> {
-    /// One permission (granting it to, or revoking it from, a role).
-    Permission(&'a str),
+    /// Granting `permission` to, or revoking it from, `role`: the caller must
+    /// hold that permission and every permission the role already has, so it
+    /// can neither hand out nor strip anything above its own level.
+    RolePermission { role: &'a str, permission: &'a str },
     /// A role's permission set (assigning it to, or revoking it from, a user).
     Role(&'a str),
     /// A user's effective permissions, the union over all their roles
@@ -60,12 +62,11 @@ pub async fn require_within_ceiling<C: ConnectionTrait>(
     }
 
     let (scope, key): (&str, Value) = match target {
-        CeilingTarget::Permission(permission) => {
-            return if caller.has_permission(permission) {
-                Ok(())
-            } else {
-                Err(refuse(caller, target, permission))
-            };
+        CeilingTarget::RolePermission { role, permission } => {
+            if !caller.has_permission(permission) {
+                return Err(refuse(caller, target, permission));
+            }
+            ("rp.role = $1", role.into())
         }
         CeilingTarget::Role(role) => ("rp.role = $1", role.into()),
         CeilingTarget::User(user_id) => (

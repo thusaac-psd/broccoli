@@ -1689,7 +1689,7 @@ export interface paths {
     put?: never;
     /**
      * Grant a permission to a role
-     * @description Grants a permission to a role. Requires `role:manage` permission, and the caller must itself hold the permission being granted unless it holds `system:admin`.
+     * @description Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.
      */
     post: operations['grantPermissionToRole'];
     delete?: never;
@@ -1710,7 +1710,7 @@ export interface paths {
     post?: never;
     /**
      * Revoke a permission from a role
-     * @description Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.
+     * @description Revokes a permission from a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold every permission of the role, including the one being revoked.
      *
      *     Refused if afterwards no active user would hold `system:admin`.
      */
@@ -10533,7 +10533,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10574,7 +10574,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;

@@ -90,14 +90,14 @@ pub async fn list_role_permissions(
     tag = "Roles",
     operation_id = "grantPermissionToRole",
     summary = "Grant a permission to a role",
-    description = "Grants a permission to a role. Requires `role:manage` permission, and the caller must itself hold the permission being granted unless it holds `system:admin`.",
+    description = "Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.",
     params(("role" = String, Path, description = "Role name")),
     request_body = PermissionGrantRequest,
     responses(
         (status = 201, description = "Permission granted successfully"),
         (status = 400, description = "Validation error", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -113,7 +113,10 @@ pub async fn grant_permission_to_role(
     require_within_ceiling(
         &state.db,
         &auth_user,
-        CeilingTarget::Permission(&req.permission),
+        CeilingTarget::RolePermission {
+            role: &role_name,
+            permission: &req.permission,
+        },
     )
     .await?;
 
@@ -147,7 +150,7 @@ pub async fn grant_permission_to_role(
     tag = "Roles",
     operation_id = "revokePermissionFromRole",
     summary = "Revoke a permission from a role",
-    description = "Revokes a permission from a role. Requires `role:manage` permission, and the caller must itself hold the permission being revoked unless it holds `system:admin`.\n\nRefused if afterwards no active user would hold `system:admin`.",
+    description = "Revokes a permission from a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold every permission of the role, including the one being revoked.\n\nRefused if afterwards no active user would hold `system:admin`.",
     params(
         ("role" = String, Path, description = "Role name"),
         ("permission" = String, Path, description = "Permission name")
@@ -155,7 +158,7 @@ pub async fn grant_permission_to_role(
     responses(
         (status = 204, description = "Permission revoked successfully"),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
-        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission is above the caller's ceiling", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling", body = ErrorBody),
         (status = 404, description = "Role permission not found (NOT_FOUND)", body = ErrorBody),
         (status = 409, description = "Would leave no active `system:admin` holder (CONFLICT)", body = ErrorBody),
     ),
@@ -172,7 +175,10 @@ pub async fn revoke_permission_from_role(
     require_within_ceiling(
         &state.db,
         &auth_user,
-        CeilingTarget::Permission(&permission_name),
+        CeilingTarget::RolePermission {
+            role: &role_name,
+            permission: &permission_name,
+        },
     )
     .await?;
 
