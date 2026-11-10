@@ -2825,3 +2825,53 @@ mod zip_upload_interplay {
         );
     }
 }
+
+mod submission_format_normalisation {
+    use super::*;
+
+    /// A submission format with padded filenames is either rejected or stored
+    /// trimmed, so a submission matching the validated format is accepted.
+    #[tokio::test]
+    async fn submission_format_with_padded_filename_is_normalised_or_rejected() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("ap_admin", "password123", "admin")
+            .await;
+        let res = app
+            .post_with_token(
+                routes::PROBLEMS,
+                &json!({
+                    "title": "Padded",
+                    "content": "x",
+                    "time_limit": 1000,
+                    "memory_limit": 262144,
+                    "problem_type": "standard",
+                    "default_contest_type": "standard",
+                    "checker_format": "exact",
+                    "is_public": true,
+                    "submission_format": {"cpp": [" solution.cpp"]},
+                }),
+                &token,
+            )
+            .await;
+        if res.status == 400 {
+            // Rejecting the padded name up front is also acceptable.
+            return;
+        }
+        assert_eq!(res.status, 201, "{}", res.text);
+        let pid = res.id();
+
+        let sub = app
+        .post_with_token(
+            &routes::problem_submissions(pid),
+            &json!({"language": "cpp", "files": [{"filename": "solution.cpp", "content": "int main(){}"}]}),
+            &token,
+        )
+        .await;
+        assert_eq!(
+            sub.status, 201,
+            "a submission matching the (validated) format was refused: {}",
+            sub.text
+        );
+    }
+}

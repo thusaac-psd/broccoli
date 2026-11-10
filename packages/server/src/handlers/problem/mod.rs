@@ -84,7 +84,11 @@ pub async fn create_problem(
         .keys()
         .cloned()
         .collect();
-    validate_submission_format(payload.submission_format.as_ref(), &known_languages)?;
+    let submission_format = payload
+        .submission_format
+        .as_ref()
+        .map(|sf| parse_submission_format(sf, &known_languages))
+        .transpose()?;
     validate_contest_type(
         "default_contest_type",
         &default_contest_type,
@@ -93,8 +97,7 @@ pub async fn create_problem(
     .await?;
 
     let now = chrono::Utc::now();
-    let submission_format_json = payload
-        .submission_format
+    let submission_format_json = submission_format
         .map(|sf| sanitize_db_json(serde_json::to_value(sf).unwrap_or(serde_json::Value::Null)));
     let new_problem = problem::ActiveModel {
         title: Set(sanitize_db_text(payload.title.trim())),
@@ -294,17 +297,22 @@ pub async fn update_problem(
     if let Some(ref cf) = payload.checker_format {
         validate_checker_format(cf, &state.registries.checker_stage_registry).await?;
     }
-    if let Some(Some(ref sf)) = payload.submission_format {
-        let known_languages: std::collections::HashSet<String> = state
-            .registries
-            .language_resolver_registry
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        validate_submission_format(Some(sf), &known_languages)?;
-    }
+    // Parsed (normalised) once here; the parsed value is what gets stored.
+    let submission_format = match &payload.submission_format {
+        Some(Some(sf)) => {
+            let known_languages: std::collections::HashSet<String> = state
+                .registries
+                .language_resolver_registry
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect();
+            Some(Some(parse_submission_format(sf, &known_languages)?))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
     if let Some(ref ct) = payload.default_contest_type {
         validate_contest_type(
             "default_contest_type",
@@ -352,7 +360,7 @@ pub async fn update_problem(
     if let Some(is_public) = payload.is_public {
         active.is_public = Set(is_public);
     }
-    match payload.submission_format {
+    match submission_format {
         Some(Some(sf)) => {
             active.submission_format = Set(Some(sanitize_db_json(
                 serde_json::to_value(sf).unwrap_or(serde_json::Value::Null),

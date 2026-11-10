@@ -39,13 +39,13 @@ pub async fn upload_checker_source(
     AppJson(payload): AppJson<UploadCheckerSourceRequest>,
 ) -> Result<Json<CheckerSourceResponse>, AppError> {
     auth_user.require_permission(perm::PROBLEM_EDIT)?;
-    validate_checker_source(&payload)?;
+    let files = parse_checker_source(payload)?;
 
     // Existence check: 404 for a missing problem, as before.
     find_problem(&state.db, id).await?;
 
     let files_value = sanitize_db_json(
-        serde_json::to_value(&payload.files)
+        serde_json::to_value(&files)
             .map_err(|e| AppError::Internal(format!("Failed to serialize checker source: {e}")))?,
     );
     let response_files = serde_json::from_value(files_value.clone())
@@ -159,7 +159,7 @@ pub async fn delete_checker_source(
 }
 
 /// The checker-source PUT body is JSON that `AppJson` buffers ENTIRELY in memory
-/// before `validate_checker_source` runs, which caps the useful payload at 20
+/// before `parse_checker_source` runs, which caps the useful payload at 20
 /// files x 1 MiB (~20 MiB). Reusing the 1 GiB STREAMED-upload limit here let a
 /// setter OOM the server with a handful of ~1 GiB JSON bodies (full-buffer before
 /// reject), a ~50x amplification the streaming upload paths avoid. Size it to the
