@@ -2912,3 +2912,91 @@ mod unregistration_window {
         );
     }
 }
+
+mod soft_deleted_contest_children {
+    use super::*;
+
+    /// Contest-problem config endpoints 404 once the contest is soft-deleted, as
+    /// contest-scope config does, so an upsert cannot re-create the config rows
+    /// the delete purged.
+    #[tokio::test]
+    async fn deleted_contest_rejects_contest_problem_config_writes() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("ac_admin", "password123", "admin")
+            .await;
+        let cid = app.create_contest(&admin, "C", true, true).await;
+        let pid = app.create_problem(&admin, "P").await;
+        app.add_problem_to_contest(cid, pid, &admin).await;
+
+        let del = app.delete_with_token(&routes::contest(cid), &admin).await;
+        assert!(del.status < 300, "delete contest: {}", del.text);
+
+        let body = json!({"config": {"time_limit": 2000}});
+        let contest_scope = app
+            .put_with_token(
+                &routes::contest_config_ns(cid, "test-plugin", "limits"),
+                &body,
+                &admin,
+            )
+            .await;
+        assert_eq!(contest_scope.status, 404, "control: contest scope 404s");
+
+        let res = app
+            .put_with_token(
+                &routes::contest_problem_config_ns(cid, pid, "test-plugin", "limits"),
+                &body,
+                &admin,
+            )
+            .await;
+        assert_eq!(
+            res.status, 404,
+            "wrote config for a deleted contest: {}",
+            res.text
+        );
+    }
+
+    /// Clarification lookups require an active contest too, so toggling a reply's
+    /// visibility 404s once the contest is soft-deleted.
+    #[tokio::test]
+    async fn deleted_contest_rejects_reply_visibility_toggle() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("ac_admin", "password123", "admin")
+            .await;
+        let contestant = app
+            .create_user_with_role("ac_p", "password123", "contestant")
+            .await;
+        let cid = app.create_contest(&admin, "C", true, false).await;
+        let q = app
+            .post_with_token(
+                &routes::contest_clarifications(cid),
+                &json!({"content": "Q?", "clarification_type": "question"}),
+                &contestant,
+            )
+            .await;
+        assert!(q.status < 300, "{}", q.text);
+        let clar_id = q.id();
+        let reply = app
+            .post_with_token(
+                &routes::contest_clarification_reply(cid, clar_id),
+                &json!({"content": "A.", "is_public": false}),
+                &admin,
+            )
+            .await;
+        assert_eq!(reply.status, 200, "{}", reply.text);
+        let reply_id = reply.body["replies"][0]["id"].as_i64().unwrap() as i32;
+
+        let del = app.delete_with_token(&routes::contest(cid), &admin).await;
+        assert!(del.status < 300, "delete contest: {}", del.text);
+
+        let res = app
+            .post_with_token(
+                &routes::contest_clarification_toggle(cid, clar_id, reply_id),
+                &json!({}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
+    }
+}
