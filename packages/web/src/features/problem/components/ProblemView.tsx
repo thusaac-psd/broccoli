@@ -18,6 +18,7 @@ import { useContestProblems } from '@/features/contest/hooks/use-contest-problem
 import { useRestoreSubmissionScroll } from '@/features/submission/hooks/use-submission-navigation';
 import { useSubmissions } from '@/features/submission/hooks/use-submissions';
 
+import { fetchProblem, fetchSampleCase } from '../api/problem-scope';
 import { ProblemCodingTab } from './ProblemCodingTab';
 import { ProblemContentTabs, type ProblemViewTab } from './ProblemContentTabs';
 import { ProblemDescriptionTab } from './ProblemDescriptionTab';
@@ -96,14 +97,8 @@ export default function ProblemView({
   } = useQuery({
     queryKey: ['problem', problemId, contestId ?? null, viewerKey],
     enabled: authReady && allowed && Number.isFinite(problemId),
-    queryFn: async ({ signal }) => {
-      const { data, error } = await apiClient.GET('/problems/{id}', {
-        params: { path: { id: problemId } },
-        signal,
-      });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: ({ signal }) =>
+      fetchProblem(apiClient, problemId, contestId, signal),
   });
 
   useEffect(() => {
@@ -191,14 +186,14 @@ export default function ProblemView({
               return [sample.id, {}] as const;
             }
 
-            const { data, error } = await apiClient.GET(
-              '/problems/{id}/test-cases/{tc_id}',
-              {
-                params: { path: { id: problemId, tc_id: sample.id } },
-                signal,
-              },
+            const data = await fetchSampleCase(
+              apiClient,
+              problemId,
+              contestId,
+              sample.id,
+              signal,
             );
-            if (error || !data) return [sample.id, {}] as const;
+            if (!data) return [sample.id, {}] as const;
 
             return [
               sample.id,
@@ -217,15 +212,8 @@ export default function ProblemView({
   const submissions = useSubmissions({ problemId, contestId });
 
   const getSampleCaseData = useCallback(
-    async (tcId: number) => {
-      const { data, error } = await apiClient.GET(
-        '/problems/{id}/test-cases/{tc_id}',
-        { params: { path: { id: problemId, tc_id: tcId } } },
-      );
-      if (error || !data) return null;
-      return data;
-    },
-    [apiClient, problemId],
+    (tcId: number) => fetchSampleCase(apiClient, problemId, contestId, tcId),
+    [apiClient, problemId, contestId],
   );
 
   const onDownloadSample = useCallback(
@@ -413,6 +401,7 @@ export default function ProblemView({
               <div className="mx-auto max-w-4xl">
                 <ProblemDescriptionTab
                   problem={problem}
+                  contestId={contestId}
                   isLoading={isLoading}
                   hasError={!!error}
                   sampleContents={sampleContents}

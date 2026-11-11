@@ -5,7 +5,10 @@
 # timeout), and a real C/C++/Python compile. Run as root on a worker, ideally
 # AFTER `install-native.sh worker` (so isolate + cgroup delegation are in place):
 #
-#   sudo ./live-boot-preflight.sh [box1-LAN-IP]
+#   sudo ./live-boot-preflight.sh [--host-only] [box1-LAN-IP]
+#
+# --host-only skips the isolate and toolchain checks, for container workers
+# whose isolate and compilers live in the worker image.
 #
 # Exit 0 = GO (all critical checks pass); nonzero = NO-GO (fix [FAIL] items).
 # [WARN] items are non-fatal (e.g. run before install, or no box1 IP given).
@@ -15,6 +18,11 @@ ok(){   echo "  [ OK ] $*"; PASS=$((PASS+1)); }
 bad(){  echo "  [FAIL] $*"; FAIL=$((FAIL+1)); }
 warn(){ echo "  [WARN] $*"; WARN=$((WARN+1)); }
 hdr(){  echo; echo "== $* =="; }
+
+# --host-only: for a Docker/Podman worker, whose isolate and compilers live in
+# the worker image. Checks only what the host provides (platform, cgroup v2).
+HOST_ONLY=0
+if [ "${1:-}" = "--host-only" ]; then HOST_ONLY=1; shift; fi
 
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 2; }
 
@@ -39,6 +47,10 @@ else
   bad "cgroup-v2 not mounted at /sys/fs/cgroup (hybrid/v1 boot? add kernel arg systemd.unified_cgroup_hierarchy=1)"
 fi
 
+if [ "$HOST_ONLY" = 1 ]; then
+  hdr "isolate + toolchain"
+  ok "skipped: they ship in the worker image (--host-only)"
+else
 hdr "isolate sandbox + resource-limit verdicts"
 if ! command -v isolate >/dev/null 2>&1; then
   bad "isolate not installed -- run install-native.sh worker"
@@ -83,6 +95,7 @@ T="$(mktemp -d)"; printf 'int main(){return 0;}\n' >"$T/a.c"; printf 'int main()
   || bad "g++ cannot compile C++ -- install build-essential"
 command -v python3 >/dev/null 2>&1 && ok "python3: $(python3 --version 2>&1)" || bad "python3 missing"
 rm -rf "$T"
+fi  # HOST_ONLY
 
 hdr "connectivity to box 1"
 if [ $# -ge 1 ]; then

@@ -1,9 +1,12 @@
+pub mod auth_tokens;
 pub(crate) mod batch_wait;
 pub mod code_run_dispatch;
+pub mod device_auth;
 pub mod evaluate_batch;
 pub mod operation_batch;
 pub mod plugin_config;
 pub mod plugin_storage;
+pub mod privileges;
 pub mod submission_dispatch;
 pub mod submission_feedback;
 pub mod user_accounts;

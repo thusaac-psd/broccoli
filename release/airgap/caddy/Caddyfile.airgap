@@ -1,7 +1,7 @@
 # Air-gapped LAN Caddyfile: explicit internal-CA leaf, no automatic online cert
 # issuance. Mounted UN-rendered into the gateway container; Caddy expands
-# {$LAN_HOST}/{$TLS_CERT}/{$TLS_KEY}/{$BROCCOLI_UPSTREAMS} from the container
-# environment at load time. Never run envsubst over this file — that corrupts
+# {$LAN_HOST}/{$LAN_HOST_ALIASES}/{$TLS_CERT}/{$TLS_KEY}/{$BROCCOLI_UPSTREAMS}
+# from the container environment at load time. Never run envsubst over this file — that corrupts
 # Caddy's {$VAR} placeholder syntax. There is no internet on-site, so cert
 # automation cannot be reached; the server serves the leaf minted from the CA.
 {
@@ -15,8 +15,23 @@
 	# Pin the default SNI to the site name so the leaf is served regardless.
 	default_sni {$LAN_HOST}
 }
-{$LAN_HOST} {
+# LAN_HOST_ALIASES (often empty) holds further names and IPs the leaf covers,
+# space-separated, so contestants can use any of them.
+{$LAN_HOST} {$LAN_HOST_ALIASES} {
 	encode zstd gzip
 	tls {$TLS_CERT} {$TLS_KEY}
-	reverse_proxy {$BROCCOLI_UPSTREAMS}
+	# Same upstream policy as examples/Caddyfile.gateway: probe the shallow
+	# /livez (not /healthz, which fails on every server at once when Postgres
+	# or Redis blips), eject an upstream after two misses, and retry requests
+	# that cannot reach an upstream on another one instead of returning 502.
+	reverse_proxy {$BROCCOLI_UPSTREAMS} {
+		lb_policy round_robin
+		health_uri /livez
+		health_interval 5s
+		health_timeout 2s
+		health_fails 2
+		health_passes 1
+		lb_try_duration 5s
+		lb_try_interval 250ms
+	}
 }

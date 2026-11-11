@@ -800,11 +800,13 @@ dependencies = [
  "http",
  "rand 0.9.2",
  "ratatui",
+ "rustls-native-certs 0.8.3",
  "serde",
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
  "ureq",
+ "webpki-root-certs",
 ]
 
 [[package]]
@@ -1201,6 +1203,7 @@ dependencies = [
  "config",
  "futures",
  "hex",
+ "hostname",
  "libc",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1215,6 +1218,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

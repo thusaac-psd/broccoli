@@ -18,11 +18,11 @@ use sea_orm::{ConnectionTrait, DbBackend, Statement};
 /// silently halts all failed-job persistence; for the result consumer it quietly
 /// erodes throughput. Catching the panic here keeps the consume task alive.
 ///
-/// A caught panic returns `Ok(())` (a clean acknowledge), NOT `Err`: the vendored
-/// `reject` retry path is itself broken (it `LREM`s the message then errors on the
-/// missing `priority` metadata that `HGETALL` never repopulates, losing the
-/// message), so acknowledging is the only way to drop a deterministically-poison
-/// message without wedging or leaking it. The panic is logged loudly.
+/// A caught panic returns `Ok(())` (a clean acknowledge), NOT `Err`: a panic is
+/// almost always deterministic for the message, so rejecting it would only burn
+/// the retry budget re-panicking before it lands in a never-drained failed
+/// queue. Acknowledging drops the poison message without wedging or leaking it.
+/// The panic is logged loudly.
 pub(crate) async fn guard_handler<F>(handler: &'static str, fut: F) -> Result<(), mq::BroccoliError>
 where
     F: std::future::Future<Output = Result<(), mq::BroccoliError>>,

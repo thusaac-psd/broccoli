@@ -14,21 +14,19 @@ pub fn parse_refresh_token(refresh_token: &str) -> Result<(&str, &str)> {
         .ok_or_else(|| anyhow::anyhow!("Invalid refresh token format"))
 }
 
-pub fn build_refresh_cookie(selector: &str, validator: &str, secure: bool) -> Cookie<'static> {
-    Cookie::build((
-        REFRESH_COOKIE_NAME,
-        construct_refresh_token(selector, validator),
-    ))
-    .http_only(true)
-    .secure(secure)
-    .same_site(if secure {
-        SameSite::Strict
-    } else {
-        SameSite::Lax
-    })
-    .path("/")
-    .max_age(time::Duration::days(REFRESH_TOKEN_EXPIRY_DAYS))
-    .build()
+/// Cookie carrying an opaque `selector:validator` refresh token.
+pub fn build_refresh_cookie(refresh_token: &str, secure: bool) -> Cookie<'static> {
+    Cookie::build((REFRESH_COOKIE_NAME, refresh_token.to_owned()))
+        .http_only(true)
+        .secure(secure)
+        .same_site(if secure {
+            SameSite::Strict
+        } else {
+            SameSite::Lax
+        })
+        .path("/")
+        .max_age(time::Duration::days(REFRESH_TOKEN_EXPIRY_DAYS))
+        .build()
 }
 
 pub fn build_removal_cookie(secure: bool) -> Cookie<'static> {

@@ -28,13 +28,14 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                match refresh_owned_leases(&db, &server_id).await {
-                    Ok((submissions, code_runs, judgements)) => {
+                match common::deadline::bounded("dispatcher.lease", common::deadline::BACKGROUND_STEP, refresh_owned_leases(&db, &server_id)).await {
+                    Some(Ok((submissions, code_runs, judgements))) => {
                         if submissions > 0 || code_runs > 0 || judgements > 0 {
                             info!(server_id = %server_id, submissions, code_runs, judgements, "Refreshed owned judging leases");
                         }
                     }
-                    Err(e) => error!(server_id = %server_id, error = %e, "Lease refresh failed"),
+                    Some(Err(e)) => error!(server_id = %server_id, error = %e, "Lease refresh failed"),
+                    None => {}
                 }
             }
             changed = cancel.changed() => {

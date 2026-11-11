@@ -36,7 +36,7 @@ Also present but not part of the main Rust workspace members list:
 
 ### JavaScript workspaces
 
-- `packages/sdk`
+- `packages/web-sdk`
 - `packages/web`
 
 ## Commands That Actually Exist
@@ -64,7 +64,9 @@ pnpm dev
 pnpm lint
 pnpm format
 pnpm format:check
-pnpm --filter @broccoli/sdk build
+pnpm test
+pnpm typecheck
+pnpm --filter @broccoli/web-sdk build
 pnpm --filter @broccoli/web dev
 ```
 
@@ -115,11 +117,15 @@ The checked-in Docker Postgres credentials are:
 
 ### Frontend
 
-- `packages/web` uses React 19, React Router 7, Vite via `rolldown-vite`,
+- `packages/web` uses React 19, React Router 7 (SPA mode, `ssr: false`), Vite 8,
   Tailwind, TanStack Query, Monaco, Radix UI, and Recharts.
 - Routing is file-system based through `@react-router/fs-routes`, with
   `packages/web/src/routes.ts` adding an explicit catch-all extension route.
-- `packages/sdk` is a published TypeScript package built with `tsup`.
+- `packages/web-sdk` (`@broccoli/web-sdk`) is a published TypeScript package
+  built with `tsdown`; the web app and plugin frontends build against it.
+- Unit tests are `*.test.ts` files run by `pnpm test` (`node --test` with type
+  stripping), so a tested module may use the `@/` alias only in `import type`;
+  runtime imports must be packages or relative `.ts` paths.
 
 ### Plugins
 
@@ -153,9 +159,10 @@ The checked-in Docker Postgres credentials are:
 ### SDK / API surface changes
 
 - If you change server request/response shapes, check whether
-  `packages/server-sdk` and `packages/sdk` need to move with them.
-- Be careful with exported package entrypoints in `packages/sdk`, since its
-  `package.json` exposes multiple subpaths.
+  `packages/server-sdk` and `packages/web-sdk` need to move with them.
+- Be careful with exported package entrypoints in `packages/web-sdk`, since its
+  `package.json` exposes multiple subpaths, and plugin bundles resolve them
+  through `SDK_SHARED_DEPS` in `packages/web/plugins/shared-deps.ts`.
 
 ### Duplication discipline
 

@@ -124,7 +124,7 @@ pub async fn shared_pg_port() -> u16 {
             server::seed::seed_role_permissions(&template_db)
                 .await
                 .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
+            server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
             drop(template_db);

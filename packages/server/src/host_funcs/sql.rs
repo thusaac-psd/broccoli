@@ -146,10 +146,15 @@ fn spawn_txn_reaper_with(
 /// state are clean by construction - it CANNOT be poisoned - making the insert
 /// succeed deterministically (modulo a genuine DB failure).
 static PLUGIN_DB_FALLBACK_URL: OnceLock<String> = OnceLock::new();
+/// Session settings (statement timeout, keepalives) for fresh fallback
+/// connections, so they are bounded exactly like the pooled plugin connections.
+static PLUGIN_DB_SESSION: OnceLock<common::db::PgSession> = OnceLock::new();
 
-/// Register the URL for the fresh-connection fallback. Idempotent.
-pub fn set_plugin_db_fallback_url(url: String) {
+/// Register the URL and the app session for the fresh-connection fallback.
+/// Idempotent.
+pub fn set_plugin_db_fallback_url(url: String, session: common::db::PgSession) {
     let _ = PLUGIN_DB_FALLBACK_URL.set(url);
+    let _ = PLUGIN_DB_SESSION.set(crate::database::plugin_session(&session));
 }
 
 /// Connection parameters for the RESTRICTED fresh-connection fallback. When set,
@@ -246,25 +251,16 @@ async fn connect_fresh_single(
     url: &str,
     login: Option<&crate::database::PluginLoginOverride>,
 ) -> Result<DatabaseConnection, sea_orm::DbErr> {
-    use sea_orm::sqlx::ConnectOptions as _;
-    use sea_orm::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-    let mut opts = url
-        .parse::<PgConnectOptions>()
-        .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?
-        .disable_statement_logging();
+    let session = PLUGIN_DB_SESSION.get().cloned().unwrap_or_else(|| {
+        crate::database::plugin_session(&crate::database::app_session(
+            &crate::config::DatabaseConfig::default(),
+        ))
+    });
+    let mut opts = common::db::pg_connect_options(url, &session)?;
     if let Some(login) = login {
         opts = opts.username(&login.username).password(&login.password);
     }
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .min_connections(1)
-        .connect_with(opts)
-        .await
-        .map_err(|e| sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?;
-    Ok(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(
-        pool,
-    ))
+    common::db::connect_with(common::db::PgPoolSpec::new(1, 1).pool_options(), opts).await
 }
 
 /// Which DB role a fresh fallback connection must assume before running its
@@ -682,7 +678,11 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 }
 
 /// Reject a raw plugin-`sql`-capability statement that changes the session role
-/// or authorization, or runs an anonymous code block. The restricted pool
+/// or authorization, runs an anonymous code block, or lifts a host-enforced
+/// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) for the rest of the
+/// session. A session-level `SET statement_timeout = 0` would otherwise outlive
+/// the call on the pooled connection and unbound every later plugin call that
+/// reuses it; the transaction-scoped `SET LOCAL` form stays allowed. The restricted pool
 /// confines plugins with a session-level `SET ROLE broccoli_plugin`
 /// (`database.rs`), but that is REVERSIBLE: without this guard a plugin could
 /// `RESET ROLE` / `SET ROLE <app-role>` / `SELECT set_config('role', ...)` /
@@ -694,7 +694,7 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 /// no privileged `session_user` to fall back to; this guard closes the escape
 /// on the default single-credential deployment.) Applied ONLY to the raw
 /// plugin-authored entry points, never to the server-owned privileged writes.
-fn reject_role_escalation(plugin_id: &str, sql: &str) -> Result<(), extism::Error> {
+fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error> {
     // Scrub comments and string/identifier bodies so keyword and ';' matching
     // sees only real top-level SQL text (see `scrub_sql_for_guard`). A lexically
     // unbalanced statement scrubs to Err and is treated as blocked -- the guard
@@ -708,17 +708,17 @@ fn reject_role_escalation(plugin_id: &str, sql: &str) -> Result<(), extism::Erro
         Ok(scrubbed) => scrubbed
             .to_ascii_lowercase()
             .split(';')
-            .any(statement_changes_role),
+            .any(statement_escapes_session),
         Err(()) => true,
     };
     if blocked {
         tracing::warn!(
             plugin_id,
             sql = %sql.chars().take(120).collect::<String>(),
-            "Rejected a role/session-authorization change on the restricted plugin SQL path",
+            "Rejected a role/session change on the restricted plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, DISCARD, and anonymous code blocks are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
         ));
     }
     Ok(())
@@ -727,8 +727,8 @@ fn reject_role_escalation(plugin_id: &str, sql: &str) -> Result<(), extism::Erro
 /// True if a single comment-stripped, lowercased SQL statement changes the
 /// session role/authorization, runs an anonymous code block, or defines a
 /// routine (whose single-quoted body the lexer cannot see into). Callers pass
-/// one ';'-separated statement (see [`reject_role_escalation`]).
-fn statement_changes_role(stmt: &str) -> bool {
+/// one ';'-separated statement (see [`reject_session_escape`]).
+fn statement_escapes_session(stmt: &str) -> bool {
     // Tokenize into SQL identifier/keyword tokens (split on any char that is not
     // part of an identifier). Token-aware matching is both whitespace-/comment-
     // insensitive (`set_config ('role'..)`, `set/**/role`, tabs) AND precise
@@ -784,7 +784,7 @@ fn statement_changes_role(stmt: &str) -> bool {
     // (SET ROLE needs only role membership, not superuser -- a live escalation)
     // AND `SET LOCAL SESSION AUTHORIZATION` (whose command word SESSION collides
     // with the scope word), while leaving `SET role_id = $1` (target `role_id`,
-    // a distinct token) and `SET statement_timeout = 5` untouched.
+    // a distinct token) and `SET LOCAL statement_timeout = 5` untouched.
     tokens.iter().enumerate().any(|(i, &t)| {
         if t != "set" && t != "reset" {
             return false;
@@ -802,8 +802,14 @@ fn statement_changes_role(stmt: &str) -> bool {
         } else {
             after.first().copied()
         };
-        let changes =
-            session_auth || matches!(target, Some("role") | Some("authorization") | Some("all"));
+        // A session-scoped SET (plain or SESSION, not LOCAL) of a setting the
+        // host enforces at connect time would persist on the pooled connection.
+        let lifts_bound = t == "set"
+            && after.first() != Some(&"local")
+            && target.is_some_and(|t| common::db::ENFORCED_SESSION_SETTINGS.contains(&t));
+        let changes = session_auth
+            || lifts_bound
+            || matches!(target, Some("role") | Some("authorization") | Some("all"));
         if !changes {
             return false;
         }
@@ -968,7 +974,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: Strin
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     let sql = sanitize_sql_text("sql", plugin_id, sql);
-    reject_role_escalation(plugin_id, &sql)?;
+    reject_session_escape(plugin_id, &sql)?;
     let args = sanitize_sql_text("args", plugin_id, args);
     let mut values = parse_args(&args, plugin_id, &sql)?;
     let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
@@ -1029,7 +1035,7 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     let sql = sanitize_sql_text("sql", plugin_id, sql);
-    reject_role_escalation(plugin_id, &sql)?;
+    reject_session_escape(plugin_id, &sql)?;
     let args = sanitize_sql_text("args", plugin_id, args);
     let values = parse_args(&args, plugin_id, &sql)?;
     let wrapped_sql = format!(
@@ -1133,7 +1139,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, Transaction
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     let sql = sanitize_sql_text("sql", plugin_id, sql);
-    reject_role_escalation(plugin_id, &sql)?;
+    reject_session_escape(plugin_id, &sql)?;
     let args = sanitize_sql_text("args", plugin_id, args);
     let values = parse_args(&args, plugin_id, &sql)?;
     let wrapped_sql = format!(
@@ -1166,7 +1172,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, Transacti
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     let sql = sanitize_sql_text("sql", plugin_id, sql);
-    reject_role_escalation(plugin_id, &sql)?;
+    reject_session_escape(plugin_id, &sql)?;
     let args = sanitize_sql_text("args", plugin_id, args);
     let mut values = parse_args(&args, plugin_id, &sql)?;
     let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
@@ -1390,6 +1396,12 @@ mod tests {
     fn role_escalation_guard_blocks_every_escape_vector() {
         for sql in [
             "RESET ROLE",
+            // session-level SET of a host-enforced bound would persist on the
+            // pooled connection (`SET LOCAL` is allowed, see the allow list)
+            "SET statement_timeout = 0",
+            "SET SESSION statement_timeout TO 0",
+            "set statement_timeout to default",
+            "SELECT 1; SET tcp_keepalives_idle = 0",
             "reset role",
             "SET ROLE app_role",
             "set role \"app\"",
@@ -1468,7 +1480,7 @@ mod tests {
             "SET u&\"\\0072ole\" TO 'postgres'",
         ] {
             assert!(
-                reject_role_escalation("p", sql).is_err(),
+                reject_session_escape("p", sql).is_err(),
                 "should have blocked: {sql}"
             );
         }
@@ -1497,7 +1509,9 @@ mod tests {
             "INSERT INTO acl (k, role) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET role = $2",
             "INSERT INTO sessions (session_token) VALUES ($1)",
             "SELECT * FROM roles WHERE name = $1",
-            "SET statement_timeout = 5000",
+            // a column named like an enforced setting is DML, not a SET command
+            "UPDATE t SET statement_timeout = 5 WHERE id = 1",
+            "RESET statement_timeout",
             // scope keyword before a NON-role parameter must stay allowed
             "SET LOCAL statement_timeout = 5000",
             "SET SESSION search_path TO my_schema",
@@ -1533,7 +1547,7 @@ mod tests {
             "SELECT nu&\"x\" FROM t",
         ] {
             assert!(
-                reject_role_escalation("p", sql).is_ok(),
+                reject_session_escape("p", sql).is_ok(),
                 "should have allowed: {sql}"
             );
         }

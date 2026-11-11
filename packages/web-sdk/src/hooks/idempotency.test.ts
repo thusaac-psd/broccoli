@@ -1,0 +1,293 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import {
+  createIdempotencyKeys,
+  fingerprint,
+  IDEMPOTENCY_KEY_IN_PROGRESS,
+  IDEMPOTENCY_KEY_MISMATCH,
+  IDEMPOTENCY_OUTCOME_UNKNOWN,
+  IDEMPOTENCY_RESPONSE_NOT_STORED,
+  IDEMPOTENCY_RESPONSE_TOO_LARGE,
+  idempotencyOutcome,
+  isAlreadyDone,
+  isOutcomeUnknown,
+  sendIdempotent,
+} from './idempotency.ts';
+
+function counterKeys() {
+  let n = 0;
+  return createIdempotencyKeys(() => `key-${++n}`);
+}
+
+// An openapi-fetch style result.
+function result(status: number, error?: unknown) {
+  return {
+    data: status < 400 ? { id: 1 } : undefined,
+    error,
+    response: new Response(null, { status }),
+  };
+}
+
+const submission = (code: string, language = 'cpp') => ({
+  contestId: 3,
+  problemId: 12,
+  language,
+  files: [{ filename: 'main.cpp', content: code }],
+});
+
+test('fingerprints ignore key order and undefined fields', () => {
+  assert.equal(
+    fingerprint({ a: 1, b: [1, 2], c: undefined }),
+    fingerprint({ b: [1, 2], a: 1 }),
+  );
+  assert.notEqual(fingerprint({ a: [1, 2] }), fingerprint({ a: [2, 1] }));
+  assert.notEqual(fingerprint({ a: '1' }), fingerprint({ a: 1 }));
+  assert.notEqual(
+    fingerprint(submission('int main(){}')),
+    fingerprint(submission('int main(){ }')),
+  );
+  assert.notEqual(
+    fingerprint(new File(['x'], 'a.txt')),
+    fingerprint(new File(['xy'], 'a.txt')),
+  );
+  const form = (name: string) => {
+    const data = new FormData();
+    data.append('file', new File(['x'], name, { lastModified: 1 }));
+    return data;
+  };
+  assert.equal(fingerprint(form('a.txt')), fingerprint(form('a.txt')));
+  assert.notEqual(fingerprint(form('a.txt')), fingerprint(form('b.txt')));
+});
+
+test('retrying the identical operation after a failure reuses the key', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const send = (status: number) =>
+    sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(
+        status,
+        status >= 400 ? { code: 'INTERNAL_ERROR' } : undefined,
+      );
+    });
+
+  await send(502);
+  await assert.rejects(
+    sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      throw new TypeError('Failed to fetch');
+    }),
+  );
+  await send(201);
+  assert.deepEqual(sent, ['key-1', 'key-1', 'key-1']);
+});
+
+test('an edited payload never reuses the key of a lost submission', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const lost = async (key: string) => {
+    sent.push(key);
+    throw new TypeError('Failed to fetch');
+  };
+  await assert.rejects(sendIdempotent(keys, submission('v1'), lost));
+  await assert.rejects(sendIdempotent(keys, submission('v2'), lost));
+  await assert.rejects(sendIdempotent(keys, submission('v2', 'java'), lost));
+  // Going back to v1 is the same operation as the lost one: replaying it is
+  // exactly what the server should do.
+  await assert.rejects(sendIdempotent(keys, submission('v1'), lost));
+  assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-1']);
+});
+
+test('an accepted operation retires its key', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  for (let i = 0; i < 2; i += 1) {
+    await sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(201);
+    });
+  }
+  // Plain-data style requests count as accepted when they resolve.
+  await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return { id: 9 };
+  });
+  assert.deepEqual(sent, ['key-1', 'key-2', 'key-3']);
+});
+
+test('a key mismatch is resent once with a fresh key', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const mismatch = { code: IDEMPOTENCY_KEY_MISMATCH, message: 'body differs' };
+
+  const ok = await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return sent.length === 1 ? result(422, mismatch) : result(201);
+  });
+  assert.equal(ok.response.status, 201);
+  assert.deepEqual(sent, ['key-1', 'key-2']);
+
+  // Thrown (mutationFn style) mismatches too; a second one is surfaced.
+  await assert.rejects(
+    sendIdempotent(keys, submission('v2'), async (key) => {
+      sent.push(key);
+      throw mismatch;
+    }),
+    (error) => error === mismatch,
+  );
+  assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-4']);
+});
+
+test('a replay whose response is gone counts as done and retires the key', async () => {
+  for (const code of [
+    IDEMPOTENCY_RESPONSE_NOT_STORED,
+    IDEMPOTENCY_RESPONSE_TOO_LARGE,
+  ]) {
+    const keys = counterKeys();
+    const sent: string[] = [];
+    const gone = { code, message: 'already succeeded' };
+
+    const replay = await sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(409, gone);
+    });
+    // Passed on once, not resent, so the caller can tell the user.
+    assert.equal(replay.error, gone);
+    assert.ok(isAlreadyDone(replay.error));
+    // Sending the same thing again on purpose is a new operation.
+    await sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      return result(201);
+    });
+
+    // Thrown (mutationFn style) too.
+    await assert.rejects(
+      sendIdempotent(keys, submission('v2'), async (key) => {
+        sent.push(key);
+        throw gone;
+      }),
+      (error) => error === gone,
+    );
+    await sendIdempotent(keys, submission('v2'), async (key) => {
+      sent.push(key);
+      return result(201);
+    });
+    assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-4'], code);
+  }
+});
+
+test('only the replay codes mean already done', () => {
+  assert.ok(isAlreadyDone({ code: IDEMPOTENCY_RESPONSE_NOT_STORED }));
+  assert.ok(!isAlreadyDone({ code: IDEMPOTENCY_KEY_IN_PROGRESS }));
+  assert.ok(!isAlreadyDone({ code: IDEMPOTENCY_OUTCOME_UNKNOWN }));
+  assert.ok(!isAlreadyDone({ code: 'CONFLICT' }));
+  assert.ok(!isAlreadyDone(IDEMPOTENCY_RESPONSE_NOT_STORED));
+  assert.ok(!isAlreadyDone(null));
+});
+
+test('each idempotency refusal has its own outcome', () => {
+  assert.equal(
+    idempotencyOutcome({ code: IDEMPOTENCY_RESPONSE_NOT_STORED }),
+    'already-done',
+  );
+  assert.equal(
+    idempotencyOutcome({ code: IDEMPOTENCY_RESPONSE_TOO_LARGE }),
+    'already-done',
+  );
+  assert.equal(
+    idempotencyOutcome({ code: IDEMPOTENCY_OUTCOME_UNKNOWN }),
+    'outcome-unknown',
+  );
+  assert.equal(
+    idempotencyOutcome({ code: IDEMPOTENCY_KEY_IN_PROGRESS }),
+    'in-progress',
+  );
+  assert.ok(isOutcomeUnknown({ code: IDEMPOTENCY_OUTCOME_UNKNOWN }));
+  assert.ok(!isOutcomeUnknown({ code: IDEMPOTENCY_KEY_IN_PROGRESS }));
+  // A plain failure, or a mismatch (which sendIdempotent resends), is none.
+  assert.equal(idempotencyOutcome({ code: IDEMPOTENCY_KEY_MISMATCH }), null);
+  assert.equal(idempotencyOutcome({ code: 'INTERNAL_ERROR' }), null);
+  assert.equal(idempotencyOutcome(new TypeError('Failed to fetch')), null);
+  assert.equal(idempotencyOutcome(IDEMPOTENCY_OUTCOME_UNKNOWN), null);
+  assert.equal(idempotencyOutcome(undefined), null);
+});
+
+test('an unknown outcome is passed on, never resent, and retires the key', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const unknown = { code: IDEMPOTENCY_OUTCOME_UNKNOWN, message: 'cut off' };
+
+  const refused = await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return result(409, unknown);
+  });
+  assert.equal(refused.error, unknown);
+  assert.ok(isOutcomeUnknown(refused.error));
+  // Once the user has checked, sending it again on purpose gets a fresh key:
+  // the server would refuse the old one until it expires.
+  await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return result(201);
+  });
+
+  // Thrown (mutationFn style) too.
+  await assert.rejects(
+    sendIdempotent(keys, submission('v2'), async (key) => {
+      sent.push(key);
+      throw unknown;
+    }),
+    (error) => error === unknown,
+  );
+  await sendIdempotent(keys, submission('v2'), async (key) => {
+    sent.push(key);
+    return result(201);
+  });
+  assert.deepEqual(sent, ['key-1', 'key-2', 'key-3', 'key-4']);
+});
+
+test('a key still in progress is kept, so a later retry gets its result', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const busy = { code: IDEMPOTENCY_KEY_IN_PROGRESS, message: 'running' };
+
+  const refused = await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return result(409, busy);
+  });
+  // Passed on once, not resent.
+  assert.equal(refused.error, busy);
+  assert.equal(idempotencyOutcome(refused.error), 'in-progress');
+  await assert.rejects(
+    sendIdempotent(keys, submission('v1'), async (key) => {
+      sent.push(key);
+      throw busy;
+    }),
+    (error) => error === busy,
+  );
+  // The original has finished: the same key replays its result.
+  const replayed = await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return result(201);
+  });
+  assert.equal(replayed.response.status, 201);
+  assert.deepEqual(sent, ['key-1', 'key-1', 'key-1']);
+});
+
+test('a resend after a mismatch that lands on an unknown outcome is not resent again', async () => {
+  const keys = counterKeys();
+  const sent: string[] = [];
+  const mismatch = { code: IDEMPOTENCY_KEY_MISMATCH, message: 'body differs' };
+  const unknown = { code: IDEMPOTENCY_OUTCOME_UNKNOWN, message: 'cut off' };
+
+  const refused = await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return sent.length === 1 ? result(422, mismatch) : result(409, unknown);
+  });
+  assert.equal(refused.error, unknown);
+  await sendIdempotent(keys, submission('v1'), async (key) => {
+    sent.push(key);
+    return result(201);
+  });
+  assert.deepEqual(sent, ['key-1', 'key-2', 'key-3']);
+});

@@ -262,6 +262,11 @@ attachments are denied by the server too. Statement caches are cleared when
 the phase changes while editor drafts remain. The **Rankings** page shows them a short link
 back to their match.
 
+A bracket problem can also sit in other contests, such as the qualifier.
+Participants of those contests read and submit it there as usual. Outside every
+contest, the problem stays hidden and cannot be submitted until each bracket
+holding it has ended.
+
 The **Rankings** page shows mirrored left and right halves expanding outward
 from the center. The championship sits above the bronze match in the middle.
 Solid lines carry winners and dashed lines carry semifinal losers. The header
