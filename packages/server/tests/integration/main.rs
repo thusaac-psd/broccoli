@@ -19,6 +19,7 @@ mod downloads;
 mod downloads_slim;
 mod health;
 mod hook_enablement;
+mod idempotency;
 mod meta;
 mod permission_fixture;
 mod plugin;

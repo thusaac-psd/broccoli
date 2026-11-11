@@ -21,6 +21,7 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
+use crate::middleware::idempotency::NoStore;
 use crate::models::user::{
     BulkCreateUsersRequest, CreateUserRequest, CreatedUserResponse, normalize_display_name,
     normalize_username, validate_create_users, validate_password,
@@ -427,17 +428,14 @@ pub async fn create_user(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<CreateUserRequest>,
-) -> Result<(StatusCode, Json<CreatedUserResponse>), AppError> {
+) -> Result<(StatusCode, NoStore<Json<CreatedUserResponse>>), AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
     let created = create_accounts(&state, vec![payload]).await?;
     Ok((
         StatusCode::CREATED,
-        Json(
-            created
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::Internal("Missing created account".into()))?,
-        ),
+        NoStore(Json(created.into_iter().next().ok_or_else(|| {
+            AppError::Internal("Missing created account".into())
+        })?)),
     ))
 }
 
@@ -459,10 +457,10 @@ pub async fn bulk_create_users(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkCreateUsersRequest>,
-) -> Result<(StatusCode, Json<Vec<CreatedUserResponse>>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     auth_user.require_permission(perm::USER_MANAGE)?;
     let created = create_accounts(&state, payload.users).await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    Ok((StatusCode::CREATED, NoStore(Json(created))))
 }
 
 async fn create_accounts(

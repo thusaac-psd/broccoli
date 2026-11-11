@@ -14,6 +14,10 @@ pub struct Model {
 
     pub request_method: String,
 
+    /// Hex SHA-256 of the request body. `None` on rows written before
+    /// fingerprints existed.
+    pub request_fingerprint: Option<String>,
+
     pub status: String,
 
     pub response_status: Option<i16>,
