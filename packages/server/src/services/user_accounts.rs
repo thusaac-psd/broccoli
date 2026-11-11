@@ -1,4 +1,4 @@
-use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, SqlErr};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DbErr, EntityTrait, Set, SqlErr};
 
 use crate::entity::{role, user, user_role};
 use crate::error::AppError;
@@ -56,6 +56,17 @@ pub async fn prepare_accounts(
     .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))?
 }
 
+/// Map a write to the `user` table onto the API error contract. The only
+/// unique constraint besides the primary key is the active-username index, so
+/// a unique violation means the username is taken (for example, a race with a
+/// concurrent create or rename).
+pub fn username_conflict(e: DbErr) -> AppError {
+    match e.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => AppError::UsernameTaken,
+        _ => AppError::from(e),
+    }
+}
+
 /// Insert an account and its default roles in the caller's transaction.
 pub async fn insert_account<C: ConnectionTrait>(
     db: &C,
@@ -70,10 +81,7 @@ pub async fn insert_account<C: ConnectionTrait>(
     }
     .insert(db)
     .await
-    .map_err(|e| match e.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(_)) => AppError::UsernameTaken,
-        _ => AppError::from(e),
-    })?;
+    .map_err(username_conflict)?;
     for role_name in role::DEFAULT_ROLES {
         let role = role::Entity::find_by_id(role_name.to_string())
             .one(db)

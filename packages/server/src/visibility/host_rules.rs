@@ -39,9 +39,16 @@
 //!      (activation window open AND `start_time <= now`), or, failing that,
 //!      `Allow` if the subject is a participant of any contest (public or
 //!      not) attached to the problem that is "open and started".
-//!      `Resource::Attachment` uses this same rule 8+9 pair, keyed on its
-//!      `problem_id` only - see [`decide_standalone_problem_access`] for why
-//!      `attachment_id` never enters the host decision.
+//!      Samples and attachments are parts of their problem: a
+//!      `Resource::Sample` or `Resource::Attachment` gets exactly the
+//!      decision its problem would get under the same `contest_id` scope
+//!      (rules 1-5 with a contest, rules 8-9 without), and `attachment_id`
+//!      never enters the host decision - see [`decide_problem_or_sample`].
+//!      Rule 9 widens READ only: under `Action::Submit` a standalone
+//!      decision stops after rule 8, so a hidden problem is denied there
+//!      even when one of its contests would admit reading it - see
+//!      [`standalone_reachable_via_contest`]. This is a deliberate departure
+//!      from the verbatim port.
 //!  10. `Resource::Clarification`, ported from `list_clarifications`
 //!      (`handlers/clarification.rs:58-208`) - see [`decide_clarification`]
 //!      for the full mapping. A missing clarification, or one where the
@@ -89,16 +96,16 @@
 //!     Submission` in the batch (needed up front, since a submission's
 //!     owner/contest_id aren't in the `Resource` itself);
 //!   - one query for the problems referenced by a standalone (`contest_id:
-//!     None`) `Resource::Problem`/`Resource::Sample`, or by any
-//!     `Resource::Attachment` (needed for rule 8's `is_public` /
-//!     existence check);
+//!     None`) problem part - `Resource::Problem`, `Resource::Sample` or
+//!     `Resource::Attachment` (needed for rule 8's `is_public` / existence
+//!     check);
 //!   - one query for `contest_problem` rows keyed by `problem_id` ONLY (not
 //!     a `(contest_id, problem_id)` pair), covering the same standalone
 //!     problem set - this is rule 9's "which contests is this problem
 //!     attached to at all" lookup, distinct from the pair-membership query
 //!     below;
 //!   - one query for the contests referenced by the batch: directly
-//!     (`Resource::Contest`), via a `Problem`/`Sample`'s `contest_id`, via a
+//!     (`Resource::Contest`), via a problem part's `contest_id`, via a
 //!     fetched submission's `contest_id` (when that submission actually
 //!     needs the peer-visibility check), OR via the standalone
 //!     `contest_problem` lookup above - a standalone problem's candidate
@@ -107,8 +114,8 @@
 //!   - one query for `contest_user` membership, covering every contest
 //!     fetched above;
 //!   - one query for `contest_problem` membership, covering every
-//!     `(contest_id, problem_id)` pair referenced by `Problem`/`Sample`
-//!     resources that carry a concrete `contest_id` (rule 5 - distinct from
+//!     `(contest_id, problem_id)` pair referenced by problem parts that
+//!     carry a concrete `contest_id` (rule 5 - distinct from
 //!     the problem_id-only lookup above, which answers a different
 //!     question).
 //!   - one query for the clarifications referenced by any `Resource::
@@ -168,6 +175,11 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 /// not an `Option<i32>`; a miss (key absent) still means "not resolved by
 /// this call", handled by the caller the same way as a submission miss.
 ///
+/// `action` matters only for standalone (`contest_id: None`) problem-keyed
+/// resources: it decides whether rule 9 applies (see
+/// [`standalone_reachable_via_contest`]). Every other rule is the same for
+/// every action.
+///
 /// Called from `VisibilityKernel::decide_batch`
 /// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
 /// deduped, not-yet-memoized resource in a batch before any plugin is
@@ -175,7 +187,7 @@ use super::{Action, Decision, FieldMask, Resource, Subject};
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     db: &C,
     subject: &Subject,
-    _action: Action,
+    action: Action,
     resources: &[Resource],
     submission_contest_ids: &mut HashMap<i32, Option<i32>>,
     clarification_contest_ids: &mut HashMap<i32, i32>,
@@ -210,28 +222,16 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     submission_contest_ids.extend(submissions.values().map(|s| (s.id, s.contest_id)));
 
     // Query A: problems referenced by a standalone (`contest_id: None`)
-    // `Resource::Problem`/`Resource::Sample`, or by any `Resource::
-    // Attachment` - rule 8. `Resource::Attachment` is keyed on `problem_id`
-    // only: `list_attachments`/`download_attachment` both gate on
-    // `require_problem_read_access(problem_id)` alone (see
-    // `handlers/attachment.rs`), never on `attachment_id`, so this set
-    // collects `problem_id` regardless of which of the two resource kinds
-    // carries it. Soft-delete-aware (`find_active`), mirroring
-    // `require_problem_read_access`'s `find_active_by_id`.
+    // problem part - rule 8. Samples and attachments are parts of their
+    // problem, so this set collects the `problem_id` of every standalone
+    // `Problem`, `Sample` and `Attachment` alike (`attachment_id` never
+    // enters the host decision). Soft-delete-aware (`find_active`),
+    // mirroring `require_problem_read_access`'s `find_active_by_id`.
     let standalone_problem_ids: HashSet<i32> = resources
         .iter()
-        .filter_map(|r| match r {
-            Resource::Problem {
-                contest_id: None,
-                problem_id,
-            }
-            | Resource::Sample {
-                contest_id: None,
-                problem_id,
-            } => Some(*problem_id),
-            Resource::Attachment { problem_id, .. } => Some(*problem_id),
-            _ => None,
-        })
+        .filter_map(Resource::problem_scope)
+        .filter(|scope| scope.contest_id.is_none())
+        .map(|scope| scope.problem_id)
         .collect();
     let problems: HashMap<i32, problem::Model> = if standalone_problem_ids.is_empty() {
         HashMap::new()
@@ -254,7 +254,12 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // `can_access_problem_via_contest`'s first query
     // (`utils/contest.rs:147-153`). Distinct from Query 3 below, which
     // answers "is this exact (contest_id, problem_id) pair a member".
-    let problem_contest_ids: HashMap<i32, Vec<i32>> = if standalone_problem_ids.is_empty() {
+    // Skipped when `action` never reaches rule 9 (`Action::Submit`): nothing
+    // would read the map, and leaving it empty also keeps this batch's
+    // contest/`contest_user` queries from fetching rule 9's candidates.
+    let rule9_may_apply =
+        !standalone_problem_ids.is_empty() && standalone_reachable_via_contest(action);
+    let problem_contest_ids: HashMap<i32, Vec<i32>> = if !rule9_may_apply {
         HashMap::new()
     } else {
         let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -326,31 +331,19 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     };
 
     // Query 1: contests referenced by the batch - directly (`Resource::
-    // Contest`), via a `Problem`/`Sample`'s `contest_id`, or via a fetched
+    // Contest`), via a problem part's `contest_id`, or via a fetched
     // submission's `contest_id` (only when that submission will actually
     // need the peer-visibility contest check - rule 6's owner/`submission:
     // view_all` bypasses never touch the contest at all, mirroring the
     // source's early-return shape). Soft-delete-aware (`find_active`),
     // mirroring `find_contest` - this is rule 7 for contests.
-    let mut contest_ids: HashSet<i32> = HashSet::new();
-    for r in resources {
-        match r {
-            Resource::Contest(id) => {
-                contest_ids.insert(*id);
-            }
-            Resource::Problem {
-                contest_id: Some(cid),
-                ..
-            }
-            | Resource::Sample {
-                contest_id: Some(cid),
-                ..
-            } => {
-                contest_ids.insert(*cid);
-            }
-            _ => {}
-        }
-    }
+    let mut contest_ids: HashSet<i32> = resources
+        .iter()
+        .filter_map(|r| match r {
+            Resource::Contest(id) => Some(*id),
+            _ => r.problem_scope().and_then(|scope| scope.contest_id),
+        })
+        .collect();
     for sub in submissions.values() {
         let needs_contest_check = !subject.has_permission(perm::SUBMISSION_VIEW_ALL)
             && subject.user_id != Some(sub.user_id);
@@ -398,8 +391,8 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     };
 
     // Query 3: `contest_problem` membership for the (contest_id,
-    // problem_id) pairs referenced by `Problem`/`Sample` resources that
-    // carry a concrete `contest_id`. Rule 5. Filtered by both columns'
+    // problem_id) pairs referenced by problem parts that carry a concrete
+    // `contest_id`. Rule 5. Filtered by both columns'
     // `IN` sets rather than an exact OR-of-pairs condition - this may
     // over-fetch a handful of unrelated rows when the batch spans several
     // contests and problems, but the per-resource decision below always
@@ -407,17 +400,8 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // over-fetch cannot change a decision.
     let cp_pairs: Vec<(i32, i32)> = resources
         .iter()
-        .filter_map(|r| match r {
-            Resource::Problem {
-                contest_id: Some(cid),
-                problem_id,
-            }
-            | Resource::Sample {
-                contest_id: Some(cid),
-                problem_id,
-            } => Some((*cid, *problem_id)),
-            _ => None,
-        })
+        .filter_map(Resource::problem_scope)
+        .filter_map(|scope| Some((scope.contest_id?, scope.problem_id)))
         .collect();
     let problem_in_contest: HashSet<(i32, i32)> = if cp_pairs.is_empty() {
         HashSet::new()
@@ -439,6 +423,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
         .map(|r| {
             decide_one(
                 subject,
+                action,
                 now,
                 r,
                 &contests,
@@ -457,6 +442,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
 #[allow(clippy::too_many_arguments)]
 fn decide_one(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     resource: &Resource,
     contests: &HashMap<i32, contest::Model>,
@@ -477,8 +463,14 @@ fn decide_one(
         | Resource::Sample {
             contest_id,
             problem_id,
+        }
+        | Resource::Attachment {
+            contest_id,
+            problem_id,
+            ..
         } => decide_problem_or_sample(
             subject,
+            action,
             now,
             *contest_id,
             *problem_id,
@@ -491,15 +483,6 @@ fn decide_one(
         Resource::Submission(id) => {
             decide_submission(subject, now, *id, contests, member_of, submissions)
         }
-        Resource::Attachment { problem_id, .. } => decide_standalone_problem_access(
-            subject,
-            now,
-            *problem_id,
-            problems,
-            problem_contest_ids,
-            contests,
-            member_of,
-        ),
         Resource::Clarification(id) => {
             decide_clarification(subject, *id, clarifications, latest_reply_public)
         }
@@ -582,10 +565,13 @@ fn decide_contest(
 /// both call `check_contest_access` THEN `require_contest_started` on the
 /// same contest before checking `find_contest_problem` /
 /// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
-/// sequence.
+/// sequence. Used for every problem part (`Problem`, `Sample`,
+/// `Attachment`): a sample or attachment is reachable exactly when its
+/// problem is, under the same scope.
 #[allow(clippy::too_many_arguments)]
 fn decide_problem_or_sample(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     contest_id: Option<i32>,
     problem_id: i32,
@@ -599,6 +585,7 @@ fn decide_problem_or_sample(
         // Standalone problem/sample access - rules 8-9.
         return decide_standalone_problem_access(
             subject,
+            action,
             now,
             problem_id,
             problems,
@@ -625,12 +612,11 @@ fn decide_problem_or_sample(
 
 /// Rules 8-9. Ported from `require_problem_read_access`
 /// (`utils/contest.rs:219-241`) and `can_access_problem_via_contest`
-/// (`utils/contest.rs:142-217`). Used both for standalone (non-contest)
-/// `Resource::Problem`/`Resource::Sample` (`contest_id: None`) and for
-/// `Resource::Attachment` - `list_attachments`/`download_attachment` both
-/// gate on `require_problem_read_access(problem_id)` alone (see
-/// `handlers/attachment.rs`), never on `attachment_id`, so this function
-/// takes only a `problem_id`, matching the source exactly.
+/// (`utils/contest.rs:142-217`). Used for every standalone
+/// (`contest_id: None`) problem part: `Resource::Problem`,
+/// `Resource::Sample` and `Resource::Attachment`. Samples and attachments
+/// are parts of their problem, so this takes only a `problem_id`, never an
+/// `attachment_id`.
 ///
 /// Preserves a source asymmetry verbatim: inside
 /// `can_access_problem_via_contest`, the `contest_ids.is_empty()` check
@@ -648,8 +634,13 @@ fn decide_problem_or_sample(
 /// strict subset of `started_contest_ids`'s, so filtering once and checking
 /// `is_public` first, then membership, is bit-identical to the source's two
 /// queries for every input.
+///
+/// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
+/// can use it. For `Action::Submit` the decision ends after rule 8.
+#[allow(clippy::too_many_arguments)]
 fn decide_standalone_problem_access(
     subject: &Subject,
+    action: Action,
     now: chrono::DateTime<chrono::Utc>,
     problem_id: i32,
     problems: &HashMap<i32, problem::Model>,
@@ -668,6 +659,9 @@ fn decide_standalone_problem_access(
     }
     if problem.is_public {
         return Decision::Allow;
+    }
+    if !standalone_reachable_via_contest(action) {
+        return Decision::Deny;
     }
     // `can_access_problem_via_contest`, inlined below.
     let no_contests: Vec<i32> = Vec::new();
@@ -696,6 +690,36 @@ fn decide_standalone_problem_access(
         return Decision::Allow;
     }
     Decision::Deny
+}
+
+/// Whether rule 9 ("hidden problem reachable via a contest") may admit a
+/// standalone (`contest_id: None`) problem-keyed resource for `action`.
+///
+/// Rule 9 lets a contestant READ a hidden problem's statement, samples and
+/// attachments by id while one of its contests runs. It must not admit
+/// `Action::Submit`. `create_submission` and `run_code` store their rows with
+/// `contest_id = NULL`, so a standalone submit to a contest's hidden problem
+/// skips everything that is keyed on the contest:
+///   - contest-scoped plugin config such as submission-limit and cooldown,
+///     because `resource_enablements(problem_id, None)` ignores it;
+///   - IOI/ICPC feedback masking, which only runs when `contest_id` is set;
+///   - standings, and the contest's own `contest_type`, since the caller may
+///     pick any `contest_type`.
+///
+/// A contestant submits to a hidden contest problem through the
+/// contest-scoped route (`Resource::Problem { contest_id: Some(_) }`, rules
+/// 1-5), and the handler then applies the contest's running-window and
+/// participant checks. Only rule 8 (problem editors, public problems) admits
+/// a standalone submit.
+///
+/// The match is exhaustive on purpose: a new `Action` has to choose here.
+/// `Clarify` and `Download` keep the READ behaviour they always had. Neither
+/// is currently decided on a standalone problem.
+fn standalone_reachable_via_contest(action: Action) -> bool {
+    match action {
+        Action::Submit => false,
+        Action::Read | Action::Clarify | Action::Download => true,
+    }
 }
 
 /// Ported from `require_submission_visible`
@@ -903,6 +927,7 @@ mod tests {
             time_used: None,
             memory_used: None,
             judge_epoch: 0,
+            max_judge_epoch: 0,
             target_worker_id: None,
             owner_server_id: None,
             lease_heartbeat_at: None,
@@ -1822,6 +1847,93 @@ mod tests {
         assert_eq!(decisions, vec![Decision::Deny]);
     }
 
+    // -- Action::Submit on a standalone problem: rule 8 only, never rule 9.
+    // Each mock below queues ONLY the problem fetch, so
+    // these also pin that Submit skips rule 9's contest_problem / contest /
+    // contest_user prefetch: an extra query would exhaust the mock and fail
+    // the `unwrap()`. --
+
+    async fn decide_standalone_submit(
+        db: &sea_orm::DatabaseConnection,
+        subject: &Subject,
+    ) -> Vec<Decision> {
+        host_decide(
+            db,
+            subject,
+            Action::Submit,
+            &[Resource::Problem {
+                contest_id: None,
+                problem_id: 1,
+            }],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_denies_even_for_started_contest_participant() {
+        // Under Action::Read, a participant of a started contest that holds
+        // this problem reaches it through rule 9 (see
+        // `rule9_hidden_problem_in_private_started_contest_allows_participant`).
+        // Submit never looks at contests, so no contest data is queued here.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[])).await,
+            vec![Decision::Deny]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_denies_contest_manage_without_problem_edit() {
+        // Rule 9's `contest:manage` bypass is a READ widening too. Staff who
+        // need to submit to a hidden problem use the contest route or hold
+        // `problem:create`/`problem:edit` (rule 8).
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::CONTEST_MANAGE])).await,
+            vec![Decision::Deny]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_public_standalone_problem_allows() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, true)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[])).await,
+            vec![Decision::Allow]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_hidden_standalone_problem_allows_problem_editor() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![problem_row(1, false)]])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
+            vec![Decision::Allow]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_missing_standalone_problem_denies_even_for_editor() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<problem::Model>::new()])
+            .into_connection();
+        assert_eq!(
+            decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
+            vec![Decision::Deny]
+        );
+    }
+
     // -- Resource::Attachment routes through the exact same rules 8-9,
     // keyed on problem_id only (never attachment_id) --
 
@@ -1836,6 +1948,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
+                contest_id: None,
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(999),
             }],
@@ -1858,6 +1971,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
+                contest_id: None,
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
@@ -1882,6 +1996,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
+                contest_id: None,
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
@@ -1891,6 +2006,57 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(decisions, vec![Decision::Allow]);
+    }
+
+    // -- a contest-scoped attachment follows its problem under that scope
+    // (rules 1-5), the same as a contest-scoped problem or sample --
+
+    #[tokio::test]
+    async fn contest_scoped_attachment_allows_when_problem_in_contest() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![contest_row(7, true, Some(-1), None, true)]])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .append_query_results([vec![contest_problem_row(7, 3)]])
+            .into_connection();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Download,
+            &[Resource::Attachment {
+                contest_id: Some(7),
+                problem_id: 3,
+                attachment_id: uuid::Uuid::from_u128(2),
+            }],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decisions, vec![Decision::Allow]);
+    }
+
+    #[tokio::test]
+    async fn contest_scoped_attachment_denies_when_problem_not_in_contest() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![contest_row(7, true, Some(-1), None, true)]])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .append_query_results([Vec::<contest_problem::Model>::new()])
+            .into_connection();
+        let decisions = host_decide(
+            &db,
+            &subject(1, &[]),
+            Action::Download,
+            &[Resource::Attachment {
+                contest_id: Some(7),
+                problem_id: 3,
+                attachment_id: uuid::Uuid::from_u128(2),
+            }],
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decisions, vec![Decision::Deny]);
     }
 
     // -- positional matching across a mixed batch --

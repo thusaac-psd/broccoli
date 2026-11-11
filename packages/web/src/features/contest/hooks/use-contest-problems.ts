@@ -1,8 +1,12 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import {
+  serverNow,
+  useApiClient,
+  useServerTimeReached,
+} from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { fetchContestProblemList } from '@/features/contest/api/fetch-contest-problem-list';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
@@ -25,13 +29,13 @@ export function useContestProblems(
   const id = contestId ?? NaN;
   const { contest } = useContestInfo(id);
   const startMs = contest ? Date.parse(contest.start_time) : null;
-  const started = usePassed(startMs);
+  const started = useServerTimeReached(startMs);
 
   const query = useQuery({
     queryKey: ['contest-problems', contestId, viewerCacheKey(user)],
     enabled: authReady && Number.isFinite(id) && enabled,
     queryFn: () => fetchContestProblemList(apiClient, id),
-    refetchInterval: () => problemListRefetchInterval(contest, Date.now()),
+    refetchInterval: () => problemListRefetchInterval(contest, serverNow()),
   });
 
   // Fetch again the moment the contest opens, when the list typically goes
@@ -57,20 +61,4 @@ export function useContestProblems(
             presentation.allowedProblemIds!.includes(problem.problem_id),
           ),
   };
-}
-
-/**
- * Whether the wall clock has reached `atMs`, re-rendering once when it
- * does. `false` while `atMs` is unknown.
- */
-export function usePassed(atMs: number | null): boolean {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (atMs === null || now >= atMs) return;
-    // setTimeout fires at once for delays past 2^31-1 ms (~24.8 days).
-    const delay = Math.min(atMs - now + 50, 2 ** 31 - 1);
-    const timer = setTimeout(() => setNow(Date.now()), delay);
-    return () => clearTimeout(timer);
-  }, [atMs, now]);
-  return atMs !== null && now >= atMs;
 }

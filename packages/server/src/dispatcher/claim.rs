@@ -93,16 +93,19 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if max_in_flight > 0
-                    && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
-                {
-                    live_slots = live_worker_slots(&state).await;
-                    slots_checked = Some(std::time::Instant::now());
-                }
-                let cap = effective_cap(max_in_flight, live_slots);
-                if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
-                    error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
-                }
+                common::deadline::bounded("dispatcher.claim", common::deadline::BACKGROUND_STEP, async {
+                    if max_in_flight > 0
+                        && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
+                    {
+                        live_slots = live_worker_slots(&state).await;
+                        slots_checked = Some(std::time::Instant::now());
+                    }
+                    let cap = effective_cap(max_in_flight, live_slots);
+                    if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
+                        error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
+                    }
+                })
+                .await;
             }
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() {

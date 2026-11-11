@@ -61,10 +61,7 @@ pub fn judge_with_context(
             return Err(SdkError::StaleEpoch);
         }
         return Ok(JudgeResult {
-            output: OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
+            output: OnSubmissionOutput::ok(),
             submission_score: Some(0.0),
             subtask_scores: Some(vec![]),
         });
@@ -102,10 +99,7 @@ pub fn judge_with_context(
             return Err(SdkError::StaleEpoch);
         }
         return Ok(JudgeResult {
-            output: OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
+            output: OnSubmissionOutput::ok(),
             submission_score: Some(0.0),
             subtask_scores: Some(vec![0.0; ctx.subtask_defs.len()]),
         });
@@ -128,10 +122,7 @@ pub fn judge_with_context(
                 ctx.submission_id, req.judge_epoch
             ));
             return Ok(JudgeResult {
-                output: OnSubmissionOutput {
-                    success: true,
-                    error_message: None,
-                },
+                output: OnSubmissionOutput::ok(),
                 submission_score: None,
                 subtask_scores: None,
             });
@@ -202,10 +193,7 @@ pub fn judge_with_context_detached(
             return Err(SdkError::StaleEpoch);
         }
         return Ok(JudgeResult {
-            output: OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
+            output: OnSubmissionOutput::ok(),
             submission_score: Some(0.0),
             subtask_scores: Some(vec![]),
         });
@@ -243,10 +231,7 @@ pub fn judge_with_context_detached(
             return Err(SdkError::StaleEpoch);
         }
         return Ok(JudgeResult {
-            output: OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
+            output: OnSubmissionOutput::ok(),
             submission_score: Some(0.0),
             subtask_scores: Some(vec![0.0; ctx.subtask_defs.len()]),
         });

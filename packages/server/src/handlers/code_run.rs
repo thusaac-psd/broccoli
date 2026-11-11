@@ -176,13 +176,16 @@ pub async fn run_code(
     // `submission::create_submission` - each step runs on the pool directly,
     // matching `run_contest_code` below.
     let problem = find_problem(&state.db, problem_id).await?;
-    // Prevent probing hidden/unreleased problems: a code run must be gated by
-    // the same read-access rule as viewing the problem (contest membership or
-    // problem-edit permission), not merely the `submission:submit` capability.
-    // The kernel OWNS the subject: one kernel per request per subject. This
-    // shares `visibility::host_rules::decide_standalone_problem_access` with
-    // `get_problem`/`create_submission` instead of duplicating the rule via
-    // the now-removed `require_problem_read_access`.
+    // Prevent probing hidden/unreleased problems: a code run is gated on
+    // reachability, not merely the `submission:submit` capability. The kernel
+    // OWNS the subject: one kernel per request per subject. This shares
+    // `create_submission`'s `Action::Submit` decision, which is stricter than
+    // viewing. Only a public problem or a problem editor gets through. A
+    // hidden problem is denied even when one of its contests would let the
+    // caller read it, because this row is stored with `contest_id = NULL` and
+    // would run outside that contest's window and `contest_type`. Contestants
+    // use `run_contest_code` instead. See
+    // `visibility::host_rules::standalone_reachable_via_contest`.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     if kernel
         .decide(
@@ -198,14 +201,7 @@ pub async fn run_code(
         return Err(AppError::NotFound("Problem not found".into()));
     }
 
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages = state.registries.known_language_ids().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
@@ -298,14 +294,7 @@ pub async fn run_contest_code(
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
 
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages = state.registries.known_language_ids().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let custom_tcs_json = sanitize_db_json(
@@ -373,5 +362,5 @@ pub async fn get_code_run(
 }
 
 pub fn code_run_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(max_size + 4096)
+    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
 }

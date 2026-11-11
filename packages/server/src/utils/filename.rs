@@ -1,5 +1,3 @@
-use std::path::Path;
-
 #[derive(Debug)]
 pub enum FilenameError {
     Empty,
@@ -73,18 +71,6 @@ pub fn contains_path_traversal(path: &str) -> bool {
         || path.starts_with("..\\")
         || path.contains("\\..\\")
         || path.ends_with("\\..")
-}
-
-pub fn extract_stem(path: &str) -> Option<(&str, &str)> {
-    let filename = Path::new(path).file_name()?.to_str()?;
-    let (stem, ext) = filename.rsplit_once('.')?;
-
-    if stem.is_empty() {
-        return None;
-    }
-
-    let stem_end = path.len() - ext.len() - 1;
-    Some((&path[..stem_end], ext))
 }
 
 pub fn split_dir_filename(path: &str) -> (&str, &str) {

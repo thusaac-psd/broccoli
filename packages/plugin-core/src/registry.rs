@@ -140,7 +140,12 @@ impl PluginEntry {
         let web_root = self.root_dir.join(&web_config.root);
         let asset_path = web_root.join(relative_path);
 
-        let canonical_web_root = web_root.canonicalize().map_err(AssetError::Io)?;
+        // A declared web root that was never built holds no assets: that is a
+        // missing asset, not a host fault.
+        let canonical_web_root = web_root.canonicalize().map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AssetError::NotFound,
+            _ => AssetError::Io(e),
+        })?;
         let canonical_asset_path = asset_path
             .canonicalize()
             .map_err(|_| AssetError::NotFound)?;
@@ -189,5 +194,41 @@ function = "second"
                 .to_string()
                 .contains("more than one server timer callback")
         );
+    }
+
+    fn web_plugin(root: &std::path::Path) -> PluginEntry {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+name = "web"
+version = "0.1.0"
+
+[web]
+root = "frontend/dist"
+entry = "index.js"
+"#,
+        )
+        .unwrap();
+        PluginEntry::new("web".into(), root.to_path_buf(), manifest).unwrap()
+    }
+
+    #[test]
+    fn an_unbuilt_web_root_is_a_missing_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = web_plugin(dir.path())
+            .resolve_web_asset("index.js")
+            .expect_err("nothing was built");
+        assert!(matches!(err, crate::error::AssetError::NotFound), "{err:?}");
+    }
+
+    #[test]
+    fn a_built_web_root_serves_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dist = dir.path().join("frontend/dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(dist.join("index.js"), "export {}").unwrap();
+        let path = web_plugin(dir.path())
+            .resolve_web_asset("index.js")
+            .unwrap();
+        assert!(path.ends_with("frontend/dist/index.js"));
     }
 }

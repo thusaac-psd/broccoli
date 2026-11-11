@@ -87,7 +87,9 @@ pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiv
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = tick_once(&state, &config).await {
+                if let Some(Err(e)) =
+                    common::deadline::bounded("dispatcher.plugin_timer", common::deadline::BACKGROUND_STEP, tick_once(&state, &config)).await
+                {
                     error!(error = %e, "Plugin timer tick failed");
                 }
             }

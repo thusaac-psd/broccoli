@@ -23,10 +23,18 @@ The root export is empty. Import from a subpath:
 | `@broccoli/web-sdk/plugin`          | `PluginRegistryProvider`, `usePluginRegistry`, types |
 | `@broccoli/web-sdk/slot`            | The `Slot` component                                 |
 | `@broccoli/web-sdk/ui`              | UI kit: `Button`, `DataTable`, `Dialog`, `Tabs`, …   |
-| `@broccoli/web-sdk/api`             | `useApiFetch`, the API client and providers          |
+| `@broccoli/web-sdk/api`             | `useApiFetch`, the API client, `serverNow`           |
+| `@broccoli/web-sdk/hooks`           | `useIdempotentRequest`, `useServerTable`, …          |
 | `@broccoli/web-sdk/i18n`            | Translation hooks and types                          |
 | `@broccoli/web-sdk/auth`            | Auth state                                           |
+| `@broccoli/web-sdk/permissions`     | Permission name constants                            |
+| `@broccoli/web-sdk/contest`         | Contest types                                        |
+| `@broccoli/web-sdk/problem`         | Problem types and presentation                       |
+| `@broccoli/web-sdk/submission`      | Submission types and helpers                         |
+| `@broccoli/web-sdk/clarification`   | Clarification types                                  |
+| `@broccoli/web-sdk/sidebar`         | Sidebar state                                        |
 | `@broccoli/web-sdk/theme`           | Theme state                                          |
+| `@broccoli/web-sdk/utils`           | `cn`, date and number formatting                     |
 | `@broccoli/web-sdk/tailwind-preset` | Tailwind preset for plugin styles                    |
 | `@broccoli/web-sdk/plugin.css`      | Base plugin stylesheet                               |
 

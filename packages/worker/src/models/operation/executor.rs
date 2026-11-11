@@ -186,7 +186,7 @@ impl OperationTaskExecutor {
         match RedisCacheLeaderElector::from_url(&config.mq.url, opts) {
             Ok(elector) => {
                 info!(
-                    redis_url = %config.mq.url,
+                    redis_url = %common::redact::redact_url(&config.mq.url),
                     ttl_secs = opts.ttl_secs,
                     heartbeat_interval_secs = opts.heartbeat_interval_secs,
                     "RedisCacheLeaderElector initialized"
@@ -195,7 +195,7 @@ impl OperationTaskExecutor {
             }
             Err(e) => {
                 warn!(
-                    redis_url = %config.mq.url,
+                    redis_url = %common::redact::redact_url(&config.mq.url),
                     error = %e,
                     "Failed to build RedisCacheLeaderElector, falling back to no-op"
                 );
@@ -286,17 +286,14 @@ impl OperationTaskExecutor {
         let cache_dir = config.storage.cache_dir.clone();
         let max_cache_size = config.storage.max_cache_size;
 
-        let database_config = config.database.clone();
-        let mut connect_options = sea_orm::ConnectOptions::new(database_config.url.clone());
-        connect_options
-            .max_connections(database_config.max_connections)
-            .min_connections(database_config.max_connections.min(1))
-            .connect_timeout(Duration::from_secs(30))
-            .acquire_timeout(Duration::from_secs(30))
-            .idle_timeout(Duration::from_secs(600))
-            .max_lifetime(Duration::from_secs(1800));
-
-        let db = match sea_orm::Database::connect(connect_options).await {
+        let database_config = &config.database;
+        let db = match common::db::connect(
+            &database_config.url,
+            &common::db::PgPoolSpec::new(database_config.max_connections, 1),
+            &database_config.session(),
+        )
+        .await
+        {
             Ok(db) => db,
             Err(e) => {
                 error!(

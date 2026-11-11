@@ -30,7 +30,17 @@ echo ">> collecting binaries"
 for b in server worker broccoli-compare; do
   need "$ROOT/target/release/$b"; install -m755 "$ROOT/target/release/$b" "$WORK/bin/$b"
 done
-need /usr/local/bin/weed;    install -m755 /usr/local/bin/weed "$WORK/bin/weed"
+need /usr/local/bin/weed
+# Ship the SeaweedFS release the Docker templates run (the SEAWEEDFS_IMAGE tag
+# in .env.infra.example), so broccoli-weed.service's flags are known to work.
+# BROCCOLI_WEED_ANY_VERSION=1 ships another one; install-native.sh then drops
+# any flag that binary does not know.
+weed_pin="$(sed -n 's/^SEAWEEDFS_IMAGE=.*:\([^:]*\)$/\1/p' "$HERE/../.env.infra.example")"
+weed_have="$(/usr/local/bin/weed version 2>/dev/null | awk '/^version/ { print $3; exit }')"
+if [ "$weed_have" != "$weed_pin" ] && [ "${BROCCOLI_WEED_ANY_VERSION:-0}" != 1 ]; then
+  die "/usr/local/bin/weed is SeaweedFS ${weed_have:-unknown}, not the pinned $weed_pin; install $weed_pin or set BROCCOLI_WEED_ANY_VERSION=1"
+fi
+install -m755 /usr/local/bin/weed "$WORK/bin/weed"
 need /usr/local/bin/isolate; install -m755 /usr/local/bin/isolate "$WORK/bin/isolate"  # setuid set at install time
 
 echo ">> collecting contestant CLI (broccoli, musl-static) for distribution to contestant machines"
@@ -86,7 +96,7 @@ install -m755 "$ROOT/scripts/fix-live-ubuntu-isolate.sh" "$WORK/scripts/fix-live
 echo ">> collecting installer + templates + contest tooling"
 install -m755 "$HERE/install-native.sh" "$WORK/install-native.sh"
 install -m755 "$HERE/../enable-plugin.sh" "$WORK/enable-plugin.sh"
-mkdir -p "$WORK/lib"; cp "$HERE/../lib/plugins.sh" "$WORK/lib/plugins.sh"
+mkdir -p "$WORK/lib"; cp "$HERE"/../lib/*.sh "$WORK/lib/"
 install -m755 "$HERE/stage-toolchain.sh" "$WORK/stage-toolchain.sh"
 install -m755 "$HERE/live-boot-preflight.sh" "$WORK/live-boot-preflight.sh"
 # pre-staged offline C/C++/Python toolchain .deb sets for live-boot workers, if any.

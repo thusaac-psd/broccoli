@@ -1,27 +1,14 @@
 import { reactRouter } from '@react-router/dev/vite';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { defineConfig } from 'vite';
 
 import {
+  resolveSdkEntry as resolveSdkDep,
   SDK_SHARED_DEPS,
   SHARED_DEPS,
   sharedDepsPlugin,
 } from './plugins/shared-deps';
-
-function resolveSdkDep(dep: string): string {
-  try {
-    return fileURLToPath(import.meta.resolve(dep));
-  } catch {
-    const relPath =
-      dep === '@broccoli/web-sdk'
-        ? 'index.js'
-        : `${dep.slice('@broccoli/web-sdk/'.length)}/index.js`;
-
-    return path.resolve(__dirname, `../web-sdk/dist/${relPath}`);
-  }
-}
 
 // https://vite.dev/config/
 export default defineConfig(() => {

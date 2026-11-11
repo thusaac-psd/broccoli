@@ -121,12 +121,9 @@ export function useSubmissionReturn(
     (!checkContest || (!contestAccess.isPending && !canViewContest)) &&
     !!submission?.problem_id;
   const problemAccess = useQuery({
-    queryKey: [
-      'problem',
-      submission?.problem_id,
-      contestId ?? null,
-      viewerCacheKey(user),
-    ],
+    // A standalone read, so it shares the standalone problem page's cache
+    // entry (`null` contest), never a contest-scoped one.
+    queryKey: ['problem', submission?.problem_id, null, viewerCacheKey(user)],
     enabled: checkProblem,
     retry: false,
     queryFn: async ({ signal }) => {

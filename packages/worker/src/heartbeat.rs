@@ -1,24 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use chrono::Utc;
-use redis::AsyncCommands;
-use redis::aio::MultiplexedConnection;
-use tokio::sync::Mutex;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use common::node_identity::{NodeClaim, NodeHeartbeat};
 
 // The heartbeat wire payload is defined once in `common` so the worker (producer)
 // and the server (consumer) cannot drift. See [`common::worker::HeartbeatPayload`].
 use common::worker::HeartbeatPayload;
 
 use crate::system_info::SystemInfo;
-
-const KEY_PREFIX: &str = common::worker::WORKER_HEARTBEAT_KEY_PREFIX;
-const TICK_INTERVAL: Duration = Duration::from_secs(5);
-const KEY_TTL_SECS: u64 = common::worker::WORKER_HEARTBEAT_TTL_SECS;
 
 #[derive(Clone)]
 pub struct InFlightCounter(Arc<AtomicU32>);
@@ -53,7 +43,6 @@ impl Drop for InFlightGuard {
 }
 
 pub struct HeartbeatConfig {
-    pub redis_url: String,
     pub worker_id: String,
     pub sandbox_backend: String,
     pub max_concurrency: Option<u32>,
@@ -61,135 +50,51 @@ pub struct HeartbeatConfig {
     pub system_info: SystemInfo,
 }
 
-pub struct HeartbeatHandle {
-    cancel: Option<oneshot::Sender<()>>,
-    join: Option<JoinHandle<()>>,
-}
+pub struct HeartbeatHandle(NodeHeartbeat);
 
 impl HeartbeatHandle {
+    /// Stop heartbeating and release the worker's ID claim.
     pub async fn shutdown(&mut self) {
-        if let Some(tx) = self.cancel.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.await;
-        }
+        self.0.shutdown().await;
     }
 }
 
-pub fn spawn(config: HeartbeatConfig, in_flight: InFlightCounter) -> HeartbeatHandle {
-    let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-
-    let join = tokio::spawn(async move {
-        let started_at = Utc::now();
-        let key = format!("{KEY_PREFIX}{}", config.worker_id);
-        let conn = Mutex::new(None::<MultiplexedConnection>);
-        let client = match redis::Client::open(config.redis_url.as_str()) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(error = %e, "Heartbeat: failed to open Redis client, disabling heartbeat");
-                return;
-            }
+impl HeartbeatConfig {
+    /// The heartbeat payload as of now.
+    pub fn payload(
+        &self,
+        started_at: chrono::DateTime<Utc>,
+        in_flight: &InFlightCounter,
+    ) -> serde_json::Value {
+        let payload = HeartbeatPayload {
+            id: self.worker_id.clone(),
+            started_at,
+            last_seen: Utc::now(),
+            in_flight: in_flight.current(),
+            max_concurrency: self.max_concurrency,
+            fairness_mode: self.fairness_mode.clone(),
+            sandbox_backend: self.sandbox_backend.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            hostname: self.system_info.hostname.clone(),
+            ip_addresses: self.system_info.ip_addresses.clone(),
+            os: Some(self.system_info.os.clone()),
+            arch: Some(self.system_info.arch.clone()),
+            cpu_count: Some(self.system_info.cpu_count),
+            pid: Some(self.system_info.pid),
         };
-
-        let mut interval = tokio::time::interval(TICK_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    let payload = HeartbeatPayload {
-                        id: config.worker_id.clone(),
-                        started_at,
-                        last_seen: Utc::now(),
-                        in_flight: in_flight.current(),
-                        max_concurrency: config.max_concurrency,
-                        fairness_mode: config.fairness_mode.clone(),
-                        sandbox_backend: config.sandbox_backend.clone(),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        hostname: config.system_info.hostname.clone(),
-                        ip_addresses: config.system_info.ip_addresses.clone(),
-                        os: Some(config.system_info.os.clone()),
-                        arch: Some(config.system_info.arch.clone()),
-                        cpu_count: Some(config.system_info.cpu_count),
-                        pid: Some(config.system_info.pid),
-                    };
-                    if let Err(e) = write_heartbeat(&client, &conn, &key, &payload).await {
-                        warn!(error = %e, "Heartbeat write failed");
-                    }
-                }
-                _ = &mut cancel_rx => {
-                    if let Err(e) = clear_heartbeat(&client, &conn, &key).await {
-                        warn!(error = %e, "Heartbeat clear on shutdown failed");
-                    } else {
-                        info!(worker_id = %config.worker_id, "Heartbeat cleared on shutdown");
-                    }
-                    return;
-                }
-            }
-        }
-    });
-
-    HeartbeatHandle {
-        cancel: Some(cancel_tx),
-        join: Some(join),
+        serde_json::to_value(payload).unwrap_or_default()
     }
 }
 
-async fn get_conn(
-    client: &redis::Client,
-    cell: &Mutex<Option<MultiplexedConnection>>,
-) -> Result<MultiplexedConnection, redis::RedisError> {
-    let mut guard = cell.lock().await;
-    if let Some(ref conn) = *guard {
-        return Ok(conn.clone());
-    }
-    let conn = client.get_multiplexed_async_connection().await?;
-    *guard = Some(conn.clone());
-    Ok(conn)
-}
-
-async fn invalidate(cell: &Mutex<Option<MultiplexedConnection>>) {
-    let mut guard = cell.lock().await;
-    *guard = None;
-}
-
-async fn write_heartbeat(
-    client: &redis::Client,
-    cell: &Mutex<Option<MultiplexedConnection>>,
-    key: &str,
-    payload: &HeartbeatPayload,
-) -> Result<(), redis::RedisError> {
-    let body = serde_json::to_string(payload)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::Client, "json", e.to_string())))?;
-    let mut conn = match get_conn(client, cell).await {
-        Ok(c) => c,
-        Err(e) => {
-            invalidate(cell).await;
-            return Err(e);
-        }
-    };
-    let result: Result<(), redis::RedisError> = redis::cmd("SET")
-        .arg(key)
-        .arg(body)
-        .arg("EX")
-        .arg(KEY_TTL_SECS)
-        .query_async(&mut conn)
-        .await;
-    if result.is_err() {
-        invalidate(cell).await;
-    }
-    result
-}
-
-async fn clear_heartbeat(
-    client: &redis::Client,
-    cell: &Mutex<Option<MultiplexedConnection>>,
-    key: &str,
-) -> Result<(), redis::RedisError> {
-    let mut conn = get_conn(client, cell).await?;
-    let _: i64 = conn.del(key).await?;
-    Ok(())
+/// Keep the worker's heartbeat key (which is also its ID claim, taken at boot
+/// with [`NodeClaim::claim_at_boot`]) alive until shutdown.
+pub fn spawn(
+    claim: NodeClaim,
+    config: HeartbeatConfig,
+    started_at: chrono::DateTime<Utc>,
+    in_flight: InFlightCounter,
+) -> HeartbeatHandle {
+    HeartbeatHandle(claim.spawn_heartbeat(move || config.payload(started_at, &in_flight)))
 }
 
 #[cfg(test)]

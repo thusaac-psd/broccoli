@@ -35,7 +35,14 @@ pub async fn run_stuck_job_detector(state: AppState, config: DlqConfig) {
     loop {
         interval.tick().await;
 
-        if let Err(e) = detect_and_handle_stuck_jobs(&state, &config, max_stuck_retries).await {
+        let scan = detect_and_handle_stuck_jobs(&state, &config, max_stuck_retries);
+        if let Some(Err(e)) = common::deadline::bounded(
+            "dlq.stuck_job_detector",
+            common::deadline::BACKGROUND_STEP,
+            scan,
+        )
+        .await
+        {
             error!(error = %e, "Stuck job detection failed");
         }
     }

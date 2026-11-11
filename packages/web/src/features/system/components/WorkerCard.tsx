@@ -1,3 +1,4 @@
+import { serverNow } from '@broccoli/web-sdk/api';
 import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import {
@@ -27,7 +28,7 @@ function formatRelative(seconds: number, t: I18nContextValue['t']) {
 function formatUptime(startedAt: string, t: I18nContextValue['t']) {
   const seconds = Math.max(
     0,
-    Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000),
+    Math.floor((serverNow() - Date.parse(startedAt)) / 1000),
   );
   if (seconds < 60) return t('system.worker.secondsUptime', { count: seconds });
   const minutes = Math.floor(seconds / 60);

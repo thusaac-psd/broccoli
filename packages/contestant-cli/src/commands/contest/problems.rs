@@ -76,7 +76,7 @@ fn download_problem(client: &Client, contest: &str, problem_id: &str) -> anyhow:
     );
 
     let problem = client
-        .get_problem(problem_id)
+        .get_contest_problem(contest, problem_id)
         .context("Failed to fetch problem statement")?;
     let samples = client
         .get_contest_problem_samples(contest, problem_id)

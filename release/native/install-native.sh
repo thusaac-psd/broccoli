@@ -7,14 +7,15 @@
 #
 # Roles:
 #   infra-server   box 1: Postgres + Redis + SeaweedFS + broccoli-server.
-#                  Generates secrets and writes connection.env for workers.
+#                  Generates secrets on the first run and keeps them on re-runs
+#                  (--rotate-secrets for new ones); writes connection.env for workers.
 #   worker         box 2..N: isolate + compilers + broccoli-worker, pointed at
 #                  the infra box over the LAN (reads connection.env).
 #
 # Usage:
 #   sudo BROCCOLI_INFRA_HOST=<box1-LAN-IP> ./install-native.sh infra-server
 #   # copy the generated connection.env to each worker box's bundle dir, then:
-#   sudo BROCCOLI__WORKER__ID=worker-2 ./install-native.sh worker
+#   sudo ./install-native.sh worker   # worker id defaults to one unique to this box
 set -euo pipefail
 
 BUNDLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,15 +25,60 @@ SVC_USER="${BROCCOLI_SVC_USER:-$(logname 2>/dev/null || echo ubuntu)}"
 DB_NAME="broccoli"; DB_USER="broccoli"
 SEAWEED_DATA="${BROCCOLI_SEAWEED_DATA:-/data/seaweed-data}"
 CONN_ENV="$BUNDLE/connection.env"
-# In a bundle plugins.sh sits in lib/; in a repo checkout, in release/lib/.
-plugins_lib="$BUNDLE/lib/plugins.sh"
-[ -f "$plugins_lib" ] || plugins_lib="$BUNDLE/../lib/plugins.sh"
-# shellcheck source=/dev/null
-. "$plugins_lib"
+# The helpers every release installer shares sit in lib/ in a bundle and in
+# release/lib/ in a repo checkout.
+release_lib="$BUNDLE/lib"
+[ -f "$release_lib/plugins.sh" ] || release_lib="$BUNDLE/../lib"
+for f in plugins env host; do
+  # shellcheck source=/dev/null
+  . "$release_lib/$f.sh"
+done
 
 die(){ echo "error: $*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" = 0 ] || die "run with sudo"; }
 gen(){ head -c "${1:-24}" /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "${2:-32}"; }
+# toml_string FILE KEY: the first `KEY = "value"` in FILE.
+toml_string(){ sed -n "s/^$2 *= *\"\(.*\)\"\$/\1/p" "$1" | head -n 1; }
+# toml_url_password FILE SCHEME: the password in the first SCHEME:// url.
+toml_url_password(){ sed -n "s|^url *= *\"$2://[^:]*:\([^@]*\)@.*|\1|p" "$1" | head -n 1; }
+
+# (Re)start a role's units after their config and unit files are written. A
+# re-run (upgrade, --rotate-secrets, a new LAN) must restart what is already
+# running: `systemctl enable --now` leaves an active unit as it is. An old weed
+# would then keep its old flags, including the LAN-wide bind that still holds
+# :8333, so the S3 socket could not bind and the install would stop before the
+# server unit and connection.env were written; and weed, the server and the
+# worker would keep their old config and credentials.
+start_infra_units(){
+  systemctl daemon-reload
+  # Free :8333 for the socket first; on a first install there is nothing to stop.
+  systemctl stop broccoli-weed-s3.socket broccoli-weed-s3.service broccoli-weed 2>/dev/null || true
+  systemctl enable broccoli-weed broccoli-weed-s3.socket broccoli-server
+  systemctl restart broccoli-weed
+  systemctl restart broccoli-weed-s3.socket
+  sleep 3
+  systemctl restart broccoli-server
+}
+
+start_worker_units(){
+  systemctl daemon-reload
+  systemctl enable broccoli-isolate-setup broccoli-worker
+  systemctl restart broccoli-isolate-setup
+  systemctl restart broccoli-worker
+}
+
+# weed_drop_unknown_flags UNIT: the bundle pins the SeaweedFS release the unit
+# was written for, but a bundle built with another one may not know
+# -s3.port.iceberg, and weed refuses to start on an unknown flag. A weed that
+# lacks the flag opens no Iceberg port either, so drop it there.
+weed_drop_unknown_flags(){
+  local help
+  # `weed server -h` exits nonzero, so read its text before matching.
+  help="$("$BUNDLE/bin/weed" server -h 2>&1 || true)"
+  case "$help" in *-s3.port.iceberg*) return 0 ;; esac
+  sed -i 's/ -s3\.port\.iceberg=0//' "$1"
+  echo ">> this weed has no -s3.port.iceberg (and no Iceberg port); dropped the flag"
+}
 
 require_ubuntu(){
   . /etc/os-release 2>/dev/null || true
@@ -122,10 +168,22 @@ install_infra_server(){
   cp -a "$BUNDLE/web/client" "$DATA_DIR/packages/web/build/client"
   chown -R "$SVC_USER":"$SVC_USER" "$DATA_DIR/plugins" "$DATA_DIR/packages" "$DATA_DIR/tools"
 
-  # secrets
-  local db_pw s3_ak s3_sk jwt admin_pw
-  db_pw="$(gen)"; s3_ak="$(gen 16 18)"; s3_sk="$(gen 24 32)"; jwt="$(gen 48 64)"
-  admin_pw="${BROCCOLI_ADMIN_PASSWORD:-$(gen)}"
+  # secrets: a re-run (to update binaries, say) keeps the ones config.toml
+  # already holds, since new ones would lock every worker out of the DB, MQ and
+  # S3 mid-event and log every user out. --rotate-secrets makes new ones.
+  local db_pw s3_ak s3_sk jwt admin_pw redis_pw conf="$DATA_DIR/config/config.toml"
+  if [ "$ROTATE_SECRETS" = 0 ] && [ -f "$conf" ]; then
+    echo ">> reusing the secrets in $conf (pass --rotate-secrets for new ones)"
+    db_pw="$(toml_url_password "$conf" postgres)"; redis_pw="$(toml_url_password "$conf" redis)"
+    s3_ak="$(toml_string "$conf" access_key)"; s3_sk="$(toml_string "$conf" secret_key)"
+    jwt="$(toml_string "$conf" jwt_secret)"; admin_pw="$(toml_string "$conf" admin_password)"
+  fi
+  [ -n "${db_pw:-}" ] || db_pw="$(gen)"
+  [ -n "${redis_pw:-}" ] || redis_pw="$(gen)"
+  [ -n "${s3_ak:-}" ] || s3_ak="$(gen 16 18)"
+  [ -n "${s3_sk:-}" ] || s3_sk="$(gen 24 32)"
+  [ -n "${jwt:-}" ] || jwt="$(gen 48 64)"
+  admin_pw="${BROCCOLI_ADMIN_PASSWORD:-${admin_pw:-$(gen)}}"
 
   # postgres: role + db + LAN access (scram)
   echo ">> configuring postgres"
@@ -139,24 +197,35 @@ install_infra_server(){
   pghba="$(dirname "$pgconf")/pg_hba.conf"
   subnet="${BROCCOLI_LAN_CIDR:-${host%.*}.0/24}"
   grep -q "^listen_addresses *= *'\*'" "$pgconf" || sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$pgconf"
-  grep -q "broccoli-lan" "$pghba" || echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
+  # Replace the rule on every run, so a new LAN (rehearsal -> venue) is let in.
+  sed -i '/# broccoli-lan$/d' "$pghba"
+  echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
   systemctl restart postgresql
 
   # redis: LAN bind + auth
   echo ">> configuring redis"
-  local redis_pw rconf; redis_pw="$(gen)"; rconf=/etc/redis/redis.conf
+  local rconf=/etc/redis/redis.conf
   sed -i "s/^bind .*/bind 127.0.0.1 $host/" "$rconf"
   sed -i "s/^# *requirepass .*/requirepass $redis_pw/; s/^requirepass .*/requirepass $redis_pw/" "$rconf"
   grep -q "^requirepass " "$rconf" || echo "requirepass $redis_pw" >> "$rconf"
   systemctl restart redis-server
 
-  # seaweedfs s3 identity + service (bind LAN so workers can fetch blobs)
+  # seaweedfs s3 identity + service. SeaweedFS itself listens on loopback
+  # only; workers reach just its credentialed S3 API, forwarded from
+  # $host:8333 by a systemd socket (the filer would otherwise hand any
+  # contestant on the LAN every testcase without credentials).
   echo ">> configuring seaweedfs"
+  local proxyd
+  proxyd="$(ls /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd 2>/dev/null | head -n 1)" || true
+  [ -n "$proxyd" ] || die "systemd-socket-proxyd not found (it ships with systemd); needed to expose only S3 on the LAN"
   install -d -o "$SVC_USER" -g "$SVC_USER" "$SEAWEED_DATA"
   sed -e "s/@ACCESS_KEY@/$s3_ak/; s/@SECRET_KEY@/$s3_sk/" \
     "$BUNDLE/config/seaweedfs-s3.json.tmpl" > "$DATA_DIR/config/seaweedfs-s3.json"
-  sed -e "s|@WEED_IP@|$host|; s|@SEAWEED_DATA@|$SEAWEED_DATA|; s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|" \
-    "$BUNDLE/systemd/broccoli-weed.service.tmpl" > /etc/systemd/system/broccoli-weed.service
+  for unit in broccoli-weed.service broccoli-weed-s3.socket broccoli-weed-s3.service; do
+    sed -e "s|@WEED_IP@|$host|; s|@SEAWEED_DATA@|$SEAWEED_DATA|; s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|; s|@SOCKET_PROXYD@|$proxyd|" \
+      "$BUNDLE/systemd/$unit.tmpl" > "/etc/systemd/system/$unit"
+  done
+  weed_drop_unknown_flags /etc/systemd/system/broccoli-weed.service
 
   # config.toml
   sed -e "s|@DB_URL@|postgres://$DB_USER:$db_pw@$host:5432/$DB_NAME|" \
@@ -175,10 +244,7 @@ install_infra_server(){
   sed -e "s|@DATA_DIR@|$DATA_DIR|; s|@USER@|$SVC_USER|" \
     "$BUNDLE/systemd/broccoli-server.service.tmpl" > /etc/systemd/system/broccoli-server.service
 
-  systemctl daemon-reload
-  systemctl enable --now broccoli-weed
-  sleep 3
-  systemctl enable --now broccoli-server
+  start_infra_units
 
   # connection.env for workers (S3 endpoint + DB/MQ on the LAN)
   umask 077
@@ -203,7 +269,7 @@ install_worker(){
   [ -f "$CONN_ENV" ] || die "connection.env not found in $BUNDLE (copy it from the infra box)"
   # shellcheck disable=SC1090
   set -a; . "$CONN_ENV"; set +a
-  local wid="${BROCCOLI__WORKER__ID:-worker-$(hostname -s)}"
+  local wid="${BROCCOLI__WORKER__ID:-$(node_id worker)}"
   require_ubuntu; install_common_dirs
   ensure_toolchain
 
@@ -244,15 +310,21 @@ install_worker(){
   install -d /etc/systemd/system/broccoli-worker.service.d
   cp "$BUNDLE/systemd/10-isolate.conf" /etc/systemd/system/broccoli-worker.service.d/10-isolate.conf
 
-  systemctl daemon-reload
-  systemctl enable --now broccoli-isolate-setup
-  systemctl enable --now broccoli-worker
+  start_worker_units
   echo ">> worker '$wid' up, judging for infra at $BROCCOLI_INFRA_HOST"
 }
+
+ROTATE_SECRETS=0
+for arg in "${@:2}"; do
+  case "$arg" in
+    --rotate-secrets) ROTATE_SECRETS=1 ;;
+    *) die "unknown argument: $arg" ;;
+  esac
+done
 
 need_root
 case "$ROLE" in
   infra-server) install_infra_server ;;
   worker)       install_worker ;;
-  *) die "usage: sudo ./install-native.sh {infra-server|worker}" ;;
+  *) die "usage: sudo ./install-native.sh {infra-server [--rotate-secrets]|worker}" ;;
 esac

@@ -156,10 +156,7 @@ pub fn evaluate_all_detached(
         "on_ioi_eval_result",
         4,
     )?;
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 pub fn handle_detached_eval_callback(

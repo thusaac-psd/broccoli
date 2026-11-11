@@ -19,8 +19,15 @@ services:
       redis:
         condition: service_healthy
     environment:
-      BROCCOLI__DATABASE__URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      BROCCOLI__MQ__URL: redis://:${REDIS_PASSWORD}@redis:6379
+      BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
+      # Unset unless the env file sets them, so the binary's defaults apply.
+      # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
+      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
+      BROCCOLI__DATABASE__TCP_KEEPALIVES:
+      BROCCOLI__DATABASE__ALLOW_MISSING_UNIQUE_INDEXES:
+      BROCCOLI__CLOCK__WARN_SKEW_MS:
+      BROCCOLI__CLOCK__MAX_SKEW_MS:
+      BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
 
   worker:
     extends:
@@ -32,8 +39,14 @@ services:
       redis:
         condition: service_healthy
     environment:
-      BROCCOLI__DATABASE__URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      BROCCOLI__MQ__URL: redis://:${REDIS_PASSWORD}@redis:6379
+      BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
+      # Unset unless the env file sets them, so the binary's defaults apply.
+      # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
+      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
+      BROCCOLI__DATABASE__TCP_KEEPALIVES:
+      BROCCOLI__CLOCK__WARN_SKEW_MS:
+      BROCCOLI__CLOCK__MAX_SKEW_MS:
+      BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
 
 volumes:
   postgres_data:
