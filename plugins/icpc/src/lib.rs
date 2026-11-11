@@ -1207,14 +1207,8 @@ pub fn handle_icpc_submission(input: String) -> FnResult<String> {
             ))?;
             match run_judge(&host, &req) {
                 Ok(out) => out,
-                Err(SdkError::StaleEpoch) => OnSubmissionOutput {
-                    success: true,
-                    error_message: None,
-                },
-                Err(e) => OnSubmissionOutput {
-                    success: false,
-                    error_message: Some(format!("{e:?}")),
-                },
+                Err(SdkError::StaleEpoch) => OnSubmissionOutput::ok(),
+                Err(e) => OnSubmissionOutput::failed(format!("{e:?}")),
             }
         }
     };
@@ -1298,10 +1292,7 @@ fn run_judge(host: &Host, req: &OnSubmissionInput) -> Result<OnSubmissionOutput,
         if affected == 0 {
             return Err(SdkError::StaleEpoch);
         }
-        return Ok(OnSubmissionOutput {
-            success: true,
-            error_message: None,
-        });
+        return Ok(OnSubmissionOutput::ok());
     }
 
     match evaluate_short_circuit_detached(host, req, &test_cases, req.submission_id) {
@@ -1311,10 +1302,7 @@ fn run_judge(host: &Host, req: &OnSubmissionInput) -> Result<OnSubmissionOutput,
                 "ICPC: Submission {} epoch {} is stale, stopping",
                 req.submission_id, req.judge_epoch
             ));
-            return Ok(OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            });
+            return Ok(OnSubmissionOutput::ok());
         }
         Err(e) => return Err(e),
     }
@@ -1329,27 +1317,15 @@ fn run_standalone_judge(host: &Host, req: &OnSubmissionInput) -> OnSubmissionOut
 
     if req.test_cases.is_empty() {
         return persist_empty_standalone(host, req).unwrap_or_else(|e| match e {
-            SdkError::StaleEpoch => OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
-            other => OnSubmissionOutput {
-                success: false,
-                error_message: Some(format!("{other:?}")),
-            },
+            SdkError::StaleEpoch => OnSubmissionOutput::ok(),
+            other => OnSubmissionOutput::failed(format!("{other:?}")),
         });
     }
 
     match evaluate_short_circuit_detached(host, req, &req.test_cases, req.submission_id) {
         Ok(out) => out,
-        Err(SdkError::StaleEpoch) => OnSubmissionOutput {
-            success: true,
-            error_message: None,
-        },
-        Err(e) => OnSubmissionOutput {
-            success: false,
-            error_message: Some(format!("{e:?}")),
-        },
+        Err(SdkError::StaleEpoch) => OnSubmissionOutput::ok(),
+        Err(e) => OnSubmissionOutput::failed(format!("{e:?}")),
     }
 }
 
@@ -1379,10 +1355,7 @@ fn persist_empty_standalone(
         return Err(SdkError::StaleEpoch);
     }
 
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 // -- API: GET /contests/{contest_id}/info --------------------------------

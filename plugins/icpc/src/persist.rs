@@ -82,10 +82,7 @@ pub fn persist_and_track(
         submission_id, verdict, eval.is_accepted
     ));
 
-    Ok(OnSubmissionOutput {
-        success: true,
-        error_message: None,
-    })
+    Ok(OnSubmissionOutput::ok())
 }
 
 #[cfg(test)]

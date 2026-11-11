@@ -44,8 +44,19 @@ pub struct Model {
     #[sea_orm(has_many)]
     pub test_case_results: HasMany<super::test_case_result::Entity>,
 
+    /// Fencing token of the current judgement's dispatch. A worker result or
+    /// a dispatch failure carrying any other epoch is ignored.
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
+    /// Highest epoch ever handed out for this submission, to itself or to
+    /// any of its judgements. This is the per-submission epoch allocator:
+    /// new epochs come only from
+    /// `services::judgement_lifecycle::AllocateJudgeEpoch`, which takes
+    /// `GREATEST(max_judge_epoch, judge_epoch) + 1`, so every judgement gets
+    /// a unique epoch even when a deferred rejudge runs beside the current
+    /// one and `judge_epoch` itself does not move.
+    #[sea_orm(default_value = 0)]
+    pub max_judge_epoch: i32,
 
     /// When set by an admin, every operation produced for this submission is
     /// pinned to the named worker via the worker's private queue.
@@ -61,11 +72,13 @@ pub struct Model {
     /// dispatch age independent of a still-live server's heartbeat refresh.
     #[sea_orm(nullable)]
     pub leased_at: Option<DateTimeUtc>,
-    /// Dispatch ATTEMPTS so far, despite the name: bumped on every claim,
-    /// steal and re-dispatch, so it is 1 after a normal first dispatch and the
-    /// number of retries is `retry_count - 1`. `max_dispatch_retries` /
-    /// `max_stuck_retries` are budgets on this count. (Column name kept for
-    /// schema compatibility.)
+    /// Dispatch ATTEMPTS of the current judging attempt, despite the name:
+    /// bumped on every claim, steal and re-dispatch, so it is 1 after a normal
+    /// first dispatch and the number of retries is `retry_count - 1`.
+    /// `max_dispatch_retries` / `max_stuck_retries` are budgets on this
+    /// count. A rejudge or DLQ retry starts a new attempt and resets it to 0
+    /// (`services::judgement_lifecycle::OpenJudgement::Rejudge`). (Column name
+    /// kept for schema compatibility.)
     #[sea_orm(default_value = 0)]
     pub retry_count: i32,
 

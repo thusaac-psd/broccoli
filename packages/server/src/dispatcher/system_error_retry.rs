@@ -27,7 +27,7 @@
 
 use std::time::Duration;
 
-use common::{SubmissionStatus, Verdict};
+use common::{SubmissionDlqErrorCode, SubmissionStatus, Verdict};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -173,6 +173,10 @@ async fn scan_once(
 /// * `status == SystemError` - stuck-handler terminal / dispatch-exhaustion
 ///   (verdict typically NULL).
 ///
+/// A deterministic plugin refusal (`error_code == PLUGIN_REFUSED`, see
+/// `OnSubmissionOutput::refused`) is a `SystemError` too, but re-running it
+/// can only fail the same way, so it is excluded.
+///
 /// A contestant `CompileError` lands as `status == CompilationError` (never
 /// `SystemError`), so it is never selected; nor are own-code verdicts
 /// (`status == Judged` with WA/TLE/MLE/RE), non-current, or unfinalized rows.
@@ -193,6 +197,14 @@ async fn find_retryable_system_errors(
                 )
                 .add(submission_judgement::Column::Status.eq(SubmissionStatus::SystemError)),
         )
+        .filter(
+            Condition::any()
+                .add(submission_judgement::Column::ErrorCode.is_null())
+                .add(
+                    submission_judgement::Column::ErrorCode
+                        .ne(SubmissionDlqErrorCode::PLUGIN_REFUSED),
+                ),
+        )
         .filter(submission_judgement::Column::RetryCount.lt(max_retry_count))
         .order_by_asc(submission_judgement::Column::Id)
         .limit(batch_size)
@@ -205,27 +217,6 @@ mod tests {
     use super::*;
     use crate::entity::{problem, submission, user};
     use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
 
     async fn seed_submission(db: &DatabaseConnection) -> i32 {
         let now = chrono::Utc::now();
@@ -303,7 +294,7 @@ mod tests {
     /// exhausted/superseded rows untouched.
     #[tokio::test]
     async fn reaper_selects_only_retryable_system_errors() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
 
         // SHOULD be selected: current, finalized, Judged + SystemError, budget.
         let s_ok = seed_submission(&db).await;
@@ -398,13 +389,52 @@ mod tests {
         )
         .await;
 
+        // NOT selected - a plugin's deterministic refusal. SHOULD be selected -
+        // an ordinary (retryable) plugin failure.
+        let s_refused = seed_submission(&db).await;
+        let j_refused = seed_judgement(
+            &db,
+            s_refused,
+            true,
+            true,
+            SubmissionStatus::SystemError,
+            None,
+            0,
+        )
+        .await;
+        let s_plugin_err = seed_submission(&db).await;
+        let j_plugin_err = seed_judgement(
+            &db,
+            s_plugin_err,
+            true,
+            true,
+            SubmissionStatus::SystemError,
+            None,
+            0,
+        )
+        .await;
+        for (id, code) in [
+            (j_refused, SubmissionDlqErrorCode::PLUGIN_REFUSED),
+            (j_plugin_err, "PLUGIN_ERROR"),
+        ] {
+            submission_judgement::Entity::update_many()
+                .col_expr(
+                    submission_judgement::Column::ErrorCode,
+                    sea_orm::sea_query::Expr::value(Some(code.to_string())),
+                )
+                .filter(submission_judgement::Column::Id.eq(id))
+                .exec(&db)
+                .await
+                .expect("set error code");
+        }
+
         let found = find_retryable_system_errors(&db, 5, 64)
             .await
             .expect("query candidates");
         let ids: Vec<i32> = found.iter().map(|j| j.id).collect();
         assert_eq!(
             ids,
-            vec![j_ok, j_stuck],
+            vec![j_ok, j_stuck, j_plugin_err],
             "both the Judged+SystemError and the status=SystemError shapes (with budget) are selected"
         );
     }

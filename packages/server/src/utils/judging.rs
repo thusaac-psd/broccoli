@@ -110,6 +110,19 @@ pub fn files_to_json(files: &[SubmissionFileDto]) -> serde_json::Value {
     serde_json::to_value(&submission_files).unwrap_or(serde_json::Value::Array(vec![]))
 }
 
+/// Log-safe description of stored submission files: each file's name and
+/// size in bytes, never its contents. Use it wherever a span or log line would
+/// otherwise carry a submission or code-run model, whose `files` hold the
+/// contestant's full source.
+pub fn files_log_summary(value: &serde_json::Value) -> String {
+    serde_json::from_value::<Vec<SubmissionFile>>(value.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|f| format!("{} ({} B)", f.filename, f.content.len()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn files_from_json(value: &serde_json::Value) -> Vec<SubmissionFileDto> {
     serde_json::from_value::<Vec<SubmissionFile>>(value.clone())
         .unwrap_or_default()
@@ -278,5 +291,16 @@ mod tests {
     fn test_validate_run_language_empty_set_allows_any() {
         let languages = HashSet::new();
         assert!(validate_run_language("anything", &languages).is_ok());
+    }
+
+    #[test]
+    fn files_log_summary_names_sizes_and_never_contents() {
+        let files = serde_json::json!([
+            {"filename": "main.cpp", "content": "int main() { return 42; }"},
+            {"filename": "util.h", "content": ""},
+        ]);
+        let summary = super::files_log_summary(&files);
+        assert_eq!(summary, "main.cpp (25 B), util.h (0 B)");
+        assert!(!summary.contains("return 42"));
     }
 }

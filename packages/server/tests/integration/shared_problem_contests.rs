@@ -285,9 +285,21 @@ async fn an_ended_bracket_no_longer_hides_its_problem_outside_every_contest() {
     let res = fx.app.get_with_token(&routes::problem(pid), token).await;
     assert_eq!(res.status, 200, "standalone statement: {}", res.text);
 
+    // The problem is hidden, so it is still submitted only through a contest
+    // that holds it: the host refuses a standalone submission either way.
     let res = fx
         .app
         .post_with_token(&routes::problem_submissions(pid), &submission_body(), token)
         .await;
-    assert_eq!(res.status, 201, "standalone submission: {}", res.text);
+    assert_eq!(res.status, 404, "standalone submission: {}", res.text);
+
+    let res = fx
+        .app
+        .post_with_token(
+            &routes::contest_problem_submissions(fx.standard_id, pid),
+            &submission_body(),
+            token,
+        )
+        .await;
+    assert_eq!(res.status, 201, "contest submission: {}", res.text);
 }

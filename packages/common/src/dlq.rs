@@ -7,6 +7,13 @@ pub struct SubmissionDlqErrorCode;
 impl SubmissionDlqErrorCode {
     pub const STUCK_JOB: &'static str = "STUCK_JOB";
     pub const DISPATCH_RETRY_EXHAUSTED: &'static str = "DISPATCH_RETRY_EXHAUSTED";
+    /// A judgement still in flight when a newer judgement replaced it as
+    /// current (rejudge, DLQ retry, lease steal, applying another judgement).
+    pub const SUPERSEDED: &'static str = "SUPERSEDED";
+    /// A contest-type plugin refused the submission deterministically
+    /// (`OnSubmissionOutput::refused`). Terminal: never re-judged
+    /// automatically.
+    pub const PLUGIN_REFUSED: &'static str = "PLUGIN_REFUSED";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

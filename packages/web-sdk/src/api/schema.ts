@@ -1815,7 +1815,7 @@ export interface paths {
     put?: never;
     /**
      * Bulk rejudge submissions
-     * @description Re-queues submissions in the provided ID list for rejudging. Max 10,000 IDs per request. Requires `submission:rejudge` permission.
+     * @description Re-queues submissions in the provided ID list for rejudging. Max 10000 IDs per request. Requires `submission:rejudge` permission.
      */
     post: operations['bulkRejudgeSubmissions'];
     delete?: never;
@@ -11024,7 +11024,7 @@ export interface operations {
           'application/json': components['schemas']['BulkRejudgeResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Empty or oversized id list, non-positive id, or invalid worker (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;

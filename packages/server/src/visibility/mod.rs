@@ -539,6 +539,7 @@ mod tests {
             time_used: None,
             memory_used: None,
             judge_epoch: 0,
+            max_judge_epoch: 0,
             target_worker_id: None,
             owner_server_id: None,
             lease_heartbeat_at: None,
