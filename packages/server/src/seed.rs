@@ -66,7 +66,7 @@ ON CONFLICT DO NOTHING
 "#;
 
 /// Ensure the built-in roles exist and apply new built-in role-permission
-/// mappings (see [`SEED_MAPPINGS_SQL`]).
+/// mappings (see `SEED_MAPPINGS_SQL`).
 pub async fn seed_role_permissions(db: &DatabaseConnection) -> Result<(), DbErr> {
     let mut roles_inserted = 0u32;
     for &name in DEFAULT_ROLES {
