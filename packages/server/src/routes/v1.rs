@@ -426,10 +426,18 @@ fn contest_problem_routes(submission_max_size: usize) -> OpenApiRouter<AppState>
         .routes(routes!(handlers::contest::reorder_contest_problems))
         .routes(routes!(handlers::contest::bulk_delete_contest_problems))
         .routes(routes!(
+            handlers::problem::get_contest_problem,
             handlers::contest::update_contest_problem,
             handlers::contest::remove_contest_problem,
         ))
         .routes(routes!(handlers::contest::get_contest_problem_samples))
+        .routes(routes!(handlers::problem::get_contest_problem_sample))
+        .routes(routes!(
+            handlers::attachment::list_contest_problem_attachments
+        ))
+        .routes(routes!(
+            handlers::attachment::download_contest_problem_attachment
+        ))
         .nest("/{problem_id}/config", contest_problem_config_routes())
         .nest(
             "/{problem_id}/submissions",

@@ -13,10 +13,10 @@ use crate::entity::test_case;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::extractors::path::AppPath;
+use crate::handlers::problem::require_problem_part_reachable;
 use crate::state::AppState;
-use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::test_case_body::read_test_case_body_preview;
-use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
+use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ProblemSamplesResponse {
@@ -56,10 +56,25 @@ pub async fn get_contest_problem_samples(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let scope = ProblemScope::in_contest(contest_id, problem_id);
     let resource = Resource::Sample {
-        contest_id: Some(contest_id),
+        contest_id: scope.contest_id,
         problem_id,
     };
+
+    // Samples are a part of their problem: a plugin that hides the problem
+    // under this contest hides its samples too, whether or not it also
+    // judges `sample` resources. Same gate as every other problem part
+    // (contest reachable, then started, then the problem reachable).
+    require_problem_part_reachable(
+        &kernel,
+        &state,
+        &auth_user,
+        scope,
+        Action::Read,
+        "Contest not found",
+    )
+    .await?;
 
     // Fail fast, before doing any (bounded but non-trivial) blob reads below,
     // on a resource the kernel already knows is unreachable. This single
@@ -88,13 +103,6 @@ pub async fn get_contest_problem_samples(
     {
         return Err(AppError::NotFound("Contest not found".into()));
     }
-
-    // NOT covered by the kernel decision above: `require_contest_started`'s
-    // `now < start_time` check is a 400 business-rule rejection, not a
-    // reachability outcome, so it has no representation in `Decision` and is
-    // re-applied here, on top of the kernel's `Allow`.
-    let contest_model = find_contest(&state.db, contest_id).await?;
-    require_contest_started(&auth_user, &contest_model)?;
 
     let sample_test_cases = test_case::Entity::find()
         .filter(test_case::Column::ProblemId.eq(problem_id))
