@@ -10,6 +10,7 @@ done
 [ -f "$d/windows.ps1" ] || { echo "FAIL: windows.ps1 missing"; exit 1; }
 
 grep -q 'update-ca-certificates'        "$d/linux.sh"   || { echo "FAIL: linux.sh lacks update-ca-certificates"; exit 1; }
+grep -q 'update-ca-trust extract'       "$d/linux.sh"   || { echo "FAIL: linux.sh lacks the RHEL-family update-ca-trust"; exit 1; }
 grep -q 'add-trusted-cert'              "$d/macos.sh"   || { echo "FAIL: macos.sh lacks add-trusted-cert"; exit 1; }
 grep -qi 'certutil'                      "$d/windows.ps1"|| { echo "FAIL: windows.ps1 lacks certutil"; exit 1; }
 grep -qi 'Root'                          "$d/windows.ps1"|| { echo "FAIL: windows.ps1 lacks Root store"; exit 1; }
