@@ -19,9 +19,6 @@ import { useNavigate } from 'react-router';
 
 interface ErrorPageProps {
   code: number | string;
-  message?: string;
-  onRetry?: () => void;
-  onBack?: () => void;
 }
 
 export function ErrorCatcher({ code }: ErrorPageProps) {

@@ -56,7 +56,14 @@ pub async fn consume_operation_dlq(db: DatabaseConnection, mq: Arc<Mq>, queue_na
                         // envelope. Only give up after a generous window.
                         let mut attempt = 0u32;
                         loop {
-                            match persist_operation_dlq(&db, &envelope).await {
+                            let persisted = common::deadline::bounded(
+                                "operation_dlq.persist",
+                                common::deadline::BACKGROUND_STEP,
+                                persist_operation_dlq(&db, &envelope),
+                            )
+                            .await
+                            .unwrap_or_else(|| Err(anyhow::anyhow!("persist timed out")));
+                            match persisted {
                                 Ok(()) => {
                                     info!(
                                         message_id = %message_id,

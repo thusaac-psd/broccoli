@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use common::worker::{Executor, Task, TaskResult};
@@ -9,16 +9,11 @@ use mq::{BrokerMessage, MqConfig, init_mq};
 use plugin_core::config::PluginConfig;
 use reqwest::Client;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbBackend, EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    QueryFilter, Set, TransactionTrait,
 };
 use serde_json::Value;
-use testcontainers::ContainerAsync;
-use testcontainers::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::redis::Redis;
-use tokio::sync::{Mutex, OnceCell, RwLock, watch};
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use worker::models::operation::OperationTaskExecutor;
 use worker::models::operation::sandbox::isolate::IsolateSandboxManager;
@@ -38,171 +33,10 @@ use server::registry::{
 use server::state::AppState;
 use server::utils::plugin::sync_plugins;
 
-static SHARED_PG: OnceCell<(ContainerAsync<Postgres>, u16)> = OnceCell::const_new();
-static SHARED_REDIS: OnceCell<(ContainerAsync<Redis>, u16)> = OnceCell::const_new();
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
-static CREATE_DB_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static PG_CONTAINER_ID: OnceLock<String> = OnceLock::new();
-static REDIS_CONTAINER_ID: OnceLock<String> = OnceLock::new();
 
-/// Dedicated multi-thread runtime that owns the shared admin DB connection.
-///
-/// `#[tokio::test]` spins up a fresh current-thread runtime per test and tears
-/// it down at exit; a sqlx pool stored in a `OnceCell` would be tied to the
-/// first test's runtime and become invalid for the rest. Housing the pool
-/// inside a long-lived dedicated runtime - and dispatching `CREATE DATABASE`
-/// onto it - keeps a single admin connection alive across every test, instead
-/// of churning a new pool per test (which exhausts PostgreSQL backend slots).
-static ADMIN_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static SHARED_ADMIN_CONN: OnceLock<DatabaseConnection> = OnceLock::new();
-
-fn admin_runtime() -> &'static tokio::runtime::Handle {
-    ADMIN_RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .thread_name("e2e-admin")
-                .build()
-                .expect("Failed to build admin runtime")
-        })
-        .handle()
-}
-
-async fn create_test_database(db_name: &str) {
-    let port = shared_pg_port().await;
-    let handle = admin_runtime().clone();
-    let db_name = db_name.to_string();
-
-    handle
-        .spawn(async move {
-            if SHARED_ADMIN_CONN.get().is_none() {
-                let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-                let mut admin_opts = ConnectOptions::new(&admin_url);
-                admin_opts
-                    .max_connections(1)
-                    .min_connections(1)
-                    .acquire_timeout(Duration::from_secs(60))
-                    .idle_timeout(Duration::from_secs(600));
-                let conn = Database::connect(admin_opts)
-                    .await
-                    .expect("Failed to initialize shared admin database pool");
-                let _ = SHARED_ADMIN_CONN.set(conn);
-            }
-
-            let admin = SHARED_ADMIN_CONN
-                .get()
-                .expect("shared admin connection must be initialized");
-            admin
-                .execute_raw(Statement::from_string(
-                    DbBackend::Postgres,
-                    format!("CREATE DATABASE \"{db_name}\" TEMPLATE template_test"),
-                ))
-                .await
-                .expect("Failed to create test database from template");
-        })
-        .await
-        .expect("admin runtime task panicked");
-}
-
-extern "C" fn cleanup_containers() {
-    for id in [PG_CONTAINER_ID.get(), REDIS_CONTAINER_ID.get()]
-        .into_iter()
-        .flatten()
-    {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", "-v", id])
-            .output();
-    }
-}
-
-async fn shared_pg_port() -> u16 {
-    let (_, port) = SHARED_PG
-        .get_or_init(|| async {
-            let container = Postgres::default()
-                .with_tag("17-alpine")
-                .with_cmd(["postgres", "-c", "max_connections=500"])
-                .start()
-                .await
-                .expect("Failed to start PostgreSQL container");
-            let port = container
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("Failed to get PostgreSQL port");
-
-            let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-            let mut template_created = false;
-            for attempt in 0..15u32 {
-                if attempt > 0 {
-                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
-                }
-                let Ok(admin_db) = Database::connect(ConnectOptions::new(&admin_url)).await else {
-                    continue;
-                };
-                if admin_db
-                    .execute_raw(Statement::from_string(
-                        DbBackend::Postgres,
-                        "CREATE DATABASE \"template_test\"".to_string(),
-                    ))
-                    .await
-                    .is_ok()
-                {
-                    drop(admin_db);
-                    template_created = true;
-                    break;
-                }
-                drop(admin_db);
-            }
-            assert!(
-                template_created,
-                "Failed to create template_test database after 15 attempts"
-            );
-
-            let _ = PG_CONTAINER_ID.set(container.id().to_string());
-
-            let template_url =
-                format!("postgres://postgres:postgres@127.0.0.1:{port}/template_test");
-            let template_db = server::database::init_db(&template_url)
-                .await
-                .expect("Failed to initialize template database");
-            server::seed::seed_role_permissions(&template_db)
-                .await
-                .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
-                .await
-                .expect("Failed to create indexes");
-            drop(template_db);
-
-            (container, port)
-        })
-        .await;
-    *port
-}
-
-async fn shared_redis_port() -> u16 {
-    let (_, port) = SHARED_REDIS
-        .get_or_init(|| async {
-            let container = Redis::default()
-                .start()
-                .await
-                .expect("Failed to start Redis container");
-            let port = container
-                .get_host_port_ipv4(6379)
-                .await
-                .expect("Failed to get Redis port");
-
-            let _ = REDIS_CONTAINER_ID.set(container.id().to_string());
-
-            static ATEXIT_REGISTERED: OnceLock<()> = OnceLock::new();
-            ATEXIT_REGISTERED.get_or_init(|| unsafe {
-                libc::atexit(cleanup_containers);
-            });
-
-            (container, port)
-        })
-        .await;
-    *port
-}
+pub use test_support::TestResponse;
+use test_support::{close_database_pool, create_test_database, shared_redis_port};
 
 fn create_sandbox_manager()
 -> Box<dyn worker::models::operation::sandbox::SandboxManager + Send + Sync> {
@@ -254,35 +88,6 @@ fn worker_tools_dir() -> Option<PathBuf> {
 }
 
 #[allow(dead_code)]
-pub struct TestResponse {
-    pub status: u16,
-    pub headers: reqwest::header::HeaderMap,
-    pub text: String,
-    pub body: Value,
-}
-
-impl TestResponse {
-    pub async fn from_response(res: reqwest::Response) -> Self {
-        let status = res.status().as_u16();
-        let headers = res.headers().clone();
-        let text = res.text().await.unwrap_or_default();
-        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Self {
-            status,
-            headers,
-            text,
-            body,
-        }
-    }
-
-    pub fn id(&self) -> i32 {
-        self.body["id"]
-            .as_i64()
-            .expect("response body should contain 'id'") as i32
-    }
-}
-
-#[allow(dead_code)]
 pub struct E2eTestApp {
     pub base_url: String,
     pub client: Client,
@@ -317,20 +122,6 @@ impl Drop for E2eTestApp {
         }
         close_database_pool(self.db.clone());
     }
-}
-
-fn close_database_pool(db: DatabaseConnection) {
-    let _ = std::thread::Builder::new()
-        .name("e2e-db-close".to_string())
-        .spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            let _ = runtime.block_on(db.close_by_ref());
-        });
 }
 
 #[allow(dead_code)]
@@ -424,16 +215,9 @@ impl E2eTestApp {
     async fn spawn_internal(load_plugins: bool, db_max_connections: u32) -> Self {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        let (pg_port, redis_port) = tokio::join!(shared_pg_port(), shared_redis_port());
-
         let db_name = format!("e2e_{test_id}");
-
-        {
-            let _lock = CREATE_DB_LOCK.get_or_init(|| Mutex::new(())).lock().await;
-            create_test_database(&db_name).await;
-        }
-
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/{db_name}");
+        let (db_url, redis_port) =
+            tokio::join!(create_test_database(&db_name), shared_redis_port());
         let mut opts = ConnectOptions::new(&db_url);
         opts.max_connections(db_max_connections)
             .min_connections(0)
@@ -521,6 +305,7 @@ impl E2eTestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "e2e-test-jwt-secret".to_string(),
@@ -546,6 +331,7 @@ impl E2eTestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            clock: Default::default(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -608,7 +394,6 @@ impl E2eTestApp {
                 evaluate_batches,
                 hook_registry,
             },
-            device_codes: Arc::new(dashmap::DashMap::new()),
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),

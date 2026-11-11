@@ -20,21 +20,34 @@ struct CheckerStageContext {
     plugin_manager: Arc<dyn PluginInvoker>,
 }
 
+impl super::HostFnContext for CheckerStageContext {
+    fn plugin_id(&self) -> &str {
+        &self.caller_plugin_id
+    }
+}
+
+fn checker_stage_data(
+    caller_plugin_id: String,
+    checker_stage_registry: CheckerStageRegistry,
+    plugin_manager: Arc<dyn PluginInvoker>,
+) -> UserData<Arc<CheckerStageContext>> {
+    super::host_data(CheckerStageContext {
+        caller_plugin_id,
+        checker_stage_registry,
+        plugin_manager,
+    })
+}
+
 pub fn create_resolve_checker_function(
     plugin_id: String,
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    let user_data: UserData<CheckerStageContext> = UserData::new(CheckerStageContext {
-        caller_plugin_id: plugin_id,
-        checker_stage_registry,
-        plugin_manager,
-    });
     Function::new(
         "resolve_checker",
         [ValType::I64],
         [ValType::I64],
-        user_data,
+        checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
         resolve_checker_fn,
     )
 }
@@ -44,16 +57,11 @@ pub fn create_interpret_checker_function(
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    let user_data: UserData<CheckerStageContext> = UserData::new(CheckerStageContext {
-        caller_plugin_id: plugin_id,
-        checker_stage_registry,
-        plugin_manager,
-    });
     Function::new(
         "interpret_checker_result",
         [ValType::I64],
         [ValType::I64],
-        user_data,
+        checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
         interpret_checker_fn,
     )
 }
@@ -62,35 +70,23 @@ pub fn create_interpret_checker_function(
 /// output bytes. The caller validates + writes them. Unknown format / plugin
 /// error -> `Err` (surfaced to the SDK as an error, mapped to SystemError).
 fn checker_stage_call(
-    user_data: &UserData<CheckerStageContext>,
+    user_data: &UserData<Arc<CheckerStageContext>>,
     host_fn_name: &'static str,
     format: &str,
     select_handler_fn: impl FnOnce(&crate::registry::CheckerStageHandlers) -> String,
     request_bytes: Vec<u8>,
 ) -> Result<Vec<u8>, extism::Error> {
-    let (caller, registry, pm) = {
-        let guard = user_data.get()?;
-        let ctx = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (
-            ctx.caller_plugin_id.clone(),
-            ctx.checker_stage_registry.clone(),
-            ctx.plugin_manager.clone(),
-        )
-    };
-    let span = super::host_fn_span(host_fn_name, &caller);
-    let _enter = span.enter();
+    let ctx = super::HostCall::enter(user_data, host_fn_name)?;
 
     let handler = tokio::runtime::Handle::current()
-        .block_on(async { registry.read().await.get(format).cloned() })
+        .block_on(async { ctx.checker_stage_registry.read().await.get(format).cloned() })
         .ok_or_else(|| {
             extism::Error::msg(format!("No checker resolver registered for '{format}'"))
         })?;
 
     let function_name = select_handler_fn(&handler);
     tracing::debug!(
-        caller = %caller,
+        caller = %ctx.caller_plugin_id,
         handler_plugin = %handler.plugin_id,
         handler_fn = %function_name,
         checker_format = %format,
@@ -99,7 +95,8 @@ fn checker_stage_call(
 
     tokio::runtime::Handle::current()
         .block_on(async {
-            pm.call_raw(&handler.plugin_id, &function_name, request_bytes)
+            ctx.plugin_manager
+                .call_raw(&handler.plugin_id, &function_name, request_bytes)
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("Checker stage plugin error: {e}")))
@@ -109,11 +106,9 @@ fn resolve_checker_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<CheckerStageContext>,
+    user_data: UserData<Arc<CheckerStageContext>>,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: ResolveCheckerInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {e}")))?;
+    let input: ResolveCheckerInput = super::read_json(plugin, inputs, "input")?;
     let request_bytes = serde_json::to_vec(&input)
         .map_err(|e| extism::Error::msg(format!("Failed to serialize resolve input: {e}")))?;
 
@@ -130,20 +125,16 @@ fn resolve_checker_fn(
     let _stage: CheckerStage = serde_json::from_slice(&output_bytes)
         .map_err(|e| extism::Error::msg(format!("Failed to deserialize checker stage: {e}")))?;
 
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-    Ok(())
+    super::write_bytes(plugin, outputs, &output_bytes)
 }
 
 fn interpret_checker_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     outputs: &mut [Val],
-    user_data: UserData<CheckerStageContext>,
+    user_data: UserData<Arc<CheckerStageContext>>,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: InterpretCheckerInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {e}")))?;
+    let input: InterpretCheckerInput = super::read_json(plugin, inputs, "input")?;
     let request_bytes = serde_json::to_vec(&input)
         .map_err(|e| extism::Error::msg(format!("Failed to serialize interpret input: {e}")))?;
 
@@ -158,7 +149,5 @@ fn interpret_checker_fn(
     let _verdict: CheckerVerdict = serde_json::from_slice(&output_bytes)
         .map_err(|e| extism::Error::msg(format!("Failed to deserialize checker verdict: {e}")))?;
 
-    let offset = plugin.memory_new(&output_bytes)?;
-    outputs[0] = Val::I64(offset.offset() as i64);
-    Ok(())
+    super::write_bytes(plugin, outputs, &output_bytes)
 }

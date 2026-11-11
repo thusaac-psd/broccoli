@@ -7,7 +7,12 @@ import React, {
   useState,
 } from 'react';
 
-import { useApiClient, useSetApiAccessToken } from '@/api';
+import {
+  type RefreshedSession,
+  useApiClient,
+  useRefreshSession,
+  useSetApiAccessToken,
+} from '@/api';
 import {
   AUTH_SESSION_EXPIRED_EVENT,
   type LoginRequest,
@@ -37,9 +42,16 @@ export function AuthProvider({
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const bootstrapStartedRef = useRef(false);
+  // Whether the bootstrap refresh has settled (the server answered).
+  const settledRef = useRef(false);
+  // When the next background refresh runs: a full interval after a success,
+  // sooner (with backoff) while the server is unreachable, never once the
+  // session is over. A fresh object re-arms the timer even for the same delay.
+  const [nextRefresh, setNextRefresh] = useState<{ inMs: number } | null>(null);
 
   const apiClient = useApiClient();
   const setApiAccessToken = useSetApiAccessToken();
+  const refreshApiSession = useRefreshSession();
 
   const queryClient = useQueryClient();
 
@@ -51,10 +63,33 @@ export function AuthProvider({
     [setApiAccessToken],
   );
 
+  // Starts (or renews) the session from a login or refresh response.
+  const startSession = useCallback(
+    (data: RefreshedSession) => {
+      updateAccessToken(data.token);
+      setUser({
+        id: data.id,
+        username: data.username,
+        display_name: data.display_name,
+        roles: data.roles,
+        permissions: data.permissions,
+      });
+      localStorage.setItem(sessionStatusKey, 'true');
+      setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
+    },
+    [updateAccessToken, sessionStatusKey],
+  );
+
+  // Ends the session in this tab and, through the session hint, in every
+  // other tab. Only for an explicit logout or a definitive auth rejection:
+  // anything weaker would sign out tabs whose session is fine.
   const clearSession = useCallback(() => {
     localStorage.setItem(sessionStatusKey, 'false');
     updateAccessToken(null);
     setUser(null);
+    setNextRefresh(null);
+    settledRef.current = true;
+    setIsLoading(false);
     queryClient.clear();
   }, [updateAccessToken, sessionStatusKey, queryClient]);
 
@@ -66,26 +101,33 @@ export function AuthProvider({
     clearSession();
   }, [apiClient, clearSession]);
 
+  // Shares the API client's refresh, so this background refresh can never race
+  // a 401-triggered one for the single-use refresh cookie.
   const refresh = useCallback(async () => {
-    const { data, error } = await apiClient.POST('/auth/refresh');
+    const outcome = await refreshApiSession();
 
-    if (error) {
+    if (outcome.status === 'unavailable') {
+      // Offline, a gateway 502, a database blip: the session is probably
+      // fine, so keep it (and keep the bootstrap pending) and ask again.
+      setNextRefresh({ inMs: outcome.retryInMs });
+      return;
+    }
+
+    if (outcome.status === 'rejected') {
       clearSession();
       return;
     }
 
-    if (data) {
-      updateAccessToken(data.token);
-      setUser({
-        id: data.id,
-        username: data.username,
-        display_name: data.display_name,
-        roles: data.roles,
-        permissions: data.permissions,
-      });
-      localStorage.setItem(sessionStatusKey, 'true');
+    startSession(outcome.session);
+
+    if (!settledRef.current) {
+      settledRef.current = true;
+      setIsLoading(false);
+      // Re-run any queries that fired before the access token was restored
+      // and got a 401 because no Authorization header was attached.
+      queryClient.invalidateQueries();
     }
-  }, [apiClient, clearSession, updateAccessToken, sessionStatusKey]);
+  }, [refreshApiSession, clearSession, startSession, queryClient]);
 
   const login = useCallback(
     async (data: LoginRequest) => {
@@ -96,30 +138,17 @@ export function AuthProvider({
       if (error) throw new Error(error.message);
       if (!resData) throw new Error('Unexpected login response');
 
-      updateAccessToken(resData.token);
-      setUser({
-        id: resData.id,
-        username: resData.username,
-        display_name: resData.display_name,
-        roles: resData.roles,
-        permissions: resData.permissions,
-      });
-
-      localStorage.setItem(sessionStatusKey, 'true');
+      startSession(resData);
       queryClient.clear();
     },
-    [apiClient, updateAccessToken, sessionStatusKey, queryClient],
+    [apiClient, startSession, queryClient],
   );
 
   // Sync state with other tabs or infrastructure events
   useEffect(() => {
-    const handleTokenCleared = (event: Event) => {
-      const key = (event as CustomEvent<{ key?: string }>).detail?.key;
-      // If no key provided, clear all. Otherwise, check if it matches our session hint key.
-      if (!key || key === sessionStatusKey) {
-        clearSession();
-      }
-    };
+    // The API client announces that the server definitively rejected the
+    // refresh cookie (see `recoverSession`).
+    const handleSessionExpired = () => clearSession();
 
     const handleStorage = (event: StorageEvent) => {
       // Another tab signalled logout: `clearSession` writes the string 'false'
@@ -131,7 +160,7 @@ export function AuthProvider({
       }
     };
 
-    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleTokenCleared);
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired);
     window.addEventListener('storage', handleStorage);
 
     const initAuth = async () => {
@@ -140,12 +169,14 @@ export function AuthProvider({
 
       const sessionHint = localStorage.getItem(sessionStatusKey);
       if (sessionHint === 'true') {
+        // Settles the bootstrap once the server has answered either way;
+        // while it is unreachable the app keeps waiting instead of
+        // concluding the user is signed out.
         await refresh();
-        // Re-run any queries that fired before the access token was restored
-        // and got a 401 because no Authorization header was attached.
-        queryClient.invalidateQueries();
+      } else {
+        settledRef.current = true;
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
 
     initAuth();
@@ -153,22 +184,18 @@ export function AuthProvider({
     return () => {
       window.removeEventListener(
         AUTH_SESSION_EXPIRED_EVENT,
-        handleTokenCleared,
+        handleSessionExpired,
       );
       window.removeEventListener('storage', handleStorage);
     };
-  }, [clearSession, refresh, sessionStatusKey, queryClient]);
+  }, [clearSession, refresh, sessionStatusKey]);
 
   // Automatic background refresh loop
   useEffect(() => {
-    if (!accessToken) return;
-
-    const timer = setInterval(() => {
-      refresh();
-    }, REFRESH_INTERVAL_MS);
-
-    return () => clearInterval(timer);
-  }, [accessToken, refresh]);
+    if (!nextRefresh) return;
+    const timer = setTimeout(() => void refresh(), nextRefresh.inMs);
+    return () => clearTimeout(timer);
+  }, [nextRefresh, refresh]);
 
   const value = useMemo(
     () => ({

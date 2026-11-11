@@ -1,11 +1,14 @@
-import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { parseApiError, serverNow, useApiClient } from '@broccoli/web-sdk/api';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
+import { toastUnsettled } from '@/lib/idempotency-feedback';
+
 type ContestEnrollState = {
   is_public: boolean;
+  start_time: string;
   end_time: string;
 };
 
@@ -21,32 +24,43 @@ export function useContestEnroll({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
+
+  const invalidateEnrollment = () => {
+    queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
+    queryClient.invalidateQueries({
+      queryKey: ['contest-my-info', contestId],
+    });
+  };
 
   const enrollMutation = useMutation({
     mutationFn: async () => {
-      const { error } = await apiClient.POST('/contests/{id}/register', {
-        headers: { 'Idempotency-Key': getKey() },
-        params: { path: { id: contestId } },
-      });
-      if (error) throw error;
+      const { error } = await sendIdempotent({ contestId }, (key) =>
+        apiClient.POST('/contests/{id}/register', {
+          headers: { 'Idempotency-Key': key },
+          params: { path: { id: contestId } },
+        }),
+      );
+      if (error && !isAlreadyDone(error)) throw error;
     },
     onSuccess: () => {
-      resetKey();
       toast.success(t('toast.contest.enrolled'));
-      queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-      queryClient.invalidateQueries({
-        queryKey: ['contest-my-info', contestId],
-      });
+      invalidateEnrollment();
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
     onError: (error: unknown) => {
+      // The refetched status shows whether the earlier attempt enrolled.
+      if (
+        toastUnsettled(error, t, {
+          refetch: invalidateEnrollment,
+          outcomeUnknownKey: 'toast.contest.enrollOutcomeUnknown',
+        })
+      ) {
+        return;
+      }
       if (parseApiError(error)?.code === 'CONFLICT') {
         toast.success(t('toast.contest.enrolled'));
-        queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-        queryClient.invalidateQueries({
-          queryKey: ['contest-my-info', contestId],
-        });
+        invalidateEnrollment();
         return;
       }
       toast.error(t('toast.contest.enrollError'));
@@ -62,10 +76,7 @@ export function useContestEnroll({
     },
     onSuccess: () => {
       toast.success(t('toast.contest.unregistered'));
-      queryClient.invalidateQueries({ queryKey: ['contest', contestId] });
-      queryClient.invalidateQueries({
-        queryKey: ['contest-my-info', contestId],
-      });
+      invalidateEnrollment();
       queryClient.invalidateQueries({ queryKey: ['dashboard-contests'] });
     },
     onError: () => {
@@ -87,9 +98,11 @@ export function useContestEnroll({
 
   const hasMyInfo = myInfo !== undefined;
   const isRegistered = Boolean(myInfo?.is_registered);
-  const hasEnded = contest
-    ? Date.now() >= new Date(contest.end_time).getTime()
-    : true;
+  const now = serverNow();
+  const hasEnded = contest ? now >= Date.parse(contest.end_time) : true;
+  // The server refuses to unregister once the contest has started, because
+  // standings are built from registrations.
+  const hasStarted = contest ? now >= Date.parse(contest.start_time) : true;
 
   const canShowEnrollCard =
     !!contest &&
@@ -105,7 +118,7 @@ export function useContestEnroll({
     !canManageContest &&
     contest.is_public &&
     isRegistered &&
-    !hasEnded;
+    !hasStarted;
 
   return {
     canShowEnrollCard,

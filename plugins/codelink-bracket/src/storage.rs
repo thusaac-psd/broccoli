@@ -5,6 +5,8 @@
 //! `Storage::modify` (a compare-and-set retry loop), never a read-then-write
 //! pair.
 
+use std::collections::HashMap;
+
 use broccoli_server_sdk::prelude::*;
 
 use crate::model::{MatchPhase, MatchState, Setup};
@@ -117,6 +119,44 @@ pub fn load_all_matches(host: &Host, contest: i32) -> Result<Vec<(u8, MatchState
     })?;
     matches.sort_by_key(|(id, _)| *id);
     Ok(matches)
+}
+
+/// For each of `problem_ids`, the bracket contests holding it that are not
+/// deleted and have not ended yet, in ONE query for the whole batch. Keys
+/// with no such contest are absent. Shared by `visibility.rs` (a problem read
+/// outside every contest is hidden while any of these hides it) and
+/// `gate.rs` (a problem cannot be submitted outside every contest while any
+/// of these holds it). An ended bracket no longer owns its problems, so they
+/// fall back to whatever the host and other plugins decide.
+pub fn unended_bracket_contests(
+    host: &Host,
+    problem_ids: &[i32],
+) -> Result<HashMap<i32, Vec<i32>>, SdkError> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        problem_id: i32,
+        contest_id: i32,
+    }
+
+    let mut held: HashMap<i32, Vec<i32>> = HashMap::new();
+    if problem_ids.is_empty() {
+        return Ok(held);
+    }
+    let mut p = Params::new();
+    let placeholders: Vec<String> = problem_ids.iter().map(|id| p.bind(*id)).collect();
+    let sql = format!(
+        "SELECT cp.problem_id AS problem_id, cp.contest_id AS contest_id \
+         FROM contest_problem cp JOIN contest c ON c.id = cp.contest_id \
+         WHERE c.contest_type = 'codelink-bracket' AND c.deleted_at IS NULL \
+         AND (c.end_time IS NULL OR c.end_time > clock_timestamp()) \
+         AND cp.problem_id IN ({})",
+        placeholders.join(",")
+    );
+    let rows: Vec<Row> = host.db.query_with_args(&sql, &p.into_args())?;
+    for row in rows {
+        held.entry(row.problem_id).or_default().push(row.contest_id);
+    }
+    Ok(held)
 }
 
 /// Find the one match, among every match already loaded for a contest, where

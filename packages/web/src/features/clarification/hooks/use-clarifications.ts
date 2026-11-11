@@ -1,9 +1,11 @@
 import { useApiClient, useApiFetch } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 import {
   createClarification,
@@ -12,6 +14,25 @@ import {
   resolveClarification,
   toggleReplyPublic,
 } from '../api/api';
+
+/** An earlier send already posted it (its response was lost): a success. */
+function treatAlreadyDoneAsPosted(error: unknown): null {
+  if (isAlreadyDone(error)) return null;
+  throw error;
+}
+
+/**
+ * An earlier send may have posted it, or is still posting it. No refetch is
+ * needed here: `onSettled` refetches the list, which shows whether it was.
+ */
+function reportedUnsettled(
+  error: unknown,
+  t: (key: string) => string,
+): boolean {
+  return toastUnsettled(error, t, {
+    outcomeUnknownKey: 'clarification.outcomeUnknown',
+  });
+}
 
 export function useClarifications(contestId: number, enabled: boolean) {
   const apiClient = useApiClient();
@@ -27,18 +48,19 @@ export function useCreateClarification(contestId: number) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  // Stable key per logical operation: same key flows through TanStack retries
-  // and any user-driven retries until the operation succeeds, at which point
-  // resetKey() ensures the next operation gets a fresh key.
-  const { getKey, resetKey } = useIdempotencyKey();
+  // The key follows the clarification's content: a retry of the same text
+  // reuses it, an edited one gets a fresh key.
+  const sendIdempotent = useIdempotentRequest();
   return useMutation({
     mutationFn: (body: CreateClarificationBody) =>
-      createClarification(apiClient, contestId, body, getKey()),
+      sendIdempotent({ contestId, body }, (key) =>
+        createClarification(apiClient, contestId, body, key),
+      ).catch(treatAlreadyDoneAsPosted),
     onSuccess: () => {
-      resetKey();
       toast.success(t('clarification.submitSuccess'));
     },
     onError: (error: Error) => {
+      if (reportedUnsettled(error, t)) return;
       toast.error(error.message || t('clarification.submitError'));
     },
     onSettled: () => {
@@ -53,21 +75,23 @@ export function useReplyClarification(contestId: number) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
   return useMutation({
     mutationFn: (payload: { clarificationId: number; content: string }) =>
-      replyClarification(
-        apiClient,
-        contestId,
-        payload.clarificationId,
-        { content: payload.content, is_public: false },
-        getKey(),
-      ),
+      sendIdempotent({ contestId, ...payload }, (key) =>
+        replyClarification(
+          apiClient,
+          contestId,
+          payload.clarificationId,
+          { content: payload.content, is_public: false },
+          key,
+        ),
+      ).catch(treatAlreadyDoneAsPosted),
     onSuccess: () => {
-      resetKey();
       toast.success(t('clarification.replySuccess'));
     },
     onError: (error: Error) => {
+      if (reportedUnsettled(error, t)) return;
       toast.error(error.message || t('clarification.replyError'));
     },
     onSettled: () => {

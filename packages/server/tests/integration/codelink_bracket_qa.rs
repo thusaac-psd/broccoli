@@ -309,6 +309,61 @@ async fn defect_standalone_sample_test_case_leaks_own_not_yet_open_bracket_probl
     );
 }
 
+/// Samples and attachments are parts of their problem: read through the
+/// bracket contest itself, they follow the problem's decision. Before this
+/// the plugin judged only `problem` resources, so a player could read the
+/// samples of their own not-yet-open problem through the contest route.
+#[tokio::test]
+async fn contest_scoped_samples_and_attachments_follow_their_problem() {
+    let fx = setup_fixture().await;
+    order_match_0(&fx).await;
+    start_match_0(&fx).await;
+
+    let a = &fx.players[0];
+    let current_problem = fx.rounds[0].group_a[0];
+    let future_problem = fx.rounds[0].group_a[2];
+
+    let mut future_ref = String::new();
+    for problem in [current_problem, future_problem] {
+        let upload = fx
+            .app
+            .upload_attachment(
+                problem,
+                "hint.txt",
+                b"a problem file".to_vec(),
+                None,
+                &fx.staff_token,
+            )
+            .await;
+        assert_eq!(upload.status, 201, "upload failed: {}", upload.text);
+        future_ref = upload.body["id"].as_str().unwrap().to_string();
+    }
+
+    for (problem, expected) in [(current_problem, 200), (future_problem, 404)] {
+        for path in [
+            routes::contest_problem(fx.contest_id, problem),
+            routes::contest_problem_samples(fx.contest_id, problem),
+            routes::contest_problem_attachments(fx.contest_id, problem),
+        ] {
+            let res = fx.app.get_with_token(&path, &a.token).await;
+            assert_eq!(res.status, expected, "{path}: {}", res.text);
+        }
+    }
+
+    let res = fx
+        .app
+        .download_raw(
+            &routes::contest_problem_attachment(fx.contest_id, future_problem, &future_ref),
+            &a.token,
+        )
+        .await;
+    assert_eq!(
+        res.status().as_u16(),
+        404,
+        "the future problem's attachment must stay hidden through the contest route"
+    );
+}
+
 // =====================================================================
 // Area 2 -- the single most severe confirmed defect: the standalone
 // submission route skips the bracket's gate ENTIRELY, not just its

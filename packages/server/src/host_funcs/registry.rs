@@ -59,9 +59,14 @@ struct RegistryContext {
     language_resolver_registry: LanguageResolverRegistry,
 }
 
-type RegistryUserData = RegistryContext;
+impl super::HostFnContext for RegistryContext {
+    fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+}
 
-#[allow(clippy::too_many_arguments)]
+type RegistryUserData = UserData<Arc<RegistryContext>>;
+
 pub fn create_registry_functions(
     plugin_id: String,
     contest_type_registry: ContestTypeRegistry,
@@ -69,12 +74,12 @@ pub fn create_registry_functions(
     checker_stage_registry: CheckerStageRegistry,
     language_resolver_registry: LanguageResolverRegistry,
 ) -> Vec<Function> {
-    let user_data: UserData<RegistryUserData> = UserData::new(RegistryContext {
-        plugin_id: plugin_id.clone(),
-        contest_type_registry: contest_type_registry.clone(),
-        evaluator_registry: evaluator_registry.clone(),
-        checker_stage_registry: checker_stage_registry.clone(),
-        language_resolver_registry: language_resolver_registry.clone(),
+    let user_data = super::host_data(RegistryContext {
+        plugin_id,
+        contest_type_registry,
+        evaluator_registry,
+        checker_stage_registry,
+        language_resolver_registry,
     });
 
     vec![
@@ -109,20 +114,16 @@ pub fn create_registry_functions(
     ]
 }
 
-#[allow(clippy::too_many_arguments)]
 fn register_handler<I: serde::de::DeserializeOwned>(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
-    _outputs: &mut [Val],
     plugin_id: &str,
     registry: &Arc<RwLock<HashMap<String, PluginHandler>>>,
     extract: impl FnOnce(&I) -> (&str, &str),
     validate: impl FnOnce(&I) -> Result<(), extism::Error>,
     label: &str,
 ) -> Result<(), extism::Error> {
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: I = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
+    let input: I = super::read_json(plugin, inputs, "input")?;
 
     validate(&input)?;
 
@@ -154,21 +155,12 @@ fn register_contest_type_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<RegistryUserData>,
+    user_data: RegistryUserData,
 ) -> Result<(), extism::Error> {
-    let (plugin_id, registry) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (data.plugin_id.clone(), data.contest_type_registry.clone())
-    };
-    let span = super::host_fn_span("register_contest_type", &plugin_id);
-    let _enter = span.enter();
+    let call = super::HostCall::enter(&user_data, "register_contest_type")?;
+    let (plugin_id, registry) = (&call.plugin_id, &call.contest_type_registry);
 
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: RegisterContestTypeInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
+    let input: RegisterContestTypeInput = super::read_json(plugin, inputs, "input")?;
 
     let key = input.contest_type;
     validate_registry_id(&key, "contest_type")?;
@@ -205,23 +197,15 @@ fn register_evaluator_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<RegistryUserData>,
+    user_data: RegistryUserData,
 ) -> Result<(), extism::Error> {
-    let (plugin_id, registry) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (data.plugin_id.clone(), data.evaluator_registry.clone())
-    };
-    let span = super::host_fn_span("register_evaluator", &plugin_id);
-    let _enter = span.enter();
+    let call = super::HostCall::enter(&user_data, "register_evaluator")?;
+    let (plugin_id, registry) = (&call.plugin_id, &call.evaluator_registry);
     register_handler::<RegisterEvaluatorInput>(
         plugin,
         inputs,
-        _outputs,
-        &plugin_id,
-        &registry,
+        plugin_id,
+        registry,
         |input| (&input.problem_type, &input.handler),
         |input| {
             validate_registry_id(&input.problem_type, "problem_type")?;
@@ -238,21 +222,12 @@ fn register_checker_resolver_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<RegistryUserData>,
+    user_data: RegistryUserData,
 ) -> Result<(), extism::Error> {
-    let (plugin_id, registry) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (data.plugin_id.clone(), data.checker_stage_registry.clone())
-    };
-    let span = super::host_fn_span("register_checker_resolver", &plugin_id);
-    let _enter = span.enter();
+    let call = super::HostCall::enter(&user_data, "register_checker_resolver")?;
+    let (plugin_id, registry) = (&call.plugin_id, &call.checker_stage_registry);
 
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: RegisterCheckerResolverInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
+    let input: RegisterCheckerResolverInput = super::read_json(plugin, inputs, "input")?;
 
     validate_registry_id(&input.checker_format, "checker_format")?;
     if input.resolve_handler.is_empty() || input.interpret_handler.is_empty() {
@@ -304,24 +279,12 @@ fn register_language_resolver_fn(
     plugin: &mut extism::CurrentPlugin,
     inputs: &[Val],
     _outputs: &mut [Val],
-    user_data: UserData<RegistryUserData>,
+    user_data: RegistryUserData,
 ) -> Result<(), extism::Error> {
-    let (plugin_id, registry) = {
-        let guard = user_data.get()?;
-        let data = guard
-            .lock()
-            .map_err(|_| extism::Error::msg("Lock poisoned"))?;
-        (
-            data.plugin_id.clone(),
-            data.language_resolver_registry.clone(),
-        )
-    };
-    let span = super::host_fn_span("register_language_resolver", &plugin_id);
-    let _enter = span.enter();
+    let call = super::HostCall::enter(&user_data, "register_language_resolver")?;
+    let (plugin_id, registry) = (&call.plugin_id, &call.language_resolver_registry);
 
-    let input_bytes: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-    let input: RegisterLanguageResolverInput = serde_json::from_slice(&input_bytes)
-        .map_err(|e| extism::Error::msg(format!("Failed to deserialize input: {}", e)))?;
+    let input: RegisterLanguageResolverInput = super::read_json(plugin, inputs, "input")?;
 
     validate_registry_id(&input.language_id, "language_id")?;
     if input.function_name.is_empty() {

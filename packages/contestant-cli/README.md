@@ -182,18 +182,22 @@ Environment overrides:
 
 ## TLS
 
-The client uses **rustls with bundled Mozilla roots** — fast, no system
-dependency, works on old/minimal Linux & Windows. Switch trust mode at runtime
-(no rebuild) via `BROCCOLI_TLS` or the `tls` config key:
+The client uses **rustls** (no OpenSSL dependency). By default it trusts the
+machine's OS certificate store **and** its bundled Mozilla roots, so it works
+both with a server whose internal CA is installed in the OS store (the air-gap
+contestant install does this) and with public-CA servers on machines whose OS
+store is missing or stale. Switch trust mode at runtime (no rebuild) via
+`BROCCOLI_TLS` or the `tls` config key:
 
-| Mode                 | When to use                                                                                                |
-| -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `webpki` _(default)_ | Public-CA HTTPS or plain HTTP.                                                                             |
-| `system`             | The server uses a **private/internal-CA** cert installed in the machine's OS trust store.                  |
-| `insecure`           | A throwaway **self-signed** dev server you control. Skips verification (prints a warning). **Not secure.** |
+| Mode                  | When to use                                                                                                |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `default` _(default)_ | Almost always: public-CA HTTPS, an internal CA in the OS store, or plain HTTP.                             |
+| `webpki`              | Trust only the bundled Mozilla roots, ignoring the OS store.                                               |
+| `system`              | Use the OS verifier alone (on macOS and Windows it also applies the OS's revocation and policy checks).    |
+| `insecure`            | A throwaway **self-signed** dev server you control. Skips verification (prints a warning). **Not secure.** |
 
 ```bash
-BROCCOLI_TLS=system broccoli submit sol.cpp -p A    # trust the OS cert store
+BROCCOLI_TLS=webpki broccoli submit sol.cpp -p A    # ignore the OS cert store
 ```
 
 ## Shell completions

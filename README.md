@@ -118,7 +118,7 @@ Copy `config/config.example.toml` to `config/config.toml`. The main sections:
 | `[server]`        | Host, port, CORS origins, trusted proxies               |
 | `[database]`      | PostgreSQL connection URL                               |
 | `[auth]`          | JWT secret and cookie settings                          |
-| `[bootstrap]`     | First admin account created on startup                  |
+| `[bootstrap]`     | First admin account created on startup; recovery reset  |
 | `[mq]`            | Redis URL, queue names, dead-letter retry policy        |
 | `[storage]`       | Backend (`database`, `filesystem`, or `object_storage`) |
 | `[worker]`        | Sandbox backend and cgroups toggle                      |
