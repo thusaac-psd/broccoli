@@ -108,10 +108,18 @@ pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiv
 /// the same way `tests/integration/scaling.rs` calls
 /// `server::dispatcher::sweeper::sweep_once` directly.
 pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickStats, DbErr> {
+    let Ok(loaded) = loaded_plugin_ids(state) else {
+        error!("Plugin registry lock poisoned; skipping plugin timer tick");
+        return Ok(TickStats::default());
+    };
+    if loaded.is_empty() {
+        return Ok(TickStats::default());
+    }
     let claimed = claim_due(
         &state.db,
         Duration::seconds(config.lease_secs),
         config.batch,
+        &loaded,
     )
     .await?;
     let stats = TickStats {
@@ -140,6 +148,13 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
 /// distinct contribution is liveness (no claimer waits on another's lock),
 /// which the suite does not measure.
 ///
+/// Only timers of `plugin_ids` (the plugins `Loaded` on this replica) are
+/// claimed. Any replica may claim any due row, and replicas do not always
+/// agree on which plugins are loaded (one is still converging onto an
+/// enable, or failed to load a plugin its peers run fine). A replica that
+/// cannot deliver a timer therefore leaves it for one that can, instead of
+/// burning a delivery attempt on it or deleting it.
+///
 /// Separately load-bearing: no transaction is held across the plugin
 /// invocation that follows. `claim_due` returns before `deliver` ever touches
 /// the plugin host, so this statement's connection is back in the pool first.
@@ -149,6 +164,7 @@ async fn claim_due(
     db: &DatabaseConnection,
     lease: Duration,
     batch: u64,
+    plugin_ids: &[String],
 ) -> Result<Vec<plugin_timer::Model>, DbErr> {
     let sql = r#"
         UPDATE plugin_timer
@@ -157,6 +173,7 @@ async fn claim_due(
           SELECT id FROM plugin_timer
           WHERE fire_at <= now()
             AND (claimed_at IS NULL OR claimed_at < now() - ($1 || ' seconds')::interval)
+            AND plugin_id = ANY($3)
           ORDER BY fire_at
           LIMIT $2
           FOR UPDATE SKIP LOCKED
@@ -166,23 +183,22 @@ async fn claim_due(
     plugin_timer::Model::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         sql,
-        [lease.num_seconds().into(), (batch as i64).into()],
+        [
+            lease.num_seconds().into(),
+            (batch as i64).into(),
+            plugin_ids.to_vec().into(),
+        ],
     ))
     .all(db)
     .await
 }
 
-/// Deletes every pending timer belonging to `plugin_id`. Called when a
-/// plugin is unloaded -- on a failed `init()` during activation
-/// (`utils::plugin::activate_plugin`) and on an admin-initiated disable
-/// (`handlers::admin::disable_plugin`). A plugin's timers are meaningless
-/// once it can no longer be invoked: without this, `deliver`'s
-/// `timer_function` lookup would keep returning `Ok(None)` for them forever,
-/// which already drops rows one at a time on the next tick that claims them
-/// -- this just does it immediately, at the moment of unload, rather than
-/// leaving them to expire on a best-effort basis. NOT called from
-/// `reload_plugin`: a reload swaps the WASM runtime under the same plugin
-/// id, and its pending timers remain valid callbacks for the reloaded code.
+/// Deletes every pending timer belonging to `plugin_id`. Called only when an
+/// admin disables the plugin (`plugin_lifecycle::disable`): that disables it
+/// on every replica, so its timers can never be delivered again. NOT called
+/// when a plugin merely fails to load on one replica (a healthy peer is
+/// still delivering them; see `claim_due`), nor on reload, which swaps the
+/// WASM runtime under the same plugin id and keeps its timers valid.
 pub async fn delete_timers_for_plugin(
     db: &DatabaseConnection,
     plugin_id: &str,
@@ -213,12 +229,22 @@ async fn delete_timer(db: &DatabaseConnection, row: &plugin_timer::Model) {
     }
 }
 
+/// Ids of the plugins currently `Loaded` on this replica.
+fn loaded_plugin_ids(state: &AppState) -> Result<Vec<String>, ()> {
+    let registry = state.plugins.get_registry().read().map_err(|_| ())?;
+    Ok(registry
+        .values()
+        .filter(|e| e.status == PluginStatus::Loaded)
+        .map(|e| e.id.clone())
+        .collect())
+}
+
 /// Looks up the `[[server.timers]] function` a `Loaded` plugin declared.
 /// Returns `Ok(None)` for an unknown plugin, one that isn't `Loaded`, or one
-/// with no declaration -- the caller treats all three identically: this row
-/// cannot be delivered right now and should be dropped with a warning, since
-/// a plugin can only reach this state by dropping the declaration (or being
-/// disabled) while timers were still pending.
+/// with no declaration. `claim_due` only claims rows of `Loaded` plugins, so
+/// in practice `None` means the plugin dropped the declaration while timers
+/// were still pending (or was unloaded between claim and delivery), and the
+/// caller drops the row with a warning.
 fn timer_function(state: &AppState, plugin_id: &str) -> Result<Option<String>, ()> {
     let registry = state.plugins.get_registry().read().map_err(|_| ())?;
     let Some(entry) = registry.get(plugin_id) else {
@@ -359,10 +385,23 @@ mod tests {
         let conn = crate::database::init_db(&url)
             .await
             .expect("init schema on test db");
+        // The plugin these tests schedule for (only an enabled plugin may arm
+        // a timer through `host_funcs::timer::schedule`).
+        sea_orm::ConnectionTrait::execute_unprepared(
+            &conn,
+            "INSERT INTO plugin (id, is_enabled, generation, updated_at) VALUES ('p', TRUE, 0, NOW())",
+        )
+        .await
+        .expect("seed plugin row");
         TestDb {
             _container: container,
             conn,
         }
+    }
+
+    /// The plugins a test claimer has loaded.
+    fn ids() -> Vec<String> {
+        vec!["p".to_string()]
     }
 
     fn now() -> DateTime<Utc> {
@@ -409,7 +448,9 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        let claimed = claim_due(&db, Duration::seconds(30), 64, &ids())
+            .await
+            .unwrap();
 
         let keys: Vec<&str> = claimed.iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, vec!["due"], "only the due, unclaimed timer is taken");
@@ -419,7 +460,9 @@ mod tests {
     async fn delivered_timer_cleanup_preserves_a_rescheduled_wakeup() {
         let db = test_db().await;
         seed_timer(&db, "p", "rearm", now() - Duration::seconds(1), None).await;
-        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        let claimed = claim_due(&db, Duration::seconds(30), 64, &ids())
+            .await
+            .unwrap();
         let delivery = &claimed[0];
         crate::host_funcs::timer::schedule(
             &db,
@@ -440,7 +483,9 @@ mod tests {
         assert!(next.claimed_at.is_none());
 
         seed_timer(&db, "p", "finished", now() - Duration::seconds(1), None).await;
-        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        let claimed = claim_due(&db, Duration::seconds(30), 64, &ids())
+            .await
+            .unwrap();
         delete_timer(&db, &claimed[0]).await;
         assert!(
             plugin_timer::Entity::find_by_id(claimed[0].id)
@@ -464,7 +509,9 @@ mod tests {
         )
         .await;
 
-        let claimed = claim_due(&db, Duration::seconds(30), 64).await.unwrap();
+        let claimed = claim_due(&db, Duration::seconds(30), 64, &ids())
+            .await
+            .unwrap();
 
         assert_eq!(claimed.len(), 1, "an expired lease must be reclaimable");
         assert_eq!(
@@ -487,9 +534,33 @@ mod tests {
             .await;
         }
 
-        let claimed = claim_due(&db, Duration::seconds(30), 2).await.unwrap();
+        let claimed = claim_due(&db, Duration::seconds(30), 2, &ids())
+            .await
+            .unwrap();
 
         assert_eq!(claimed.len(), 2, "batch limit must bound one claim tick");
+    }
+
+    #[tokio::test]
+    async fn claim_leaves_timers_of_plugins_not_loaded_here() {
+        let db = test_db().await;
+        seed_timer(&db, "p", "mine", now() - Duration::seconds(5), None).await;
+        seed_timer(&db, "elsewhere", "k", now() - Duration::seconds(5), None).await;
+
+        let claimed = claim_due(&db, Duration::seconds(30), 64, &ids())
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].plugin_id, "p");
+
+        let left = plugin_timer::Entity::find()
+            .filter(plugin_timer::Column::PluginId.eq("elsewhere"))
+            .one(&*db)
+            .await
+            .unwrap()
+            .expect("the other plugin's timer must be left in place");
+        assert_eq!(left.claimed_at, None, "and left unclaimed");
+        assert_eq!(left.attempts, 0, "without burning a delivery attempt");
     }
 
     #[tokio::test]
@@ -536,9 +607,10 @@ mod tests {
         let db = test_db().await;
         seed_timer(&db, "p", "contended", now() - Duration::seconds(5), None).await;
 
+        let ids = ids();
         let (a, b) = tokio::join!(
-            claim_due(&db, Duration::seconds(30), 64),
-            claim_due(&db, Duration::seconds(30), 64),
+            claim_due(&db, Duration::seconds(30), 64, &ids),
+            claim_due(&db, Duration::seconds(30), 64, &ids),
         );
         let total = a.unwrap().len() + b.unwrap().len();
 
@@ -572,9 +644,10 @@ mod tests {
             .await;
         }
 
+        let ids = ids();
         let (a, b) = tokio::join!(
-            claim_due(&db, Duration::seconds(30), 64),
-            claim_due(&db, Duration::seconds(30), 64),
+            claim_due(&db, Duration::seconds(30), 64, &ids),
+            claim_due(&db, Duration::seconds(30), 64, &ids),
         );
         let total = a.unwrap().len() + b.unwrap().len();
 

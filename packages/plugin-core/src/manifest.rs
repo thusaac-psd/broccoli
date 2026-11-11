@@ -43,6 +43,30 @@ impl PluginManifest {
         !self.translations.is_empty()
     }
 
+    /// Paths, relative to the plugin directory, of the files and
+    /// directories the host loads for this plugin besides `plugin.toml`: the
+    /// server and worker entry points, the web root, translation files and
+    /// included config schemas. Together they identify what a replica would
+    /// actually run, without sweeping in build output or sources that happen
+    /// to sit in the same directory.
+    pub fn loaded_paths(&self) -> Vec<&str> {
+        let mut paths = Vec::new();
+        if let Some(server) = &self.server {
+            paths.push(server.entry.as_str());
+        }
+        if let Some(worker) = &self.worker {
+            paths.push(worker.entry.as_str());
+        }
+        if let Some(web) = &self.web {
+            paths.push(web.root.as_str());
+        }
+        paths.extend(self.translations.values().map(String::as_str));
+        paths.extend(self.config.values().filter_map(|ns| ns.schema.as_deref()));
+        paths.sort_unstable();
+        paths.dedup();
+        paths
+    }
+
     pub fn is_hollow(&self) -> bool {
         !self.has_server() && !self.has_worker() && !self.has_web() && !self.has_translations()
     }

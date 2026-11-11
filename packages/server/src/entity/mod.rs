@@ -12,6 +12,7 @@ pub mod idempotency_key;
 pub mod judgement_reset;
 pub mod plugin;
 pub mod plugin_config;
+pub mod plugin_replica;
 pub mod plugin_storage;
 pub mod plugin_timer;
 pub mod problem;

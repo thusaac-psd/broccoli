@@ -51,11 +51,23 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(exit_code);
     }
 
-    tokio_runtime.block_on(async move {
+    let result = tokio_runtime.block_on(async move {
         let server_runtime = ServerRuntime::build(app_config).await?;
         nofile.log();
         server_runtime.serve().await
-    })
+    });
+    // `serve` has drained HTTP, the dispatcher and plugin calls, released this
+    // server's in-flight work and flushed telemetry. Exit without tearing the
+    // runtime down: a plugin call that outlived the drain would otherwise
+    // panic inside its runtime bridge, turning a normal stop into a crash
+    // for the supervisor.
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("{e:?}");
+            std::process::exit(1)
+        }
+    }
 }
 
 /// Hits the local `/healthz` endpoint and returns a process exit code:

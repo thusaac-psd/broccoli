@@ -85,3 +85,83 @@ mod system_view_permission {
         assert!(queues_res.body["queues"].is_array());
     }
 }
+
+/// Worker liveness is read from the heartbeat key's TTL on the Redis clock,
+/// so a worker whose own clock is far off is still live while it keeps
+/// writing heartbeats.
+mod worker_liveness {
+    use super::*;
+    use crate::common::SpawnOptions;
+    use common::worker::{
+        HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX, WORKER_HEARTBEAT_TTL_SECS,
+    };
+    use redis::AsyncCommands;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::redis::Redis;
+
+    async fn write_heartbeat(conn: &mut redis::aio::MultiplexedConnection, id: &str, ttl: u64) {
+        // The worker's clock is an hour behind the server's.
+        let skewed = chrono::Utc::now() - chrono::Duration::hours(1);
+        let payload = HeartbeatPayload {
+            id: id.to_string(),
+            started_at: skewed,
+            last_seen: skewed,
+            in_flight: 0,
+            max_concurrency: Some(2),
+            fairness_mode: "unknown".to_string(),
+            sandbox_backend: "test".to_string(),
+            version: "test".to_string(),
+            hostname: None,
+            ip_addresses: Vec::new(),
+            os: None,
+            arch: None,
+            cpu_count: None,
+            pid: None,
+        };
+        let _: () = conn
+            .set_ex(
+                format!("{WORKER_HEARTBEAT_KEY_PREFIX}{id}"),
+                serde_json::to_string(&payload).unwrap(),
+                ttl,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fresh_heartbeat_is_live_whatever_the_worker_clock_says() {
+        let redis = Redis::default().start().await.expect("start redis");
+        let port = redis.get_host_port_ipv4(6379).await.unwrap();
+        let url = format!("redis://127.0.0.1:{port}");
+        let mut conn = redis::Client::open(url.as_str())
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        // Fresh: just written with the full TTL.
+        write_heartbeat(&mut conn, "fresh", WORKER_HEARTBEAT_TTL_SECS).await;
+        // Old: its TTL says it was written 12s ago, past the 10s staleness.
+        write_heartbeat(&mut conn, "old", WORKER_HEARTBEAT_TTL_SECS - 12).await;
+
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            redis_url: Some(url),
+            ..Default::default()
+        })
+        .await;
+        let admin = app
+            .create_user_with_role("liveness_admin", "pass1234", "admin")
+            .await;
+        let res = app.get_with_token(routes::SYSTEM_WORKERS, &admin).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let workers = res.body["workers"].as_array().unwrap();
+        let by_id = |id: &str| {
+            workers
+                .iter()
+                .find(|w| w["id"] == id)
+                .unwrap_or_else(|| panic!("worker {id} listed: {}", res.text))
+        };
+        assert_eq!(by_id("fresh")["stale"], false, "{}", res.text);
+        assert!(by_id("fresh")["seconds_since_last_seen"].as_u64().unwrap() <= 2);
+        assert_eq!(by_id("old")["stale"], true, "{}", res.text);
+    }
+}
