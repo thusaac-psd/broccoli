@@ -13,7 +13,7 @@
 //! `IDEMPOTENCY_OUTCOME_UNKNOWN` until the key expires; the client must check
 //! what happened and use a fresh key.
 //!
-//! Only JSON-sized bodies are covered (see [`max_request_body_bytes`]); a keyed
+//! Only JSON-sized bodies are covered (see `max_request_body_bytes`); a keyed
 //! request with a larger body is refused with 413 before it is read.
 //!
 //! Retries must resend a byte-identical body. JSON clients do this naturally;
