@@ -7,7 +7,8 @@ use tracing::{debug, error, info, warn};
 
 const BROKER_SUFFIXES: [&str; 4] = ["_processing", "_failed", "_fairness_set", ""];
 const DEAD_SINCE_PREFIX: &str = "broccoli:server:dead_since:";
-const SERVER_HEARTBEAT_PREFIX: &str = "broccoli:server:heartbeat:";
+// Written by every live server; see `common::node_identity`.
+const SERVER_HEARTBEAT_PREFIX: &str = common::node_identity::SERVER_HEARTBEAT_KEY_PREFIX;
 const GHOST_QUEUE_GRACE_SECS: i64 = 3600;
 
 pub async fn run(
@@ -51,8 +52,8 @@ pub async fn sweep_once(
 
     // Fail-safe: this sweeper decides a server is dead purely from the absence
     // of its `broccoli:server:heartbeat:<id>` key. If NO heartbeat key exists
-    // for ANY server, the liveness signal itself is absent (the heartbeat
-    // publisher is not wired up, it broke fleet-wide, or Redis was flushed) -
+    // for ANY server, the liveness signal itself is absent (e.g. every server
+    // predates the heartbeat, it broke fleet-wide, or Redis was flushed) -
     // it does not mean every server died at once. Acting on an unproduced
     // signal would delete the reply queues of RUNNING servers, losing
     // in-flight operation results. A garbage collector keyed on liveness must
@@ -369,5 +370,59 @@ mod tests {
             .await
             .expect("exists failed");
         assert!(queue_exists, "queue must survive inside the grace period");
+    }
+
+    /// The server heartbeat the sweeper keys on is now actually written: a
+    /// live replica's ID claim keeps its reply queues off the dead list, and
+    /// releasing it on graceful shutdown lets the sweeper start the debounce.
+    #[tokio::test]
+    async fn server_id_claims_are_the_liveness_signal_the_sweeper_reads() {
+        use common::node_identity::{NodeClaim, NodeRole};
+        use redis::AsyncCommands;
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::redis::Redis;
+
+        let redis = Redis::default().start().await.expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        conn.rpush::<_, _, ()>("operation_results.server-1_processing", "in-flight")
+            .await
+            .unwrap();
+
+        let claim = |id: &'static str| {
+            let client = client.clone();
+            async move {
+                NodeClaim::claim_at_boot(client, NodeRole::Server, id, serde_json::json!({}))
+                    .await
+                    .expect("claim")
+                    .spawn_heartbeat(|| serde_json::json!({}))
+            }
+        };
+        let mut server_1 = claim("server-1").await;
+        let mut server_2 = claim("server-2").await;
+
+        sweep_once(&client, "operation_results", false)
+            .await
+            .unwrap();
+        let dead_since: bool = conn
+            .exists("broccoli:server:dead_since:server-1")
+            .await
+            .unwrap();
+        assert!(!dead_since, "a live, claimed server is not treated as dead");
+
+        server_1.shutdown().await;
+        sweep_once(&client, "operation_results", false)
+            .await
+            .unwrap();
+        let dead_since: bool = conn
+            .exists("broccoli:server:dead_since:server-1")
+            .await
+            .unwrap();
+        assert!(
+            dead_since,
+            "a server that released its claim is debounced as dead"
+        );
+        server_2.shutdown().await;
     }
 }
