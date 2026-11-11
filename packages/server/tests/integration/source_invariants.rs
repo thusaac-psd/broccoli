@@ -1,19 +1,29 @@
-//! Static-source regression guards for the server crate.
+//! Static checks over the server crate's source tree, plus an opt-in host
+//! function stress wave.
 //!
-//! UP#14g - `tokio::task::block_in_place` was removed from every host
-//! function in UP#13 (see roadmap entry at
-//! `docs/profiling/run-2/roadmap.md`). Re-parking a tokio worker thread
-//! from a `spawn_blocking` task is harmful and was found to starve the
-//! API runtime under load. This file holds a structural invariant: no
-//! `block_in_place(` may reappear in `packages/server/src/host_funcs/`.
+//! No host function calls `tokio::task::block_in_place`: no
+//! `block_in_place(` token appears in code under
+//! `packages/server/src/host_funcs/`. Host functions run inside
+//! `spawn_blocking` tasks, and calling `block_in_place` there re-parks a
+//! tokio worker thread, which starves the API runtime under load. The check
+//! is a static scan rather than a runtime counter
+//! (`host_fn_block_in_place_total`), because the counter only moves when a
+//! host function opts in through `record_block_in_place_regression`, so a
+//! careless call would never show up in it.
 //!
-//! The original UP#14g acceptance asked for a dynamic counter
-//! (`host_fn_block_in_place_total`) check at the end of a 60s stress
-//! wave. That formulation is weaker than a static-source guard: the
-//! counter only increments if a future host function explicitly opts
-//! in via `record_block_in_place_regression`, so a careless
-//! re-introduction would silently bypass the check. A static scan is
-//! the invariant we actually want.
+//! Under a sustained wave of plugin host function calls, the process does
+//! not grow a thread storm and records no `block_in_place` or plugin call
+//! failures. This test is `#[ignore]`d because it runs for 60 seconds by
+//! default; run it explicitly before a release.
+//!
+//! Handler modules do not reference `crate::entity` directly. Each direct
+//! reference (an import, a module alias, an alias use or a fully qualified
+//! call) carries a `visibility-bypass-audited:` comment directly above it or
+//! above the `use` line that opens its group.
+//!
+//! Outside the entity module, every `pub use` or `pub(crate) use` that
+//! re-exports from `crate::entity` carries the same audit marker, so no
+//! module becomes an unreviewed facade over the entity tables.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,8 +83,8 @@ fn match_is_inside_identifier(line: &str, match_start: usize) -> bool {
     prev_byte.is_ascii_alphanumeric() || prev_byte == b'_'
 }
 
-/// True iff this line is a `//` comment (single-line). We use this to
-/// allow-list the documentation around the regression sentinel.
+/// True iff this line is a `//` comment (single-line). Comment lines are
+/// exempt from the scan, so documentation may mention the token.
 fn line_is_comment(line: &str) -> bool {
     line.trim_start().starts_with("//")
 }
@@ -86,12 +96,9 @@ struct Offender {
     line: String,
 }
 
-/// UP#14g: scan `packages/server/src/host_funcs/` for the literal
-/// `block_in_place(` token outside identifier and comment context.
-/// Fail loudly with file/line offenders if any are found.
-///
-/// See also UP#13 (the collapse that removed the toxic pattern) at
-/// `docs/profiling/run-2/roadmap.md`.
+/// Scans `packages/server/src/host_funcs/` for the literal
+/// `block_in_place(` token outside identifier and comment context, and
+/// fails with every offending file and line.
 #[test]
 fn host_funcs_must_not_use_tokio_block_in_place() {
     const NEEDLE: &str = "block_in_place(";
@@ -107,7 +114,7 @@ fn host_funcs_must_not_use_tokio_block_in_place() {
     collect_rs_files(&root, &mut files);
     assert!(
         !files.is_empty(),
-        "no .rs files found under {}; the regression guard would silently pass",
+        "no .rs files found under {}; the scan would pass vacuously",
         root.display()
     );
 
@@ -117,8 +124,8 @@ fn host_funcs_must_not_use_tokio_block_in_place() {
         let contents =
             fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for (idx, line) in contents.lines().enumerate() {
-            // Allowlist: comment-only lines (the regression-guard doc
-            // comments in host_funcs/mod.rs reference the token).
+            // Comment-only lines are exempt (the doc comments in
+            // host_funcs/mod.rs mention the token).
             if line_is_comment(line) {
                 continue;
             }
@@ -142,8 +149,9 @@ fn host_funcs_must_not_use_tokio_block_in_place() {
 
     if !offenders.is_empty() {
         let mut msg = String::from(
-            "UP#14g regression: tokio::task::block_in_place reintroduced in host_funcs/. \
-             This re-parks tokio worker threads and was removed in UP#13. \
+            "tokio::task::block_in_place is called in host_funcs/. \
+             Host functions run inside spawn_blocking, where block_in_place \
+             re-parks tokio worker threads and starves the runtime. \
              Offenders:\n",
         );
         for o in &offenders {
@@ -160,7 +168,7 @@ fn host_funcs_must_not_use_tokio_block_in_place() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "60s runtime stress-wave guard; run explicitly for pre-release regression checks"]
+#[ignore = "60s runtime stress wave; run explicitly before a release"]
 async fn host_fn_stress_wave_does_not_spawn_thread_storm() {
     let duration = env_duration_secs("BROCCOLI_STRESS_WAVE_SECS", 60);
     let concurrency = env_usize("BROCCOLI_STRESS_WAVE_CONCURRENCY", 48);
@@ -286,7 +294,7 @@ async fn host_fn_stress_wave_does_not_spawn_thread_storm() {
         prometheus_counter_sum(&metrics.text, "broccoli_host_fn_block_in_place_total");
     assert_eq!(
         block_in_place_total, baseline_block_in_place,
-        "host_fn block_in_place regression counter changed during stress wave"
+        "host_fn block_in_place counter changed during stress wave"
     );
     let plugin_call_failures =
         prometheus_counter_sum(&metrics.text, "broccoli_plugin_call_failures_total");
@@ -383,11 +391,11 @@ fn handlers_root() -> PathBuf {
 
 /// Blanks the interior of every `"..."` string literal on `line` (minimal
 /// backslash-escape handling: `\"` does not end the string), replacing each
-/// character inside the quotes - including an escape backslash itself - with
+/// character inside the quotes (including an escape backslash itself) with
 /// a space. Column positions are preserved (same length in, same length
-/// out). Exists so a string literal that happens to spell `"entity::..."`
-/// (an error message, a `.contains(...)` check) is never mistaken for a real
-/// path reference (M8).
+/// out). Blanking literals means a string that happens to spell
+/// `"entity::..."` (an error message, a `.contains(...)` check) is never
+/// mistaken for a real path reference.
 fn strip_string_literals(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut in_string = false;
@@ -418,14 +426,14 @@ fn strip_string_literals(line: &str) -> String {
 
 /// The portion of `line` that can actually be a real `entity` access: string
 /// literals blanked (see `strip_string_literals`), everything from an
-/// unquoted `//` onward dropped (a trailing comment must not be mistaken for
-/// code, M8), and the whole line blanked if - once trimmed - it is a
-/// self-contained single-line `/* ... */` block comment (M8; a multi-line
-/// block comment is not handled, since recognizing one requires tracking
-/// open/close state across lines, which this line-oriented scanner
-/// deliberately does not do - no known false positive from that gap has
-/// been observed, and the cost of getting it wrong is a false positive, not
-/// a missed detection, consistent with this guard's stated tradeoff).
+/// unquoted `//` onward dropped (a trailing comment is not code), and the
+/// whole line blanked if, once trimmed, it is a self-contained single-line
+/// `/* ... */` block comment.
+///
+/// Multi-line block comments are not recognized, because that needs
+/// open/close state across lines and this scanner is deliberately
+/// line-oriented. The cost of that gap is a possible false positive, never a
+/// missed detection.
 fn effective_code(line: &str) -> String {
     let trimmed = line.trim_start();
     if trimmed.starts_with("/*") && trimmed.trim_end().ends_with("*/") {
@@ -439,8 +447,8 @@ fn effective_code(line: &str) -> String {
 }
 
 /// True iff the character immediately before byte offset `idx` in `code` is
-/// not an identifier character (or `idx` is 0) - i.e. a pattern starting at
-/// `idx` is a genuine word-boundary match, not the tail of a longer
+/// not an identifier character (or `idx` is 0). That is, a pattern starting
+/// at `idx` is a genuine word-boundary match, not the tail of a longer
 /// identifier (e.g. `plugin_entity::` must not match `entity::`).
 fn starts_at_word_boundary(code: &str, idx: usize) -> bool {
     if idx == 0 {
@@ -450,9 +458,9 @@ fn starts_at_word_boundary(code: &str, idx: usize) -> bool {
     !(prev.is_alphanumeric() || prev == '_')
 }
 
-/// True iff `code` (the *effective code* portion of a line - see
+/// True iff `code` (the *effective code* portion of a line, see
 /// `effective_code`) references the `entity` module as a path segment
-/// (`entity::`) at a genuine word boundary — this is what rejects
+/// (`entity::`) at a genuine word boundary. The boundary check rejects
 /// `plugin_entity::` (an unrelated locally-aliased import) while still
 /// accepting `crate::entity::`, `super::super::entity::` (any depth of
 /// relative chain), `self::entity::`, and a grouped path fragment like
@@ -462,10 +470,9 @@ fn starts_at_word_boundary(code: &str, idx: usize) -> bool {
 /// no `entity::` token.
 ///
 /// `known_aliases` are module aliases introduced earlier in the same file
-/// via `use crate::entity as X;` — a subsequent `X::` reference is checked
-/// the same way `entity::` is. This closes the evasion where an audited
-/// alias declaration is followed by unaudited uses of the alias itself
-/// (M7): the declaration being justified does not justify every later use.
+/// via `use crate::entity as X;`. A subsequent `X::` reference is checked
+/// the same way `entity::` is, so an audited alias declaration does not
+/// cover later uses of the alias: each use needs its own audit.
 fn line_has_entity_access(code: &str, known_aliases: &[String]) -> bool {
     let mut patterns: Vec<String> = vec!["entity::".to_string(), "entity as ".to_string()];
     patterns.extend(known_aliases.iter().map(|a| format!("{a}::")));
@@ -486,7 +493,7 @@ fn line_has_entity_access(code: &str, known_aliases: &[String]) -> bool {
 /// Extracts the alias name from `entity as X` in `code`, if present at a
 /// genuine word boundary (see `line_has_entity_access`). Used to grow the
 /// set of names `line_has_entity_access` also treats as entity accesses for
-/// every following line in the file (M7).
+/// every following line in the file.
 fn extract_entity_alias(code: &str) -> Option<String> {
     const PAT: &str = "entity as ";
     let mut start = 0;
@@ -511,27 +518,21 @@ fn extract_entity_alias(code: &str) -> Option<String> {
 /// continuation line, separate from the `use` keyword an audit comment sits
 /// above. Walk backward to find the `use` line that opens the enclosing
 /// group, so the audit comment above *that* line covers the whole group.
-/// Bounded by the start of the file, by crossing a prior statement's end
-/// (`;`), and by a blank line - not by a fixed step count. An earlier
-/// version of this function capped the walk at 8 lines, which made a `use`
-/// group with more than 8 continuation lines above the hit line fail to
-/// find its (correctly audited) anchor and flag a false positive (M8). The
-/// `;`/blank-line checks are the real safety boundary regardless of depth:
-/// any prior statement genuinely ends with one, and a real `use` group's
-/// continuation lines are never blank (rustfmt does not put blank lines
-/// inside one) - so removing the numeric cap does not risk walking into
-/// unrelated code.
+/// The walk is bounded by the start of the file, by a prior statement's end
+/// (`;`), and by a blank line, not by a fixed step count, so a `use` group
+/// of any depth finds its anchor. The `;` and blank-line checks are a
+/// sufficient boundary: any prior statement ends with `;`, and a `use`
+/// group's continuation lines are never blank (rustfmt does not put blank
+/// lines inside one), so the walk never reaches unrelated code.
 ///
-/// A `use ` line that is ITSELF a complete, self-contained statement (ends
-/// with `;` on the same line) is a prior statement, not the opener of a
-/// group enclosing `hit_line` - only a still-open `use` line (no trailing
-/// `;` yet, e.g. `use crate::{`) can be that. Without this check, an
-/// unrelated single-line `use foo::bar as e;` earlier in the same file
-/// could be mistaken for the anchor of a completely unrelated later
-/// statement that merely has no blank line or semicolon between them and
-/// the hit line (e.g. an alias-use site a few lines into a function body) -
-/// this was a real false negative found while closing M7's alias-use
-/// evasion, not a hypothetical.
+/// A `use ` line that is itself a complete statement (ends with `;` on the
+/// same line) is a prior statement, not the opener of a group enclosing
+/// `hit_line`. Only a still-open `use` line (no trailing `;` yet, e.g.
+/// `use crate::{`) can be that opener. This keeps an unrelated single-line
+/// `use foo::bar as e;` from serving as the anchor of a later statement
+/// that merely has no blank line or semicolon between it and the hit line
+/// (e.g. an alias-use site a few lines into a function body), which would
+/// otherwise be a false negative.
 fn find_use_group_anchor(lines: &[&str], hit_line: usize) -> usize {
     if lines[hit_line].trim_start().starts_with("use ") {
         return hit_line;
@@ -574,32 +575,29 @@ fn is_audited_at(lines: &[&str], anchor_line: usize) -> bool {
 /// Returns the 1-indexed line numbers in `content` where the `entity` module
 /// is referenced without an adjacent `visibility-bypass-audited:` comment.
 /// Scoped per line (and per `use` group), not per file: one audited import
-/// earlier in a file no longer exempts every later import in that same file.
+/// earlier in a file does not exempt any later import in that same file.
 ///
-/// M7: the alias-then-use-alias evasion described in an earlier version of
-/// this comment (`use crate::entity as e;` audited, but a later
-/// `e::user::Entity::find()` elsewhere in the file not tracked back to that
-/// alias) is now closed — see `known_aliases` on `line_has_entity_access`
-/// and `extract_entity_alias`.
+/// Uses of a module alias are tracked too: after `use crate::entity as e;`,
+/// a later `e::user::Entity::find()` is an entity access that needs its own
+/// audit (see `known_aliases` on `line_has_entity_access` and
+/// `extract_entity_alias`).
 ///
-/// Known residual gap (not detected by this line-oriented scan, and not
-/// practical to close without turning this into a real import/symbol
-/// resolver — see task-13-report.md addendum for the original finding):
+/// Known gap, which this line-oriented scan cannot close without becoming a
+/// real import and symbol resolver:
 ///   - a facade re-export: another (non-`entity`, non-`handlers`) module
 ///     doing `pub use crate::entity::submission;`, imported by a handler
 ///     from that facade instead of from `crate::entity` directly. Proving
 ///     `crate::some_module::submission` is transitively `crate::entity::submission`
 ///     requires resolving `pub use` chains across the whole crate, which a
-///     per-line text scan structurally cannot do. This is narrowed, not
-///     closed, by `entity_reexports_outside_the_entity_module_are_audited`
-///     below: it cannot catch the *consuming* handler, but it requires the
-///     facade itself, wherever it is created, to carry its own audit
-///     marker — a silent facade can no longer come into existence
-///     unreviewed, even though a handler that later imports an
-///     already-audited facade is not itself flagged. Stated plainly rather
-///     than overstated: this guard proves "no handler imports
-///     `crate::entity::` directly, and no facade re-exports it silently,"
-///     not "no handler can ever reach an entity table outside the kernel."
+///     per-line text scan cannot do. The gap is narrowed, not closed, by
+///     `entity_reexports_outside_the_entity_module_are_audited` below: it
+///     does not flag the *consuming* handler, but it requires the facade
+///     itself, wherever it is created, to carry its own audit marker. So a
+///     facade cannot appear unreviewed, but a handler that imports an
+///     already-audited facade is not flagged. Precisely, this check
+///     guarantees "no handler imports `crate::entity::` directly, and no
+///     facade re-exports it silently", not "no handler can ever reach an
+///     entity table outside the kernel".
 fn find_unaudited_entity_accesses(content: &str) -> Vec<usize> {
     let lines: Vec<&str> = content.lines().collect();
     let effective: Vec<String> = lines.iter().map(|line| effective_code(line)).collect();
@@ -634,8 +632,8 @@ fn server_src_root() -> PathBuf {
 /// Re-export variant of `find_unaudited_entity_accesses`: flags `pub use` /
 /// `pub(crate) use` lines that reference the `entity` module without an
 /// adjacent `visibility-bypass-audited:` marker. See
-/// `entity_reexports_outside_the_entity_module_are_audited` (M7) for why
-/// this exists and what it does and does not close.
+/// `entity_reexports_outside_the_entity_module_are_audited` for what this
+/// does and does not cover.
 fn find_unaudited_entity_reexports(content: &str) -> Vec<usize> {
     let lines: Vec<&str> = content.lines().collect();
     let mut offenders = Vec::new();
@@ -658,13 +656,13 @@ fn find_unaudited_entity_reexports(content: &str) -> Vec<usize> {
 
 /// Handlers must reach entities only through the visibility kernel. A direct
 /// `crate::entity::` import in a handler module is a bypass: it can read a row
-/// the kernel would have denied. Kept as a static guard because the failure
-/// this prevents — a new read path that skips the kernel — is invisible at
-/// runtime until someone reads a problem they should not have.
+/// the kernel would have denied. The check is static because the failure it
+/// prevents (a new read path that skips the kernel) is invisible at runtime
+/// until someone reads a problem they should not have.
 ///
-/// This is a per-line/per-`use`-group check, not a per-file one: a file that
-/// already has one audited entity import does not get a blanket exemption for
-/// every entity import added to it afterward.
+/// This is a per-line and per-`use`-group check, not a per-file one: a file
+/// that has one audited entity import gets no blanket exemption for its other
+/// entity imports.
 #[test]
 fn handlers_do_not_import_entities_directly() {
     let root = handlers_root();
@@ -678,7 +676,7 @@ fn handlers_do_not_import_entities_directly() {
     collect_rs_files(&root, &mut files);
     assert!(
         !files.is_empty(),
-        "no .rs files found under {}; the regression guard would silently pass",
+        "no .rs files found under {}; the scan would pass vacuously",
         root.display()
     );
 
@@ -697,15 +695,14 @@ fn handlers_do_not_import_entities_directly() {
     );
 }
 
-/// M7 (partial closure of the facade-re-export gap — see the doc comment on
-/// `find_unaudited_entity_accesses`): `handlers_do_not_import_entities_directly`
-/// only scans `src/handlers/`, so it cannot see a handler that imports an
-/// entity type by name from some OTHER module which itself re-exports it
-/// from `crate::entity`. This guard cannot catch the consuming handler
-/// either — that would need real import resolution — but it requires every
-/// such re-export, wherever in the crate it is created, to carry its own
-/// `visibility-bypass-audited:` marker. A facade can no longer be created
-/// silently; creating one is now a reviewable, explained step.
+/// Every re-export of `crate::entity` outside the entity module carries a
+/// `visibility-bypass-audited:` marker. This narrows the facade gap
+/// described on `find_unaudited_entity_accesses`:
+/// `handlers_do_not_import_entities_directly` only scans `src/handlers/`, so
+/// it cannot see a handler that imports an entity type by name from some
+/// other module which itself re-exports it from `crate::entity`. This check
+/// does not flag the consuming handler either (that needs real import
+/// resolution), but it makes creating a facade a reviewed, explained step.
 #[test]
 fn entity_reexports_outside_the_entity_module_are_audited() {
     let root = server_src_root();
@@ -719,7 +716,7 @@ fn entity_reexports_outside_the_entity_module_are_audited() {
     collect_rs_files(&root, &mut files);
     assert!(
         !files.is_empty(),
-        "no .rs files found under {}; the regression guard would silently pass",
+        "no .rs files found under {}; the scan would pass vacuously",
         root.display()
     );
 
@@ -746,10 +743,9 @@ fn entity_reexports_outside_the_entity_module_are_audited() {
 mod entity_import_guard_tests {
     use super::{find_unaudited_entity_accesses, find_unaudited_entity_reexports};
 
-    /// The CRITICAL fix this module exists to pin: an audited import earlier
-    /// in a file must NOT exempt an unrelated, unaudited import later in the
-    /// same file. Before this fix the guard checked `file.contains(marker)`
-    /// once for the whole file, so this exact shape passed silently.
+    /// Audits are scoped per import, not per file: an audited import earlier
+    /// in a file does not exempt an unrelated, unaudited import later in the
+    /// same file. A whole-file `contains(marker)` check would pass this shape.
     #[test]
     fn earlier_audited_import_does_not_exempt_a_later_unaudited_one() {
         let src = "\
@@ -781,16 +777,16 @@ use crate::entity::user;
         assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
     }
 
-    /// Evasion form 1: a grouped path has no literal `use crate::entity::`
-    /// substring at all.
+    /// A grouped path is detected even though it has no literal
+    /// `use crate::entity::` substring.
     #[test]
     fn grouped_use_path_is_detected() {
         let src = "use crate::{entity::user, other_mod};\n";
         assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
     }
 
-    /// Evasion form 2: a relative chain has no `crate::entity::` substring;
-    /// this must be caught at any depth of `super::`.
+    /// A relative chain has no `crate::entity::` substring and is detected at
+    /// any depth of `super::`.
     #[test]
     fn relative_super_chain_is_detected_at_any_depth() {
         assert_eq!(
@@ -803,7 +799,7 @@ use crate::entity::user;
         );
     }
 
-    /// Evasion form 4: a fully-qualified inline call with no `use` at all.
+    /// A fully qualified inline call with no `use` at all is detected.
     #[test]
     fn fully_qualified_inline_call_is_detected() {
         let src = "\
@@ -838,9 +834,9 @@ use crate::{
         assert!(find_unaudited_entity_accesses(src).is_empty());
     }
 
-    /// `use crate::entity::user as u;` — the alias is on the imported item,
-    /// not the module — still contains a literal `entity::` token and must
-    /// still be caught.
+    /// `use crate::entity::user as u;` (the alias is on the imported item,
+    /// not the module) still contains a literal `entity::` token and is
+    /// still caught.
     #[test]
     fn item_level_alias_does_not_evade() {
         let src = "use crate::entity::user as u;\n";
@@ -855,9 +851,9 @@ use crate::{
         assert_eq!(find_unaudited_entity_accesses(src), vec![1]);
     }
 
-    /// M7: the alias-then-use-alias evasion. An audited alias declaration
-    /// must NOT exempt a later, unrelated use of the alias — same principle
-    /// as `earlier_audited_import_does_not_exempt_a_later_unaudited_one`,
+    /// An audited alias declaration does not exempt a later, unrelated use
+    /// of the alias. This is the same rule as
+    /// `earlier_audited_import_does_not_exempt_a_later_unaudited_one`,
     /// applied to an alias instead of a second `entity::` import.
     #[test]
     fn alias_used_later_in_file_is_flagged_even_if_declaration_itself_is_audited() {
@@ -878,8 +874,8 @@ fn read_it() {
         );
     }
 
-    /// M7: an audit on the alias USE site (not just the declaration) still
-    /// exempts that use, same as any other entity access.
+    /// An audit on the alias use site (not just the declaration) exempts
+    /// that use, the same as for any other entity access.
     #[test]
     fn audited_alias_use_is_not_flagged() {
         let src = "\
@@ -894,35 +890,33 @@ fn read_it() {
         assert!(find_unaudited_entity_accesses(src).is_empty());
     }
 
-    /// M8: a string literal that happens to spell `entity::...` (e.g. an
-    /// error message or a `.contains(...)` check) must not be mistaken for
-    /// a real path reference.
+    /// A string literal that happens to spell `entity::...` (e.g. an error
+    /// message or a `.contains(...)` check) is not a path reference.
     #[test]
     fn entity_substring_inside_a_string_literal_is_not_a_false_positive() {
         let src = "let msg = \"reachable via entity::user in the audit log\";\n";
         assert!(find_unaudited_entity_accesses(src).is_empty());
     }
 
-    /// M8: a single-line `/* ... */` block comment must not be mistaken for
-    /// code, same as a `//` comment already is.
+    /// A single-line `/* ... */` block comment is not code, the same as a
+    /// `//` comment.
     #[test]
     fn single_line_block_comment_is_not_a_false_positive() {
         let src = "/* legacy note: entity::user used to live here */\n";
         assert!(find_unaudited_entity_accesses(src).is_empty());
     }
 
-    /// M8: a trailing `//` comment mentioning `entity::` on a line whose
-    /// actual code has nothing to do with it must not be flagged.
+    /// A trailing `//` comment mentioning `entity::` on a line whose actual
+    /// code has nothing to do with it is not flagged.
     #[test]
     fn trailing_comment_only_reference_is_not_a_false_positive() {
         let src = "let x = 1; // see entity::user for context\n";
         assert!(find_unaudited_entity_accesses(src).is_empty());
     }
 
-    /// M8: a `use crate::{ ... }` group deeper than the old 8-line cap must
-    /// still resolve back to its audited opening line. Reproduces the exact
-    /// shape the old cap mishandled: 9 lines between the opening `use` and
-    /// the `entity::` continuation line.
+    /// A deep `use crate::{ ... }` group (here, 9 lines between the opening
+    /// `use` and the `entity::` continuation line) resolves back to its
+    /// audited opening line: the anchor walk has no fixed depth limit.
     #[test]
     fn use_group_deeper_than_eight_lines_still_finds_its_anchor_comment() {
         let src = "\
@@ -969,9 +963,9 @@ pub use crate::entity::submission;
     }
 
     /// Only `pub`/`pub(crate)` re-exports create a facade another module
-    /// can import from — a private `use` is already scoped to its own
-    /// module by ordinary Rust visibility and is out of scope for this
-    /// specific guard (it is still covered by
+    /// can import from. A private `use` is already scoped to its own module
+    /// by ordinary Rust visibility and is out of scope for this check (it is
+    /// still covered by
     /// `handlers_do_not_import_entities_directly` if the private `use` is
     /// itself inside `handlers/`).
     #[test]
@@ -987,9 +981,9 @@ mod helper_tests {
 
     #[test]
     fn identifier_context_is_recognized() {
-        // Hypothetical user-defined wrapper `my_block_in_place(` - the char
-        // immediately before `block_in_place(` is `_`, so the guard must
-        // treat the match as an identifier tail and skip it.
+        // Hypothetical user-defined wrapper `my_block_in_place(`: the char
+        // immediately before `block_in_place(` is `_`, so the scan treats
+        // the match as an identifier tail and skips it.
         let line = "    my_block_in_place(|| {});";
         let pos = line.find("block_in_place(").expect("substring present");
         assert!(match_is_inside_identifier(line, pos));

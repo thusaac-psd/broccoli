@@ -358,7 +358,7 @@ async fn connect_restricted_pool_with_fallback(
 ///    windowed-evaluate driver. Under load the shared pool produces spurious
 ///    server-side "invalid byte sequence ... 0x00" errors on byte-clean plugin
 ///    INSERTs - connection-protocol desync inherited from OTHER operations on
-///    the same pool (see docs/plans/2026-06-25-nul-byte-root-cause.md). Plugin
+///    the same pool. Plugin
 ///    host functions always run their DB call to completion (sync `block_on` on
 ///    a blocking thread, never cancelled), so a pool used ONLY by them stays
 ///    clean. No schema-sync/seeding here - [`BootSession`] already ran it.
