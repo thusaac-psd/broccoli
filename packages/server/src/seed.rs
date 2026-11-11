@@ -306,7 +306,7 @@ fn boot_indexes() -> Vec<BootIndex> {
     ]
 }
 
-/// Create every [`boot_indexes`] entry that is missing.
+/// Create every `boot_indexes` entry that is missing.
 ///
 /// A UNIQUE index that cannot be created means its invariant is not enforced,
 /// almost always because duplicate rows already exist (e.g. a duplicate

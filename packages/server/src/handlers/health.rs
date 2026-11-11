@@ -64,7 +64,7 @@ impl Probe {
         }
     }
 
-    /// Run `ping` within [`PROBE_BUDGET`], logging why it failed.
+    /// Run `ping` within `PROBE_BUDGET`, logging why it failed.
     async fn run<E: std::fmt::Display>(
         component: &'static str,
         ping: impl std::future::Future<Output = Result<(), E>>,
@@ -84,7 +84,7 @@ impl Probe {
 }
 
 /// Probes the database and MQ backends concurrently and returns a populated
-/// [`HealthResponse`]. The whole check is bounded by [`PROBE_BUDGET`].
+/// [`HealthResponse`]. The whole check is bounded by `PROBE_BUDGET`.
 ///
 /// This is the deep readiness / monitoring check, shared between the documented
 /// `/api/v1/health` route and the plain `/healthz` route. Load balancers should
