@@ -135,8 +135,11 @@ async fn admin_and_contest_creation_share_names_without_overwriting_existing_acc
 #[tokio::test]
 async fn only_user_managers_can_rename_and_names_do_not_follow_username_changes() {
     let app = TestApp::spawn().await;
+    // `submission:submit` keeps the contestant within the privilege ceiling
+    // `update_user` enforces (covered in user.rs); `user:manage` is the
+    // gate under test here.
     let admin = app
-        .create_user_with_permissions("admin", "securepass", &["user:manage"])
+        .create_user_with_permissions("admin", "securepass", &["user:manage", "submission:submit"])
         .await;
     let player = app.create_authenticated_user("player", "securepass").await;
     let manager = app
@@ -229,6 +232,12 @@ async fn legacy_database_upgrade_and_restarts_preserve_account_names() {
     let upgraded = server::database::init_db(&app.state.config.database.url)
         .await
         .unwrap();
+    // A real upgrade restarts the server, so no connection carries a plan
+    // prepared against the pre-upgrade `user` columns. This server keeps its
+    // pool; wait for the fixture's 2 s idle timeout to retire those
+    // connections, or Postgres refuses the stale plans with "cached plan must
+    // not change result type" depending on which connection a request gets.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let profile = app.get_with_token(routes::ME, &token).await;
     assert_eq!(profile.status, 200, "{}", profile.text);
     assert_eq!(profile.body["display_name"], "legacy");

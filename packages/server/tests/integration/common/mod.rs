@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use plugin_core::config::PluginConfig;
 use plugin_core::error::PluginError;
@@ -13,15 +13,11 @@ use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::{PluginInvoker, PluginManager};
 use reqwest::Client;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    DbBackend, EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    QueryFilter, Set, TransactionTrait,
 };
 use serde_json::Value;
-use testcontainers::ContainerAsync;
-use testcontainers::ImageExt;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
-use tokio::sync::{Mutex, OnceCell, RwLock};
+use tokio::sync::RwLock;
 
 use common::storage::config::create_blob_store;
 use server::config::{
@@ -37,21 +33,10 @@ use server::registry::{
 use server::state::AppState;
 use server::utils::plugin::sync_plugins;
 
-static SHARED_PG: OnceCell<(ContainerAsync<Postgres>, u16)> = OnceCell::const_new();
-
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-static CREATE_DB_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-/// Dedicated multi-thread runtime that owns the shared admin DB connection.
-///
-/// `#[tokio::test]` spins up a fresh current-thread runtime per test and tears
-/// it down at exit; a sqlx pool stored in a `OnceCell` would be tied to the
-/// first test's runtime and become invalid for the rest. By housing the pool
-/// inside a long-lived dedicated runtime and dispatching `CREATE DATABASE`
-/// onto it via `Handle::spawn`, the pool outlives every individual test.
-static ADMIN_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-static SHARED_ADMIN_CONN: OnceLock<DatabaseConnection> = OnceLock::new();
+pub use test_support::TestResponse;
+use test_support::{close_database_pool, create_test_database};
 
 struct TestPluginManager {
     inner: Arc<ServerManager>,
@@ -95,139 +80,17 @@ impl PluginManager for TestPluginManager {
     }
 }
 
-fn admin_runtime() -> &'static tokio::runtime::Handle {
-    ADMIN_RUNTIME
-        .get_or_init(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .thread_name("integration-admin")
-                .build()
-                .expect("Failed to build admin runtime")
-        })
-        .handle()
-}
-
-async fn create_test_database(db_name: &str) {
-    let port = shared_pg_port().await;
-    let handle = admin_runtime().clone();
-    let db_name = db_name.to_string();
-
-    handle
-        .spawn(async move {
-            if SHARED_ADMIN_CONN.get().is_none() {
-                let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-                let mut admin_opts = ConnectOptions::new(&admin_url);
-                admin_opts
-                    .max_connections(1)
-                    .min_connections(1)
-                    .acquire_timeout(std::time::Duration::from_secs(60))
-                    .idle_timeout(std::time::Duration::from_secs(600));
-                let conn = Database::connect(admin_opts)
-                    .await
-                    .expect("Failed to initialize shared admin database pool");
-                let _ = SHARED_ADMIN_CONN.set(conn);
-            }
-
-            let admin = SHARED_ADMIN_CONN
-                .get()
-                .expect("shared admin connection must be initialized");
-            admin
-                .execute_raw(Statement::from_string(
-                    DbBackend::Postgres,
-                    format!("CREATE DATABASE \"{db_name}\" TEMPLATE template_test"),
-                ))
-                .await
-                .expect("Failed to create test database from template");
-        })
-        .await
-        .expect("admin runtime task panicked");
-}
-
-static CONTAINER_ID: OnceLock<String> = OnceLock::new();
-
-extern "C" fn cleanup_container() {
-    if let Some(id) = CONTAINER_ID.get() {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", "-v", id])
-            .output();
-    }
-}
-
-async fn shared_pg_port() -> u16 {
-    let (_, port) = SHARED_PG
-        .get_or_init(|| async {
-            let container = Postgres::default()
-                .with_tag("17-alpine")
-                .with_cmd(["postgres", "-c", "max_connections=500"])
-                .start()
-                .await
-                .expect("Failed to start PostgreSQL container");
-            let port = container
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("Failed to get PostgreSQL port");
-
-            let admin_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-            let mut template_created = false;
-            for attempt in 0..15u32 {
-                if attempt > 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        500 * u64::from(attempt),
-                    ))
-                    .await;
-                }
-                let Ok(admin_db) = Database::connect(ConnectOptions::new(&admin_url)).await else {
-                    continue;
-                };
-                if admin_db
-                    .execute_raw(Statement::from_string(
-                        DbBackend::Postgres,
-                        "CREATE DATABASE \"template_test\"".to_string(),
-                    ))
-                    .await
-                    .is_ok()
-                {
-                    drop(admin_db);
-                    template_created = true;
-                    break;
-                }
-                drop(admin_db);
-            }
-            assert!(
-                template_created,
-                "Failed to create template_test database after 15 attempts"
-            );
-
-            let _ = CONTAINER_ID.set(container.id().to_string());
-
-            unsafe { libc::atexit(cleanup_container) };
-
-            let template_url =
-                format!("postgres://postgres:postgres@127.0.0.1:{port}/template_test");
-            let template_db = server::database::init_db(&template_url)
-                .await
-                .expect("Failed to initialize template database");
-            server::seed::seed_role_permissions(&template_db)
-                .await
-                .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
-                .await
-                .expect("Failed to create indexes");
-            drop(template_db);
-
-            (container, port)
-        })
-        .await;
-    *port
-}
-
 pub mod routes {
     pub const REGISTER: &str = "/api/v1/auth/register";
     pub const LOGIN: &str = "/api/v1/auth/login";
     pub const REFRESH: &str = "/api/v1/auth/refresh";
     pub const LOGOUT: &str = "/api/v1/auth/logout";
     pub const ME: &str = "/api/v1/auth/me";
+    pub const CLI_TOKEN: &str = "/api/v1/auth/cli-token";
+    pub const CLI_REFRESH: &str = "/api/v1/auth/cli-refresh";
+    pub const DEVICE_CODE: &str = "/api/v1/auth/device-code";
+    pub const DEVICE_AUTHORIZE: &str = "/api/v1/auth/device-authorize";
+    pub const DEVICE_TOKEN: &str = "/api/v1/auth/device-token";
 
     pub const USERS: &str = "/api/v1/users";
 
@@ -312,6 +175,22 @@ pub mod routes {
 
     pub fn contest_problem(id: i32, problem_id: i32) -> String {
         format!("/api/v1/contests/{id}/problems/{problem_id}")
+    }
+
+    pub fn contest_problem_samples(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples")
+    }
+
+    pub fn contest_problem_sample(id: i32, problem_id: i32, tc_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples/{tc_id}")
+    }
+
+    pub fn contest_problem_attachments(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments")
+    }
+
+    pub fn contest_problem_attachment(id: i32, problem_id: i32, ref_id: &str) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments/{ref_id}")
     }
 
     pub fn contest_participants(id: i32) -> String {
@@ -516,29 +395,8 @@ impl Drop for TestApp {
     }
 }
 
-fn close_database_pool(db: DatabaseConnection) {
-    let _ = std::thread::Builder::new()
-        .name("integration-db-close".to_string())
-        .spawn(move || {
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            let _ = runtime.block_on(db.close_by_ref());
-        });
-}
-
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-pub struct TestResponse {
-    pub status: u16,
-    pub headers: reqwest::header::HeaderMap,
-    pub text: String,
-    pub body: Value,
 }
 
 /// Read a matching JSON snapshot without losing frames split across HTTP chunks.
@@ -637,16 +495,8 @@ impl TestApp {
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
-        let port = shared_pg_port().await;
         let db_name = format!("test_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
-
-        let _lock = CREATE_DB_LOCK.get_or_init(|| Mutex::new(())).lock().await;
-
-        create_test_database(&db_name).await;
-
-        drop(_lock);
-
-        let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
+        let db_url = create_test_database(&db_name).await;
         let mut opts = ConnectOptions::new(&db_url);
         opts.max_connections(2)
             .min_connections(0)
@@ -720,6 +570,7 @@ impl TestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
@@ -740,6 +591,7 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            clock: Default::default(),
         };
 
         if let Some(cap) = options.max_queued_submissions {
@@ -872,7 +724,6 @@ impl TestApp {
                 evaluate_batches,
                 hook_registry,
             },
-            device_codes: std::sync::Arc::new(dashmap::DashMap::new()),
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
@@ -1418,26 +1269,5 @@ impl TestApp {
 
         self.create_user_with_role(username, password, &role_name)
             .await
-    }
-}
-
-impl TestResponse {
-    pub async fn from_response(res: reqwest::Response) -> Self {
-        let status = res.status().as_u16();
-        let headers = res.headers().clone();
-        let text = res.text().await.unwrap_or_default();
-        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Self {
-            status,
-            headers,
-            text,
-            body,
-        }
-    }
-
-    pub fn id(&self) -> i32 {
-        self.body["id"]
-            .as_i64()
-            .expect("response body should contain 'id'") as i32
     }
 }

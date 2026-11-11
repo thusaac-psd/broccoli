@@ -7,11 +7,17 @@
 #![allow(clippy::double_must_use)]
 
 pub mod cancel;
+#[cfg(feature = "sea-orm")]
+pub mod clock;
 pub mod config;
+#[cfg(feature = "sea-orm")]
+pub mod db;
+pub mod deadline;
 pub mod dlq;
 pub mod event;
 pub mod hook;
 pub mod metrics;
+pub mod node_identity;
 pub mod observability;
 pub mod redact;
 pub mod retry;

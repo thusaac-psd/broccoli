@@ -100,8 +100,12 @@ pub enum Resource {
     // the host. `Uuid` is `Hash + Eq`, so `Resource` (and therefore the
     // kernel's `(Action, Resource)` per-request memo key) still works
     // unchanged. See `wire_id`'s doc comment for why the wire
-    // representation must stay lossless too.
+    // representation must stay lossless too. `contest_id` is the same
+    // request scope `Problem` and `Sample` carry: an attachment is a part
+    // of its problem, read through either the standalone problem route
+    // (`None`) or a contest's problem route (`Some`).
     Attachment {
+        contest_id: Option<i32>,
         problem_id: i32,
         attachment_id: uuid::Uuid,
     },
@@ -144,16 +148,79 @@ impl Resource {
     /// The parent problem for a `Problem`/`Sample`/`Attachment` resource,
     /// `None` for the three kinds that have no problem (`Contest`,
     /// `Submission`, `Clarification`). Exists so `QueryResource.problem_id`
-    /// can be populated on the wire - without it, an attachment-visibility
-    /// plugin would receive `contest_id: null` (an attachment's contest
-    /// scope is never resolvable, see `resource_contest_id`'s doc comment
-    /// in `visibility/mod.rs`) and nothing else to reason about at all.
+    /// can be populated on the wire: an attachment's own `id` is its UUID,
+    /// so without this a plugin judging an attachment could not tell which
+    /// problem it belongs to.
     pub fn wire_problem_id(&self) -> Option<i32> {
+        self.problem_scope().map(|scope| scope.problem_id)
+    }
+
+    /// The `(contest scope, problem)` pair of a problem part: the problem
+    /// itself, its samples, or one of its attachments. `None` for the kinds
+    /// that are not part of a problem. Callers that only care about "which
+    /// contest and problem is this about" match on this instead of listing
+    /// the three variants again.
+    pub fn problem_scope(&self) -> Option<ProblemScope> {
         match self {
-            Resource::Problem { problem_id, .. }
-            | Resource::Sample { problem_id, .. }
-            | Resource::Attachment { problem_id, .. } => Some(*problem_id),
+            Resource::Problem {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Sample {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Attachment {
+                contest_id,
+                problem_id,
+                ..
+            } => Some(ProblemScope {
+                contest_id: *contest_id,
+                problem_id: *problem_id,
+            }),
             Resource::Contest(_) | Resource::Submission(_) | Resource::Clarification(_) => None,
+        }
+    }
+}
+
+/// A problem as reached by one request: through the standalone problem
+/// routes (`contest_id: None`) or through one contest's problem routes.
+/// Handlers that serve both build one of these and derive every resource
+/// they ask the kernel about from it, so the problem, its samples and its
+/// attachments are always judged under the same scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProblemScope {
+    pub contest_id: Option<i32>,
+    pub problem_id: i32,
+}
+
+impl ProblemScope {
+    pub fn standalone(problem_id: i32) -> Self {
+        Self {
+            contest_id: None,
+            problem_id,
+        }
+    }
+
+    pub fn in_contest(contest_id: i32, problem_id: i32) -> Self {
+        Self {
+            contest_id: Some(contest_id),
+            problem_id,
+        }
+    }
+
+    pub fn problem(&self) -> Resource {
+        Resource::Problem {
+            contest_id: self.contest_id,
+            problem_id: self.problem_id,
+        }
+    }
+
+    pub fn attachment(&self, attachment_id: uuid::Uuid) -> Resource {
+        Resource::Attachment {
+            contest_id: self.contest_id,
+            problem_id: self.problem_id,
+            attachment_id,
         }
     }
 }

@@ -528,6 +528,15 @@ mod self_registration {
         let cid = app
             .create_contest(&admin, "Unreg Contest", true, false)
             .await;
+        // Unregistering is only allowed before the contest starts.
+        let res = app
+            .patch_with_token(
+                &format!("/api/v1/contests/{cid}"),
+                &serde_json::json!({"start_time": "2098-01-01T00:00:00Z"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
         app.register_for_contest(cid, &user).await;
 
         let res = app
