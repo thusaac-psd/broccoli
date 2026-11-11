@@ -1,5 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 interface TestCaseFormDialogProps {
   problemId: number;
@@ -41,7 +42,7 @@ export function TestCaseFormDialog({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
   const isEdit = !!testCaseId;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileOutputRef = useRef<HTMLInputElement>(null);
@@ -152,14 +153,26 @@ export function TestCaseFormDialog({
           params: { path: { id: problemId, tc_id: testCaseId! } },
           body: updateBody,
         })
-      : await apiClient.POST('/problems/{id}/test-cases', {
-          headers: { 'Idempotency-Key': getKey() },
-          params: { path: { id: problemId } },
-          body: createBody,
-        });
+      : await sendIdempotent({ problemId, body: createBody }, (key) =>
+          apiClient.POST('/problems/{id}/test-cases', {
+            headers: { 'Idempotency-Key': key },
+            params: { path: { id: problemId } },
+            body: createBody,
+          }),
+        );
 
     setLoading(false);
-    if (result.error) {
+    if (
+      toastUnsettled(result.error, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({ queryKey: testCasesQueryKey }),
+      })
+    ) {
+      // The form stays open: if the test case is not in the list, it can be
+      // sent again as it is.
+      return;
+    }
+    if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(
           result.error,
@@ -167,7 +180,6 @@ export function TestCaseFormDialog({
         ),
       );
     } else {
-      if (!isEdit) resetKey();
       toast.success(
         isEdit ? t('toast.testCase.updated') : t('toast.testCase.created'),
       );

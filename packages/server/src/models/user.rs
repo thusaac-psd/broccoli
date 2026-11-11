@@ -91,6 +91,17 @@ pub fn validate_account_credentials(
     username: &str,
     password: Option<&str>,
 ) -> Result<(), crate::error::AppError> {
+    normalize_username(username)?;
+    if let Some(password) = password {
+        validate_password(password)?;
+    }
+    Ok(())
+}
+
+/// Username rules shared by registration, account creation and user update.
+/// Returns the trimmed name, which is what callers store: login trims its
+/// input, so a stored `" bob"` could never log in.
+pub fn normalize_username(username: &str) -> Result<String, crate::error::AppError> {
     use crate::error::AppError;
     let username = username.trim();
     if username.is_empty() || username.chars().count() > 32 {
@@ -106,10 +117,13 @@ pub fn validate_account_credentials(
             "Username must contain only letters, digits, and underscores".into(),
         ));
     }
-    if let Some(password) = password
-        && (password.len() < 8 || password.len() > 128)
-    {
-        return Err(AppError::Validation(
+    Ok(username.to_owned())
+}
+
+/// Password rules shared by registration, account creation and user update.
+pub fn validate_password(password: &str) -> Result<(), crate::error::AppError> {
+    if password.len() < 8 || password.len() > 128 {
+        return Err(crate::error::AppError::Validation(
             "Password must be 8-128 characters".into(),
         ));
     }

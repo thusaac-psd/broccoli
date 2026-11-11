@@ -68,6 +68,20 @@ export const en: Record<string, string> = {
   'error.title.default': 'Unknown Error',
   'error.desc.default': 'Something went wrong.',
 
+  // Root error page
+  'error.crash.title': 'Something went wrong',
+  'error.crash.desc':
+    'The page hit an unexpected error. Your submissions and contest data are safe on the server; reloading usually fixes it.',
+  'error.chunk.title': 'Part of the page did not load',
+  'error.chunk.desc':
+    'The connection may have dropped, or the site was just updated. Your submissions and contest data are safe on the server; check your connection and reload.',
+  'error.chunk.reloading': 'Reloading to get the latest version…',
+  'error.offline.desc':
+    'You are offline. Your submissions and contest data are safe on the server; the page reloads by itself once the connection is back.',
+  'error.action.reload': 'Reload page',
+  'error.action.retry': 'Try again',
+  'error.action.back': 'Go back',
+
   // Overview
   'overview.title': 'Overview',
   'overview.problems': 'Problems',
@@ -455,6 +469,12 @@ export const en: Record<string, string> = {
     'Save these credentials before closing. Passwords cannot be retrieved later.',
   'users.create.download': 'Download credentials',
   'users.create.done': 'Done',
+  'users.create.alreadyCreatedTitle':
+    'These users were already created by an earlier attempt.',
+  'users.create.alreadyCreatedDesc':
+    'Its response, with their passwords, was lost and cannot be shown again. Reset their passwords in the user list before handing out credentials.',
+  'users.create.outcomeUnknown':
+    'An earlier attempt was interrupted and may have created some or all of these users. Check the user list before trying again.',
   'users.users.empty': 'No users found.',
   'users.users.noRoles': 'No roles assigned.',
   'users.users.manageRoles': 'Manage Roles',
@@ -589,6 +609,10 @@ export const en: Record<string, string> = {
   'admin.bulkParticipantsNotFound': 'Not Found',
   'admin.bulkParticipantsError':
     'Bulk enrollment failed. Please check the data and try again.',
+  'admin.bulkParticipantsAlreadyDoneDesc':
+    'Its response was lost and cannot be shown again, so the passwords of any users it created are unknown. Reset those passwords in the user list before handing out credentials.',
+  'admin.bulkParticipantsOutcomeUnknown':
+    'An earlier attempt was interrupted and may have enrolled participants or created users. Check the participant list, then preview again before retrying.',
   'admin.addProblem': 'Add Problem',
   'admin.field.label': 'Label',
   'admin.field.password': 'Password',
@@ -761,6 +785,8 @@ export const en: Record<string, string> = {
   'toast.contest.deleteError': 'Failed to delete contest.',
   'toast.contest.enrolled': 'Enrolled in contest successfully.',
   'toast.contest.enrollError': 'Failed to enroll in contest.',
+  'toast.contest.enrollOutcomeUnknown':
+    'An earlier enrollment attempt was interrupted and may have gone through. Your enrollment status is being refreshed; check it before enrolling again.',
   'toast.contest.unregistered': 'Registration canceled successfully.',
   'toast.contest.unregisterError': 'Failed to cancel registration.',
   'toast.problem.created': 'Problem created successfully.',
@@ -774,6 +800,8 @@ export const en: Record<string, string> = {
   'toast.problem.loadError': 'Failed to load problem.',
   'toast.problem.createdNotAttached':
     'Problem created, but it could not be added to this contest. Add it from the contest problems dialog.',
+  'toast.problem.createdAttachUnknown':
+    'Problem created, but adding it to this contest was interrupted and may not have finished. Check the contest problems dialog before adding it again.',
   'toast.testCase.created': 'Test case created successfully.',
   'toast.testCase.updated': 'Test case updated successfully.',
   'toast.testCase.deleted': 'Test case deleted successfully.',
@@ -784,7 +812,13 @@ export const en: Record<string, string> = {
   'toast.participant.removeError': 'Failed to remove participant.',
   'toast.participant.bulkSuccess': 'Bulk enrollment completed successfully.',
   'toast.participant.bulkError': 'Bulk enrollment failed.',
+  'toast.participant.bulkAlreadyDone':
+    'This import already went through on an earlier attempt.',
   'toast.submission.submitted': 'Code submitted successfully.',
+  'toast.submission.alreadySubmitted':
+    'This code was already submitted by an earlier attempt; find it in your submissions.',
+  'toast.submission.outcomeUnknown':
+    'An earlier attempt to submit this code was interrupted and may have gone through. Check your submissions before submitting it again.',
   'toast.submission.fannedOut':
     'Code pinned to {count} worker(s). Comparing results below.',
   'toast.submission.fanOutWithheld':
@@ -801,6 +835,10 @@ export const en: Record<string, string> = {
   'pinnedGroup.allAccepted': 'All workers accepted',
   'toast.submission.running': 'Running code...',
   'toast.submission.error': 'Failed to submit code. Please try again.',
+  'toast.idempotency.outcomeUnknown':
+    'An earlier attempt was interrupted and may already have gone through. Check whether it did before trying again.',
+  'toast.idempotency.inProgress':
+    'An earlier attempt is still being processed. Wait a moment, then try again to get its result.',
 
   // Plugins management
   'plugins.title': 'Plugins',
@@ -909,6 +947,8 @@ export const en: Record<string, string> = {
   'clarification.submitError': 'Failed to submit.',
   'clarification.replySuccess': 'Reply sent.',
   'clarification.replyError': 'Failed to send reply.',
+  'clarification.outcomeUnknown':
+    'An earlier attempt to send this was interrupted and may have gone through. Check the list before sending it again.',
   'clarification.resolved': 'Thread resolved.',
   'clarification.reopened': 'Thread reopened.',
   'clarification.resolveError': 'Failed to update thread status.',

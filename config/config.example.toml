@@ -78,8 +78,12 @@ secure_cookies = true
 
 [bootstrap]
 # Optional first-run admin bootstrap. Leave both empty for normal development.
+# A boot creates or resets this account (and restores the admin role) only
+# when no active user holds system:admin, or when reset_admin is true;
+# otherwise it is left alone.
 admin_username = ""
 admin_password = ""
+reset_admin = false
 
 [submission]
 max_size = 1048576

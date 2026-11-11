@@ -28,4 +28,16 @@ ord 'INTO "user"'     'INTO user_role'
 ord 'INTO contest'    'INTO contest_user'
 ord 'INTO contest'    'INTO contest_problem'
 
+# A Docker install has no config.toml: --env-file reads connection.env instead.
+# A stub psql that only answers the schema probe lets this reach the reader.
+mkdir -p "$bundle/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/psql.log"\nexit 1\n' "$bundle" > "$bundle/bin/psql"
+chmod +x "$bundle/bin/psql"
+printf "BROCCOLI__DATABASE__URL='postgres://postgres:p%%40ss@10.0.0.10:5432/broccoli'\n" > "$bundle/connection.env"
+PATH="$bundle/bin:$PATH" bash "$import" --bundle "$bundle" --env-file "$bundle/connection.env" >/dev/null 2>&1 || true
+grep -q '^postgres://postgres:p%40ss@10.0.0.10:5432/broccoli ' "$bundle/psql.log" \
+  || { echo "MISSING: --env-file did not hand connection.env's database URL to psql"; fail=1; }
+out="$(PATH="$bundle/bin:$PATH" bash "$import" --bundle "$bundle" --config "$bundle/none.toml" 2>&1 || true)"
+check "pass --env-file connection.env on a Docker install"
+
 [ "$fail" -eq 0 ] && echo "PASS: contest import dry-run" || { echo "FAIL"; exit 1; }

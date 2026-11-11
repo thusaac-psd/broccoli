@@ -635,7 +635,7 @@ jobs:
               mkdir -p /tmp/broccoli-smoke
               tar -xzf /tmp/broccoli-platform.tar.gz -C /tmp/broccoli-smoke --strip-components=1
               cd /tmp/broccoli-smoke
-              trap "docker compose -f docker-compose.single-host.yaml logs --tail=200 || true; docker compose -f docker-compose.single-host.yaml down -v || true" EXIT
+              trap "docker compose --env-file .env.single-host -f docker-compose.single-host.yaml logs --tail=200 || true; docker compose --env-file .env.single-host -f docker-compose.single-host.yaml down -v || true" EXIT
 
               docker compose --env-file .env.example -f docker-compose.single-host.yaml.template config >/dev/null
               for role in infra server worker gateway; do
@@ -643,7 +643,7 @@ jobs:
               done
 
               ./install.sh single-host
-              docker compose -f docker-compose.single-host.yaml ps
+              docker compose --env-file .env.single-host -f docker-compose.single-host.yaml ps
 
               repo_lc="$(echo "${{ github.repository }}" | tr "[:upper:]" "[:lower:]")"
               for variant in base icpc full; do
@@ -654,7 +654,7 @@ jobs:
               docker run --rm --entrypoint which "ghcr.io/${repo_lc}/broccoli-worker:${{ github.ref_name }}-full" kotlinc
 
               for service in db redis server worker; do
-                cid="$(docker compose -f docker-compose.single-host.yaml ps -q "$service")"
+                cid="$(docker compose --env-file .env.single-host -f docker-compose.single-host.yaml ps -q "$service")"
                 test -n "$cid"
                 status="$(docker inspect -f "{{.State.Status}}" "$cid")"
                 health="$(docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" "$cid")"
