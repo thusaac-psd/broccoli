@@ -17,6 +17,7 @@ pub mod dlq;
 pub mod event;
 pub mod hook;
 pub mod metrics;
+pub mod node_identity;
 pub mod observability;
 pub mod retry;
 pub mod rlimit;

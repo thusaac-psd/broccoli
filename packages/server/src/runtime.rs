@@ -23,6 +23,7 @@ use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
+use common::node_identity::{NodeClaim, NodeHeartbeat, NodeRole};
 
 pub struct ServerRuntime {
     listener: tokio::net::TcpListener,
@@ -35,6 +36,8 @@ pub struct ServerRuntime {
     /// the OS on exit, so we hold the handle for ownership but never `join()`
     /// it - hence the underscore prefix to silence dead-code warnings.
     _healthz_handle: Option<std::thread::JoinHandle<()>>,
+    /// Keeps this replica's ID claim / heartbeat alive; released in [`Self::serve`].
+    node_heartbeat: Option<NodeHeartbeat>,
     _telemetry_guard: common::observability::TelemetryGuard,
 }
 
@@ -89,12 +92,7 @@ impl ServerRuntime {
         )
         .await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
-        crate::seed::ensure_bootstrap_admin(
-            boot.conn(),
-            &app_config.bootstrap.admin_username,
-            &app_config.bootstrap.admin_password,
-        )
-        .await?;
+        crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
         crate::seed::backfill_submission_judgements(boot.conn()).await?;
 
         let db = crate::database::connect_main_pool(
@@ -229,6 +227,42 @@ impl ServerRuntime {
 
         common::clock::check_clock_skew(&db, redis_client.as_deref(), &app_config.clock).await?;
 
+        // Claim the server ID before consuming this replica's result queue or
+        // recovering leases under it: a second live replica with the same ID
+        // would eat its results and release its in-flight rows, so it refuses
+        // to start instead. The claim is the `broccoli:server:heartbeat:<id>`
+        // key the reply-queue sweeper reads; released on graceful shutdown.
+        let node_heartbeat = match redis_client.as_deref() {
+            Some(client) => {
+                let started_at = chrono::Utc::now();
+                let payload = {
+                    let server_id = server_id.clone();
+                    let hostname = hostname::get()
+                        .ok()
+                        .map(|h| h.to_string_lossy().into_owned());
+                    move || {
+                        serde_json::json!({
+                            "id": server_id,
+                            "started_at": started_at,
+                            "last_seen": chrono::Utc::now(),
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "hostname": hostname,
+                            "pid": std::process::id(),
+                        })
+                    }
+                };
+                let claim = NodeClaim::claim_at_boot(
+                    client.clone(),
+                    NodeRole::Server,
+                    &server_id,
+                    payload(),
+                )
+                .await?;
+                Some(claim.spawn_heartbeat(payload))
+            }
+            None => None,
+        };
+
         if let Some(ref mq_arc) = mq {
             let op_dlq_consumer_db = db.clone();
             let op_dlq_consumer_mq = Arc::clone(mq_arc);
@@ -350,20 +384,6 @@ impl ServerRuntime {
         )
         .context("Failed to initialize plugin manager")?;
 
-        let device_codes: crate::state::DeviceCodeStore = Arc::new(DashMap::new());
-
-        {
-            let codes = device_codes.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let now = std::time::Instant::now();
-                    codes.retain(|_code, entry| entry.expires_at > now);
-                }
-            });
-        }
-
         {
             let cleanup_db = db.clone();
             tokio::spawn(async move {
@@ -403,7 +423,6 @@ impl ServerRuntime {
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
             },
-            device_codes,
             metrics,
             prometheus_registry,
             dispatcher_permits,
@@ -550,6 +569,7 @@ impl ServerRuntime {
             addr,
             dispatcher,
             _healthz_handle: healthz_handle,
+            node_heartbeat,
             _telemetry_guard: telemetry_guard,
         })
     }
@@ -559,6 +579,9 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Server runtime error at http://{}", self.addr));
         self.dispatcher.shutdown().await;
+        if let Some(heartbeat) = self.node_heartbeat.as_mut() {
+            heartbeat.shutdown().await;
+        }
         serve_result
     }
 }

@@ -3,6 +3,7 @@ import { Skeleton } from '@broccoli/web-sdk/ui';
 
 import { Markdown } from '@/components/Markdown';
 
+import { scopeAttachmentUrl } from '../api/problem-scope';
 import { ProblemSamplesSection } from './ProblemSamplesSection';
 
 type SampleContentMap = Record<number, { input?: string; output?: string }>;
@@ -29,12 +30,15 @@ interface ProblemSample {
 }
 
 interface ProblemData {
+  id: number;
   content: string;
   samples: ProblemSample[];
 }
 
 interface ProblemDescriptionTabProps {
   problem: ProblemData | undefined;
+  /** The contest the problem is read through, if any. */
+  contestId?: number;
   isLoading: boolean;
   hasError: boolean;
   sampleContents: SampleContentMap;
@@ -45,6 +49,7 @@ interface ProblemDescriptionTabProps {
 
 export function ProblemDescriptionTab({
   problem,
+  contestId,
   isLoading,
   hasError,
   sampleContents,
@@ -72,12 +77,17 @@ export function ProblemDescriptionTab({
 
   if (!problem) return null;
 
+  const problemId = problem.id;
+  const resolveUrl = (url: string | undefined) =>
+    scopeAttachmentUrl(url, problemId, contestId);
+
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none">
-      <Markdown>{problem.content}</Markdown>
+      <Markdown resolveUrl={resolveUrl}>{problem.content}</Markdown>
 
       <ProblemSamplesSection
         samples={problem.samples}
+        resolveUrl={resolveUrl}
         sampleContents={sampleContents}
         copiedKey={copiedKey}
         onCopySample={onCopySample}

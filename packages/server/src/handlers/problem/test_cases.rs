@@ -10,10 +10,10 @@ use tracing::instrument;
 // visibility-bypass-audited: every write here (create/update/delete/reorder/
 // bulk_delete) requires perm::PROBLEM_EDIT, asserted at its handler's entry
 // and pinned by tests/integration/problem.rs's `contestant_cannot_reorder_test_cases`
-// and `contestant_cannot_bulk_delete_test_cases`. The one viewer-facing read,
-// `get_test_case`, gates reachability through `VisibilityKernel`'s
-// `Resource::Problem` decision before touching these types (see the kernel
-// call above), pinned by `contestant_can_access_sample_test_case_via_active_contest`
+// and `contestant_cannot_bulk_delete_test_cases`. The viewer-facing reads,
+// `get_test_case` and `get_contest_problem_sample`, gate reachability through
+// `VisibilityKernel`'s `Resource::Problem` decision (see `get_test_case_in`),
+// pinned by `contestant_can_access_sample_test_case_via_active_contest`
 // and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
 use crate::entity::{test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
@@ -28,9 +28,9 @@ use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
 };
 use crate::utils::text::{sanitize_db_text, sanitize_db_text_opt};
-use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
+use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
 
-use super::find_problem_for_update;
+use super::{find_problem_for_update, require_problem_part_reachable};
 
 #[utoipa::path(
     post,
@@ -202,16 +202,71 @@ pub async fn get_test_case(
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
 ) -> Result<Json<TestCaseResponse>, AppError> {
-    let tc = find_test_case_for_problem(&state.db, problem_id, tc_id).await?;
+    get_test_case_in(
+        &state,
+        &auth_user,
+        ProblemScope::standalone(problem_id),
+        tc_id,
+    )
+    .await
+}
 
-    if !auth_user.has_permission(perm::PROBLEM_CREATE)
-        && !auth_user.has_permission(perm::PROBLEM_EDIT)
-    {
+#[utoipa::path(
+    get,
+    path = "/{problem_id}/samples/{tc_id}",
+    tag = "Contest Problems",
+    operation_id = "getContestProblemSample",
+    summary = "Get one sample test case of a contest problem",
+    description = "Returns the full details of one sample (`is_sample = true`) test case, read through this contest. Visibility is decided for this contest only. The contest must have started. Non-sample test cases are not served here, whatever the caller's permissions.",
+    params(
+        ("id" = i32, Path, description = "Contest ID"),
+        ("problem_id" = i32, Path, description = "Problem ID"),
+        ("tc_id" = i32, Path, description = "Test case ID"),
+    ),
+    responses(
+        (status = 200, description = "Test case details", body = TestCaseResponse),
+        (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 404, description = "Test case not found (NOT_FOUND)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(contest_id, problem_id, tc_id))]
+pub async fn get_contest_problem_sample(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath((contest_id, problem_id, tc_id)): AppPath<(i32, i32, i32)>,
+) -> Result<Json<TestCaseResponse>, AppError> {
+    get_test_case_in(
+        &state,
+        &auth_user,
+        ProblemScope::in_contest(contest_id, problem_id),
+        tc_id,
+    )
+    .await
+}
+
+/// Shared body of `get_test_case` and `get_contest_problem_sample`: one test
+/// case of the problem as reached under `scope`.
+async fn get_test_case_in(
+    state: &AppState,
+    auth_user: &AuthUser,
+    scope: ProblemScope,
+    tc_id: i32,
+) -> Result<Json<TestCaseResponse>, AppError> {
+    // Setters keep full access to every test case, but only on the
+    // standalone route: a contest-scoped read serves samples only, under
+    // that contest's rules, whoever asks.
+    let setter_bypass = scope.contest_id.is_none()
+        && (auth_user.has_permission(perm::PROBLEM_CREATE)
+            || auth_user.has_permission(perm::PROBLEM_EDIT));
+
+    if !setter_bypass {
         // Reachability to the *problem* is a kernel decision - the same
-        // `Resource::Problem` decision `get_problem` (handlers/problem/mod.rs)
-        // makes - rather than a second, hand-written copy of
-        // `require_problem_read_access`'s permission/is_public/via-contest
-        // logic that could drift from `decide_standalone_problem_access`.
+        // `Resource::Problem` decision `get_problem_in` (handlers/problem/
+        // mod.rs) makes under the same scope - rather than a second,
+        // hand-written copy of the permission/is_public/via-contest logic
+        // that could drift from `visibility::host_rules`.
         // NOTE: `is_denied()` treats `Decision::Redact` the same as `Allow`
         // (only `Deny` is denied) - this gate is a pure yes/no reachability
         // check, not a `fetch_visible`/`into_masked_json` call, so a
@@ -220,20 +275,26 @@ pub async fn get_test_case(
         // no masking step. Today no plugin returns `Redact` for
         // `Resource::Problem`, so this is a documented no-op, not a live
         // bug - see Task 20 Item 6.
-        let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
-        let resource = Resource::Problem {
-            contest_id: None,
-            problem_id,
-        };
-        if kernel.decide(Action::Read, resource).await?.is_denied() {
-            return Err(AppError::NotFound("Test case not found".into()));
-        }
-        // The kernel only knows the *problem* is reachable; whether this
-        // particular test case is a public sample is local to test cases and
-        // has no kernel resource of its own.
-        if !tc.is_sample {
-            return Err(AppError::NotFound("Test case not found".into()));
-        }
+        let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
+        require_problem_part_reachable(
+            &kernel,
+            state,
+            auth_user,
+            scope,
+            Action::Read,
+            "Test case not found",
+        )
+        .await?;
+    }
+
+    // Looked up only after the gate, so a viewer who cannot reach the
+    // problem cannot tell which test case ids belong to it.
+    let tc = find_test_case_for_problem(&state.db, scope.problem_id, tc_id).await?;
+    // The kernel only knows the *problem* is reachable; whether this
+    // particular test case is a public sample is local to test cases and
+    // has no kernel resource of its own.
+    if !setter_bypass && !tc.is_sample {
+        return Err(AppError::NotFound("Test case not found".into()));
     }
 
     Ok(Json(

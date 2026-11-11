@@ -1,15 +1,23 @@
 //! TLS trust config. Mode from `$BROCCOLI_TLS` (takes precedence) or the `tls`
-//! config key; default is rustls with bundled webpki roots.
+//! config key. The default trusts the OS certificate store and the bundled
+//! Mozilla (webpki) roots together, so a server whose internal CA has been
+//! installed into the OS store (the air-gap contestant install does this)
+//! works out of the box, and so does a public-CA server on a machine whose OS
+//! store is missing or stale.
 
-use std::sync::Once;
+use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 
 use console::style;
-use ureq::tls::{RootCerts, TlsConfig};
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsMode {
+    /// OS trust store plus bundled Mozilla roots.
+    Default,
+    /// Bundled Mozilla roots only.
     WebPki,
+    /// The OS verifier only (rustls-platform-verifier).
     Platform,
     Insecure,
 }
@@ -26,11 +34,12 @@ pub fn resolve_tls_mode() -> TlsMode {
 /// Unknown or empty values fall back to the secure default.
 fn parse_tls_mode(raw: Option<&str>) -> TlsMode {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("webpki" | "mozilla" | "bundled") => TlsMode::WebPki,
         Some("system" | "platform" | "native" | "os") => TlsMode::Platform,
         Some("insecure" | "danger" | "danger-accept-invalid" | "no-verify" | "skip") => {
             TlsMode::Insecure
         }
-        _ => TlsMode::WebPki,
+        _ => TlsMode::Default,
     }
 }
 
@@ -42,7 +51,13 @@ pub fn build_agent(connect: Option<Duration>, global: Option<Duration>) -> ureq:
         .timeout_global(global);
 
     match resolve_tls_mode() {
-        TlsMode::WebPki => {}
+        TlsMode::Default => {
+            builder = builder.tls_config(TlsConfig::builder().root_certs(default_roots()).build());
+        }
+        TlsMode::WebPki => {
+            builder =
+                builder.tls_config(TlsConfig::builder().root_certs(RootCerts::WebPki).build());
+        }
         TlsMode::Platform => {
             builder = builder.tls_config(
                 TlsConfig::builder()
@@ -59,6 +74,26 @@ pub fn build_agent(connect: Option<Duration>, global: Option<Duration>) -> ureq:
     builder.build().into()
 }
 
+/// The OS store's roots plus the bundled Mozilla roots, loaded once per
+/// process. An unreadable or empty OS store just leaves the Mozilla roots.
+fn default_roots() -> RootCerts {
+    static ROOTS: OnceLock<Arc<Vec<Certificate<'static>>>> = OnceLock::new();
+    let roots = ROOTS.get_or_init(|| {
+        let native = rustls_native_certs::load_native_certs().certs;
+        Arc::new(combine_roots(native.iter().map(|c| c.as_ref())))
+    });
+    RootCerts::Specific(Arc::clone(roots))
+}
+
+fn combine_roots<'a>(os_roots: impl Iterator<Item = &'a [u8]>) -> Vec<Certificate<'static>> {
+    webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|c| c.as_ref())
+        .chain(os_roots)
+        .map(|der| Certificate::from_der(der).to_owned())
+        .collect()
+}
+
 fn warn_insecure_once() {
     static WARNED: Once = Once::new();
     WARNED.call_once(|| {
@@ -72,14 +107,21 @@ fn warn_insecure_once() {
 
 #[cfg(test)]
 mod tests {
-    use super::{TlsMode, parse_tls_mode};
+    use super::{TlsMode, combine_roots, parse_tls_mode};
 
     #[test]
-    fn defaults_to_webpki() {
-        assert_eq!(parse_tls_mode(None), TlsMode::WebPki);
-        assert_eq!(parse_tls_mode(Some("")), TlsMode::WebPki);
-        assert_eq!(parse_tls_mode(Some("webpki")), TlsMode::WebPki);
-        assert_eq!(parse_tls_mode(Some("nonsense")), TlsMode::WebPki);
+    fn defaults_to_os_plus_mozilla_roots() {
+        assert_eq!(parse_tls_mode(None), TlsMode::Default);
+        assert_eq!(parse_tls_mode(Some("")), TlsMode::Default);
+        assert_eq!(parse_tls_mode(Some("default")), TlsMode::Default);
+        assert_eq!(parse_tls_mode(Some("nonsense")), TlsMode::Default);
+    }
+
+    #[test]
+    fn explicit_webpki_keeps_only_the_bundled_roots() {
+        for v in ["webpki", "WebPKI", " mozilla ", "bundled"] {
+            assert_eq!(parse_tls_mode(Some(v)), TlsMode::WebPki, "{v}");
+        }
     }
 
     #[test]
@@ -94,5 +136,15 @@ mod tests {
         for v in ["insecure", "no-verify", "skip", "DANGER"] {
             assert_eq!(parse_tls_mode(Some(v)), TlsMode::Insecure, "{v}");
         }
+    }
+
+    #[test]
+    fn default_roots_keep_every_mozilla_root_and_add_os_roots() {
+        let internal_ca: &[u8] = b"an internal CA from the OS store";
+        let roots = combine_roots([internal_ca].into_iter());
+        let mozilla = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len();
+        assert!(mozilla > 100, "bundled Mozilla roots missing");
+        assert_eq!(roots.len(), mozilla + 1);
+        assert!(roots.iter().any(|c| c.der() == internal_ca));
     }
 }

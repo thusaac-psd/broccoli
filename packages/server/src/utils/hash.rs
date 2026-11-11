@@ -45,3 +45,35 @@ pub fn generate_random_string() -> String {
     rand::fill(&mut key);
     hex::encode(key)
 }
+
+/// [`verify_password`] on the blocking pool. Argon2 is deliberately slow
+/// (tens of milliseconds of CPU); running it on an async worker thread stalls
+/// every other request scheduled there, which a login storm at contest start
+/// turns into runtime-wide latency.
+pub async fn verify_password_off_thread(
+    password: String,
+    password_hash: Option<String>,
+) -> Result<bool> {
+    tokio::task::spawn_blocking(move || verify_password(&password, password_hash.as_deref()))
+        .await
+        .map_err(|e| anyhow::anyhow!("password verification task failed: {e}"))?
+}
+
+/// [`hash_password`] on the blocking pool; see [`verify_password_off_thread`].
+pub async fn hash_password_off_thread(password: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| anyhow::anyhow!("password hashing task failed: {e}"))?
+}
+
+/// Lowercase hex SHA-256 of `input`.
+pub fn sha256_hex(input: impl AsRef<[u8]>) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(input.as_ref()))
+}
+
+/// Byte comparison whose running time does not depend on where the inputs
+/// first differ.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}

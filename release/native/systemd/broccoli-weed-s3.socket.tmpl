@@ -1,0 +1,10 @@
+[Unit]
+Description=Broccoli S3 on the LAN (credentialed SeaweedFS S3 only)
+
+[Socket]
+ListenStream=@WEED_IP@:8333
+# Bind even if the LAN address is not up yet at boot.
+FreeBind=true
+
+[Install]
+WantedBy=sockets.target

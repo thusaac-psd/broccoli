@@ -1,8 +1,6 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use common::storage::BlobStore;
-use dashmap::DashMap;
 use mq::MqQueue;
 use plugin_core::traits::PluginManager;
 use sea_orm::DatabaseConnection;
@@ -14,16 +12,6 @@ use crate::registry::{
     CheckerStageRegistry, ContestTypeRegistry, EvaluateBatches, EvaluatorRegistry,
     LanguageResolverRegistry, OperationBatches, OperationWaiters,
 };
-
-pub struct PendingDeviceAuth {
-    pub user_code: String,
-    pub token: Option<String>,
-    pub created_at: Instant,
-    pub expires_at: Instant,
-    pub last_poll: Option<Instant>,
-}
-
-pub type DeviceCodeStore = Arc<DashMap<String, PendingDeviceAuth>>;
 
 #[derive(Clone)]
 pub struct RegistryState {
@@ -46,7 +34,6 @@ pub struct AppState {
     pub redis_client: Option<Arc<redis::Client>>,
     pub blob_store: Arc<dyn BlobStore>,
     pub registries: RegistryState,
-    pub device_codes: DeviceCodeStore,
     pub metrics: common::metrics::Metrics,
     pub prometheus_registry: prometheus::Registry,
     pub dispatcher_permits: DispatcherSemaphore,
