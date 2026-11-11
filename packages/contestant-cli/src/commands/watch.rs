@@ -604,7 +604,7 @@ fn open_detail(app: &mut AppData, client: &Client) {
             let Some(row) = app.problems.get(app.sel_prob) else {
                 return;
             };
-            match client.get_problem(&row.problem_id) {
+            match client.get_contest_problem(&app.contest_id, &row.problem_id) {
                 Ok(p) => {
                     app.overlay = Some(Overlay::Problem {
                         title: format!("{} (problem {})", p.title, p.id),

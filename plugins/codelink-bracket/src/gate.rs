@@ -18,9 +18,17 @@
 //! problem id directly, bypassing whatever the UI shows. This gate is the
 //! enforcement point, independent of visibility.
 //!
-//! The global hook passes unrelated submissions and protects bracket problems
-//! from submissions through practice or a different contest format. All of
-//! those restrictions are owned here, rather than inferred by the host.
+//! The hook is global, so it also sees submissions outside bracket contests,
+//! and [`dispatch_submission_gate`] sorts them by where they come from:
+//!
+//! - through a bracket contest: the rules above;
+//! - through any other contest (a qualifier sharing the problem, say): pass.
+//!   That contest's own rules and the host decide, not this plugin;
+//! - outside every contest: rejected while a bracket that has not ended
+//!   holds the problem, so a player cannot dodge the rules above through
+//!   practice.
+//!
+//! All of those restrictions are owned here, rather than inferred by the host.
 
 use crate::model::MatchPhase;
 
@@ -289,23 +297,24 @@ fn check_submission_response(
     }
 }
 
+/// The global `before_submission` entry point. See the module doc comment
+/// for how a submission is sorted by where it comes from.
 pub fn dispatch_submission_gate(
     host: &Host,
     event: &BeforeSubmissionEvent,
 ) -> Result<HookResponse, SdkError> {
-    if event.contest_id.is_some() && event.contest_type == "codelink-bracket" {
-        return check_submission_response(host, event);
-    }
-    let blocked = if event.contest_type == "codelink-bracket" {
-        true
-    } else {
-        let mut p = Params::new();
-        let sql = format!("SELECT c.id FROM contest c JOIN contest_problem cp ON cp.contest_id = c.id
-            WHERE cp.problem_id = {} AND c.contest_type = 'codelink-bracket'
-            AND c.deleted_at IS NULL AND (c.end_time IS NULL OR c.end_time > clock_timestamp()) LIMIT 1", p.bind(event.problem_id));
-        host.db
-            .query_one_with_args::<serde_json::Value>(&sql, &p.into_args())?
-            .is_some()
+    let blocked = match event.contest_id {
+        Some(_) if event.contest_type == "codelink-bracket" => {
+            return check_submission_response(host, event);
+        }
+        // Another contest's submission is that contest's business, even when
+        // a bracket also holds the problem.
+        Some(_) => false,
+        None => {
+            event.contest_type == "codelink-bracket"
+                || storage::unended_bracket_contests(host, &[event.problem_id])?
+                    .contains_key(&event.problem_id)
+        }
     };
     Ok(if blocked {
         HookResponse::reject(
@@ -358,8 +367,14 @@ mod tests {
         }
     }
 
+    fn is_contest_submission_required(response: HookResponse) -> bool {
+        matches!(response, HookResponse::Reject { code, .. } if code == "CONTEST_SUBMISSION_REQUIRED")
+    }
+
     #[test]
-    fn global_gate_passes_unrelated_formats_and_blocks_alternate_submission_contexts() {
+    fn global_gate_passes_another_contest_without_a_lookup() {
+        // A qualifier sharing a bracket problem judges its own submissions,
+        // whether or not a bracket still holds the problem.
         let host = Host::mock();
         let mut request = event(10, 101, Some(9));
         request.contest_type = "other-format".into();
@@ -367,18 +382,48 @@ mod tests {
             dispatch_submission_gate(&host, &request).unwrap(),
             HookResponse::Pass
         ));
-        for contest_id in [None, Some(9)] {
-            request.contest_id = contest_id;
-            host.db.queue_query_result(serde_json::json!([{"id":7}]));
-            assert!(
-                matches!(dispatch_submission_gate(&host,&request).unwrap(),HookResponse::Reject {code,..} if code == "CONTEST_SUBMISSION_REQUIRED")
-            );
-        }
-        request.contest_type = "codelink-bracket".into();
-        request.contest_id = None;
         assert!(
-            matches!(dispatch_submission_gate(&host,&request).unwrap(),HookResponse::Reject {code,..} if code == "CONTEST_SUBMISSION_REQUIRED")
+            host.db.queries().is_empty(),
+            "another contest's submission must not look up brackets: {:?}",
+            host.db.queries()
         );
+    }
+
+    #[test]
+    fn global_gate_blocks_a_standalone_submission_only_while_a_bracket_holds_the_problem() {
+        let host = Host::mock();
+        let mut request = event(10, 101, None);
+        request.contest_type = "other-format".into();
+
+        host.db
+            .queue_query_result(serde_json::json!([{ "problem_id": 101, "contest_id": 7 }]));
+        assert!(is_contest_submission_required(
+            dispatch_submission_gate(&host, &request).unwrap()
+        ));
+        let queries = host.db.queries();
+        assert_eq!(queries.len(), 1);
+        assert!(
+            queries[0].sql.contains("c.end_time > clock_timestamp()"),
+            "an ended bracket must not hold the problem: {}",
+            queries[0].sql
+        );
+
+        host.db.queue_query_result(serde_json::json!([]));
+        assert!(matches!(
+            dispatch_submission_gate(&host, &request).unwrap(),
+            HookResponse::Pass
+        ));
+    }
+
+    #[test]
+    fn global_gate_always_blocks_the_bracket_type_outside_a_contest() {
+        let host = Host::mock();
+        let mut request = event(10, 101, None);
+        request.contest_type = "codelink-bracket".into();
+        assert!(is_contest_submission_required(
+            dispatch_submission_gate(&host, &request).unwrap()
+        ));
+        assert!(host.db.queries().is_empty());
     }
 
     #[test]

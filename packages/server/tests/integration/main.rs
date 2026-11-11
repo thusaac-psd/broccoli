@@ -29,6 +29,7 @@ mod problem;
 mod regression_guards;
 mod rejudge_visibility;
 mod scaling;
+mod shared_problem_contests;
 mod submission;
 mod submission_admission;
 mod system;

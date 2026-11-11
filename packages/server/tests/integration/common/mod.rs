@@ -319,6 +319,22 @@ pub mod routes {
         format!("/api/v1/contests/{id}/problems/{problem_id}")
     }
 
+    pub fn contest_problem_samples(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples")
+    }
+
+    pub fn contest_problem_sample(id: i32, problem_id: i32, tc_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples/{tc_id}")
+    }
+
+    pub fn contest_problem_attachments(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments")
+    }
+
+    pub fn contest_problem_attachment(id: i32, problem_id: i32, ref_id: &str) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments/{ref_id}")
+    }
+
     pub fn contest_participants(id: i32) -> String {
         format!("/api/v1/contests/{id}/participants")
     }
