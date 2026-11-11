@@ -19,9 +19,15 @@ pub async fn serve_plugin_asset(
         .resolve_plugin_asset(&plugin_id, &file_path)
         .map_err(AppError::from)?;
 
+    // A plugin that declares a web entry it never built (or a client asking
+    // for a file that does not exist) is a missing asset, not a server
+    // fault: answer 404 so clients stop treating it as transient.
     let content = tokio::fs::read(&safe_path)
         .await
-        .map_err(|e| AppError::Internal(format!("IO error: {}", e)))?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AppError::NotFound("Asset not found".into()),
+            _ => AppError::Internal(format!("IO error: {}", e)),
+        })?;
 
     let mime = mime_guess::from_path(&safe_path).first_or_octet_stream();
 

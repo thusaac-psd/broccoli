@@ -186,7 +186,7 @@ impl OperationTaskExecutor {
         match RedisCacheLeaderElector::from_url(&config.mq.url, opts) {
             Ok(elector) => {
                 info!(
-                    redis_url = %config.mq.url,
+                    redis_url = %common::redact::redact_url(&config.mq.url),
                     ttl_secs = opts.ttl_secs,
                     heartbeat_interval_secs = opts.heartbeat_interval_secs,
                     "RedisCacheLeaderElector initialized"
@@ -195,7 +195,7 @@ impl OperationTaskExecutor {
             }
             Err(e) => {
                 warn!(
-                    redis_url = %config.mq.url,
+                    redis_url = %common::redact::redact_url(&config.mq.url),
                     error = %e,
                     "Failed to build RedisCacheLeaderElector, falling back to no-op"
                 );
