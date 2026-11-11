@@ -5,7 +5,7 @@
 //! writes off the raw `db_execute`/`db_query` channel. The guest now serializes
 //! *structured* input (a `SubmissionUpdate`, a batch of `TestCaseResultRow`s,
 //! etc.) and the SERVER owns the SQL. Every write to a
-//! judgement's results is fenced by [`JUDGEMENT_WRITE_FENCE`]. The
+//! judgement's results is fenced by `JUDGEMENT_WRITE_FENCE`. The
 //! statements run on the PRIVILEGED pool (the app role) - not the restricted
 //! `broccoli_plugin` pool that backs the raw `sql` channel - but still through
 //! the SAME NUL-sanitization / arg-parsing / poisoned-connection recovery choke
@@ -102,7 +102,7 @@ fn judgement_write_fence(judgement: &str, submission: &str, epoch: &str) -> Stri
 }
 
 /// `submission_update`'s first statement: mirrors the judged columns onto the
-/// caller's own judgement, behind [`JUDGEMENT_WRITE_FENCE`]. A terminal
+/// caller's own judgement, behind `JUDGEMENT_WRITE_FENCE`. A terminal
 /// Judged/CompilationError status also finalizes it. `None` when the update
 /// sets no judgement column.
 fn judgement_update(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {

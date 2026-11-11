@@ -7,11 +7,11 @@
 //! submission's epoch must never move backwards.
 //!
 //! Every epoch comes from one allocator: `submission.max_judge_epoch`, bumped
-//! in SQL by [`AllocateJudgeEpoch`]. The bump runs inside an UPDATE of the
+//! in SQL by `AllocateJudgeEpoch`. The bump runs inside an UPDATE of the
 //! submission row, so concurrent allocators for the same submission are
 //! serialized by its row lock and each sees the previous one's value. A
 //! judgement's epoch is then copied from its submission
-//! ([`allocated_epoch`] or the RETURNING row of [`open_judgement`]), never
+//! (`allocated_epoch` or the RETURNING row of `open_judgement`), never
 //! computed locally as `epoch + 1`. Local `+ 1` arithmetic was how a deferred
 //! rejudge and a later immediate rejudge both picked `judge_epoch + 1`.
 //!
@@ -20,12 +20,12 @@
 //! plugins join results to their judgement on it (IOI's
 //! `sj.judge_epoch = tcr.judge_epoch`), and every in-place re-dispatch wipes
 //! the old attempt's rows. The one path that moves a judgement to a new epoch
-//! while keeping its results, [`apply_judgement`], re-stamps them in the same
+//! while keeping its results, `apply_judgement`, re-stamps them in the same
 //! transaction.
 //!
 //! Every path that starts a new judgement row (admin rejudge, deferred
 //! rejudge, DLQ retry, stuck-job retry and lease steal) goes through
-//! [`open_judgement`], so the epoch, the supersede step and the submission
+//! `open_judgement`, so the epoch, the supersede step and the submission
 //! reset cannot drift apart between them.
 
 use chrono::Utc;
@@ -74,7 +74,7 @@ impl AllocateJudgeEpoch for UpdateMany<submission::Entity> {
 
 /// `submission_judgement.judge_epoch` value for an in-place re-dispatch: the
 /// epoch most recently allocated for the judgement's submission. Use it in
-/// the same transaction right after [`AllocateJudgeEpoch`] ran on that
+/// the same transaction right after `AllocateJudgeEpoch` ran on that
 /// submission; the row lock that UPDATE took keeps anyone else from
 /// allocating in between.
 pub(crate) fn allocated_epoch() -> SimpleExpr {
@@ -137,7 +137,7 @@ const IN_FLIGHT: [SubmissionStatus; 3] = [
     SubmissionStatus::Running,
 ];
 
-/// Why [`open_judgement`] opens a new judgement row.
+/// Why `open_judgement` opens a new judgement row.
 pub(crate) enum OpenJudgement {
     /// Admin rejudge or DLQ retry that becomes current at once: a new judging
     /// attempt. The submission goes back to `Queued` with a fresh retry
@@ -392,7 +392,7 @@ async fn supersede_current_judgement<C: ConnectionTrait>(
     Ok(())
 }
 
-/// Outcome of [`apply_judgement`].
+/// Outcome of `apply_judgement`.
 pub(crate) enum ApplyJudgement {
     Applied(Box<submission::Model>),
     SubmissionNotFound,
