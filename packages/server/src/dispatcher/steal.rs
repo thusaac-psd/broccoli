@@ -1236,7 +1236,6 @@ mod tests {
                 evaluate_batches,
                 hook_registry: crate::hooks::new_shared_registry(),
             },
-            device_codes: Arc::new(dashmap::DashMap::new()),
             metrics,
             prometheus_registry,
             dispatcher_permits,

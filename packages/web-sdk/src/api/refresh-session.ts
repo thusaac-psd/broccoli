@@ -58,6 +58,11 @@ export interface RefreshDeps {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   withLock: <T>(run: () => Promise<T>) => Promise<T>;
+  /**
+   * A monotonic clock for the backoff window. Not `Date.now()`: the wall
+   * clock of a contestant PC gets corrected mid-contest, and a backwards jump
+   * right after a failure would block refreshing for the size of the jump.
+   */
   now: () => number;
   random: () => number;
 }
@@ -69,7 +74,7 @@ const defaultDeps: RefreshDeps = {
     typeof navigator !== 'undefined' && navigator.locks?.request
       ? await navigator.locks.request(REFRESH_LOCK, run)
       : withStorageLease(run),
-  now: () => Date.now(),
+  now: () => performance.now(),
   random: () => Math.random(),
 };
 
@@ -78,33 +83,59 @@ const defaultDeps: RefreshDeps = {
 // that finds another tab's unexpired lease waits until it is released (the
 // `storage` event, so no polling) or expires. Two tabs can still take it in
 // the same instant; the TOKEN_INVALID retry covers that rare case.
+//
+// The expiry is wall-clock time, the only clock tabs share, so a backwards
+// clock jump makes a peer's lease look longer than any lease can be. Each
+// lease is therefore waited on for at most `LEASE_MS` by this tab's monotonic
+// clock, whatever its stored expiry says.
 const LEASE_KEY = 'broccoli:auth:refresh-lease';
 // Long enough for a whole attempt: two timed-out requests and the pause.
-const LEASE_MS = 2 * REFRESH_TIMEOUT_MS + REFRESH_RETRY_DELAY_MS;
+export const LEASE_MS = 2 * REFRESH_TIMEOUT_MS + REFRESH_RETRY_DELAY_MS;
 const tabId = Math.random().toString(36).slice(2);
 
-export async function withStorageLease<T>(run: () => Promise<T>): Promise<T> {
+export interface LeaseClocks {
+  /** Shared between tabs; stamps and reads lease expiries. */
+  wallNow: () => number;
+  /** This tab's own; bounds how long one lease is waited on. */
+  monotonicNow: () => number;
+}
+
+const defaultLeaseClocks: LeaseClocks = {
+  wallNow: () => Date.now(),
+  monotonicNow: () => performance.now(),
+};
+
+export async function withStorageLease<T>(
+  run: () => Promise<T>,
+  clocks: LeaseClocks = defaultLeaseClocks,
+): Promise<T> {
   let storage: Storage;
   try {
     storage = window.localStorage;
   } catch {
     return run();
   }
-  const peerLeaseExpiry = () => {
-    const [owner, expires] = (storage.getItem(LEASE_KEY) ?? '').split(':');
-    return owner && owner !== tabId ? Number(expires) || 0 : 0;
-  };
 
-  for (
-    let expires = peerLeaseExpiry();
-    expires > Date.now();
-    expires = peerLeaseExpiry()
-  ) {
-    await storageChange(LEASE_KEY, expires - Date.now());
+  let seenLease: string | null = null;
+  let giveUpAt = 0;
+  for (;;) {
+    const lease = storage.getItem(LEASE_KEY);
+    const [owner, expires] = (lease ?? '').split(':');
+    if (!owner || owner === tabId) break;
+    if (lease !== seenLease) {
+      seenLease = lease;
+      giveUpAt = clocks.monotonicNow() + LEASE_MS;
+    }
+    const waitMs = Math.min(
+      (Number(expires) || 0) - clocks.wallNow(),
+      giveUpAt - clocks.monotonicNow(),
+    );
+    if (waitMs <= 0) break;
+    await storageChange(LEASE_KEY, waitMs);
   }
 
   try {
-    storage.setItem(LEASE_KEY, `${tabId}:${Date.now() + LEASE_MS}`);
+    storage.setItem(LEASE_KEY, `${tabId}:${clocks.wallNow() + LEASE_MS}`);
   } catch {
     // Storage full or blocked: refresh without the lease.
   }

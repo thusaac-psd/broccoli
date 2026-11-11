@@ -1,9 +1,11 @@
 import { useApiClient, useApiFetch } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 import {
   createClarification,
@@ -12,6 +14,25 @@ import {
   resolveClarification,
   toggleReplyPublic,
 } from '../api/api';
+
+/** An earlier send already posted it (its response was lost): a success. */
+function treatAlreadyDoneAsPosted(error: unknown): null {
+  if (isAlreadyDone(error)) return null;
+  throw error;
+}
+
+/**
+ * An earlier send may have posted it, or is still posting it. No refetch is
+ * needed here: `onSettled` refetches the list, which shows whether it was.
+ */
+function reportedUnsettled(
+  error: unknown,
+  t: (key: string) => string,
+): boolean {
+  return toastUnsettled(error, t, {
+    outcomeUnknownKey: 'clarification.outcomeUnknown',
+  });
+}
 
 export function useClarifications(contestId: number, enabled: boolean) {
   const apiClient = useApiClient();
@@ -34,11 +55,12 @@ export function useCreateClarification(contestId: number) {
     mutationFn: (body: CreateClarificationBody) =>
       sendIdempotent({ contestId, body }, (key) =>
         createClarification(apiClient, contestId, body, key),
-      ),
+      ).catch(treatAlreadyDoneAsPosted),
     onSuccess: () => {
       toast.success(t('clarification.submitSuccess'));
     },
     onError: (error: Error) => {
+      if (reportedUnsettled(error, t)) return;
       toast.error(error.message || t('clarification.submitError'));
     },
     onSettled: () => {
@@ -64,11 +86,12 @@ export function useReplyClarification(contestId: number) {
           { content: payload.content, is_public: false },
           key,
         ),
-      ),
+      ).catch(treatAlreadyDoneAsPosted),
     onSuccess: () => {
       toast.success(t('clarification.replySuccess'));
     },
     onError: (error: Error) => {
+      if (reportedUnsettled(error, t)) return;
       toast.error(error.message || t('clarification.replyError'));
     },
     onSettled: () => {

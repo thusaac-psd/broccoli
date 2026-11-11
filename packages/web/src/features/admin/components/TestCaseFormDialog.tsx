@@ -1,5 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 interface TestCaseFormDialogProps {
   problemId: number;
@@ -161,7 +162,17 @@ export function TestCaseFormDialog({
         );
 
     setLoading(false);
-    if (result.error) {
+    if (
+      toastUnsettled(result.error, t, {
+        refetch: () =>
+          queryClient.invalidateQueries({ queryKey: testCasesQueryKey }),
+      })
+    ) {
+      // The form stays open: if the test case is not in the list, it can be
+      // sent again as it is.
+      return;
+    }
+    if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
         getErrorMessage(
           result.error,

@@ -13,7 +13,14 @@ import { useEffect, useReducer, useSyncExternalStore } from 'react';
 // offset to an interval. Intersecting the intervals of successive responses
 // converges on the true offset well below a second. An empty intersection
 // means one of the clocks jumped (the user fixed their clock, NTP kicked in),
-// so the estimate starts over from the newest response.
+// so the estimate starts over, but only once a second response agrees with
+// the first disjoint one: a lone outlier is likelier a stale `Date` than a
+// jump, and a jump costs one extra response to pick up.
+//
+// A response served from the browser's HTTP cache carries the `Date` of the
+// original response, up to its max-age in the past (attachments are cached
+// for an hour), so `isFreshResponse` keeps every response a cache could have
+// served out of the estimate.
 //
 // Cross-origin, `Date` is readable only when the server exposes it; until then
 // no sample arrives and the local clock is used unchanged.
@@ -21,11 +28,48 @@ import { useEffect, useReducer, useSyncExternalStore } from 'react';
 /** Offset changes smaller than this do not re-render subscribers. */
 const PUBLISH_THRESHOLD_MS = 250;
 
+/** Offset bounds `[lower, upper]` in milliseconds. */
+type Interval = [number, number];
+
+function intersect(a: Interval, b: Interval): Interval | null {
+  const lower = Math.max(a[0], b[0]);
+  const upper = Math.min(a[1], b[1]);
+  return lower <= upper ? [lower, upper] : null;
+}
+
+/**
+ * Whether a response's headers rule out an HTTP cache having served it, so its
+ * `Date` was stamped while this request was in flight. Anything a cache may
+ * hold (explicit freshness, or a bare `Last-Modified`, which browsers cache
+ * heuristically) or did relay (`Age`) is ruled out. A `no-cache` response is
+ * fine: revalidating it refreshes the stored `Date`.
+ */
+export function isFreshResponse(headers: Headers): boolean {
+  if (headers.has('Age')) return false;
+  const cacheControl = headers.get('Cache-Control') ?? '';
+  const directives = new Map(
+    cacheControl
+      .toLowerCase()
+      .split(',')
+      .map((directive) => {
+        const [name, value = ''] = directive.split('=');
+        return [name.trim(), value.trim().replace(/^"|"$/g, '')];
+      }),
+  );
+  if (directives.has('no-store') || directives.has('no-cache')) return true;
+  if (directives.has('immutable')) return false;
+  const maxAge = directives.get('max-age') ?? directives.get('s-maxage');
+  if (maxAge !== undefined) return Number(maxAge) === 0;
+  return !headers.has('Expires') && !headers.has('Last-Modified');
+}
+
 export function createServerClock(localNow: () => number = Date.now) {
   let lowerBound = -Infinity;
   let upperBound = Infinity;
   let offsetMs = 0;
   let publishedOffsetMs = 0;
+  // A sample disjoint from the estimate, held until a second one confirms it.
+  let pendingReset: Interval | null = null;
   const listeners = new Set<() => void>();
 
   return {
@@ -40,10 +84,16 @@ export function createServerClock(localNow: () => number = Date.now) {
 
       const sampleLower = serverMs - receivedAt;
       const sampleUpper = serverMs + 1_000 - sentAt;
-      const lower = Math.max(lowerBound, sampleLower);
-      const upper = Math.min(upperBound, sampleUpper);
-      [lowerBound, upperBound] =
-        lower <= upper ? [lower, upper] : [sampleLower, sampleUpper];
+      const sample: Interval = [sampleLower, sampleUpper];
+      const next =
+        intersect([lowerBound, upperBound], sample) ??
+        (pendingReset && intersect(pendingReset, sample));
+      if (!next) {
+        pendingReset = sample;
+        return;
+      }
+      [lowerBound, upperBound] = next;
+      pendingReset = null;
       offsetMs = Math.round((lowerBound + upperBound) / 2);
 
       if (Math.abs(offsetMs - publishedOffsetMs) >= PUBLISH_THRESHOLD_MS) {
@@ -73,7 +123,9 @@ export async function fetchWithServerClock(
 ): Promise<Response> {
   const sentAt = Date.now();
   const response = await fetch(input, init);
-  clock.observe(response.headers.get('Date'), sentAt, Date.now());
+  if (isFreshResponse(response.headers)) {
+    clock.observe(response.headers.get('Date'), sentAt, Date.now());
+  }
   return response;
 }
 

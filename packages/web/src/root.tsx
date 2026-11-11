@@ -55,8 +55,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     window.addEventListener('error', onError);
 
     // Vite's preload helper failed to fetch a chunk's dependencies. Reload
-    // for fresh chunks; if that was just tried, let the import fail into the
-    // error boundary instead of looping.
+    // for fresh chunks; if that was just tried, or the browser is offline,
+    // let the import fail into the error boundary instead.
     const onPreloadError = (event: Event) => {
       if (reloadForFreshChunks()) event.preventDefault();
     };
@@ -118,8 +118,8 @@ export default function Root() {
 /**
  * Every error no route handles lands here: a render crash, or code that
  * failed to load (offline for a moment, or a redeploy removed the chunks this
- * page points at). The latter reloads once for fresh code; anything else gets
- * a translated error page.
+ * page points at). The latter reloads once for fresh code (once back online,
+ * if the browser is offline); anything else gets a translated error page.
  */
 export function ErrorBoundary() {
   const error = useRouteError();
@@ -142,6 +142,15 @@ export function ErrorBoundary() {
           : { message: String(error) },
     );
   }, [error, reloading]);
+
+  // Offline, no reload was attempted (it would land on the browser's offline
+  // page); try once the connection is back.
+  useEffect(() => {
+    if (!chunkLoad || reloading) return;
+    const onOnline = () => reloadForFreshChunks();
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [chunkLoad, reloading]);
 
   // The translated page needs the providers the crash may have come from;
   // should they fail again, ErrorReporter falls back to plain English.
