@@ -608,7 +608,6 @@ impl E2eTestApp {
                 evaluate_batches,
                 hook_registry,
             },
-            device_codes: Arc::new(dashmap::DashMap::new()),
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
