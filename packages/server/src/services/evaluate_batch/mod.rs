@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::entity::{additional_file, plugin_config, problem, test_case};
 use crate::host_funcs::context::EvaluateHostDeps;
 use crate::registry::{BatchState, EvaluateBatches, PluginHandler};
+use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::submission_dispatch::fire_after_judging_hooks_for_detached_completion;
 use crate::services::windowed_session::{
     SessionAction, SessionDecision, SlotEvent, SlotOutcome, WindowedSession, run_windowed_session,
@@ -130,98 +131,6 @@ fn system_error_verdict(test_case_id: i32, message: impl Into<String>) -> TestCa
         message: Some(message.into()),
         stdout: None,
         stderr: None,
-    }
-}
-
-// Shares the evaluate-batch verdict context tuple (plugin id, batches, metrics,
-// ops registry, batch id, verdict channel, pending-count) with
-// drain_evaluate_verdict_before_giveup and result_wait::handle_evaluate_receive.
-// A shared `EvaluateVerdictCtx` would dedupe the three (dedup backlog); until
-// then these are distinct values, so allow the arg count.
-#[allow(clippy::too_many_arguments)]
-fn handle_evaluate_verdict(
-    plugin_id: &str,
-    batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry,
-    batch_id: &str,
-    result_rx: &flume::Receiver<TestCaseVerdict>,
-    pending_count: &Arc<AtomicUsize>,
-    wait_start: Instant,
-    verdict: TestCaseVerdict,
-) -> anyhow::Result<Option<TestCaseVerdict>> {
-    evaluate_ops_registry.mark_test_case_completed(batch_id, verdict.test_case_id);
-    if let Some(metrics) = metrics {
-        let attrs = [
-            KeyValue::new("batch.kind", "evaluate"),
-            KeyValue::new("plugin.id", plugin_id.to_string()),
-            KeyValue::new("outcome", "result"),
-            KeyValue::new("verdict", verdict.verdict.to_string()),
-        ];
-        metrics
-            .batch_wait_duration
-            .record(wait_start.elapsed().as_secs_f64(), &attrs);
-        metrics.batch_results_total.add(1, &attrs);
-    }
-    tracing::debug!(
-        plugin_id = %plugin_id,
-        batch_id = %batch_id,
-        test_case_id = verdict.test_case_id,
-        verdict = %verdict.verdict,
-        "Evaluate result received"
-    );
-
-    if pending_count.load(Ordering::SeqCst) == 0
-        && result_rx.is_empty()
-        && batches.remove(batch_id).is_some()
-    {
-        evaluate_ops_registry.remove_batch(batch_id);
-        if let Some(metrics) = metrics {
-            metrics
-                .batch_active
-                .add(-1, &[KeyValue::new("batch.kind", "evaluate")]);
-        }
-    }
-
-    Ok(Some(verdict))
-}
-
-/// Non-blocking drain attempted before a blocking result-wait give-up branch
-/// returns `Ok(None)`. The per-test-case dispatch task ([`start_evaluate_batch`])
-/// does `batch_tx.send(verdict)` BEFORE `decrement_pending`, so the instant a
-/// give-up branch observes the timeout a completed verdict may ALREADY be
-/// buffered in `result_rx`. Returning `Ok(None)` without this check drops it, and
-/// the detached windowed driver maps `Ok(None)` to a Timeout event -> a spurious
-/// SystemError (or a wasted retry) under load. Delivers the buffered verdict
-/// (running the normal bookkeeping via [`handle_evaluate_verdict`]) when present;
-/// returns `None` only when the channel is genuinely empty. Mirrors
-/// `operation_batch::drain_delivered_before_giveup`.
-// Same evaluate-batch verdict context tuple as handle_evaluate_verdict (dedup
-// backlog: shared `EvaluateVerdictCtx`).
-#[allow(clippy::too_many_arguments)]
-fn drain_evaluate_verdict_before_giveup(
-    plugin_id: &str,
-    batches: &EvaluateBatches,
-    metrics: Option<&common::metrics::Metrics>,
-    evaluate_ops_registry: &crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry,
-    batch_id: &str,
-    result_rx: &flume::Receiver<TestCaseVerdict>,
-    pending_count: &Arc<AtomicUsize>,
-    wait_start: Instant,
-) -> Option<anyhow::Result<Option<TestCaseVerdict>>> {
-    match result_rx.try_recv() {
-        Ok(verdict) => Some(handle_evaluate_verdict(
-            plugin_id,
-            batches,
-            metrics,
-            evaluate_ops_registry,
-            batch_id,
-            result_rx,
-            pending_count,
-            wait_start,
-            verdict,
-        )),
-        Err(_) => None,
     }
 }
 

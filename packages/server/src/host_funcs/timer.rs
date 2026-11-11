@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use extism::host_fn;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set};
@@ -132,12 +134,9 @@ pub(crate) async fn cancel(
     Ok(())
 }
 
-host_fn!(pub timer_schedule(user_data: (String, DatabaseConnection); input: String) -> String {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("timer_schedule", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub timer_schedule(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "timer_schedule")?;
+    let (plugin_id, db) = &*call;
 
     let parsed: ScheduleInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid timer_schedule input: {e}")))?;
@@ -148,12 +147,9 @@ host_fn!(pub timer_schedule(user_data: (String, DatabaseConnection); input: Stri
     Ok(serde_json::json!({ "ok": true }).to_string())
 });
 
-host_fn!(pub timer_cancel(user_data: (String, DatabaseConnection); input: String) -> String {
-    let user_data_guard = user_data.get()?;
-    let user_data = super::lock_or_poison(&user_data_guard)?;
-    let (plugin_id, db) = &*user_data;
-    let span = super::host_fn_span("timer_cancel", plugin_id);
-    let _enter = span.enter();
+host_fn!(pub timer_cancel(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "timer_cancel")?;
+    let (plugin_id, db) = &*call;
 
     let parsed: CancelInput = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid timer_cancel input: {e}")))?;
