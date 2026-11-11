@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Enable optional plugins shipped with this bundle, for example
 #   ./enable-plugin.sh codelink-qualifier codelink-bracket
-# Run it on each node whose role loads plugins, then select Reload All on the
-# admin Plugins page (or restart the server). Without arguments, lists the
-# optional plugins in this bundle.
+# Run it on each node whose role loads plugins, then restart every server.
+# Reload All on the admin Plugins page reloads only the server that handled
+# the click, so it is enough only when there is a single server.
+# Without arguments, lists the optional plugins in this bundle.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/plugins.sh

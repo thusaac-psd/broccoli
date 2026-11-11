@@ -32,7 +32,10 @@ runbook sequences the whole hand-off around it.
 
 China LAN reality baked in: **nothing is fetched at deploy time.** Docker images
 are `docker load`-ed from the bundle (never pulled), the S3 copy is pure Python
-stdlib (no `aws-cli`), and the time-check is skipped (`BROCCOLI_SKIP_TIME_CHECK=1`).
+stdlib (no `aws-cli`), and the clock check only warns. Before the contest, make the
+infra box the LAN's time server and point every other box at it
+([../docs/operator-runbook.md](../docs/operator-runbook.md#time-sync-on-an-offline-lan)):
+servers and workers that disagree on the time delay or lose judging results.
 
 ---
 
@@ -82,7 +85,6 @@ contest box over USB or LAN scp. Extract to the same directory on each.
 
 ```bash
 cd <bundle>
-export BROCCOLI_SKIP_TIME_CHECK=1            # offline: no NTP/HTTPS clock check
 export BROCCOLI_INFRA_HOST=<box1-LAN-IP>     # so workers reach DB/MQ/S3 over the LAN
 ./install.sh infra server
 #   - choose object_storage (SeaweedFS) at the storage menu  [recommended]
@@ -90,12 +92,14 @@ export BROCCOLI_INFRA_HOST=<box1-LAN-IP>     # so workers reach DB/MQ/S3 over th
 ```
 
 The server auto-creates its schema and registers plugins on first boot. Then
-load the problems (it reads the contest box's own `config.toml`):
+load the problems. On this Docker install the connection settings are in the
+`connection.env` that `./install.sh infra` wrote; a native install reads its
+`config.toml` instead. The host needs `psql` (`postgresql-client`):
 
 ```bash
 cd contest
-./import-problems.sh ../broccoli-problems-*.tar.gz
-#   --config PATH   target config.toml (default /data/broccoli/config/config.toml)
+./import-problems.sh ../broccoli-problems-*.tar.gz --env-file ../connection.env
+#   --config PATH   a native target's config.toml (the default without --env-file)
 #   --truncate      replace problems if the target already has some
 ```
 
@@ -108,15 +112,14 @@ Copy `connection.env` from Box 1 into each worker's bundle dir, then:
 ```bash
 cd <bundle>
 # (connection.env from box 1 is in this dir)
-export BROCCOLI_SKIP_TIME_CHECK=1
-BROCCOLI__WORKER__ID=worker-2 ./install.sh worker     # worker-3, worker-4, ...
+./install.sh worker     # the worker id defaults to one unique to this machine
 #   choose the 'icpc' worker image (C/C++/Python) at the worker-image menu
 ```
 
 `bring-up-worker.sh` wraps this non-interactively for fleets:
 
 ```bash
-./contest/bring-up-worker.sh --id worker-2            # reads ./connection.env
+./contest/bring-up-worker.sh            # reads ./connection.env; --id NAME to pick the id
 ```
 
 ### Sanity check
@@ -184,7 +187,8 @@ disaster recovery of a single contest without a full-database restore.
 - **Postgres version.** Staging dumps are plain `COPY` data (PG 14) and restore
   into the bundle's Postgres (PG 18) — the forward-compatible direction.
 - **Run as the broccoli user** (or one that can read `config.toml` and reach
-  Postgres/SeaweedFS). `export`/`import` read DB + S3 creds from `config.toml`.
+  Postgres/SeaweedFS). `export` reads DB + S3 creds from `config.toml`; `import`
+  reads them from `config.toml` or, with `--env-file`, from `connection.env`.
 - **testlib special judges** carry their `testlib.h` inside `checker_source`
   (stored in the DB), so they export/import intact with no internet — the
   `fetch-testlib.sh` in `examples/testlib-checker` is only for authoring new

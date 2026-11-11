@@ -255,6 +255,9 @@ mod token_refresh {
             .cookie_store(false)
             .build()
             .unwrap();
+        // Replaying A right away is a benign race (another tab, or a retry
+        // after a lost response): it is answered with a sibling token rather
+        // than a 401 that would log the client out.
         let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
             .header("cookie", format!("broccoli_refresh={}", cookie_a))
@@ -262,27 +265,87 @@ mod token_refresh {
             .send()
             .await
             .expect("send refresh replay A");
-        assert_eq!(replay_a.status(), 401);
-        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
-        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+        assert_eq!(replay_a.status(), 200, "in-grace replay must succeed");
 
-        // Second legit refresh with cookie B (via the cookie-store client): rotates to cookie C.
-        let r2 = app.post_without_token(routes::REFRESH, &json!({})).await;
-        assert_eq!(r2.status, 200);
-        let cookie_c = extract_refresh_cookie(&r2);
-        assert_ne!(cookie_b, cookie_c, "second refresh must also rotate");
-
-        // Replay cookie B: 401 TOKEN_INVALID.
-        let replay_b = raw_client
+        // Past the grace window, the same replay is reuse.
+        {
+            use sea_orm::ConnectionTrait;
+            app.db
+                .execute_unprepared(
+                    "UPDATE refresh_tokens SET revoked_at = NOW() - INTERVAL '1 hour' \
+                     WHERE revoked_at IS NOT NULL",
+                )
+                .await
+                .expect("backdate revoked_at");
+        }
+        let replay_a = raw_client
             .post(format!("http://{}{}", app.addr, routes::REFRESH))
-            .header("cookie", format!("broccoli_refresh={}", cookie_b))
+            .header("cookie", format!("broccoli_refresh={}", cookie_a))
             .json(&json!({}))
             .send()
             .await
-            .expect("send refresh replay B");
-        assert_eq!(replay_b.status(), 401);
-        let replay_b_body: serde_json::Value = replay_b.json().await.unwrap();
-        assert_eq!(replay_b_body["code"], "TOKEN_INVALID");
+            .expect("send refresh replay A past grace");
+        assert_eq!(replay_a.status(), 401);
+        let replay_a_body: serde_json::Value = replay_a.json().await.unwrap();
+        assert_eq!(replay_a_body["code"], "TOKEN_INVALID");
+    }
+
+    /// Two refreshes carrying the same cookie (two tabs, or a retry after the
+    /// response with the new cookie was lost) both succeed, and both resulting
+    /// tokens stay usable.
+    #[tokio::test]
+    async fn concurrent_refreshes_with_one_cookie_both_succeed() {
+        fn extract_refresh_cookie(resp: &reqwest::Response) -> String {
+            for hv in resp.headers().get_all("set-cookie").iter() {
+                let s = hv.to_str().expect("set-cookie utf-8");
+                if let Some(rest) = s.strip_prefix("broccoli_refresh=") {
+                    let val = rest.split(';').next().unwrap_or("").to_string();
+                    if !val.is_empty() {
+                        return val;
+                    }
+                }
+            }
+            panic!("no broccoli_refresh Set-Cookie on response");
+        }
+
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "dora", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let raw = reqwest::Client::builder()
+            .no_proxy()
+            .cookie_store(false)
+            .build()
+            .unwrap();
+        let login = raw
+            .post(format!("http://{}{}", app.addr, routes::LOGIN))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let cookie = extract_refresh_cookie(&login);
+
+        let refresh = |cookie: String| {
+            let raw = raw.clone();
+            let url = format!("http://{}{}", app.addr, routes::REFRESH);
+            async move {
+                raw.post(url)
+                    .header("cookie", format!("broccoli_refresh={cookie}"))
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+        let (a, b) = tokio::join!(refresh(cookie.clone()), refresh(cookie));
+        assert_eq!(a.status(), 200);
+        assert_eq!(b.status(), 200);
+        let (cookie_a, cookie_b) = (extract_refresh_cookie(&a), extract_refresh_cookie(&b));
+        assert_ne!(cookie_a, cookie_b);
+
+        for next in [cookie_a, cookie_b] {
+            let res = refresh(next).await;
+            assert_eq!(res.status(), 200, "a sibling token must stay usable");
+        }
     }
 
     /// Replaying a rotated refresh token AFTER the benign-race grace window is
@@ -358,6 +421,314 @@ mod token_refresh {
             401,
             "reuse past grace must revoke the whole token family, including the current token"
         );
+    }
+}
+
+mod refresh_validator_format {
+    use super::*;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::{refresh_token, user};
+
+    /// Refresh rows written before validators moved to SHA-256 hold argon2
+    /// hashes. They must keep working until they expire, and rotating one
+    /// writes its successor in the new format.
+    #[tokio::test]
+    async fn legacy_argon2_refresh_token_still_rotates_into_the_new_format() {
+        let app = TestApp::spawn().await;
+        app.create_authenticated_user("legacy_rt", "securepass")
+            .await;
+        let uid = user::Entity::find()
+            .filter(user::Column::Username.eq("legacy_rt"))
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let now = chrono::Utc::now();
+        let validator = "legacy-validator";
+        sea_orm::ActiveModelTrait::insert(
+            refresh_token::ActiveModel {
+                selector: sea_orm::Set("legacy-selector".into()),
+                validator: sea_orm::Set(server::utils::hash::hash_password(validator).unwrap()),
+                user_id: sea_orm::Set(uid),
+                expires_at: sea_orm::Set(now + chrono::Duration::days(1)),
+                created_at: sea_orm::Set(now),
+                revoked_at: sea_orm::Set(None),
+                rotated_from: sea_orm::Set(None),
+            },
+            &app.db,
+        )
+        .await
+        .unwrap();
+
+        let res = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": format!("legacy-selector:{validator}") }),
+            )
+            .await;
+        assert_eq!(res.status, 200, "legacy refresh: {}", res.text);
+
+        let successor = res.body["refresh_token"].as_str().unwrap();
+        let (selector, _) = successor.split_once(':').unwrap();
+        let row = refresh_token::Entity::find_by_id(selector.to_owned())
+            .one(&app.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.validator.starts_with("sha256$"),
+            "successor stored as {}",
+            row.validator
+        );
+
+        let again = app
+            .post_without_token(routes::CLI_REFRESH, &json!({ "refresh_token": successor }))
+            .await;
+        assert_eq!(again.status, 200, "sha256 refresh: {}", again.text);
+    }
+
+    #[tokio::test]
+    async fn wrong_validator_is_rejected() {
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "wrong_rt", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let login = app.post_without_token(routes::CLI_TOKEN, &json!({})).await;
+        assert_eq!(
+            login.status, 401,
+            "cli-token needs a bearer: {}",
+            login.text
+        );
+
+        let token = app.post_without_token(routes::LOGIN, &body).await.body["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let issued = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &token)
+            .await;
+        let rt = issued.body["refresh_token"].as_str().unwrap();
+        let (selector, _) = rt.split_once(':').unwrap();
+
+        let res = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": format!("{selector}:not-the-validator") }),
+            )
+            .await;
+        assert_eq!(res.status, 401);
+        assert_eq!(res.body["code"], "TOKEN_INVALID");
+    }
+}
+
+mod refresh_grace_cap {
+    use super::*;
+
+    fn cookie_of(resp: &reqwest::Response) -> String {
+        for hv in resp.headers().get_all("set-cookie").iter() {
+            let s = hv.to_str().expect("set-cookie utf-8");
+            if let Some(rest) = s.strip_prefix("broccoli_refresh=") {
+                let val = rest.split(';').next().unwrap_or("").to_string();
+                if !val.is_empty() {
+                    return val;
+                }
+            }
+        }
+        panic!("no broccoli_refresh Set-Cookie on response");
+    }
+
+    struct Raw {
+        client: reqwest::Client,
+        base: String,
+    }
+
+    impl Raw {
+        fn new(app: &TestApp) -> Self {
+            Self {
+                client: reqwest::Client::builder()
+                    .no_proxy()
+                    .cookie_store(false)
+                    .build()
+                    .unwrap(),
+                base: format!("http://{}", app.addr),
+            }
+        }
+
+        async fn login(&self, username: &str) -> String {
+            let res = self
+                .client
+                .post(format!("{}{}", self.base, routes::LOGIN))
+                .json(&json!({"username": username, "password": "securepass"}))
+                .send()
+                .await
+                .unwrap();
+            cookie_of(&res)
+        }
+
+        async fn post(&self, path: &str, cookie: &str) -> reqwest::Response {
+            self.client
+                .post(format!("{}{}", self.base, path))
+                .header("cookie", format!("broccoli_refresh={cookie}"))
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+        }
+    }
+
+    async fn setup(app: &TestApp, username: &str) -> Raw {
+        app.post_without_token(
+            routes::REGISTER,
+            &json!({"username": username, "password": "securepass"}),
+        )
+        .await;
+        Raw::new(app)
+    }
+
+    /// Inside the grace window a rotated token gets one sibling, not one per
+    /// replay: a thief replaying it cannot fork extra live chains.
+    #[tokio::test]
+    async fn only_one_sibling_per_rotated_token() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "gina").await;
+        let a = raw.login("gina").await;
+
+        let first = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(first.status(), 200);
+        let b = cookie_of(&first);
+        let sibling = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(sibling.status(), 200, "one in-grace replay is answered");
+
+        let third = raw.post(routes::REFRESH, &a).await;
+        assert_eq!(third.status(), 401, "a second in-grace replay is refused");
+
+        // A refused extra replay is not treated as theft.
+        assert_eq!(raw.post(routes::REFRESH, &b).await.status(), 200);
+    }
+
+    /// Once the successor has itself been rotated, the chain moved on without
+    /// the old token: a replay is reuse even inside the grace window.
+    #[tokio::test]
+    async fn replay_after_the_successor_was_used_is_reuse() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "hank").await;
+        let a = raw.login("hank").await;
+
+        let b = cookie_of(&raw.post(routes::REFRESH, &a).await);
+        let next = raw.post(routes::REFRESH, &b).await;
+        assert_eq!(next.status(), 200);
+        let c = cookie_of(&next);
+
+        assert_eq!(raw.post(routes::REFRESH, &a).await.status(), 401);
+        assert_eq!(
+            raw.post(routes::REFRESH, &c).await.status(),
+            401,
+            "reuse must revoke the whole family"
+        );
+    }
+
+    /// Logging out also retires the token the presented one replaced, so it
+    /// cannot be replayed during the rest of the grace window.
+    #[tokio::test]
+    async fn logout_retires_the_rotated_predecessor() {
+        let app = TestApp::spawn().await;
+        let raw = setup(&app, "ivy").await;
+        let a = raw.login("ivy").await;
+        let b = cookie_of(&raw.post(routes::REFRESH, &a).await);
+
+        assert_eq!(raw.post(routes::LOGOUT, &b).await.status(), 204);
+        assert_eq!(
+            raw.post(routes::REFRESH, &a).await.status(),
+            401,
+            "the predecessor stayed replayable after logout"
+        );
+    }
+}
+
+mod refresh_vs_credential_change {
+    use super::*;
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement, TransactionTrait};
+    use std::time::Duration;
+
+    /// A refresh that races a password reset (which locks the user row, then
+    /// deletes the user's refresh rows) must not leave a fresh refresh row
+    /// behind that the reset's DELETE did not see.
+    #[tokio::test]
+    async fn refresh_waits_for_a_concurrent_session_revocation() {
+        let app = TestApp::spawn().await;
+        let body = json!({"username": "racer", "password": "securepass"});
+        app.post_without_token(routes::REGISTER, &body).await;
+        let login = app.post_without_token(routes::LOGIN, &body).await;
+        let uid = login.body["id"].as_i64().unwrap() as i32;
+
+        let other = Database::connect(&app.state.config.database.url)
+            .await
+            .unwrap();
+        let reset = other.begin().await.unwrap();
+        reset
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"SELECT 1 FROM "user" WHERE id = $1 FOR UPDATE"#,
+                [uid.into()],
+            ))
+            .await
+            .unwrap();
+
+        let empty = json!({});
+        let refresh = app.post_without_token(routes::REFRESH, &empty);
+        tokio::pin!(refresh);
+        let waiting = async {
+            loop {
+                let n: i64 = other
+                    .query_one_raw(Statement::from_string(
+                        DbBackend::Postgres,
+                        "SELECT count(*) AS n FROM pg_stat_activity \
+                         WHERE wait_event_type = 'Lock' AND datname = current_database()",
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .try_get("", "n")
+                    .unwrap();
+                if n >= 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            res = &mut refresh => panic!("refresh did not wait for the reset: {}", res.text),
+            r = tokio::time::timeout(Duration::from_secs(15), waiting) => {
+                r.expect("refresh should queue behind the user row lock");
+            }
+        }
+
+        reset
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM refresh_tokens WHERE user_id = $1",
+                [uid.into()],
+            ))
+            .await
+            .unwrap();
+        reset.commit().await.unwrap();
+
+        let res = refresh.await;
+        assert_eq!(res.status, 401, "{}", res.text);
+        let left: i64 = other
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM refresh_tokens WHERE user_id = $1",
+                [uid.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "n")
+            .unwrap();
+        assert_eq!(left, 0, "a refresh row survived the revocation");
+        other.close().await.unwrap();
     }
 }
 
@@ -534,6 +905,237 @@ mod token_freshness {
             read.status, 200,
             "stateless read path must keep accepting the token: {}",
             read.text
+        );
+    }
+}
+
+mod token_reissue {
+    use super::*;
+    use crate::common::routes::CLI_TOKEN;
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement,
+    };
+    use server::entity::user_role;
+
+    /// Looks up the id of the user named `username`.
+    async fn user_id(app: &TestApp, username: &str) -> i32 {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        use server::entity::user;
+
+        user::Entity::find()
+            .filter(user::Column::Username.eq(username))
+            .one(&app.db)
+            .await
+            .expect("db")
+            .expect("user exists")
+            .id
+    }
+
+    /// Makes every token minted so far for `uid` stale, the same way a role revoke
+    /// or password reset does. Setting `credentials_changed_at` an hour ahead keeps
+    /// the check clear of same-second timing.
+    async fn invalidate_sessions(app: &TestApp, uid: i32) {
+        app.db
+        .execute_raw(Statement::from_string(
+            app.db.get_database_backend(),
+            format!(
+                "UPDATE \"user\" SET credentials_changed_at = now() + interval '1 hour' WHERE id = {uid}"
+            ),
+        ))
+        .await
+        .expect("bump credentials_changed_at");
+    }
+
+    /// Replaces a user's roles directly in the database without bumping
+    /// `credentials_changed_at`, so their existing access token still counts as
+    /// fresh. This stands in for a role change landing in the same second the token
+    /// was minted, which `FreshAuthUser` tolerates by design.
+    async fn replace_roles_without_bump(app: &TestApp, uid: i32, role: &str) {
+        user_role::Entity::delete_many()
+            .filter(user_role::Column::UserId.eq(uid))
+            .exec(&app.db)
+            .await
+            .expect("clear user roles");
+        user_role::ActiveModel {
+            user_id: Set(uid),
+            role: Set(role.to_string()),
+        }
+        .insert(&app.db)
+        .await
+        .expect("insert user role");
+    }
+
+    /// Roles and permissions a token carries, as `/auth/me` echoes its claims.
+    async fn token_grants(app: &TestApp, token: &str) -> (serde_json::Value, Vec<String>) {
+        let me = app.get_with_token(routes::ME, token).await;
+        assert_eq!(me.status, 200, "/me with minted token: {}", me.text);
+        let permissions = me.body["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .map(|p| p.as_str().expect("permission string").to_string())
+            .collect();
+        (me.body["roles"].clone(), permissions)
+    }
+
+    /// Starts a device-flow login and returns `(device_code, user_code)`.
+    async fn start_device_flow(app: &TestApp) -> (String, String) {
+        let res = app
+            .post_without_token(routes::DEVICE_CODE, &json!({}))
+            .await;
+        assert_eq!(res.status, 200, "device-code: {}", res.text);
+        (
+            res.body["device_code"].as_str().unwrap().to_string(),
+            res.body["user_code"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// `/auth/cli-token` refuses an access token minted before the user's
+    /// `credentials_changed_at`. Exchanging it would turn a session revoked by a role
+    /// change or password reset into a fresh token plus a new refresh token.
+    #[tokio::test]
+    async fn cli_token_refuses_a_stale_access_token() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_admin").await;
+        invalidate_sessions(&app, uid).await;
+
+        // Control: the stale token is already refused on a guarded mutation.
+        let guarded = app
+            .post_with_token(
+                &routes::user_roles(uid),
+                &json!({"role": "contestant"}),
+                &token,
+            )
+            .await;
+        assert_eq!(guarded.status, 401, "control: {}", guarded.text);
+
+        let res = app.post_with_token(CLI_TOKEN, &json!({}), &token).await;
+        assert_eq!(
+            res.status, 401,
+            "stale token was exchanged for a fresh one: {}",
+            res.text
+        );
+    }
+
+    /// `/auth/cli-token` refuses the token of a soft-deleted user, so a deleted
+    /// account cannot keep minting fresh tokens.
+    #[tokio::test]
+    async fn cli_token_refuses_a_deleted_user() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("aa_admin", "password123", "admin")
+            .await;
+        let victim = app
+            .create_user_with_role("aa_gone", "password123", "contestant")
+            .await;
+        let vid = user_id(&app, "aa_gone").await;
+        let del = app.delete_with_token(&routes::user(vid), &admin).await;
+        assert_eq!(del.status, 204, "{}", del.text);
+
+        let res = app.post_with_token(CLI_TOKEN, &json!({}), &victim).await;
+        assert_eq!(res.status, 401, "deleted user minted a token: {}", res.text);
+    }
+
+    /// A token minted by `/auth/cli-token` carries the user's current roles and
+    /// permissions from the database, not the claims of the presented token, and its
+    /// refresh token works.
+    #[tokio::test]
+    async fn cli_token_reissues_from_current_roles_not_the_presented_claims() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("aa_demoted", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_demoted").await;
+        replace_roles_without_bump(&app, uid, "contestant").await;
+
+        let res = app
+            .post_with_token(CLI_TOKEN, &json!({}), &admin_token)
+            .await;
+        assert_eq!(res.status, 200, "cli-token: {}", res.text);
+
+        let (roles, permissions) = token_grants(&app, res.body["token"].as_str().unwrap()).await;
+        assert_eq!(roles, json!(["contestant"]));
+        assert!(
+            !permissions.iter().any(|p| p == perm::USER_MANAGE),
+            "minted token must not carry the revoked admin permissions: {permissions:?}"
+        );
+
+        let refreshed = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": res.body["refresh_token"] }),
+            )
+            .await;
+        assert_eq!(refreshed.status, 200, "cli-refresh: {}", refreshed.text);
+    }
+
+    /// `/auth/device-authorize` refuses a stale access token with `TOKEN_INVALID`
+    /// and leaves the device code pending.
+    #[tokio::test]
+    async fn device_authorize_refuses_a_stale_access_token() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("aa_stale_dev", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_stale_dev").await;
+        invalidate_sessions(&app, uid).await;
+
+        let (device_code, user_code) = start_device_flow(&app).await;
+        let res = app
+            .post_with_token(
+                routes::DEVICE_AUTHORIZE,
+                &json!({ "user_code": user_code }),
+                &token,
+            )
+            .await;
+        assert_eq!(
+            res.status, 401,
+            "stale token authorized a device: {}",
+            res.text
+        );
+        assert_eq!(res.body["code"], "TOKEN_INVALID");
+
+        let poll = app
+            .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+            .await;
+        assert_eq!(poll.status, 400, "device-token: {}", poll.text);
+        assert_eq!(poll.body["error"], "authorization_pending");
+    }
+
+    /// The token a device poll receives carries the approving user's current roles
+    /// and permissions, not the claims of the token that approved the device.
+    #[tokio::test]
+    async fn device_authorize_issues_a_token_from_current_roles() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("aa_dev_demoted", "password123", "admin")
+            .await;
+        let uid = user_id(&app, "aa_dev_demoted").await;
+        replace_roles_without_bump(&app, uid, "contestant").await;
+
+        let (device_code, user_code) = start_device_flow(&app).await;
+        let res = app
+            .post_with_token(
+                routes::DEVICE_AUTHORIZE,
+                &json!({ "user_code": user_code }),
+                &admin_token,
+            )
+            .await;
+        assert_eq!(res.status, 200, "device-authorize: {}", res.text);
+
+        let poll = app
+            .post_without_token(routes::DEVICE_TOKEN, &json!({ "device_code": device_code }))
+            .await;
+        assert_eq!(poll.status, 200, "device-token: {}", poll.text);
+
+        let (roles, permissions) = token_grants(&app, poll.body["token"].as_str().unwrap()).await;
+        assert_eq!(roles, json!(["contestant"]));
+        assert!(
+            !permissions.iter().any(|p| p == perm::USER_MANAGE),
+            "device token must not carry the revoked admin permissions: {permissions:?}"
         );
     }
 }

@@ -6,6 +6,32 @@ use crate::decide::{SubmissionRecord, submission_in_flight};
 use crate::model::{MatchPhase, MatchState};
 use crate::storage;
 
+const PENALTY_VERDICTS: &[Verdict] = &[
+    Verdict::WrongAnswer,
+    Verdict::TimeLimitExceeded,
+    Verdict::MemoryLimitExceeded,
+    Verdict::RuntimeError,
+];
+
+pub(crate) fn counts_as_penalty(sub: &SubmissionRecord) -> bool {
+    sub.status == SubmissionLifecycle::Judged
+        && sub
+            .verdict
+            .as_ref()
+            .is_some_and(|verdict| PENALTY_VERDICTS.contains(verdict))
+}
+
+pub(crate) fn score_delay_seconds(m: &MatchState, count: i64, penalty_seconds: i64) -> i64 {
+    if m.xiaoju
+        .last()
+        .is_some_and(|game| m.is_regular_game(game.index))
+    {
+        count.saturating_mul(penalty_seconds)
+    } else {
+        0
+    }
+}
+
 pub fn game_scope(contest: i32, match_id: u8, index: u8) -> String {
     format!("game:{contest}:{match_id}:{index}")
 }
@@ -42,9 +68,14 @@ pub fn player_feedback(
     let mut p = Params::new();
     let contest_param = p.bind(contest);
     let user_param = p.bind(user);
+    let penalty_verdicts = PENALTY_VERDICTS
+        .iter()
+        .map(|verdict| p.bind(verdict.to_db_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
         "SELECT COUNT(*) FILTER (WHERE s.status::text = 'Judged' AND s.verdict IN \
-            ('WrongAnswer', 'TimeLimitExceeded', 'MemoryLimitExceeded', 'RuntimeError')) AS penalty_count \
+            ({penalty_verdicts})) AS penalty_count \
          FROM submission s \
          WHERE s.contest_id = {} AND s.user_id = {} AND s.problem_id = {} \
            AND s.created_at >= to_timestamp({}::double precision / 1000)",
@@ -62,11 +93,7 @@ pub fn player_feedback(
         feedback.pending_submission_id = Some(pending.submission_id);
         feedback.effective_at_us = Some(effective_time(&pending)?);
     }
-    feedback.delay_seconds = if m.is_regular_game(game.index) {
-        feedback.penalty_count.saturating_mul(penalty_seconds)
-    } else {
-        0
-    };
+    feedback.delay_seconds = score_delay_seconds(m, feedback.penalty_count, penalty_seconds);
     Ok(feedback)
 }
 

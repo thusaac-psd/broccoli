@@ -1,3 +1,4 @@
+pub mod advisory_lock;
 pub mod blob;
 pub mod contest;
 pub mod filename;
