@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,29 +21,31 @@ import type { Plugin, ResolvedConfig, Rollup } from 'vite';
  * dynamically loaded module (including cross-origin plugin bundles).
  */
 
+const SDK_SRC_ROOT = fileURLToPath(
+  new URL('../../web-sdk/src/', import.meta.url),
+);
+
 /**
- * Every `@broccoli/web-sdk/*` subpath a plugin bundle may import must be listed
- * here: plugins externalize these specifiers and rely on the host's import map
- * to resolve them at runtime. A missing entry makes the plugin fail to load with
- * "Failed to resolve module specifier". Keep in sync with web-sdk's subpaths.
+ * Every `@broccoli/web-sdk/*` subpath a plugin bundle may import. Plugins
+ * externalize these specifiers and rely on the host's import map to resolve
+ * them at runtime, so a missing entry makes the plugin fail to load with
+ * "Failed to resolve module specifier".
+ *
+ * Derived from the same rule web-sdk's build and `exports` map use (every
+ * `src/<name>/index.ts` is a subpath), so a new subpath is shared
+ * automatically instead of depending on a hand-maintained list.
  */
-export const SDK_SHARED_DEPS = [
+export const SDK_SHARED_DEPS: readonly string[] = [
   '@broccoli/web-sdk',
-  '@broccoli/web-sdk/api',
-  '@broccoli/web-sdk/auth',
-  '@broccoli/web-sdk/contest',
-  '@broccoli/web-sdk/hooks',
-  '@broccoli/web-sdk/i18n',
-  '@broccoli/web-sdk/permissions',
-  '@broccoli/web-sdk/plugin',
-  '@broccoli/web-sdk/problem',
-  '@broccoli/web-sdk/sidebar',
-  '@broccoli/web-sdk/slot',
-  '@broccoli/web-sdk/submission',
-  '@broccoli/web-sdk/theme',
-  '@broccoli/web-sdk/ui',
-  '@broccoli/web-sdk/utils',
-] as const;
+  ...readdirSync(SDK_SRC_ROOT, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        existsSync(resolve(SDK_SRC_ROOT, entry.name, 'index.ts')),
+    )
+    .map((entry) => `@broccoli/web-sdk/${entry.name}`)
+    .sort(),
+];
 
 export const SHARED_DEPS = [
   'react',
@@ -141,11 +143,12 @@ function flattenId(dep: string): string {
   return dep.replace(/\//g, '_');
 }
 
-function isSdkDep(dep: string): dep is (typeof SDK_SHARED_DEPS)[number] {
+function isSdkDep(dep: string): boolean {
   return dep === '@broccoli/web-sdk' || dep.startsWith('@broccoli/web-sdk/');
 }
 
-function resolveSdkEntry(dep: (typeof SDK_SHARED_DEPS)[number]): string {
+/** Absolute path of a web-sdk entry, falling back to its built `dist` file. */
+export function resolveSdkEntry(dep: string): string {
   try {
     return fileURLToPath(import.meta.resolve(dep));
   } catch {

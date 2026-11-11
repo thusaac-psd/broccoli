@@ -1,5 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   type CodeRun,
@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 const POLL_INTERVAL_MS = 1000;
 
@@ -89,11 +90,11 @@ export function useSubmissions({
   const pollersRef = useRef<Map<number, ReturnType<typeof setInterval>>>(
     new Map(),
   );
-  // Stable Idempotency-Key per logical submission attempt: retries of the same
-  // logical submission (e.g., user re-clicks Submit after a network error)
-  // reuse the same key so the backend can return the cached response. The key
-  // is reset on success so the next logical submission gets a fresh one.
-  const { getKey, resetKey } = useIdempotencyKey();
+  // Idempotency-Key bound to the submission itself: re-clicking Submit after
+  // a network error resends the same key (the server replays a submission
+  // whose response was lost), while edited code or another language gets a
+  // fresh key, so the server can never replay the old code in its place.
+  const sendIdempotent = useIdempotentRequest();
 
   const stopPolling = useCallback((entryId: number) => {
     const interval = pollersRef.current.get(entryId);
@@ -197,6 +198,21 @@ export function useSubmissions({
       contestType?: string,
       targetWorkerIds?: string[],
     ) => {
+      // Lists that show this problem's submissions now include new ones.
+      const invalidateSubmissionLists = () => {
+        if (contestId) {
+          queryClient.invalidateQueries({
+            queryKey: ['contest-submissions-table', String(contestId)],
+          });
+        }
+        queryClient.invalidateQueries({
+          queryKey: ['problem-recent-submissions', contestId, problemId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ['admin-submissions-table'],
+        });
+      };
+
       // Fan-out path: one pinned submission per worker, grouped together for
       // the comparison-strip UI.
       if (targetWorkerIds && targetWorkerIds.length > 0) {
@@ -277,17 +293,7 @@ export function useSubmissions({
             }),
           );
 
-          if (contestId) {
-            queryClient.invalidateQueries({
-              queryKey: ['contest-submissions-table', String(contestId)],
-            });
-          }
-          queryClient.invalidateQueries({
-            queryKey: ['problem-recent-submissions', contestId, problemId],
-          });
-          queryClient.invalidateQueries({
-            queryKey: ['admin-submissions-table'],
-          });
+          invalidateSubmissionLists();
 
           toast.success(
             t('toast.submission.fannedOut', {
@@ -332,65 +338,81 @@ export function useSubmissions({
       setActiveEntryId(entryId);
 
       try {
-        let data: Submission;
-        const idempotencyHeaders = {
-          'Idempotency-Key': getKey(),
-        };
+        // Null when an earlier send of this very submission was accepted but
+        // its response is gone (`isAlreadyDone`).
+        let data: Submission | null;
 
         if (contestId) {
-          const res = await apiClient.POST(
-            '/contests/{id}/problems/{problem_id}/submissions',
-            {
-              params: {
-                path: { id: contestId, problem_id: problemId },
-              },
-              body: { files, language },
-              headers: idempotencyHeaders,
-            },
+          const body = { files, language };
+          const res = await sendIdempotent(
+            { contestId, problemId, body },
+            (key) =>
+              apiClient.POST(
+                '/contests/{id}/problems/{problem_id}/submissions',
+                {
+                  params: {
+                    path: { id: contestId, problem_id: problemId },
+                  },
+                  body,
+                  headers: { 'Idempotency-Key': key },
+                },
+              ),
           );
-          if (res.error) throw res.error;
-          data = res.data;
+          if (res.error && !isAlreadyDone(res.error)) throw res.error;
+          data = res.data ?? null;
         } else {
-          const res = await apiClient.POST('/problems/{id}/submissions', {
-            params: { path: { id: problemId } },
-            body: { files, language, contest_type: contestType },
-            headers: idempotencyHeaders,
-          });
-          if (res.error) throw res.error;
-          data = res.data;
+          const body = { files, language, contest_type: contestType };
+          const res = await sendIdempotent({ problemId, body }, (key) =>
+            apiClient.POST('/problems/{id}/submissions', {
+              params: { path: { id: problemId } },
+              body,
+              headers: { 'Idempotency-Key': key },
+            }),
+          );
+          if (res.error && !isAlreadyDone(res.error)) throw res.error;
+          data = res.data ?? null;
         }
 
-        // Success: clear key so the next logical submission gets a fresh one.
-        resetKey();
-
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, submission: data, status: 'polling' as const }
-              : e,
-          ),
-        );
-
+        invalidateSubmissionLists();
         if (contestId) {
-          queryClient.invalidateQueries({
-            queryKey: ['contest-submissions-table', String(contestId)],
-          });
           queryClient.invalidateQueries({
             queryKey: ['contest-submission-languages', contestId],
           });
         }
-        queryClient.invalidateQueries({
-          queryKey: ['problem-recent-submissions', contestId, problemId],
-        });
-        queryClient.invalidateQueries({
-          queryKey: ['admin-submissions-table'],
-        });
+
+        if (!data) {
+          // It is in the submissions list; there is nothing to poll here.
+          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          setActiveEntryId(null);
+          toast.success(t('toast.submission.alreadySubmitted'));
+          return;
+        }
+        const submission = data;
+
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? { ...e, submission, status: 'polling' as const }
+              : e,
+          ),
+        );
 
         toast.success(t('toast.submission.submitted'));
-        startSubmissionPolling(entryId, data.id);
+        startSubmissionPolling(entryId, submission.id);
       } catch (err) {
-        // On error: keep the key so a retry of the same logical operation
-        // sends the same Idempotency-Key (allowing backend dedup).
+        if (
+          toastUnsettled(err, t, {
+            refetch: invalidateSubmissionLists,
+            outcomeUnknownKey: 'toast.submission.outcomeUnknown',
+          })
+        ) {
+          // Not a failure of this code: an earlier attempt to submit it may
+          // have gone through (the refetched list shows it if so) or is
+          // still running. There is nothing to poll here either way.
+          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          setActiveEntryId(null);
+          return;
+        }
         console.error('Submission failed:', err);
         const submissionError = parseSubmissionError(err);
         setEntries((prev) =>
@@ -406,10 +428,9 @@ export function useSubmissions({
     [
       apiClient,
       contestId,
-      getKey,
       problemId,
       queryClient,
-      resetKey,
+      sendIdempotent,
       startSubmissionPolling,
       t,
     ],
