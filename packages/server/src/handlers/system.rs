@@ -149,11 +149,18 @@ pub fn spawn_queue_depth_sampler(state: AppState, interval: Duration) {
 
         loop {
             ticker.tick().await;
-            record_queue_depths(&state, &mut previous_queue_depths).await;
-            record_submission_lifecycle_metrics(
-                &state,
-                &mut previous_submission_in_flight,
-                &mut previous_submission_judge_queue_depth,
+            common::deadline::bounded(
+                "metrics.queue_depth_sampler",
+                common::deadline::BACKGROUND_STEP,
+                async {
+                    record_queue_depths(&state, &mut previous_queue_depths).await;
+                    record_submission_lifecycle_metrics(
+                        &state,
+                        &mut previous_submission_in_flight,
+                        &mut previous_submission_judge_queue_depth,
+                    )
+                    .await;
+                },
             )
             .await;
         }

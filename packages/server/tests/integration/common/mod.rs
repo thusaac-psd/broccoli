@@ -211,7 +211,7 @@ async fn shared_pg_port() -> u16 {
             server::seed::seed_role_permissions(&template_db)
                 .await
                 .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
+            server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
             drop(template_db);
@@ -741,6 +741,7 @@ impl TestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
@@ -761,6 +762,7 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            clock: Default::default(),
         };
 
         if let Some(cap) = options.max_queued_submissions {

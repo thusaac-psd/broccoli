@@ -22,6 +22,21 @@ pub enum TaskCachePutOutcome {
     AlreadyExists,
 }
 
+/// Client-side bound on one task-cache round-trip (a primary-key read or an
+/// insert). Every caller treats a cache error as a miss, so giving up early
+/// only costs a recompute, whereas a read hung on a vanished database host
+/// would wedge the worker for good while it keeps heartbeating `in_flight=1`.
+const TASK_CACHE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn bounded<T>(
+    step: &'static str,
+    fut: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    common::deadline::bounded(step, TASK_CACHE_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|| Err(format!("{step} timed out after {TASK_CACHE_TIMEOUT:?}")))
+}
+
 pub struct DatabaseTaskCacheStore {
     db: sea_orm::DatabaseConnection,
 }
@@ -52,10 +67,13 @@ impl DatabaseTaskCacheStore {
 #[async_trait]
 impl TaskCacheStore for DatabaseTaskCacheStore {
     async fn get(&self, cache_key: &str) -> Result<Option<HashMap<String, String>>, String> {
-        let result = task_cache::Entity::find_by_id(cache_key.to_string())
-            .one(&self.db)
-            .await
-            .map_err(|e| format!("task_cache lookup failed: {e}"))?;
+        let result = bounded("task_cache lookup", async {
+            task_cache::Entity::find_by_id(cache_key.to_string())
+                .one(&self.db)
+                .await
+                .map_err(|e| format!("task_cache lookup failed: {e}"))
+        })
+        .await?;
 
         match result {
             Some(model) => {
@@ -81,20 +99,23 @@ impl TaskCacheStore for DatabaseTaskCacheStore {
             created_at: Set(Utc::now()),
         };
 
-        let result = task_cache::Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(task_cache::Column::CacheKey)
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .exec_without_returning(&self.db)
-            .await;
+        bounded("task_cache insert", async {
+            let result = task_cache::Entity::insert(model)
+                .on_conflict(
+                    OnConflict::column(task_cache::Column::CacheKey)
+                        .do_nothing()
+                        .to_owned(),
+                )
+                .exec_without_returning(&self.db)
+                .await;
 
-        match result {
-            Ok(rows_affected) => Ok(task_cache_put_outcome(rows_affected)),
-            Err(sea_orm::DbErr::RecordNotInserted) => Ok(TaskCachePutOutcome::AlreadyExists),
-            Err(e) => return Err(format!("task_cache insert failed: {e}")),
-        }
+            match result {
+                Ok(rows_affected) => Ok(task_cache_put_outcome(rows_affected)),
+                Err(sea_orm::DbErr::RecordNotInserted) => Ok(TaskCachePutOutcome::AlreadyExists),
+                Err(e) => Err(format!("task_cache insert failed: {e}")),
+            }
+        })
+        .await
     }
 }
 
@@ -238,6 +259,51 @@ mod tests {
         let cache = NoopTaskCacheStore;
         assert!(cache.get("any_key").await.unwrap().is_none());
         assert!(cache.put("any_key", HashMap::new()).await.is_ok());
+    }
+
+    /// A cache call that never returns (here: blocked behind a table lock with
+    /// no server-side statement timeout, standing in for a read hung on a
+    /// vanished database host) gives up with an error the caller treats as a
+    /// miss, instead of wedging the worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_cache_call_times_out_as_an_error() {
+        use sea_orm::{ConnectionTrait, TransactionTrait};
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let db = common::db::connect(
+            &url,
+            &common::db::PgPoolSpec::new(2, 1),
+            &common::db::PgSession::unbounded("task-cache-test"),
+        )
+        .await
+        .expect("connect");
+        DatabaseTaskCacheStore::ensure_table(&db)
+            .await
+            .expect("table");
+
+        let locker = db.begin().await.expect("begin");
+        locker
+            .execute_unprepared("LOCK TABLE task_cache IN ACCESS EXCLUSIVE MODE")
+            .await
+            .expect("lock");
+
+        let store = DatabaseTaskCacheStore::new(db.clone());
+        let started = std::time::Instant::now();
+        let err = store
+            .get("k")
+            .await
+            .expect_err("blocked lookup must time out");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < TASK_CACHE_TIMEOUT + std::time::Duration::from_secs(5));
+        locker.rollback().await.expect("rollback");
     }
 
     #[test]

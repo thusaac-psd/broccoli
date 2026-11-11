@@ -168,7 +168,7 @@ async fn shared_pg_port() -> u16 {
             server::seed::seed_role_permissions(&template_db)
                 .await
                 .expect("Failed to seed template database");
-            server::seed::ensure_indexes(&template_db)
+            server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
             drop(template_db);
@@ -521,6 +521,7 @@ impl E2eTestApp {
                 plugin_max_connections: 1,
                 plugin_privileged_max_connections: 1,
                 plugin_url: None,
+                ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "e2e-test-jwt-secret".to_string(),
@@ -546,6 +547,7 @@ impl E2eTestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            clock: Default::default(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));

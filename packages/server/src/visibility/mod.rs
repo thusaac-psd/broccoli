@@ -738,6 +738,7 @@ mod tests {
                     plugin_max_connections: 1,
                     plugin_privileged_max_connections: 1,
                     plugin_url: None,
+                    ..Default::default()
                 },
                 auth: AuthConfig {
                     jwt_secret: "test-secret".to_string(),
@@ -755,6 +756,7 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
+                clock: Default::default(),
             },
             mq: None,
             redis_client: None,
