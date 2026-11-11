@@ -18,6 +18,8 @@ use broccoli_server_sdk::types::{
     SubmissionStatus, SubmissionUpdate, TestCaseResultRow, push_judge_sets,
     sanitize_result_text_field,
 };
+use std::sync::Arc;
+
 use extism::host_fn;
 use sea_orm::DatabaseConnection;
 use serde_json::{Value as JsonValue, json};
@@ -186,14 +188,9 @@ fn submission_cache_update(update: &SubmissionUpdate) -> Option<(String, Vec<Jso
     Some((sql, p.into_args()))
 }
 
-host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("submission_update", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "submission_update")?;
+    let (plugin_id, db) = &*call;
 
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
@@ -205,7 +202,7 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
     let mut judgement_rows: u64 = 1;
     if let Some((jsql, jargs)) = judgement_update(&update) {
         let jargs = serde_json::to_string(&jargs)?;
-        let resp_json = super::sql::execute_on_pool(&db, &plugin_id, jsql, jargs)?;
+        let resp_json = super::sql::execute_on_pool(db, plugin_id, jsql, jargs)?;
         let env: ExecEnvelope = serde_json::from_str(&resp_json)
             .map_err(|e| extism::Error::msg(format!("Malformed submission_judgement envelope: {e}")))?;
         if env.error.is_some() {
@@ -220,7 +217,7 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
     }
 
     let args = serde_json::to_string(&args)?;
-    let resp_json = super::sql::execute_on_pool(&db, &plugin_id, sql, args)?;
+    let resp_json = super::sql::execute_on_pool(db, plugin_id, sql, args)?;
     let env: ExecEnvelope = serde_json::from_str(&resp_json)
         .map_err(|e| extism::Error::msg(format!("Malformed submission envelope: {e}")))?;
     if env.error.is_some() {
@@ -231,14 +228,9 @@ host_fn!(pub submission_update(user_data: (String, DatabaseConnection); input: S
     ok_affected(judgement_rows)
 });
 
-host_fn!(pub submission_insert_results(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("submission_insert_results", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "submission_insert_results")?;
+    let (plugin_id, db) = &*call;
 
     let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
@@ -290,7 +282,7 @@ host_fn!(pub submission_insert_results(user_data: (String, DatabaseConnection); 
         judgement_write_fence("v.judgement_id", "v.submission_id", "v.judge_epoch"),
     );
     let args = serde_json::to_string(&p.into_args())?;
-    super::sql::execute_on_pool(&db, &plugin_id, sql, args)
+    super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
 /// `submission_delete_results`' statement. Same fence as the writes: a
@@ -314,31 +306,21 @@ fn delete_results_statement(
     (sql, p.into_args())
 }
 
-host_fn!(pub submission_delete_results(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("submission_delete_results", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub submission_delete_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "submission_delete_results")?;
+    let (plugin_id, db) = &*call;
 
     let (submission_id, judgement_id, judge_epoch): (i32, i32, i32) = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_delete_results input: {e}")))?;
 
     let (sql, args) = delete_results_statement(submission_id, judgement_id, judge_epoch);
     let args = serde_json::to_string(&args)?;
-    super::sql::execute_on_pool(&db, &plugin_id, sql, args)
+    super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
-host_fn!(pub submission_query_test_cases(user_data: (String, DatabaseConnection); input: String) -> String {
-    let (plugin_id, db) = {
-        let user_data_guard = user_data.get()?;
-        let ctx = super::lock_or_poison(&user_data_guard)?;
-        (ctx.0.clone(), ctx.1.clone())
-    };
-    let span = super::host_fn_span("submission_query_test_cases", &plugin_id);
-    let _enter = span.enter();
+host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "submission_query_test_cases")?;
+    let (plugin_id, db) = &*call;
 
     let problem_id: i32 = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_query_test_cases input: {e}")))?;
@@ -350,7 +332,7 @@ host_fn!(pub submission_query_test_cases(user_data: (String, DatabaseConnection)
         p.bind(problem_id)
     );
     let args = serde_json::to_string(&p.into_args())?;
-    super::sql::query_on_pool(&db, &plugin_id, sql, args)
+    super::sql::query_on_pool(db, plugin_id, sql, args)
 });
 
 /// The write fence against real Postgres, driven through the same builders and

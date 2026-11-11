@@ -68,6 +68,19 @@ pub struct LoginResponse {
     pub permissions: Vec<String>,
 }
 
+impl From<crate::services::auth_tokens::AccessGrant> for LoginResponse {
+    fn from(grant: crate::services::auth_tokens::AccessGrant) -> Self {
+        Self {
+            token: grant.token,
+            id: grant.user_id,
+            username: grant.username,
+            display_name: grant.display_name,
+            roles: grant.roles,
+            permissions: grant.permissions,
+        }
+    }
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct MeResponse {
     #[schema(example = 42)]

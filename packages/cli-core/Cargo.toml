@@ -12,9 +12,12 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true
-# rustls with bundled webpki roots avoids an OpenSSL dependency.
-# platform-verifier lets users opt into the OS trust store via BROCCOLI_TLS=system.
+# rustls avoids an OpenSSL dependency. By default the CLI trusts the OS store
+# (rustls-native-certs) plus the bundled Mozilla roots (webpki-root-certs);
+# platform-verifier backs BROCCOLI_TLS=system.
 ureq = { version = "3", features = ["json", "platform-verifier"] }
+rustls-native-certs = "0.8"
+webpki-root-certs = "1"
 dirs.workspace = true
 console = "0.15"
 rand.workspace = true

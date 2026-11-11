@@ -8,10 +8,11 @@ re-vendor.
 
 ## `broccoli_queue` 0.4.6 (`third_party/broccoli_queue`)
 
-Two message-loss bugs in the Redis broker path. Both silently drop a message
-that the queue is supposed to retry or dead-letter, and neither is reachable
-from our own code (they live inside `reject` / `process_messages`), so they can
-only be fixed in the crate itself.
+Patches 1, 2 and 4 to 6 fix bugs in the Redis broker path; patch 3 is a lint
+fix. The first two are message-loss bugs. Both silently drop a message that the
+queue is supposed to retry or dead-letter, and neither is reachable from our own
+code (they live inside `reject` / `process_messages`), so they can only be fixed
+in the crate itself.
 
 ### 1. `reject` loses a message on its first retry
 
@@ -89,10 +90,72 @@ Patch: the per-task loop yields instead of sleeping. `consume` awaits Redis I/O
 and naps on an empty queue, so the task is still abortable. With `consume_wait`
 unset (every other consumer) behavior is unchanged: upstream slept zero there.
 
+### 5. Message visibility depends on publisher vs consumer wall clocks
+
+`src/brokers/redis/broker.rs` (`RedisBroker::publish`) and
+`src/brokers/redis/utils.rs` (`RedisBroker::get_task_id`, both consume scripts).
+
+Upstream scores a published message as `priority x publisher's now()` and the
+consume script pops the minimum but pushes it back while
+`score > 5 x consumer's now()`. Both clocks were the hosts' own wall clocks, so
+at priority 5 (the default for worker results and server op tasks) a message
+from a host whose clock ran ahead of the consumer by D stayed invisible for D.
+On an offline LAN without NTP that added the skew to every operation round-trip,
+and with hours of skew results were effectively lost.
+
+Patch: both scripts read Redis `TIME` instead of taking a client timestamp, so
+the only clock involved is Redis's. The publisher passes only a relative delay
+(0 unless scheduling is enabled and a delay was requested) or, for
+`scheduled_at`, the explicit absolute instant the caller asked for. The score
+format (`priority x unix nanoseconds`) and so the priority encoding are
+unchanged, which keeps upgrades safe: a message already in Redis from the old
+code is consumed normally (it is still gated by its old publisher's clock that
+one time). `TIME` before a write is fine on Redis >= 5, which replicates script
+effects rather than script bodies.
+
+### 6. A Redis outage blocks every MQ call silently, for up to 300 s past recovery
+
+`src/brokers/redis/utils.rs` (`RedisBroker::get_redis_connection`, new
+`TimeoutRedisConnectionManager`), `src/brokers/redis/broker.rs` (the pool type),
+`src/queue.rs` (the `Some(concurrency)` branch of `process_messages`).
+
+When a pool check-out failed, upstream rebuilt the pool (bb8's `build` is lazy,
+so that never fails), constructed a `BroccoliError` and discarded it unlogged,
+then slept 1, 2, 4, ... up to 300 s and retried forever. Publish, consume, ack
+and reject therefore blocked instead of erroring, callers' own backoff and
+health logic never ran, and after an 80 s Redis restart consumers resumed only
+at about 141 s (271 s for a 150 s outage). Separately, `bb8_redis`'s manager
+opens connections with no response timeout, so a command in flight on a
+half-open socket (the Redis host lost power) waited for TCP retransmission,
+about 15 minutes.
+
+Patch:
+
+- `get_redis_connection` makes at most 3 check-out attempts (250 ms, then 500 ms
+  backoff, each attempt bounded by the pool's 2 s connection timeout), logs
+  every failure, and returns the error. The pointless pool rebuild is gone, and
+  with it the `RwLock` around the pool and the stored broker URL that only the
+  rebuild used.
+- The pool uses `TimeoutRedisConnectionManager`, identical to
+  `bb8_redis::RedisConnectionManager` except that connections carry a 2 s
+  connect timeout and a 30 s response timeout, and the check-out `PING` is
+  bounded at 1 s. That bound must stay below the pool's 2 s connection timeout:
+  bb8 puts a connection whose validation was cancelled by that timeout back as
+  healthy, so an unbounded `PING` on a dead socket would wedge every check-out
+  on it, whereas a `PING` that errors marks it invalid and bb8 replaces it. The
+  response timeout is generous on purpose: a command that times out may still
+  have executed (a consume script that already moved the message to
+  `_processing` would strand it; a publish would duplicate on retry), so it must
+  outlast ordinary stalls such as a fork or fsync while still bounding the
+  half-open socket case.
+- Because consume now errors instead of blocking, the per-task loop of
+  `process_messages` sleeps 1 s after a consume error instead of spinning.
+  `process_messages_with_handlers` is unused and left unpatched, as in patch 2.
+
 ### Re-vendoring
 
 To pull a new upstream version: replace `third_party/broccoli_queue`, bump the
-version here and in `[patch.crates-io]`, and re-apply all four patches (grep for
-`BROCCOLI VENDOR PATCH`). If upstream fixes the two message-loss bugs, drop the
-vendor and the `[patch.crates-io]` entry (the lint patch is only needed while we
-vendor).
+version here and in `[patch.crates-io]`, and re-apply all six patches (grep for
+`BROCCOLI VENDOR PATCH`). If upstream fixes the message-loss, clock and outage
+bugs, drop the vendor and the `[patch.crates-io]` entry (the lint patch is only
+needed while we vendor).

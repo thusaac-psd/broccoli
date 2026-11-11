@@ -36,7 +36,12 @@ pub struct QueryContext {
 /// `Some(id)` when this resource is known to belong to contest `id`
 /// (including when the resource itself IS a contest), `None` when it is
 /// genuinely contest-less (e.g. a standalone submission) or its contest is
-/// not resolvable by the host. `#[serde(default)]` keeps this field
+/// not resolvable by the host. For the problem parts (`problem`, `sample`,
+/// `attachment`) it is the request's scope: `Some(id)` when the part was
+/// read through contest `id`'s problem routes, `None` when it was read
+/// through the standalone problem routes. Samples and attachments are parts
+/// of their problem, so they carry exactly the scope their problem would.
+/// `#[serde(default)]` keeps this field
 /// optional on the wire so any code deserializing an older, pre-existing
 /// payload that never had it still round-trips.
 ///
@@ -55,15 +60,10 @@ pub struct QueryContext {
 ///
 /// `problem_id` is the parent problem for a `problem`, `sample`, or
 /// `attachment` resource (`None` for `contest`/`submission`/
-/// `clarification`, none of which have one). It exists because `contest_id`
-/// alone does not give an attachment-visibility plugin anything to reason
-/// about: an attachment's `contest_id` is always `None` (a problem maps to
-/// contests many-to-many via `contest_problem`, so there is no single
-/// authoritative contest scope to report - see
-/// `visibility::mod::resource_contest_id`'s doc comment), so without
-/// `problem_id` a plugin would receive `{"kind":"attachment","id":"...",
-/// "contest_id":null}` and have no attribute to condition a decision on at
-/// all.
+/// `clarification`, none of which have one). It exists because an
+/// attachment's `id` is its own UUID: without `problem_id` a plugin judging
+/// an attachment could not tell which problem it belongs to, and so could
+/// not give it its problem's decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResource {
     pub kind: String,

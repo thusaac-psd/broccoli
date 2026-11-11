@@ -29,7 +29,7 @@ use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::dlq::*;
-use crate::models::shared::Pagination;
+use crate::models::shared::PageWindow;
 use crate::services::judgement_lifecycle::{OpenJudgement, open_judgement};
 use crate::state::AppState;
 
@@ -43,6 +43,7 @@ use crate::state::AppState;
     params(ListDlqParams),
     responses(
         (status = 200, description = "List of DLQ messages", body = DlqListResponse),
+        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
     ),
@@ -62,25 +63,16 @@ pub async fn list_dlq_messages(
         .transpose()
         .map_err(AppError::Validation)?;
 
-    let page = params.page.unwrap_or(1).max(1);
-    let per_page = params.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(params.page, params.per_page)?;
 
     let dlq = dlq_service(&state.db);
-    let (messages, total) = dlq
-        .list(message_type, params.resolved, page, per_page)
-        .await?;
+    let (messages, total) = dlq.list(message_type, params.resolved, window).await?;
 
     let data: Vec<DlqMessageResponse> = messages.into_iter().map(Into::into).collect();
-    let total_pages = total.div_ceil(per_page);
 
     Ok(Json(DlqListResponse {
         data,
-        pagination: Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        pagination: window.pagination(total),
     }))
 }
 

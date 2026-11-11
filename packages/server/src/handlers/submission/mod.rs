@@ -1,5 +1,3 @@
-use std::cmp;
-
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -36,7 +34,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::hooks;
 use crate::models::problem::validate_contest_type;
-use crate::models::shared::{Pagination, escape_like};
+use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
 use crate::state::AppState;
 use crate::utils::contest::{
@@ -262,8 +260,7 @@ pub async fn list_submissions(
 
     let can_view_all = auth_user.has_permission(perm::SUBMISSION_VIEW_ALL);
 
-    let page = cmp::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut base_select = submission::Entity::find();
 
@@ -389,8 +386,8 @@ pub async fn list_submissions(
     };
 
     let submissions = select
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .all(&state.db)
         .await?;
 
@@ -405,16 +402,9 @@ pub async fn list_submissions(
     // here to keep rows from different contests from bleeding into each
     // other's decision.
     let data = apply_filter_to_list(&kernel, data).await?;
-    let total_pages = total.div_ceil(per_page);
-
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        "pagination": window.pagination(total),
     })))
 }
 
@@ -982,8 +972,7 @@ pub async fn list_contest_submissions(
             .is_some()
     };
 
-    let page = cmp::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut base_select =
         submission::Entity::find().filter(submission::Column::ContestId.eq(Some(contest_id)));
@@ -1030,8 +1019,8 @@ pub async fn list_contest_submissions(
     };
 
     let submissions = select
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .all(&state.db)
         .await?;
 
@@ -1049,21 +1038,14 @@ pub async fn list_contest_submissions(
     // contest could see peers' submissions in the list that `get_submission`
     // would already 404 on individually - this closes that inconsistency.
     let data = apply_filter_to_list(&kernel, data).await?;
-    let total_pages = total.div_ceil(per_page);
-
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        "pagination": window.pagination(total),
     })))
 }
 
 pub fn submission_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(max_size + 4096)
+    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
 }
 
 #[cfg(test)]

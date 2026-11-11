@@ -1,3 +1,4 @@
+import { serverNow } from '@broccoli/web-sdk/api';
 import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 
@@ -12,7 +13,7 @@ interface Props {
 function timeAgo(iso: string, t: I18nContextValue['t']) {
   const seconds = Math.max(
     0,
-    Math.floor((Date.now() - new Date(iso).getTime()) / 1000),
+    Math.floor((serverNow() - Date.parse(iso)) / 1000),
   );
   if (seconds < 60) return t('dlq.row.secondsAgo', { count: seconds });
   const minutes = Math.floor(seconds / 60);

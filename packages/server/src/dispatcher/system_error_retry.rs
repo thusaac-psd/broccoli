@@ -57,7 +57,8 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if let Err(e) = scan_once(&state, &server_id, max_system_error_retries).await {
+                let scan = scan_once(&state, &server_id, max_system_error_retries);
+                if let Some(Err(e)) = common::deadline::bounded("dispatcher.system_error_retry", common::deadline::BACKGROUND_STEP, scan).await {
                     error!(server_id = %server_id, error = %e, "SystemError-retry scan failed");
                 }
             }

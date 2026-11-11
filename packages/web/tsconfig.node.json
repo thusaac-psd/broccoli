@@ -9,5 +9,5 @@
     "erasableSyntaxOnly": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["vite.config.ts", "plugins/**/*.ts"]
+  "include": ["vite.config.ts", "plugins/**/*.ts", "scripts/**/*.ts"]
 }

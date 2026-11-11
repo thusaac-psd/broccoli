@@ -83,13 +83,13 @@ default = []
 bundled-stress-test = []
 
 [dev-dependencies]
-libc = "0.2"
 reqwest = { version = "0.12", features = ["cookies", "json", "multipart"] }
 sea-orm = { workspace = true, features = ["mock"] }
 worker = { path = "../worker" }
 tempfile = "3"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
+test-support = { path = "../test-support" }
 
 [target.'cfg(unix)'.dev-dependencies]
 testcontainers = { version = "0.23", features = ["watchdog"] }

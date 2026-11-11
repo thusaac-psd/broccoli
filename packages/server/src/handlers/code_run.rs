@@ -201,14 +201,7 @@ pub async fn run_code(
         return Err(AppError::NotFound("Problem not found".into()));
     }
 
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages = state.registries.known_language_ids().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let contest_type = problem.default_contest_type.clone();
@@ -301,14 +294,7 @@ pub async fn run_contest_code(
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
 
-    let known_languages: std::collections::HashSet<String> = state
-        .registries
-        .language_resolver_registry
-        .read()
-        .await
-        .keys()
-        .cloned()
-        .collect();
+    let known_languages = state.registries.known_language_ids().await;
     validate_run_language(&payload.language, &known_languages)?;
 
     let custom_tcs_json = sanitize_db_json(
@@ -376,5 +362,5 @@ pub async fn get_code_run(
 }
 
 pub fn code_run_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(max_size + 4096)
+    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
 }

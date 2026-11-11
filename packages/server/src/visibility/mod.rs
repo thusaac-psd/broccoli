@@ -15,7 +15,7 @@ pub use decision::{Decision, FieldMask};
 pub(crate) use host_rules::host_decide;
 pub use mask::apply_mask;
 pub(crate) use plugin_query::query_plugins;
-pub use subject::{Action, Resource, Subject};
+pub use subject::{Action, ProblemScope, Resource, Subject};
 pub use visible::Visible;
 
 use crate::error::AppError;
@@ -33,31 +33,20 @@ use crate::state::AppState;
 /// `Clarification` do not - resolving those needs a DB round trip, which
 /// this function deliberately does not do, unlike [`resource_contest_id`]),
 /// so this only looks at the variants that do carry one directly:
-/// `Contest`, and `Problem`/`Sample` with an explicit `contest_id`. Returns
+/// `Contest`, and the problem parts (`Problem`/`Sample`/`Attachment`, see
+/// [`Resource::problem_scope`]) with an explicit `contest_id`. Returns
 /// `None` when the batch references zero or more than one distinct contest
 /// this way - guessing one contest out of several would be a wrong signal
 /// to hand a plugin, so "no single scope" is reported as `None` rather than
 /// picked arbitrarily.
 fn contest_scope(resources: &[Resource]) -> Option<i32> {
-    let mut ids: HashSet<i32> = HashSet::new();
-    for r in resources {
-        match r {
-            Resource::Contest(id) => {
-                ids.insert(*id);
-            }
-            Resource::Problem {
-                contest_id: Some(cid),
-                ..
-            }
-            | Resource::Sample {
-                contest_id: Some(cid),
-                ..
-            } => {
-                ids.insert(*cid);
-            }
-            _ => {}
-        }
-    }
+    let ids: HashSet<i32> = resources
+        .iter()
+        .filter_map(|r| match r {
+            Resource::Contest(id) => Some(*id),
+            _ => r.problem_scope().and_then(|scope| scope.contest_id),
+        })
+        .collect();
     if ids.len() == 1 {
         ids.into_iter().next()
     } else {
@@ -89,32 +78,20 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// the exact Task 7 `Submission` bug this function's own history warns
 /// about: a real, single-valued `contest_id` exists and is knowable, so
 /// reporting `None` would be silently dishonest to a plugin, not merely
-/// imprecise. It differs from `Resource::Attachment`'s principled `None`
-/// below in exactly this way - a clarification has ONE contest, a problem
-/// backing an attachment can have zero, one, or many. A miss in this map
+/// imprecise. It differs from a standalone problem part's principled
+/// `None` below in exactly this way - a clarification has ONE contest, a
+/// problem read outside any contest can sit in zero, one, or many. A miss in this map
 /// (the id absent as a key) can only mean this resource was never a host
 /// `Deny` target that reached here in the first place, mirroring
 /// `submission_contest_ids`'s own miss handling.
 ///
-/// `Resource::Attachment` DOES reach this function now: `host_decide` can
-/// `Allow` it (see `host_rules::decide_standalone_problem_access`, Task 10),
-/// so its `None` here is a deliberate, principled answer, not the same kind
-/// of "unresolved" gap `Clarification` used to document before Task 12, and
-/// NOT a repeat of the Task 7 `Submission` bug this function's history
-/// warns about. The `Submission` bug was losing a real, single-valued
-/// `contest_id` that existed but was not inline in the `Resource` (it had
-/// to come from `submission_contest_ids`) - dropping it to `None` was
-/// silently wrong. `Resource::Attachment` is different in kind, not just in
-/// whether a lookup was wired up: it carries a `problem_id`, not a
-/// `contest_id`, and the rule that admits it
-/// (`decide_standalone_problem_access`) is the same contest-agnostic rule
-/// used for standalone `Resource::Problem`/`Resource::Sample`
-/// (`contest_id: None`, handled by the arm below) - a problem can be
-/// attached to zero, one, or many contests via `contest_problem`, so even a
-/// DB lookup would produce a SET, not a single authoritative value. There
-/// is no real single answer to lose here, so `None` is not fail-open; it is
-/// the same "not scoped to one contest" answer this function already gives
-/// for a standalone `Resource::Problem`/`Resource::Sample`.
+/// The problem parts (`Problem`, `Sample` and `Attachment`) carry their
+/// request scope inline: `Some(contest_id)` when the request came through
+/// that contest's problem routes, `None` when it came through the
+/// standalone problem routes. A sample or an attachment is a part of its
+/// problem, so it reports exactly the scope its problem would. `None` here
+/// is not a lost value: a standalone request is genuinely not scoped to
+/// one contest (a problem can sit in zero, one or many contests).
 fn resource_contest_id(
     resource: &Resource,
     submission_contest_ids: &HashMap<i32, Option<i32>>,
@@ -122,12 +99,11 @@ fn resource_contest_id(
 ) -> Option<i32> {
     match resource {
         Resource::Contest(id) => Some(*id),
-        Resource::Problem { contest_id, .. } | Resource::Sample { contest_id, .. } => *contest_id,
         Resource::Submission(id) => submission_contest_ids.get(id).copied().flatten(),
         Resource::Clarification(id) => clarification_contest_ids.get(id).copied(),
-        // See the doc comment above: `Attachment` has no single contest
-        // scope even in principle (problem -> contest is many-to-many).
-        Resource::Attachment { .. } => None,
+        Resource::Problem { .. } | Resource::Sample { .. } | Resource::Attachment { .. } => {
+            resource.problem_scope().and_then(|scope| scope.contest_id)
+        }
     }
 }
 
@@ -763,6 +739,7 @@ mod tests {
                     plugin_max_connections: 1,
                     plugin_privileged_max_connections: 1,
                     plugin_url: None,
+                    ..Default::default()
                 },
                 auth: AuthConfig {
                     jwt_secret: "test-secret".to_string(),
@@ -780,6 +757,7 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
+                clock: Default::default(),
             },
             mq: None,
             redis_client: None,
@@ -794,7 +772,6 @@ mod tests {
                 evaluate_batches,
                 hook_registry: crate::hooks::new_shared_registry(),
             },
-            device_codes: Arc::new(dashmap::DashMap::new()),
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),

@@ -5,6 +5,7 @@ members = [
   "packages/mq",
   "packages/plugin-core",
   "packages/server",
+  "packages/test-support",
   "packages/worker",
   "packages/dev-cli",
   "packages/stress-test",
@@ -96,6 +97,7 @@ tower-http = { version = "0.6", features = [
   "compression-gzip",
   "cors",
   "fs",
+  "set-header",
   "timeout",
   "trace",
 ] }

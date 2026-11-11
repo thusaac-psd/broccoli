@@ -7,6 +7,7 @@
     "dev": "react-router dev",
     "build": "react-router build",
     "typecheck": "react-router typegen && tsc -b",
+    "check:asset-hashes": "node --experimental-strip-types scripts/check-asset-hashes.ts",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -12,7 +12,7 @@
 //! migrations as no-ops on first run.
 //!
 //! `sync()` still creates/updates the core tables from the entities; the
-//! migrator runs AFTER it (see [`crate::database::init_db_with_max_connections`]).
+//! migrator runs AFTER it (see [`crate::database::BootSession::migrate`]).
 
 use sea_orm_migration::prelude::*;
 
@@ -28,6 +28,7 @@ mod m0009_retired_submission_feedback;
 mod m0010_plugin_submission_feedback;
 mod m0011_user_display_name;
 mod m0012_max_judge_epoch;
+mod m0013_idempotency_purge_credentials;
 
 pub(crate) use m0011_user_display_name::prepare_column as prepare_user_display_name;
 
@@ -49,6 +50,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0010_plugin_submission_feedback::Migration),
             Box::new(m0011_user_display_name::Migration),
             Box::new(m0012_max_judge_epoch::Migration),
+            Box::new(m0013_idempotency_purge_credentials::Migration),
         ]
     }
 }
