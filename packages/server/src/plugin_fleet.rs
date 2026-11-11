@@ -88,7 +88,7 @@ pub type ReplicaReport = BTreeMap<String, ReplicaPluginState>;
 /// retry times derived from it.
 ///
 /// `contest_types` are the contest types this replica can judge (see
-/// [`crate::dispatcher::prefer_local_handler`]).
+/// `crate::dispatcher::prefer_local_handler`).
 pub async fn report(
     db: &DatabaseConnection,
     server_id: &str,

@@ -195,7 +195,7 @@ async fn claim_due(
 /// admin disables the plugin (`plugin_lifecycle::disable`): that disables it
 /// on every replica, so its timers can never be delivered again. NOT called
 /// when a plugin merely fails to load on one replica (a healthy peer is
-/// still delivering them; see [`claim_due`]), nor on reload, which swaps the
+/// still delivering them; see `claim_due`), nor on reload, which swaps the
 /// WASM runtime under the same plugin id and keeps its timers valid.
 pub async fn delete_timers_for_plugin(
     db: &DatabaseConnection,
@@ -239,7 +239,7 @@ fn loaded_plugin_ids(state: &AppState) -> Result<Vec<String>, ()> {
 
 /// Looks up the `[[server.timers]] function` a `Loaded` plugin declared.
 /// Returns `Ok(None)` for an unknown plugin, one that isn't `Loaded`, or one
-/// with no declaration. [`claim_due`] only claims rows of `Loaded` plugins, so
+/// with no declaration. `claim_due` only claims rows of `Loaded` plugins, so
 /// in practice `None` means the plugin dropped the declaration while timers
 /// were still pending (or was unloaded between claim and delivery), and the
 /// caller drops the row with a warning.
