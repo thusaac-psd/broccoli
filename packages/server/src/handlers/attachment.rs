@@ -11,9 +11,9 @@ use tracing::instrument;
 use uuid::Uuid;
 
 // visibility-bypass-audited: `upload_attachment`/`delete_attachment` require
-// perm::PROBLEM_EDIT and are write-only. The two viewer-facing reads,
-// `list_attachments`/`download_attachment`, already route through
-// `VisibilityKernel` below (`Resource::Problem`); `problem`/`problem_attachment`
+// perm::PROBLEM_EDIT and are write-only. The viewer-facing reads (the
+// standalone and contest-scoped list and download routes) all route through
+// `VisibilityKernel` below (`Resource::Problem` and `Resource::Attachment`); `problem`/`problem_attachment`
 // here are only used for the pre-kernel row fetch and for the admin write
 // paths. Pinned by the frozen
 // `tests/integration/visibility_matrix.rs::problem_attachment_list` suite.
@@ -21,6 +21,7 @@ use crate::entity::{problem, problem_attachment};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::path::AppPath;
+use crate::handlers::problem::require_problem_part_reachable;
 use crate::models::attachment::{AttachmentListResponse, AttachmentResponse};
 use crate::state::AppState;
 use crate::upload_limits::LARGE_UPLOAD_LIMIT_BYTES;
@@ -29,7 +30,7 @@ use crate::utils::blob::{
     take_required_file,
 };
 use crate::utils::soft_delete::SoftDeletable;
-use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
+use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
 pub fn attachment_upload_body_limit() -> DefaultBodyLimit {
     DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
@@ -180,29 +181,68 @@ pub async fn list_attachments(
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    list_attachments_in(&state, &auth_user, ProblemScope::standalone(problem_id)).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/{problem_id}/attachments",
+    tag = "Contest Problems",
+    operation_id = "listContestProblemAttachments",
+    summary = "List attachments for a contest problem",
+    description = "Returns the same attachments as `listAttachments`, read through this contest. \
+        Visibility is decided for this contest only. The contest must have started.",
+    params(
+        ("id" = i32, Path, description = "Contest ID"),
+        ("problem_id" = i32, Path, description = "Problem ID"),
+    ),
+    responses(
+        (status = 200, description = "Attachment list", body = AttachmentListResponse),
+        (status = 400, description = "Contest has not started yet (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 404, description = "Problem not found or not accessible (NOT_FOUND)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(contest_id, problem_id))]
+pub async fn list_contest_problem_attachments(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath((contest_id, problem_id)): AppPath<(i32, i32)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    list_attachments_in(
+        &state,
+        &auth_user,
+        ProblemScope::in_contest(contest_id, problem_id),
+    )
+    .await
+}
+
+/// Shared body of `list_attachments` and `list_contest_problem_attachments`:
+/// the attachments of the problem as reached under `scope`.
+async fn list_attachments_in(
+    state: &AppState,
+    auth_user: &AuthUser,
+    scope: ProblemScope,
+) -> Result<Json<serde_json::Value>, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
-    let problem_resource = Resource::Problem {
-        contest_id: None,
-        problem_id,
-    };
+    let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
 
     // Fail fast, before reading the attachment rows below, on a problem the
-    // kernel already knows is unreachable. This single Problem decision
-    // folds in what the pre-kernel handler checked as
-    // `require_problem_read_access` (permission bypass, `is_public`, and -
-    // for a hidden draft - reachability via any contest it is attached to) -
-    // see `visibility::host_rules::decide_standalone_problem_access`.
-    if kernel
-        .decide(Action::Read, problem_resource)
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Problem not found".into()));
-    }
+    // kernel already knows is unreachable under this scope. This is the
+    // same Problem decision `get_problem_in` makes (handlers/problem/mod.rs).
+    require_problem_part_reachable(
+        &kernel,
+        state,
+        auth_user,
+        scope,
+        Action::Read,
+        "Problem not found",
+    )
+    .await?;
 
     let refs = problem_attachment::Entity::find()
-        .filter(problem_attachment::Column::ProblemId.eq(problem_id))
+        .filter(problem_attachment::Column::ProblemId.eq(scope.problem_id))
         .order_by_asc(problem_attachment::Column::CreatedAt)
         .all(&state.db)
         .await?;
@@ -215,13 +255,7 @@ pub async fn list_attachments(
     // placeholder - a placeholder would confirm it exists.
     let items: Vec<(Resource, AttachmentResponse)> = refs
         .into_iter()
-        .map(|m| {
-            let resource = Resource::Attachment {
-                problem_id,
-                attachment_id: m.id,
-            };
-            (resource, AttachmentResponse::from(m))
-        })
+        .map(|m| (scope.attachment(m.id), AttachmentResponse::from(m)))
         .collect();
 
     let visible = kernel.fetch_visible_batch(Action::Read, items).await?;
@@ -266,29 +300,88 @@ pub async fn download_attachment(
     AppPath((problem_id, ref_id)): AppPath<(i32, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    download_attachment_in(
+        &state,
+        &auth_user,
+        ProblemScope::standalone(problem_id),
+        &ref_id,
+        &headers,
+    )
+    .await
+}
+
+#[utoipa::path(
+    get,
+    path = "/{problem_id}/attachments/{ref_id}",
+    tag = "Contest Problems",
+    operation_id = "downloadContestProblemAttachment",
+    summary = "Download an attachment of a contest problem",
+    description = "Streams the same content as `downloadAttachment`, read through this contest. \
+        Visibility is decided for this contest only. The contest must have started. \
+        Supports ETag-based caching via If-None-Match.",
+    params(
+        ("id" = i32, Path, description = "Contest ID"),
+        ("problem_id" = i32, Path, description = "Problem ID"),
+        ("ref_id" = String, Path, description = "Attachment reference ID (UUID)"),
+    ),
+    responses(
+        (status = 200, description = "Attachment content"),
+        (status = 304, description = "Not Modified (ETag match)"),
+        (status = 400, description = "Contest has not started yet, or invalid attachment ID (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 404, description = "Attachment not found or not accessible (NOT_FOUND)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(
+    skip(state, auth_user, headers),
+    fields(contest_id, problem_id, ref_id)
+)]
+pub async fn download_contest_problem_attachment(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath((contest_id, problem_id, ref_id)): AppPath<(i32, i32, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    download_attachment_in(
+        &state,
+        &auth_user,
+        ProblemScope::in_contest(contest_id, problem_id),
+        &ref_id,
+        &headers,
+    )
+    .await
+}
+
+/// Shared body of `download_attachment` and
+/// `download_contest_problem_attachment`: one attachment of the problem as
+/// reached under `scope`.
+async fn download_attachment_in(
+    state: &AppState,
+    auth_user: &AuthUser,
+    scope: ProblemScope,
+    ref_id: &str,
+    headers: &HeaderMap,
+) -> Result<Response, AppError> {
     // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    let kernel = VisibilityKernel::new(state, Subject::from_auth_user(auth_user));
 
     // Fail fast, before parsing/looking up the specific attachment, on a
     // problem the kernel already knows is unreachable - preserves the
     // pre-kernel handler's exact order (`require_problem_read_access` ran
     // before `Uuid::parse_str`). `Action::Download` throughout this handler:
     // the whole operation is a file-bytes read, not a metadata read.
-    if kernel
-        .decide(
-            Action::Download,
-            Resource::Problem {
-                contest_id: None,
-                problem_id,
-            },
-        )
-        .await?
-        .is_denied()
-    {
-        return Err(AppError::NotFound("Problem not found".into()));
-    }
+    require_problem_part_reachable(
+        &kernel,
+        state,
+        auth_user,
+        scope,
+        Action::Download,
+        "Problem not found",
+    )
+    .await?;
 
-    let ref_uuid = Uuid::parse_str(&ref_id)
+    let ref_uuid = Uuid::parse_str(ref_id)
         .map_err(|_| AppError::Validation("Invalid attachment ID".into()))?;
 
     let model = problem_attachment::Entity::find_by_id(ref_uuid)
@@ -296,7 +389,7 @@ pub async fn download_attachment(
         .await?
         .ok_or_else(|| AppError::NotFound("Attachment not found".into()))?;
 
-    if model.problem_id != problem_id {
+    if model.problem_id != scope.problem_id {
         return Err(AppError::NotFound("Attachment not found".into()));
     }
 
@@ -308,8 +401,8 @@ pub async fn download_attachment(
     // kernel memoizes per (Action, Resource); `Action::Download` on
     // `Resource::Attachment` was never asked above (only on `Resource::
     // Problem`), so this is a genuinely new host decision, not a free
-    // re-check - it resolves from `problem_id` alone though, via the same
-    // `decide_standalone_problem_access` rule as the gate above.
+    // re-check - it resolves from the scope alone though, via the same
+    // `decide_problem_or_sample` rule as the gate above.
     // NOTE: `is_denied()` only checks for `Decision::Deny` - a `Redact`
     // decision here would be indistinguishable from `Allow` and this
     // handler would stream the raw blob unmasked below regardless, since
@@ -317,19 +410,15 @@ pub async fn download_attachment(
     // entirely (there is no `FieldMask` concept for a binary blob body). No
     // plugin currently returns `Redact` for `Resource::Attachment`, so this
     // is a documented no-op today, not a live bug - see Task 20 Item 6.
-    let attachment_resource = Resource::Attachment {
-        problem_id,
-        attachment_id: model.id,
-    };
     if kernel
-        .decide(Action::Download, attachment_resource)
+        .decide(Action::Download, scope.attachment(model.id))
         .await?
         .is_denied()
     {
         return Err(AppError::NotFound("Attachment not found".into()));
     }
 
-    build_blob_response(&BlobMetadata::from(&model), &headers, &*state.blob_store).await
+    build_blob_response(&BlobMetadata::from(&model), headers, &*state.blob_store).await
 }
 
 #[utoipa::path(

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -411,8 +413,25 @@ impl Client {
         self.parse_response(resp)
     }
 
+    /// A standalone problem, read outside every contest. A problem reached
+    /// through a contest must use [`Client::get_contest_problem`] instead, or
+    /// another contest holding the same problem can hide it.
     pub fn get_problem(&self, problem_id: &str) -> anyhow::Result<ProblemDetailResponse> {
         let resp = self.get(&format!("/api/v1/problems/{}", problem_id))?;
+        self.parse_response(resp)
+    }
+
+    /// A problem's statement, read through the contest it belongs to so the
+    /// server decides visibility for that contest only.
+    pub fn get_contest_problem(
+        &self,
+        contest_id: &str,
+        problem_id: &str,
+    ) -> anyhow::Result<ProblemDetailResponse> {
+        let resp = self.get(&format!(
+            "/api/v1/contests/{}/problems/{}",
+            contest_id, problem_id
+        ))?;
         self.parse_response(resp)
     }
 
@@ -781,6 +800,9 @@ pub struct ProblemDetailResponse {
     pub memory_limit: i32,
     #[serde(default)]
     pub problem_type: String,
+    /// Required filenames per language, when the problem fixes them.
+    #[serde(default)]
+    pub submission_format: Option<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

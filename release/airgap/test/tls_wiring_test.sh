@@ -4,11 +4,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 inst="$here/../install.sh"
 cf="$here/../caddy/Caddyfile.airgap"
 gw="$here/../../docker-compose.gateway-airgap.yaml.template"
+srv="$here/../../docker-compose.server-airgap.yaml.template"
 
 # C2: install.sh must NOT envsubst the Caddyfile (that corrupts Caddy {$VAR}).
 grep -q 'envsubst' "$inst" && { echo "FAIL: install.sh still runs envsubst (corrupts Caddy {\$VAR})"; exit 1; } || true
 # C1: server role must compose the TLS gateway template.
 grep -q 'docker-compose.gateway-airgap.yaml.template' "$inst" || { echo "FAIL: server install does not compose the TLS gateway"; exit 1; }
+grep -q 'docker-compose.server-airgap.yaml.template' "$inst" || { echo "FAIL: server install does not compose the server-airgap override"; exit 1; }
 # gateway template exists, publishes 443, mounts the un-rendered Caddyfile.
 [ -f "$gw" ] || { echo "FAIL: gateway-airgap compose template missing"; exit 1; }
 grep -q ':443' "$gw" || { echo "FAIL: gateway does not publish 443"; exit 1; }
@@ -27,14 +29,19 @@ grep -q 'BROCCOLI_TLS_KEY'  "$inst" || { echo "FAIL: install.sh does not export 
 grep -qF 'tls {$TLS_CERT} {$TLS_KEY}' "$cf" || { echo "FAIL: Caddyfile lost its Caddy {\$VAR} tls placeholders"; exit 1; }
 # --- M-A: gateway-bypass hardening -------------------------------------------
 # server override marks cookies Secure behind the gateway.
-grep -Eq 'BROCCOLI__AUTH__SECURE_COOKIES:[[:space:]]*"true"' "$gw" \
-  || { echo "FAIL: gateway override does not force SECURE_COOKIES=true"; exit 1; }
+grep -Eq 'BROCCOLI__AUTH__SECURE_COOKIES:[[:space:]]*"true"' "$srv" \
+  || { echo "FAIL: server-airgap override does not force SECURE_COOKIES=true"; exit 1; }
 # trusted proxies set (non-empty) so XFF yields real client IPs, not the gateway.
-grep -q 'BROCCOLI__SERVER__TRUSTED_PROXIES' "$gw" \
-  || { echo "FAIL: gateway override does not set TRUSTED_PROXIES"; exit 1; }
-# loopback (127.0.0.0/8) must NOT be trusted (anti XFF-spoof from a host-local hit).
-grep -E 'BROCCOLI__SERVER__TRUSTED_PROXIES' "$gw" | grep -q '127\.' \
-  && { echo "FAIL: TRUSTED_PROXIES must exclude loopback"; exit 1; } || true
+grep -q 'BROCCOLI__SERVER__TRUSTED_PROXIES' "$srv" \
+  || { echo "FAIL: server-airgap override does not set TRUSTED_PROXIES"; exit 1; }
+# Never a whole private range or loopback: any contestant inside a trusted
+# range could forge X-Forwarded-For and dodge the login limits.
+grep -E '10\.0\.0\.0/8|192\.168\.0\.0/16|172\.16\.0\.0/12|127\.' "$srv" "$gw" \
+  && { echo "FAIL: the airgap trust list must name only the gateway"; exit 1; } || true
+# The gateway template stands alone: it declares no service but the gateway,
+# so it also runs on a host of its own.
+[ "$(grep -cE '^  [a-z][a-z0-9_-]*:$' "$gw")" -ge 1 ] && ! grep -qE '^  server:' "$gw" \
+  || { echo "FAIL: the gateway template must not define the server service"; exit 1; }
 # install.sh binds plaintext :3000 to host loopback (no LAN bypass around 443).
 grep -Eq 'BROCCOLI_HTTP_BIND="\$\{BROCCOLI_HTTP_BIND:-127\.0\.0\.1:3000\}"' "$inst" \
   || { echo "FAIL: install.sh does not loopback-bind BROCCOLI_HTTP_BIND"; exit 1; }
@@ -58,8 +65,10 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
      BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY=x \
      BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY=x \
      LAN_HOST=contest.lan BROCCOLI_TLS_CERT="$tmp/server.crt" BROCCOLI_TLS_KEY="$tmp/server.key" \
+     BROCCOLI_GATEWAY_TRUSTED_PROXIES='["172.31.250.0/28"]' \
        docker compose --env-file "$tmp/envfile" \
                       -f "$rel/docker-compose.server.yaml.template" \
+                      -f "$rel/docker-compose.server-airgap.yaml.template" \
                       -f "$rel/docker-compose.gateway-airgap.yaml.template" \
                       config > "$tmp/merged.yaml" 2>/dev/null; then
     # server's published :3000 must bind 127.0.0.1 (export beats --env-file).
@@ -68,6 +77,22 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
       || { echo "FAIL: server :3000 not loopback-bound; shell export must beat --env-file (got '${sip:-none}')"; exit 1; }
     grep -Eq 'SECURE_COOKIES: .true.' "$tmp/merged.yaml" \
       || { echo "FAIL: merged server missing SECURE_COOKIES=true"; exit 1; }
+    # The gateway is only on the edge network, which the server also joins.
+    python3 - "$tmp/merged.yaml" <<'PY' || { echo "FAIL: gateway and server do not share only the edge network"; exit 1; }
+import sys, re
+text = open(sys.argv[1]).read()
+def nets(svc):
+    block = re.search(r"^  %s:\n((?:    .*\n|\n)*)" % svc, text, re.M).group(1)
+    m = re.search(r"^    networks:\n((?:      .*\n)*)", block, re.M)
+    return set(re.findall(r"^      ([a-z_-]+):", m.group(1), re.M))
+assert nets("gateway") == {"edge"}, nets("gateway")
+assert nets("server") == {"default", "edge"}, nets("server")
+PY
+    # Standalone gateway host: the gateway template alone renders.
+    LAN_HOST=contest.lan BROCCOLI_TLS_CERT="$tmp/server.crt" BROCCOLI_TLS_KEY="$tmp/server.key" \
+    BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' \
+      docker compose -f "$rel/docker-compose.gateway-airgap.yaml.template" config -q \
+      || { echo "FAIL: gateway-airgap template does not run on a host of its own"; exit 1; }
     echo "PASS: merged server publishes :3000 on 127.0.0.1 (export beats --env-file), cookies Secure"
   else
     # docker is present and every interpolation var is supplied, so a config

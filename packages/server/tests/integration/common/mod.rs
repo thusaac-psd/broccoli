@@ -228,6 +228,11 @@ pub mod routes {
     pub const REFRESH: &str = "/api/v1/auth/refresh";
     pub const LOGOUT: &str = "/api/v1/auth/logout";
     pub const ME: &str = "/api/v1/auth/me";
+    pub const CLI_TOKEN: &str = "/api/v1/auth/cli-token";
+    pub const CLI_REFRESH: &str = "/api/v1/auth/cli-refresh";
+    pub const DEVICE_CODE: &str = "/api/v1/auth/device-code";
+    pub const DEVICE_AUTHORIZE: &str = "/api/v1/auth/device-authorize";
+    pub const DEVICE_TOKEN: &str = "/api/v1/auth/device-token";
 
     pub const USERS: &str = "/api/v1/users";
 
@@ -312,6 +317,22 @@ pub mod routes {
 
     pub fn contest_problem(id: i32, problem_id: i32) -> String {
         format!("/api/v1/contests/{id}/problems/{problem_id}")
+    }
+
+    pub fn contest_problem_samples(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples")
+    }
+
+    pub fn contest_problem_sample(id: i32, problem_id: i32, tc_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/samples/{tc_id}")
+    }
+
+    pub fn contest_problem_attachments(id: i32, problem_id: i32) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments")
+    }
+
+    pub fn contest_problem_attachment(id: i32, problem_id: i32, ref_id: &str) -> String {
+        format!("/api/v1/contests/{id}/problems/{problem_id}/attachments/{ref_id}")
     }
 
     pub fn contest_participants(id: i32) -> String {
@@ -872,7 +893,6 @@ impl TestApp {
                 evaluate_batches,
                 hook_registry,
             },
-            device_codes: std::sync::Arc::new(dashmap::DashMap::new()),
             metrics: test_metrics.clone(),
             prometheus_registry: test_prom_registry.clone(),
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),

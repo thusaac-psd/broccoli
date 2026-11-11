@@ -21,17 +21,39 @@ pub struct Model {
     #[sea_orm(nullable)]
     pub revoked_at: Option<DateTimeUtc>,
 
+    /// Selector of the row this one replaced, when it was issued by a
+    /// rotation. It caps the reuse grace at one sibling per rotated row and
+    /// lets logout retire the predecessor along with the presented row.
+    #[sea_orm(nullable, indexed)]
+    pub rotated_from: Option<String>,
+
     #[sea_orm(belongs_to, from = "user_id", to = "id")]
     pub user: HasOne<super::user::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
 
+/// Row lock on the owning user that every refresh-token write for that user
+/// takes first: a rotation (`services::auth_tokens::rotate_refresh_token`) and
+/// [`Entity::revoke_all_for_user`]. It orders the two, so a rotation that
+/// commits while a password reset is deleting the user's rows cannot leave
+/// behind a fresh row the reset's DELETE did not see. `NO KEY UPDATE` does not
+/// block inserts into tables that reference the user.
+pub const LOCK_OWNER_SQL: &str = r#"SELECT 1 FROM "user" WHERE id = $1 FOR NO KEY UPDATE"#;
+
 impl Entity {
+    /// Delete every refresh token of `user_id`, after taking the owner lock
+    /// (see [`LOCK_OWNER_SQL`]).
     pub async fn revoke_all_for_user<C>(db: &C, user_id: i32) -> Result<(), sea_orm::DbErr>
     where
         C: ConnectionTrait,
     {
+        db.execute_raw(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            LOCK_OWNER_SQL,
+            [user_id.into()],
+        ))
+        .await?;
         Self::delete_many()
             .filter(Column::UserId.eq(user_id))
             .exec(db)

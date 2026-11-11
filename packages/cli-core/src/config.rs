@@ -212,7 +212,8 @@ pub struct UserConfig {
     #[serde(default)]
     pub server: Option<String>,
 
-    /// `webpki` (default), `system` (OS trust store, for private CAs), or `insecure`; overridden by `$BROCCOLI_TLS`.
+    /// `default` (OS trust store plus bundled Mozilla roots), `webpki` (bundled roots only),
+    /// `system` (the OS verifier only), or `insecure`; overridden by `$BROCCOLI_TLS`.
     #[serde(default)]
     pub tls: Option<String>,
 

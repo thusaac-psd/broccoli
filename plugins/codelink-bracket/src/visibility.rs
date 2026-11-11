@@ -188,18 +188,13 @@ struct SubmissionOwnerRow {
     contest_type: Option<String>,
 }
 
-/// One `(problem_id, contest_id)` pair for a CONTEXT-FREE problem resource
-/// (`Resource::Problem{contest_id: None, ..}`) that turns out to belong to
-/// one of THIS plugin's own bracket contests. A problem may belong to more
-/// than one bracket contest, so this is a row per membership, not per
-/// problem -- see [`decide_visibility_decisions`]'s standalone-problem
-/// branch for why the full set matters (Deny composes; attribution does
-/// not).
+/// Samples and attachments are parts of their problem: the host scopes
+/// them exactly like the problem, and this plugin gives them the problem's
+/// decision. Judging only `problem` would leak an opponent's or a
+/// not-yet-open problem's samples and files.
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Debug, Deserialize)]
-struct ContextFreeProblemContestRow {
-    problem_id: i32,
-    contest_id: i32,
+fn is_problem_part(kind: &str) -> bool {
+    matches!(kind, "problem" | "sample" | "attachment")
 }
 
 // `find_players_match` moved to `storage.rs`: it operates purely on
@@ -250,7 +245,7 @@ fn decide_problem_for_contest(
 ///
 /// `decisions` is POSITIONAL and always exactly as long as
 /// `req.resources` -- a resource this plugin has no opinion about (any kind
-/// other than `problem`/`submission`, or one belonging to a non-bracket
+/// other than a problem part or `submission`, or one belonging to a non-bracket
 /// contest) defaults to `Allow`, the identity element of the host's `meet`,
 /// so "no opinion" genuinely composes rather than silently denying.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -272,12 +267,13 @@ fn decide_visibility_decisions(
     }
     let viewer = req.subject.user_id;
 
-    // -- Problem resources: resolve contest_type, then setup + matches, in
-    // ONE batched read per distinct contest actually referenced. --
+    // -- Problem parts (problem, sample, attachment): resolve contest_type,
+    // then setup + matches, in ONE batched read per distinct contest
+    // actually referenced. --
     let mut problem_contest_ids: Vec<i32> = req
         .resources
         .iter()
-        .filter(|r| r.kind == "problem")
+        .filter(|r| is_problem_part(&r.kind))
         .filter_map(|r| r.contest_id)
         .collect();
     problem_contest_ids.sort_unstable();
@@ -299,53 +295,38 @@ fn decide_visibility_decisions(
         }
     }
 
-    // -- Context-free problem resources (`contest_id: None`): resolve which
-    // of THIS plugin's own bracket contests each problem_id belongs to, in
-    // ONE batched query for the WHOLE request -- this is on the hot path for
-    // every standalone problem read on the platform (`GET /problems/{id}`,
-    // attachment download, sample test cases, the standalone submit route's
-    // gate check), so a per-resource query here would be the same N+1 defect
-    // the ICPC plugin's M20 fixed. This is deliberately NOT "resolve a
-    // contest for the problem": a problem can belong to several contests
-    // (including non-bracket ones, filtered out by the `contest_type` join
-    // below), and a contest-free problem is a first-class platform feature.
-    // It resolves the FULL set of this plugin's own bracket contests per
+    // -- Context-free problem parts (`contest_id: None`): resolve which of
+    // THIS plugin's own bracket contests that have not ended hold each
+    // problem_id, in ONE batched query for the WHOLE request -- this is on
+    // the hot path for every standalone problem read on the platform
+    // (`GET /problems/{id}`, attachment download, sample test cases, the
+    // standalone submit route's gate check), so a per-resource query here
+    // would be the same N+1 defect the ICPC plugin's M20 fixed. This is
+    // deliberately NOT "resolve a contest for the problem": a problem can
+    // belong to several contests (including non-bracket ones, which read it
+    // through their own contest scope and never reach this branch), and a
+    // contest-free problem is a first-class platform feature. It resolves
+    // the FULL set of this plugin's own unended bracket contests per
     // problem_id, because Deny composes (any one of them hiding it is
-    // enough) while attribution does not.
+    // enough) while attribution does not. An ended bracket no longer hides
+    // its problems outside a contest.
     let mut context_free_problem_ids: Vec<i32> = req
         .resources
         .iter()
-        .filter(|r| r.kind == "problem" && r.contest_id.is_none())
+        .filter(|r| is_problem_part(&r.kind) && r.contest_id.is_none())
         .filter_map(|r| r.problem_id)
         .collect();
     context_free_problem_ids.sort_unstable();
     context_free_problem_ids.dedup();
 
-    let mut context_free_bracket_contests: HashMap<i32, Vec<i32>> = HashMap::new();
-    if !context_free_problem_ids.is_empty() {
-        let mut p = Params::new();
-        let placeholders: Vec<String> = context_free_problem_ids
-            .iter()
-            .map(|id| p.bind(*id))
-            .collect();
-        let sql = format!(
-            "SELECT cp.problem_id AS problem_id, cp.contest_id AS contest_id \
-             FROM contest_problem cp JOIN contest c ON c.id = cp.contest_id \
-             WHERE c.contest_type = 'codelink-bracket' AND c.deleted_at IS NULL \
-             AND cp.problem_id IN ({})",
-            placeholders.join(",")
-        );
-        let rows: Vec<ContextFreeProblemContestRow> =
-            host.db.query_with_args(&sql, &p.into_args())?;
-        for row in rows {
-            // Fold into `bracket_contests` too so the setup+matches batch
-            // load just below covers contests discovered here, not just
-            // ones an explicit `contest_id` resource already named.
-            bracket_contests.insert(row.contest_id, ());
-            context_free_bracket_contests
-                .entry(row.problem_id)
-                .or_default()
-                .push(row.contest_id);
+    let context_free_bracket_contests =
+        storage::unended_bracket_contests(host, &context_free_problem_ids)?;
+    // Fold into `bracket_contests` too so the setup+matches batch load just
+    // below covers contests discovered here, not just ones an explicit
+    // `contest_id` resource already named.
+    for contest_ids in context_free_bracket_contests.values() {
+        for &contest_id in contest_ids {
+            bracket_contests.insert(contest_id, ());
         }
     }
 
@@ -390,7 +371,7 @@ fn decide_visibility_decisions(
         .resources
         .iter()
         .map(|resource| match resource.kind.as_str() {
-            "problem" => {
+            kind if is_problem_part(kind) => {
                 let Some(problem_id) = resource.problem_id else {
                     return WireDecision::Allow {};
                 };
@@ -414,12 +395,16 @@ fn decide_visibility_decisions(
                         // attachment download, sample test cases, and --
                         // decisively -- the standalone submit route's
                         // pre-hook kernel gate) reach here with no contest
-                        // context at all. This is NOT "resolve a contest for
+                        // context at all. A read through ANOTHER contest
+                        // (a qualifier sharing the problem) carries that
+                        // contest's id and is handled by the arm above,
+                        // where a non-bracket contest gets no opinion. This is NOT "resolve a contest for
                         // the problem" -- see the batching block above for
                         // why. It answers one question about OURSELVES
                         // instead: is this problem attached to one of THIS
                         // plugin's own bracket contests, and if so, does
                         // that contest currently hide it from this viewer?
+                        // Only brackets that have not ended count.
                         // A problem with no such attachment is untouched:
                         // `Allow {}`, the identity of the host's `meet`,
                         // exactly as before this fix. A problem attached to
@@ -743,8 +728,8 @@ mod tests {
     /// Persist a `RoundDef`-shaped `Setup` plus one match document, WITHOUT
     /// touching the mock DB's query queue -- callers queue whichever
     /// query row shape their path needs (the explicit-`contest_id`
-    /// `ContestTypeRow` shape, or the context-free `ContextFreeProblemContestRow`
-    /// shape) themselves, since the two paths issue differently-shaped
+    /// `ContestTypeRow` shape, or the context-free
+    /// `storage::unended_bracket_contests` row shape) themselves, since the two paths issue differently-shaped
     /// queries. Mirrors `gate.rs::seed_match`, generalized to take a caller-
     /// built `MatchState` instead of hardcoding one.
     fn seed_setup_and_match(host: &Host, contest_id: i32, m: &MatchState) {
@@ -870,6 +855,51 @@ mod tests {
         };
         let decisions = decide_visibility_decisions(&host, &req_owner).unwrap();
         assert!(matches!(decisions[0], WireDecision::Deny {}));
+    }
+
+    #[test]
+    fn samples_and_attachments_get_their_problems_decision_during_ordering() {
+        // A problem's samples and files must not leak where the problem
+        // itself is hidden: the owner is denied all three parts of their own
+        // problem during ordering, the opponent (who ranks it) sees all
+        // three.
+        let parts = |problem_id: i32| -> Vec<QueryResource> {
+            ["problem", "sample", "attachment"]
+                .into_iter()
+                .map(|kind| QueryResource {
+                    kind: kind.to_string(),
+                    id: if kind == "attachment" {
+                        "0196c1d2-3a4b-7c8d-9e0f-1a2b3c4d5e6f".to_string()
+                    } else {
+                        problem_id.to_string()
+                    },
+                    contest_id: Some(7),
+                    problem_id: Some(problem_id),
+                })
+                .collect()
+        };
+        for (viewer, expect_allow) in [(20, true), (10, false)] {
+            let host = Host::mock();
+            seed_bracket_contest(&host, 7);
+            let req = VisibilityQueryInput {
+                subject: subject(Some(viewer), false),
+                action: "view".to_string(),
+                context: QueryContext {
+                    contest_id: Some(7),
+                },
+                resources: parts(101),
+            };
+            let decisions = decide_visibility_decisions(&host, &req).unwrap();
+            assert_eq!(decisions.len(), 3);
+            for (resource, decision) in req.resources.iter().zip(&decisions) {
+                assert_eq!(
+                    matches!(decision, WireDecision::Allow {}),
+                    expect_allow,
+                    "viewer {viewer}, {} part: got {decision:?}",
+                    resource.kind
+                );
+            }
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use broccoli_cli_core::fmt;
 use broccoli_cli_core::resolve;
 use clap::Args;
 use console::style;
+use std::collections::HashMap;
 use std::fs;
 use std::time::Duration;
 
@@ -87,6 +88,31 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         style("→").blue().bold(),
         style(&language).cyan()
     );
+
+    if let [file] = submission_files.as_mut_slice() {
+        // Read the problem the same way it is submitted: through its contest
+        // when there is one, so another contest holding the same problem
+        // cannot hide it here. A problem that cannot be read is sent as-is
+        // and the server has the final word on its filename.
+        let problem = match contest_id.as_deref() {
+            Some(cid) => client.get_contest_problem(cid, &problem_id),
+            None => client.get_problem(&problem_id),
+        };
+        if let Ok(problem) = problem
+            && let Some(required) =
+                single_required_filename(problem.submission_format.as_ref(), &language)
+            && required != file.filename
+        {
+            println!(
+                "{}  Submitting {} as {} (the filename this problem requires)",
+                style("→").blue().bold(),
+                style(&file.filename).cyan(),
+                style(required).cyan()
+            );
+            file.filename = required.to_string();
+        }
+    }
+
     match contest_id.as_deref() {
         Some(c) => println!(
             "{}  Submitting to contest {}...",
@@ -134,6 +160,23 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The one filename `submission_format` requires for `language`, if it
+/// requires exactly one distinct non-empty name. `None` when the problem
+/// fixes no filenames, says nothing about this language, or asks for several
+/// files, since a single file cannot be renamed to fit those.
+fn single_required_filename<'a>(
+    submission_format: Option<&'a HashMap<String, Vec<String>>>,
+    language: &str,
+) -> Option<&'a str> {
+    let mut names = submission_format?
+        .get(language.trim())?
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty());
+    let first = names.next()?;
+    names.all(|name| name == first).then_some(first)
 }
 
 fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
@@ -235,5 +278,65 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
 
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::single_required_filename;
+    use std::collections::HashMap;
+
+    fn format(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(lang, names)| {
+                (
+                    lang.to_string(),
+                    names.iter().map(|n| n.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_required_name_is_chosen() {
+        let f = format(&[("cpp", &["solution.cpp"]), ("python3", &["main.py"])]);
+        assert_eq!(
+            single_required_filename(Some(&f), "cpp"),
+            Some("solution.cpp")
+        );
+        assert_eq!(
+            single_required_filename(Some(&f), "python3"),
+            Some("main.py")
+        );
+    }
+
+    #[test]
+    fn no_format_or_unlisted_language_has_no_name() {
+        let f = format(&[("cpp", &["solution.cpp"])]);
+        assert_eq!(single_required_filename(None, "cpp"), None);
+        assert_eq!(single_required_filename(Some(&f), "java"), None);
+        assert_eq!(single_required_filename(Some(&HashMap::new()), "cpp"), None);
+    }
+
+    #[test]
+    fn several_distinct_names_have_no_single_name() {
+        let f = format(&[("cpp", &["grader.cpp", "solution.cpp"])]);
+        assert_eq!(single_required_filename(Some(&f), "cpp"), None);
+    }
+
+    #[test]
+    fn repeated_blank_and_padded_names_collapse_to_one() {
+        let f = format(&[("cpp", &[" solution.cpp", "", "solution.cpp ", "  "])]);
+        assert_eq!(
+            single_required_filename(Some(&f), " cpp "),
+            Some("solution.cpp")
+        );
+    }
+
+    #[test]
+    fn only_blank_names_have_no_name() {
+        let f = format(&[("cpp", &["", "  "])]);
+        assert_eq!(single_required_filename(Some(&f), "cpp"), None);
     }
 }
