@@ -1,22 +1,35 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useServerNow } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment } from 'react';
 import { useParams } from 'react-router';
+
+import { contestPhase } from '@/features/contest/utils/status';
 
 // -- helpers ------------------------------------------------------------------
 
-function getTimeLeft(target: Date) {
-  const ms = Math.max(0, target.getTime() - Date.now());
-  const totalSecs = Math.floor(ms / 1000);
+function getTimeLeft(targetMs: number, now: number) {
+  const totalSecs = Math.floor(Math.max(0, targetMs - now) / 1000);
   return {
     days: Math.floor(totalSecs / 86400),
     hours: Math.floor((totalSecs % 86400) / 3600),
     minutes: Math.floor((totalSecs % 3600) / 60),
     seconds: totalSecs % 60,
-    ms,
   };
+}
+
+/** The digit groups to show: days only when at least a day is left. */
+function countdownSegments(
+  tl: ReturnType<typeof getTimeLeft>,
+  t: (key: string) => string,
+) {
+  return [
+    ...(tl.days > 0 ? [{ value: tl.days, label: t('countdown.days') }] : []),
+    { value: tl.hours, label: t('countdown.hours') },
+    { value: tl.minutes, label: t('countdown.minutes') },
+    { value: tl.seconds, label: t('countdown.seconds') },
+  ];
 }
 
 // CSS-variable-based color tokens - respond to any theme automatically
@@ -27,12 +40,8 @@ const ACCENT = 'hsl(var(--sidebar-ring))';
 function useCountdownData(contestId: number) {
   const apiClient = useApiClient();
   const authReady = useAuthReady();
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const timer = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // The server enforces the window by its clock, so count down by it too.
+  const now = useServerNow(1000);
 
   const { data: contest } = useQuery({
     queryKey: ['contest', contestId],
@@ -49,26 +58,15 @@ function useCountdownData(contestId: number) {
 
   if (!contest) return null;
 
-  const now = Date.now();
-  const startMs = new Date(contest.start_time).getTime();
-  const endMs = new Date(contest.end_time).getTime();
+  const startMs = Date.parse(contest.start_time);
+  const endMs = Date.parse(contest.end_time);
+  const phase = contestPhase(startMs, endMs, now);
 
-  const phase: 'upcoming' | 'running' | 'ended' =
-    now < startMs ? 'upcoming' : now <= endMs ? 'running' : 'ended';
-
-  const target =
-    phase === 'upcoming'
-      ? new Date(contest.start_time)
-      : new Date(contest.end_time);
-
-  const tl = getTimeLeft(target);
+  const tl = getTimeLeft(phase === 'upcoming' ? startMs : endMs, now);
   const totalDuration = endMs - startMs;
   const elapsed = Math.max(0, now - startMs);
   const progress =
     phase === 'running' ? Math.min(100, (elapsed / totalDuration) * 100) : 0;
-
-  // suppress unused tick warning - it drives re-renders
-  void tick;
 
   return { contest, phase, tl, progress };
 }
@@ -84,19 +82,7 @@ export function ContestCountdown() {
   const { contest, phase, tl, progress } = d;
 
   const active = phase !== 'ended';
-  const segments =
-    tl.days > 0
-      ? [
-          { value: tl.days, label: t('countdown.days') },
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ]
-      : [
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ];
+  const segments = countdownSegments(tl, t);
 
   const phaseLabel =
     phase === 'upcoming'
@@ -214,19 +200,7 @@ export function ContestCountdownMini() {
   if (!contestId || !d || d.phase === 'ended') return null;
   const { phase, tl } = d;
 
-  const segments =
-    tl.days > 0
-      ? [
-          { value: tl.days, label: t('countdown.days') },
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ]
-      : [
-          { value: tl.hours, label: t('countdown.hours') },
-          { value: tl.minutes, label: t('countdown.minutes') },
-          { value: tl.seconds, label: t('countdown.seconds') },
-        ];
+  const segments = countdownSegments(tl, t);
 
   const phaseLabel =
     phase === 'upcoming' ? t('countdown.startsIn') : t('countdown.endsIn');

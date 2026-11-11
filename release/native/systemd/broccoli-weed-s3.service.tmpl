@@ -1,0 +1,9 @@
+[Unit]
+Description=Broccoli S3 LAN forwarder to SeaweedFS S3 on loopback
+Requires=broccoli-weed-s3.socket broccoli-weed.service
+After=broccoli-weed-s3.socket broccoli-weed.service
+
+[Service]
+ExecStart=@SOCKET_PROXYD@ --connections-max=4096 127.0.0.1:8334
+DynamicUser=yes
+PrivateTmp=yes

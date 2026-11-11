@@ -2,7 +2,9 @@ import createClient from 'openapi-fetch';
 import { type ReactNode, useCallback, useMemo, useRef } from 'react';
 
 import { ApiClientContext } from '@/api/api-client-context';
+import { refreshSession as refreshSharedSession } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
+import { fetchWithServerClock } from '@/api/server-clock';
 import { AUTH_SESSION_EXPIRED_EVENT } from '@/auth/types';
 
 interface ApiClientProviderProps {
@@ -38,7 +40,6 @@ export function ApiClientProvider({
   baseUrl,
 }: ApiClientProviderProps) {
   const accessTokenRef = useRef<string | null>(null);
-  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
 
   const setAccessToken = useCallback((token: string | null) => {
     accessTokenRef.current = token;
@@ -69,55 +70,43 @@ export function ApiClientProvider({
   // browsers throttle the background refresh interval in inactive/slept tabs.
   // So a 401 TOKEN_INVALID must first attempt a refresh; only when the refresh
   // itself is rejected is the session actually over. Concurrent 401s (e.g. a
-  // refetch-on-focus burst after waking a laptop) share a single in-flight
-  // refresh request.
-  const refreshAccessToken = useCallback(async (): Promise<string | null> => {
-    if (!refreshPromiseRef.current) {
-      const refreshUrl = `${
+  // refetch-on-focus burst after waking a laptop) and the AuthProvider's
+  // background refresh all share one refresh (see refresh-session.ts).
+  const refreshUrl = useMemo(
+    () =>
+      `${
         resolvedBaseUrl.endsWith('/')
           ? resolvedBaseUrl.slice(0, -1)
           : resolvedBaseUrl
-      }/auth/refresh`;
+      }/auth/refresh`,
+    [resolvedBaseUrl],
+  );
 
-      refreshPromiseRef.current = (async () => {
-        try {
-          const response = await fetch(refreshUrl, {
-            method: 'POST',
-            credentials: 'include',
-          });
-          if (!response.ok) return null;
-          const body = (await response.json()) as { token?: unknown };
-          return typeof body?.token === 'string' ? body.token : null;
-        } catch {
-          return null;
-        }
-      })();
-
-      refreshPromiseRef.current.finally(() => {
-        refreshPromiseRef.current = null;
-      });
-    }
-
-    return refreshPromiseRef.current;
-  }, [resolvedBaseUrl]);
+  const refreshSession = useCallback(
+    () => refreshSharedSession(refreshUrl, { fetch: fetchWithServerClock }),
+    [refreshUrl],
+  );
 
   // Returns the new access token after a successful refresh (also storing it
-  // for subsequent requests), or null after clearing the session because the
-  // refresh token itself was rejected.
+  // for subsequent requests), or null when there is none. Only a definitive
+  // rejection ends the session; when the server is merely unreachable the
+  // caller gets the original 401 and the session survives for a later retry.
   const recoverSession = useCallback(async (): Promise<string | null> => {
-    const token = await refreshAccessToken();
-    if (!token) {
+    const outcome = await refreshSession();
+    if (outcome.status === 'rejected') {
       clearAuth();
       return null;
     }
-    accessTokenRef.current = token;
-    return token;
-  }, [refreshAccessToken, clearAuth]);
+    if (outcome.status === 'unavailable') return null;
+    accessTokenRef.current = outcome.session.token;
+    return outcome.session.token;
+  }, [refreshSession, clearAuth]);
 
   const apiClient = useMemo(() => {
     const client = createClient<paths>({
       baseUrl: resolvedBaseUrl,
       credentials: 'include',
+      fetch: fetchWithServerClock,
     });
 
     // Pristine clones of in-flight requests (keyed by middleware request id)
@@ -145,12 +134,11 @@ export function ApiClientProvider({
           return response;
         }
 
-        // A rejected /auth/refresh means the refresh token itself is dead;
-        // attempting another refresh would loop.
-        if (isRefreshUrl(request.url)) {
-          clearAuth();
-          return response;
-        }
+        // Never answer a refresh's 401 with another refresh (it would loop).
+        // Nor is it proof the session is over: a refresh sent around
+        // `refreshSession` can lose a rotation race, so only that function
+        // decides when a session has ended.
+        if (isRefreshUrl(request.url)) return response;
 
         const token = await recoverSession();
         if (!token) {
@@ -165,12 +153,12 @@ export function ApiClientProvider({
         }
 
         retryRequest.headers.set('Authorization', `Bearer ${token}`);
-        return fetch(retryRequest);
+        return fetchWithServerClock(retryRequest);
       },
     });
 
     return client;
-  }, [resolvedBaseUrl, clearAuth, recoverSession]);
+  }, [resolvedBaseUrl, recoverSession]);
 
   const apiFetch = useMemo(
     () => async (input: string | URL, init?: RequestInit) => {
@@ -182,7 +170,7 @@ export function ApiClientProvider({
       }
 
       const url = new URL(input, resolvedBaseUrl);
-      const response = await fetch(url, {
+      const response = await fetchWithServerClock(url, {
         ...init,
         headers,
       });
@@ -191,10 +179,7 @@ export function ApiClientProvider({
         return response;
       }
 
-      if (isRefreshUrl(url.toString())) {
-        clearAuth();
-        return response;
-      }
+      if (isRefreshUrl(url.toString())) return response;
 
       const token = await recoverSession();
       if (!token) {
@@ -209,16 +194,18 @@ export function ApiClientProvider({
 
       const retryHeaders = new Headers(init?.headers);
       retryHeaders.set('Authorization', `Bearer ${token}`);
-      return fetch(url, {
+      return fetchWithServerClock(url, {
         ...init,
         headers: retryHeaders,
       });
     },
-    [resolvedBaseUrl, clearAuth, recoverSession],
+    [resolvedBaseUrl, recoverSession],
   );
 
   return (
-    <ApiClientContext value={{ apiClient, apiFetch, setAccessToken }}>
+    <ApiClientContext
+      value={{ apiClient, apiFetch, setAccessToken, refreshSession }}
+    >
       {children}
     </ApiClientContext>
   );

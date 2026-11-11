@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * List all discovered plugins
-     * @description Returns a list of all plugins that have been discovered on disk, along with their manifest information and current status. Requires `plugin:manage` permission.
+     * @description Returns a list of all plugins discovered on any server replica (a plugin whose files are not on the serving replica is listed with its id as its name and no manifest details), along with their manifest information, whether each is enabled, and its load state on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['listAllPlugins'];
     put?: never;
@@ -35,7 +35,7 @@ export interface paths {
     put?: never;
     /**
      * Reload all plugins and discover new ones
-     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory. Requires `plugin:manage` permission.
+     * @description Reloads all currently loaded plugins and discovers any new plugins in the plugins directory, on every server replica: the serving replica reloads first and the others follow within a few seconds, each from its own plugins directory. The response reports the serving replica. Requires `plugin:manage` permission.
      */
     post: operations['reloadAllPlugins'];
     delete?: never;
@@ -55,7 +55,7 @@ export interface paths {
     put?: never;
     /**
      * Upload a plugin archive
-     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload. Requires `plugin:manage` permission.
+     * @description Uploads a tar.gz plugin archive. Files are merged into the plugins directory (existing files not in the archive are preserved). The plugin is automatically loaded after upload and enabled on every replica; other replicas load it from their own plugins directory, so the directory must be shared (or the archive installed on each node). Requires `plugin:manage` permission.
      */
     post: operations['uploadPlugin'];
     delete?: never;
@@ -73,7 +73,7 @@ export interface paths {
     };
     /**
      * Get details of a specific plugin
-     * @description Returns detailed information about a specific plugin, including its manifest and current status. Requires `plugin:manage` permission.
+     * @description Returns detailed information about a specific plugin, including its manifest, whether it is enabled, and its load state (with any load error) on every live server replica (`fleet`). Requires `plugin:manage` permission.
      */
     get: operations['getPluginDetails'];
     put?: never;
@@ -131,7 +131,7 @@ export interface paths {
     put?: never;
     /**
      * Disable a plugin
-     * @description Disables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Disables a plugin by its ID on every server replica and deletes its pending timers. The other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['disablePlugin'];
     delete?: never;
@@ -151,7 +151,7 @@ export interface paths {
     put?: never;
     /**
      * Enable a plugin
-     * @description Enables a plugin by its ID. Requires `plugin:manage` permission.
+     * @description Enables a plugin by its ID on every server replica. Loads it on the serving replica first and records it as enabled only if that succeeds; the other replicas follow within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['enablePlugin'];
     delete?: never;
@@ -171,7 +171,7 @@ export interface paths {
     put?: never;
     /**
      * Reload a plugin
-     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be currently loaded. Requires `plugin:manage` permission.
+     * @description Reloads a plugin by re-reading its manifest from disk and re-creating the WASM runtime. The plugin must be enabled; it need not be loaded on the serving replica, so this is also how to retry a plugin that failed to load. Reloads on the serving replica first; if that succeeds, every other replica reloads from its own plugins directory within a few seconds. Requires `plugin:manage` permission.
      */
     post: operations['reloadPlugin'];
     delete?: never;
@@ -271,7 +271,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh a CLI access token using a stored refresh token
-     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated.
+     * @description Body-based (cookie-free) refresh for CLI clients. Validates and rotates the supplied refresh token, returning a new access token and a new refresh token. The old refresh token is invalidated, with the same 30-second replay grace as POST /auth/refresh.
      */
     post: operations['cliRefreshToken'];
     delete?: never;
@@ -351,7 +351,7 @@ export interface paths {
     put?: never;
     /**
      * Poll for device authorization token
-     * @description Polling endpoint for the device code flow. Returns the JWT token once the user has authorized the device. Returns 400 with 'authorization_pending' while waiting.
+     * @description Polling endpoint for the device code flow. Returns a JWT minted from the approving user's current roles once the device is authorized, consuming the code. Otherwise returns 400 with `error` set to 'authorization_pending' (waiting), 'slow_down' (polled faster than the interval), 'expired_token' (unknown, expired or already collected) or 'access_denied' (the approving user was deleted).
      */
     post: operations['pollDeviceToken'];
     delete?: never;
@@ -431,7 +431,7 @@ export interface paths {
     put?: never;
     /**
      * Refresh access token
-     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token. Fails if the user is banned or the token is expired/revoked.
+     * @description Exchanges a valid HttpOnly refresh token cookie for a new short-lived access token and rotates the cookie. Fails if the user is banned or the token is expired/revoked. A token presented again within 30 seconds of its rotation (a concurrent refresh, or a retry after a lost response) is answered once with a new token pair, provided the token that replaced it has not been used yet (a further replay gets TOKEN_INVALID); presented later, or after its replacement was used, it revokes every refresh token of the user.
      */
     post: operations['refreshToken'];
     delete?: never;
@@ -861,7 +861,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get a contest problem
+     * @description Returns the same problem details as `getProblem`, read through this contest. Visibility is decided for this contest only, so a problem that another contest still hides stays readable here. The contest must have started.
+     */
+    get: operations['getContestProblem'];
     put?: never;
     post?: never;
     /**
@@ -876,6 +880,46 @@ export interface paths {
      * @description Updates the label or position of a problem within a contest. Requires `contest:manage` permission. Returns 409 CONFLICT on duplicate labels.
      */
     patch: operations['updateContestProblem'];
+    trace?: never;
+  };
+  '/contests/{id}/problems/{problem_id}/attachments': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List attachments for a contest problem
+     * @description Returns the same attachments as `listAttachments`, read through this contest. Visibility is decided for this contest only. The contest must have started.
+     */
+    get: operations['listContestProblemAttachments'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/contests/{id}/problems/{problem_id}/attachments/{ref_id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Download an attachment of a contest problem
+     * @description Streams the same content as `downloadAttachment`, read through this contest. Visibility is decided for this contest only. The contest must have started. Supports ETag-based caching via If-None-Match.
+     */
+    get: operations['downloadContestProblemAttachment'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   '/contests/{id}/problems/{problem_id}/code-runs': {
@@ -954,6 +998,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/contests/{id}/problems/{problem_id}/samples/{tc_id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get one sample test case of a contest problem
+     * @description Returns the full details of one sample (`is_sample = true`) test case, read through this contest. Visibility is decided for this contest only. The contest must have started. Non-sample test cases are not served here, whatever the caller's permissions.
+     */
+    get: operations['getContestProblemSample'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/contests/{id}/problems/{problem_id}/submissions': {
     parameters: {
       query?: never;
@@ -990,7 +1054,7 @@ export interface paths {
     post: operations['registerForContest'];
     /**
      * Self-unregister from a contest
-     * @description Removes the authenticated user's registration from a contest. Returns 404 if the caller is not registered.
+     * @description Removes the authenticated user's registration from an active public contest that has not started yet. Inactive or non-public contests return 404, like self-registration. Blocked once the contest has started, because standings are built from registrations. Returns 404 if the caller is not registered.
      */
     delete: operations['unregisterFromContest'];
     options?: never;
@@ -1150,8 +1214,8 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Server liveness and dependency health
-     * @description Public, unauthenticated. Pings the database and message queue with a 2s timeout each. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. Used by load balancers and Docker `HEALTHCHECK` (via the `--healthcheck` CLI flag).
+     * Server readiness and dependency health
+     * @description Public, unauthenticated. Pings the database and message queue concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
      */
     get: operations['getHealth'];
     put?: never;
@@ -1617,7 +1681,7 @@ export interface paths {
     put?: never;
     /**
      * Upload test cases from a ZIP file
-     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
+     * @description Bulk-creates test cases from a ZIP archive. Customizable file matching formats using `*` wildcard. A file matching both formats belongs to the more specific one (more literal characters, e.g. `*.a` over `*`); equally specific overlaps are rejected. Requires `problem:edit` permission. Files under `sample/` are marked as samples. Decompression limits: 1 GB per file, 4 GB total. Body limit: 1 GB.
      */
     post: operations['uploadTestCases'];
     delete?: never;
@@ -1689,7 +1753,7 @@ export interface paths {
     put?: never;
     /**
      * Grant a permission to a role
-     * @description Grants a permission to a role. Requires `role:manage` permission.
+     * @description Grants a permission to a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold the permission being granted and every permission the role already has.
      */
     post: operations['grantPermissionToRole'];
     delete?: never;
@@ -1710,7 +1774,9 @@ export interface paths {
     post?: never;
     /**
      * Revoke a permission from a role
-     * @description Revokes a permission from a role. Requires `role:manage` permission.
+     * @description Revokes a permission from a role. Requires `role:manage` permission, and, unless it holds `system:admin`, the caller must itself hold every permission of the role, including the one being revoked.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokePermissionFromRole'];
     options?: never;
@@ -1749,7 +1815,7 @@ export interface paths {
     put?: never;
     /**
      * Bulk rejudge submissions
-     * @description Re-queues submissions in the provided ID list for rejudging. Max 10,000 IDs per request. Requires `submission:rejudge` permission.
+     * @description Re-queues submissions in the provided ID list for rejudging. Max 10000 IDs per request. Requires `submission:rejudge` permission.
      */
     post: operations['bulkRejudgeSubmissions'];
     delete?: never;
@@ -1975,16 +2041,16 @@ export interface paths {
     post?: never;
     /**
      * Soft-delete a user by ID
-     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission.
+     * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;
     head?: never;
     /**
      * Update user information
-     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name.
+     * @description Updates username, display name, or password. Requires `user:manage` permission, including for one's own display name. Without `system:admin`, the target user may not hold any permission the caller lacks.
      */
     patch: operations['updateUser'];
     trace?: never;
@@ -2000,7 +2066,7 @@ export interface paths {
     put?: never;
     /**
      * Assign a role to a user
-     * @description Assigns a role to the user. Requires `user:manage` permission.
+     * @description Assigns a role to the user. Requires `user:manage` permission. Idempotent: assigning a role the user already holds changes nothing and returns 200.
      */
     post: operations['assignRole'];
     delete?: never;
@@ -2021,7 +2087,9 @@ export interface paths {
     post?: never;
     /**
      * Revoke a role from a user
-     * @description Revokes a role from the user. Requires `user:manage` permission.
+     * @description Revokes a role from the user. Requires `user:manage` permission; without `system:admin`, neither the role nor the target user may hold a permission the caller lacks.
+     *
+     *     Refused if afterwards no active user would hold `system:admin`.
      */
     delete: operations['revokeRole'];
     options?: never;
@@ -2531,6 +2599,7 @@ export interface components {
       namespace: string;
       scopes: string[];
     };
+    /** @description One contest in a contest list. */
     ContestListItem: {
       /**
        * Format: date-time
@@ -3027,7 +3096,19 @@ export interface components {
       unresolved_by_message_type: components['schemas']['MessageTypeCounts'];
     };
     ErrorBody: {
-      /** @example VALIDATION_ERROR */
+      /**
+       * @description Machine-readable error code. Any POST sent with an `Idempotency-Key`
+       *     can also answer: 422 `IDEMPOTENCY_KEY_MISMATCH` (key reused for a
+       *     different method, path, query or body); 409 `IDEMPOTENCY_KEY_IN_PROGRESS`
+       *     (the original is still running); 409 `IDEMPOTENCY_RESPONSE_NOT_STORED`
+       *     (the original succeeded but its response carried credentials and was not
+       *     kept); 409 `IDEMPOTENCY_RESPONSE_TOO_LARGE` (the original succeeded but
+       *     its response was too large to keep); 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`
+       *     (the original failed or was cut off after it started and may have taken
+       *     effect); 413 `PAYLOAD_TOO_LARGE` (body too large for an idempotent
+       *     request).
+       * @example VALIDATION_ERROR
+       */
       code: string;
       details?: unknown;
       /** @example Title must be 1-256 characters */
@@ -3051,6 +3132,11 @@ export interface components {
        */
       problem_type: string;
     };
+    /**
+     * @description Fleet-wide state of one plugin.
+     * @enum {string}
+     */
+    FleetPluginState: 'loaded' | 'failed' | 'pending' | 'disabled';
     HealthResponse: {
       /**
        * @description Database probe result: `"ok"` or `"down"`.
@@ -3069,6 +3155,18 @@ export interface components {
        * @example ok
        */
       mq: string;
+      /**
+       * @description Plugin readiness on this replica: `"ok"` when every plugin enabled in
+       *     the shared desired state is loaded here, `"degraded"` otherwise. It
+       *     does not change `status` or the HTTP code, so one plugin that fails
+       *     everywhere cannot take the whole fleet out of rotation; a load
+       *     balancer that should drain such a replica can match on this field.
+       *     Which plugins and why is in the authenticated admin plugin API
+       *     (`fleet`), not here: this endpoint is public, and load errors carry
+       *     file paths and database messages.
+       * @example ok
+       */
+      plugins: string;
       /**
        * @description Aggregate status: `"ok"` when every probed component is healthy,
        *     `"degraded"` otherwise.
@@ -3274,6 +3372,13 @@ export interface components {
       config_schemas: components['schemas']['ConfigSchemaResponse'][];
       /** @example This plugin does awesome things! */
       description?: string | null;
+      /**
+       * @description Whether the plugin is enabled (the fleet-wide desired state).
+       * @example true
+       */
+      enabled: boolean;
+      /** @description The plugin's load state on every live server replica. */
+      fleet: components['schemas']['PluginFleetResponse'];
       /** @example true */
       has_server: boolean;
       /** @example true */
@@ -3284,9 +3389,35 @@ export interface components {
       id: string;
       /** @example An Awesome Plugin */
       name: string;
+      /**
+       * @description Load state on the replica that served this request only. Prefer
+       *     `enabled` and `fleet`, which cover every server replica.
+       */
       status: components['schemas']['PluginStatusResponse'];
       /** @example 1.0.0 */
       version: string;
+    };
+    /** @description A plugin's state across all live server replicas. */
+    PluginFleetResponse: {
+      replicas: components['schemas']['PluginReplicaResponse'][];
+      /**
+       * Format: int32
+       * @description Live replicas where the plugin failed, is not installed, is still on a
+       *     previous version because the latest one failed to load, or runs files
+       *     that differ from the published version.
+       */
+      replicas_failed: number;
+      /**
+       * Format: int32
+       * @description Live replicas with the plugin loaded at the latest generation.
+       */
+      replicas_loaded: number;
+      /**
+       * Format: int32
+       * @description Live replicas.
+       */
+      replicas_total: number;
+      state: components['schemas']['FleetPluginState'];
     };
     PluginFullDetailResponse: {
       /**
@@ -3297,6 +3428,13 @@ export interface components {
       config_schemas: components['schemas']['ConfigSchemaResponse'][];
       /** @example This plugin does awesome things! */
       description?: string | null;
+      /**
+       * @description Whether the plugin is enabled (the fleet-wide desired state).
+       * @example true
+       */
+      enabled: boolean;
+      /** @description The plugin's load state on every live server replica. */
+      fleet: components['schemas']['PluginFleetResponse'];
       /** @example true */
       has_server: boolean;
       /** @example true */
@@ -3308,12 +3446,36 @@ export interface components {
       /** @example An Awesome Plugin */
       name: string;
       server?: null | components['schemas']['ServerDetailResponse'];
+      /**
+       * @description Load state on the replica that served this request only. Prefer
+       *     `enabled` and `fleet`, which cover every server replica.
+       */
       status: components['schemas']['PluginStatusResponse'];
       translations: string[];
       /** @example 1.0.0 */
       version: string;
       web?: null | components['schemas']['WebDetailResponse'];
       worker?: null | components['schemas']['WorkerDetailResponse'];
+    };
+    /** @description One live replica's view of a plugin. */
+    PluginReplicaResponse: {
+      /** @description Load or `init()` error, when `status` is `failed`. */
+      error?: string | null;
+      /**
+       * Format: date-time
+       * @description When this replica next retries a failed load.
+       */
+      retry_at?: string | null;
+      /** @example server-1 */
+      server_id: string;
+      status: components['schemas']['ReplicaPluginStatus'];
+      /** @description Whether this replica has applied the latest lifecycle change. */
+      up_to_date: boolean;
+      /**
+       * @description Manifest version of what is loaded on this replica.
+       * @example 1.2.0
+       */
+      version?: string | null;
     };
     /** @enum {string} */
     PluginStatusResponse: 'Unloaded' | 'Loaded' | 'Failed';
@@ -3339,6 +3501,7 @@ export interface components {
        */
       total_blobs: number;
     };
+    /** @description One problem in a problem list. */
     ProblemListItem: {
       /** @example exact */
       checker_format: string;
@@ -3547,6 +3710,17 @@ export interface components {
        */
       test_case_ids: number[];
     };
+    /**
+     * @description One plugin's state on one replica.
+     * @enum {string}
+     */
+    ReplicaPluginStatus:
+      | 'loaded'
+      | 'failed'
+      | 'not_installed'
+      | 'outdated'
+      | 'mismatched'
+      | 'unloaded';
     ReplyClarificationRequest: {
       /** @example Yes, the input is always sorted in ascending order. */
       content: string;
@@ -4947,7 +5121,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Plugin not currently loaded (CONFLICT) */
+      /** @description Plugin not enabled (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -5618,6 +5792,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ContestListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -6945,6 +7128,58 @@ export interface operations {
       };
     };
   };
+  getContestProblem: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+        /** @description Problem ID */
+        problem_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Problem details */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemResponse'];
+        };
+      };
+      /** @description Contest has not started yet (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Problem not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   removeContestProblem: {
     parameters: {
       query?: never;
@@ -7060,6 +7295,117 @@ export interface operations {
       };
       /** @description Duplicate label in contest (CONFLICT) */
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  listContestProblemAttachments: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+        /** @description Problem ID */
+        problem_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Attachment list */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AttachmentListResponse'];
+        };
+      };
+      /** @description Contest has not started yet (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Problem not found or not accessible (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  downloadContestProblemAttachment: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+        /** @description Problem ID */
+        problem_id: number;
+        /** @description Attachment reference ID (UUID) */
+        ref_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Attachment content */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Not Modified (ETag match) */
+      304: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Contest has not started yet, or invalid attachment ID (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Attachment not found or not accessible (NOT_FOUND) */
+      404: {
         headers: {
           [name: string]: unknown;
         };
@@ -7426,6 +7772,60 @@ export interface operations {
       };
     };
   };
+  getContestProblemSample: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Contest ID */
+        id: number;
+        /** @description Problem ID */
+        problem_id: number;
+        /** @description Test case ID */
+        tc_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Test case details */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TestCaseResponse'];
+        };
+      };
+      /** @description Contest has not started yet (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Test case not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   createContestSubmission: {
     parameters: {
       query?: never;
@@ -7498,7 +7898,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After */
       503: {
         headers: {
           [name: string]: unknown;
@@ -7584,6 +7984,15 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description Contest has already started (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
       401: {
@@ -7701,6 +8110,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['DlqListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -8702,6 +9120,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ProblemListResponse'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
       /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
@@ -10213,7 +10640,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Duplicate label in problem (CONFLICT) */
+      /** @description Duplicate label (abort), or replace would delete test cases that have judge results (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10529,8 +10956,17 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Role not found (NOT_FOUND) */
+      404: {
         headers: {
           [name: string]: unknown;
         };
@@ -10570,7 +11006,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED): missing `role:manage`, or the permission or role is above the caller's ceiling */
       403: {
         headers: {
           [name: string]: unknown;
@@ -10581,6 +11017,15 @@ export interface operations {
       };
       /** @description Role permission not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -10671,7 +11116,7 @@ export interface operations {
           'application/json': components['schemas']['BulkRejudgeResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Empty or oversized id list, non-positive id, or invalid worker (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -11410,7 +11855,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11428,7 +11873,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description User is in an active or under-judgement contest (CONFLICT) */
+      /** @description User is in an active or under-judgement contest, or is the last active `system:admin` holder (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
@@ -11482,7 +11927,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden: missing `user:manage`, or the target holds a permission the caller lacks (PERMISSION_DENIED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -11493,6 +11938,15 @@ export interface operations {
       };
       /** @description User not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Username taken (USERNAME_TAKEN) */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -11518,6 +11972,13 @@ export interface operations {
       };
     };
     responses: {
+      /** @description User already holds the role; nothing changed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
       /** @description Role assigned */
       201: {
         headers: {
@@ -11604,6 +12065,15 @@ export interface operations {
       };
       /** @description User role not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Would leave no active `system:admin` holder (CONFLICT) */
+      409: {
         headers: {
           [name: string]: unknown;
         };

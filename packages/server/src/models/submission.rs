@@ -374,11 +374,24 @@ pub struct BulkRejudgeResponse {
     pub queued: usize,
 }
 
+/// Most ids one `POST /submissions/bulk-rejudge` accepts. The endpoint's
+/// OpenAPI description is built from this constant, so the documented and
+/// the enforced cap cannot drift. It also keeps the `IN (...)` id list far
+/// below Postgres' 65,535 bind-parameter limit.
+pub const MAX_BULK_REJUDGE_IDS: usize = 10_000;
+
 pub fn validate_bulk_rejudge(req: &BulkRejudgeRequest) -> Result<(), AppError> {
     if req.submission_ids.is_empty() {
         return Err(AppError::Validation(
             "submission_ids cannot be empty".into(),
         ));
+    }
+
+    if req.submission_ids.len() > MAX_BULK_REJUDGE_IDS {
+        return Err(AppError::Validation(format!(
+            "submission_ids contains {} ids; at most {MAX_BULK_REJUDGE_IDS} are allowed per request",
+            req.submission_ids.len()
+        )));
     }
 
     if let Some(invalid_id) = req.submission_ids.iter().copied().find(|id| *id <= 0) {

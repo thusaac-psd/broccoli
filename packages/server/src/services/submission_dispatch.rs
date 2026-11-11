@@ -4,7 +4,7 @@ use broccoli_server_sdk::types::{
     SourceFile, TestCaseBodyRef, TestCaseRow, sanitize_text_field,
 };
 use chrono::Utc;
-use common::{SubmissionStatus, Verdict};
+use common::{SubmissionDlqErrorCode, SubmissionStatus, Verdict};
 use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use sea_orm::prelude::Expr;
 use sea_orm::*;
@@ -15,7 +15,11 @@ use crate::entity::{
     test_case_result,
 };
 use crate::hooks;
+use crate::services::judgement_lifecycle::{
+    RetryBudget, allocated_epoch, redispatch_current_submission,
+};
 use crate::state::AppState;
+use crate::utils::judging::files_log_summary;
 use crate::utils::test_case_body::{
     AGGREGATE_INLINE_TEST_CASE_BUDGET_BYTES, select_inline_within_budget,
 };
@@ -191,7 +195,7 @@ pub(crate) async fn ensure_active_judgement_id(
             // Adopt the existing current judgement under THIS dispatch's owner +
             // a fresh lease, exactly as the creation branch below stamps a new
             // one. A judgement created unowned elsewhere - notably the
-            // apply-immediately rejudge path (`open_rejudge_judgement`), which
+            // apply-immediately rejudge (`judgement_lifecycle::open_judgement`), which
             // inserts it with owner_server_id=NULL - would otherwise stay unowned
             // while being judged, and the deferred-judgement steal
             // (`owner_server_id IS NULL AND created_at < threshold`) would reclaim
@@ -296,8 +300,8 @@ async fn mark_submission_dispatch_system_error(
         // write below. A dispatch task captures `submission.judge_epoch` at
         // spawn time and carries it, unre-read, into its detached future; if
         // the age-cap stuck-detector (`max_inflight_secs`) recovers this job's
-        // judgement mid-flight, it re-dispatches the SAME judgement id at
-        // `judge_epoch + 1`. Without the epoch guard, this task's later failure
+        // judgement mid-flight, it re-dispatches the SAME judgement id at a
+        // freshly allocated epoch. Without the epoch guard, this task's later failure
         // would clobber that live, newer-epoch judgement by id alone — flipping
         // a correctly-judged (or still-in-flight) result to a finalized
         // SystemError. The `is_finalized = FALSE` guard mirrors the sibling and
@@ -432,19 +436,32 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
         return Ok(None);
     }
 
-    let new_epoch = expected_epoch.saturating_add(1);
     let new_retry = judgement.retry_count.saturating_add(1);
     let now = Utc::now();
 
-    // Reset the judgement to a fresh, re-dispatchable epoch, owned by this server
-    // with a live lease (so the lease fiber keeps it alive and the steal leaves
-    // it alone while it re-judges). Epoch-gated so a concurrent steal/retry that
-    // already advanced this judgement wins and we abandon (rows == 0).
+    // Allocate a fresh epoch on the parent submission and advance it there in
+    // lockstep with the judgement below. Both writes are epoch-gated so a
+    // concurrent steal/retry that already advanced this attempt wins and we
+    // abandon (rows == 0). The submission goes first: its UPDATE allocates
+    // the epoch and holds the row lock while the judgement copies it.
+    // `AtLeast`: the judgement's SystemError-retry count is a separate,
+    // larger budget and is often below the submission's dispatch count.
+    let submission_rows =
+        redispatch_current_submission(submission_id, server_id, RetryBudget::AtLeast(new_retry))
+            .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
+            .exec(&txn)
+            .await?
+            .rows_affected;
+    if submission_rows == 0 {
+        txn.rollback().await.ok();
+        return Ok(None);
+    }
+
+    // Reset the judgement to the fresh, re-dispatchable epoch, owned by this
+    // server with a live lease (so the lease fiber keeps it alive and the
+    // steal leaves it alone while it re-judges).
     let judgement_rows = submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::JudgeEpoch,
-            Expr::value(new_epoch),
-        )
+        .col_expr(submission_judgement::Column::JudgeEpoch, allocated_epoch())
         .col_expr(
             submission_judgement::Column::Status,
             Expr::value(SubmissionStatus::Pending.to_string()),
@@ -480,31 +497,6 @@ pub(crate) async fn requeue_judgement_for_system_error_retry(
         .await?
         .rows_affected;
     if judgement_rows == 0 {
-        txn.rollback().await.ok();
-        return Ok(None);
-    }
-
-    // Advance the parent submission in lockstep, epoch-gated for the same reason.
-    let submission_rows = submission::Entity::update_many()
-        .col_expr(submission::Column::JudgeEpoch, Expr::value(new_epoch))
-        .col_expr(
-            submission::Column::Status,
-            Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .clear_judgement_columns()
-        .col_expr(submission::Column::RetryCount, Expr::value(new_retry))
-        .col_expr(
-            submission::Column::OwnerServerId,
-            Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
-        .col_expr(submission::Column::LeasedAt, Expr::value(Some(now)))
-        .filter(submission::Column::Id.eq(submission_id))
-        .filter(submission::Column::JudgeEpoch.eq(expected_epoch))
-        .exec(&txn)
-        .await?
-        .rows_affected;
-    if submission_rows == 0 {
         txn.rollback().await.ok();
         return Ok(None);
     }
@@ -562,15 +554,26 @@ async fn record_dispatch_failure(
     );
 }
 
-#[instrument(skip(state), fields(submission_id = submission.id))]
+// The submission model is skipped in both spans: its `files` hold the
+// contestant's full source. Ids, language and file names/sizes only.
+#[instrument(
+    skip(state, submission),
+    fields(
+        submission_id = submission.id,
+        language = %submission.language,
+        files = %files_log_summary(&submission.files),
+    )
+)]
 pub(crate) async fn dispatch_submission_to_plugin(state: AppState, submission: submission::Model) {
     dispatch_submission_to_plugin_with_judgement(state, submission, None, true).await;
 }
 
 #[instrument(
-    skip(state),
+    skip(state, submission),
     fields(
         submission_id = submission.id,
+        language = %submission.language,
+        files = %files_log_summary(&submission.files),
         judgement_id = ?judgement_id,
         problem_id = tracing::field::Empty,
         contest_id = tracing::field::Empty,
@@ -926,12 +929,20 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
                                     error = ?output.error_message,
                                     "Plugin reported failure"
                                 );
+                                // A refusal is deterministic: record it under
+                                // its own code, which the SystemError-retry
+                                // reaper leaves alone.
+                                let error_code = if output.retryable {
+                                    "PLUGIN_ERROR"
+                                } else {
+                                    SubmissionDlqErrorCode::PLUGIN_REFUSED
+                                };
                                 record_dispatch_failure(
                                     &db,
                                     &metrics,
                                     submission_id,
                                     judgement_id,
-                                    "PLUGIN_ERROR",
+                                    error_code,
                                     &output
                                         .error_message
                                         .unwrap_or_else(|| "Unknown plugin error".to_string()),
@@ -972,6 +983,14 @@ pub(crate) async fn dispatch_submission_to_plugin_with_judgement(
                             .await;
                         }
                     }
+                }
+                Err(plugin_core::error::PluginError::ShuttingDown) => {
+                    // Not a judging failure: this server is stopping. Leave the
+                    // submission in flight (no verdict, no hooks, no retry
+                    // spent); shutdown releases its lease and a peer
+                    // re-dispatches it.
+                    warn!(submission_id, judgement_id, "Server shutting down; leaving submission for a peer");
+                    return;
                 }
                 Err(e) => {
                     error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
@@ -1051,27 +1070,6 @@ async fn resolve_body_ref(
 mod tests {
     use super::*;
     use crate::entity::user;
-    use testcontainers::ContainerAsync;
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::postgres::Postgres;
-
-    async fn start_pg() -> (ContainerAsync<Postgres>, DatabaseConnection) {
-        let container = Postgres::default()
-            .with_tag("17-alpine")
-            .start()
-            .await
-            .expect("start postgres container");
-        let port = container
-            .get_host_port_ipv4(5432)
-            .await
-            .expect("postgres host port");
-        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = crate::database::init_db(&url)
-            .await
-            .expect("init schema on test db");
-        (container, db)
-    }
 
     /// Seed an owned, in-flight submission whose `created_at` is deliberately an
     /// hour old (mirroring a submission that has been judging for a while).
@@ -1124,7 +1122,7 @@ mod tests {
     /// after creation regardless of active progress.
     #[tokio::test]
     async fn ensure_active_judgement_inherits_submission_owner_and_heartbeat() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
 
         let before = Utc::now();
@@ -1228,7 +1226,7 @@ mod tests {
     /// attempt's results wiped.
     #[tokio::test]
     async fn finalized_system_error_judgement_is_requeued_for_retry() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1304,7 +1302,7 @@ mod tests {
     /// still requeues it: no system condition stands as the contestant's verdict.
     #[tokio::test]
     async fn stuck_terminal_system_error_status_is_requeued_within_system_error_budget() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(&db, &sub, 0, 5, SubmissionStatus::SystemError, None).await;
         seed_tcr(&db, sub.id, jid, 0).await;
@@ -1329,10 +1327,41 @@ mod tests {
         assert_eq!(j.verdict, None);
     }
 
+    /// The requeue never LOWERS the submission's dispatch-retry count: the
+    /// judgement's own SystemError-retry count is a separate budget and is
+    /// usually below the submission's. Copying it over would hand a
+    /// flapping submission a fresh steal/stuck budget on every SE retry.
+    #[tokio::test]
+    async fn system_error_requeue_never_lowers_submission_retry_count() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let sub = seed_owned_submission(&db, "srv-A").await;
+        let jid = finalize_judgement(
+            &db,
+            &sub,
+            0,
+            0,
+            SubmissionStatus::Judged,
+            Some(Verdict::SystemError),
+        )
+        .await;
+        submission::Entity::update_many()
+            .col_expr(submission::Column::RetryCount, Expr::value(4))
+            .filter(submission::Column::Id.eq(sub.id))
+            .exec(&db)
+            .await
+            .expect("seed dispatch attempts");
+
+        let resub = requeue_judgement_for_system_error_retry(&db, sub.id, jid, 0, "srv-A", 5)
+            .await
+            .expect("requeue call")
+            .expect("system-error judgement is requeued");
+        assert_eq!(resub.retry_count, 4, "submission retry budget kept");
+    }
+
     /// Bounded: once the retry budget is exhausted, the SystemError stands.
     #[tokio::test]
     async fn exhausted_system_error_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         // retry_count + 1 > max(5) => exhausted.
         let jid = finalize_judgement(
@@ -1362,7 +1391,7 @@ mod tests {
     /// Safety: a contestant verdict (here WrongAnswer) must never be retried.
     #[tokio::test]
     async fn non_system_error_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1385,7 +1414,7 @@ mod tests {
     /// must keep it final and unretried.
     #[tokio::test]
     async fn compile_error_status_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1410,7 +1439,7 @@ mod tests {
     /// dispatched) must not be requeued.
     #[tokio::test]
     async fn superseded_epoch_judgement_is_not_requeued() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = finalize_judgement(
             &db,
@@ -1467,7 +1496,7 @@ mod tests {
     /// result to a spurious SystemError.
     #[tokio::test]
     async fn stale_epoch_dispatch_failure_does_not_clobber_readvanced_judgement() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         // The age-cap recovery advanced BOTH rows to epoch 1 in lockstep, and
         // the judgement is judging afresh (current, un-finalized, Running).
@@ -1533,7 +1562,7 @@ mod tests {
     /// SystemError, exactly as the pre-guard by-id write did.
     #[tokio::test]
     async fn matching_epoch_dispatch_failure_finalizes_judgement_as_system_error() {
-        let (_pg, db) = start_pg().await;
+        let (_pg, db) = crate::test_support::postgres().await;
         let sub = seed_owned_submission(&db, "srv-A").await;
         let jid = seed_current_inflight_judgement(&db, &sub, 0, SubmissionStatus::Running).await;
 

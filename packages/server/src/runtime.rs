@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::http::{HeaderName, HeaderValue, Method};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use common::storage::config::create_blob_store;
 use dashmap::DashMap;
 use mq::{MqConfig as MqConnConfig, init_mq};
@@ -23,18 +23,27 @@ use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
+use common::node_identity::{NodeClaim, NodeHeartbeat, NodeRole};
 
 pub struct ServerRuntime {
     listener: tokio::net::TcpListener,
     app: axum::Router,
     addr: SocketAddr,
     dispatcher: crate::dispatcher::Dispatcher,
+    /// To release this server's in-flight work after the dispatcher stops.
+    db: sea_orm::DatabaseConnection,
+    server_id: String,
+    /// For shutdown: refusing and draining plugin calls, stopping the plugin
+    /// lifecycle before its replica row is retired.
+    state: AppState,
     /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
     /// [`crate::healthz_runtime`] (UP#14e). `None` when `server.healthz_listen`
     /// is unset. The thread runs for the process lifetime and is reaped by
     /// the OS on exit, so we hold the handle for ownership but never `join()`
     /// it - hence the underscore prefix to silence dead-code warnings.
     _healthz_handle: Option<std::thread::JoinHandle<()>>,
+    /// Keeps this replica's ID claim / heartbeat alive; released in [`Self::serve`].
+    node_heartbeat: Option<NodeHeartbeat>,
     _telemetry_guard: common::observability::TelemetryGuard,
 }
 
@@ -75,9 +84,27 @@ impl ServerRuntime {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
-        let db = crate::database::init_db_with_max_connections(
+        let db_session = crate::database::app_session(&app_config.database);
+        // Boot-time schema work runs on one session holding a cluster-wide
+        // advisory lock, so replicas booting together serialize instead of
+        // racing each other's DDL and check-then-insert seeding. Indexes come
+        // before seeding: the unique username index must exist before the
+        // bootstrap admin is inserted, or a duplicate admin makes it uncreatable.
+        let boot = crate::database::BootSession::acquire(&app_config.database.url).await?;
+        boot.migrate().await?;
+        crate::seed::ensure_indexes(
+            boot.conn(),
+            app_config.database.allow_missing_unique_indexes,
+        )
+        .await?;
+        crate::seed::seed_role_permissions(boot.conn()).await?;
+        crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
+        crate::seed::backfill_submission_judgements(boot.conn()).await?;
+
+        let db = crate::database::connect_main_pool(
             &app_config.database.url,
             app_config.database.max_connections,
+            &db_session,
         )
         .await?;
         // Dedicated pool for plugin host-function DB calls, isolated from the
@@ -92,13 +119,17 @@ impl ServerRuntime {
         // `broccoli_plugin_login`, degrading to app-role auth + the SQL text guard
         // if neither is available. It returns the fresh-connection fallback target
         // so the 0x00 fallback authenticates the same way the pool did.
+        // Provisioning the dedicated plugin login (CREATE ROLE, the shared
+        // secret row) is boot-time DDL too, so it runs on the locked session.
         let restricted = crate::database::resolve_restricted_plugin_pool(
-            &db,
+            boot.conn(),
             &app_config.database.url,
             app_config.database.plugin_url.as_deref(),
             app_config.database.plugin_max_connections,
+            &db_session,
         )
         .await?;
+        boot.release().await?;
         let plugin_db = restricted.pool;
         let restricted_fb_url = restricted.fallback_url;
         let restricted_fb_login = restricted.fallback_login;
@@ -131,6 +162,7 @@ impl ServerRuntime {
         let privileged_plugin_db = crate::database::init_plugin_db_privileged(
             &app_config.database.url,
             app_config.database.plugin_privileged_max_connections,
+            &db_session,
         )
         .await?;
         info!(
@@ -145,7 +177,10 @@ impl ServerRuntime {
         // RESTRICTED fallback (raw `sql`) uses whatever auth the restricted pool
         // ended up on, so an escape that survives the SQL text guard lands on a
         // non-privileged role on the fallback path too, not just the pool.
-        crate::host_funcs::sql::set_plugin_db_fallback_url(app_config.database.url.clone());
+        crate::host_funcs::sql::set_plugin_db_fallback_url(
+            app_config.database.url.clone(),
+            db_session.clone(),
+        );
         crate::host_funcs::sql::set_plugin_db_restricted_fallback(
             restricted_fb_url,
             restricted_fb_login,
@@ -158,15 +193,6 @@ impl ServerRuntime {
             app_config.storage.backend
         );
 
-        crate::seed::seed_role_permissions(&db).await?;
-        crate::seed::ensure_bootstrap_admin(
-            &db,
-            &app_config.bootstrap.admin_username,
-            &app_config.bootstrap.admin_password,
-        )
-        .await?;
-        crate::seed::ensure_indexes(&db).await?;
-        crate::seed::backfill_submission_judgements(&db).await?;
         crate::seed::spawn_large_test_case_body_backfill(db.clone(), Arc::clone(&blob_store));
 
         let mq = if app_config.mq.enabled {
@@ -177,7 +203,10 @@ impl ServerRuntime {
             .await
             {
                 Ok(queue) => {
-                    info!("MQ connected to {}", app_config.mq.url);
+                    info!(
+                        "MQ connected to {}",
+                        common::redact::redact_url(&app_config.mq.url)
+                    );
                     Some(Arc::new(queue))
                 }
                 Err(e) => {
@@ -203,6 +232,44 @@ impl ServerRuntime {
             }
         } else {
             None
+        };
+
+        common::clock::check_clock_skew(&db, redis_client.as_deref(), &app_config.clock).await?;
+
+        // Claim the server ID before consuming this replica's result queue or
+        // recovering leases under it: a second live replica with the same ID
+        // would eat its results and release its in-flight rows, so it refuses
+        // to start instead. The claim is the `broccoli:server:heartbeat:<id>`
+        // key the reply-queue sweeper reads; released on graceful shutdown.
+        let node_heartbeat = match redis_client.as_deref() {
+            Some(client) => {
+                let started_at = chrono::Utc::now();
+                let payload = {
+                    let server_id = server_id.clone();
+                    let hostname = hostname::get()
+                        .ok()
+                        .map(|h| h.to_string_lossy().into_owned());
+                    move || {
+                        serde_json::json!({
+                            "id": server_id,
+                            "started_at": started_at,
+                            "last_seen": chrono::Utc::now(),
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "hostname": hostname,
+                            "pid": std::process::id(),
+                        })
+                    }
+                };
+                let claim = NodeClaim::claim_at_boot(
+                    client.clone(),
+                    NodeRole::Server,
+                    &server_id,
+                    payload(),
+                )
+                .await?;
+                Some(claim.spawn_heartbeat(payload))
+            }
+            None => None,
         };
 
         if let Some(ref mq_arc) = mq {
@@ -326,27 +393,18 @@ impl ServerRuntime {
         )
         .context("Failed to initialize plugin manager")?;
 
-        let device_codes: crate::state::DeviceCodeStore = Arc::new(DashMap::new());
-
-        {
-            let codes = device_codes.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let now = std::time::Instant::now();
-                    codes.retain(|_code, entry| entry.expires_at > now);
-                }
-            });
-        }
-
         {
             let cleanup_db = db.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3600));
                 loop {
                     interval.tick().await;
-                    crate::middleware::idempotency::cleanup_expired_keys(&cleanup_db).await;
+                    common::deadline::bounded(
+                        "idempotency.cleanup",
+                        common::deadline::BACKGROUND_STEP,
+                        crate::middleware::idempotency::cleanup_expired_keys(&cleanup_db),
+                    )
+                    .await;
                 }
             });
         }
@@ -374,10 +432,10 @@ impl ServerRuntime {
                 evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
             },
-            device_codes,
             metrics,
             prometheus_registry,
             dispatcher_permits,
+            plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
                 Duration::from_secs(app_config.auth.login_failure_window_secs),
@@ -413,41 +471,19 @@ impl ServerRuntime {
         }
 
         let _failures = sync_plugins(&state).await?;
+        // Converge onto plugin lifecycle changes made through any replica,
+        // and retry plugins that failed to load here.
+        tokio::spawn(crate::plugin_lifecycle::run(state.clone()));
 
         // Boot-time orphan recovery: a restart leaves this server's in-flight
-        // submissions/judgements/code-runs tagged with our own `server_id` and a
-        // fresh lease the (now-dead) driver can no longer honor. The lease fiber
-        // would keep refreshing those leases, so the steal sweeper could never
-        // reclaim them and the work would hang in `Running` forever. Release them
-        // BEFORE spawning the dispatcher so the steal sweeper's first scan picks
-        // them up. Best-effort: a failure here must not block startup. Gated on
-        // lease/steal being enabled - without the sweeper nothing would reclaim
-        // the released rows.
-        if app_config.server.dispatcher_lease_steal_enabled {
-            match crate::dispatcher::steal::recover_orphaned_leases(&db, &server_id).await {
-                Ok((subs, code_runs, judgements)) => {
-                    if subs > 0 || code_runs > 0 || judgements > 0 {
-                        info!(
-                            server_id = %server_id,
-                            submissions = subs,
-                            code_runs,
-                            judgements,
-                            "Startup recovery released own orphaned in-flight leases for steal"
-                        );
-                    } else {
-                        info!(server_id = %server_id, "Startup recovery: no orphaned leases to release");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server_id = %server_id,
-                        error = %e,
-                        "Startup orphan-lease recovery failed; in-flight work owned by a prior \
-                         instance of this server_id may hang until manually reclaimed"
-                    );
-                }
-            }
-        }
+        // submissions/judgements/code-runs tagged with our own `server_id`,
+        // but the drivers judging them died with the old process. Release
+        // them BEFORE spawning the dispatcher, whose first reclaim scan then
+        // re-dispatches them: the steal sweeper with lease/steal on, the
+        // released-work scan with it off. Releasing also stops them from
+        // counting against this server's in-flight budget. Best-effort: a
+        // failure here must not block startup.
+        release_own_inflight(&db, &server_id, "Startup recovery").await;
 
         let dispatcher = crate::dispatcher::Dispatcher::spawn(crate::dispatcher::DispatcherDeps {
             state: state.clone(),
@@ -457,36 +493,9 @@ impl ServerRuntime {
             config: app_config.server.clone(),
         });
 
-        let mut allow_origins = Vec::new();
-        for origin in &app_config.server.cors.allow_origins {
-            allow_origins.push(
-                origin
-                    .parse::<HeaderValue>()
-                    .with_context(|| format!("Invalid CORS origin: {}", origin))?,
-            );
-        }
-
         let healthz_state = state.clone();
-        let app = build_router(state).layer(
-            CorsLayer::new()
-                .allow_origin(allow_origins)
-                .allow_methods([
-                    Method::GET,
-                    Method::POST,
-                    Method::PUT,
-                    Method::PATCH,
-                    Method::DELETE,
-                ])
-                .allow_headers([
-                    HeaderName::from_static("content-type"),
-                    HeaderName::from_static("authorization"),
-                    HeaderName::from_static("idempotency-key"),
-                    HeaderName::from_static("x-request-id"),
-                    HeaderName::from_static("x-broccoli-stress-run-id"),
-                ])
-                .allow_credentials(true)
-                .max_age(Duration::from_secs(app_config.server.cors.max_age)),
-        );
+        let shutdown_state = state.clone();
+        let app = build_router(state).layer(cors_layer(&app_config.server.cors)?);
 
         let addr_str = format!("{}:{}", app_config.server.host, app_config.server.port);
         let addr: SocketAddr = addr_str
@@ -520,7 +529,11 @@ impl ServerRuntime {
             app,
             addr,
             dispatcher,
+            db,
+            server_id,
+            state: shutdown_state,
             _healthz_handle: healthz_handle,
+            node_heartbeat,
             _telemetry_guard: telemetry_guard,
         })
     }
@@ -530,6 +543,133 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Server runtime error at http://{}", self.addr));
         self.dispatcher.shutdown().await;
+        // From here on, plugin calls are refused (a clean error, not a call
+        // that outlives the runtime).
+        let gate = self.state.plugins.call_gate().cloned();
+        if let Some(gate) = &gate {
+            gate.close();
+        }
+        // The drivers of this server's in-flight work die with the process:
+        // hand the work to the rest of the fleet now instead of leaving it
+        // owned by a server that is gone.
+        release_own_inflight(&self.db, &self.server_id, "Shutdown").await;
+        crate::plugin_lifecycle::stop(&self.state).await;
+        if let Err(e) = crate::plugin_fleet::retire(&self.db, &self.server_id).await {
+            warn!(error = %e, "Shutdown: failed to remove this replica's plugin report");
+        }
+        // Calls already running bridge back into this runtime from their
+        // blocking threads; let them finish before it is torn down.
+        if let Some(gate) = gate
+            && !gate.drain(PLUGIN_CALL_DRAIN).await
+        {
+            warn!(
+                in_flight = gate.in_flight(),
+                "Shutdown: plugin calls still running after {:?}; exiting anyway",
+                PLUGIN_CALL_DRAIN
+            );
+        }
+        // Give up the server ID last, once nothing of this replica is running.
+        if let Some(heartbeat) = self.node_heartbeat.as_mut() {
+            heartbeat.shutdown().await;
+        }
         serve_result
+    }
+}
+
+/// CORS for a split frontend origin. `expose_headers` lists every response
+/// header the web client reads cross-origin: download filenames, rate-limit
+/// backoff, the request id for error reports and `Date` for the server clock
+/// offset.
+fn cors_layer(cors: &crate::config::CorsConfig) -> anyhow::Result<CorsLayer> {
+    let allow_origins = cors
+        .allow_origins
+        .iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .with_context(|| format!("Invalid CORS origin: {}", origin))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(CorsLayer::new()
+        .allow_origin(allow_origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("idempotency-key"),
+            HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("x-broccoli-stress-run-id"),
+        ])
+        .expose_headers([
+            header::CONTENT_DISPOSITION,
+            header::DATE,
+            header::RETRY_AFTER,
+            HeaderName::from_static("x-request-id"),
+        ])
+        .allow_credentials(true)
+        .max_age(Duration::from_secs(cors.max_age)))
+}
+
+/// How long shutdown waits for running plugin calls. Inside the usual 10s
+/// stop grace of container supervisors, so a normal stop is not a SIGKILL.
+const PLUGIN_CALL_DRAIN: Duration = Duration::from_secs(8);
+
+/// Release every in-flight row this server owns so the fleet re-dispatches
+/// it (see [`crate::dispatcher::steal::release_owned_leases`]).
+async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str, phase: &str) {
+    match crate::dispatcher::steal::release_owned_leases(db, server_id).await {
+        Ok((submissions, code_runs, judgements)) => info!(
+            server_id,
+            submissions, code_runs, judgements, "{phase}: released own in-flight work"
+        ),
+        Err(e) => warn!(
+            server_id,
+            error = %e,
+            "{phase}: failed to release own in-flight work; it is recovered at this \
+             server's next boot or by the stuck-job detector"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn cors_exposes_the_headers_the_web_client_reads() {
+        let cors = crate::config::CorsConfig {
+            allow_origins: vec!["http://web.example".into()],
+            ..Default::default()
+        };
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(cors_layer(&cors).unwrap());
+        let res = app
+            .oneshot(
+                Request::get("/")
+                    .header(header::ORIGIN, "http://web.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exposed = res
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for name in ["content-disposition", "date", "retry-after", "x-request-id"] {
+            assert!(exposed.contains(name), "{name} not exposed: {exposed}");
+        }
     }
 }

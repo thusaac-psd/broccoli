@@ -1,7 +1,9 @@
+use std::marker::PhantomData;
 use std::ops::Deref;
 
 use axum::extract::{FromRef, FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
+use broccoli_server_sdk::permissions as perm;
 use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
 
 use crate::entity::user;
@@ -117,7 +119,10 @@ where
             .ok_or(AppError::TokenInvalid)?;
 
         // Tokens predating the last credential change (including legacy tokens
-        // with no `iat`, which decode as 0) are stale -> force a re-auth.
+        // with no `iat`, which decode as 0) are stale -> force a re-auth. Both
+        // sides of the comparison are DB-clock values (`iat` is stamped from
+        // `statement_timestamp()` in `services::auth_tokens`), so it holds even
+        // when server replicas' clocks disagree.
         //
         // Strict `<` (NOT `<=`) is deliberate: `iat` is second-granularity per the
         // JWT spec, so a token minted by a re-login in the SAME second as the
@@ -131,6 +136,59 @@ where
         }
 
         Ok(FreshAuthUser(AuthUser::from(claims)))
+    }
+}
+
+/// A permission an [`Authorized`] extractor demands. Implemented by zero-sized
+/// marker types so the requirement is part of the handler's signature.
+pub trait RequiredPermission {
+    const NAME: &'static str;
+}
+
+/// Marker for [`perm::PROBLEM_EDIT`].
+pub struct ProblemEdit;
+
+impl RequiredPermission for ProblemEdit {
+    const NAME: &'static str = perm::PROBLEM_EDIT;
+}
+
+/// A [`FreshAuthUser`] that already holds permission `P`.
+///
+/// Use it instead of `FreshAuthUser` + `require_permission(..)` on any handler
+/// that takes a request body. Axum runs every `FromRequestParts` extractor
+/// before the single body extractor (`AppJson`, `BaseMultipart`, ...), so
+/// checking the permission HERE rejects an unauthorised caller with 403 before
+/// the body is read. A check in the handler body runs only after the body
+/// extractor has buffered and parsed the whole request, which behind the
+/// 1 GiB upload limit lets any logged-in user make the server allocate ~1 GiB
+/// per request.
+pub struct Authorized<P: RequiredPermission> {
+    user: FreshAuthUser,
+    _permission: PhantomData<P>,
+}
+
+impl<P: RequiredPermission> Deref for Authorized<P> {
+    type Target = AuthUser;
+    fn deref(&self) -> &AuthUser {
+        &self.user
+    }
+}
+
+impl<S, P> FromRequestParts<S> for Authorized<P>
+where
+    S: Send + Sync,
+    AppState: axum::extract::FromRef<S>,
+    P: RequiredPermission,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let user = FreshAuthUser::from_request_parts(parts, state).await?;
+        user.require_permission(P::NAME)?;
+        Ok(Self {
+            user,
+            _permission: PhantomData,
+        })
     }
 }
 

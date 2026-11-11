@@ -28,13 +28,14 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                match refresh_owned_leases(&db, &server_id).await {
-                    Ok((submissions, code_runs, judgements)) => {
+                match common::deadline::bounded("dispatcher.lease", common::deadline::BACKGROUND_STEP, refresh_owned_leases(&db, &server_id)).await {
+                    Some(Ok((submissions, code_runs, judgements))) => {
                         if submissions > 0 || code_runs > 0 || judgements > 0 {
                             info!(server_id = %server_id, submissions, code_runs, judgements, "Refreshed owned judging leases");
                         }
                     }
-                    Err(e) => error!(server_id = %server_id, error = %e, "Lease refresh failed"),
+                    Some(Err(e)) => error!(server_id = %server_id, error = %e, "Lease refresh failed"),
+                    None => {}
                 }
             }
             changed = cancel.changed() => {
@@ -46,14 +47,19 @@ pub async fn run(
     }
 }
 
+/// Bump the heartbeat of every in-flight row this server owns.
+///
+/// The heartbeat is stamped with the DATABASE clock (`NOW()`), and the steal
+/// scan compares it against the database clock too, so a lease's age never
+/// mixes two servers' clocks: an owner whose clock ran behind a peer's by more
+/// than the lease TTL would otherwise look dead to that peer on every scan and
+/// have its live work stolen and judged twice.
 pub async fn refresh_owned_leases(
     db: &DatabaseConnection,
     server_id: &str,
 ) -> Result<(u64, u64, u64), sea_orm::DbErr> {
-    let now = chrono::Utc::now();
-
     let submissions = submission::Entity::update_many()
-        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
+        .col_expr(submission::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
         .filter(submission::Column::OwnerServerId.eq(server_id))
         .filter(submission::Column::Status.is_in(LEASED_STATUSES))
         .exec(db)
@@ -61,7 +67,7 @@ pub async fn refresh_owned_leases(
         .rows_affected;
 
     let code_runs = code_run::Entity::update_many()
-        .col_expr(code_run::Column::LeaseHeartbeatAt, Expr::value(Some(now)))
+        .col_expr(code_run::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
         .filter(code_run::Column::OwnerServerId.eq(server_id))
         .filter(code_run::Column::Status.is_in(LEASED_STATUSES))
         .exec(db)
@@ -73,8 +79,8 @@ pub async fn refresh_owned_leases(
             DbBackend::Postgres,
             r#"
             UPDATE submission_judgement j
-               SET lease_heartbeat_at = $1
-             WHERE j.owner_server_id = $2
+               SET lease_heartbeat_at = NOW()
+             WHERE j.owner_server_id = $1
                AND j.is_current = TRUE
                AND j.is_finalized = FALSE
                AND j.status IN ('Pending', 'Compiling', 'Running')
@@ -84,7 +90,7 @@ pub async fn refresh_owned_leases(
                     WHERE j2.submission_id = j.submission_id
                )
             "#,
-            [now.into(), server_id.into()],
+            [server_id.into()],
         ))
         .await?
         .rows_affected();

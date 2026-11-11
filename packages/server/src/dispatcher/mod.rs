@@ -16,6 +16,61 @@ use tracing::info;
 use crate::config::ServerConfig;
 use crate::state::AppState;
 
+/// The contest types this replica has a handler for right now, sorted.
+pub(crate) async fn local_contest_types(state: &AppState) -> Vec<String> {
+    let mut types: Vec<String> = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect();
+    types.sort();
+    types
+}
+
+/// SQL predicate: whether this replica should take judging work whose
+/// contest type is the SQL expression `contest_type`. It should when it has a
+/// handler for that type (`local_types`, a placeholder bound to
+/// [`local_contest_types`]), or when no live replica does: then whoever takes
+/// it fails it visibly with `NO_HANDLER_REGISTERED` instead of it waiting
+/// forever.
+///
+/// Replicas do not always agree on which plugins are loaded (one is still
+/// converging onto an enable, or failed to load a plugin its peers run
+/// fine), and a replica that takes work it cannot judge only fails it and
+/// burns its retry budget. Each replica publishes the types it handles in its
+/// `plugin_replica` row (see [`crate::plugin_fleet`]); liveness is that row's
+/// heartbeat against the database clock, so no server clock is involved.
+/// Shared by every select that hands out judging work: the claim fiber, the
+/// steal scans, and the SystemError retry.
+pub(crate) fn prefer_local_handler(contest_type: &str, local_types: &str) -> String {
+    format!(
+        "({contest_type} = ANY({local_types}) OR NOT EXISTS (\
+           SELECT 1 FROM plugin_replica r \
+            WHERE r.heartbeat_at > NOW() - make_interval(secs => {live}) \
+              AND r.contest_types @> jsonb_build_array({contest_type})))",
+        live = crate::plugin_fleet::LIVE_WINDOW_SECS,
+    )
+}
+
+/// [`prefer_local_handler`] for a row of `table`: `submission` and
+/// `code_run` rows carry their contest type; a judgement takes its parent
+/// submission's.
+pub(crate) fn prefer_local_handler_for(table: &str, local_types: &str) -> String {
+    if table == "submission_judgement" {
+        format!(
+            "EXISTS (SELECT 1 FROM submission s \
+                      WHERE s.id = submission_judgement.submission_id \
+                        AND {})",
+            prefer_local_handler("s.contest_type", local_types)
+        )
+    } else {
+        prefer_local_handler(&format!("{table}.contest_type"), local_types)
+    }
+}
+
 pub struct DispatcherDeps {
     pub state: AppState,
     pub redis_client: Option<redis::Client>,
@@ -143,7 +198,9 @@ impl Dispatcher {
             handles.push(tokio::spawn(steal::run(
                 deps.state.clone(),
                 deps.server_id.clone(),
-                deps.config.lease_ttl_secs,
+                steal::Reclaim::Stale {
+                    lease_ttl_secs: deps.config.lease_ttl_secs,
+                },
                 deps.config.steal_scan_interval_secs,
                 deps.config.steal_batch_size,
                 deps.config.max_dispatch_retries,
@@ -162,7 +219,23 @@ impl Dispatcher {
                 info!("Reply-queue sweeper disabled because Redis client is unavailable");
             }
         } else {
-            info!("Lease refresh and steal scanning disabled by config");
+            // Without lease refresh a live peer's heartbeat goes stale too, so
+            // stealing by lease age is off. Work a server explicitly released
+            // (graceful shutdown, or a restart's boot recovery) is owned by
+            // no one, though, and is still re-dispatched promptly.
+            handles.push(tokio::spawn(steal::run(
+                deps.state.clone(),
+                deps.server_id.clone(),
+                steal::Reclaim::Released,
+                deps.config.steal_scan_interval_secs,
+                deps.config.steal_batch_size,
+                deps.config.max_dispatch_retries,
+                cancel_rx.clone(),
+            )));
+            info!(
+                "Lease refresh and steal scanning disabled by config; only released work \
+                 is reclaimed"
+            );
         }
 
         if deps.config.operation_reaper_enabled {

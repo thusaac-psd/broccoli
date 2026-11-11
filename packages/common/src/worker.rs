@@ -42,7 +42,8 @@ pub fn worker_private_queue_name(shared_queue: &str, worker_id: &str) -> String 
 }
 
 /// Redis key prefix for a worker's liveness heartbeat: the full key is
-/// `{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}` (15s TTL, written by the worker).
+/// `{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}` (15s TTL, written by the worker;
+/// it is also the worker's ID claim, see [`crate::node_identity`]).
 ///
 /// This is the coupling between the worker (which WRITES its heartbeat) and the
 /// server (which READS it for the system dashboard, the dead-worker operation
@@ -50,7 +51,13 @@ pub fn worker_private_queue_name(shared_queue: &str, worker_id: &str) -> String 
 /// (which checks a prior owner's heartbeat). Every one of those sites must use
 /// the identical prefix, so it lives here as the single source of truth rather
 /// than as a hand-copied literal in each crate.
-pub const WORKER_HEARTBEAT_KEY_PREFIX: &str = "broccoli:worker:heartbeat:";
+pub use crate::node_identity::WORKER_HEARTBEAT_KEY_PREFIX;
+
+/// TTL (seconds) the worker sets on its heartbeat key, refreshing it every few
+/// seconds. Readers derive a heartbeat's age from the key's remaining TTL, so
+/// liveness is measured on the Redis clock alone and never compares a
+/// worker's clock with a server's.
+pub const WORKER_HEARTBEAT_TTL_SECS: u64 = 15;
 
 fn default_fairness_mode() -> String {
     "unknown".into()

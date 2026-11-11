@@ -78,6 +78,10 @@ impl RetryStrategy {
     }
 }
 
+/// BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md): pause after a failed consume
+/// in `process_messages` before trying again.
+const CONSUME_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Builder for configuring and creating a `BroccoliQueue` instance.
 ///
 /// This struct provides a fluent interface for setting up queue parameters
@@ -847,7 +851,11 @@ impl BroccoliQueue {
                                     }
                                 }
                             } else {
-                                log::error!("Failed to consume message");
+                                // BROCCOLI VENDOR PATCH (see VENDOR-PATCHES.md):
+                                // the broker now returns connection errors
+                                // instead of blocking, so back off here rather
+                                // than spinning on a fast-failing consume.
+                                tokio::time::sleep(CONSUME_ERROR_BACKOFF).await;
                                 continue;
                             }
                         }

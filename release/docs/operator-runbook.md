@@ -56,28 +56,61 @@ during a contest window.
 
 ## Plugin Reload
 
-The server image contains the default plugins and also mounts `./plugins`. After
-replacing plugin files on a server node, restart that server or use the admin UI
-plugin reload action:
+The server image contains the default plugins and also mounts `./plugins`. To
+roll out new plugin files:
 
-```bash
-docker compose --env-file .env.server -f docker-compose.server.yaml restart server
-```
+1. Copy the same files to `./plugins` on **every** server node.
+2. Select **Reload** for the plugin (or **Reload All**) once, on the admin
+   Plugins page. The server that handles the click loads the new files first;
+   only if that works is the change published, and every other server reloads
+   from its own `./plugins` within a few seconds.
 
-Repeat per server node.
+The Plugins page shows each server's state. A server that cannot load the new
+version keeps running the version it had and shows **Running previous version**;
+a server whose files differ from the published ones shows **Different files**.
+Fix that node's files and select **Retry** (or **Reload**) again. Enable,
+disable and reload all act on every server; there is no need to restart servers
+or repeat the action per node.
+
+Upgrade all server nodes together. Servers from before this mechanism do not
+publish plugin changes to their peers, so in a mixed fleet a change made through
+an old server only reaches that server.
 
 ## Password Reset
 
-Use the admin UI when another admin account is available. If all admin accounts
-are locked out, edit the server node `.env.server` and restart the server:
+Use the admin UI when another admin account is available.
+
+The bootstrap admin (`BROCCOLI_BOOTSTRAP_ADMIN_USERNAME`) is created on the
+first boot. After that, a restart leaves it alone: a password changed in the UI,
+an `admin` role revoked on purpose, or the account renamed or deleted, survives
+restarts. A boot creates the account (if no active user has that username) or
+resets it to the configured password, and restores the `admin` role and its
+built-in permissions, only in two cases:
+
+- no active user holds `system:admin`; this happens automatically;
+- `BROCCOLI_BOOTSTRAP_ADMIN_RESET=true` is set; use this when admin accounts
+  still exist but nobody can sign in to one.
+
+To recover, edit the server node `.env.server` and restart the server:
 
 ```bash
 BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=admin
 BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=replace-this-password
+BROCCOLI_BOOTSTRAP_ADMIN_RESET=true
 docker compose --env-file .env.server -f docker-compose.server.yaml up -d --no-deps server
 ```
 
-Remove or rotate the bootstrap password after login.
+The reset also signs the account out everywhere. After signing in, remove
+`BROCCOLI_BOOTSTRAP_ADMIN_RESET` (otherwise every restart resets the password
+again) and rotate the bootstrap password.
+
+## Built-in Role Permissions
+
+Each built-in role permission (for example `submission:submit` on `contestant`)
+is granted once, on the first boot that knows about it. Revoking one through the
+API or UI persists across restarts. A permission that a later release adds to a
+built-in role is granted once on the first boot of that release. The recovery
+above re-grants the `admin` role's built-in permissions.
 
 ## Logs
 
@@ -120,6 +153,47 @@ server-secrets.env   # copy only to servers
 
 Workers do not need `server-secrets.env`.
 
+## Time Sync on an Offline LAN
+
+Every server and worker must agree on the time to within about a second. The
+message queue orders messages by the publisher's clock, so a server running
+ahead of a worker by some delta hides its work from that worker for that delta
+(and the other way round for results); a few seconds of skew add seconds to
+every test case, and hours of skew lose results. Worker liveness (10 s),
+refresh-token reuse and lease checks also compare clocks across machines. An
+offline venue has no internet NTP, so make the infra node the LAN's time server
+with chrony and point every other node at it. Containers use their host's clock,
+so this is host configuration.
+
+On the infra node, set the clock once (for example from a phone:
+`sudo date -s '2026-11-10 09:00:00'`), then in `/etc/chrony/chrony.conf`
+(`/etc/chrony.conf` on RHEL-family hosts):
+
+```
+# Serve this machine's clock to the LAN even without an upstream source.
+local stratum 8
+allow 10.0.0.0/24        # the venue LAN
+```
+
+On every server and worker node, replace the `pool`/`server` lines with:
+
+```
+server 10.0.0.10 iburst  # the infra node
+makestep 1 -1            # step the clock whenever it is more than 1 s off
+```
+
+Restart chrony (`sudo systemctl restart chrony`, or `chronyd`) everywhere, then
+check each node: `chronyc tracking` names the infra node as its reference and
+shows a system time offset well under a second, and `chronyc sources` marks it
+with `*`. Pointing contestant PCs at the same server also keeps contest
+countdowns and certificate validity honest.
+
+`install.sh` reports the platform time-sync status and, when online, compares
+the clock against an HTTPS `Date` header. Both checks only warn, and offline the
+HTTPS check gives up after three seconds, so leave it on for real events.
+`BROCCOLI_SKIP_TIME_CHECK=1` skips it entirely and exists for scripted test
+runs.
+
 ## Capacity Planning
 
 Broccoli's per-machine throughput is bounded by the worker's intra-process
@@ -133,11 +207,8 @@ drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
 
 For 100 submissions × 50 testcases × 5 s on 7 machines × 4 slots ≈ 30 minutes.
 
-Servers default to local evaluator admission sizing. After worker heartbeats are
-visible and include `worker.max_concurrency`, operators can enable
-`BROCCOLI__SERVER__FLEET_AWARE_ADMISSION_ENABLED=true`; each server then polls
-live worker/server heartbeats and sizes its evaluator slots to roughly
-`sum(live worker max_concurrency) / live server replicas`.
+Each server sizes its evaluator admission locally, from
+`BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM` (see the plugin pool section below).
 
 **Deployment topology**
 
@@ -161,10 +232,10 @@ trade-off. Use the procedure below before changing it.
 Default worker concurrency is `max_concurrency=1`. Leave it there unless the
 worker host has been prepared for CPU isolation.
 
-On the Linux worker host, run:
+On the Linux worker host, from the bundle directory, run:
 
 ```bash
-sudo ./release/setup-fairness.sh --max-concurrency 4 --cpus 0-3
+sudo ./setup-fairness.sh --max-concurrency 4 --cpus 0-3
 cat fairness.env >> .env.worker
 docker compose --env-file .env.worker -f docker-compose.worker.yaml up -d --no-deps worker
 ```
@@ -274,15 +345,17 @@ BROCCOLI__PLUGIN__POOL_MAX_INSTANCES=64
 BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM=64
 ```
 
-`release/.env.server.example` ships these as the multi-replica defaults.
+`docker-compose.server.yaml.template` passes both to every server, with these
+values as its defaults; set them in `.env.server` to change them. To size
+tokio's blocking pool by hand, set `BROCCOLI__SERVER__MAX_BLOCKING_THREADS`
+there too; when it is unset the server picks a value from the CPU count.
 
 **Diagnosing pool contention.** Both the deadlock case and the queueing case
 show up as climbing `plugin_instance_acquire_duration` for the bottlenecked
 plugin and flat `plugin_instance_acquire_failures` (callers wait rather than
-fail). When the fleet-aware admission semaphore saturates, the API returns
-`503 OVERLOADED`. The auto-bump removes the misconfigured-pool failure mode;
-remaining contention is genuine capacity exhaustion and requires either more
-replicas or higher `pool_max_instances` (at the cost of WASM instance memory).
+fail). The auto-bump removes the misconfigured-pool failure mode; remaining
+contention is genuine capacity exhaustion and requires either more replicas or
+higher `pool_max_instances` (at the cost of WASM instance memory).
 
 The longer-term fix is to move checker invocation out of the contest plugin call
 path (so the contest call returns before the checker runs), which makes the
@@ -292,9 +365,15 @@ Phase 1.
 ## Multi-Replica Server Identity
 
 `BROCCOLI__SERVER__ID` **must** be set explicitly on every server replica in a
-multi-server deployment. The release templates set it (`.env.server.example`
-ships `BROCCOLI__SERVER__ID=server-1`); confirm each replica's `.env.server` has
-a unique stable value (`server-1`, `server-2`, `server-3`, ...).
+multi-server deployment, and the same holds for `BROCCOLI__WORKER__ID` on every
+worker. `install.sh server` and `install.sh worker` default each to an id unique
+to the machine, such as `worker-ubuntu-3f9c2a1b`: the hostname plus a hash of
+the host's `/etc/machine-id` and the MAC address of its first physical network
+card, so cloned or live-boot machines that all call themselves `ubuntu` still
+get distinct ids. The installer writes the id into `.env.server` or
+`.env.worker`, and re-runs keep it. If you write env files by hand
+(`.env.server.example` ships `server-1`), give each replica a unique stable
+value.
 
 **Why it matters:** each server consumes its own per-replica result queue
 (`operation_results.<server_id>`). If two replicas share the same ID, they will
@@ -306,26 +385,35 @@ memory until manually deleted.
 The release `install.sh` prompts for the ID; if you bypass the installer, audit
 each replica's env file before starting.
 
-## Recovering In-Flight Submissions After a Server Crash
+## Recovering In-Flight Submissions After a Server Restart or Crash
 
-Unless the Phase 1b lease/steal mechanism is explicitly enabled, a server crash
-leaves its in-flight submissions in `Running` status until the stuck-job
-detector catches them (default 2 hours via `stuck_job_timeout_secs`). When this
-happens:
+Every server re-dispatches its own unfinished work automatically, whatever
+`BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED` is set to:
+
+- **Graceful stop** (`docker compose stop`, a rolling restart, a redeploy): the
+  server releases the submissions, rejudges and code runs it was judging as it
+  shuts down, and the other servers pick them up within one steal-scan interval
+  (`steal_scan_interval_secs`, default 15 s). Nobody has to resubmit.
+- **Restart after a crash**: a server that comes back with the same
+  `BROCCOLI__SERVER__ID` releases and re-dispatches the work its previous
+  instance left behind as it boots. That work no longer counts against its
+  in-flight limit.
+- **Crash without a restart**: with lease/steal enabled, the other servers steal
+  the dead server's work once its lease expires (`lease_ttl_secs`). With it
+  disabled (the release default) nothing can tell a dead server from a live one,
+  so the work waits until that server ID boots again, or until the stuck-job
+  detector fails it after `max_inflight_secs` (default 1 hour) so it can be
+  rejudged.
+
+When a crashed server will not come back:
 
 1. Confirm the failed server is dead (not merely network-partitioned). Two
    replicas with the same ID racing on the same queue is worse than ghost
    queues.
-2. After restart, the new server with the same ID consumes its old reply queue
-   and drops the stale results (logged as "no waiter found"). The failed
-   submissions still need to be re-submitted by the user, because the platform
-   does not automatically replay them.
+2. Either start a replacement with the same `BROCCOLI__SERVER__ID` (its boot
+   recovery re-dispatches the stranded work), or rejudge the affected
+   submissions once the stuck-job detector has failed them.
 3. If `redis-cli SCAN MATCH operation_results.*` shows queues with no live
    consumer (i.e. their `<server_id>` does not match any healthy replica),
    `redis-cli DEL <queue_name> <queue_name>_processing <queue_name>_failed <queue_name>_fairness_set`
    to reclaim the memory.
-
-With `BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED=true`, Phase 1b automates
-the recovery loop foundation: servers write heartbeats, refresh owned leases,
-and dry-run ghost reply-queue sweeps. Steal scanning remains behind the same
-opt-in rollout path until the dispatch replay path is enabled.

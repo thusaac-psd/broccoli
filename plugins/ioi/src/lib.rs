@@ -88,10 +88,7 @@ pub fn handle_ioi_submission(input: String) -> FnResult<String> {
     let req: OnSubmissionInput = serde_json::from_str(&input)?;
 
     let output = match req.contest_id {
-        None => OnSubmissionOutput {
-            success: false,
-            error_message: Some("IOI plugin requires contest_id".into()),
-        },
+        None => OnSubmissionOutput::refused("IOI plugin requires contest_id"),
         Some(id) => {
             host.log.info(&format!(
                 "IOI: Judging submission {} for problem {} in contest {}",
@@ -99,14 +96,8 @@ pub fn handle_ioi_submission(input: String) -> FnResult<String> {
             ))?;
             match score::run_judge(&host, &req, id) {
                 Ok(out) => out,
-                Err(SdkError::StaleEpoch) => OnSubmissionOutput {
-                    success: true,
-                    error_message: None,
-                },
-                Err(e) => OnSubmissionOutput {
-                    success: false,
-                    error_message: Some(format!("{e:?}")),
-                },
+                Err(SdkError::StaleEpoch) => OnSubmissionOutput::ok(),
+                Err(e) => OnSubmissionOutput::failed(format!("{e:?}")),
             }
         }
     };

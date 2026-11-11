@@ -11,6 +11,16 @@ use serde::Serialize;
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ErrorBody {
+    /// Machine-readable error code. Any POST sent with an `Idempotency-Key`
+    /// can also answer: 422 `IDEMPOTENCY_KEY_MISMATCH` (key reused for a
+    /// different method, path, query or body); 409 `IDEMPOTENCY_KEY_IN_PROGRESS`
+    /// (the original is still running); 409 `IDEMPOTENCY_RESPONSE_NOT_STORED`
+    /// (the original succeeded but its response carried credentials and was not
+    /// kept); 409 `IDEMPOTENCY_RESPONSE_TOO_LARGE` (the original succeeded but
+    /// its response was too large to keep); 409 `IDEMPOTENCY_OUTCOME_UNKNOWN`
+    /// (the original failed or was cut off after it started and may have taken
+    /// effect); 413 `PAYLOAD_TOO_LARGE` (body too large for an idempotent
+    /// request).
     #[schema(example = "VALIDATION_ERROR")]
     pub code: String,
     #[schema(example = "Title must be 1-256 characters")]
@@ -18,6 +28,10 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
+
+/// `Retry-After` for [`AppError::ContestTypeUnavailable`]: about one plugin
+/// reconcile interval, after which this replica may have loaded the plugin.
+const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
 
 #[derive(Debug)]
 pub enum AppError {
@@ -39,6 +53,10 @@ pub enum AppError {
     /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
     /// 503 means "the system as a whole is past capacity". UP#39 uses this
     /// for durable-queue depth backpressure.
+    /// The serving replica has no handler for this contest type right now
+    /// (its plugin is still loading, or failed to load, here). Retryable: the
+    /// load balancer will likely route the retry to a replica that has it.
+    ContestTypeUnavailable(String),
     Overloaded {
         retry_after: u64,
     },
@@ -52,6 +70,12 @@ pub enum AppError {
     IdempotencyKeyMismatch(String),
     /// Idempotent response was too large to cache and cannot be replayed.
     IdempotencyResponseTooLarge,
+    /// Idempotent response carried credentials (`Cache-Control: no-store`),
+    /// so only its completion was recorded and it cannot be replayed.
+    IdempotencyResponseNotStored,
+    /// The original request's handler ran but failed or was cancelled, so it
+    /// may have committed; the key is never reused for a re-execution.
+    IdempotencyOutcomeUnknown,
     Internal(String),
 }
 
@@ -108,6 +132,16 @@ impl AppError {
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
                 ),
             ),
+            AppError::ContestTypeUnavailable(contest_type) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "CONTEST_TYPE_UNAVAILABLE",
+                    format!(
+                        "This server cannot accept '{contest_type}' submissions right now; \
+                         retry in {CONTEST_TYPE_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::Overloaded { retry_after } => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -151,9 +185,27 @@ impl AppError {
             AppError::IdempotencyResponseTooLarge => (
                 StatusCode::CONFLICT,
                 simple(
-                    "CONFLICT",
+                    "IDEMPOTENCY_RESPONSE_TOO_LARGE",
                     "Idempotent response too large to replay; original request \
                      succeeded but cannot be safely re-issued"
+                        .into(),
+                ),
+            ),
+            AppError::IdempotencyResponseNotStored => (
+                StatusCode::CONFLICT,
+                simple(
+                    "IDEMPOTENCY_RESPONSE_NOT_STORED",
+                    "Idempotent response carries credentials and is never stored; \
+                     original request succeeded but cannot be replayed"
+                        .into(),
+                ),
+            ),
+            AppError::IdempotencyOutcomeUnknown => (
+                StatusCode::CONFLICT,
+                simple(
+                    "IDEMPOTENCY_OUTCOME_UNKNOWN",
+                    "The original request with this idempotency key failed after it started \
+                     and may have taken effect; check its result and retry with a new key"
                         .into(),
                 ),
             ),
@@ -178,6 +230,7 @@ impl IntoResponse for AppError {
             AppError::RateLimited { retry_after } | AppError::Overloaded { retry_after } => {
                 Some(*retry_after)
             }
+            AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -277,6 +330,36 @@ mod tests {
     /// `Retry-After` header populated from the variant payload. This
     /// pins the contract so a future refactor that re-tags the
     /// variant or drops the header branch fails loudly here.
+    /// The idempotency replay refusals are API contracts the web client
+    /// branches on; each has its own code (all 409).
+    #[tokio::test]
+    async fn idempotency_replay_refusals_have_distinct_codes() {
+        for (err, code) in [
+            (
+                AppError::IdempotencyKeyInProgress,
+                "IDEMPOTENCY_KEY_IN_PROGRESS",
+            ),
+            (
+                AppError::IdempotencyResponseTooLarge,
+                "IDEMPOTENCY_RESPONSE_TOO_LARGE",
+            ),
+            (
+                AppError::IdempotencyResponseNotStored,
+                "IDEMPOTENCY_RESPONSE_NOT_STORED",
+            ),
+            (
+                AppError::IdempotencyOutcomeUnknown,
+                "IDEMPOTENCY_OUTCOME_UNKNOWN",
+            ),
+        ] {
+            let response = err.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], code);
+        }
+    }
+
     #[tokio::test]
     async fn overloaded_maps_to_503_with_retry_after() {
         let err = AppError::Overloaded { retry_after: 7 };

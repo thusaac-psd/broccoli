@@ -12,6 +12,7 @@ use crate::consumers::mark_code_run_system_error_with_epoch;
 use crate::entity::{code_run, problem};
 use crate::models::code_run::CustomTestCaseInput;
 use crate::state::AppState;
+use crate::utils::judging::files_log_summary;
 
 /// Loose safety net for a code run's SYNCHRONOUS `evaluate_run` plugin call. It
 /// must exceed the inner budget or it fails legitimate runs: `evaluate_run` waits
@@ -46,10 +47,13 @@ async fn mark_code_run_error_or_log(
     }
 }
 
+// The code-run model is skipped: its `files` hold the full source.
 #[instrument(
-    skip(state),
+    skip(state, code_run),
     fields(
         code_run_id = code_run.id,
+        language = %code_run.language,
+        files = %files_log_summary(&code_run.files),
         problem_id = code_run.problem_id,
         contest_id = tracing::field::Empty,
     )
@@ -300,6 +304,11 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                         .await;
                     }
                 },
+                Err(plugin_core::error::PluginError::ShuttingDown) => {
+                    // This server is stopping: leave the code run in flight for
+                    // a peer (see the matching arm in submission dispatch).
+                    warn!(code_run_id, "Server shutting down; leaving code run for a peer");
+                }
                 Err(e) => {
                     error!(code_run_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
                     mark_code_run_error_or_log(

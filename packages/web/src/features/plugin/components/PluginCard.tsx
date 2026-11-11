@@ -15,6 +15,9 @@ import { useState } from 'react';
 
 import { ResourceConfigDialog } from '@/components/config';
 
+import { firstFleetError } from '../fleet';
+import { PluginFleetBadge } from './PluginFleetBadge';
+
 export function PluginCard({
   plugin,
   toggling,
@@ -32,7 +35,10 @@ export function PluginCard({
 }) {
   const { t } = useTranslation();
   const [configOpen, setConfigOpen] = useState(false);
-  const isEnabled = plugin.status === 'Loaded';
+  // The fleet-wide desired state, not whether the server that answered has
+  // it loaded: a plugin enabled but failing to load is still enabled.
+  const isEnabled = plugin.enabled;
+  const failed = plugin.fleet.state === 'failed';
   const hasPluginSchemas = plugin.config_schemas?.some((schema) =>
     schema.scopes.includes('plugin'),
   );
@@ -63,8 +69,17 @@ export function PluginCard({
               {plugin.description}
             </p>
           )}
+          {failed && (
+            <p
+              className="text-xs text-destructive mb-3 line-clamp-2 break-words"
+              title={firstFleetError(plugin.fleet)}
+            >
+              {firstFleetError(plugin.fleet) ?? t('plugins.fleet.notInstalled')}
+            </p>
+          )}
           <div className="flex items-end justify-between gap-4">
             <div className="flex flex-wrap gap-2">
+              <PluginFleetBadge fleet={plugin.fleet} />
               {plugin.has_server && (
                 <Badge variant="outline" className="gap-1 text-xs">
                   <Server className="h-3 w-3" />
@@ -107,8 +122,8 @@ export function PluginCard({
                   className="h-8 w-8"
                   onClick={() => onReload(plugin)}
                   disabled={reloading || toggling}
-                  aria-label={t('plugins.reload')}
-                  title={t('plugins.reload')}
+                  aria-label={failed ? t('plugins.retry') : t('plugins.reload')}
+                  title={failed ? t('plugins.retry') : t('plugins.reload')}
                 >
                   {reloading ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -122,7 +137,7 @@ export function PluginCard({
               )}
               <Switch
                 checked={isEnabled}
-                disabled={toggling || reloading || plugin.status === 'Failed'}
+                disabled={toggling || reloading}
                 onCheckedChange={(checked) => onToggle(plugin, checked)}
                 aria-label={
                   isEnabled ? t('plugins.disable') : t('plugins.enable')

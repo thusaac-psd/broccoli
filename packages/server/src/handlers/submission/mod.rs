@@ -1,5 +1,3 @@
-use std::cmp;
-
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -36,7 +34,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::hooks;
 use crate::models::problem::validate_contest_type;
-use crate::models::shared::{Pagination, escape_like};
+use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
 use crate::state::AppState;
 use crate::utils::contest::{
@@ -58,7 +56,6 @@ pub use rejudge::*;
 // Re-exported for the DLQ retry path, which is an immediate rejudge and must
 // prepare the judgement lineage through the same primitive as the admin
 // rejudge endpoints (see `crate::handlers::dlq`).
-pub(crate) use dispatch::open_rejudge_judgement;
 
 use dispatch::{dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks};
 use filter::{apply_filter_to_judgement_response, apply_filter_to_list, apply_filter_to_response};
@@ -123,17 +120,22 @@ pub async fn create_submission(
     // directly so a request never holds two connections at once.
     let problem = find_problem(&state.db, problem_id).await?;
     // The kernel OWNS the subject: one kernel per request per subject.
-    // REACHABILITY FIRST: gate on problem read access (contest membership or
-    // problem-edit permission), same as viewing the problem, and do it before
-    // the `before_submission` hook dispatch below. Without this a contestant
-    // can probe and submit against hidden/unreleased problems by guessing
-    // IDs, which is a stronger information oracle than viewing since it runs
-    // secret tests. A denied decision fails closed and silent (404) - this is
-    // reachability, not a business rule, so it must never grow a reason
-    // string; the cooldown/submission-limit plugins' own loud, reasoned
-    // rejections are a separate, later check untouched by this gate. See
-    // `visibility::host_rules::decide_standalone_problem_access`, ported
-    // verbatim from the `require_problem_read_access` this replaces.
+    // REACHABILITY FIRST, before the `before_submission` hook dispatch below.
+    // Without this a contestant can probe and submit against hidden or
+    // unreleased problems by guessing IDs. That is a stronger information
+    // oracle than viewing, because a submission runs the secret tests. A
+    // denied decision fails closed and silent (404). This is reachability,
+    // not a business rule, so it must never grow a reason string. The
+    // cooldown/submission-limit plugins' own loud, reasoned rejections are a
+    // separate, later check that this gate does not touch.
+    //
+    // `Action::Submit` is stricter than viewing. Only a public problem or a
+    // problem editor gets through here. A hidden problem is denied even when
+    // one of its contests would let the caller read it, because this row is
+    // stored with `contest_id = NULL` and would skip that contest's plugin
+    // config, feedback masking and standings. Contestants submit through
+    // `create_contest_submission` instead. See
+    // `visibility::host_rules::standalone_reachable_via_contest`.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     if kernel
         .decide(
@@ -258,8 +260,7 @@ pub async fn list_submissions(
 
     let can_view_all = auth_user.has_permission(perm::SUBMISSION_VIEW_ALL);
 
-    let page = cmp::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut base_select = submission::Entity::find();
 
@@ -385,8 +386,8 @@ pub async fn list_submissions(
     };
 
     let submissions = select
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .all(&state.db)
         .await?;
 
@@ -401,16 +402,9 @@ pub async fn list_submissions(
     // here to keep rows from different contests from bleeding into each
     // other's decision.
     let data = apply_filter_to_list(&kernel, data).await?;
-    let total_pages = total.div_ceil(per_page);
-
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        "pagination": window.pagination(total),
     })))
 }
 
@@ -701,7 +695,7 @@ pub async fn get_submission_judgement(
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest or problem not found (NOT_FOUND)", body = ErrorBody),
         (status = 429, description = "Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED)", body = ErrorBody),
-        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED)", body = ErrorBody),
+        (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED), or this server cannot judge the contest's type right now (CONTEST_TYPE_UNAVAILABLE); both carry Retry-After", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -802,10 +796,15 @@ pub async fn create_contest_submission(
         .await
         .get(&contest_type)
         .cloned();
+    // Contest types are plugin-provided, and the handler owns admission: a
+    // replica without one (its plugin still loading or failed here) must not
+    // accept the submission unchecked. Reject before any hook runs.
+    let Some(handler) = handler else {
+        return Err(AppError::ContestTypeUnavailable(contest_type));
+    };
     let admission_owner = handler
-        .as_ref()
-        .filter(|h| h.submission_admission)
-        .map(|h| h.plugin_id.as_str());
+        .submission_admission
+        .then_some(handler.plugin_id.as_str());
     let hook_event = BeforeSubmissionEvent {
         user_id: auth_user.user_id,
         problem_id,
@@ -838,8 +837,8 @@ pub async fn create_contest_submission(
         ..Default::default()
     };
 
-    let model = match (handler, admission) {
-        (Some(handler), Some(admission)) if handler.submission_admission => {
+    let model = match admission {
+        Some(admission) if handler.submission_admission => {
             crate::services::submission_feedback::insert_admitted(
                 &state,
                 new_submission,
@@ -848,13 +847,13 @@ pub async fn create_contest_submission(
             )
             .await?
         }
-        (Some(handler), None) if handler.submission_admission => {
+        None if handler.submission_admission => {
             return Err(AppError::Internal(
                 "Contest plugin did not provide submission admission".into(),
             ));
         }
-        (_, Some(_)) => return Err(AppError::Internal("Unexpected submission admission".into())),
-        _ => new_submission.insert(&state.db).await?,
+        Some(_) => return Err(AppError::Internal("Unexpected submission admission".into())),
+        None => new_submission.insert(&state.db).await?,
     };
 
     fire_after_submission_hooks(
@@ -978,8 +977,7 @@ pub async fn list_contest_submissions(
             .is_some()
     };
 
-    let page = cmp::max(query.page.unwrap_or(1), 1);
-    let per_page = query.per_page.unwrap_or(20).clamp(1, 100);
+    let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut base_select =
         submission::Entity::find().filter(submission::Column::ContestId.eq(Some(contest_id)));
@@ -1026,8 +1024,8 @@ pub async fn list_contest_submissions(
     };
 
     let submissions = select
-        .offset(Some((page - 1) * per_page))
-        .limit(Some(per_page))
+        .offset(Some(window.offset()))
+        .limit(Some(window.limit()))
         .all(&state.db)
         .await?;
 
@@ -1045,21 +1043,14 @@ pub async fn list_contest_submissions(
     // contest could see peers' submissions in the list that `get_submission`
     // would already 404 on individually - this closes that inconsistency.
     let data = apply_filter_to_list(&kernel, data).await?;
-    let total_pages = total.div_ceil(per_page);
-
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": Pagination {
-            page,
-            per_page,
-            total,
-            total_pages,
-        },
+        "pagination": window.pagination(total),
     })))
 }
 
 pub fn submission_body_limit(max_size: usize) -> axum::extract::DefaultBodyLimit {
-    axum::extract::DefaultBodyLimit::max(max_size + 4096)
+    axum::extract::DefaultBodyLimit::max(crate::upload_limits::source_request_limit_bytes(max_size))
 }
 
 #[cfg(test)]

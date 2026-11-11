@@ -19,7 +19,7 @@ use uuid::Uuid;
 // participation.
 use crate::entity::{additional_file, problem};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::models::attachment::{AdditionalFileListResponse, AdditionalFileResponse};
 use crate::state::AppState;
@@ -28,7 +28,7 @@ use crate::utils::blob::{
     BlobMetadata, build_blob_response, resolve_virtual_path, stream_field_to_store,
     take_required_file,
 };
-use crate::utils::soft_delete::SoftDeletable;
+use crate::utils::soft_delete::{SoftDeletable, find_active_child};
 
 pub fn additional_file_upload_body_limit() -> DefaultBodyLimit {
     DefaultBodyLimit::max(LARGE_UPLOAD_LIMIT_BYTES)
@@ -74,15 +74,13 @@ fn validate_language_code(lang: &str) -> Result<(), AppError> {
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, multipart), fields(problem_id))]
+#[instrument(skip(_auth, state, multipart), fields(problem_id))]
 pub async fn upload_additional_file(
-    auth_user: FreshAuthUser,
+    _auth: Authorized<ProblemEdit>,
     State(state): State<AppState>,
     AppPath(problem_id): AppPath<i32>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission(perm::PROBLEM_EDIT)?;
-
     problem::Entity::find_active_by_id(problem_id)
         .one(&state.db)
         .await?
@@ -271,14 +269,14 @@ pub async fn download_additional_file(
     let ref_uuid = Uuid::parse_str(&ref_id)
         .map_err(|_| AppError::Validation("Invalid additional file ID".into()))?;
 
-    let model = additional_file::Entity::find_by_id(ref_uuid)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Additional file not found".into()))?;
-
-    if model.problem_id != problem_id {
-        return Err(AppError::NotFound("Additional file not found".into()));
-    }
+    let model = find_active_child::<problem::Entity, additional_file::Entity, _, _>(
+        &state.db,
+        additional_file::Column::ProblemId,
+        problem_id,
+        ref_uuid,
+        "Additional file",
+    )
+    .await?;
 
     build_blob_response(&BlobMetadata::from(&model), &headers, &*state.blob_store).await
 }
@@ -313,14 +311,14 @@ pub async fn delete_additional_file(
     let ref_uuid = Uuid::parse_str(&ref_id)
         .map_err(|_| AppError::Validation("Invalid additional file ID".into()))?;
 
-    let model = additional_file::Entity::find_by_id(ref_uuid)
-        .one(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Additional file not found".into()))?;
-
-    if model.problem_id != problem_id {
-        return Err(AppError::NotFound("Additional file not found".into()));
-    }
+    find_active_child::<problem::Entity, additional_file::Entity, _, _>(
+        &state.db,
+        additional_file::Column::ProblemId,
+        problem_id,
+        ref_uuid,
+        "Additional file",
+    )
+    .await?;
 
     additional_file::Entity::delete_by_id(ref_uuid)
         .exec(&state.db)

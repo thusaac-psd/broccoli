@@ -28,15 +28,16 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // *mutation* is authorised by `submission:rejudge` alone; what comes back
 // reflects the actor's own Read visibility, not a blanket admin view. Pinned
 // by `tests/integration/rejudge_visibility.rs`.
-use crate::entity::{
-    judgement_reset::ClearJudgementActiveModel, submission, submission_judgement, test_case_result,
-};
+use crate::entity::{submission, submission_judgement, test_case_result};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::FreshAuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::validate_contest_type;
 use crate::models::submission::*;
+use crate::services::judgement_lifecycle::{
+    ApplyJudgement, OpenJudgement, apply_judgement, open_judgement,
+};
 use crate::services::submission_dispatch::fire_after_judging_hooks;
 use crate::state::AppState;
 use crate::utils::contest::{find_contest, is_problem_in_contest, required_contest_type};
@@ -44,7 +45,6 @@ use crate::utils::judging::{files_to_json, validate_code_payload, validate_submi
 use crate::utils::problem::find_problem;
 use crate::visibility::{Subject, VisibilityKernel};
 
-use super::dispatch::open_rejudge_judgement;
 use super::filter::apply_filter_to_response_after_mutation;
 use super::response::{VisibilityContext, build_submission_response};
 
@@ -77,50 +77,20 @@ pub async fn apply_submission_judgement(
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    let sub = submission::Entity::find_by_id(id)
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Submission not found".into()))?;
-
-    let judgement = submission_judgement::Entity::find_by_id(judgement_id)
-        .filter(submission_judgement::Column::SubmissionId.eq(id))
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Judgement not found".into()))?;
-
-    if !judgement.is_finalized {
-        return Err(AppError::Validation(
-            "Cannot apply a judgement that is not finalized".into(),
-        ));
-    }
-
-    submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::IsCurrent,
-            sea_orm::sea_query::Expr::value(false),
-        )
-        .filter(submission_judgement::Column::SubmissionId.eq(id))
-        .exec(&txn)
-        .await?;
-
-    let mut active_judgement: submission_judgement::ActiveModel = judgement.clone().into();
-    active_judgement.is_current = Set(true);
-    active_judgement.update(&txn).await?;
-
-    let mut active_submission: submission::ActiveModel = sub.into();
-    active_submission.status = Set(judgement.status);
-    active_submission.verdict = Set(judgement.verdict);
-    active_submission.compile_output = Set(judgement.compile_output);
-    active_submission.error_code = Set(judgement.error_code);
-    active_submission.error_message = Set(judgement.error_message);
-    active_submission.score = Set(judgement.score);
-    active_submission.time_used = Set(judgement.time_used);
-    active_submission.memory_used = Set(judgement.memory_used);
-    active_submission.judged_at = Set(judgement.finalized_at);
-    active_submission.judge_epoch = Set(judgement.judge_epoch);
-    active_submission.target_worker_id = Set(judgement.target_worker_id);
-    let updated = active_submission.update(&txn).await?;
+    let updated = match apply_judgement(&txn, id, judgement_id).await? {
+        ApplyJudgement::Applied(updated) => *updated,
+        ApplyJudgement::SubmissionNotFound => {
+            return Err(AppError::NotFound("Submission not found".into()));
+        }
+        ApplyJudgement::JudgementNotFound => {
+            return Err(AppError::NotFound("Judgement not found".into()));
+        }
+        ApplyJudgement::NotFinalized => {
+            return Err(AppError::Validation(
+                "Cannot apply a judgement that is not finalized".into(),
+            ));
+        }
+    };
     txn.commit().await?;
 
     fire_after_judging_hooks(
@@ -281,69 +251,30 @@ pub async fn rejudge_submission(
         }
     };
 
+    // `open_judgement` allocates the new judgement's epoch, resets the
+    // submission (apply-immediately) and inserts the judgement, all in this
+    // transaction. Both branches are durable: the claim fiber picks up a
+    // `Queued` submission (apply-immediately) or a `Queued` judgement
+    // (deferred, dispatched with `fire_after_judging=false`), so no
+    // handler-side spawn is needed and a crash after commit cannot lose the
+    // rejudge. The prior verdict and its test_case_result rows stay attached
+    // to the old judgement as version history.
     let txn = state.db.begin().await?;
-
-    let sub = submission::Entity::find_by_id(id)
-        .lock(LockType::Update)
-        .one(&txn)
+    let open = if payload.apply_immediately {
+        OpenJudgement::Rejudge {
+            triggered_by_user_id: auth_user.user_id,
+            target_worker_id: new_target,
+        }
+    } else {
+        OpenJudgement::DeferredRejudge {
+            triggered_by_user_id: auth_user.user_id,
+            target_worker_id: new_target,
+        }
+    };
+    let (updated, _judgement) = open_judgement(&txn, id, open)
         .await?
         .ok_or_else(|| AppError::NotFound("Submission not found".into()))?;
-
-    let new_epoch = sub.judge_epoch.saturating_add(1);
-
-    // The prior verdict (and its test_case_result rows) stay attached to
-    // the old judgement so it remains visible as version history. The
-    // dispatch path will look up the new current judgement created here.
-    let resolved_target = new_target
-        .clone()
-        .unwrap_or_else(|| sub.target_worker_id.clone());
-    let _new_judgement = open_rejudge_judgement(
-        &txn,
-        &sub,
-        auth_user.user_id,
-        resolved_target,
-        None,
-        new_epoch,
-        payload.apply_immediately,
-    )
-    .await?;
-
-    let updated = if payload.apply_immediately {
-        let mut active: submission::ActiveModel = sub.clone().into();
-        // UP#37: rejudge that takes effect immediately enters the same
-        // durable-accept lifecycle as a fresh POST - flip to `Queued`
-        // and let the claim fiber (UP#38) promote to `Pending` and
-        // dispatch. The new judgement row was just created above by
-        // `open_rejudge_judgement` and is `is_current=true`, so the
-        // claim path's call to `ensure_active_judgement_id` will pick
-        // it up.
-        active.status = Set(SubmissionStatus::Queued);
-        active.clear_judgement_columns();
-        active.judge_epoch = Set(new_epoch);
-        if let Some(target) = new_target.clone() {
-            active.target_worker_id = Set(target);
-        }
-        active.update(&txn).await?
-    } else {
-        sub.clone()
-    };
-
     txn.commit().await?;
-
-    // UP#37 + residual fix: both branches are durable now.
-    //
-    // - `apply_immediately=true` flips the submission row to `Queued`;
-    //   the claim fiber's submission scan promotes it to Pending and
-    //   dispatches.
-    // - `apply_immediately=false` inserts a non-current judgement at
-    //   `status=Queued` (see `open_rejudge_judgement` above); the claim
-    //   fiber's judgement scan picks that up, promotes it to Pending,
-    //   and dispatches via `dispatch_to_plugin_with_judgement` with
-    //   `fire_after_judging=false`.
-    //
-    // No handler-side `tokio::spawn` is needed in either branch - a
-    // crash between txn.commit() and the response no longer loses the
-    // rejudge.
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response =
@@ -375,8 +306,8 @@ pub async fn rejudge_submission(
 /// surface already has and keeps after the submission:rejudge visibility
 /// fix - `GET /submissions/{id}` still answers 200 vs. 404 for exactly this
 /// reason, and `apply_submission_judgement`/`rejudge_submission` still
-/// succeed-or-404 on a nonexistent id - just aggregated across up to 10,000
-/// ids in one round trip instead of one id per request. It is not a
+/// succeed-or-404 on a nonexistent id - just aggregated across up to
+/// [`MAX_BULK_REJUDGE_IDS`] ids in one round trip instead of one id per request. It is not a
 /// regression introduced by that fix. Don't close it by changing this
 /// endpoint's behaviour alone: the identical oracle stays reachable one id
 /// at a time via the endpoints above, so narrowing only this one would trade
@@ -387,11 +318,11 @@ pub async fn rejudge_submission(
     tag = "Submissions",
     operation_id = "bulkRejudgeSubmissions",
     summary = "Bulk rejudge submissions",
-    description = "Re-queues submissions in the provided ID list for rejudging. Max 10,000 IDs per request. Requires `submission:rejudge` permission.",
+    description = format!("Re-queues submissions in the provided ID list for rejudging. Max {MAX_BULK_REJUDGE_IDS} IDs per request. Requires `submission:rejudge` permission."),
     request_body = BulkRejudgeRequest,
     responses(
         (status = 200, description = "Submissions re-queued", body = BulkRejudgeResponse),
-        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Empty or oversized id list, non-positive id, or invalid worker (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 503, description = "Durable queue depth exceeded (QUEUE_OVERLOADED)", body = ErrorBody),
@@ -457,61 +388,31 @@ pub async fn bulk_rejudge_submissions(
     }
 
     const BATCH_SIZE: usize = 500;
-    // Per-batch counter: rows the user successfully re-queued (immediate
-    // path -> submission row in `Queued`; deferred path -> judgement row
-    // in `Queued`). After UP#37 + the residual fix, both branches are
-    // claim-fiber-driven and the handler never spawns.
+    // Rows the caller re-queued: a `Queued` submission (apply-immediately)
+    // or a `Queued` deferred judgement, both picked up by the claim fiber,
+    // so the handler never spawns. Ids are visited in ascending order, so
+    // two concurrent bulk rejudges take the submission row locks in the same
+    // order. A row deleted since the existence scan above is skipped.
     let mut queued: usize = 0;
 
     for batch_ids in all_ids.chunks(BATCH_SIZE) {
         let txn = state.db.begin().await?;
-
-        let locked = submission::Entity::find()
-            .filter(submission::Column::Id.is_in(batch_ids.to_vec()))
-            .lock(LockType::Update)
-            .all(&txn)
-            .await?;
-
-        for sub in &locked {
-            let resolved_target = match new_target.clone() {
-                Some(t) => t,
-                None => sub.target_worker_id.clone(),
-            };
-            let new_epoch = sub.judge_epoch.saturating_add(1);
-            let _new_judgement = open_rejudge_judgement(
-                &txn,
-                sub,
-                auth_user.user_id,
-                resolved_target.clone(),
-                None,
-                new_epoch,
-                payload.apply_immediately,
-            )
-            .await?;
-
-            if payload.apply_immediately {
-                let mut active: submission::ActiveModel = sub.clone().into();
-                // UP#37: durable accept - flip to `Queued`, claim fiber
-                // (UP#38) will promote to `Pending` and dispatch. See
-                // single-submission rejudge handler above for the full
-                // narrative.
-                active.status = Set(SubmissionStatus::Queued);
-                active.clear_judgement_columns();
-                active.judge_epoch = Set(new_epoch);
-                if let Some(target) = new_target.clone() {
-                    active.target_worker_id = Set(target);
+        for &id in batch_ids {
+            let open = if payload.apply_immediately {
+                OpenJudgement::Rejudge {
+                    triggered_by_user_id: auth_user.user_id,
+                    target_worker_id: new_target.clone(),
                 }
-                active.update(&txn).await?;
+            } else {
+                OpenJudgement::DeferredRejudge {
+                    triggered_by_user_id: auth_user.user_id,
+                    target_worker_id: new_target.clone(),
+                }
+            };
+            if open_judgement(&txn, id, open).await?.is_some() {
+                queued += 1;
             }
-            // Deferred branch (`apply_immediately=false`): the
-            // judgement row was inserted at status=Queued (see
-            // `open_rejudge_judgement`); the claim fiber's judgement
-            // scan will dispatch it via
-            // `dispatch_to_plugin_with_judgement(..., fire_after_judging=false)`.
-            // No handler-side spawn.
-            queued += 1;
         }
-
         txn.commit().await?;
     }
 

@@ -12,7 +12,11 @@ use utoipa::ToSchema;
 
 use crate::state::AppState;
 
-const PING_TIMEOUT: Duration = Duration::from_secs(2);
+/// Total time budget for the deep check. The probes run concurrently, so this
+/// bounds the whole response, and it stays below the 2 s probe timeout a load
+/// balancer typically uses: a slow dependency reads as `down`, never as a
+/// timed-out probe.
+const PROBE_BUDGET: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -34,66 +38,123 @@ pub struct HealthResponse {
     /// from a git checkout).
     #[schema(example = "abc1234")]
     pub git_sha: String,
+    /// Plugin readiness on this replica: `"ok"` when every plugin enabled in
+    /// the shared desired state is loaded here, `"degraded"` otherwise. It
+    /// does not change `status` or the HTTP code, so one plugin that fails
+    /// everywhere cannot take the whole fleet out of rotation; a load
+    /// balancer that should drain such a replica can match on this field.
+    /// Which plugins and why is in the authenticated admin plugin API
+    /// (`fleet`), not here: this endpoint is public, and load errors carry
+    /// file paths and database messages.
+    #[schema(example = "ok")]
+    pub plugins: String,
 }
 
-/// Probes the database and MQ backends and returns a populated
-/// [`HealthResponse`]. Each backend is probed with a 2-second hard timeout.
-///
-/// Shared between the documented `/api/v1/health` route and the plain
-/// `/healthz` route mounted on the outer Router.
-pub async fn compute_health(
+/// Outcome of one dependency probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Ok,
+    Down,
+    Disabled,
+}
+
+impl Probe {
+    fn as_str(self) -> &'static str {
+        match self {
+            Probe::Ok => "ok",
+            Probe::Down => "down",
+            Probe::Disabled => "disabled",
+        }
+    }
+
+    fn healthy(self) -> bool {
+        match self {
+            Probe::Ok | Probe::Disabled => true,
+            Probe::Down => false,
+        }
+    }
+
+    /// Run `ping` within `PROBE_BUDGET`, logging why it failed.
+    async fn run<E: std::fmt::Display>(
+        component: &'static str,
+        ping: impl std::future::Future<Output = Result<(), E>>,
+    ) -> Self {
+        match timeout(PROBE_BUDGET, ping).await {
+            Ok(Ok(())) => Probe::Ok,
+            Ok(Err(e)) => {
+                warn!(component, error = %e, "Health check: ping failed");
+                Probe::Down
+            }
+            Err(_) => {
+                warn!(component, "Health check: ping timed out");
+                Probe::Down
+            }
+        }
+    }
+}
+
+/// Result of probing the shared dependencies, see [`probe_dependencies`].
+#[derive(Debug, Clone, Copy)]
+pub struct DependencyHealth {
+    db: Probe,
+    mq: Probe,
+}
+
+impl DependencyHealth {
+    pub fn db(&self) -> &'static str {
+        self.db.as_str()
+    }
+
+    pub fn mq(&self) -> &'static str {
+        self.mq.as_str()
+    }
+
+    pub fn healthy(&self) -> bool {
+        self.db.healthy() && self.mq.healthy()
+    }
+}
+
+/// Probes the database and MQ backends concurrently; the whole probe is
+/// bounded by `PROBE_BUDGET`, not budget-per-dependency.
+pub async fn probe_dependencies(
     db: &DatabaseConnection,
     redis_client: Option<&redis::Client>,
     mq_enabled: bool,
-) -> HealthResponse {
-    let db_status = match timeout(PING_TIMEOUT, ping_db(db)).await {
-        Ok(Ok(())) => "ok",
-        Ok(Err(e)) => {
-            warn!(error = %e, "Health check: DB ping failed");
-            "down"
-        }
-        Err(_) => {
-            warn!("Health check: DB ping timed out");
-            "down"
-        }
-    };
-
-    let mq_status = if !mq_enabled {
-        "disabled"
-    } else {
-        match redis_client {
-            Some(client) => match timeout(PING_TIMEOUT, ping_redis(client)).await {
-                Ok(Ok(())) => "ok",
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Health check: MQ ping failed");
-                    "down"
-                }
-                Err(_) => {
-                    warn!("Health check: MQ ping timed out");
-                    "down"
-                }
-            },
-            None => {
+) -> DependencyHealth {
+    let mq_probe = async {
+        match (mq_enabled, redis_client) {
+            (false, _) => Probe::Disabled,
+            (true, Some(client)) => Probe::run("mq", ping_redis(client)).await,
+            (true, None) => {
                 warn!("Health check: MQ enabled but no Redis client available");
-                "down"
+                Probe::Down
             }
         }
     };
+    let (db, mq) = tokio::join!(Probe::run("db", ping_db(db)), mq_probe);
+    DependencyHealth { db, mq }
+}
 
-    let status = if db_status == "ok" && (mq_status == "ok" || mq_status == "disabled") {
-        "ok"
-    } else {
-        "degraded"
-    };
+/// The deep readiness / monitoring check, shared between the documented
+/// `/api/v1/health` route and the plain `/healthz` route: the shared
+/// dependencies plus this replica's plugin readiness. Load balancers should
+/// probe [`livez`] instead: every server shares the same database and Redis, so
+/// a dependency blip would fail this check on every replica at once and leave
+/// the balancer with no upstream at all.
+pub async fn compute_health(state: &AppState) -> HealthResponse {
+    let deps =
+        probe_dependencies(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let plugins_ready = crate::plugin_lifecycle::not_ready(state).is_empty();
 
     HealthResponse {
-        status: status.to_string(),
-        db: db_status.to_string(),
-        mq: mq_status.to_string(),
+        status: if deps.healthy() { "ok" } else { "degraded" }.to_string(),
+        db: deps.db().to_string(),
+        mq: deps.mq().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: option_env!("BROCCOLI_GIT_SHA")
             .unwrap_or("unknown")
             .to_string(),
+        plugins: if plugins_ready { "ok" } else { "degraded" }.to_string(),
     }
 }
 
@@ -123,21 +184,22 @@ fn status_code(body: &HealthResponse) -> StatusCode {
 /// Plain-router handler for `GET /healthz`. Not part of the OpenAPI surface.
 #[instrument(skip(state))]
 pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }
 
-/// Liveness-only `/healthz` handler for the dedicated UP#14e runtime. Does
-/// NOT ping the DB or Redis - those checks issue I/O through pool driver
-/// tasks that were spawned on the *main* tokio runtime, so a saturated main
-/// runtime would stall the ping regardless of which runtime the handler runs
-/// on, defeating the entire purpose of the dedicated listener.
+/// `GET /livez`: shallow liveness. The process is up and its HTTP stack is
+/// serving; no database, Redis or object-storage call is made, so it keeps
+/// answering while shared infrastructure is down and costs next to nothing at a
+/// 5 s probe interval. This is what a load balancer should probe; `/healthz`
+/// is the deep check for readiness and monitoring.
 ///
-/// This handler conveys process-is-alive only (the standard Kubernetes
-/// liveness-vs-readiness distinction). For full dependency status, the main
-/// router still serves the original `/healthz` and `/api/v1/health` - point
-/// readiness probes at those.
-pub async fn healthz_liveness() -> impl IntoResponse {
+/// Served on the main router and on the dedicated `server.healthz_listen`
+/// runtime. The dedicated runtime also answers `/healthz` with this handler (as
+/// it always has): pinging the DB or Redis from there would run through pool
+/// driver tasks on the *main* runtime and stall with it, defeating the point of
+/// the dedicated listener.
+pub async fn livez() -> impl IntoResponse {
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -152,11 +214,12 @@ pub async fn healthz_liveness() -> impl IntoResponse {
     path = "/health",
     tag = "Meta",
     operation_id = "getHealth",
-    summary = "Server liveness and dependency health",
-    description = "Public, unauthenticated. Pings the database and message queue with a 2s \
-                   timeout each. Returns 200 with `status: \"ok\"` when all probed components \
-                   are healthy; 503 with `status: \"degraded\"` otherwise. Used by load \
-                   balancers and Docker `HEALTHCHECK` (via the `--healthcheck` CLI flag).",
+    summary = "Server readiness and dependency health",
+    description = "Public, unauthenticated. Pings the database and message queue concurrently, \
+                   within a 1.5s total budget. Returns 200 with `status: \"ok\"` when all probed \
+                   components are healthy; 503 with `status: \"degraded\"` otherwise. This is the \
+                   deep readiness check; load balancers should probe the shallow `GET /livez`, \
+                   which makes no dependency calls.",
     responses(
         (status = 200, description = "All components healthy", body = HealthResponse),
         (status = 503, description = "One or more components are down", body = HealthResponse),
@@ -164,6 +227,6 @@ pub async fn healthz_liveness() -> impl IntoResponse {
 )]
 #[instrument(skip(state))]
 pub async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
-    let body = compute_health(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let body = compute_health(&state).await;
     (status_code(&body), Json(body))
 }

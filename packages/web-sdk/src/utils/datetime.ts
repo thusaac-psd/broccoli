@@ -1,3 +1,5 @@
+import { serverNow } from '@/api/server-clock';
+
 export function formatTime(isoString: string, locale?: string) {
   return new Date(isoString).toLocaleTimeString(locale, {
     hour: '2-digit',
@@ -27,9 +29,8 @@ export function formatRelativeDatetime(
   dateStr: string,
   t: (key: string, params?: Record<string, string>) => string,
 ): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
+  // Server-stamped times, so measured against the server's clock.
+  const diffMs = Date.parse(dateStr) - serverNow();
   const absDiffMs = Math.abs(diffMs);
   const mins = Math.floor(absDiffMs / 60000);
   const hours = Math.floor(mins / 60);

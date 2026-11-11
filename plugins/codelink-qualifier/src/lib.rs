@@ -24,14 +24,8 @@ mod plugin {
         let host = Host::new();
         let req: OnSubmissionInput = serde_json::from_str(&input)?;
         let output = match crate::judge::judge(&host, &req) {
-            Ok(()) | Err(SdkError::StaleEpoch) => OnSubmissionOutput {
-                success: true,
-                error_message: None,
-            },
-            Err(e) => OnSubmissionOutput {
-                success: false,
-                error_message: Some(e.to_string()),
-            },
+            Ok(()) | Err(SdkError::StaleEpoch) => OnSubmissionOutput::ok(),
+            Err(e) => OnSubmissionOutput::failed(e.to_string()),
         };
         Ok(serde_json::to_string(&output)?)
     }

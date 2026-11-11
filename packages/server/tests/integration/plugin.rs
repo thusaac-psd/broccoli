@@ -437,6 +437,18 @@ mod sql {
         assert_eq!(res.headers["Content-Type"], "text/javascript");
     }
 
+    /// A file the plugin's web root does not contain (an unbuilt bundle, or a
+    /// stale chunk name) is a 404, not a 500 the web client keeps retrying.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_file_in_a_web_plugin_returns_not_found() {
+        let app = TestApp::spawn_with_plugins().await;
+
+        let res = app
+            .get_without_token(&routes::plugin_asset("web-plugin", "styles.css"))
+            .await;
+        assert_eq!(res.status, 404, "body: {}", res.text);
+    }
+
     #[tokio::test]
     async fn asset_request_for_plugin_without_web_assets_returns_not_found() {
         let app = TestApp::spawn().await;

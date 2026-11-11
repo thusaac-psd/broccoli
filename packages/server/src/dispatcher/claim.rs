@@ -93,16 +93,19 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if max_in_flight > 0
-                    && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
-                {
-                    live_slots = live_worker_slots(&state).await;
-                    slots_checked = Some(std::time::Instant::now());
-                }
-                let cap = effective_cap(max_in_flight, live_slots);
-                if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
-                    error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
-                }
+                common::deadline::bounded("dispatcher.claim", common::deadline::BACKGROUND_STEP, async {
+                    if max_in_flight > 0
+                        && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
+                    {
+                        live_slots = live_worker_slots(&state).await;
+                        slots_checked = Some(std::time::Instant::now());
+                    }
+                    let cap = effective_cap(max_in_flight, live_slots);
+                    if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
+                        error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
+                    }
+                })
+                .await;
             }
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() {
@@ -124,15 +127,18 @@ pub async fn run(
 /// (which has already flipped the row to `Pending`, set `owner_server_id`
 /// to *us*, and bumped `retry_count`) but before the spawned task
 /// actually publishes the dispatch, the row is now stranded in `Pending`
-/// owned by a dead server. The **only** safety net is the
-/// dispatcher/steal scanner (UP#17): once `lease_heartbeat_at` is older
-/// than `lease_ttl_secs`, a peer server's steal scanner reclaims the row
-/// and re-dispatches it. So the worst-case end-to-end recovery latency
-/// is `lease_ttl_secs`, not "instant" - this is the cost of decoupling
-/// claim from dispatch. Don't introduce a bounded join-set or `await`
+/// owned by a dead server. It is recovered when this `server_id` boots
+/// again (boot releases its own in-flight rows for re-dispatch; see
+/// `steal::release_owned_leases`), or, with lease/steal on, by a peer's
+/// steal scanner once `lease_heartbeat_at` is older than `lease_ttl_secs`.
+/// So recovery is not "instant" - this is the cost of decoupling claim
+/// from dispatch. Don't introduce a bounded join-set or `await`
 /// here without re-thinking that contract: an inline `await` would make
 /// the claim fiber the bottleneck for dispatch throughput.
-async fn claim_once(
+///
+/// `pub` so integration tests can drive one cycle directly, like
+/// `plugin_timer::tick_once`.
+pub async fn claim_once(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
@@ -144,8 +150,11 @@ async fn claim_once(
         count_in_flight(state, server_id).await?
     };
     let budget = claim_budget(batch_size, max_in_flight, in_flight);
+    // The contest types this replica can judge right now; see
+    // `dispatcher::prefer_local_handler`.
+    let contest_types = super::local_contest_types(state).await;
     let submission_models = if budget > 0 {
-        claim_queued_submissions(state, server_id, budget).await?
+        claim_queued_submissions(state, server_id, budget, &contest_types).await?
     } else {
         Vec::new()
     };
@@ -159,7 +168,8 @@ async fn claim_once(
         });
     }
 
-    let code_run_models = claim_queued_code_runs(state, server_id, batch_size).await?;
+    let code_run_models =
+        claim_queued_code_runs(state, server_id, batch_size, &contest_types).await?;
     for model in code_run_models {
         let state_clone = state.clone();
         tokio::spawn(async move {
@@ -175,7 +185,7 @@ async fn claim_once(
     // own status is unchanged for these rows, so the submission scan
     // above doesn't reach them - the judgement scan does.
     let judgement_pairs = if rejudge_budget > 0 {
-        claim_queued_judgements(state, server_id, rejudge_budget).await?
+        claim_queued_judgements(state, server_id, rejudge_budget, &contest_types).await?
     } else {
         Vec::new()
     };
@@ -266,9 +276,10 @@ async fn claim_queued_submissions(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<submission::Model>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission", batch_size).await?;
+    let rows = select_queued_rows(&txn, "submission", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -332,9 +343,10 @@ async fn claim_queued_code_runs(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<code_run::Model>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "code_run", batch_size).await?;
+    let rows = select_queued_rows(&txn, "code_run", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -402,9 +414,10 @@ async fn claim_queued_judgements(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> anyhow::Result<Vec<(submission::Model, submission_judgement::Model)>> {
     let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission_judgement", batch_size).await?;
+    let rows = select_queued_rows(&txn, "submission_judgement", batch_size, contest_types).await?;
 
     if rows.is_empty() {
         txn.commit().await?;
@@ -601,6 +614,7 @@ async fn select_queued_rows(
     txn: &DatabaseTransaction,
     table: &str,
     batch_size: u32,
+    contest_types: &[String],
 ) -> Result<Vec<QueuedRow>, sea_orm::DbErr> {
     // Spawn-time validation (see `dispatcher::Dispatcher::spawn`) asserts
     // `batch_size > 0`, so we should never see a 0 here. Keep a defensive
@@ -608,23 +622,30 @@ async fn select_queued_rows(
     // into a silent "select 0 rows forever" no-op.
     debug_assert!(batch_size > 0, "batch_size must be positive at this point");
     let limit = std::cmp::max(batch_size, 1);
-    let sql = format!(
-        r#"SELECT id
-           FROM {table}
-           WHERE status = 'Queued'
-           ORDER BY created_at
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#
-    );
     let rows = txn
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            sql,
-            [i64::from(limit).into()],
+            queued_rows_sql(table),
+            [i64::from(limit).into(), contest_types.to_vec().into()],
         ))
         .await?;
 
     rows.into_iter().map(row_to_queued).collect()
+}
+
+/// The claim SELECT for `table`: `$1` batch limit, `$2` the contest types
+/// this replica handles (see [`super::prefer_local_handler`]).
+fn queued_rows_sql(table: &str) -> String {
+    format!(
+        r#"SELECT id
+           FROM {table}
+           WHERE status = 'Queued'
+             AND {handled}
+           ORDER BY created_at
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED"#,
+        handled = super::prefer_local_handler_for(table, "$2"),
+    )
 }
 
 fn row_to_queued(row: QueryResult) -> Result<QueuedRow, sea_orm::DbErr> {
@@ -640,24 +661,18 @@ mod tests {
 
     #[test]
     fn select_queued_rows_sql_includes_for_update_skip_locked() {
-        // Smoke test: assert that the SELECT statement we will emit has
-        // the critical `FOR UPDATE SKIP LOCKED` clause and a bounded
-        // LIMIT. A regression here would be silent (the fiber would
-        // still appear to work but lose concurrency safety vs. peer
-        // fibers and the dispatcher/steal scanner), so guard it.
-        let sql = format!(
-            r#"SELECT id
-           FROM {table}
-           WHERE status = 'Queued'
-           ORDER BY created_at
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#,
-            table = "submission"
-        );
-        assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(sql.contains("LIMIT $1"));
-        assert!(sql.contains("status = 'Queued'"));
-        assert!(sql.contains("ORDER BY created_at"));
+        // The claim SELECT must lock with `FOR UPDATE SKIP LOCKED` and stay
+        // bounded. A regression here would be silent (the fiber would still
+        // appear to work but lose concurrency safety vs. peer fibers and the
+        // dispatcher/steal scanner), so guard the SQL actually emitted.
+        for table in ["submission", "code_run", "submission_judgement"] {
+            let sql = queued_rows_sql(table);
+            assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "{sql}");
+            assert!(sql.contains("LIMIT $1"), "{sql}");
+            assert!(sql.contains("status = 'Queued'"), "{sql}");
+            assert!(sql.contains("ORDER BY created_at"), "{sql}");
+            assert!(sql.contains("ANY($2)"), "{sql}");
+        }
     }
 
     #[test]

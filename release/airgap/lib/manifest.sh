@@ -19,12 +19,14 @@ else
   return 1 2>/dev/null || exit 1
 fi
 
-# NOTE: .env.infra/.env.server/.env.worker are on-host runtime config generated
-# on the server/worker (they never crossed the air gap and hold secrets), so
-# they are excluded from transport-integrity. *.example templates ARE covered.
-# Single-sourced here so manifest_generate, manifest_verify, and the pristine
-# check (manifest_no_hostenv) share one exclusion set and can never drift.
-_MANIFEST_HOSTENV=(.env.infra .env.server .env.worker)
+# NOTE: .env.infra/.env.server/.env.worker/.env.gateway and server-join.env are
+# on-host runtime config generated on the node (or, for server-join.env,
+# copied from the infra node to each further server); they never crossed the
+# air gap and hold secrets, so they are excluded from transport-integrity.
+# *.example templates ARE covered. Single-sourced here so manifest_generate,
+# manifest_verify, and the pristine check (manifest_no_hostenv) share one
+# exclusion set and can never drift.
+_MANIFEST_HOSTENV=(.env.infra .env.server .env.worker .env.gateway server-join.env)
 
 # Hash every bundle file except the manifest itself and the on-host env files,
 # relative to and sorted within `dir`. Shared by generate + verify so the
@@ -76,8 +78,8 @@ manifest_verify() {
   fi
 }
 
-# Assert `dir` carries NONE of the given host-env basenames (default: the three
-# excluded above). Those files are the manifest's integrity blind spot: excluded
+# Assert `dir` carries NONE of the given host-env basenames (default: all of
+# those excluded above). Those files are the manifest's integrity blind spot: excluded
 # so operator-generated on-host config doesn't break verify, which also means a
 # planted one rides a "verified" bundle undetected. A pristine bundle (fresh off
 # transport, before any generation) must contain none of them. Prints each

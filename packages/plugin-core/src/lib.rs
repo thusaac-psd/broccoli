@@ -4,6 +4,7 @@
 // `PluginInvoker` / `PluginInvokerExt` traits in `traits.rs`; suppress crate-wide.
 #![allow(clippy::double_must_use)]
 
+pub mod call_gate;
 pub mod config;
 pub mod error;
 pub mod hook;
