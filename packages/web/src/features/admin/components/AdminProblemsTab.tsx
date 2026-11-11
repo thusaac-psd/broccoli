@@ -1,6 +1,10 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
-import { useIdempotencyKey } from '@broccoli/web-sdk/hooks';
+import {
+  idempotencyOutcome,
+  isAlreadyDone,
+  useIdempotentRequest,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
@@ -53,6 +57,7 @@ import {
 } from '@/features/problem/api/attachments';
 import { fetchProblems } from '@/features/problem/api/fetch-problems';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
+import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 // -- Helpers --
 
@@ -107,7 +112,7 @@ export function ProblemFormDialog({
   const [loading, setLoading] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
   const apiClient = useApiClient();
-  const { getKey, resetKey } = useIdempotencyKey();
+  const sendIdempotent = useIdempotentRequest();
 
   const { data: attachments = [] } = useQuery({
     queryKey: attachmentsQueryKey(problem?.id ?? 0),
@@ -175,25 +180,39 @@ export function ProblemFormDialog({
     }
   }, [apiClient, open, problem]);
 
-  async function attachToContest(problemId: number): Promise<boolean> {
-    if (!contestId) return false;
+  // `unsettled`: an earlier attempt to attach it is still running or was cut
+  // off, so it may or may not be in the contest yet.
+  async function attachToContest(
+    problemId: number,
+  ): Promise<'attached' | 'failed' | 'unsettled'> {
+    if (!contestId) return 'failed';
     const { data: existing, error: listError } = await apiClient.GET(
       '/contests/{id}/problems',
       { params: { path: { id: contestId } } },
     );
-    if (listError || !existing) return false;
+    if (listError || !existing) return 'failed';
     const label = nextProblemLabel(
       new Set(existing.map((p: ContestProblem) => p.label)),
     );
-    if (!label) return false;
-    const { error } = await apiClient.POST('/contests/{id}/problems', {
-      headers: { 'Idempotency-Key': getKey() },
-      params: { path: { id: contestId } },
-      body: { problem_id: problemId, label },
-    });
-    if (error) return false;
-    resetKey();
-    return true;
+    if (!label) return 'failed';
+    const body = { problem_id: problemId, label };
+    const { error } = await sendIdempotent({ contestId, body }, (key) =>
+      apiClient.POST('/contests/{id}/problems', {
+        headers: { 'Idempotency-Key': key },
+        params: { path: { id: contestId } },
+        body,
+      }),
+    );
+    if (!error) return 'attached';
+    switch (idempotencyOutcome(error)) {
+      case 'already-done':
+        return 'attached';
+      case 'outcome-unknown':
+      case 'in-progress':
+        return 'unsettled';
+      default:
+        return 'failed';
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -241,12 +260,29 @@ export function ProblemFormDialog({
           params: { path: { id: problem!.id } },
           body,
         })
-      : await apiClient.POST('/problems', {
-          headers: { 'Idempotency-Key': getKey() },
-          body,
-        });
+      : await sendIdempotent(body, (key) =>
+          apiClient.POST('/problems', {
+            headers: { 'Idempotency-Key': key },
+            body,
+          }),
+        );
 
-    if (result.error) {
+    const refetchProblems = () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-problems'] });
+      if (contestId) {
+        queryClient.invalidateQueries({
+          queryKey: ['contest-problems', contestId],
+        });
+      }
+    };
+
+    if (toastUnsettled(result.error, t, { refetch: refetchProblems })) {
+      // The form stays open: if the problem is not in the list, it can be
+      // sent again as it is.
+      setLoading(false);
+      return;
+    }
+    if (result.error && !isAlreadyDone(result.error)) {
       setLoading(false);
       toast.error(
         getErrorMessage(
@@ -257,27 +293,24 @@ export function ProblemFormDialog({
       return;
     }
 
-    if (!isEdit) resetKey();
-
-    let attachFailed = false;
-    if (!isEdit && contestId && result.data) {
-      attachFailed = !(await attachToContest(result.data.id));
+    let attached: Awaited<ReturnType<typeof attachToContest>> = 'attached';
+    if (!isEdit && contestId) {
+      // Without data an earlier attempt created the problem, but its id was
+      // lost with the response, so it cannot be attached from here.
+      attached = result.data ? await attachToContest(result.data.id) : 'failed';
     }
     setLoading(false);
 
-    if (attachFailed) {
+    if (attached === 'failed') {
       toast.warning(t('toast.problem.createdNotAttached'));
+    } else if (attached === 'unsettled') {
+      toast.warning(t('toast.problem.createdAttachUnknown'));
     } else {
       toast.success(
         isEdit ? t('toast.problem.updated') : t('toast.problem.created'),
       );
     }
-    queryClient.invalidateQueries({ queryKey: ['admin-problems'] });
-    if (contestId) {
-      queryClient.invalidateQueries({
-        queryKey: ['contest-problems', contestId],
-      });
-    }
+    refetchProblems();
     onOpenChange(false);
   }
 

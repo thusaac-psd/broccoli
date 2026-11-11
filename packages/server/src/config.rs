@@ -5,7 +5,6 @@ use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
 };
-use tracing::{info, warn};
 
 pub use common::config::MqAppConfig;
 pub use common::storage::config::BlobStoreConfig;
@@ -44,6 +43,23 @@ pub struct DatabaseConfig {
     /// its way back to the privileged app role.
     #[serde(default)]
     pub plugin_url: Option<String>,
+    /// Server-side `statement_timeout` for every pooled connection, in seconds
+    /// (`0` disables it). Boot-time schema sync, migrations and seeding run on a
+    /// separate unbounded session. See `common::db`.
+    #[serde(default = "common::db::default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    /// Send server-side TCP keepalive settings on every connection. Turn this
+    /// off (together with `statement_timeout_secs = 0`) behind a PgBouncer that
+    /// rejects the startup `options` parameter. See `common::db::PgSession`.
+    #[serde(default = "common::db::default_tcp_keepalives")]
+    pub tcp_keepalives: bool,
+    /// TEMPORARY (one release): start even when a boot-time UNIQUE index cannot
+    /// be built because duplicate rows already exist, logging the query that
+    /// lists them instead of refusing to boot. Lets a deployment carrying
+    /// duplicates from older releases start before the cleanup described in
+    /// the upgrade guide. The invariant stays unenforced while this is on.
+    #[serde(default)]
+    pub allow_missing_unique_indexes: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -54,6 +70,9 @@ impl Default for DatabaseConfig {
             plugin_max_connections: default_plugin_max_connections(),
             plugin_privileged_max_connections: default_plugin_privileged_max_connections(),
             plugin_url: None,
+            statement_timeout_secs: common::db::default_statement_timeout_secs(),
+            tcp_keepalives: common::db::default_tcp_keepalives(),
+            allow_missing_unique_indexes: false,
         }
     }
 }
@@ -128,12 +147,13 @@ pub struct ServerConfig {
     /// Logical identity of this replica. Used to derive the per-replica
     /// operation-result queue name so multiple servers behind a load balancer
     /// each receive their own plugin-dispatch results. Empty (the default)
-    /// resolves to the OS hostname; an unusable hostname falls back to a
-    /// random short ID. See [`resolve_server_id`].
+    /// resolves to an ID derived from the machine ID (hostname, then random,
+    /// as fallbacks). See [`resolve_server_id`]. Claimed in Redis at boot, so
+    /// a second live replica with the same ID refuses to start.
     #[serde(default)]
     pub id: String,
     /// Multi-replica deployments require a stable explicit server ID; when
-    /// true, hostname/random fallbacks are rejected.
+    /// true, the host-default fallback is rejected.
     #[serde(default)]
     pub expects_multi_replica: bool,
     /// Master switch for lease refresh, steal scanning, and reply-queue
@@ -283,10 +303,10 @@ pub struct ServerConfig {
     #[serde(default = "default_operation_batch_publish_concurrency")]
     pub operation_batch_publish_concurrency: u32,
     /// Address (e.g. `"0.0.0.0:9091"`) for an **optional** dedicated TCP
-    /// listener that serves only `/healthz` and `/metrics` on its own tokio
-    /// runtime + OS thread (UP#14e). When `None`, behavior is identical to
-    /// the legacy setup: the two endpoints are served only on the main
-    /// router and therefore share the main runtime's scheduler.
+    /// listener that serves only `/livez`, `/healthz` (both liveness-only
+    /// there) and `/metrics` on its own tokio runtime + OS thread (UP#14e).
+    /// When `None`, these endpoints are served only on the main router and
+    /// therefore share the main runtime's scheduler.
     ///
     /// Setting this is **opt-in**: it lets liveness probes and metrics
     /// scrapes survive even when the api runtime is saturated by submission
@@ -664,12 +684,25 @@ fn default_submission_rate_limit_per_minute() -> u32 {
     10
 }
 
+/// The bootstrap admin account (see `seed::ensure_bootstrap_admin`).
+///
+/// When both fields are set, boot acts only on recovery: when no active user
+/// holds `system:admin` (including a fresh database), or when `reset_admin`
+/// is set. It then creates the account, or resets its password to
+/// `admin_password`, and restores the `admin` role and its built-in
+/// permissions. Otherwise a changed password, a revoked role or a renamed or
+/// deleted bootstrap account survives restarts.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct BootstrapConfig {
     #[serde(default)]
     pub admin_username: String,
     #[serde(default)]
     pub admin_password: String,
+    /// Force the recovery above on the next boot even though a `system:admin`
+    /// holder exists, for example after the admin password was lost. Unset it
+    /// again once signed in.
+    #[serde(default)]
+    pub reset_admin: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -695,104 +728,32 @@ pub struct AppConfig {
     pub batch_max_age_secs: u64,
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
+    /// Boot-time clock skew bounds against Postgres and Redis.
+    #[serde(default)]
+    pub clock: common::clock::ClockConfig,
 }
 
 fn default_batch_max_age_secs() -> u64 {
     7200
 }
 
-/// Returns true if `id` is a safe queue-suffix (alphanumeric + `-_.`,
-/// non-empty, <=128 chars). Mirrors the worker-id rules so the same
-/// validation applies to both sides of the MQ envelope.
-pub fn is_valid_server_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && !id.ends_with("_processing")
-        && !id.ends_with("_failed")
-        && !id.ends_with("_fairness_set")
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
+/// Returns true if `id` is a safe queue-suffix. The same rules apply to worker
+/// IDs; see [`common::node_identity::is_valid_node_id`].
+pub use common::node_identity::is_valid_node_id as is_valid_server_id;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ServerIdResolveError {
-    #[error(
-        "server.id must be explicitly set to a valid value when server.expects_multi_replica is true"
-    )]
-    MultiReplicaServerIdRequired,
-}
-
-/// Resolves the effective server ID from a configured value:
-/// 1. If `configured` is non-empty and valid, use it.
-/// 2. If multi-replica mode is expected, reject missing/invalid configured IDs.
-/// 3. Else fall back to the OS hostname (sanitized - Windows hostnames may
-///    contain characters Redis dislikes in queue names).
-/// 4. Else generate an 8-char random ID and warn.
+/// Resolves the effective server ID: a valid configured value, else (unless
+/// multi-replica mode demands an explicit one) the host default from
+/// [`common::node_identity::default_node_id`]. An explicit but invalid value is
+/// an error.
 pub fn resolve_server_id(
     configured: &str,
     expects_multi_replica: bool,
-) -> Result<String, ServerIdResolveError> {
-    let trimmed = configured.trim();
-    if !trimmed.is_empty() {
-        if is_valid_server_id(trimmed) {
-            info!(server_id = %trimmed, "Server ID resolved from explicit configuration");
-            return Ok(trimmed.to_string());
-        }
-        if expects_multi_replica {
-            return Err(ServerIdResolveError::MultiReplicaServerIdRequired);
-        }
-        warn!(
-            configured = %trimmed,
-            "Configured server.id failed validation; falling back to hostname"
-        );
-    } else if expects_multi_replica {
-        return Err(ServerIdResolveError::MultiReplicaServerIdRequired);
-    }
-
-    if let Ok(host) = hostname::get() {
-        let lossy = host.to_string_lossy();
-        let sanitized: String = lossy
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .take(128)
-            .collect();
-        if is_valid_server_id(&sanitized) {
-            warn!(
-                server_id = %sanitized,
-                "Server ID not configured; inferred from hostname. \
-                 Set BROCCOLI__SERVER__ID explicitly in multi-replica deployments \
-                 to avoid silent collisions between replicas with identical hostnames."
-            );
-            return Ok(sanitized);
-        }
-        warn!(
-            hostname = %lossy,
-            "OS hostname unsuitable as server.id; using random fallback"
-        );
-    } else {
-        warn!("Could not read OS hostname; using random server.id fallback");
-    }
-
-    let fallback: String = uuid::Uuid::new_v4()
-        .simple()
-        .to_string()
-        .chars()
-        .take(8)
-        .collect();
-    warn!(
-        server_id = %fallback,
-        "Server ID generated as random fallback because hostname was unobtainable or invalid. \
-         This ID changes every restart — set BROCCOLI__SERVER__ID explicitly so in-flight \
-         operation results route correctly across restarts."
-    );
-    Ok(fallback)
+) -> Result<String, common::node_identity::NodeIdError> {
+    common::node_identity::resolve_node_id(
+        common::node_identity::NodeRole::Server,
+        configured,
+        expects_multi_replica,
+    )
 }
 
 /// Centralized derivation of the per-replica operation-result queue name.
@@ -887,15 +848,12 @@ mod tests {
     }
 
     #[test]
-    fn resolves_invalid_explicit_id_via_fallback() {
-        // "has space" is invalid; we expect a non-empty fallback (hostname or random).
-        let resolved = resolve_server_id("has space", false).unwrap();
-        assert!(!resolved.is_empty());
-        assert!(is_valid_server_id(&resolved));
+    fn rejects_an_invalid_explicit_id() {
+        assert!(resolve_server_id("has space", false).is_err());
     }
 
     #[test]
-    fn resolves_empty_to_hostname_or_random_fallback() {
+    fn resolves_empty_to_a_host_default() {
         let resolved = resolve_server_id("", false).unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));
@@ -904,7 +862,7 @@ mod tests {
     #[test]
     fn resolves_whitespace_only_to_fallback() {
         // Whitespace-only configured value should behave like empty:
-        // produce a non-empty, well-formed ID via the hostname/random path.
+        // produce a non-empty, well-formed host default.
         let resolved = resolve_server_id("   ", false).unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));

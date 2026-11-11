@@ -13,6 +13,8 @@ import { AuthLink } from '@/components/AuthLink';
 interface MarkdownProps {
   children: string;
   className?: string;
+  /** Rewrites link and image URLs before they are fetched or followed. */
+  resolveUrl?: (url: string | undefined) => string | undefined;
 }
 
 function markdownCellAlignClass(
@@ -28,7 +30,8 @@ function markdownCellAlignClass(
   }
 }
 
-export function Markdown({ children, className }: MarkdownProps) {
+export function Markdown({ children, className, resolveUrl }: MarkdownProps) {
+  const resolve = resolveUrl ?? ((url: string | undefined) => url);
   return (
     <div className={className}>
       <ReactMarkdown
@@ -73,7 +76,7 @@ export function Markdown({ children, className }: MarkdownProps) {
           hr: () => <hr className="my-6 border-border" />,
           a: ({ href, children }: ComponentPropsWithoutRef<'a'>) => (
             <AuthLink
-              href={href}
+              href={resolve(href)}
               className="text-primary underline underline-offset-2 decoration-primary/40 hover:decoration-primary/80 transition-colors"
             >
               {children}
@@ -161,7 +164,7 @@ export function Markdown({ children, className }: MarkdownProps) {
           ),
           img: ({ src, alt }: ComponentPropsWithoutRef<'img'>) => (
             <AuthImage
-              src={src}
+              src={resolve(src)}
               alt={alt}
               className="rounded-md max-w-full my-3"
             />

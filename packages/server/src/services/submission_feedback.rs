@@ -2,6 +2,7 @@
 use crate::entity::{plugin_storage, submission};
 use crate::error::AppError;
 use crate::state::AppState;
+use crate::utils::advisory_lock;
 use broccoli_server_sdk::types::{
     FeedbackUpdateOutcome, SubmissionAdmission, SubmissionFeedbackAction, SubmissionFeedbackQuery,
     SubmissionFeedbackRecord, SubmissionFeedbackResult, SubmissionSlotObservation,
@@ -44,12 +45,8 @@ pub async fn insert_admitted(
     if let Some(slot) = &admission.slot {
         // Namespaces are chosen by plugins. Lock before checking the generation,
         // including when two admissions guard different storage keys.
-        txn.execute_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            [format!("submission-slot:{plugin_id}:{}", slot.key()).into()],
-        ))
-        .await?;
+        advisory_lock::lock_xact(&txn, &format!("submission-slot:{plugin_id}:{}", slot.key()))
+            .await?;
         let (generation, pending) = slot_state(&txn, plugin_id, slot.key()).await?;
         if generation != slot.generation() || pending.is_some() {
             return Err(rejected(

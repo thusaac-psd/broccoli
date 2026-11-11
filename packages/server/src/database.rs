@@ -1,12 +1,40 @@
-use std::time::Duration;
-
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
+use common::db::{PgPoolSpec, PgSession};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
 use sea_orm_migration::MigratorTrait;
 
 use crate::migration::Migrator;
 
+/// `application_name` of the server's own pools (`pg_stat_activity`).
+pub const APP_NAME: &str = "broccoli-server";
+/// `application_name` of the plugin host-function pools, so plugin SQL is
+/// distinguishable from the server's own in `pg_stat_activity`.
+pub const PLUGIN_APP_NAME: &str = "broccoli-server-plugin";
+
+/// The session every pooled server connection runs with.
+pub fn app_session(config: &crate::config::DatabaseConfig) -> PgSession {
+    PgSession::new(
+        APP_NAME,
+        config.statement_timeout_secs,
+        config.tcp_keepalives,
+    )
+}
+
+/// The same bounds as [`app_session`], labelled as plugin traffic.
+pub fn plugin_session(app: &PgSession) -> PgSession {
+    PgSession {
+        application_name: PLUGIN_APP_NAME,
+        ..app.clone()
+    }
+}
+
+/// Migrated main pool with default settings (tests and tools).
 pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
-    init_db_with_max_connections(db_url, 100).await
+    init_db_with_max_connections(
+        db_url,
+        100,
+        &app_session(&crate::config::DatabaseConfig::default()),
+    )
+    .await
 }
 
 /// The restricted, NOLOGIN Postgres role raw plugin SQL runs under. Applied per
@@ -72,7 +100,7 @@ pub struct PluginLoginOverride {
 pub async fn provision_restricted_plugin_login(
     privileged: &DatabaseConnection,
 ) -> Option<PluginLoginOverride> {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use sea_orm::{DbBackend, Statement};
 
     // A fresh candidate secret; only the FIRST writer's value persists (ON
     // CONFLICT DO NOTHING), so every replica ends up reading the same stored
@@ -252,6 +280,7 @@ pub async fn resolve_restricted_plugin_pool(
     app_url: &str,
     plugin_url: Option<&str>,
     max_connections: u32,
+    session: &PgSession,
 ) -> Result<RestrictedPluginPool, DbErr> {
     let (primary_url, login) = match plugin_url {
         Some(url) => (url.to_string(), None),
@@ -260,8 +289,14 @@ pub async fn resolve_restricted_plugin_pool(
             provision_restricted_plugin_login(privileged).await,
         ),
     };
-    let mut resolved =
-        connect_restricted_pool_with_fallback(app_url, primary_url, login, max_connections).await?;
+    let mut resolved = connect_restricted_pool_with_fallback(
+        app_url,
+        primary_url,
+        login,
+        max_connections,
+        session,
+    )
+    .await?;
     // An operator-configured `plugin_url` is trusted as-is; otherwise the presence
     // of a dedicated login decides engine isolation vs. an app-role degrade.
     resolved.auth =
@@ -278,8 +313,16 @@ async fn connect_restricted_pool_with_fallback(
     primary_url: String,
     primary_login: Option<PluginLoginOverride>,
     max_connections: u32,
+    session: &PgSession,
 ) -> Result<RestrictedPluginPool, DbErr> {
-    match init_plugin_db(&primary_url, max_connections, primary_login.clone()).await {
+    match init_plugin_db(
+        &primary_url,
+        max_connections,
+        primary_login.clone(),
+        session,
+    )
+    .await
+    {
         Ok(pool) => Ok(RestrictedPluginPool {
             pool,
             fallback_url: primary_url,
@@ -294,7 +337,7 @@ async fn connect_restricted_pool_with_fallback(
                 "Restricted plugin pool could not connect as the dedicated login role; \
                  falling back to app-role auth (raw plugin SQL will be disabled)"
             );
-            let pool = init_plugin_db(app_url, max_connections, None).await?;
+            let pool = init_plugin_db(app_url, max_connections, None, session).await?;
             Ok(RestrictedPluginPool {
                 pool,
                 fallback_url: app_url.to_string(),
@@ -318,12 +361,12 @@ async fn connect_restricted_pool_with_fallback(
 ///    the same pool (see docs/plans/2026-06-25-nul-byte-root-cause.md). Plugin
 ///    host functions always run their DB call to completion (sync `block_on` on
 ///    a blocking thread, never cancelled), so a pool used ONLY by them stays
-///    clean. No schema-sync/seeding here - the main pool already ran it.
+///    clean. No schema-sync/seeding here - [`BootSession`] already ran it.
 ///
 /// 2. **Bounded privilege** - every connection runs `SET ROLE broccoli_plugin`
 ///    before the plugin can use it, via sqlx's per-connection `after_connect`
-///    hook. `broccoli_plugin` is a NOLOGIN role (created + granted in
-///    [`init_db_with_max_connections`]) that the app role is a MEMBER of. By
+///    hook. `broccoli_plugin` is a NOLOGIN role (created + granted by the
+///    migrations in [`BootSession::migrate`]) that the app role is a MEMBER of. By
 ///    product decision (migrations m0003/m0004) it has full read + write DML
 ///    (SELECT/INSERT/UPDATE/DELETE) on every table, so raw plugin SQL can freely
 ///    read and mutate contest DATA. What it still CANNOT do, and what this role
@@ -349,21 +392,10 @@ pub async fn init_plugin_db(
     db_url: &str,
     max_connections: u32,
     login: Option<PluginLoginOverride>,
+    session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    // `sqlx::ConnectOptions` (trait) brings `disable_statement_logging` into
-    // scope; it is distinct from `sea_orm::ConnectOptions` (struct) used below.
-    use sea_orm::sqlx::ConnectOptions as _;
-    use sea_orm::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-    let pool_options = PgPoolOptions::new()
-        .max_connections(max_connections)
-        .min_connections(max_connections.min(2))
-        // sea_orm's ConnectOptions collapses connect_timeout + acquire_timeout
-        // onto sqlx's single acquire_timeout; 30s matches the privileged pool.
-        .acquire_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(600))
-        .max_lifetime(Duration::from_secs(1800))
-        .test_before_acquire(true)
+    let pool_options = PgPoolSpec::new(max_connections, 2)
+        .pool_options()
         // The unbypassable choke point: every physical connection downshifts to
         // the bounded `broccoli_plugin` role at connect time. `SET ROLE` is
         // session-level and persists for the connection's lifetime, so pooled
@@ -380,10 +412,7 @@ pub async fn init_plugin_db(
             })
         });
 
-    let mut connect_options = db_url
-        .parse::<PgConnectOptions>()
-        .map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?
-        .disable_statement_logging();
+    let mut connect_options = common::db::pg_connect_options(db_url, &plugin_session(session))?;
     if let Some(login) = &login {
         // Overriding on PgConnectOptions (not by rewriting the URL string) means
         // no percent-encoding concerns for the credentials.
@@ -392,14 +421,7 @@ pub async fn init_plugin_db(
             .password(&login.password);
     }
 
-    let pool = pool_options
-        .connect_with(connect_options)
-        .await
-        .map_err(|e| DbErr::Conn(sea_orm::RuntimeErr::SqlxError(e.into())))?;
-
-    Ok(sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(
-        pool,
-    ))
+    common::db::connect_with(pool_options, connect_options).await
 }
 
 /// The PRIVILEGED plugin pool: identical to [`init_plugin_db`] (same isolation,
@@ -417,66 +439,156 @@ pub async fn init_plugin_db(
 pub async fn init_plugin_db_privileged(
     db_url: &str,
     max_connections: u32,
+    session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    let mut opt = ConnectOptions::new(db_url.to_owned());
-    opt.max_connections(max_connections)
-        .min_connections(max_connections.min(2))
-        .connect_timeout(Duration::from_secs(30))
-        .acquire_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(600))
-        .max_lifetime(Duration::from_secs(1800))
-        .test_before_acquire(true)
-        .sqlx_logging(false);
-    Database::connect(opt).await
+    common::db::connect(
+        db_url,
+        &PgPoolSpec::new(max_connections, 2),
+        &plugin_session(session),
+    )
+    .await
 }
 
+/// Bring the schema up to date (under the boot lock), then open the main pool.
+/// For tests and tools; the server binary drives [`BootSession`] itself so
+/// seeding runs under the same lock.
 pub async fn init_db_with_max_connections(
     db_url: &str,
     max_connections: u32,
+    session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    let mut opt = ConnectOptions::new(db_url.to_owned());
+    let boot = BootSession::acquire(db_url).await?;
+    boot.migrate().await?;
+    boot.release().await?;
+    connect_main_pool(db_url, max_connections, session).await
+}
 
-    opt.max_connections(max_connections)
-        .min_connections(max_connections.min(5))
-        .connect_timeout(Duration::from_secs(30))
-        .acquire_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(600))
-        .max_lifetime(Duration::from_secs(1800))
-        // A plugin DB host call can be cancelled mid-flight (e.g. a detached
-        // evaluate timeout aborts the Extism call while it is inside
-        // `block_on(execute_raw)`), which can return a pooled connection with
-        // unread protocol bytes. Reusing such a connection surfaces stale
-        // framing bytes (message length headers contain 0x00) as a spurious
-        // "invalid byte sequence for encoding UTF8: 0x00" on the NEXT, clean
-        // statement. Liveness-check connections on acquire so sqlx discards a
-        // desynced connection instead of handing it to the next query.
-        .test_before_acquire(true)
-        .sqlx_logging(false);
+/// The main pool (handlers, dispatcher, background loops). No schema work.
+pub async fn connect_main_pool(
+    db_url: &str,
+    max_connections: u32,
+    session: &PgSession,
+) -> Result<DatabaseConnection, DbErr> {
+    // `test_before_acquire` (on by default in `PgPoolSpec`) matters here: a
+    // plugin DB host call can be cancelled mid-flight (e.g. a detached evaluate
+    // timeout aborts the Extism call while it is inside
+    // `block_on(execute_raw)`), which can return a pooled connection with unread
+    // protocol bytes. Reusing such a connection surfaces stale framing bytes
+    // (message length headers contain 0x00) as a spurious "invalid byte sequence
+    // for encoding UTF8: 0x00" on the NEXT, clean statement. The liveness check
+    // on acquire makes sqlx discard a desynced connection instead.
+    common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
+}
 
-    let db = Database::connect(opt).await?;
+/// Session-level advisory lock key that serializes boot-time schema work
+/// (schema sync, migrations, seeding, plugin-login provisioning) across every
+/// server booting against the same database. The value is arbitrary but fixed
+/// ("broccoli" in ASCII); it only has to be unique among this database's
+/// advisory locks.
+pub const BOOT_LOCK_KEY: i64 = 0x6272_6f63_636f_6c69;
 
-    crate::migration::prepare_user_display_name(&db).await?;
+/// One dedicated database session holding [`BOOT_LOCK_KEY`] for the duration
+/// of boot-time schema work.
+///
+/// Without it, servers booting together on a fresh database race each other's
+/// check-then-insert seeding and DDL: losers fail and restart, and a duplicate
+/// bootstrap admin inserted before the unique username index exists makes that
+/// index impossible to create, so the invariant is lost for good.
+///
+/// The session is a single never-recycled connection (so the session-level
+/// lock and the work run on the same backend) with no `statement_timeout`
+/// (DDL and backfills on a large database legitimately run long). If this
+/// process dies while holding the lock, Postgres releases it when the session
+/// ends; the server-side keepalive in [`common::db`] bounds that to about a
+/// minute even when the host vanishes without closing the socket.
+pub struct BootSession {
+    db: DatabaseConnection,
+}
 
-    // Create/update the core tables from the entity definitions.
-    db.get_schema_registry("server::entity::*")
-        .sync(&db)
+impl BootSession {
+    /// Open the session and take the boot lock, waiting for a peer that is
+    /// booting to finish first.
+    pub async fn acquire(db_url: &str) -> Result<Self, DbErr> {
+        let db = common::db::connect(
+            db_url,
+            &PgPoolSpec::single_session(),
+            &PgSession::unbounded(APP_NAME),
+        )
         .await?;
+        let boot = Self { db };
+        // Override any role- or database-level default too. A plain `SET` (not
+        // a startup option) also works through a PgBouncer in session mode.
+        boot.db
+            .execute_unprepared("SET statement_timeout = 0")
+            .await?;
+        let held = boot
+            .db
+            .query_one_raw(boot.lock_stmt("SELECT pg_try_advisory_lock($1) AS held"))
+            .await?
+            .map(|r| r.try_get::<bool>("", "held"))
+            .transpose()?
+            .unwrap_or(false);
+        if !held {
+            tracing::info!(
+                lock_key = BOOT_LOCK_KEY,
+                "Another server is running boot-time schema work; waiting for it to finish"
+            );
+            boot.db
+                .execute_raw(boot.lock_stmt("SELECT pg_advisory_lock($1)"))
+                .await?;
+        }
+        tracing::info!("Acquired the boot lock");
+        Ok(boot)
+    }
 
-    // Apply the versioned, tracked supplementary DDL (column evolutions, the
-    // one-time data backfill, and the `broccoli_plugin` least-privilege role +
-    // read-narrowing grants/view) that the entity `sync()` above does not cover.
-    // Recorded in `seaql_migrations` so each runs once and its failures surface
-    // instead of being swallowed; idempotent, so an existing deployment records
-    // them as no-ops on first run. See `crate::migration`.
-    Migrator::up(&db, None).await?;
+    fn lock_stmt(&self, sql: &str) -> sea_orm::Statement {
+        sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            sql,
+            [BOOT_LOCK_KEY.into()],
+        )
+    }
 
-    Ok(db)
+    /// The locked session, for seeding and provisioning.
+    pub fn conn(&self) -> &DatabaseConnection {
+        &self.db
+    }
+
+    /// Schema sync and versioned migrations.
+    pub async fn migrate(&self) -> Result<(), DbErr> {
+        let db = &self.db;
+        crate::migration::prepare_user_display_name(db).await?;
+
+        // Create/update the core tables from the entity definitions.
+        db.get_schema_registry("server::entity::*").sync(db).await?;
+
+        // Apply the versioned, tracked supplementary DDL (column evolutions, the
+        // one-time data backfill, and the `broccoli_plugin` least-privilege role +
+        // read-narrowing grants/view) that the entity `sync()` above does not
+        // cover. Recorded in `seaql_migrations` so each runs once and its failures
+        // surface instead of being swallowed; idempotent, so an existing
+        // deployment records them as no-ops on first run. See `crate::migration`.
+        Migrator::up(db, None).await
+    }
+
+    /// Release the lock and close the session. Dropping a `BootSession`
+    /// without calling this also releases the lock, once the pool closes.
+    pub async fn release(self) -> Result<(), DbErr> {
+        self.db
+            .execute_raw(self.lock_stmt("SELECT pg_advisory_unlock($1)"))
+            .await?;
+        self.db.close().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::ConnectionTrait;
+    use std::time::Duration;
+
+    fn test_session() -> PgSession {
+        app_session(&crate::config::DatabaseConfig::default())
+    }
 
     /// Pure classification of the restricted pool's end-state — the single input
     /// to the runtime's raw-SQL fail-closed decision. Operator `plugin_url` wins
@@ -507,6 +619,248 @@ mod tests {
         );
     }
 
+    async fn fresh_postgres() -> (
+        testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
+        String,
+    ) {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+        let container = testcontainers_modules::postgres::Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        (container, url)
+    }
+
+    /// The server's boot sequence as `ServerRuntime::build` runs it.
+    async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
+        let boot = BootSession::acquire(url).await?;
+        boot.migrate().await?;
+        crate::seed::ensure_indexes(boot.conn(), false).await?;
+        crate::seed::seed_role_permissions(boot.conn()).await?;
+        let bootstrap = crate::config::BootstrapConfig {
+            admin_username: "admin".into(),
+            admin_password: "pw".into(),
+            ..Default::default()
+        };
+        crate::seed::ensure_bootstrap_admin(boot.conn(), &bootstrap).await?;
+        boot.release().await
+    }
+
+    /// The boot-time skew check reads both shared clocks for real; on one host
+    /// they agree with ours, so it passes even with a strict bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clock_skew_check_reads_postgres_and_redis() {
+        use testcontainers::runners::AsyncRunner;
+        let (_pg, url) = fresh_postgres().await;
+        let redis = testcontainers_modules::redis::Redis::default()
+            .start()
+            .await
+            .expect("start redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("redis port");
+        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let db = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        let strict = common::clock::ClockConfig {
+            warn_skew_ms: 1_000,
+            max_skew_ms: 1_000,
+        };
+        common::clock::check_clock_skew(&db, Some(&client), &strict)
+            .await
+            .expect("same-host clocks agree");
+    }
+
+    /// The boot session is unbounded even when the role carries a default
+    /// `statement_timeout` (it sets 0 explicitly instead of relying on startup
+    /// options, which a PgBouncer may strip).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_session_overrides_a_role_level_statement_timeout() {
+        let (_c, url) = fresh_postgres().await;
+        let admin = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        admin
+            .execute_unprepared("ALTER ROLE postgres SET statement_timeout = '1s'")
+            .await
+            .expect("role default");
+        admin.close().await.expect("close");
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.conn()
+            .execute_unprepared("SELECT pg_sleep(1.5)")
+            .await
+            .expect("boot DDL is not cut off by the role default");
+        boot.release().await.expect("release");
+    }
+
+    /// A second booter blocks on the boot lock until the first releases it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_lock_serializes_booters() {
+        let (_c, url) = fresh_postgres().await;
+        let first = BootSession::acquire(&url).await.expect("first acquire");
+        let second_url = url.clone();
+        let mut second = tokio::spawn(async move { BootSession::acquire(&second_url).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut second)
+                .await
+                .is_err(),
+            "second booter must wait while the first holds the lock"
+        );
+        first.release().await.expect("release");
+        let second = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("second booter proceeds once the lock is released")
+            .expect("join")
+            .expect("second acquire");
+        second.release().await.expect("release");
+    }
+
+    /// Servers booting together on a fresh database all succeed, and exactly
+    /// one bootstrap admin exists, guarded by the unique username index.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_first_boots_converge() {
+        let (_c, url) = fresh_postgres().await;
+        let boots: Vec<_> = (0..4)
+            .map(|_| {
+                let url = url.clone();
+                tokio::spawn(async move { boot_like_the_server(&url).await })
+            })
+            .collect();
+        for b in boots {
+            b.await
+                .expect("join")
+                .expect("every concurrent boot succeeds");
+        }
+        let db = connect_main_pool(&url, 1, &test_session())
+            .await
+            .expect("pool");
+        let row = db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "SELECT (SELECT COUNT(*) FROM \"user\" WHERE username = 'admin')::bigint AS admins, \
+                 EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_user_username_active') AS idx",
+            ))
+            .await
+            .expect("query")
+            .expect("row");
+        assert_eq!(row.try_get::<i64>("", "admins").unwrap(), 1);
+        assert!(row.try_get::<bool>("", "idx").unwrap());
+    }
+
+    /// A unique index that cannot be built (duplicates already present) fails
+    /// boot instead of leaving the invariant silently unenforced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uncreatable_unique_index_fails_boot() {
+        let (_c, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.migrate().await.expect("migrate");
+        for _ in 0..2 {
+            boot.conn()
+                .execute_unprepared(
+                    "INSERT INTO \"user\" (username, display_name, password, created_at, credentials_changed_at) \
+                     VALUES ('dup', 'dup', 'x', now(), now())",
+                )
+                .await
+                .expect("insert duplicate user");
+        }
+        let err = crate::seed::ensure_indexes(boot.conn(), false)
+            .await
+            .expect_err("duplicate usernames must fail boot");
+        let msg = err.to_string();
+        assert!(msg.contains("idx_user_username_active"), "{msg}");
+        assert!(msg.contains("ALLOW_MISSING_UNIQUE_INDEXES"), "{msg}");
+
+        // The reported query is runnable and lists exactly the offending key.
+        let find = msg
+            .split("Find the duplicate rows with: ")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("find query in the error");
+        let rows = boot
+            .conn()
+            .query_all_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                find.to_string(),
+            ))
+            .await
+            .expect("find query runs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<String>("", "username").unwrap(), "dup");
+        assert_eq!(rows[0].try_get::<i64>("", "rows").unwrap(), 2);
+
+        // The one-release opt-out lets boot continue with the index missing.
+        crate::seed::ensure_indexes(boot.conn(), true)
+            .await
+            .expect("opt-out starts anyway");
+    }
+
+    /// Every pooled connection carries the shared session settings: a slow
+    /// statement is cancelled server-side by `statement_timeout`, and keepalive +
+    /// `application_name` are set, on the main AND plugin pools. The migration
+    /// session is unbounded, so long DDL is not cut off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pooled_sessions_are_bounded_and_labelled() {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        let container = Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+
+        let session = app_session(&crate::config::DatabaseConfig {
+            statement_timeout_secs: 1,
+            ..Default::default()
+        });
+        let app = init_db_with_max_connections(&url, 2, &session)
+            .await
+            .expect("migrate + main pool");
+        let privileged = init_plugin_db_privileged(&url, 1, &session)
+            .await
+            .expect("privileged plugin pool");
+        let restricted = init_plugin_db(&url, 1, None, &session)
+            .await
+            .expect("restricted plugin pool");
+
+        async fn show(db: &DatabaseConnection, setting: &str) -> String {
+            db.query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!("SELECT current_setting('{setting}') AS v"),
+            ))
+            .await
+            .expect("show")
+            .expect("row")
+            .try_get::<String>("", "v")
+            .expect("value")
+        }
+
+        for (db, name) in [
+            (&app, APP_NAME),
+            (&privileged, PLUGIN_APP_NAME),
+            (&restricted, PLUGIN_APP_NAME),
+        ] {
+            assert_eq!(show(db, "statement_timeout").await, "1s");
+            assert_eq!(show(db, "application_name").await, name);
+            // Keepalives only apply to TCP sessions, which these are.
+            assert_eq!(show(db, "tcp_keepalives_idle").await, "30");
+            let err = db
+                .execute_unprepared("SELECT pg_sleep(3)")
+                .await
+                .expect_err("statement_timeout must cancel the sleep");
+            assert!(
+                err.to_string().contains("statement timeout"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
     /// The plugin role may now READ and WRITE (DML) any core table by product
     /// decision (m0003 reads, m0004 writes), but core schema DDL (`DROP`/`ALTER`)
     /// stays owner-only, so a plugin cannot corrupt/drop the schema. It retains
@@ -531,16 +885,16 @@ mod tests {
 
         // Full app migration: syncs the core schema AND applies the plugin role's
         // read (m0003) + write (m0004) grants.
-        let app = init_db_with_max_connections(&url, 5)
+        let app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
 
         // RESTRICTED pool: every connection `SET ROLE broccoli_plugin`.
-        let restricted = init_plugin_db(&url, 2, None)
+        let restricted = init_plugin_db(&url, 2, None, &test_session())
             .await
             .expect("restricted plugin pool");
         // PRIVILEGED pool: runs as the app role (no SET ROLE).
-        let privileged = init_plugin_db_privileged(&url, 2)
+        let privileged = init_plugin_db_privileged(&url, 2, &test_session())
             .await
             .expect("privileged plugin pool");
 
@@ -657,7 +1011,7 @@ mod tests {
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
-        let app = init_db_with_max_connections(&url, 5)
+        let app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
 
@@ -668,7 +1022,7 @@ mod tests {
         assert_eq!(login.username, PLUGIN_DB_LOGIN_ROLE);
 
         // Single-connection restricted pool authenticating as the dedicated role.
-        let restricted = init_plugin_db(&url, 1, Some(login))
+        let restricted = init_plugin_db(&url, 1, Some(login), &test_session())
             .await
             .expect("restricted plugin pool on the dedicated login");
 
@@ -778,7 +1132,7 @@ mod tests {
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
-        let _app = init_db_with_max_connections(&url, 5)
+        let _app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
 
@@ -787,9 +1141,15 @@ mod tests {
             username: "no_such_plugin_login".to_string(),
             password: "nope".to_string(),
         };
-        let resolved = connect_restricted_pool_with_fallback(&url, url.clone(), Some(unusable), 2)
-            .await
-            .expect("a refused dedicated login must degrade, not error");
+        let resolved = connect_restricted_pool_with_fallback(
+            &url,
+            url.clone(),
+            Some(unusable),
+            2,
+            &test_session(),
+        )
+        .await
+        .expect("a refused dedicated login must degrade, not error");
 
         // Degraded to app-role auth, and the returned pool actually works.
         assert!(
@@ -838,10 +1198,10 @@ mod tests {
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
-        let _app = init_db_with_max_connections(&url, 5)
+        let _app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
-        let restricted = init_plugin_db(&url, 2, None)
+        let restricted = init_plugin_db(&url, 2, None, &test_session())
             .await
             .expect("restricted plugin pool");
 

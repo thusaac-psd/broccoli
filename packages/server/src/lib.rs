@@ -289,7 +289,26 @@ fn frontend_assets_service(
 > {
     tower::ServiceBuilder::new()
         .map_response(normalize_javascript_content_type)
+        .map_response(cache_hashed_asset_forever)
         .service(ServeDir::new(frontend_dist.as_ref().join("assets")))
+}
+
+/// Host assets under `/assets/*` are content-hashed, and the web build's
+/// shared-deps plugin writes its import map before hashing, so a file name
+/// pins its bytes and a browser may keep it for good. Only successful (or
+/// `304`) responses are marked: a 404 for a chunk a redeploy removed must not
+/// be cached, or that browser could never load the chunk again. Plugin assets
+/// are served by their own route and are not content-hashed, so they never
+/// reach this service.
+fn cache_hashed_asset_forever<B>(mut response: HttpResponse<B>) -> HttpResponse<B> {
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
 }
 
 fn spa_fallback_service(frontend_dist: impl Into<PathBuf>) -> ServeDir<ServeFile> {
@@ -324,7 +343,9 @@ pub fn build_router(state: AppState) -> axum::Router {
         )
         .fallback_service(frontend_assets_service(&frontend_dist));
 
-    // `/metrics` and `/healthz` are also served on a dedicated tokio runtime
+    // `/livez` is the shallow liveness probe for load balancers (no dependency
+    // calls); `/healthz` is the deep readiness check (DB + Redis).
+    // `/metrics`, `/livez` and `/healthz` are also served on a dedicated tokio runtime
     // + listener when `server.healthz_listen` is configured - see UP#14e in
     // `healthz_runtime`. Operators are encouraged to point load-balancer
     // probes and Prometheus scrapes at the dedicated listener so main-runtime
@@ -335,6 +356,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .nest("/api", router.fallback(api_not_found))
         .route("/metrics", axum::routing::get(metrics_handler))
         .route("/healthz", axum::routing::get(handlers::health::healthz))
+        .route("/livez", axum::routing::get(handlers::health::livez))
         .nest("/assets", assets_router)
         .fallback_service(spa_fallback_service(frontend_dist))
         .with_state(state)
@@ -485,6 +507,10 @@ mod tests {
                 response.headers()[axum::http::header::CONTENT_TYPE],
                 "application/javascript"
             );
+            assert_eq!(
+                response.headers()[axum::http::header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
         }
 
         let response = service
@@ -500,6 +526,13 @@ mod tests {
         let response = response.into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .is_none(),
+            "a missing chunk must not be cached"
+        );
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ use crate::metrics::{
     TaskMetricGuard, WorkerPermitMetricGuard, record_mq_consume, record_mq_publish,
 };
 use crate::models::worker::Worker;
-use crate::task_runner::process_task;
+use crate::task_runner::{PublishRetry, execute_task, publish_result};
 
 #[derive(Clone)]
 pub struct WorkerConsumer {
@@ -29,6 +29,7 @@ pub struct WorkerConsumer {
     cancel_checker: Option<Arc<RedisCancelChecker>>,
     metrics: Metrics,
     worker_id: String,
+    publish_retry: PublishRetry,
 }
 
 pub struct WorkerConsumerDeps {
@@ -55,6 +56,7 @@ impl WorkerConsumer {
             cancel_checker: deps.cancel_checker,
             metrics: deps.metrics,
             worker_id: deps.worker_id,
+            publish_retry: PublishRetry::default(),
         }
     }
 
@@ -194,8 +196,11 @@ impl WorkerConsumer {
         let task_start = std::time::Instant::now();
         let mut cleanup_guard = RetryCleanupGuard::new(&self.retry_tracker, &task_id);
 
+        // Only EXECUTION is retried by this loop. Once a result exists it is
+        // published with its own publish-only retry, so a transient MQ failure
+        // never re-runs the sandbox job or discards the computed verdict.
         loop {
-            match process_task(
+            match execute_task(
                 &task,
                 &self.worker,
                 &self.mq,
@@ -205,27 +210,45 @@ impl WorkerConsumer {
             .await
             {
                 Ok(result) => {
+                    self.retry_tracker.lock().await.clear(&task_id);
+                    cleanup_guard.defuse();
+                    let published =
+                        publish_result(&task, &result, &self.mq, &self.metrics, self.publish_retry)
+                            .await;
+
+                    let outcome = match (&published, result.success) {
+                        (Err(_), _) => "publish_failed",
+                        (Ok(()), true) => "success",
+                        (Ok(()), false) => "failure",
+                    };
                     let mut completion_attrs = task_attrs.clone();
-                    completion_attrs.push(KeyValue::new(
-                        "outcome",
-                        if result.success { "success" } else { "failure" },
-                    ));
+                    completion_attrs.push(KeyValue::new("outcome", outcome));
                     self.metrics
                         .task_process_duration
                         .record(task_start.elapsed().as_secs_f64(), &completion_attrs);
                     self.metrics.tasks_completed_total.add(1, &completion_attrs);
-
-                    self.retry_tracker.lock().await.clear(&task_id);
-                    cleanup_guard.defuse();
                     record_mq_consume(
                         &self.metrics,
                         "operation",
                         "operation_task",
-                        if result.success { "success" } else { "failure" },
+                        outcome,
                         attempts,
                         consume_start,
                     );
-                    return Ok(());
+                    // A result that could not be delivered within the publish
+                    // window is handed back to the broker for redelivery. Drop
+                    // our dedup claim first: it can outlive this attempt, and a
+                    // worker that receives the redelivery would otherwise see
+                    // it held, skip the task and ack it away. This is best
+                    // effort: if Redis is still failing, the reject can fail too
+                    // (under OOM the vendored reject drops the message from the
+                    // processing list before its re-publish is refused).
+                    if published.is_err()
+                        && let Some(dedup) = self.dedup.as_ref()
+                    {
+                        dedup.release(&task_id).await;
+                    }
+                    return published.map_err(|e| BroccoliError::Publish(e.to_string()));
                 }
                 Err(e) => {
                     let error_str = e.to_string();
@@ -520,5 +543,132 @@ mod tests {
             0,
             "cancelled tasks must not reach the executor"
         );
+    }
+
+    /// Regression: when only the result PUBLISH fails (here Redis is OOM under
+    /// `noeviction`), the worker must retry the publish of the computed result,
+    /// not re-run the sandbox job and then discard the verdict.
+    #[tokio::test]
+    async fn publish_failure_retries_publish_without_re_executing() {
+        let redis = Redis::default().start().await.expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let redis_url = format!("redis://127.0.0.1:{port}");
+        let client = redis::Client::open(redis_url.as_str()).unwrap();
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+        consumer.cancel_checker = None;
+        consumer.publish_retry = PublishRetry {
+            base_delay_ms: 50,
+            max_delay_ms: 200,
+            deadline: std::time::Duration::from_secs(30),
+        };
+
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory-policy")
+            .arg("noeviction")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory")
+            .arg("1")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let t = task("publish-retry", None);
+        let reply_queue = t.reply_queue_name().to_string();
+        let run =
+            tokio::spawn(
+                async move { consumer.process_message(BrokerMessage::new(t, None)).await },
+            );
+
+        // Let several publish attempts fail, then relieve the memory pressure.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(!run.is_finished(), "the publish must still be retrying");
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory")
+            .arg("0")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        run.await
+            .unwrap()
+            .expect("the task completes once the publish goes through");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a publish failure must not re-run the job"
+        );
+        let depth: i64 = redis::cmd("ZCARD")
+            .arg(&reply_queue)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert_eq!(depth, 1, "exactly one (successful) result is published");
+    }
+
+    /// Regression: when the publish window runs out the task is handed back for
+    /// redelivery, so this worker's dedup claim must be released; otherwise the
+    /// worker that receives the redelivery sees it held, skips and acks it.
+    #[tokio::test]
+    async fn exhausted_publish_releases_the_dedup_claim() {
+        let redis = Redis::default().start().await.expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let redis_url = format!("redis://127.0.0.1:{port}");
+        let client = redis::Client::open(redis_url.as_str()).unwrap();
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+        consumer.cancel_checker = None;
+        consumer.dedup = Some(Arc::new(
+            RedisTaskDedup::new(&redis_url, 600, "worker-cancel-test".into()).unwrap(),
+        ));
+        consumer.publish_retry = PublishRetry {
+            base_delay_ms: 50,
+            max_delay_ms: 100,
+            deadline: std::time::Duration::from_millis(500),
+        };
+
+        // The dedup claim fits before memory runs out; the result publish never does.
+        let t = task("publish-exhausted", None);
+        let dedup_key = format!("broccoli:dedup:{}", t.id);
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory-policy")
+            .arg("noeviction")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        let claimed = consumer.dedup.as_ref().unwrap().try_claim(&t.id).await;
+        assert!(matches!(claimed, ClaimOutcome::Claimed));
+        let _: () = redis::cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory")
+            .arg("1")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        let result = consumer.process_message(BrokerMessage::new(t, None)).await;
+        assert!(
+            result.is_err(),
+            "an undeliverable result is handed back to the broker"
+        );
+        let held: bool = redis::cmd("EXISTS")
+            .arg(&dedup_key)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert!(
+            !held,
+            "the dedup claim must be released before the redelivery"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
