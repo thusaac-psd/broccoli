@@ -1,30 +1,21 @@
-//! Exploratory QA for the 下午场 (afternoon-session) bracket plugin --
-//! Areas 3 (timing/races) and 4 (setup/ordering abuse) of
-//! `docs/superpowers/plans/2026-09-22-bracket-exploratory-qa.md`. Areas 1-2
-//! (visibility, submission gate) are covered by `codelink_bracket_qa.rs`;
-//! area 5 (web UI) is out of scope for both files.
+//! Timing, race, setup and ordering tests for the 下午场
+//! (afternoon-session) bracket plugin. Visibility and submission-gate
+//! scenarios live in `codelink_bracket_gating.rs`.
 //!
 //! Reuses `codelink_bracket.rs`'s `pub(crate)` helpers
 //! (`spawn_bracket_app`, `player`, `create_all_round_problems`, `get_match`,
-//! `submit`, `XIAOJU_SECONDS`) rather than re-deriving them, same rationale
-//! as `codelink_bracket_qa.rs`. This file defines its OWN local `Fixture`
-//! (not importable from `codelink_bracket_qa.rs` -- that one is private to
-//! its module) with one difference that matters for this file's scenarios:
-//! `setup_fixture_with_timing` lets each test pick its own
-//! `xiaoju_seconds` / `break_before_seconds` / `escalation_grace_seconds`
-//! rather than hard-coding them, since several scenarios here specifically
-//! need those knobs (a short escalation grace period so the AwaitingJudge
-//! test does not take 120s; a non-zero intermission to probe the round-2
-//! start gate; etc).
+//! `submit`, `XIAOJU_SECONDS`), as `codelink_bracket_gating.rs` does. This
+//! file defines its own local `Fixture` (the one in
+//! `codelink_bracket_gating.rs` is private to its module) because its
+//! scenarios need the timing knobs: `setup_fixture_with_timing` and its
+//! siblings let each test pick `xiaoju_seconds`, `break_before_seconds`,
+//! `escalation_grace_seconds` and related values instead of hard-coding
+//! them (for example, a short escalation grace period keeps the
+//! `AwaitingJudge` test from taking 120s, and a non-zero intermission
+//! exercises the round-2 start gate).
 //!
-//! Two classes of `#[ignore]`d tests below encode CONFIRMED defects rather
-//! than being softened to pass -- see each test's `#[ignore = "..."]`
-//! reason for the full repro and root cause. Passing tests are deliberately
-//! kept in the suite too: a probe that confirms a rule IS enforced is
-//! exactly as valuable as one that catches a leak.
-//!
-//! Findings are written up in
-//! `.superpowers/sdd/2026-09-19-afternoon-bracket/qa-timing-setup.md`.
+//! Several tests wait out real wall-clock deadlines of a few seconds, then
+//! force timer delivery with `tick_once`.
 
 use crate::codelink_bracket::{
     Player, RoundProblems, XIAOJU_SECONDS, bracket_route, create_all_round_problems,
@@ -117,7 +108,7 @@ async fn setup_fixture_with_stage_timing(
 
     let staff_token = app
         .create_user_with_permissions(
-            "timing_qa_staff",
+            "timing_staff",
             "pass1234",
             &[
                 perm::CONTEST_CREATE,
@@ -130,15 +121,15 @@ async fn setup_fixture_with_stage_timing(
 
     let mut players = Vec::with_capacity(16);
     for i in 0..16 {
-        players.push(player(&app, &format!("timing_qa_player_{i}")).await);
+        players.push(player(&app, &format!("timing_player_{i}")).await);
     }
 
     let res = app
         .post_with_token(
             routes::CONTESTS,
             &json!({
-                "title": "Afternoon Bracket Timing/Setup QA",
-                "description": "Timing/races + setup-abuse exploratory QA contest",
+                "title": "Afternoon Bracket Timing",
+                "description": "Bracket timing and setup validation contest",
                 "activate_time": "2020-01-01T00:00:00Z",
                 "start_time": "2020-01-01T00:00:00Z",
                 "end_time": "2099-01-02T00:00:00Z",
@@ -195,9 +186,9 @@ async fn setup_fixture() -> Fixture {
 
 /// Rank match `match_id` both directions: `b` (imposed order goes onto `a`)
 /// ranks `round.group_a`, `a` ranks `round.group_b`. Caller must pass the
-/// ACTUAL `player_a`/`player_b` of that match (see
-/// `MatchState::order_a`/`order_b`'s doc comment on this direction being
-/// the single most likely bug to get backwards).
+/// actual `player_a`/`player_b` of that match (see
+/// `MatchState::order_a`/`order_b`'s doc comment: this direction is easy to
+/// get backwards).
 async fn order_match(fx: &Fixture, match_id: u8, round: &RoundProblems, a: &Player, b: &Player) {
     let res = fx
         .app
@@ -242,7 +233,7 @@ async fn start_match(fx: &Fixture, match_id: u8) -> TestResponse {
 }
 
 /// Matches start by themselves once both players have ranked: assert that
-/// happened (formerly staff had to POST /start).
+/// match 0 is now in progress.
 async fn start_match_0(fx: &Fixture) {
     expect_auto_started(fx, 0).await;
 }
@@ -318,9 +309,9 @@ async fn insert_submission(
 }
 
 /// Build a contest + rounds ready for a `/setup` call, without seeding
-/// players into the bracket via `/setup` itself -- for tests that probe
-/// `/setup`'s OWN validation, where the interesting part is the request
-/// body sent to `/setup`, not a fully-running match.
+/// players into the bracket via `/setup` itself. For tests of `/setup`'s
+/// own validation, where the interesting part is the request body sent to
+/// `/setup`, not a running match.
 async fn contest_and_rounds_for_setup_probe(
     title: &str,
 ) -> (
@@ -353,7 +344,7 @@ async fn contest_and_rounds_for_setup_probe(
             routes::CONTESTS,
             &json!({
                 "title": title,
-                "description": "setup-abuse QA contest",
+                "description": "setup validation contest",
                 "activate_time": "2020-01-01T00:00:00Z",
                 "start_time": "2020-01-01T00:00:00Z",
                 "end_time": "2099-01-02T00:00:00Z",
@@ -374,18 +365,16 @@ async fn contest_and_rounds_for_setup_probe(
 }
 
 // =====================================================================
-// Area 3 -- timing and races
+// Timing and races
 // =====================================================================
 
-/// Pins the design's own required "submission-time ordering" test
-/// (`docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`): B's AC
-/// lands (already judged) while A's EARLIER submission is still in flight --
-/// `decide_xiaoju` must report "not yet", not award B the 小局 just because
-/// B's verdict resolved first. Once A's older submission also resolves
-/// Accepted, A must win. Uses direct DB inserts (rather than racing two real
-/// submissions through the fixture judge) so the submitted-vs-judged
-/// ordering is exact and reproducible, not a coin flip against a fast fixture
-/// evaluator.
+/// Submission-time ordering decides a 小局: when B's AC lands (already
+/// judged) while A's earlier submission is still in flight, `decide_xiaoju`
+/// reports "not yet" instead of awarding B the 小局 because B's verdict
+/// resolved first. Once A's older submission also resolves Accepted, A
+/// wins. Uses direct DB inserts (rather than racing two real submissions
+/// through the fixture judge) so the submitted-vs-judged ordering is exact
+/// and deterministic, not a coin flip against a fast fixture evaluator.
 #[tokio::test]
 async fn earliest_submitted_wins_and_the_intermediate_awaiting_state_is_pinned() {
     let fx = setup_fixture().await;
@@ -560,10 +549,10 @@ async fn two_concurrent_force_decides_never_corrupt_match_state() {
     );
 }
 
-/// NUISANCE finding, not a correctness bug: the losing side of a concurrent
-/// force-decide gets a bare 500, not a 4xx conflict response.
+/// The losing side of a concurrent force-decide gets a 4xx conflict
+/// response, not a bare 500.
 #[tokio::test]
-async fn defect_the_losing_side_of_a_concurrent_force_decide_gets_a_bare_500_not_a_4xx() {
+async fn the_losing_side_of_a_concurrent_force_decide_gets_a_4xx() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
     start_match_0(&fx).await;
@@ -585,9 +574,9 @@ async fn defect_the_losing_side_of_a_concurrent_force_decide_gets_a_bare_500_not
     );
 }
 
-/// Verifies (rather than trusts) the per-slot-key design claim: two sibling
-/// round-1 matches decided AT THE SAME TIME both land in the shared round-2
-/// slot -- neither winner is lost to a lost CAS retry.
+/// Per-slot storage keys keep sibling decisions independent: two round-1
+/// matches decided at the same time both land in the shared round-2 slot,
+/// and neither winner is lost to a failed CAS retry.
 #[tokio::test]
 async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_round2_slot() {
     let fx = setup_fixture().await;
@@ -616,8 +605,8 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
     assert!(
         present.contains(&Some(winner0 as i64)) && present.contains(&Some(winner1 as i64)),
         "both sibling winners must land in round 2's shared slot; got player_a={a:?} \
-         player_b={b:?} (design claim under test: per-slot storage keys make this race \
-         structurally impossible, not merely unlikely)"
+         player_b={b:?} (per-slot storage keys must make this race structurally \
+         impossible, not merely unlikely)"
     );
 }
 
@@ -625,16 +614,16 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
 /// end to end via `server::dispatcher::plugin_timer::tick_once`, matching
 /// `tests/integration/plugin_timer.rs`'s pattern, rather than sleeping and
 /// polling for the background dispatcher loop to get around to it. The only
-/// sleeps here wait out the UNAVOIDABLE real wall-clock deadlines
-/// (`xiaoju_seconds`, `escalation_grace_seconds` are computed from real
+/// sleeps here wait out the unavoidable real wall-clock deadlines
+/// (`xiaoju_seconds` and `escalation_grace_seconds` are computed from real
 /// `NOW()`), and they are derived from the deadline the server reports, not
 /// guessed; delivery itself is always forced deterministically via
 /// `tick_once` immediately afterwards.
 ///
-/// Both submissions are inserted directly with fixed verdicts. An earlier
-/// version sent B's AC through the real judging pipeline with a short game,
-/// and failed whenever a loaded test run judged it late or pushed the
-/// pre-deadline check past a 3 s deadline.
+/// Both submissions are inserted directly with fixed verdicts. Sending B's
+/// AC through the real judging pipeline with a short game is flaky: under
+/// load the judgement can arrive late, or the pre-deadline check can slip
+/// past a 3 s deadline.
 #[tokio::test]
 async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     const GAME_SECONDS: i64 = 8;
@@ -649,8 +638,8 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     let prob_b = fx.rounds[0].group_b[0];
 
     // A's submission never resolves; B's, submitted later, is already an
-    // AC. That makes A's submission a BLOCKER rather than simply the only
-    // submission on the board (see the separate defect test for that case).
+    // AC. That makes A's submission a blocker rather than simply the only
+    // submission on the board (a separate test below covers that case).
     let t0 = Utc::now();
     let stuck = insert_submission(&fx, a.id, prob_a, SubmissionStatus::Running, None, t0).await;
     insert_submission(
@@ -716,7 +705,7 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     assert_eq!(
         view["state"], "awaiting_judge",
         "the deadline passed while blocked on A's still-in-flight submission with B's AC \
-         on record -- must enter awaiting_judge, got {view}"
+         on record, so the match must enter awaiting_judge, got {view}"
     );
     assert_eq!(
         view["awaiting_submission_id"].as_i64(),
@@ -897,11 +886,12 @@ async fn shared_extra_time_timeout_leaves_later_games_and_tiebreaks_at_base_dura
     assert_eq!(after["games"][0]["extra_time_used_ms"], 2_000);
 }
 
-/// DEFECT: `decide_xiaoju`'s `best_ac == None` branch never checks for an
-/// in-flight submission before declaring the 小局 scoreless.
+/// An in-flight submission blocks a scoreless decision even with no
+/// competing AC: when `best_ac` is `None` on both sides at the deadline,
+/// `decide_xiaoju` waits for the pending verdict (`awaiting_judge`) instead
+/// of declaring the 小局 scoreless.
 #[tokio::test]
-async fn defect_a_lone_in_flight_submission_with_no_competing_ac_is_silently_scored_scoreless_at_the_deadline()
- {
+async fn a_lone_in_flight_submission_blocks_a_scoreless_decision_at_the_deadline() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
     start_match_0(&fx).await;
@@ -910,7 +900,7 @@ async fn defect_a_lone_in_flight_submission_with_no_competing_ac_is_silently_sco
     let prob_a = fx.rounds[0].group_a[0];
 
     // A submits well before the deadline; still in flight (no verdict at
-    // all) when the deadline passes. B never submits anything -- best_ac
+    // all) when the deadline passes. B never submits anything, so best_ac
     // is None on both sides.
     let stuck = insert_submission(
         &fx,
@@ -941,9 +931,10 @@ async fn defect_a_lone_in_flight_submission_with_no_competing_ac_is_silently_sco
 }
 
 /// A stale xiaoju-N deadline timer firing after that 小局 already resolved
-/// early (on a real AC) must be a no-op -- the module doc comment's "stale
-/// key, discarded index" contract, not a premature decision of the NEXT
-/// 小局. Uses a wide xiaoju_seconds window and an artificial delay before
+/// early (on a real AC) is a no-op: a timer whose 小局 has already resolved
+/// is discarded (see `xiaoju_timer_key` in the plugin's `judge.rs`), and it
+/// must not decide the next 小局 prematurely.
+/// Uses a wide xiaoju_seconds window and an artificial delay before
 /// submitting so the stale timer's original fire time sits comfortably
 /// before the next 小局's own fresh deadline.
 #[tokio::test]
@@ -955,8 +946,8 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
     let a = &fx.players[0];
     let prob_a = fx.rounds[0].group_a[0];
 
-    // ~2s in, 小局 0 resolves early via a real AC -- well ahead of its
-    // original 6s deadline. The ORIGINAL xiaoju-0 timer still fires at
+    // ~2s in, 小局 0 resolves early via a real AC, well ahead of its
+    // original 6s deadline. The original xiaoju-0 timer still fires at
     // (match start + 6s); xiaoju-1 (opened at ~2s) has its own fresh
     // deadline at ~(2s + 6s) = ~8s, a ~2s margin after the stale fire.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -973,7 +964,7 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
         "xiaoju 1 should now be open, got {after_early_decision}"
     );
 
-    // Wait until just past the ORIGINAL (now stale) xiaoju-0 deadline
+    // Wait until just past the original (now stale) xiaoju-0 deadline
     // (match start + 6s) and force delivery deterministically.
     tokio::time::sleep(Duration::from_millis(3_800)).await; // 2s + 0.5s already elapsed -> land at ~6.3s
     let config = TimerConfig::default();
@@ -1002,7 +993,7 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
 }
 
 // =====================================================================
-// Area 4 -- setup and ordering abuse
+// Setup and ordering validation
 // =====================================================================
 
 #[tokio::test]
@@ -1083,8 +1074,10 @@ async fn setup_freezes_opened_stages_and_allows_future_stage_edits() {
     );
 }
 
+/// Re-running setup is refused once a stage has opened, and the live match
+/// keeps the pacing it started under.
 #[tokio::test]
-async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_timing() {
+async fn setup_is_refused_once_a_stage_has_opened() {
     let fx = setup_fixture_with_stage_timing(3, 7, 0, 0, 120, 20).await;
     let seeds: Vec<i32> = fx.players.iter().map(|p| p.id).collect();
     order_match_0(&fx).await;
@@ -1125,10 +1118,9 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
     assert_eq!(
         deadline - opened_at,
         3_000,
-        "expected 小局 1 (opened WITHIN the same already-started match) to keep the \
-         xiaoju_seconds=3 pacing the match actually started under -- got a {}-ms window, \
-         meaning the second /setup call's xiaoju_seconds=300 silently applied to a live \
-         match mid-play (view: {view})",
+        "expected 小局 1 (opened within the same already-started match) to keep the \
+         xiaoju_seconds=3 pacing the match started under; a {}-ms window means the second \
+         /setup call's xiaoju_seconds=300 applied to a live match mid-play (view: {view})",
         deadline - opened_at
     );
 
@@ -1158,10 +1150,10 @@ async fn defect_setup_called_twice_silently_reconfigures_an_in_progress_matchs_t
     );
 }
 
-/// DEFECT: a ranking can be resubmitted after the match has left the
-/// Ordering phase.
+/// A ranking cannot be resubmitted once the match has left the Ordering
+/// phase.
 #[tokio::test]
-async fn defect_ranking_can_be_resubmitted_after_the_match_has_started() {
+async fn a_ranking_cannot_be_resubmitted_after_the_match_has_started() {
     let fx = setup_fixture().await;
     order_match_0(&fx).await;
     start_match_0(&fx).await;
@@ -1315,7 +1307,7 @@ async fn staff_start_fills_a_missing_ranking_with_the_listed_order() {
 #[tokio::test]
 async fn setup_rejects_fewer_than_16_seeds() {
     let (app, _tmp, staff_token, contest_id, rounds, players) =
-        contest_and_rounds_for_setup_probe("Short Seeds QA").await;
+        contest_and_rounds_for_setup_probe("Short Seeds").await;
     let seeds: Vec<i32> = players.iter().take(15).map(|p| p.id).collect();
     let res = app
         .post_with_token(
@@ -1335,7 +1327,7 @@ async fn setup_rejects_fewer_than_16_seeds() {
 #[tokio::test]
 async fn setup_rejects_a_duplicate_seed() {
     let (app, _tmp, staff_token, contest_id, rounds, players) =
-        contest_and_rounds_for_setup_probe("Duplicate Seed QA").await;
+        contest_and_rounds_for_setup_probe("Duplicate Seed").await;
     let mut seeds: Vec<i32> = players.iter().map(|p| p.id).collect();
     seeds[15] = seeds[0]; // 16 elements, only 15 distinct ids
     let res = app
@@ -1360,7 +1352,7 @@ async fn setup_rejects_a_duplicate_seed() {
 #[tokio::test]
 async fn setup_rejects_a_problem_reused_across_two_groups() {
     let (app, _tmp, staff_token, contest_id, mut rounds, players) =
-        contest_and_rounds_for_setup_probe("Reused Problem QA").await;
+        contest_and_rounds_for_setup_probe("Reused Problem").await;
     rounds[1].group_a[0] = rounds[0].group_a[0];
     let seeds: Vec<i32> = players.iter().map(|p| p.id).collect();
     let res = app
@@ -1385,7 +1377,7 @@ async fn setup_rejects_a_problem_reused_across_two_groups() {
 #[tokio::test]
 async fn setup_rejects_an_empty_tiebreak_list() {
     let (app, _tmp, staff_token, contest_id, rounds, players) =
-        contest_and_rounds_for_setup_probe("Empty Tiebreak QA").await;
+        contest_and_rounds_for_setup_probe("Empty Tiebreak").await;
     let seeds: Vec<i32> = players.iter().map(|p| p.id).collect();
     let mut body = full_setup_body(&rounds, &seeds, 3, 0, 120);
     body["rounds"][0]["tiebreak"] = json!([]);

@@ -935,22 +935,21 @@ mod tests {
     }
 
     // =====================================================================
-    // Standalone (context-free, `contest_id: None`) problem resources --
-    // the fix for the QA sweep's Area-1 leaks and, for free, the Area-2
-    // submission-gate bypass (`create_submission` gates on this same
-    // `Resource::Problem{contest_id: None, ..}` decision before any hook
-    // runs). See this file's `None =>` arm in `decide_visibility_decisions`.
+    // Standalone (context-free, `contest_id: None`) problem resources. The
+    // same decision also gates standalone submits, because `create_submission`
+    // checks this `Resource::Problem{contest_id: None, ..}` decision before any
+    // hook runs. See this file's `None =>` arm in `decide_visibility_decisions`.
     // =====================================================================
 
     #[test]
     fn decide_visibility_standalone_problem_denies_owner_their_own_not_yet_open_problem_matching_contest_scoped_answer()
      {
-        // THE fix. Before it, `contest_id: None` unconditionally returned
-        // `Allow {}` (no opinion), so the host's contest-blind standalone
-        // rule took over and leaked A's own not-yet-open problem -- see
-        // `packages/server/tests/integration/codelink_bracket_qa.rs`'s
-        // `defect_standalone_problem_detail_leaks_own_not_yet_open_bracket_problem`
-        // and its Area-1 module comment for the full root cause.
+        // A contest-less problem resource is decided against its bracket
+        // contests, so the plugin's answer matches the contest-scoped one
+        // instead of deferring to the host's contest-blind standalone rule.
+        // `codelink_bracket_gating.rs`'s
+        // `standalone_problem_detail_hides_own_not_yet_open_bracket_problem`
+        // covers the same case end to end.
         let future_problem = 102; // A's own group, position 2, current xiaoju index 0 -- not yet open.
         let m = MatchState {
             round: 1,

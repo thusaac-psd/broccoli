@@ -33,12 +33,10 @@ pub(crate) fn lock_or_poison<T>(
     m.lock().map_err(|_| extism::Error::msg("Lock poisoned"))
 }
 
-// regression guard, see UP#14g
-//
-// Available for any future host_fn that re-introduces a `block_in_place`
-// wrapper. Not called anywhere in shipping code - a non-zero count of
-// `broccoli.host_fn.block_in_place` indicates someone reverted UP#13's
-// collapse and CI should fail the build via UP#14g.
+// Counts a host function entering `block_in_place`. Host functions run inside
+// `spawn_blocking` and must not call it, so nothing in shipping code calls
+// this: a non-zero `broccoli.host_fn.block_in_place` count means one does, and
+// the stress wave in `tests/integration/source_invariants.rs` fails on it.
 #[track_caller]
 #[allow(dead_code)]
 pub(crate) fn record_block_in_place_regression(metrics: &Option<Metrics>, host_fn: &str) {

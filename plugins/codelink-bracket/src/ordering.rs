@@ -57,8 +57,8 @@ fn is_permutation_of(order: &[i32], group: &[i32]) -> bool {
 /// `order_b` are read LIVE (not snapshotted) by `judge.rs::current_problem`
 /// and `gate.rs::check` to decide who is currently playing which problem, so
 /// letting either player rewrite them mid-match would let a player reorder
-/// remaining problems after seeing an earlier 小局's outcome -- see the QA
-/// regression test `defect_ranking_can_be_resubmitted_after_the_match_has_started`.
+/// remaining problems after seeing an earlier 小局's outcome (covered by the
+/// integration test `a_ranking_cannot_be_resubmitted_after_the_match_has_started`).
 pub fn record_order(
     match_state: &mut MatchState,
     submitter: i32,
@@ -275,8 +275,7 @@ mod tests {
 
     #[test]
     fn rejects_a_ranking_submitted_to_an_already_decided_match() {
-        // Not just InProgress -- every non-Ordering phase must be covered,
-        // not merely the one the QA reproduction happens to exercise.
+        // Every non-Ordering phase refuses a ranking, not just InProgress.
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
         m.state = MatchPhase::Decided;
         assert!(record_order(&mut m, 20, group_a()).is_err());
@@ -410,8 +409,8 @@ mod tests {
 
     #[test]
     fn handle_order_rejects_a_resubmission_after_the_match_has_started() {
-        // Plugin-level mirror of the QA regression test
-        // `defect_ranking_can_be_resubmitted_after_the_match_has_started`.
+        // Plugin-level mirror of the integration test
+        // `a_ranking_cannot_be_resubmitted_after_the_match_has_started`.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         let mut m = match_in_ordering(10, 20, group_a(), group_b());
