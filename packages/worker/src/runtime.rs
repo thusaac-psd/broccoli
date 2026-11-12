@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use common::retry::{RetryTracker, spawn_cleanup_task};
 use common::worker::Task;
+use futures::FutureExt;
 use mq::{Delivery, EntryRef, GroupConsumer, Mq, Settled};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -278,6 +279,25 @@ impl Held {
     fn snapshot(&self) -> Vec<EntryRef> {
         self.0.lock().unwrap().iter().cloned().collect()
     }
+
+    /// Stop holding `entry` when the guard drops, however its task ends.
+    fn release_on_drop(&self, entry: EntryRef) -> HeldGuard {
+        HeldGuard {
+            held: self.clone(),
+            entry,
+        }
+    }
+}
+
+struct HeldGuard {
+    held: Held,
+    entry: EntryRef,
+}
+
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        self.held.remove(&self.entry);
+    }
 }
 
 /// The worker's consume loop, extracted from [`WorkerRuntime::run`] so it can
@@ -368,7 +388,17 @@ async fn run_consume_loop<F, Fut>(
             let _in_flight = in_flight_guard;
             let _permit = permit;
             let entry = delivery.entry.clone();
-            let settled = match handle(delivery).await {
+            let _held = held.release_on_drop(entry.clone());
+            // A panicking handler abandons the task: it is redelivered once
+            // idle, and dead-lettered once it has failed MAX_DELIVERIES times.
+            let settlement = std::panic::AssertUnwindSafe(handle(delivery))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    error!(entry = %entry.id, "Task handler panicked; abandoning the task");
+                    Settlement::Abandon
+                });
+            let settled = match settlement {
                 Settlement::Ack => tasks.ack(&entry).await,
                 Settlement::DeadLetter(envelope) => tasks.dead_letter(&entry, &envelope).await,
                 Settlement::Abandon => {
@@ -386,7 +416,6 @@ async fn run_consume_loop<F, Fut>(
                     error!(entry = %entry.id, error = %e, "Settling a task failed; it will be redelivered")
                 }
             }
-            held.remove(&entry);
         });
     }
 
@@ -619,5 +648,105 @@ mod tests {
 
         let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
         assert_eq!((depths[0].unread, depths[0].pending), (0, 1));
+    }
+
+    /// A handler that panics abandons its task: the worker stops holding it,
+    /// so it becomes reclaimable instead of being refreshed forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_task_is_released_for_redelivery() {
+        let (mq, _container) = redis_mq().await;
+        mq.publish_task(&task("boom"), None).await.expect("publish");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (ran_tx, ran_rx) = tokio::sync::oneshot::channel::<()>();
+        let ran_tx = Arc::new(StdMutex::new(Some(ran_tx)));
+        let in_flight = InFlightCounter::new();
+        let join = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let mq = mq.clone();
+            let in_flight = in_flight.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    in_flight,
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |_d| {
+                        let ran_tx = Arc::clone(&ran_tx);
+                        async move {
+                            if let Some(tx) = ran_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            panic!("handler bug");
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        ran_rx.await.expect("the handler ran");
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.expect("the loop survives a panicking handler");
+        assert_eq!(
+            in_flight.current(),
+            0,
+            "the panicked task is no longer in flight"
+        );
+
+        // Nothing holds it any more: aged past the threshold, it is reclaimable.
+        let mut conn = redis::Client::open(mq_url(&_container).await.as_str())
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let pending: Vec<(String, String, u64, u64)> = redis::cmd("XPENDING")
+            .arg(mq.topology().shared())
+            .arg(mq::WORKERS_GROUP)
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1, "the task stays pending for redelivery");
+        let _: Vec<String> = redis::cmd("XCLAIM")
+            .arg(mq.topology().shared())
+            .arg(mq::WORKERS_GROUP)
+            .arg("w")
+            .arg(0)
+            .arg(&pending[0].0)
+            .arg("IDLE")
+            .arg(mq::CLAIM_IDLE.as_millis() as u64 * 2)
+            .arg("JUSTID")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let reclaimed = mq.task_consumer("w2").reclaim(1).await.unwrap();
+        assert_eq!(reclaimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_held_entry_is_released_when_its_task_panics() {
+        let held = Held::default();
+        let entry = EntryRef {
+            stream: Arc::from("ops"),
+            id: "1-0".into(),
+        };
+        held.insert(&entry);
+        let task = tokio::spawn({
+            let guard = held.release_on_drop(entry.clone());
+            async move {
+                let _guard = guard;
+                panic!("handler bug");
+            }
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(held.snapshot().is_empty());
+    }
+
+    async fn mq_url(container: &testcontainers::ContainerAsync<Redis>) -> String {
+        let port = container.get_host_port_ipv4(6379).await.unwrap();
+        format!("redis://127.0.0.1:{port}")
     }
 }
