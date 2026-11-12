@@ -670,9 +670,9 @@ mod tests {
         let (metrics, prometheus_registry) =
             common::observability::init_metrics("broccoli-visibility-kernel-test");
 
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
+        let evaluate_batches = EvaluateBatches::default();
         let contest_type_registry: ContestTypeRegistry =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let evaluator_registry: EvaluatorRegistry =

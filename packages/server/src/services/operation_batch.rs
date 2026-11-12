@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
@@ -20,7 +19,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::host_funcs::context::OperationHostDeps;
-use crate::registry::{BatchState, OperationBatches, OperationWaiter, OperationWaiters};
+use crate::registry::{EvaluateCaseRef, OperationBatches, OperationWaiter, OperationWaiters};
+use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::windowed_session::{
     SessionAction, SessionDecision, SlotEvent, SlotOutcome, WindowedSession, run_windowed_session,
@@ -127,37 +127,21 @@ pub async fn start_operation_batch(
 ) -> anyhow::Result<String> {
     // Fast-fail before allocating batch state if MQ isn't configured. Each
     // per-op future also re-checks (since they clone `deps`), but rejecting
-    // here preserves the early-return semantic (and avoids registering a
-    // BatchState whose ops can never publish).
+    // here preserves the early-return semantic (and avoids opening a batch
+    // whose ops can never publish).
     deps.operation_publisher
         .as_ref()
         .ok_or_else(|| anyhow!("MQ not available"))?;
 
     let batch_id = Uuid::new_v4().to_string();
 
-    let (batch_tx, batch_rx) = flume::unbounded();
-    let pending_count = Arc::new(AtomicUsize::new(operations.len()));
-    let cleanup_keys = Arc::new(
-        operations
-            .iter()
-            .map(|_| Uuid::new_v4().to_string())
-            .collect::<Vec<_>>(),
-    );
-    let evaluate_refs = operations
+    let correlation_ids = operations
         .iter()
-        .filter_map(|op| op.evaluate_batch_id.clone().zip(op.test_case_id))
+        .map(|_| Uuid::new_v4().to_string())
         .collect::<Vec<_>>();
-
-    deps.operation_batches.insert(
-        batch_id.clone(),
-        BatchState {
-            result_rx: batch_rx,
-            pending_count: pending_count.clone(),
-            created_at: Instant::now(),
-            cleanup_keys: cleanup_keys.clone(),
-            poisoned: AtomicBool::new(false),
-        },
-    );
+    let batch_tx =
+        deps.operation_batches
+            .open(&batch_id, operations.len(), correlation_ids.clone());
 
     tracing::info!(
         plugin_id = %plugin_id,
@@ -174,9 +158,6 @@ pub async fn start_operation_batch(
                 KeyValue::new("plugin.id", plugin_id.clone()),
             ],
         );
-        metrics
-            .batch_active
-            .add(1, &[KeyValue::new("batch.kind", "operation")]);
     }
 
     // Parallelize per-op blob-externalize + mq.publish via
@@ -186,31 +167,43 @@ pub async fn start_operation_batch(
     // short-circuits via try_collect; in-flight peers are dropped.
     let publish_concurrency = deps.operation_batch_publish_concurrency.max(1);
     let per_op_inputs: Vec<(String, OperationTask)> =
-        cleanup_keys.iter().cloned().zip(operations).collect();
+        correlation_ids.iter().cloned().zip(operations).collect();
 
     stream::iter(per_op_inputs.into_iter().map(|(correlation_id, op)| {
         let deps = deps.clone();
         let batch_tx = batch_tx.clone();
-        let pending_count = pending_count.clone();
         let plugin_id = plugin_id.clone();
         let batch_id = batch_id.clone();
         async move {
             let (op_tx, op_rx) = tokio::sync::oneshot::channel();
+            let evaluate_case = op
+                .evaluate_batch_id
+                .clone()
+                .zip(op.test_case_id)
+                .map(|(batch_id, test_case_id)| EvaluateCaseRef {
+                    batch_id,
+                    test_case_id,
+                });
 
             // Waiter insert must precede publish for THIS op, or a fast
             // reply could arrive before anyone is waiting for it. These
-            // two sync calls happen before the awaits below.
+            // sync calls happen before the awaits below.
+            if let Some(case) = evaluate_case.as_ref() {
+                deps.evaluate_batches.record_ops(
+                    &case.batch_id,
+                    case.test_case_id,
+                    &batch_id,
+                    vec![correlation_id.clone()],
+                );
+            }
             deps.operation_waiters.insert(
                 correlation_id.clone(),
-                OperationWaiter::new(op_tx),
+                OperationWaiter {
+                    result_tx: op_tx,
+                    evaluate_case,
+                },
             );
-            spawn_waiter_forwarder(
-                correlation_id.clone(),
-                op_rx,
-                batch_tx,
-                pending_count,
-                deps.metrics.clone(),
-            );
+            spawn_waiter_forwarder(correlation_id.clone(), op_rx, batch_tx);
 
             // Resolve the target queue for a pinned operation. An invalid worker
             // id, OR a valid id whose worker has no live heartbeat, falls back to
@@ -240,17 +233,6 @@ pub async fn start_operation_batch(
             };
             let target_queue =
                 target_operation_queue(&deps.operation_queue_name, effective_target);
-
-            if let (Some(eval_batch_id), Some(test_case_id)) =
-                (op.evaluate_batch_id.clone(), op.test_case_id)
-            {
-                deps.evaluate_ops_registry.record_ops(
-                    &eval_batch_id,
-                    test_case_id,
-                    &batch_id,
-                    std::iter::once(correlation_id.clone()),
-                );
-            }
 
             let op = externalize_large_inline_files(op, deps.blob_store.clone())
                 .await
@@ -308,45 +290,27 @@ pub async fn start_operation_batch(
     .buffer_unordered(publish_concurrency)
     .try_collect::<Vec<()>>()
     .await
-    .inspect_err(|_| {
-        cleanup_failed_operation_batch(
-            &deps,
-            &batch_id,
-            cleanup_keys.as_ref(),
-            &evaluate_refs,
-            plugin_id.as_str(),
-        );
-    })?;
+    .inspect_err(|_| cleanup_failed_operation_batch(&deps, &batch_id))?;
 
     Ok(batch_id)
 }
 
-fn cleanup_failed_operation_batch(
-    deps: &OperationHostDeps,
-    batch_id: &str,
-    cleanup_keys: &[String],
-    evaluate_refs: &[(String, i32)],
-    plugin_id: &str,
-) {
-    deps.operation_batches.remove(batch_id);
-    for correlation_id in cleanup_keys {
-        deps.operation_waiters.remove(correlation_id);
-    }
-    for (evaluate_batch_id, test_case_id) in evaluate_refs {
-        deps.evaluate_ops_registry.remove_operation_batch(
-            evaluate_batch_id,
-            *test_case_id,
-            batch_id,
-        );
-    }
-    if let Some(metrics) = deps.metrics.as_ref() {
-        metrics.batch_active.add(
-            -1,
-            &[
-                KeyValue::new("batch.kind", "operation"),
-                KeyValue::new("plugin.id", plugin_id.to_string()),
-            ],
-        );
+/// Remove an operation batch that failed to start, together with its
+/// waiters and the operation refs it recorded on evaluate cases.
+fn cleanup_failed_operation_batch(deps: &OperationHostDeps, batch_id: &str) {
+    let Some(correlation_ids) = deps.operation_batches.remove(batch_id, Removal::Failed) else {
+        return;
+    };
+    for correlation_id in &correlation_ids {
+        if let Some((_, waiter)) = deps.operation_waiters.remove(correlation_id)
+            && let Some(case) = waiter.evaluate_case
+        {
+            deps.evaluate_batches.remove_operation_batch(
+                &case.batch_id,
+                case.test_case_id,
+                batch_id,
+            );
+        }
     }
 }
 
@@ -418,14 +382,11 @@ impl WindowedSession for OperationDriver {
         let wait_plugin_id = self.plugin_id.clone();
         let deps = self.deps.clone();
         tokio::spawn(async move {
-            let batches = deps.operation_batches.clone();
-            let metrics = deps.metrics.clone();
             // Await the result as a cheap future instead of occupying a blocking
             // thread for the op's whole lifetime.
             let result = next_operation_result_async(
                 &wait_plugin_id,
-                &batches,
-                metrics.as_ref(),
+                &deps.operation_batches,
                 &wait_batch_id,
                 timeout,
             )
@@ -572,7 +533,6 @@ fn cancel_active_operation_slots(
             plugin_id,
             &deps.operation_batches,
             &deps.operation_waiters,
-            deps.metrics.as_ref(),
             batch_id,
         );
     }
@@ -591,7 +551,6 @@ fn cancel_operation_indices(
                 plugin_id,
                 &deps.operation_batches,
                 &deps.operation_waiters,
-                deps.metrics.as_ref(),
                 batch_id,
             );
             cancelled.push(*idx);
@@ -633,8 +592,7 @@ struct OperationWait {
     ceiling: Duration,
 }
 
-impl WaitPolicy<TaskResult> for OperationWait {
-    const KIND: &'static str = "operation";
+impl WaitPolicy<TaskResult, Vec<String>> for OperationWait {
     const DISCONNECTED: &'static str = "Batch channel disconnected";
 
     fn next_tick(&self, waited: Duration) -> Option<Duration> {
@@ -644,11 +602,11 @@ impl WaitPolicy<TaskResult> for OperationWait {
     // Pending means the operation is in flight: keep waiting (system
     // slowness) and give up only once it is no longer pending (accounted for,
     // no result) or the ceiling is reached.
-    fn extend(&self, _wait: &WaitCtx<'_, TaskResult>) -> bool {
+    fn extend(&self, _wait: &WaitCtx<'_, TaskResult, Vec<String>>) -> bool {
         true
     }
 
-    fn on_delivered(&self, wait: &WaitCtx<'_, TaskResult>, task_result: &TaskResult) {
+    fn on_delivered(&self, wait: &WaitCtx<'_, TaskResult, Vec<String>>, task_result: &TaskResult) {
         record_operation_result_e2e(wait.metrics, task_result, "delivered");
         wait.record_outcome(
             "result",
@@ -669,18 +627,11 @@ impl WaitPolicy<TaskResult> for OperationWait {
 fn operation_wait<'a>(
     plugin_id: &'a str,
     batches: &'a OperationBatches,
-    metrics: Option<&'a common::metrics::Metrics>,
     batch_id: &'a str,
     timeout: Duration,
-) -> anyhow::Result<BatchWait<'a, TaskResult, OperationWait>> {
+) -> anyhow::Result<BatchWait<'a, TaskResult, Vec<String>, OperationWait>> {
     let ceiling = timeout.max(operation_infra_floor());
-    BatchWait::open(
-        plugin_id,
-        batches,
-        metrics,
-        batch_id,
-        OperationWait { ceiling },
-    )
+    BatchWait::open(plugin_id, batches, batch_id, OperationWait { ceiling })
 }
 
 /// Wait for the batch's next operation result, blocking the calling thread.
@@ -689,11 +640,10 @@ fn operation_wait<'a>(
 pub fn next_operation_result(
     plugin_id: &str,
     batches: &OperationBatches,
-    metrics: Option<&common::metrics::Metrics>,
     batch_id: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<TaskResult>> {
-    operation_wait(plugin_id, batches, metrics, batch_id, timeout)?.blocking()
+    operation_wait(plugin_id, batches, batch_id, timeout)?.blocking()
 }
 
 /// Async sibling of [`next_operation_result`]. Awaits the result via flume's
@@ -706,11 +656,10 @@ pub fn next_operation_result(
 pub async fn next_operation_result_async(
     plugin_id: &str,
     batches: &OperationBatches,
-    metrics: Option<&common::metrics::Metrics>,
     batch_id: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<TaskResult>> {
-    operation_wait(plugin_id, batches, metrics, batch_id, timeout)?
+    operation_wait(plugin_id, batches, batch_id, timeout)?
         .wait()
         .await
 }
@@ -719,23 +668,10 @@ pub fn cancel_operation_batch(
     plugin_id: &str,
     batches: &OperationBatches,
     waiters: &OperationWaiters,
-    metrics: Option<&common::metrics::Metrics>,
     batch_id: &str,
 ) {
-    if let Some((_, batch)) = batches.remove(batch_id) {
-        for key in batch.cleanup_keys.iter() {
-            waiters.remove(key);
-        }
-        if let Some(metrics) = metrics {
-            let attrs = [
-                KeyValue::new("batch.kind", "operation"),
-                KeyValue::new("plugin.id", plugin_id.to_string()),
-            ];
-            metrics.batch_cancelled_total.add(1, &attrs);
-            metrics
-                .batch_active
-                .add(-1, &[KeyValue::new("batch.kind", "operation")]);
-        }
+    if let Some(correlation_ids) = batches.remove(batch_id, Removal::Cancelled { plugin_id }) {
+        release_waiters(waiters, &correlation_ids);
     }
 
     tracing::info!(
@@ -745,50 +681,33 @@ pub fn cancel_operation_batch(
     );
 }
 
+/// Drop the waiters of a batch that will not take their results.
+pub fn release_waiters(waiters: &OperationWaiters, correlation_ids: &[String]) {
+    for correlation_id in correlation_ids {
+        waiters.remove(correlation_id);
+    }
+}
+
+/// Forward one operation's result into its batch. A dropped waiter (cancelled
+/// batch, removed by the reaper) still delivers an error result, so the batch
+/// always receives exactly one result per operation.
 fn spawn_waiter_forwarder(
     correlation_id: String,
     op_rx: tokio::sync::oneshot::Receiver<TaskResult>,
-    batch_tx: flume::Sender<TaskResult>,
-    pending_count: Arc<AtomicUsize>,
-    metrics: Option<common::metrics::Metrics>,
+    batch_tx: BatchSender<TaskResult>,
 ) {
-    if let Some(metrics) = metrics.as_ref() {
-        metrics
-            .batch_pending_items
-            .add(1, &[KeyValue::new("batch.kind", "operation")]);
-    }
-
     tokio::spawn(async move {
-        match op_rx.await {
-            Ok(result) => {
-                let _ = batch_tx.send(result);
-                pending_count.fetch_sub(1, Ordering::SeqCst);
-                if let Some(metrics) = metrics.as_ref() {
-                    metrics
-                        .batch_pending_items
-                        .add(-1, &[KeyValue::new("batch.kind", "operation")]);
-                }
-            }
-            Err(_) => {
-                let error_result = TaskResult {
-                    task_id: correlation_id,
-                    success: false,
-                    output: serde_json::json!({}),
-                    error: Some("Operation cancelled or timed out".into()),
-                    task_type: Some("operation".to_string()),
-                    operation: Some("operation".to_string()),
-                    worker_id: None,
-                    enqueued_at_unix_ms: None,
-                };
-                let _ = batch_tx.send(error_result);
-                pending_count.fetch_sub(1, Ordering::SeqCst);
-                if let Some(metrics) = metrics.as_ref() {
-                    metrics
-                        .batch_pending_items
-                        .add(-1, &[KeyValue::new("batch.kind", "operation")]);
-                }
-            }
-        }
+        let result = op_rx.await.unwrap_or_else(|_| TaskResult {
+            task_id: correlation_id,
+            success: false,
+            output: serde_json::json!({}),
+            error: Some("Operation cancelled or timed out".into()),
+            task_type: Some("operation".to_string()),
+            operation: Some("operation".to_string()),
+            worker_id: None,
+            enqueued_at_unix_ms: None,
+        });
+        batch_tx.deliver(result);
     });
 }
 
@@ -915,19 +834,6 @@ mod tests {
 
     use super::*;
 
-    fn test_operation_batch(
-        rx: flume::Receiver<TaskResult>,
-        pending: usize,
-    ) -> BatchState<TaskResult> {
-        BatchState {
-            result_rx: rx,
-            pending_count: Arc::new(std::sync::atomic::AtomicUsize::new(pending)),
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
     fn dummy_task_result(task_id: &str) -> TaskResult {
         TaskResult {
             task_id: task_id.to_string(),
@@ -943,34 +849,30 @@ mod tests {
 
     #[tokio::test]
     async fn async_wait_delivers_a_result() {
-        let batches: OperationBatches = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = flume::unbounded::<TaskResult>();
-        batches.insert("b1".to_string(), test_operation_batch(rx, 1));
-        tx.send(dummy_task_result("op-1")).unwrap();
+        let batches = OperationBatches::default();
+        let tx = batches.open("b1", 1, Vec::new());
+        tx.deliver(dummy_task_result("op-1"));
 
-        let got = next_operation_result_async("p", &batches, None, "b1", Duration::from_secs(5))
+        let got = next_operation_result_async("p", &batches, "b1", Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(got.unwrap().task_id, "op-1");
+        assert!(!batches.contains("b1"), "the drained batch is removed");
     }
 
     #[tokio::test]
     async fn async_wait_drains_buffered_result_when_giving_up() {
-        // Lost-result race regression: the waiter-forwarder does
-        // `batch_tx.send(result)` BEFORE `pending_count.fetch_sub(1)`, so the
-        // instant the wait observes `pending_count == 0` the delivered result is
-        // ALREADY buffered in the channel. A give-up branch that returns
-        // `Ok(None)` without draining drops that completed result, which
-        // `wait_for_operation_results` then mis-maps to a "timed out" SystemError
-        // under load. `pending == 0` + a buffered result + `Duration::ZERO`
-        // (ceiling 0 via the test infra floor) forces the give-up branch on the
-        // first poll, exactly the runtime race window.
-        let batches: OperationBatches = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = flume::unbounded::<TaskResult>();
-        batches.insert("b1".to_string(), test_operation_batch(rx, 0));
-        tx.send(dummy_task_result("op-1")).unwrap();
+        // Each result is buffered BEFORE the pending count drops, so the
+        // instant the wait observes the batch as settled the result is already
+        // in the channel. A give-up that returns `Ok(None)` without draining
+        // drops it, which `wait_for_operation_results` then maps to a "timed
+        // out" SystemError. `Duration::ZERO` (ceiling 0 via the test infra
+        // floor) forces the give-up branch on the first poll.
+        let batches = OperationBatches::default();
+        let tx = batches.open("b1", 1, Vec::new());
+        tx.deliver(dummy_task_result("op-1"));
 
-        let got = next_operation_result_async("p", &batches, None, "b1", Duration::ZERO)
+        let got = next_operation_result_async("p", &batches, "b1", Duration::ZERO)
             .await
             .unwrap();
         assert_eq!(
@@ -982,13 +884,12 @@ mod tests {
 
     #[test]
     fn sync_wait_drains_buffered_result_when_giving_up() {
-        // Sync sibling of the lost-result race (the Extism host-fn boundary).
-        let batches: OperationBatches = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = flume::unbounded::<TaskResult>();
-        batches.insert("b1".to_string(), test_operation_batch(rx, 0));
-        tx.send(dummy_task_result("op-1")).unwrap();
+        // Sync sibling of the give-up drain (the Extism host-fn boundary).
+        let batches = OperationBatches::default();
+        let tx = batches.open("b1", 1, Vec::new());
+        tx.deliver(dummy_task_result("op-1"));
 
-        let got = next_operation_result("p", &batches, None, "b1", Duration::ZERO).unwrap();
+        let got = next_operation_result("p", &batches, "b1", Duration::ZERO).unwrap();
         assert_eq!(
             got.expect("a delivered result must never be dropped by a give-up branch")
                 .task_id,
@@ -998,27 +899,15 @@ mod tests {
 
     #[tokio::test]
     async fn async_wait_ends_promptly_on_dropped_sender() {
-        // The leak fix: an orphaned op (sender dropped, e.g. its batch was
-        // cancelled/superseded) must terminate the async wait at once, NOT linger
-        // to the infra ceiling. pending stays > 0 so only the disconnect can end it.
-        let batches: OperationBatches = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = flume::unbounded::<TaskResult>();
-        batches.insert("b2".to_string(), test_operation_batch(rx, 1));
-        drop(tx);
+        // An orphaned op (sender dropped) must end the async wait at once, not
+        // linger to the infra ceiling. The batch stays pending, so only the
+        // disconnect can end it.
+        let batches = OperationBatches::default();
+        drop(batches.open("b2", 1, Vec::new()));
 
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(500),
-            next_operation_result_async("p", &batches, None, "b2", Duration::from_secs(30)),
-        )
-        .await;
-        assert!(
-            outcome.is_ok(),
-            "wait must end promptly on a dropped sender, not linger to the ceiling"
-        );
-        assert!(
-            outcome.unwrap().is_err(),
-            "dropped sender surfaces as an error"
-        );
+        let outcome =
+            next_operation_result_async("p", &batches, "b2", Duration::from_secs(30)).await;
+        assert!(outcome.is_err(), "dropped sender surfaces as an error");
     }
 
     #[test]
@@ -1160,28 +1049,51 @@ mod tests {
         assert!(!hash.is_empty());
     }
 
-    #[tokio::test]
-    async fn start_operation_batch_fails_when_mq_unavailable() {
-        let temp = tempfile::tempdir().unwrap();
-        let blob_store = Arc::new(
-            FilesystemBlobStore::new(temp.path().to_path_buf(), 2_000_000)
-                .await
-                .unwrap(),
-        );
-        let deps = OperationHostDeps {
+    fn deps(
+        blob_store: Arc<dyn BlobStore>,
+        operation_batches: OperationBatches,
+        operation_waiters: OperationWaiters,
+        evaluate_batches: crate::registry::EvaluateBatches,
+    ) -> OperationHostDeps {
+        OperationHostDeps {
             plugin_manager: None,
             operation_publisher: None,
-            operation_batches: Arc::new(dashmap::DashMap::new()),
-            operation_waiters: Arc::new(dashmap::DashMap::new()),
+            operation_batches,
+            operation_waiters,
             operation_queue_name: "ops".to_string(),
             operation_result_queue_name: "ops-results".to_string(),
             blob_store,
             metrics: None,
-            evaluate_ops_registry:
-                crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default(),
+            evaluate_batches,
             operation_batch_publish_concurrency: 32,
             redis_client: None,
-        };
+        }
+    }
+
+    async fn blob_store(temp: &tempfile::TempDir) -> Arc<dyn BlobStore> {
+        Arc::new(
+            FilesystemBlobStore::new(temp.path().to_path_buf(), 2_000_000)
+                .await
+                .unwrap(),
+        )
+    }
+
+    fn waiter(evaluate_case: Option<EvaluateCaseRef>) -> OperationWaiter {
+        OperationWaiter {
+            result_tx: tokio::sync::oneshot::channel().0,
+            evaluate_case,
+        }
+    }
+
+    #[tokio::test]
+    async fn start_operation_batch_fails_when_mq_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let deps = deps(
+            blob_store(&temp).await,
+            OperationBatches::default(),
+            Arc::default(),
+            Default::default(),
+        );
 
         let err = start_operation_batch("plugin".to_string(), deps, vec![])
             .await
@@ -1192,86 +1104,51 @@ mod tests {
     #[tokio::test]
     async fn failed_operation_batch_cleanup_removes_batch_waiters_and_eval_refs() {
         let temp = tempfile::tempdir().unwrap();
-        let blob_store = Arc::new(
-            FilesystemBlobStore::new(temp.path().to_path_buf(), 2_000_000)
-                .await
-                .unwrap(),
+        let operation_batches = OperationBatches::default();
+        let operation_waiters: OperationWaiters = Arc::default();
+        let evaluate_batches = crate::registry::EvaluateBatches::default();
+        evaluate_batches.open(
+            "eval-1",
+            1,
+            crate::services::evaluate_batch::EvaluateCases::new([10]),
         );
-        let operation_batches = Arc::new(dashmap::DashMap::new());
-        let operation_waiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_ops_registry =
-            crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-        let cleanup_keys = vec!["op-1".to_string(), "op-2".to_string()];
-        let (_batch_tx, batch_rx) = flume::unbounded();
-        let (waiter_tx, _waiter_rx) = tokio::sync::oneshot::channel();
+        let correlation_ids = vec!["op-1".to_string(), "op-2".to_string()];
+        operation_batches.open("batch-1", 2, correlation_ids.clone());
+        for id in &correlation_ids {
+            evaluate_batches.record_ops("eval-1", 10, "batch-1", vec![id.clone()]);
+            operation_waiters.insert(
+                id.clone(),
+                waiter(Some(EvaluateCaseRef {
+                    batch_id: "eval-1".into(),
+                    test_case_id: 10,
+                })),
+            );
+        }
+        evaluate_batches.record_ops("eval-1", 10, "batch-0", vec!["kept".into()]);
 
-        operation_batches.insert(
-            "batch-1".to_string(),
-            BatchState {
-                result_rx: batch_rx,
-                pending_count: Arc::new(AtomicUsize::new(2)),
-                created_at: Instant::now(),
-                cleanup_keys: Arc::new(cleanup_keys.clone()),
-                poisoned: AtomicBool::new(false),
-            },
+        let deps = deps(
+            blob_store(&temp).await,
+            operation_batches.clone(),
+            operation_waiters.clone(),
+            evaluate_batches.clone(),
         );
-        operation_waiters.insert("op-1".to_string(), OperationWaiter::new(waiter_tx));
-        evaluate_ops_registry.record_ops("eval-1", 10, "batch-1", cleanup_keys.clone());
+        cleanup_failed_operation_batch(&deps, "batch-1");
 
-        let deps = OperationHostDeps {
-            plugin_manager: None,
-            operation_publisher: None,
-            operation_batches: operation_batches.clone(),
-            operation_waiters: operation_waiters.clone(),
-            operation_queue_name: "ops".to_string(),
-            operation_result_queue_name: "ops-results".to_string(),
-            blob_store,
-            metrics: None,
-            evaluate_ops_registry: evaluate_ops_registry.clone(),
-            operation_batch_publish_concurrency: 32,
-            redis_client: None,
-        };
-
-        cleanup_failed_operation_batch(
-            &deps,
-            "batch-1",
-            &cleanup_keys,
-            &[("eval-1".to_string(), 10)],
-            "plugin",
-        );
-
-        assert!(operation_batches.get("batch-1").is_none());
-        assert!(operation_waiters.get("op-1").is_none());
-        assert!(
-            evaluate_ops_registry
-                .operation_task_ids_for_test_cases("eval-1", &[10])
-                .is_empty()
-        );
+        assert!(!operation_batches.contains("batch-1"));
+        assert!(operation_waiters.is_empty());
+        assert_eq!(evaluate_batches.operation_task_ids("eval-1"), vec!["kept"]);
     }
 
     #[test]
     fn cancel_operation_batch_removes_waiters() {
-        let batches = Arc::new(dashmap::DashMap::new());
-        let waiters = Arc::new(dashmap::DashMap::new());
-        let (batch_tx, batch_rx) = flume::unbounded();
-        drop(batch_tx);
-        let (waiter_tx, _waiter_rx) = tokio::sync::oneshot::channel();
-        let cleanup_keys = Arc::new(vec!["task-1".to_string()]);
-        batches.insert(
-            "batch-1".to_string(),
-            BatchState {
-                result_rx: batch_rx,
-                pending_count: Arc::new(AtomicUsize::new(1)),
-                created_at: Instant::now(),
-                cleanup_keys: cleanup_keys.clone(),
-                poisoned: AtomicBool::new(false),
-            },
-        );
-        waiters.insert("task-1".to_string(), OperationWaiter::new(waiter_tx));
+        let batches = OperationBatches::default();
+        let waiters: OperationWaiters = Arc::default();
+        batches.open("batch-1", 1, vec!["task-1".to_string()]);
+        waiters.insert("task-1".to_string(), waiter(None));
 
-        cancel_operation_batch("plugin", &batches, &waiters, None, "batch-1");
+        cancel_operation_batch("plugin", &batches, &waiters, "batch-1");
 
-        assert!(batches.get("batch-1").is_none());
+        assert!(!batches.contains("batch-1"));
         assert!(waiters.get("task-1").is_none());
     }
 }

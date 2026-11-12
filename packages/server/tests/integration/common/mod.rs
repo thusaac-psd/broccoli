@@ -642,12 +642,10 @@ impl TestApp {
         let checker_stage_registry: CheckerStageRegistry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry: LanguageResolverRegistry =
             Arc::new(RwLock::new(HashMap::new()));
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
+        let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
-        let evaluate_ops_registry =
-            server::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
         let (test_metrics, test_prom_registry) =
             common::observability::init_metrics("broccoli-test");
 
@@ -668,7 +666,6 @@ impl TestApp {
                 checker_stage_registry: checker_stage_registry.clone(),
                 language_resolver_registry: language_resolver_registry.clone(),
                 evaluate_batches: evaluate_batches.clone(),
-                evaluate_ops_registry,
                 blob_store: blob_store.clone(),
                 hook_registry: hook_registry.clone(),
                 config: app_config.clone(),

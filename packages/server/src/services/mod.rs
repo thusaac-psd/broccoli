@@ -1,4 +1,5 @@
 pub mod auth_tokens;
+pub mod batch_table;
 pub(crate) mod batch_wait;
 pub mod code_run_dispatch;
 pub mod device_auth;

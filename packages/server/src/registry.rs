@@ -3,9 +3,10 @@ use common::worker::TaskResult;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, oneshot};
+
+use crate::services::batch_table::BatchTable;
+use crate::services::evaluate_batch::EvaluateCases;
 
 #[derive(Clone, Debug)]
 pub struct PluginHandler {
@@ -19,14 +20,6 @@ pub struct ContestTypeHandlers {
     pub submission_fn: String,
     pub code_run_fn: String,
     pub submission_admission: bool,
-}
-
-pub struct BatchState<T> {
-    pub result_rx: flume::Receiver<T>,
-    pub pending_count: Arc<std::sync::atomic::AtomicUsize>,
-    pub created_at: Instant,
-    pub cleanup_keys: Arc<Vec<String>>,
-    pub poisoned: AtomicBool,
 }
 
 pub type ContestTypeRegistry = Arc<RwLock<HashMap<String, ContestTypeHandlers>>>;
@@ -59,78 +52,27 @@ pub struct LanguageResolverEntry {
 
 pub type LanguageResolverRegistry = Arc<RwLock<HashMap<String, LanguageResolverEntry>>>;
 
-pub type OperationBatches = Arc<DashMap<String, BatchState<TaskResult>>>;
+/// Live operation batches; each batch's state is its waiters' correlation
+/// ids.
+pub type OperationBatches = BatchTable<TaskResult, Vec<String>>;
 
-pub type EvaluateBatches = Arc<DashMap<String, BatchState<TestCaseVerdict>>>;
+/// Live evaluate batches with their per-test-case progress.
+pub type EvaluateBatches = BatchTable<TestCaseVerdict, EvaluateCases>;
 
-pub fn spawn_batch_reaper<T: Send + Sync + 'static, F>(
-    label: &'static str,
-    batches: Arc<DashMap<String, BatchState<T>>>,
-    max_age: Duration,
-    metrics: Option<common::metrics::Metrics>,
-    on_expire: F,
-) where
-    F: Fn(&str, &BatchState<T>) + Send + Sync + 'static,
-{
-    let on_expire = Arc::new(on_expire);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let mut poisoned_count = 0u32;
-            let mut reaped_count = 0u32;
-            let on_expire = on_expire.clone();
-            batches.retain(|batch_id, state| {
-                if state.created_at.elapsed() <= max_age {
-                    return true;
-                }
-                if state.poisoned.load(Ordering::Relaxed) {
-                    reaped_count += 1;
-                    if let Some(metrics) = metrics.as_ref() {
-                        let attrs = [
-                            opentelemetry::KeyValue::new("batch.kind", label),
-                            opentelemetry::KeyValue::new("phase", "reaped"),
-                        ];
-                        metrics.batch_reaped_total.add(1, &attrs);
-                        metrics
-                            .batch_active
-                            .add(-1, &[opentelemetry::KeyValue::new("batch.kind", label)]);
-                    }
-                    false
-                } else {
-                    on_expire(batch_id, state);
-                    state.poisoned.store(true, Ordering::Relaxed);
-                    poisoned_count += 1;
-                    if let Some(metrics) = metrics.as_ref() {
-                        metrics.batch_reaped_total.add(
-                            1,
-                            &[
-                                opentelemetry::KeyValue::new("batch.kind", label),
-                                opentelemetry::KeyValue::new("phase", "poisoned"),
-                            ],
-                        );
-                    }
-                    true
-                }
-            });
-            if poisoned_count > 0 || reaped_count > 0 {
-                tracing::warn!(poisoned_count, reaped_count, label, "Batch reaper cycle");
-            }
-        }
-    });
+/// The evaluate test case an operation runs for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvaluateCaseRef {
+    pub batch_id: String,
+    pub test_case_id: i32,
 }
 
-#[derive(Clone)]
+/// Waits for one operation's result. The result consumer removes the waiter
+/// from [`OperationWaiters`] to deliver, so it owns the sender outright.
 pub struct OperationWaiter {
-    pub result_tx: Arc<std::sync::Mutex<Option<oneshot::Sender<TaskResult>>>>,
-}
-
-impl OperationWaiter {
-    pub fn new(result_tx: oneshot::Sender<TaskResult>) -> Self {
-        Self {
-            result_tx: Arc::new(std::sync::Mutex::new(Some(result_tx))),
-        }
-    }
+    pub result_tx: oneshot::Sender<TaskResult>,
+    /// Set when the operation runs for an evaluate test case, so its start
+    /// can be recorded on that case.
+    pub evaluate_case: Option<EvaluateCaseRef>,
 }
 
 pub type OperationWaiters = Arc<DashMap<String, OperationWaiter>>;

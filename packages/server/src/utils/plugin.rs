@@ -433,9 +433,9 @@ mod tests {
             evaluator_registry: Arc::new(RwLock::new(HashMap::new())),
             checker_stage_registry: Arc::new(RwLock::new(HashMap::new())),
             language_resolver_registry: Arc::new(RwLock::new(HashMap::new())),
-            operation_batches: Arc::new(dashmap::DashMap::new()),
+            operation_batches: Default::default(),
             operation_waiters: Arc::new(dashmap::DashMap::new()),
-            evaluate_batches: Arc::new(dashmap::DashMap::new()),
+            evaluate_batches: Default::default(),
             hook_registry: crate::hooks::new_shared_registry(),
         }
     }

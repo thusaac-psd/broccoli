@@ -15,8 +15,7 @@ use server::config::per_replica_result_queue_name;
 use server::consumers::consume_operation_results;
 use server::dispatcher::sweeper::sweep_once;
 use server::host_funcs::context::OperationHostDeps;
-use server::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
-use server::registry::{OperationWaiter, OperationWaiters};
+use server::registry::{EvaluateBatches, OperationBatches, OperationWaiter, OperationWaiters};
 use server::services::operation_batch::{
     OperationTaskPublisher, next_operation_result, start_operation_batch,
 };
@@ -71,16 +70,20 @@ async fn per_replica_result_queue_delivers_to_originating_replica_only() {
 
     let waiters_a: OperationWaiters = Arc::new(DashMap::new());
     let waiters_b: OperationWaiters = Arc::new(DashMap::new());
-    let evaluate_ops_registry = EvaluateBatchOpsRegistry::default();
+    let evaluate_batches = EvaluateBatches::default();
     let (tx_a, rx_a) = oneshot::channel();
     let (tx_b, rx_b) = oneshot::channel();
-    waiters_a.insert("task-1".to_string(), OperationWaiter::new(tx_a));
-    waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b));
+    let waiter = |result_tx| OperationWaiter {
+        result_tx,
+        evaluate_case: None,
+    };
+    waiters_a.insert("task-1".to_string(), waiter(tx_a));
+    waiters_b.insert("task-1".to_string(), waiter(tx_b));
 
     let consumer_a = tokio::spawn(consume_operation_results(
         Arc::clone(&mq_a),
         Arc::clone(&waiters_a),
-        evaluate_ops_registry.clone(),
+        evaluate_batches.clone(),
         queue_a.clone(),
         metrics.clone(),
         std::time::Duration::from_millis(20),
@@ -88,7 +91,7 @@ async fn per_replica_result_queue_delivers_to_originating_replica_only() {
     let consumer_b = tokio::spawn(consume_operation_results(
         Arc::clone(&mq_b),
         Arc::clone(&waiters_b),
-        evaluate_ops_registry,
+        evaluate_batches,
         queue_b,
         metrics,
         std::time::Duration::from_millis(20),
@@ -291,14 +294,14 @@ async fn operation_result_burst_has_no_missing_waiters() {
         .as_nanos();
     let result_queue = format!("operation_results.waiter_burst_{suffix}");
     let (metrics, registry, _metrics_provider) = init_local_metrics("broccoli-waiter-burst-test");
-    let operation_batches = Arc::new(DashMap::new());
-    let operation_waiters = Arc::new(DashMap::new());
-    let evaluate_ops_registry = EvaluateBatchOpsRegistry::default();
+    let operation_batches = OperationBatches::new(Some(metrics.clone()));
+    let operation_waiters: OperationWaiters = Arc::new(DashMap::new());
+    let evaluate_batches = EvaluateBatches::default();
 
     let consumer = tokio::spawn(consume_operation_results(
         Arc::clone(&mq),
         Arc::clone(&operation_waiters),
-        evaluate_ops_registry.clone(),
+        evaluate_batches.clone(),
         result_queue.clone(),
         metrics.clone(),
         std::time::Duration::from_millis(20),
@@ -312,7 +315,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
             mq: Arc::clone(&mq),
             result_queue: result_queue.clone(),
         })),
-        operation_batches: Arc::clone(&operation_batches),
+        operation_batches: operation_batches.clone(),
         operation_waiters: Arc::clone(&operation_waiters),
         operation_queue_name: format!("operation_tasks.waiter_burst_{suffix}"),
         operation_result_queue_name: result_queue,
@@ -322,7 +325,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
                 .expect("blob store should initialize"),
         ),
         metrics: Some(metrics.clone()),
-        evaluate_ops_registry,
+        evaluate_batches,
         operation_batch_publish_concurrency: 128,
         redis_client: None,
     };
@@ -340,7 +343,6 @@ async fn operation_result_burst_has_no_missing_waiters() {
         let result = next_operation_result(
             "waiter-burst-test",
             &operation_batches,
-            Some(&metrics),
             &batch_id,
             Duration::from_secs(10),
         )

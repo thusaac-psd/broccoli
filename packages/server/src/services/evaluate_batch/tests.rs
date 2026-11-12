@@ -9,40 +9,31 @@ use common::worker::TaskResult;
 
 use super::*;
 
-#[test]
-fn giveup_drains_verdict_buffered_in_the_send_before_decrement_race() {
-    // The per-test-case dispatch task sends the verdict BEFORE decrementing
-    // pending_count, so a give-up branch can observe the timeout with a
-    // completed verdict already buffered in the channel. The drain must
-    // deliver it, never drop it into a spurious timeout -> SystemError.
-    let batches = EvaluateBatches::default();
-    let registry = crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-    let (tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending_count = Arc::new(AtomicUsize::new(0));
-    let batch_id = "eval-drain-buffered";
-    batches.insert(
-        batch_id.to_string(),
-        BatchState {
-            result_rx: rx.clone(),
-            pending_count: pending_count.clone(),
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: AtomicBool::new(false),
-        },
-    );
-    tx.send(system_error_verdict(7, "buffered in race window"))
-        .unwrap();
-
-    let delivered = evaluate_wait(
-        "plugin",
-        &batches,
-        None,
-        &registry,
+fn open_batch(
+    batches: &EvaluateBatches,
+    batch_id: &str,
+    case_ids: &[i32],
+) -> BatchSender<TestCaseVerdict> {
+    batches.open(
         batch_id,
-        Duration::ZERO,
+        case_ids.len(),
+        EvaluateCases::new(case_ids.iter().copied()),
     )
-    .unwrap()
-    .give_up();
+}
+
+#[test]
+fn giveup_drains_verdict_buffered_before_the_pending_decrement() {
+    // Each verdict is buffered BEFORE the pending count drops, so a give-up
+    // branch can observe the batch as settled with the verdict already in
+    // the channel. The drain must deliver it, never drop it into a spurious
+    // timeout -> SystemError.
+    let batches = EvaluateBatches::default();
+    let tx = open_batch(&batches, "eval-drain-buffered", &[7]);
+    tx.deliver(system_error_verdict(7, "buffered"));
+
+    let delivered = evaluate_wait("plugin", &batches, "eval-drain-buffered", Duration::ZERO)
+        .unwrap()
+        .give_up();
     let verdict = delivered.expect("a buffered verdict must be drained, not dropped");
     assert_eq!(verdict.test_case_id, 7);
 }
@@ -50,33 +41,13 @@ fn giveup_drains_verdict_buffered_in_the_send_before_decrement_race() {
 #[test]
 fn giveup_drain_is_none_when_channel_genuinely_empty() {
     let batches = EvaluateBatches::default();
-    let registry = crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-    let (_tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending_count = Arc::new(AtomicUsize::new(0));
-    let batch_id = "eval-drain-empty";
-    batches.insert(
-        batch_id.to_string(),
-        BatchState {
-            result_rx: rx.clone(),
-            pending_count: pending_count.clone(),
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: AtomicBool::new(false),
-        },
-    );
+    let _tx = open_batch(&batches, "eval-drain-empty", &[7]);
 
     assert!(
-        evaluate_wait(
-            "plugin",
-            &batches,
-            None,
-            &registry,
-            batch_id,
-            Duration::ZERO
-        )
-        .unwrap()
-        .give_up()
-        .is_none()
+        evaluate_wait("plugin", &batches, "eval-drain-empty", Duration::ZERO)
+            .unwrap()
+            .give_up()
+            .is_none()
     );
 }
 
@@ -128,181 +99,74 @@ fn detached_evaluate_completion_hooks_only_follow_terminal_callback_actions() {
 }
 
 #[test]
-fn next_result_extends_timeout_until_tracked_operation_execution_budget_expires() {
+fn delivered_verdict_completes_its_case_and_drains_the_batch() {
     let batches = EvaluateBatches::default();
-    let registry = crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-    let (tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending_count = Arc::new(AtomicUsize::new(1));
-    let batch_id = "eval-timeout-started";
+    let tx = open_batch(&batches, "eval-1", &[10, 11]);
+    tx.deliver(system_error_verdict(10, "done"));
 
-    batches.insert(
-        batch_id.to_string(),
-        BatchState {
-            result_rx: rx,
-            pending_count: pending_count.clone(),
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: AtomicBool::new(false),
-        },
-    );
-    registry.record_ops(batch_id, 10, "op-batch-1", ["op-1".to_string()]);
-
-    let batches_for_waiter = batches.clone();
-    let registry_for_waiter = registry.clone();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = next_evaluate_result(
-            "plugin",
-            &batches_for_waiter,
-            None,
-            &registry_for_waiter,
-            batch_id,
-            Duration::from_millis(25),
-        )
-        .unwrap();
-        done_tx.send(result).unwrap();
-    });
-
-    std::thread::sleep(Duration::from_millis(40));
-    assert!(
-        done_rx.try_recv().is_err(),
-        "queued operation should silently extend the first timeout"
+    let got = next_evaluate_result("plugin", &batches, "eval-1", Duration::ZERO).unwrap();
+    assert_eq!(got.map(|v| v.test_case_id), Some(10));
+    assert!(batches.contains("eval-1"), "case 11 is still pending");
+    assert_eq!(
+        batches.cancel_cases("eval-1", &[10, 11]),
+        1,
+        "case 10 has its verdict"
     );
 
-    registry.mark_operation_started("op-1", chrono::Utc::now().timestamp_millis());
-    std::thread::sleep(Duration::from_millis(10));
-    assert!(
-        done_rx.try_recv().is_err(),
-        "started operation should keep waiting until execution timeout elapses"
-    );
+    tx.deliver(system_error_verdict(11, "done"));
+    next_evaluate_result("plugin", &batches, "eval-1", Duration::ZERO).unwrap();
+    assert!(!batches.contains("eval-1"));
+}
 
+#[test]
+fn next_result_zero_timeout_is_nonblocking_even_when_a_case_is_waiting() {
+    let batches = EvaluateBatches::default();
+    let _tx = open_batch(&batches, "eval-timeout-zero", &[10]);
     assert!(
-        done_rx
-            .recv_timeout(Duration::from_millis(80))
+        next_evaluate_result("plugin", &batches, "eval-timeout-zero", Duration::ZERO)
             .unwrap()
-            .is_none()
-    );
-    drop(tx);
-}
-
-#[test]
-fn next_result_uses_first_started_operation_for_multi_op_test_case() {
-    let batches = EvaluateBatches::default();
-    let registry = crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-    let (_tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending_count = Arc::new(AtomicUsize::new(1));
-    let batch_id = "eval-timeout-multi-op";
-
-    batches.insert(
-        batch_id.to_string(),
-        BatchState {
-            result_rx: rx,
-            pending_count: pending_count.clone(),
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: AtomicBool::new(false),
-        },
-    );
-    registry.record_ops(
-        batch_id,
-        10,
-        "op-batch-1",
-        ["op-1".to_string(), "op-2".to_string()],
-    );
-
-    registry.mark_operation_started("op-1", chrono::Utc::now().timestamp_millis());
-    std::thread::sleep(Duration::from_millis(30));
-
-    assert!(
-        next_evaluate_result(
-            "plugin",
-            &batches,
-            None,
-            &registry,
-            batch_id,
-            Duration::from_millis(20),
-        )
-        .unwrap()
-        .is_none()
-    );
-}
-
-#[test]
-fn next_result_zero_timeout_is_nonblocking_even_when_operation_is_queued() {
-    let batches = EvaluateBatches::default();
-    let registry = crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
-    let (_tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending_count = Arc::new(AtomicUsize::new(1));
-    let batch_id = "eval-timeout-zero";
-
-    batches.insert(
-        batch_id.to_string(),
-        BatchState {
-            result_rx: rx,
-            pending_count,
-            created_at: Instant::now(),
-            cleanup_keys: Arc::new(Vec::new()),
-            poisoned: AtomicBool::new(false),
-        },
-    );
-    registry.record_ops(batch_id, 10, "op-batch-1", ["op-1".to_string()]);
-
-    let start = Instant::now();
-    assert!(
-        next_evaluate_result(
-            "plugin",
-            &batches,
-            None,
-            &registry,
-            batch_id,
-            Duration::ZERO,
-        )
-        .unwrap()
-        .is_none()
-    );
-    assert!(
-        start.elapsed() < Duration::from_millis(20),
+            .is_none(),
         "timeout=0 must preserve the SDK's nonblocking poll contract"
     );
 }
 
 #[test]
-fn dispatch_guard_drains_remaining_on_drop() {
-    let (tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending = Arc::new(AtomicUsize::new(3));
+fn dispatch_guard_delivers_for_unclaimed_cases_on_drop() {
+    let batches = EvaluateBatches::default();
+    let tx = open_batch(&batches, "eval-guard", &[10, 20, 30]);
     {
         let mut guard = DispatchGuard {
             pending: vec![10, 20, 30],
-            batch_tx: tx,
-            pending_count: pending.clone(),
-            metrics: None,
+            batch_tx: tx.clone(),
         };
         // Worker spawned for tc_id=10 -> guard no longer owns it.
         guard.claim(10);
         // Simulate dispatcher unwind: drop guard with [20, 30] still pending.
     }
-    // Guard's Drop emits SystemError + decrement for each remaining tc_id.
-    assert_eq!(pending.load(Ordering::SeqCst), 1, "should drop by 2");
-    let mut seen: Vec<i32> = rx.try_iter().map(|v| v.test_case_id).collect();
+    let mut seen = Vec::new();
+    while let Some(verdict) =
+        next_evaluate_result("plugin", &batches, "eval-guard", Duration::ZERO).unwrap()
+    {
+        seen.push(verdict.test_case_id);
+    }
     seen.sort();
     assert_eq!(seen, vec![20, 30]);
+    assert!(batches.contains("eval-guard"), "case 10 is still owed");
 }
 
 #[test]
-fn dispatch_guard_empty_pending_is_noop_on_drop() {
-    let (tx, rx) = flume::unbounded::<TestCaseVerdict>();
-    let pending = Arc::new(AtomicUsize::new(2));
-    {
-        let guard = DispatchGuard {
-            pending: Vec::new(),
-            batch_tx: tx,
-            pending_count: pending.clone(),
-            metrics: None,
-        };
-        drop(guard);
-    }
-    assert_eq!(pending.load(Ordering::SeqCst), 2, "no decrement on empty");
-    assert!(rx.try_recv().is_err(), "no verdicts on empty drain");
+fn dispatch_guard_with_nothing_pending_delivers_nothing() {
+    let batches = EvaluateBatches::default();
+    let tx = open_batch(&batches, "eval-guard", &[10]);
+    drop(DispatchGuard {
+        pending: Vec::new(),
+        batch_tx: tx.clone(),
+    });
+    assert!(
+        next_evaluate_result("plugin", &batches, "eval-guard", Duration::ZERO)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

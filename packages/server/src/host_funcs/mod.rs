@@ -3,7 +3,6 @@ pub mod config;
 pub mod context;
 pub mod dispatch;
 pub mod evaluate;
-pub mod evaluate_ops_registry;
 pub mod feedback;
 pub mod language;
 pub mod logger;

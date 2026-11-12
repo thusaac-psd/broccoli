@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
@@ -23,7 +22,8 @@ use uuid::Uuid;
 
 use crate::entity::{additional_file, plugin_config, problem, test_case};
 use crate::host_funcs::context::EvaluateHostDeps;
-use crate::registry::{BatchState, EvaluateBatches, PluginHandler};
+use crate::registry::{EvaluateBatches, PluginHandler};
+use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::submission_dispatch::fire_after_judging_hooks_for_detached_completion;
 use crate::services::windowed_session::{
@@ -39,19 +39,21 @@ const BATCH_EVALUATOR_CALLBACK_FN: &str = "on_operation_results";
 const BATCH_EVALUATOR_CALLBACK_COALESCE: usize = 4;
 /// How many times a timed-out detached evaluate op is re-dispatched (on a fresh
 /// op batch, which any worker may pick up) before the timeout is surfaced to the
-/// plugin as a terminal event. The queued-op extend in `EvaluateBatchOpsRegistry`
+/// plugin as a terminal event. The queued-case extend in [`EvaluateCases`]
 /// already prevents queue-wait timeouts, so a timeout reaching the driver means a
 /// genuine execution/result failure (dead worker, lost result, transient stall)
 /// that is worth retrying on another worker rather than letting the plugin
 /// blanket-fail the whole submission with SystemError.
 const MAX_DETACHED_OP_RETRIES: u32 = 2;
 
+mod cases;
 mod detached;
 mod dispatch;
 mod result_wait;
 #[cfg(test)]
 mod tests;
 
+pub use cases::EvaluateCases;
 pub use detached::*;
 pub use dispatch::*;
 pub use result_wait::*;
@@ -284,48 +286,20 @@ fn operation_results_from_task_results(
         .collect()
 }
 
-fn send_system_error(
-    batch_tx: &flume::Sender<TestCaseVerdict>,
-    test_case_id: i32,
-    message: String,
-) {
-    let _ = batch_tx.send(TestCaseVerdict {
-        test_case_id,
-        verdict: SdkVerdict::SystemError,
-        score: 0.0,
-        time_used_ms: None,
-        memory_used_kb: None,
-        message: Some(message),
-        stdout: None,
-        stderr: None,
-    });
-}
-
-fn decrement_pending(pending: &AtomicUsize, metrics: Option<&common::metrics::Metrics>) {
-    pending.fetch_sub(1, Ordering::SeqCst);
-    if let Some(metrics) = metrics {
-        metrics
-            .batch_pending_items
-            .add(-1, &[KeyValue::new("batch.kind", "evaluate")]);
-    }
-}
-
 /// Defensive cleanup for the fan-out dispatcher task. The dispatcher loop has
 /// no panic sites today, but if a future change introduces one, the guard's
-/// Drop drains any test cases that weren't yet handed off to a worker. Without
-/// this floor, a dispatcher panic would leave `pending_count > 0` and block
-/// every `next_evaluate_result` waiter forever.
+/// Drop delivers a SystemError for every test case not yet handed off to a
+/// worker. Without this floor, a dispatcher panic would leave the batch
+/// pending forever and block every `next_evaluate_result` waiter.
 struct DispatchGuard {
     pending: Vec<i32>,
-    batch_tx: flume::Sender<TestCaseVerdict>,
-    pending_count: Arc<AtomicUsize>,
-    metrics: Option<common::metrics::Metrics>,
+    batch_tx: BatchSender<TestCaseVerdict>,
 }
 
 impl DispatchGuard {
     /// Mark a tc_id as successfully handed off to a worker (or cleaned up
-    /// inline). The worker now owns the cleanup obligation for that tc_id, so
-    /// the guard must not double-drain it.
+    /// inline). The worker now owns the delivery obligation for that tc_id, so
+    /// the guard must not deliver it again.
     fn claim(&mut self, tc_id: i32) {
         if let Some(pos) = self.pending.iter().position(|x| *x == tc_id) {
             self.pending.swap_remove(pos);
@@ -336,12 +310,10 @@ impl DispatchGuard {
 impl Drop for DispatchGuard {
     fn drop(&mut self) {
         for tc_id in self.pending.drain(..) {
-            send_system_error(
-                &self.batch_tx,
+            self.batch_tx.deliver(system_error_verdict(
                 tc_id,
-                "Evaluator dispatcher terminated unexpectedly".into(),
-            );
-            decrement_pending(&self.pending_count, self.metrics.as_ref());
+                "Evaluator dispatcher terminated unexpectedly",
+            ));
         }
     }
 }

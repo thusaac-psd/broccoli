@@ -8,7 +8,6 @@ use tokio::sync::Semaphore;
 
 use crate::config::AppConfig;
 use crate::hooks::SharedHookRegistry;
-use crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
 use crate::registry::{
     CheckerStageRegistry, ContestTypeRegistry, EvaluateBatches, EvaluatorRegistry,
     LanguageResolverRegistry, OperationBatches, OperationWaiters,
@@ -32,7 +31,6 @@ pub struct HostFunctionSystemDeps {
     pub checker_stage_registry: CheckerStageRegistry,
     pub language_resolver_registry: LanguageResolverRegistry,
     pub evaluate_batches: EvaluateBatches,
-    pub evaluate_ops_registry: EvaluateBatchOpsRegistry,
     pub blob_store: Arc<dyn BlobStore>,
     pub hook_registry: SharedHookRegistry,
     pub config: AppConfig,
@@ -56,7 +54,8 @@ pub struct OperationHostDeps {
     pub operation_result_queue_name: String,
     pub blob_store: Arc<dyn BlobStore>,
     pub metrics: Option<common::metrics::Metrics>,
-    pub evaluate_ops_registry: EvaluateBatchOpsRegistry,
+    /// Evaluate batches whose test cases an operation may run for.
+    pub evaluate_batches: EvaluateBatches,
     /// Per-batch cap on concurrent in-flight blob-externalize + mq.publish
     /// operations inside `start_operation_batch`. Sourced from
     /// `server.operation_batch_publish_concurrency`.
@@ -81,7 +80,6 @@ pub struct EvaluateHostDeps {
     /// `after_judging` hook enablement (see `hooks::resource_enablements`).
     pub contest_type_registry: ContestTypeRegistry,
     pub metrics: Option<common::metrics::Metrics>,
-    pub evaluate_ops_registry: EvaluateBatchOpsRegistry,
     pub redis_client: Option<Arc<redis::Client>>,
     pub cancel_primitive_enabled: bool,
 }
@@ -106,7 +104,7 @@ impl HostFunctionSystemDeps {
             operation_result_queue_name: self.config.mq.operation_result_queue_name.clone(),
             blob_store: self.blob_store.clone(),
             metrics: self.metrics.clone(),
-            evaluate_ops_registry: self.evaluate_ops_registry.clone(),
+            evaluate_batches: self.evaluate_batches.clone(),
             operation_batch_publish_concurrency: self
                 .config
                 .server
@@ -139,7 +137,6 @@ impl HostFunctionDeps {
             hook_registry: self.system.hook_registry.clone(),
             contest_type_registry: self.system.contest_type_registry.clone(),
             metrics: self.system.metrics.clone(),
-            evaluate_ops_registry: self.system.evaluate_ops_registry.clone(),
             redis_client: self.system.redis_client.clone(),
             cancel_primitive_enabled: self.system.config.server.cancel_primitive_enabled,
         }

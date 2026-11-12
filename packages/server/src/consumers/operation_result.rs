@@ -1,5 +1,4 @@
-use crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
-use crate::registry::OperationWaiters;
+use crate::registry::{EvaluateBatches, OperationWaiters};
 use common::metrics::Metrics;
 use common::worker::TaskReply;
 use mq::MqQueue;
@@ -10,7 +9,7 @@ use tracing::{debug, error, info, warn};
 pub async fn consume_operation_results(
     mq: Arc<MqQueue>,
     waiters: OperationWaiters,
-    evaluate_ops_registry: EvaluateBatchOpsRegistry,
+    evaluate_batches: EvaluateBatches,
     queue_name: String,
     metrics: Metrics,
     // How long each task naps after an empty poll (`mq.result_poll_interval_ms`).
@@ -38,7 +37,7 @@ pub async fn consume_operation_results(
             }),
             move |message: mq::BrokerMessage<TaskReply>| {
                 let waiters = waiters.clone();
-                let evaluate_ops_registry = evaluate_ops_registry.clone();
+                let evaluate_batches = evaluate_batches.clone();
                 let metrics = metrics.clone();
                 async move {
                     crate::consumers::guard_handler("operation_result", async move {
@@ -46,9 +45,18 @@ pub async fn consume_operation_results(
                     let (reply_type, outcome, task_success) = match message.payload {
                         TaskReply::Started { notification } => {
                             let task_id = notification.task_id;
-                            let outcome = if evaluate_ops_registry
-                                .mark_operation_started(&task_id, notification.started_at_unix_ms)
-                            {
+                            // The start is timed by this server's monotonic
+                            // clock on receipt, never by the worker's clock.
+                            let case = waiters
+                                .get(&task_id)
+                                .and_then(|waiter| waiter.evaluate_case.clone());
+                            let outcome = if case.is_some_and(|case| {
+                                evaluate_batches.mark_case_started(
+                                    &case.batch_id,
+                                    case.test_case_id,
+                                    std::time::Instant::now(),
+                                )
+                            }) {
                                 debug!(%task_id, "Operation start delivered to evaluate batch registry");
                                 "started"
                             } else {
@@ -61,22 +69,12 @@ pub async fn consume_operation_results(
                             let task_id = result.task_id.clone();
                             let task_success = result.success;
                             let outcome = if let Some((_, waiter)) = waiters.remove(&task_id) {
-                                let tx = waiter
-                                    .result_tx
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut guard| guard.take());
-                                if let Some(tx) = tx {
-                                    if tx.send(result).is_err() {
-                                        error!(%task_id, "Failed to send operation result to waiter (receiver dropped)");
-                                        "receiver_dropped"
-                                    } else {
-                                        debug!(%task_id, "Operation result delivered to plugin");
-                                        "delivered"
-                                    }
-                                } else {
-                                    error!(%task_id, "Operation result waiter sender missing");
+                                if waiter.result_tx.send(result).is_err() {
+                                    error!(%task_id, "Failed to send operation result to waiter (receiver dropped)");
                                     "receiver_dropped"
+                                } else {
+                                    debug!(%task_id, "Operation result delivered to plugin");
+                                    "delivered"
                                 }
                             } else {
                                 warn!(%task_id, "Operation result received but no waiter found (batch may have been cancelled)");

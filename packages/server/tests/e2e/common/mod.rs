@@ -339,11 +339,9 @@ impl E2eTestApp {
         let checker_stage_registry: CheckerStageRegistry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry: LanguageResolverRegistry =
             Arc::new(RwLock::new(HashMap::new()));
-        let operation_batches: OperationBatches = Arc::new(dashmap::DashMap::new());
+        let operation_batches = OperationBatches::default();
         let operation_waiters: OperationWaiters = Arc::new(dashmap::DashMap::new());
-        let evaluate_batches: EvaluateBatches = Arc::new(dashmap::DashMap::new());
-        let evaluate_ops_registry =
-            server::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
+        let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
 
         let plugins = ServerManager::new(
@@ -363,7 +361,6 @@ impl E2eTestApp {
                 checker_stage_registry: checker_stage_registry.clone(),
                 language_resolver_registry: language_resolver_registry.clone(),
                 evaluate_batches: evaluate_batches.clone(),
-                evaluate_ops_registry: evaluate_ops_registry.clone(),
                 blob_store: blob_store.clone(),
                 hook_registry: hook_registry.clone(),
                 config: app_config.clone(),
@@ -391,7 +388,7 @@ impl E2eTestApp {
                 language_resolver_registry,
                 operation_batches,
                 operation_waiters: operation_waiters.clone(),
-                evaluate_batches,
+                evaluate_batches: evaluate_batches.clone(),
                 hook_registry,
             },
             metrics: e2e_metrics.clone(),
@@ -423,14 +420,14 @@ impl E2eTestApp {
 
             let consumer_mq = Arc::clone(&mq);
             let consumer_waiters = operation_waiters.clone();
-            let consumer_evaluate_ops_registry = evaluate_ops_registry.clone();
+            let consumer_evaluate_batches = evaluate_batches.clone();
             let consumer_queue = result_queue.clone();
             let consumer_metrics = e2e_metrics.clone();
             result_consumer_handle_opt = Some(tokio::spawn(async move {
                 consume_operation_results(
                     consumer_mq,
                     consumer_waiters,
-                    consumer_evaluate_ops_registry,
+                    consumer_evaluate_batches,
                     consumer_queue,
                     consumer_metrics,
                     std::time::Duration::from_millis(20),

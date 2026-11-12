@@ -184,15 +184,11 @@ impl TaskResult {
     }
 }
 
+/// Sent when a worker starts executing an operation task. The server times
+/// the start by its own clock on receipt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStartedNotification {
     pub task_id: String,
-    #[serde(default = "current_unix_ms")]
-    pub started_at_unix_ms: i64,
-}
-
-fn current_unix_ms() -> i64 {
-    Utc::now().timestamp_millis()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,7 +248,6 @@ mod reply_tests {
         let reply = TaskReply::Started {
             notification: TaskStartedNotification {
                 task_id: "op-1".to_string(),
-                started_at_unix_ms: 1_234,
             },
         };
 
@@ -260,8 +255,7 @@ mod reply_tests {
             serde_json::to_value(reply).unwrap(),
             serde_json::json!({
                 "type": "started",
-                "task_id": "op-1",
-                "started_at_unix_ms": 1_234
+                "task_id": "op-1"
             })
         );
     }

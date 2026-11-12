@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use common::metrics::Metrics;
 use common::retry::calculate_backoff;
 use common::worker::{Task, TaskReply, TaskResult, TaskStartedNotification};
@@ -34,7 +33,6 @@ pub async fn execute_task(
         publish_started(
             TaskStartedNotification {
                 task_id: task.id.clone(),
-                started_at_unix_ms: Utc::now().timestamp_millis(),
             },
             task.reply_queue_name(),
             mq,
