@@ -596,7 +596,7 @@ impl TestApp {
                 claim_batch_size: 32,
                 max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
-                plugin_timer_lease_secs: 30,
+                plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },

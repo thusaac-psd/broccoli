@@ -184,10 +184,17 @@ struct TimerCallbackInputIn {
 /// `"trap_on_timer"` (seeded through `kv_write`, exactly like
 /// `decide_visibility`'s `"trap"` mode) forces a real WASM trap so the
 /// integration suite can prove retry-then-drop without wedging the loop.
+/// `"hang_on_timer"` makes the handler spin forever, so only the host can
+/// end the call.
 #[plugin_fn]
 pub fn on_timer(input: String) -> FnResult<String> {
     if read_kv_single("trap_on_timer")?.as_deref() == Some("1") {
         panic!("on_timer: forced trap for failure-injection test");
+    }
+    if read_kv_single("hang_on_timer")?.as_deref() == Some("1") {
+        loop {
+            std::hint::spin_loop();
+        }
     }
 
     let cb: TimerCallbackInputIn = serde_json::from_str(&input)?;
@@ -348,7 +355,9 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
             .map(|_| WireDecisionOut::Allow {})
             .collect();
         decisions.pop();
-        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut {
+            decisions,
+        })?);
     }
 
     if mode == "over_limit_segments" || mode == "over_limit_bytes" || mode == "over_limit_fields" {
@@ -368,7 +377,9 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
                 fields: fields.clone(),
             })
             .collect();
-        return Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?);
+        return Ok(serde_json::to_string(&VisibilityQueryOutputOut {
+            decisions,
+        })?);
     }
 
     // -- Normal path -------------------------------------------------------
@@ -395,8 +406,7 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
                 WireDecisionOut::Redact {
                     fields: redact_fields.clone(),
                 }
-            } else if r.kind == "submission" && redact_submission_ids.iter().any(|id| id == &r.id)
-            {
+            } else if r.kind == "submission" && redact_submission_ids.iter().any(|id| id == &r.id) {
                 WireDecisionOut::Redact {
                     fields: vec!["result.verdict".to_string(), "result.score".to_string()],
                 }
@@ -406,7 +416,9 @@ pub fn decide_visibility(input: String) -> FnResult<String> {
         })
         .collect();
 
-    Ok(serde_json::to_string(&VisibilityQueryOutputOut { decisions })?)
+    Ok(serde_json::to_string(&VisibilityQueryOutputOut {
+        decisions,
+    })?)
 }
 
 /// Read a single KV value written via the `kv_write` route.

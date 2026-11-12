@@ -274,6 +274,53 @@ async fn a_trapping_handler_is_retried_then_dropped() {
     );
 }
 
+/// A handler that never returns is cancelled when its claim's lease ends, so
+/// no other replica can claim the timer while this one still runs it. The
+/// tick waits for the guest to stop: once it returns, no plugin call is in
+/// flight. The attempt stays spent and the row stays claimed until the lease
+/// expires in the database, like any other failed delivery.
+#[tokio::test]
+async fn a_handler_still_running_at_lease_end_is_cancelled() {
+    let app = TestApp::spawn_with_plugins().await;
+    seed_kv(&app, "hang_on_timer", "1").await;
+    schedule_timer(&app, "hang", 0, "{}").await;
+
+    // A zero call budget lets the delivery start with only the 1s lease
+    // left, far less than the 300s call timeout, so only the lease can end it.
+    let config = server::dispatcher::plugin_timer::TimerConfig {
+        lease_secs: 1,
+        call_budget: Duration::ZERO,
+        ..Default::default()
+    };
+    // A guard far below the call timeout: without the lease cancel the
+    // guest would spin until the call timeout ends it.
+    let stats = tokio::time::timeout(
+        Duration::from_secs(60),
+        server::dispatcher::plugin_timer::tick_once(&app.state, &config),
+    )
+    .await
+    .expect("the lease ends the delivery, not the call timeout")
+    .expect("a hanging plugin must not fail the tick itself");
+    assert_eq!(stats.claimed, 1);
+
+    let gate = app
+        .state
+        .plugins
+        .call_gate()
+        .expect("the server gates plugin calls");
+    assert_eq!(
+        gate.in_flight(),
+        0,
+        "the hanging guest was stopped, not abandoned"
+    );
+    assert_eq!(
+        pending_timer_count(&app, "hang").await,
+        1,
+        "an undelivered timer is kept"
+    );
+    assert!(read_deliveries(&app).await.is_empty());
+}
+
 /// Move every claim's lease into the past, as if it had expired.
 async fn expire_claims(app: &TestApp) {
     sea_orm::ConnectionTrait::execute_unprepared(

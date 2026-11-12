@@ -126,6 +126,7 @@ impl Dispatcher {
                 lease_secs: deps.config.plugin_timer_lease_secs,
                 batch: deps.config.plugin_timer_batch,
                 max_attempts: deps.config.plugin_timer_max_attempts,
+                call_budget: deps.state.plugins.get_config().call_timeout(),
             },
             cancel_rx.clone(),
         )));

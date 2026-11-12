@@ -22,13 +22,19 @@
 //! single owner of the retry budget: it never claims a row whose budget is
 //! spent and, in the same statement, deletes every such row whose last
 //! claim's lease has expired, however that last delivery ended (a trap, a
-//! hang, or a crashed replica). A tick starts deliveries only while its
-//! claim's lease holds and hands the rows it did not reach back unclaimed,
-//! with their attempt refunded.
+//! hang, or a crashed replica).
+//!
+//! A delivery never outlives its claim's lease, so no two replicas run the
+//! same timer at once. A tick starts a delivery only while the lease still
+//! has room for a whole plugin call (`TimerConfig::call_budget`), cancels a
+//! guest still running when the lease ends, and hands the rows it did not
+//! reach back unclaimed, with their attempt refunded.
 
 use std::time::Duration as StdDuration;
 
+use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
+use plugin_core::traits::CallOptions;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
     FromQueryResult, QueryFilter, Statement,
@@ -40,24 +46,36 @@ use tracing::{error, info, warn};
 use crate::entity::plugin_timer;
 use crate::state::AppState;
 
-/// Config for the plugin-timer delivery loop. Defaults: 1s tick, 30s claim
-/// lease, 64-row batch, 5 delivery attempts before a timer is dropped.
+/// Config for the plugin-timer delivery loop. Defaults: 1s tick, 330s claim
+/// lease, 64-row batch, 5 delivery attempts before a timer is dropped, and the
+/// default plugin call timeout as the call budget.
 #[derive(Debug, Clone, Copy)]
 pub struct TimerConfig {
     pub tick_interval_secs: u64,
     pub lease_secs: i64,
     pub batch: u64,
     pub max_attempts: i32,
+    /// The longest one delivery may need: the plugin call timeout. A delivery
+    /// starts only while the lease has at least this much left, so one that
+    /// starts is cut short by its own call timeout, not by the lease.
+    pub call_budget: StdDuration,
 }
 
 impl Default for TimerConfig {
     fn default() -> Self {
         Self {
             tick_interval_secs: 1,
-            lease_secs: 30,
+            lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
             batch: 64,
             max_attempts: 5,
+            call_budget: plugin_core::config::PluginConfig::default().call_timeout(),
         }
+    }
+}
+
+impl TimerConfig {
+    fn lease(&self) -> StdDuration {
+        StdDuration::from_secs(self.lease_secs.max(0) as u64)
     }
 }
 
@@ -92,8 +110,11 @@ pub async fn run(state: AppState, config: TimerConfig, mut cancel: watch::Receiv
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                // A tick's deliveries end with its lease, so the tick is
+                // bounded by the lease plus the usual statement budget.
+                let budget = config.lease() + common::deadline::BACKGROUND_STEP;
                 if let Some(Err(e)) =
-                    common::deadline::bounded("dispatcher.plugin_timer", common::deadline::BACKGROUND_STEP, tick_once(&state, &config)).await
+                    common::deadline::bounded("dispatcher.plugin_timer", budget, tick_once(&state, &config)).await
                 {
                     error!(error = %e, "Plugin timer tick failed");
                 }
@@ -138,19 +159,22 @@ pub async fn tick_once(state: &AppState, config: &TimerConfig) -> Result<TickSta
     };
 
     // Deliver only while the claim's lease holds: past it another replica may
-    // re-claim the rows, so delivering here too would deliver twice. A
-    // delivery still running when the lease ends is abandoned and keeps its
-    // attempt; the rows not reached are handed back with theirs refunded.
-    let lease_ends = claim_started + StdDuration::from_secs(config.lease_secs.max(0) as u64);
-    let mut rows = due.into_iter();
-    for row in rows.by_ref() {
-        let delivery = tokio::time::timeout_at(lease_ends, deliver(state, &row)).await;
-        if delivery.is_err() {
+    // re-claim the rows, so a guest still running here would run twice. A
+    // delivery starts only with a whole call budget of lease left, and one
+    // still running when the lease ends is cancelled and keeps its attempt;
+    // the rows not reached are handed back with theirs refunded.
+    let lease_ends = claim_started + config.lease();
+    let mut rows = due.into_iter().peekable();
+    while rows.peek().is_some_and(|_| {
+        lease_ends.saturating_duration_since(tokio::time::Instant::now()) >= config.call_budget
+    }) {
+        let Some(row) = rows.next() else { break };
+        if deliver(state, &row, lease_ends.into_std()).await == Delivery::LeaseEnded {
             warn!(
                 plugin_id = %row.plugin_id,
                 key = %row.key,
                 attempts = row.attempts,
-                "Plugin timer delivery outlived its claim lease; it will be retried"
+                "Plugin timer delivery was cancelled at the end of its claim lease; it will be retried"
             );
             break;
         }
@@ -381,11 +405,26 @@ struct TimerCallbackInput<'a> {
     attempt: i32,
 }
 
+/// How one delivery ended, as far as the tick is concerned.
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    /// The delivery finished (delivered, failed, or dropped) before the lease
+    /// ended.
+    Done,
+    /// The guest was still running when the claim's lease ended and was
+    /// cancelled.
+    LeaseEnded,
+}
+
 /// Delivers one claimed row: invokes the plugin's declared timer function,
-/// then deletes the row on success, or otherwise leaves it claimed for
-/// lease-expiry redelivery (or, with its budget spent, for [`claim_due`] to
-/// drop).
-async fn deliver(state: &AppState, row: &plugin_timer::Model) {
+/// cancelling it if it is still running at `lease_ends`, then deletes the row
+/// on success, or otherwise leaves it claimed for lease-expiry redelivery (or,
+/// with its budget spent, for [`claim_due`] to drop).
+async fn deliver(
+    state: &AppState,
+    row: &plugin_timer::Model,
+    lease_ends: std::time::Instant,
+) -> Delivery {
     let function = match timer_function(state, &row.plugin_id) {
         Ok(Some(f)) => f,
         Ok(None) => {
@@ -397,7 +436,7 @@ async fn deliver(state: &AppState, row: &plugin_timer::Model) {
                  disabled/uninstalled) while timers are pending."
             );
             delete_timer(&state.db, row).await;
-            return;
+            return Delivery::Done;
         }
         Err(()) => {
             error!(
@@ -406,7 +445,7 @@ async fn deliver(state: &AppState, row: &plugin_timer::Model) {
                 "Plugin registry lock poisoned while resolving the timer handler; leaving row \
                  claimed for lease-expiry redelivery"
             );
-            return;
+            return Delivery::Done;
         }
     };
 
@@ -426,18 +465,25 @@ async fn deliver(state: &AppState, row: &plugin_timer::Model) {
                 "Failed to serialize plugin timer callback input; leaving row claimed for \
                  lease-expiry redelivery"
             );
-            return;
+            return Delivery::Done;
         }
     };
 
     match state
         .plugins
-        .call_raw(&row.plugin_id, &function, input_bytes)
+        .call_raw_with(
+            &row.plugin_id,
+            &function,
+            input_bytes,
+            CallOptions::until(lease_ends),
+        )
         .await
     {
         Ok(_) => {
             delete_timer(&state.db, row).await;
+            Delivery::Done
         }
+        Err(PluginError::DeadlineExceeded { .. }) => Delivery::LeaseEnded,
         Err(e) => {
             warn!(
                 plugin_id = %row.plugin_id,
@@ -446,6 +492,7 @@ async fn deliver(state: &AppState, row: &plugin_timer::Model) {
                 error = %e,
                 "Plugin timer delivery failed; will retry after lease expiry"
             );
+            Delivery::Done
         }
     }
 }

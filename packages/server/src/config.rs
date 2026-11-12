@@ -368,7 +368,10 @@ pub struct ServerConfig {
     pub plugin_timer_tick_interval_secs: u64,
     /// Claim lease (seconds) for a plugin timer row: how long a claiming
     /// replica has to deliver before another replica may reclaim it. Default
-    /// 30s. Mirrors `lease_ttl_secs`'s crash-recovery role for submissions.
+    /// 330s. Mirrors `lease_ttl_secs`'s crash-recovery role for submissions.
+    /// A delivery is cancelled when its lease ends, so the lease must exceed
+    /// `plugin.call_timeout_secs`; [`AppConfig::load`] rejects one that does
+    /// not.
     #[serde(default = "default_plugin_timer_lease_secs")]
     pub plugin_timer_lease_secs: i64,
     /// Bounded batch size for one plugin-timer claim tick. Default 64.
@@ -553,8 +556,12 @@ fn default_plugin_timer_tick_interval_secs() -> u64 {
     1
 }
 
+/// Default [`ServerConfig::plugin_timer_lease_secs`]: the default plugin call
+/// timeout plus 30s for waiting on a pooled instance.
+pub const DEFAULT_PLUGIN_TIMER_LEASE_SECS: i64 = 330;
+
 fn default_plugin_timer_lease_secs() -> i64 {
-    30
+    DEFAULT_PLUGIN_TIMER_LEASE_SECS
 }
 
 fn default_plugin_timer_batch() -> u64 {
@@ -822,7 +829,23 @@ impl AppConfig {
             )
             .build()?;
 
-        s.try_deserialize()
+        let config: Self = s.try_deserialize()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Reject settings that cannot work together.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let lease = self.server.plugin_timer_lease_secs;
+        let call_timeout = self.plugin.call_timeout().as_secs();
+        if lease <= 0 || (lease as u64) <= call_timeout {
+            return Err(ConfigError::Message(format!(
+                "server.plugin_timer_lease_secs ({lease}) must exceed \
+                 plugin.call_timeout_secs ({call_timeout}): a timer delivery is \
+                 cancelled when its lease ends"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1028,6 +1051,43 @@ mod tests {
         assert_eq!(cfg.observability.log_format, "pretty");
         assert_eq!(cfg.observability.log_filter, "info");
         assert!(cfg.bootstrap.admin_username.is_empty());
+    }
+
+    fn config_with(overrides: &[(&str, i64)]) -> AppConfig {
+        let mut builder = Config::builder()
+            .set_override("auth.jwt_secret", "test-secret")
+            .unwrap();
+        for (key, value) in overrides {
+            builder = builder.set_override(*key, *value).unwrap();
+        }
+        builder.build().unwrap().try_deserialize().unwrap()
+    }
+
+    #[test]
+    fn default_timer_lease_exceeds_the_default_call_timeout() {
+        config_with(&[])
+            .validate()
+            .expect("defaults are consistent");
+    }
+
+    #[test]
+    fn a_timer_lease_not_above_the_call_timeout_is_rejected() {
+        for lease in [0, 60, 300] {
+            let cfg = config_with(&[
+                ("server.plugin_timer_lease_secs", lease),
+                ("plugin.call_timeout_secs", 300),
+            ]);
+            let err = cfg
+                .validate()
+                .expect_err("lease must exceed the call timeout");
+            assert!(err.to_string().contains("plugin_timer_lease_secs"), "{err}");
+        }
+        config_with(&[
+            ("server.plugin_timer_lease_secs", 61),
+            ("plugin.call_timeout_secs", 60),
+        ])
+        .validate()
+        .expect("a lease above the call timeout is accepted");
     }
 
     /// A partially-populated table must still fill its remaining keys from

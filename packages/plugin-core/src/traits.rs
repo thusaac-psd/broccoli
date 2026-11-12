@@ -96,6 +96,28 @@ fn record_pool_acquire_metrics(
     }
 }
 
+/// Per-call options for [`PluginInvoker::call_raw_with`].
+#[derive(Debug, Clone, Default)]
+pub struct CallOptions {
+    /// Host context visible to host functions for the duration of the call.
+    pub host_context: Option<serde_json::Value>,
+    /// When set, the call ends by this instant: waiting for a pooled instance
+    /// gives up at it, a guest still running at it is cancelled, and either
+    /// way the call returns [`PluginError::DeadlineExceeded`]. Once the call
+    /// returns, the guest has stopped.
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl CallOptions {
+    /// Options for a call that must end by `deadline`.
+    pub fn until(deadline: std::time::Instant) -> Self {
+        Self {
+            deadline: Some(deadline),
+            ..Self::default()
+        }
+    }
+}
+
 /// Invocation surface: the ability to *call into* an already-loaded plugin.
 ///
 /// Split out from [`PluginManager`] so host functions -- which run *inside* a
@@ -103,8 +125,7 @@ fn record_pool_acquire_metrics(
 /// delegation) -- can be handed an `Arc<dyn PluginInvoker>`. That narrows their
 /// capability: an invoker cannot discover, load, unload, or reload plugins. The
 /// accessors declared here are exactly the state that
-/// [`call_raw_with_host_context`](PluginInvoker::call_raw_with_host_context)
-/// needs; the wider management surface lives on the [`PluginManager`] subtrait.
+/// [`call_raw_with`](PluginInvoker::call_raw_with) needs; the wider management surface lives on the [`PluginManager`] subtrait.
 // `async_trait` marks each method `#[must_use]` on top of its boxed future.
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -130,18 +151,22 @@ pub trait PluginInvoker: Send + Sync {
         func_name: &str,
         input: Vec<u8>,
     ) -> Result<Vec<u8>, PluginError> {
-        self.call_raw_with_host_context(plugin_id, func_name, input, None)
+        self.call_raw_with(plugin_id, func_name, input, CallOptions::default())
             .await
     }
 
-    #[instrument(skip(self, input, host_context), fields(plugin_id = %plugin_id, function = %func_name))]
-    async fn call_raw_with_host_context(
+    #[instrument(skip(self, input, options), fields(plugin_id = %plugin_id, function = %func_name))]
+    async fn call_raw_with(
         &self,
         plugin_id: &str,
         func_name: &str,
         input: Vec<u8>,
-        host_context: Option<serde_json::Value>,
+        options: CallOptions,
     ) -> Result<Vec<u8>, PluginError> {
+        let CallOptions {
+            host_context,
+            deadline,
+        } = options;
         let start = std::time::Instant::now();
         // First, before anything else: once the host is shutting down every
         // call is refused the same way, whatever plugin it is for.
@@ -153,7 +178,7 @@ pub trait PluginInvoker: Send + Sync {
         // How long to wait for a free pooled instance. Distinct from the
         // guest execution deadline (`call_timeout_secs`), which is enforced by
         // extism via the manifest timeout set in `load_plugin`.
-        let timeout = self.get_config().pool_acquire_timeout();
+        let acquire_timeout = self.get_config().pool_acquire_timeout();
         let pool = {
             let registry = self.get_registry().read().map_err(|_| {
                 PluginError::Internal("Failed to acquire registry read lock".into())
@@ -192,6 +217,12 @@ pub trait PluginInvoker: Send + Sync {
                 let _span_guard = parent_span.enter();
                 crate::host_context::with_context(host_context, || {
                     let acquire_start = std::time::Instant::now();
+                    let timeout = match deadline {
+                        Some(deadline) => {
+                            acquire_timeout.min(deadline.saturating_duration_since(acquire_start))
+                        }
+                        None => acquire_timeout,
+                    };
                     let mut plugin = match pool.get(timeout) {
                         Ok(Some(plugin)) => {
                             record_pool_acquire_metrics(
@@ -211,6 +242,12 @@ pub trait PluginInvoker: Send + Sync {
                                 PoolAcquireOutcome::Timeout,
                                 acquire_start.elapsed(),
                             );
+                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                return Err(PluginError::DeadlineExceeded {
+                                    plugin_id: plugin_id.clone(),
+                                    func_name: func_name.clone(),
+                                });
+                            }
                             return Err(PluginError::PoolTimeout(plugin_id.clone()));
                         }
                         Err(e) => {
@@ -235,18 +272,48 @@ pub trait PluginInvoker: Send + Sync {
                         });
                     }
 
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        return Err(PluginError::DeadlineExceeded {
+                            plugin_id: plugin_id.clone(),
+                            func_name: func_name.clone(),
+                        });
+                    }
+
                     let input_len = input.len();
                     // Reset the per-call streamed-byte counter; host functions
                     // (e.g. blob_read_range) add to it during the call so the
                     // pool can weigh how much data this instance churned through.
                     crate::host_context::reset_stream_bytes();
-                    let call_result: Result<Vec<u8>, PluginError> = plugin
-                        .call::<_, Vec<u8>>(func_name.as_str(), input)
-                        .map_err(|e| PluginError::ExecutionFailed {
-                            plugin_id: plugin_id.clone(),
-                            func_name: func_name.clone(),
-                            message: e.to_string(),
-                        });
+                    let call_result: Result<Vec<u8>, PluginError> = match deadline {
+                        None => plugin
+                            .call::<_, Vec<u8>>(func_name.as_str(), input)
+                            .map_err(|e| PluginError::ExecutionFailed {
+                                plugin_id: plugin_id.clone(),
+                                func_name: func_name.clone(),
+                                message: e.to_string(),
+                            }),
+                        Some(deadline) => {
+                            let cancel = plugin.cancel_handle();
+                            let (result, cancelled) =
+                                crate::deadline::cancel_at(&cancel, deadline, || {
+                                    plugin.call::<_, Vec<u8>>(func_name.as_str(), input)
+                                });
+                            result.map_err(|e| {
+                                if cancelled {
+                                    PluginError::DeadlineExceeded {
+                                        plugin_id: plugin_id.clone(),
+                                        func_name: func_name.clone(),
+                                    }
+                                } else {
+                                    PluginError::ExecutionFailed {
+                                        plugin_id: plugin_id.clone(),
+                                        func_name: func_name.clone(),
+                                        message: e.to_string(),
+                                    }
+                                }
+                            })
+                        }
+                    };
                     // Heap-profile hook (opt-in via BROCCOLI_PROFILE_PLUGIN_IO): record the
                     // bytes marshalled in/out of WASM per plugin call. Copying input/output
                     // across the host<->guest boundary grows the pooled instance's WASM
