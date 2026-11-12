@@ -311,7 +311,7 @@ async fn run_one(
 
     match poll_until_terminal(client, submitted.id, timeout).await {
         Ok(final_resp) => {
-            let label = label_for(final_resp.status, terminal_verdict(&final_resp));
+            let label = label_for(final_resp.status.clone(), terminal_verdict(&final_resp));
             SubResult {
                 verdict_label: Some(label),
                 error: None,
@@ -428,102 +428,13 @@ fn aggregate(results: Vec<SubResult>) -> PassthroughOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::AuthCreds;
+
+    use crate::test_support::*;
     use serde_json::{Value, json};
-    use std::collections::HashSet;
-    use std::sync::atomic::{AtomicI32, Ordering};
-    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    use std::sync::Arc as StdArc;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-    fn login_body(token: &str) -> Value {
-        json!({
-            "token": token,
-            "id": 1,
-            "username": "admin",
-            "roles": ["admin"],
-            "permissions": [],
-        })
-    }
-
-    async fn build_client(server: &MockServer) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(login_body("tok")))
-            .mount(server)
-            .await;
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client built")
-    }
-
-    fn submission_json(id: i32, status: &str, verdict: Option<&str>) -> Value {
-        let result = match verdict {
-            Some(v) => json!({
-                "verdict": v,
-                "score": 100.0,
-                "time_used": 10,
-                "memory_used": 1024,
-                "compile_output": null,
-                "error_message": null,
-                "judged_at": "2026-05-01T00:00:00Z",
-                "test_case_results": [],
-            }),
-            None => Value::Null,
-        };
-        json!({
-            "id": id,
-            "language": "python3",
-            "status": status,
-            "user_id": 1,
-            "username": "admin",
-            "problem_id": 5,
-            "problem_title": "passthrough-target",
-            "contest_id": 42,
-            "contest_type": "icpc",
-            "judge_epoch": 0,
-            "created_at": "2026-05-01T00:00:00Z",
-            "result": result,
-        })
-    }
-
-    fn contest_json(id: i32, contest_type: Option<&str>) -> Value {
-        let ct = contest_type.map(Value::from).unwrap_or(Value::Null);
-        json!({
-            "id": id,
-            "title": "Test Contest",
-            "description": "",
-            "activate_time": null,
-            "start_time": "2026-05-01T00:00:00Z",
-            "end_time": "2026-05-01T03:00:00Z",
-            "deactivate_time": null,
-            "is_public": true,
-            "submissions_visible": true,
-            "show_compile_output": true,
-            "show_participants_list": true,
-            "contest_type": ct,
-            "created_at": "2026-05-01T00:00:00Z",
-            "updated_at": "2026-05-01T00:00:00Z",
-        })
-    }
-
-    fn problem_json(id: i32, checker_format: &str) -> Value {
-        json!({
-            "id": id,
-            "title": "Pass-through Target",
-            "time_limit": 1000,
-            "memory_limit": 262144,
-            "problem_type": "batch",
-            "checker_format": checker_format,
-            "default_contest_type": "icpc",
-        })
-    }
 
     fn test_case_list_item(id: i32, is_sample: bool, position: i32) -> Value {
         json!({
@@ -540,51 +451,6 @@ mod tests {
         })
     }
 
-    fn test_case_full(id: i32, expected: &str) -> Value {
-        json!({
-            "id": id,
-            "input": "1\n",
-            "expected_output": expected,
-            "score": 100,
-            "label": "01",
-            "description": null,
-            "is_sample": true,
-            "position": 0,
-            "problem_id": 5,
-            "created_at": "2026-05-01T00:00:00Z",
-        })
-    }
-
-    fn drain(rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-        let mut out = Vec::new();
-        while let Ok(e) = rx.try_recv() {
-            out.push(e);
-        }
-        out
-    }
-
-    struct MockSubmissionStore {
-        next_id: AtomicI32,
-        submitted_ids: StdMutex<Vec<i32>>,
-    }
-
-    impl MockSubmissionStore {
-        fn new(first_id: i32) -> Self {
-            Self {
-                next_id: AtomicI32::new(first_id),
-                submitted_ids: StdMutex::new(Vec::new()),
-            }
-        }
-
-        fn submitted_ids(&self) -> Vec<i32> {
-            self.submitted_ids.lock().unwrap().clone()
-        }
-    }
-
-    fn submission_id_from_request(request: &Request) -> Option<i32> {
-        request.url.path().rsplit('/').next()?.parse().ok()
-    }
-
     async fn mount_accepted_submissions(
         server: &MockServer,
         first_id: i32,
@@ -594,42 +460,37 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/42/problems/5/submissions"))
             .respond_with(move |_request: &Request| {
-                let submission_id = store_for_post.next_id.fetch_add(1, Ordering::SeqCst);
-                store_for_post
-                    .submitted_ids
-                    .lock()
-                    .unwrap()
-                    .push(submission_id);
+                let submission_id = store_for_post.submit(MockFinalSubmission {
+                    status: SubmissionStatus::Judged,
+                    verdict: Some(Verdict::Accepted),
+                    fails_on_get: false,
+                });
                 ResponseTemplate::new(201).set_body_json(submission_json(
                     submission_id,
-                    "Pending",
+                    SubmissionStatus::Pending,
                     None,
                 ))
             })
             .mount(server)
             .await;
 
+        let store_for_get = store.clone();
         Mock::given(method("GET"))
             .and(path_regex(r"^/api/v1/submissions/\d+$"))
             .respond_with(move |request: &Request| {
-                let Some(submission_id) = submission_id_from_request(request) else {
-                    return ResponseTemplate::new(400).set_body_string("invalid submission id");
+                let Some((submission_id, done)) = store_for_get.poll(request) else {
+                    return ResponseTemplate::new(404).set_body_string("unknown submission id");
                 };
                 ResponseTemplate::new(200).set_body_json(submission_json(
                     submission_id,
-                    "Judged",
-                    Some("Accepted"),
+                    done.status,
+                    done.verdict,
                 ))
             })
             .mount(server)
             .await;
 
         store
-    }
-
-    fn assert_distinct_submission_ids(ids: &[i32]) {
-        let unique: HashSet<_> = ids.iter().copied().collect();
-        assert_eq!(unique.len(), ids.len(), "submission ids must be distinct");
     }
 
     #[test]
@@ -773,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_problem_id_not_in_contest_errors() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/contests/42"))
@@ -815,7 +676,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_all_consistent_passes() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/contests/42"))
@@ -837,7 +698,9 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/5"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(problem_json(5, "exact")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(problem_json(5, "batch", "exact", "icpc")),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -850,7 +713,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/5/test-cases/11"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(test_case_full(11, "1\n")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_case_json(11, 5, "1\n")))
             .mount(&server)
             .await;
 
@@ -911,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn nondeterministic_verdicts_fail_phase() {
         let server = MockServer::start().await;
-        let client = build_client(&server).await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/contests/42"))
@@ -933,7 +796,9 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/5"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(problem_json(5, "exact")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(problem_json(5, "batch", "exact", "icpc")),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -946,23 +811,27 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/5/test-cases/11"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(test_case_full(11, "1\n")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(test_case_json(11, 5, "1\n")))
             .mount(&server)
             .await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/42/problems/5/submissions"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(submission_json(900, "Pending", None)),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(submission_json(
+                900,
+                SubmissionStatus::Pending,
+                None,
+            )))
             .up_to_n_times(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/42/problems/5/submissions"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(submission_json(901, "Pending", None)),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(submission_json(
+                901,
+                SubmissionStatus::Pending,
+                None,
+            )))
             .mount(&server)
             .await;
 
@@ -970,8 +839,8 @@ mod tests {
             .and(path("/api/v1/submissions/900"))
             .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
                 900,
-                "Judged",
-                Some("Accepted"),
+                SubmissionStatus::Judged,
+                Some(Verdict::Accepted),
             )))
             .mount(&server)
             .await;
@@ -979,8 +848,8 @@ mod tests {
             .and(path("/api/v1/submissions/901"))
             .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
                 901,
-                "Judged",
-                Some("WrongAnswer"),
+                SubmissionStatus::Judged,
+                Some(Verdict::WrongAnswer),
             )))
             .mount(&server)
             .await;

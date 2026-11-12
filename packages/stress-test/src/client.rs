@@ -264,7 +264,7 @@ impl Client {
         .await
     }
 
-    pub async fn get_dlq_stats(&self) -> StressResult<crate::dto::DlqStats> {
+    pub async fn get_dlq_stats(&self) -> StressResult<crate::dto::DlqStatsResponse> {
         self.send_json_with_retry::<(), _>(reqwest::Method::GET, "/api/v1/dlq/stats", None)
             .await
     }
@@ -568,37 +568,10 @@ async fn decode_bytes(resp: reqwest::Response) -> StressResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{client_with_login, contest_json, login_body};
     use serde_json::json;
     use wiremock::matchers::{body_partial_json, header, header_exists, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-    fn login_body(token: &str) -> serde_json::Value {
-        json!({
-            "token": token,
-            "id": 1,
-            "username": "admin",
-            "roles": ["admin"],
-            "permissions": []
-        })
-    }
-
-    async fn build_client_with_login(server: &MockServer, token: &str) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(login_body(token)))
-            .mount(server)
-            .await;
-
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client builds")
-    }
 
     #[tokio::test]
     async fn login_uses_post_v1_auth_login_and_stores_token() {
@@ -631,13 +604,14 @@ mod tests {
     #[tokio::test]
     async fn get_submission_attaches_bearer_token() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "first-token").await;
+        let client = client_with_login(&server, "first-token").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/submissions/42"))
             .and(header("authorization", "Bearer first-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": 42,
+                "files": [],
                 "language": "cpp",
                 "status": "Pending",
                 "user_id": 1,
@@ -676,6 +650,7 @@ mod tests {
             .and(header("x-request-id", "profile-run-1-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": 42,
+                "files": [],
                 "language": "cpp",
                 "status": "Pending",
                 "user_id": 1,
@@ -730,6 +705,7 @@ mod tests {
             .and(header("authorization", "Bearer new-token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": 7,
+                "files": [],
                 "language": "cpp",
                 "status": "Pending",
                 "user_id": 1,
@@ -798,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn upload_plugin_sends_multipart_with_plugin_field() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "first-token").await;
+        let client = client_with_login(&server, "first-token").await;
 
         let archive = b"fake-tar-gz-bytes-payload-12345";
         let archive_vec = archive.to_vec();
@@ -826,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn api_errors_decode_into_stress_error_api() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "first-token").await;
+        let client = client_with_login(&server, "first-token").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/404"))
@@ -855,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn non_json_error_body_falls_back_to_unknown_code() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "first-token").await;
+        let client = client_with_login(&server, "first-token").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/problems/500"))
@@ -881,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn delete_problem_treats_204_as_success() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "first-token").await;
+        let client = client_with_login(&server, "first-token").await;
 
         Mock::given(method("DELETE"))
             .and(path("/api/v1/problems/12"))
@@ -897,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn create_contest_posts_v1_contests_and_returns_response() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests"))
@@ -907,11 +883,7 @@ mod tests {
                 "is_public": false,
                 "contest_type": "icpc"
             })))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "id": 7,
-                "title": "stress-test scratch",
-                "contest_type": "icpc"
-            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(contest_json(7, Some("icpc"))))
             .expect(1)
             .mount(&server)
             .await;
@@ -924,6 +896,9 @@ mod tests {
             end_time: chrono::Utc::now() + chrono::Duration::hours(24),
             deactivate_time: None,
             is_public: false,
+            submissions_visible: None,
+            show_compile_output: None,
+            show_participants_list: None,
             contest_type: "icpc".into(),
         };
         let resp = client.create_contest(&req).await.expect("ok");
@@ -933,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn add_problem_to_contest_posts_v1_contests_id_problems() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/7/problems"))
@@ -963,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn delete_contest_treats_204_as_success() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("DELETE"))
             .and(path("/api/v1/contests/7"))
@@ -978,13 +953,14 @@ mod tests {
     #[tokio::test]
     async fn create_contest_submission_targets_contest_problem_path() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/7/problems/11/submissions"))
             .and(header("authorization", "Bearer tok"))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "id": 99,
+                "files": [],
                 "language": "cpp",
                 "status": "Pending",
                 "user_id": 1,
@@ -1017,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn list_registries_uses_public_endpoint_without_auth() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "ignored-token").await;
+        let client = client_with_login(&server, "ignored-token").await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/plugins/registries"))
@@ -1026,7 +1002,10 @@ mod tests {
                 "problem_types": ["batch", "interactive"],
                 "checker_formats": ["exact", "tokens"],
                 "contest_types": ["icpc", "ioi"],
-                "languages": []
+                "languages": [],
+                "evaluators": [],
+                "contest_type_handlers": [],
+                "hooks": []
             })))
             .expect(1)
             .mount(&server)

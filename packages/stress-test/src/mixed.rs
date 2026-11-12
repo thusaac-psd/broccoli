@@ -418,6 +418,7 @@ async fn build_contestant_clients(
     let entries: Vec<CreateUserEntry> = (0..config.contestants)
         .map(|idx| CreateUserEntry {
             username: contestant_username(client.run_id(), idx),
+            display_name: None,
             password: Some(contestant_password(client.run_id(), idx)),
         })
         .collect();
