@@ -145,15 +145,23 @@ mod tests {
     use testcontainers_modules::redis::Redis;
 
     async fn set_heartbeat(url: &str, worker_id: &str, hostname: Option<String>) {
-        let payload = serde_json::json!({
-            "id": worker_id,
-            "started_at": chrono::Utc::now(),
-            "last_seen": chrono::Utc::now(),
-            "in_flight": 0,
-            "sandbox_backend": "isolate",
-            "version": "test",
-            "hostname": hostname,
-        });
+        let payload = serde_json::to_value(common::worker::HeartbeatPayload {
+            id: worker_id.to_string(),
+            started_at: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            in_flight: 0,
+            max_concurrency: None,
+            fairness_mode: "unknown".into(),
+            sandbox_backend: "isolate".into(),
+            version: "test".into(),
+            hostname,
+            ip_addresses: Vec::new(),
+            os: None,
+            arch: None,
+            cpu_count: None,
+            pid: None,
+        })
+        .unwrap();
         let client = redis::Client::open(url).unwrap();
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
         let _: () = redis::cmd("SET")
