@@ -75,6 +75,53 @@ impl OperationHandler {
             operation.tasks.len()
         );
 
+        let environments = self.create_environments(operation).await?;
+
+        // Run everything else under a panic guard so the sandbox + channels
+        // cleanup below ALWAYS runs. A panicking step future - or an error at
+        // any stage - would otherwise unwind straight past the cleanup and
+        // orphan the isolate boxes and the shared channels dir.
+        let mut channels_dir = None;
+        let outcome =
+            AssertUnwindSafe(self.run_operation(operation, &environments, &mut channels_dir))
+                .catch_unwind()
+                .await;
+
+        // Always clean up, whatever the run did (completed, errored, panicked).
+        if let Some(dir) = &channels_dir
+            && let Err(e) = tokio::fs::remove_dir_all(dir).await
+        {
+            error!(error = %e, "Failed to clean up shared channels directory");
+        }
+        self.cleanup_environments(&environments).await.ok();
+
+        let (task_results, global_success) = match outcome {
+            Ok(result) => result?,
+            Err(panic) => {
+                error!("A step future panicked; sandboxes cleaned up, re-raising the panic");
+                std::panic::resume_unwind(panic);
+            }
+        };
+
+        info!(
+            success = global_success,
+            tasks_count = task_results.len(),
+            "Operation execution completed"
+        );
+
+        Ok(OperationResult {
+            success: global_success,
+            task_results,
+            error: None,
+        })
+    }
+
+    /// Create one sandbox per environment and load its files. On failure the
+    /// sandboxes already created are removed.
+    async fn create_environments(
+        &self,
+        operation: &OperationTask,
+    ) -> Result<HashMap<String, EnvironmentList>> {
         let mut environments = HashMap::new();
         for env_config in operation.environments.iter() {
             let box_id = allocate_box_id();
@@ -105,16 +152,25 @@ impl OperationHandler {
                 EnvironmentList::new(env_config.id.clone(), box_id, working_dir),
             );
         }
+        Ok(environments)
+    }
 
+    /// Everything after the environments exist: channels, keep-alives and the
+    /// execution layers. `channels_dir` is set as soon as the shared channels
+    /// directory exists, so the caller removes it whatever happens next.
+    /// Returns the per-step results and whether every step succeeded.
+    async fn run_operation(
+        &self,
+        operation: &OperationTask,
+        environments: &HashMap<String, EnvironmentList>,
+        channels_dir: &mut Option<PathBuf>,
+    ) -> Result<(HashMap<String, TaskExecutionResult>, bool)> {
         let channel_names: HashSet<String> =
             operation.channels.iter().map(|c| c.name.clone()).collect();
         for name in &channel_names {
-            if let Err(e) = validate_pipe_name(name) {
-                self.cleanup_environments(&environments).await.ok();
-                return Err(e);
-            }
+            validate_pipe_name(name)?;
         }
-        let shared_channels_dir = if !channel_names.is_empty() {
+        if !channel_names.is_empty() {
             let dir = std::env::temp_dir().join(format!(
                 "broccoli-channels-{}-{}-{}",
                 std::process::id(),
@@ -124,67 +180,15 @@ impl OperationHandler {
                     .map(|d| d.as_nanos())
                     .unwrap_or(0),
             ));
-            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-                self.cleanup_environments(&environments).await.ok();
-                return Err(
-                    anyhow::Error::new(e).context("Failed to create shared channels directory")
-                );
-            }
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .context("Failed to create shared channels directory")?;
+            *channels_dir = Some(dir.clone());
+            create_channel_fifos(&dir, &operation.channels).await?;
+        }
+        let shared_channels_dir = channels_dir.clone();
 
-            for channel in &operation.channels {
-                let fifo_path = dir.join(&channel.name);
-                let output = tokio::process::Command::new("mkfifo")
-                    .arg(&fifo_path)
-                    .output()
-                    .await
-                    .context("Failed to execute mkfifo for channel")?;
-                if !output.status.success() {
-                    if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
-                        warn!(error = %e, "Failed to clean up shared channels directory after mkfifo failure");
-                    }
-                    self.cleanup_environments(&environments).await.ok();
-                    return Err(anyhow!(
-                        "mkfifo failed for channel {}: {}",
-                        channel.name,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) =
-                        std::fs::set_permissions(&fifo_path, std::fs::Permissions::from_mode(0o666))
-                    {
-                        warn!(path = %fifo_path.display(), error = %e, "Failed to set permissions on channel FIFO");
-                    }
-                }
-                debug!(channel = %channel.name, "Created shared channel FIFO");
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(e) =
-                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
-                {
-                    warn!(path = %dir.display(), error = %e, "Failed to set permissions on channels directory");
-                }
-            }
-
-            Some(dir)
-        } else {
-            None
-        };
-
-        let execution_layers = match self.get_execution_order(operation) {
-            Ok(layers) => layers,
-            Err(e) => {
-                if let Some(ref dir) = shared_channels_dir {
-                    let _ = tokio::fs::remove_dir_all(dir).await;
-                }
-                self.cleanup_environments(&environments).await.ok();
-                return Err(e);
-            }
-        };
+        let execution_layers = self.get_execution_order(operation)?;
         debug!(layers = ?execution_layers, "Task execution layers determined");
 
         // Map each step id to its environment's working dir so a dependent step
@@ -319,102 +323,65 @@ impl OperationHandler {
             }
         }
 
-        // Run the execution layers under a panic guard so the sandbox + channels
-        // cleanup below ALWAYS runs. A panicking step future - or the `?` on a
-        // dependency-graph inconsistency - would otherwise unwind straight past
-        // the cleanup and orphan the isolate boxes and the shared channels dir.
-        let layer_outcome: std::thread::Result<Result<()>> = AssertUnwindSafe(async {
-            for layer in execution_layers {
-                let mut futures = Vec::new();
-                for task_id in &layer {
-                    let task = operation
-                        .tasks
-                        .iter()
-                        .find(|t| t.id == *task_id)
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "Task '{}' not found — dependency graph inconsistency",
-                                task_id
-                            )
-                        })?;
+        for layer in execution_layers {
+            let mut futures = Vec::new();
+            for task_id in &layer {
+                let task = operation
+                    .tasks
+                    .iter()
+                    .find(|t| t.id == *task_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Task '{}' not found — dependency graph inconsistency",
+                            task_id
+                        )
+                    })?;
 
-                    let deps_ok = task.depends_on.iter().all(|dep_id| {
-                        task_results
-                            .get(dep_id)
-                            .map(|r: &TaskExecutionResult| r.success)
-                            .unwrap_or(false)
-                    });
+                let deps_ok = task.depends_on.iter().all(|dep_id| {
+                    task_results
+                        .get(dep_id)
+                        .map(|r: &TaskExecutionResult| r.success)
+                        .unwrap_or(false)
+                });
 
-                    // Hand this step the keep-alive fds for any channels it
-                    // produces. They are released -- delivering EOF to the
-                    // concurrent consumer -- only once the consumer has opened the
-                    // FIFO (see `release_channel_keepalive`), not merely when this
-                    // producer resolves. `own_done` is this step's consumer flag (if
-                    // it reads a channel); we raise it before releasing so a paired
-                    // producer's release routine can stop promptly.
-                    let produced_keepalives = channel_keepalives.remove(task_id);
-                    let own_done = consumer_flags.get(task_id).cloned();
-                    let step_future = self.execute_step_with_deps(
-                        task,
-                        &environments,
-                        &step_working_dirs,
-                        deps_ok,
-                        shared_channels_dir.as_deref(),
-                        &channel_names,
-                    );
-                    futures.push(async move {
-                        let result = step_future.await;
-                        if let Some(flag) = &own_done {
-                            flag.store(true, Ordering::Release);
-                        }
-                        if let Some(keepalives) = produced_keepalives {
-                            release_channel_keepalives(keepalives).await;
-                        }
-                        result
-                    });
-                }
-
-                let results = join_all(futures).await;
-                for result in results {
-                    if !result.success {
-                        global_success = false;
+                // Hand this step the keep-alive fds for any channels it
+                // produces. They are released -- delivering EOF to the
+                // concurrent consumer -- only once the consumer has opened the
+                // FIFO (see `release_channel_keepalive`), not merely when this
+                // producer resolves. `own_done` is this step's consumer flag (if
+                // it reads a channel); we raise it before releasing so a paired
+                // producer's release routine can stop promptly.
+                let produced_keepalives = channel_keepalives.remove(task_id);
+                let own_done = consumer_flags.get(task_id).cloned();
+                let step_future = self.execute_step_with_deps(
+                    task,
+                    environments,
+                    &step_working_dirs,
+                    deps_ok,
+                    shared_channels_dir.as_deref(),
+                    &channel_names,
+                );
+                futures.push(async move {
+                    let result = step_future.await;
+                    if let Some(flag) = &own_done {
+                        flag.store(true, Ordering::Release);
                     }
-                    task_results.insert(result.task_id.clone(), result);
+                    if let Some(keepalives) = produced_keepalives {
+                        release_channel_keepalives(keepalives).await;
+                    }
+                    result
+                });
+            }
+
+            let results = join_all(futures).await;
+            for result in results {
+                if !result.success {
+                    global_success = false;
                 }
-            }
-            Ok(())
-        })
-        .catch_unwind()
-        .await;
-
-        // Always clean up, whatever the layers did (completed, errored, panicked).
-        if let Some(dir) = &shared_channels_dir
-            && let Err(e) = tokio::fs::remove_dir_all(dir).await
-        {
-            error!(error = %e, "Failed to clean up shared channels directory");
-        }
-        self.cleanup_environments(&environments).await.ok();
-
-        match layer_outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(panic) => {
-                error!("A step future panicked; sandboxes cleaned up, re-raising the panic");
-                std::panic::resume_unwind(panic);
+                task_results.insert(result.task_id.clone(), result);
             }
         }
-
-        info!(
-            success = global_success,
-            tasks_count = task_results.len(),
-            "Operation execution completed"
-        );
-
-        Ok(OperationResult {
-            success: global_success,
-            task_results,
-            error: None,
-        })
+        Ok((task_results, global_success))
     }
 
     fn build_dependency_graph(&self, operation: &OperationTask) -> HashMap<String, Vec<String>> {
@@ -1171,6 +1138,44 @@ fn open_channel_keepalive(fifo_path: &Path) -> Option<std::fs::File> {
             None
         }
     }
+}
+
+/// Create each channel's FIFO in `dir`, readable and writable by the sandbox
+/// users.
+async fn create_channel_fifos(dir: &Path, channels: &[Channel]) -> Result<()> {
+    for channel in channels {
+        let fifo_path = dir.join(&channel.name);
+        let output = tokio::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .output()
+            .await
+            .context("Failed to execute mkfifo for channel")?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "mkfifo failed for channel {}: {}",
+                channel.name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&fifo_path, std::fs::Permissions::from_mode(0o666))
+            {
+                warn!(path = %fifo_path.display(), error = %e, "Failed to set permissions on channel FIFO");
+            }
+        }
+        debug!(channel = %channel.name, "Created shared channel FIFO");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)) {
+            warn!(path = %dir.display(), error = %e, "Failed to set permissions on channels directory");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
