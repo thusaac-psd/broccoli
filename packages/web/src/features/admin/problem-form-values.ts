@@ -20,7 +20,8 @@ export const NEW_PROBLEM: ProblemFormData = {
   timeLimit: 1000,
   memoryLimit: 262144,
   problemType: '',
-  checkerFormat: 'exact',
+  // Chosen from the registered checker formats once they load.
+  checkerFormat: '',
   defaultContestType: '',
   showTestDetails: false,
   isPublic: false,

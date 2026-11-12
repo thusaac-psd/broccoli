@@ -25,34 +25,13 @@ import { MarkdownEditorWithAttachments } from '@/features/admin/components/Markd
 import { SwitchField } from '@/features/admin/components/SwitchField';
 import type { ProblemFormData } from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
-import {
-  fetchSupportedLanguages,
-  type SupportedLanguage,
-} from '@/features/problem/api/fetch-supported-languages';
+import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 
 interface ProblemFormProps {
   data: ProblemFormData;
   onChange: (data: ProblemFormData) => void;
   problemId?: number;
   attachments?: Attachment[];
-}
-
-function fallbackDefaultFilename(languageId: string): string {
-  const filenameMap: Record<string, string> = {
-    cpp: 'solution.cpp',
-    c: 'solution.c',
-    python3: 'solution.py',
-    java: 'Main.java',
-    javascript: 'solution.js',
-    typescript: 'solution.ts',
-    rust: 'solution.rs',
-    go: 'solution.go',
-  };
-  return filenameMap[languageId] ?? 'solution.txt';
-}
-
-function getDefaultFilename(language: SupportedLanguage): string {
-  return language.defaultFilename || fallbackDefaultFilename(language.id);
 }
 
 export function ProblemForm({
@@ -96,9 +75,13 @@ export function ProblemForm({
       newData.problemType = '';
       changed = true;
     }
-    if (data.checkerFormat && !checkerFormats.includes(data.checkerFormat)) {
-      newData.checkerFormat = '';
-      changed = true;
+    // A new problem starts with the first registered checker format.
+    if (!checkerFormats.includes(data.checkerFormat)) {
+      const first = checkerFormats[0] ?? '';
+      if (data.checkerFormat !== first) {
+        newData.checkerFormat = first;
+        changed = true;
+      }
     }
     // Deliberately no auto-pick for the contest type: it decides who judges
     // practice submissions, so the admin must choose it. An unknown value is
@@ -180,15 +163,14 @@ export function ProblemForm({
   const addLanguage = () => {
     const lang = selectedLanguage.trim();
     if (!lang || data.submissionFormat[lang]) return;
+    // Each registered language names its default file.
     const languageMeta = languageById.get(lang);
-    const defaultFilename = languageMeta
-      ? getDefaultFilename(languageMeta)
-      : fallbackDefaultFilename(lang);
+    if (!languageMeta) return;
     onChange({
       ...data,
       submissionFormat: {
         ...data.submissionFormat,
-        [lang]: [defaultFilename],
+        [lang]: [languageMeta.defaultFilename],
       },
     });
     setSelectedLanguage('');

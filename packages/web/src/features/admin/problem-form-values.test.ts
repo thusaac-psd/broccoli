@@ -12,6 +12,7 @@ const complete = {
   title: 'A + B',
   content: 'Add two numbers.',
   problemType: 'standard',
+  checkerFormat: 'exact',
   defaultContestType: 'icpc',
 };
 
