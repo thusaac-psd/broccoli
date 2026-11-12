@@ -586,13 +586,15 @@ async fn build_visible_judgement(
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "WITH old_results AS (
-                 SELECT * FROM test_case_result WHERE judgement_id = $2
+                 SELECT r.* FROM test_case_result r
+                 JOIN submission_judgement j
+                   ON j.id = r.judgement_id AND j.judge_epoch = r.judge_epoch
+                 WHERE r.judgement_id = $2
              ), current_results AS (
-                 SELECT * FROM test_case_result
-                 WHERE judgement_id = (
-                     SELECT id FROM submission_judgement
-                     WHERE submission_id = $1 AND is_current
-                 )
+                 SELECT r.* FROM test_case_result r
+                 JOIN submission_judgement j
+                   ON j.id = r.judgement_id AND j.judge_epoch = r.judge_epoch
+                 WHERE j.submission_id = $1 AND j.is_current
              )
              SELECT COUNT(*) AS count
              FROM old_results r

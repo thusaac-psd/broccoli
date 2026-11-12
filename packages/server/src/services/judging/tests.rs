@@ -707,7 +707,7 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
     let second = tokio::spawn(async move {
         rejudge_in(second_txn).await.commit().await.unwrap();
     });
-    wait_until_blocked_on_a_lock(&db).await;
+    crate::test_support::wait_until_blocked_on_a_lock(&db).await;
     first.commit().await.unwrap();
     second.await.unwrap();
 
@@ -722,28 +722,6 @@ async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
     assert_eq!(all.iter().filter(|j| j.is_current).count(), 1);
     let current = claim_one(&db, "srv").await;
     assert_eq!(current.judgement.version, 3);
-}
-
-/// Returns once another session of this database is waiting for a row lock.
-/// Polls `pg_stat_activity`, the server's own view of who waits on what, so
-/// the caller acts only after the wait has begun.
-async fn wait_until_blocked_on_a_lock(db: &DatabaseConnection) {
-    loop {
-        let row = db
-            .query_one_raw(Statement::from_string(
-                DbBackend::Postgres,
-                "SELECT COUNT(*)::bigint AS n FROM pg_stat_activity \
-                 WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                    .to_string(),
-            ))
-            .await
-            .unwrap()
-            .unwrap();
-        if row.try_get::<i64>("", "n").unwrap() > 0 {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
 }
 
 /// The lease refresh takes rows in id order and skips one a transition

@@ -13,6 +13,11 @@ use super::unit::{Unit, cascade};
 /// unique per submission and a judgement is finalized when it is superseded
 /// or requeued under a new epoch, so only the dispatch that owns an epoch can
 /// write, whether its judgement is current or a deferred rejudge.
+///
+/// A statement that only reads the fenced row (a result insert or delete)
+/// must lock it `FOR SHARE`: the lock waits out a concurrent requeue and
+/// re-checks the fence against the committed row, where a plain read would
+/// check its own snapshot and let a stale dispatch's rows in.
 pub(crate) fn write_fence(alias: &str, judgement: &str, submission: &str, epoch: &str) -> String {
     format!(
         "{alias}.id = {judgement} AND {alias}.submission_id = {submission} \
@@ -72,7 +77,7 @@ pub(crate) fn judgement_write<P: SqlBindSink>(
 /// The write fence every plugin write to a code run goes through: the run
 /// (`alias`) the caller names, at the epoch it was dispatched with, still in
 /// flight. A requeue gives the run a new epoch, so a lost dispatch cannot
-/// write.
+/// write. A result insert locks the run `FOR SHARE`, as for [`write_fence`].
 pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> String {
     format!(
         "{alias}.id = {code_run} AND {alias}.judge_epoch = {epoch} \

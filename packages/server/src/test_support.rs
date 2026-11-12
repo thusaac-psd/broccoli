@@ -1,7 +1,7 @@
 //! Shared fixtures for the crate's unit tests.
 
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
@@ -52,4 +52,26 @@ pub(crate) async fn seed_user_and_problem(db: &DatabaseConnection) -> (i32, i32)
     .await
     .expect("insert problem");
     (u.id, p.id)
+}
+
+/// Returns once another session of this database is waiting for a row lock.
+/// Polls `pg_stat_activity`, the server's own view of who waits on what, so
+/// the caller acts only after the wait has begun.
+pub(crate) async fn wait_until_blocked_on_a_lock(db: &DatabaseConnection) {
+    loop {
+        let row = db
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT COUNT(*)::bigint AS n FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        if row.try_get::<i64>("", "n").unwrap() > 0 {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
 }

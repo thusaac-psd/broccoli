@@ -56,8 +56,10 @@ async fn build_code_run_response(
     let show_results = cr.status.is_terminal() || is_running;
 
     let result_response = if show_results {
+        // Only the results of the run's current dispatch.
         let results = code_run_result::Entity::find()
             .filter(code_run_result::Column::CodeRunId.eq(cr.id))
+            .filter(code_run_result::Column::JudgeEpoch.eq(cr.judge_epoch))
             .order_by_asc(code_run_result::Column::RunIndex)
             .all(db)
             .await?;

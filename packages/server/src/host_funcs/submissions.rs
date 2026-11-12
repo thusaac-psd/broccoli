@@ -110,23 +110,16 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
     super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
-host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
-    let call = super::HostCall::enter(&user_data, "submission_insert_results")?;
-    let (plugin_id, db) = &*call;
-
-    let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
-        .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
-
-    // The guest early-returns on an empty batch; guard here too so an empty
-    // VALUES list can never produce invalid SQL.
+/// `submission_insert_results`' statement: the rows land only while their
+/// judgement is unfinalized at their epoch. `None` for an empty batch.
+fn submission_results_statement(results: &[TestCaseResultRow]) -> Option<(String, Vec<JsonValue>)> {
     if results.is_empty() {
-        return ok_affected(0);
+        return None;
     }
-
     let mut p = Params::new();
     let mut rows = Vec::with_capacity(results.len());
 
-    for r in &results {
+    for r in results {
         let score_val = if r.score.is_finite() { r.score } else { 0.0 };
         let message = r.message.as_deref().map(sanitize_result_text_field);
         let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
@@ -159,11 +152,24 @@ host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnectio
              submission_id, judgement_id, judge_epoch, test_case_id, run_index, verdict, score, \
              time_used, memory_used, checker_output, stdout, stderr, created_at \
          ) \
-         JOIN submission_judgement j ON {}",
+         JOIN submission_judgement j ON {} \
+         FOR SHARE OF j",
         rows.join(", "),
         judging::write_fence("j", "v.judgement_id", "v.submission_id", "v.judge_epoch"),
     );
-    let args = serde_json::to_string(&p.into_args())?;
+    Some((sql, p.into_args()))
+}
+
+host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "submission_insert_results")?;
+    let (plugin_id, db) = &*call;
+
+    let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
+        .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
+    let Some((sql, args)) = submission_results_statement(&results) else {
+        return ok_affected(0);
+    };
+    let args = serde_json::to_string(&args)?;
     super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
@@ -179,7 +185,7 @@ fn delete_results_statement(
     let sql = format!(
         "DELETE FROM test_case_result t \
          WHERE t.submission_id = {} AND t.judgement_id = {} AND t.judge_epoch = {} \
-           AND EXISTS (SELECT 1 FROM submission_judgement j WHERE {})",
+           AND EXISTS (SELECT 1 FROM submission_judgement j WHERE {} FOR SHARE)",
         p.bind(submission_id),
         p.bind(judgement_id),
         p.bind(judge_epoch),
@@ -277,7 +283,8 @@ fn code_run_results_statement(results: &[CodeRunResultRow]) -> Option<(String, V
              code_run_id, judge_epoch, run_index, verdict, score, \
              time_used, memory_used, checker_output, stdout, stderr, created_at \
          ) \
-         JOIN code_run cr ON {}",
+         JOIN code_run cr ON {} \
+         FOR SHARE OF cr",
         rows.join(", "),
         judging::code_run_write_fence("cr", "v.code_run_id", "v.judge_epoch"),
     );
@@ -305,8 +312,8 @@ mod tests {
     use broccoli_server_sdk::types::{SubmissionStatus, Verdict};
     use chrono::Utc;
     use sea_orm::{
-        ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
-        TransactionTrait,
+        ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
+        Set, TransactionTrait,
     };
 
     fn execute(db: &DatabaseConnection, sql: String, args: Vec<JsonValue>) -> u64 {
@@ -697,5 +704,67 @@ mod tests {
         assert!(row.resolved);
         assert!(row.resolved_at.is_some());
         assert_eq!(row.resolved_by, None);
+    }
+
+    /// A result insert from a dispatch whose judgement is being requeued waits
+    /// for the requeue and then re-checks its fence against the committed
+    /// row, so the stale rows never land.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_insert_racing_a_requeue_writes_nothing() {
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, _) = seed_judged(&db).await;
+        let j = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+
+        let requeue = db.begin().await.expect("begin");
+        requeue
+            .execute_unprepared(&format!(
+                "UPDATE submission_judgement SET judge_epoch = judge_epoch + 1 WHERE id = {}",
+                j.id
+            ))
+            .await
+            .expect("requeue");
+        let insert = {
+            let db = db.clone();
+            let row = TestCaseResultRow {
+                submission_id: j.submission_id,
+                judgement_id: j.id,
+                judge_epoch: j.judge_epoch,
+                test_case_id: None,
+                run_index: Some(0),
+                verdict: Verdict::Accepted,
+                score: 1.0,
+                time_used: None,
+                memory_used: None,
+                message: None,
+                stdout: None,
+                stderr: None,
+            };
+            tokio::task::spawn_blocking(move || {
+                let (sql, args) = submission_results_statement(&[row]).expect("rows");
+                execute(&db, sql, args)
+            })
+        };
+        crate::test_support::wait_until_blocked_on_a_lock(&db).await;
+        requeue.commit().await.expect("commit");
+
+        assert_eq!(
+            insert.await.expect("join"),
+            0,
+            "the stale insert writes nothing"
+        );
+        let rows = test_case_result::Entity::find()
+            .filter(test_case_result::Column::JudgementId.eq(j.id))
+            .count(&db)
+            .await
+            .expect("count");
+        assert_eq!(rows, 0);
     }
 }
