@@ -52,18 +52,8 @@ pub struct EvaluatorEntry {
     pub function_name: String,
 }
 
-/// A single contest type registration entry.
-///
-/// Used to carry a fourth field, `filter_submission_fn`: the function a
-/// contest-type plugin registered to filter/redact a submission response
-/// body before it left the server. Retired entirely (not replaced by
-/// anything in this struct) once the VisibilityKernel took over submission
-/// visibility end to end - `Decision`/`FieldMask` plus each plugin's
-/// `topic = "visibility"` query function now own that job, driven by
-/// `packages/server/src/visibility/`, not by a per-contest-type hook listed
-/// here. See `git show dc8112d8` ("retire filter_submission_fn plugin hook")
-/// for the removal and SDD 2026-09-15-visibility-kernel Tasks 13-16 for what
-/// replaced it.
+/// A single contest type registration entry. Submission visibility is not
+/// part of it: plugins govern visibility through their `visibility` queries.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContestTypeEntry {
     /// Contest type identifier (e.g. "icpc", "ioi").
