@@ -58,7 +58,6 @@
 'codelink-bracket.live.awaitingJudge' = 'The deadline passed while an earlier submission was still being judged. Waiting on the judge.'
 
 'codelink-bracket.card.you' = 'You'
-'codelink-bracket.confirm.cancel' = 'Cancel'
 'codelink-bracket.error.rejudge' = 'Failed to rejudge the submission.'
 'codelink-bracket.game.column' = 'Game'
 'codelink-bracket.game.live' = 'Live'
