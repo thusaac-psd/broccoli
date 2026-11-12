@@ -177,6 +177,7 @@ pub async fn create_submission(
     let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
         attempt_id: attempt_id.to_string(),
+        attempt_timeout_ms: dispatch::ATTEMPT_TIMEOUT.as_millis() as u64,
         user_id: auth_user.user_id,
         problem_id,
         contest_id: None,
@@ -809,6 +810,7 @@ pub async fn create_contest_submission(
     let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
         attempt_id: attempt_id.to_string(),
+        attempt_timeout_ms: dispatch::ATTEMPT_TIMEOUT.as_millis() as u64,
         user_id: auth_user.user_id,
         problem_id,
         contest_id: Some(contest_id),
