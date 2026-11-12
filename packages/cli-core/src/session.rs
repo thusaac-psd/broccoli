@@ -249,10 +249,7 @@ impl Session {
             Ok(lock) => lock,
             Err(e) => return Exchange::Unreachable(format!("{e:#}")),
         };
-        let saved = match lock.read(&self.inner.server) {
-            Ok(saved) => saved,
-            Err(e) => return Exchange::Unreachable(format!("{e:#}")),
-        };
+        let saved = lock.read(&self.inner.server);
         let refresh_token = match saved {
             // Another process rotated (or logged in again) while this request
             // was in flight: its pair is current and ours is spent.
@@ -277,8 +274,6 @@ impl Session {
         let store = self.inner.store.as_ref()?;
         store
             .read(&self.inner.server)
-            .ok()
-            .flatten()
             .filter(|saved| saved.token != token)
     }
 
@@ -321,7 +316,7 @@ mod tests {
 
     /// One CLI process: a session over the pair currently saved in `file`.
     fn process(file: &CredentialsFile) -> Session {
-        let tokens = file.read(SERVER).unwrap().unwrap();
+        let tokens = file.read(SERVER).unwrap();
         Session::stored(SERVER.into(), tokens, file.clone())
     }
 
@@ -346,7 +341,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(session.bearer().unwrap(), "t1");
-        assert_eq!(file.read(SERVER).unwrap(), Some(pair("t1", "r1")));
+        assert_eq!(file.read(SERVER), Some(pair("t1", "r1")));
     }
 
     #[test]

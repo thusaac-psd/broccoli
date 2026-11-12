@@ -7,6 +7,10 @@
 //! Holding the lock is the only way to obtain a writer, which makes an unlocked
 //! read-modify-write impossible to express. Writes replace the file
 //! atomically, so an unlocked reader never sees a partial file.
+//!
+//! A damaged or foreign file never makes the CLI unusable: entries that do not
+//! parse are treated as absent (see [`CredentialsFile::damage`] for the
+//! warning), and the next login rewrites the file from the entries that do.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -21,9 +25,21 @@ pub struct StoredTokens {
     pub refresh_token: String,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Default)]
 struct FileContents {
     entries: Vec<Entry>,
+}
+
+/// The file as stored, before each entry is checked on its own.
+#[derive(Deserialize)]
+struct RawContents {
+    entries: Vec<serde_json::Value>,
+}
+
+/// The entries that parsed, and what was wrong with the rest of the file.
+struct Loaded {
+    contents: FileContents,
+    damage: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,23 +70,28 @@ impl CredentialsFile {
     }
 
     /// The pair saved for `server`.
-    pub fn read(&self, server: &str) -> anyhow::Result<Option<StoredTokens>> {
-        Ok(self
-            .contents()?
+    pub fn read(&self, server: &str) -> Option<StoredTokens> {
+        self.load()
+            .contents
             .entries
             .into_iter()
             .find(|e| e.server == server)
-            .map(|e| e.tokens))
+            .map(|e| e.tokens)
     }
 
     /// The most recently saved server and its pair.
-    pub fn most_recent(&self) -> anyhow::Result<Option<(String, StoredTokens)>> {
-        Ok(self
-            .contents()?
+    pub fn most_recent(&self) -> Option<(String, StoredTokens)> {
+        self.load()
+            .contents
             .entries
             .into_iter()
             .next()
-            .map(|e| (e.server, e.tokens)))
+            .map(|e| (e.server, e.tokens))
+    }
+
+    /// Why part or all of the file is being ignored, if it is.
+    pub fn damage(&self) -> Option<String> {
+        self.load().damage
     }
 
     /// Block until no other process holds the lock, then take it.
@@ -96,11 +117,42 @@ impl CredentialsFile {
         self.path.with_file_name(name)
     }
 
-    fn contents(&self) -> anyhow::Result<FileContents> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(text) => serde_json::from_str(&text).context("Failed to parse credentials file"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileContents::default()),
-            Err(e) => Err(e).context("Failed to read credentials file"),
+    fn load(&self) -> Loaded {
+        let path = self.path.display();
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Loaded {
+                    contents: FileContents::default(),
+                    damage: None,
+                };
+            }
+            Err(e) => {
+                return Loaded {
+                    contents: FileContents::default(),
+                    damage: Some(format!("cannot read {path}: {e}")),
+                };
+            }
+        };
+        let raw: RawContents = match serde_json::from_str(&text) {
+            Ok(raw) => raw,
+            Err(e) => {
+                return Loaded {
+                    contents: FileContents::default(),
+                    damage: Some(format!("{path} is not a credentials file ({e})")),
+                };
+            }
+        };
+        let total = raw.entries.len();
+        let entries: Vec<Entry> = raw
+            .entries
+            .into_iter()
+            .filter_map(|value| serde_json::from_value(value).ok())
+            .collect();
+        let skipped = total - entries.len();
+        Loaded {
+            contents: FileContents { entries },
+            damage: (skipped > 0).then(|| format!("{skipped} entry(ies) in {path} are invalid")),
         }
     }
 }
@@ -112,14 +164,14 @@ pub struct CredentialsLock {
 }
 
 impl CredentialsLock {
-    pub fn read(&self, server: &str) -> anyhow::Result<Option<StoredTokens>> {
+    pub fn read(&self, server: &str) -> Option<StoredTokens> {
         self.file.read(server)
     }
 
     /// Save `tokens` for `server` and make it the most recent server. Other
-    /// servers' entries are kept.
+    /// servers' valid entries are kept; anything unreadable is replaced.
     pub fn write(&self, server: &str, tokens: &StoredTokens) -> anyhow::Result<()> {
-        let mut contents = self.file.contents()?;
+        let mut contents = self.file.load().contents;
         contents.entries.retain(|e| e.server != server);
         contents.entries.insert(
             0,
@@ -176,18 +228,43 @@ mod tests {
         lock.write("https://a", &pair("a2", "ra2")).unwrap();
         drop(lock);
 
-        assert_eq!(file.read("https://a").unwrap(), Some(pair("a2", "ra2")));
-        assert_eq!(file.read("https://b").unwrap(), Some(pair("b1", "rb1")));
-        let (server, _) = file.most_recent().unwrap().unwrap();
+        assert_eq!(file.read("https://a"), Some(pair("a2", "ra2")));
+        assert_eq!(file.read("https://b"), Some(pair("b1", "rb1")));
+        let (server, _) = file.most_recent().unwrap();
         assert_eq!(server, "https://a");
     }
 
     #[test]
-    fn an_entry_without_a_refresh_token_is_rejected() {
+    fn an_invalid_entry_is_skipped_and_reported() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("credentials.json");
-        std::fs::write(&path, r#"{"entries":[{"server":"https://x","token":"t"}]}"#).unwrap();
-        assert!(CredentialsFile::at(path).read("https://x").is_err());
+        std::fs::write(
+            &path,
+            r#"{"entries":[{"server":"https://x","token":"t"},
+                {"server":"https://y","token":"t","refresh_token":"r"}]}"#,
+        )
+        .unwrap();
+        let file = CredentialsFile::at(path);
+        assert_eq!(file.read("https://x"), None);
+        assert_eq!(file.read("https://y"), Some(pair("t", "r")));
+        assert!(file.damage().unwrap().contains("1 entry"));
+    }
+
+    #[test]
+    fn a_login_replaces_a_file_that_does_not_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        std::fs::write(&path, "not json at all").unwrap();
+        let file = CredentialsFile::at(&path);
+        assert_eq!(file.most_recent(), None);
+        assert!(file.damage().is_some());
+
+        file.lock()
+            .unwrap()
+            .write("https://a", &pair("a", "r"))
+            .unwrap();
+        assert_eq!(file.read("https://a"), Some(pair("a", "r")));
+        assert_eq!(file.damage(), None);
     }
 
     #[cfg(unix)]

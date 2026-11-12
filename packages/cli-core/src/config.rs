@@ -49,15 +49,24 @@ fn resolve_credentials_from_sources(
     let token = token
         .map(String::from)
         .or_else(|| env_lookup("BROCCOLI_TOKEN"));
+    // Explicit credentials never touch the credentials file, so a damaged
+    // file cannot lock out `--server`/`--token`.
+    if let (Some(server), Some(token)) = (&server, &token) {
+        return Ok(Session::explicit(server.clone(), token.clone()));
+    }
 
+    if let Some(damage) = store.damage() {
+        eprintln!(
+            "Warning: ignoring saved credentials: {damage}. Run `broccoli login` to replace them."
+        );
+    }
     let saved = match &server {
-        Some(server) => store.read(server)?.map(|tokens| (server.clone(), tokens)),
-        None => store.most_recent()?,
+        Some(server) => store.read(server).map(|tokens| (server.clone(), tokens)),
+        None => store.most_recent(),
     };
-    match (token, server, saved) {
-        (Some(token), Some(server), _) => Ok(Session::explicit(server, token)),
-        (Some(token), None, Some((server, _))) => Ok(Session::explicit(server, token)),
-        (None, _, Some((server, tokens))) => Ok(Session::stored(server, tokens, store.clone())),
+    match (token, saved) {
+        (Some(token), Some((server, _))) => Ok(Session::explicit(server, token)),
+        (None, Some((server, tokens))) => Ok(Session::stored(server, tokens, store.clone())),
         _ => bail!(
             "No credentials found.\n\
              Run `broccoli login` to authenticate, or pass --server and --token."
@@ -279,6 +288,17 @@ mod tests {
         let session = resolve(None, None, &[], None, &store).unwrap();
         assert_eq!(session.server(), "https://judge");
         assert_eq!(session.bearer().unwrap(), "saved");
+    }
+
+    #[test]
+    fn a_damaged_file_neither_blocks_explicit_credentials_nor_resolves_a_session() {
+        let (dir, store) = empty_store();
+        std::fs::write(dir.path().join("credentials.json"), "{garbage").unwrap();
+        let session = resolve(Some("https://judge"), Some("tok"), &[], None, &store).unwrap();
+        assert_eq!(session.bearer().unwrap(), "tok");
+        let env = [("BROCCOLI_URL", "https://judge"), ("BROCCOLI_TOKEN", "env")];
+        assert!(resolve(None, None, &env, None, &store).is_ok());
+        assert!(resolve(None, None, &[], None, &store).is_err());
     }
 
     #[test]
