@@ -73,7 +73,20 @@ pub enum Exchange {
     /// The server refused the refresh token.
     Refused,
     /// The server could not be reached or failed; the token may still be good.
-    Unreachable(String),
+    /// `retry_after` is the server's `Retry-After`, when it sent one.
+    Unreachable {
+        cause: String,
+        retry_after: Option<Duration>,
+    },
+}
+
+impl Exchange {
+    pub fn unreachable(cause: impl Into<String>) -> Self {
+        Self::Unreachable {
+            cause: cause.into(),
+            retry_after: None,
+        }
+    }
 }
 
 struct Slot {
@@ -152,7 +165,7 @@ impl Session {
         used: &str,
         exchange: impl FnOnce(&str) -> Exchange,
     ) -> Result<(), SessionError> {
-        self.refresh_at(used, exchange, Instant::now())
+        self.refresh_at(used, exchange, Instant::now)
     }
 
     fn bearer_at(&self, now: Instant) -> Result<String, SessionError> {
@@ -185,7 +198,7 @@ impl Session {
         &self,
         used: &str,
         exchange: impl FnOnce(&str) -> Exchange,
-        now: Instant,
+        now: impl Fn() -> Instant,
     ) -> Result<(), SessionError> {
         let mut slot = self.lock();
         loop {
@@ -196,7 +209,7 @@ impl Session {
             match slot.state {
                 SessionState::Refreshing => slot = self.wait(slot),
                 SessionState::Rejected => return Err(SessionError::Rejected),
-                SessionState::Unavailable { retry_at } if now < retry_at => {
+                SessionState::Unavailable { retry_at } if now() < retry_at => {
                     return Err(SessionError::Unavailable {
                         retry_at,
                         cause: "the server was unreachable".into(),
@@ -221,8 +234,10 @@ impl Session {
                 slot.state = SessionState::Rejected;
                 Err(SessionError::Rejected)
             }
-            Exchange::Unreachable(cause) => {
-                let retry_at = now + REFRESH_RETRY;
+            Exchange::Unreachable { cause, retry_after } => {
+                // Measured from when the exchange ended, so a slow timeout
+                // still waits the full backoff.
+                let retry_at = now() + retry_after.unwrap_or_default().max(REFRESH_RETRY);
                 slot.state = SessionState::Unavailable { retry_at };
                 Err(SessionError::Unavailable { retry_at, cause })
             }
@@ -247,7 +262,7 @@ impl Session {
         };
         let lock = match store.lock() {
             Ok(lock) => lock,
-            Err(e) => return Exchange::Unreachable(format!("{e:#}")),
+            Err(e) => return Exchange::unreachable(format!("{e:#}")),
         };
         let saved = lock.read(&self.inner.server);
         let refresh_token = match saved {
@@ -298,6 +313,7 @@ fn adopt(slot: &mut Slot, tokens: StoredTokens) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     const SERVER: &str = "https://judge.example";
 
@@ -423,28 +439,51 @@ mod tests {
         // refresh token to exercise the network path.
         session.lock().refresh_token = Some("r0".into());
         let t = Instant::now();
+        let clock = Cell::new(t);
 
+        // The exchange itself takes 30 s (a timeout); the backoff starts after it.
         let err = session
             .refresh_at(
                 "t0",
-                |_| Exchange::Unreachable("connection refused".into()),
-                t,
+                |_| {
+                    clock.set(t + Duration::from_secs(30));
+                    Exchange::unreachable("timed out")
+                },
+                || clock.get(),
+            )
+            .unwrap_err();
+        let expected = t + Duration::from_secs(30) + REFRESH_RETRY;
+        assert!(matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == expected));
+
+        let before = expected - Duration::from_millis(1);
+        assert!(session.bearer_at(before).is_err());
+        assert!(session.refresh_at("t0", never, || before).is_err());
+
+        assert_eq!(session.bearer_at(expected).unwrap(), "t0");
+        session
+            .refresh_at("t0", |_| Exchange::Rotated(pair("t1", "r1")), || expected)
+            .unwrap();
+        assert_eq!(session.bearer_at(expected).unwrap(), "t1");
+    }
+
+    #[test]
+    fn a_longer_retry_after_from_the_server_wins_over_the_backoff() {
+        let session = Session::explicit(SERVER.into(), "t0".into());
+        session.lock().refresh_token = Some("r0".into());
+        let t = Instant::now();
+        let err = session
+            .refresh_at(
+                "t0",
+                |_| Exchange::Unreachable {
+                    cause: "429".into(),
+                    retry_after: Some(Duration::from_secs(60)),
+                },
+                || t,
             )
             .unwrap_err();
         assert!(
-            matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == t + REFRESH_RETRY)
+            matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == t + Duration::from_secs(60))
         );
-
-        let before = t + REFRESH_RETRY - Duration::from_millis(1);
-        assert!(session.bearer_at(before).is_err());
-        assert!(session.refresh_at("t0", never, before).is_err());
-
-        let after = t + REFRESH_RETRY;
-        assert_eq!(session.bearer_at(after).unwrap(), "t0");
-        session
-            .refresh_at("t0", |_| Exchange::Rotated(pair("t1", "r1")), after)
-            .unwrap();
-        assert_eq!(session.bearer_at(after).unwrap(), "t1");
     }
 
     #[test]

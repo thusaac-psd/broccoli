@@ -110,7 +110,7 @@ impl Client {
             });
         let resp = match sent {
             Ok(resp) => resp,
-            Err(e) => return Exchange::Unreachable(e.to_string()),
+            Err(e) => return Exchange::unreachable(e.to_string()),
         };
         match resp.status().as_u16() {
             200 => match resp.into_body().read_json::<CliTokenResponse>() {
@@ -118,14 +118,12 @@ impl Client {
                     token: body.token,
                     refresh_token: body.refresh_token,
                 }),
-                Err(e) => Exchange::Unreachable(format!("unreadable refresh response: {e}")),
+                Err(e) => Exchange::unreachable(format!("unreadable refresh response: {e}")),
             },
             // Too many requests, a timeout or a server failure says nothing
             // about the refresh token; any other client error refuses it.
-            408 | 429 => Exchange::Unreachable(ApiError::from_response(resp).to_string()),
-            status if status >= 500 => {
-                Exchange::Unreachable(ApiError::from_response(resp).to_string())
-            }
+            408 | 429 => unavailable(resp),
+            status if status >= 500 => unavailable(resp),
             _ => Exchange::Refused,
         }
     }
@@ -510,6 +508,21 @@ pub fn persist_session(server: &str, access_token: &str) -> anyhow::Result<()> {
             },
         )
         .context("Failed to save credentials")
+}
+
+/// An exchange the server could not complete, honouring its `Retry-After`
+/// (in seconds; the HTTP-date form is not used by the server).
+fn unavailable(resp: Response) -> Exchange {
+    let retry_after = resp
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs);
+    Exchange::Unreachable {
+        cause: ApiError::from_response(resp).to_string(),
+        retry_after,
+    }
 }
 
 /// A request the server answered with a non-2xx status. `code` is the
