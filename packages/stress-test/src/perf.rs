@@ -598,15 +598,18 @@ fn hist_us() -> Histogram<u64> {
     Histogram::new_with_bounds(1, 3_600_000_000, 3).expect("valid bounds")
 }
 
-/// Per-stage durations from durable timestamps, in milliseconds.
+/// Per-stage durations from durable timestamps, in milliseconds. `{lease}` is
+/// the claim timestamp: `submission.leased_at` where the submission row carries
+/// the lease, else the current judgement's `leased_at`.
 const STAGE_SQL: &str = r#"
 WITH r AS (
-  SELECT s.id, s.created_at, s.leased_at, s.judged_at,
+  SELECT s.id, s.created_at, {lease} AS leased_at, s.judged_at,
          MIN(t.created_at) AS first_tc, MAX(t.created_at) AS last_tc
     FROM submission s
     LEFT JOIN test_case_result t ON t.submission_id = s.id
+    LEFT JOIN submission_judgement j ON j.submission_id = s.id AND j.is_current
    WHERE s.id = ANY($1)
-   GROUP BY s.id
+   GROUP BY s.id, {lease}
 )
 SELECT
   (EXTRACT(EPOCH FROM (leased_at - created_at)) * 1000)::float8 AS queued,
@@ -629,7 +632,21 @@ async fn stage_breakdown(db: &sqlx::PgPool, ids: &[i32]) -> anyhow::Result<Value
         Option<f64>,
         Option<f64>,
     );
-    let rows: Vec<Row> = sqlx::query_as(STAGE_SQL).bind(ids).fetch_all(db).await?;
+    let has_submission_lease: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+          WHERE table_name = 'submission' AND column_name = 'leased_at')",
+    )
+    .fetch_one(db)
+    .await?;
+    let lease = if has_submission_lease {
+        "s.leased_at"
+    } else {
+        "j.leased_at"
+    };
+    let rows: Vec<Row> = sqlx::query_as(&STAGE_SQL.replace("{lease}", lease))
+        .bind(ids)
+        .fetch_all(db)
+        .await?;
     let names = [
         "queued",
         "to_first_result",
