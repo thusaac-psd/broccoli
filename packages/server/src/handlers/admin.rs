@@ -259,7 +259,13 @@ struct ArchiveForm {
     replaces: Option<String>,
 }
 
-async fn read_archive(state: &AppState, mut multipart: Multipart) -> Result<ArchiveForm, AppError> {
+/// `body_len` is the request's `Content-Length`, if sent: the archive buffer
+/// is sized from it once instead of growing (and copying) as chunks arrive.
+async fn read_archive(
+    state: &AppState,
+    body_len: Option<usize>,
+    mut multipart: Multipart,
+) -> Result<ArchiveForm, AppError> {
     if !state.config.plugin.uploads_enabled {
         return Err(AppError::PluginUploadDisabled);
     }
@@ -277,18 +283,26 @@ async fn read_archive(state: &AppState, mut multipart: Multipart) -> Result<Arch
         }
     };
     let (mut bytes, mut replaces) = (None, None);
-    while let Some(field) = multipart.next_field().await.map_err(unreadable)? {
+    while let Some(mut field) = multipart.next_field().await.map_err(unreadable)? {
         match field.name() {
-            Some("plugin") => bytes = Some(field.bytes().await.map_err(unreadable)?),
+            Some("plugin") => {
+                // Chunk by chunk, so an oversized archive is refused as soon
+                // as it crosses the limit rather than read to the end.
+                let mut buf = Vec::with_capacity(body_len.unwrap_or(0).min(MAX_ARCHIVE_BYTES));
+                while let Some(chunk) = field.chunk().await.map_err(unreadable)? {
+                    if buf.len() + chunk.len() > MAX_ARCHIVE_BYTES {
+                        return Err(too_large());
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                bytes = Some(buf);
+            }
             Some("replaces") => replaces = Some(field.text().await.map_err(unreadable)?),
             _ => {}
         }
     }
     let bytes = bytes
         .ok_or_else(|| AppError::Validation("Missing 'plugin' field in multipart form".into()))?;
-    if bytes.len() > MAX_ARCHIVE_BYTES {
-        return Err(too_large());
-    }
     // Decompressing and checking up to the unpacked limit is CPU work.
     let archive = tokio::task::spawn_blocking(move || PluginArchive::parse(bytes))
         .await
@@ -316,6 +330,15 @@ fn parse_replaces(value: Option<&str>) -> Result<Option<PluginSource>, AppError>
             Ok(Some(PluginSource::Upload(hash.to_hex())))
         }
     }
+}
+
+fn content_length(headers: &axum::http::HeaderMap) -> Option<usize> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// One archive at a time per server: each holds up to [`MAX_ARCHIVE_BYTES`]
@@ -373,15 +396,18 @@ pub async fn get_plugin_upload_policy(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, multipart))]
+#[instrument(skip(state, auth_user, headers, multipart))]
 pub async fn inspect_plugin_archive(
     auth_user: AuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<PluginArchiveSummary>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let _intake = archive_intake().await?;
-    let archive = read_archive(&state, multipart).await?.archive;
+    let archive = read_archive(&state, content_length(&headers), multipart)
+        .await?
+        .archive;
     let current = plugin_entity::Entity::find_by_id(archive.id().as_str())
         .one(&state.db)
         .await?
@@ -429,15 +455,17 @@ pub async fn inspect_plugin_archive(
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user, multipart))]
+#[instrument(skip(state, auth_user, headers, multipart))]
 pub async fn upload_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<PluginUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let _intake = archive_intake().await?;
-    let ArchiveForm { archive, replaces } = read_archive(&state, multipart).await?;
+    let ArchiveForm { archive, replaces } =
+        read_archive(&state, content_length(&headers), multipart).await?;
     let replaces = parse_replaces(replaces.as_deref())?;
     let plugin_id = archive.id().to_string();
     let version = archive.manifest().version.clone();
