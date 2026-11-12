@@ -26,9 +26,8 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::services::judging;
 
-/// Server-side mirror of the guest SDK's `db::Params`: assigns positional
-/// `$1..$N` placeholders (1-based) and collects the bound JSON values, so the
-/// SQL built here is byte-identical to what the SDK used to build guest-side.
+/// Positional parameters of the statements built here: assigns `$1..$N`
+/// placeholders (1-based) and collects the bound JSON values.
 /// NUL bytes in bound values do not need scrubbing here - every statement is
 /// executed through `sql::execute_on_pool` / `sql::query_on_pool`, which strip
 /// NUL at the shared choke point exactly as for any other plugin statement.

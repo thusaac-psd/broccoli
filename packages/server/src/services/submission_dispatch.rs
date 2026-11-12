@@ -381,11 +381,8 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
         // are already blob-backed are untouched -- they never occupy the
         // inline budget in the first place.
         //
-        // This check runs on EVERY dispatch, so it also transparently repairs
-        // problems that were already stored over-budget before this fix
-        // existed: there is no separate backfill migration, because the split
-        // is re-derived from current storage state each time a submission is
-        // judged. Candidates are walked in a fixed order (test-case
+        // The split is derived from current storage on every dispatch, so a
+        // problem stored over budget is judged within budget. Candidates are walked in a fixed order (test-case
         // `position`, already the query's ORDER BY, then input before
         // expected_output within a case), so the split is deterministic and
         // stable across rejudges of the same test-case set.
@@ -682,10 +679,8 @@ async fn resolve_body_ref(
 
     // `candidate_sizes` produces exactly one flag per inline candidate, in
     // the same order candidates are resolved here, so this always has a
-    // matching entry. Fall back to "keep inline" (today's behavior) rather
-    // than panicking if that invariant is ever violated by a future edit --
-    // a stale/missing flag should degrade to the pre-fix behavior, not take
-    // down submission dispatch.
+    // matching entry. A missing flag keeps the body inline rather than
+    // taking down submission dispatch.
     let keep = keep_flags.next().unwrap_or(true);
     if keep {
         return Ok(TestCaseBodyRef::inline(inline_text));
