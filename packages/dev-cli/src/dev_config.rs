@@ -44,7 +44,7 @@ pub fn resolve(plugin_dir: &Path, web_root: Option<&str>) -> ResolvedDevConfig {
 
     let frontend_install_cmd = match raw.build.frontend_install_cmd {
         Some(cmd) => shell_words(cmd.trim()),
-        None => vec!["pnpm".into(), "install".into()],
+        None => default_install_cmd(frontend_dir.as_deref().unwrap_or(plugin_dir)),
     };
 
     let frontend_build_cmd = match raw.build.frontend_build_cmd {
@@ -112,6 +112,94 @@ fn resolve_frontend_dir(
     }
 
     None
+}
+
+/// `pnpm install`, plus `--ignore-workspace` when `dir` sits inside a pnpm
+/// workspace that does not list it as a member: from such a directory pnpm
+/// would otherwise install the enclosing workspace instead of the plugin.
+fn default_install_cmd(dir: &Path) -> Vec<String> {
+    let mut cmd = vec!["pnpm".to_string(), "install".to_string()];
+    if outside_enclosing_workspace(dir) {
+        cmd.push("--ignore-workspace".into());
+    }
+    cmd
+}
+
+/// Whether the nearest `pnpm-workspace.yaml` at or above `dir` exists and its
+/// `packages` patterns leave `dir` out.
+fn outside_enclosing_workspace(dir: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
+    for root in dir.ancestors() {
+        let manifest = root.join("pnpm-workspace.yaml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let rel: Vec<String> = dir
+            .strip_prefix(root)
+            .unwrap_or(Path::new(""))
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        return !is_workspace_member(&rel, &workspace_patterns(&text));
+    }
+    false
+}
+
+/// The entries of a `pnpm-workspace.yaml`'s top-level `packages` list.
+fn workspace_patterns(text: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    let mut in_packages = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !line.starts_with([' ', '\t', '-']) && !trimmed.is_empty() {
+            in_packages = trimmed.starts_with("packages:");
+            continue;
+        }
+        if in_packages && let Some(item) = trimmed.strip_prefix('-') {
+            let item = item.split(" #").next().unwrap_or("").trim();
+            patterns.push(item.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+    }
+    patterns
+}
+
+/// pnpm's membership rule: the workspace root is always a member; otherwise a
+/// directory is a member when a pattern matches it and no `!` pattern does.
+fn is_workspace_member(rel: &[String], patterns: &[String]) -> bool {
+    if rel.is_empty() {
+        return true;
+    }
+    let matches = |pattern: &str| {
+        let parts: Vec<&str> = pattern
+            .trim_start_matches("./")
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .collect();
+        path_glob_match(&parts, rel)
+    };
+    let included = patterns
+        .iter()
+        .filter(|p| !p.starts_with('!'))
+        .any(|p| matches(p));
+    let excluded = patterns
+        .iter()
+        .filter_map(|p| p.strip_prefix('!'))
+        .any(matches);
+    included && !excluded
+}
+
+/// Path-component glob: `**` matches any number of components, and every
+/// other part matches one component with [`glob_match`].
+fn path_glob_match(pattern: &[&str], path: &[String]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => (0..=path.len()).any(|skip| path_glob_match(rest, &path[skip..])),
+        Some((part, rest)) => path
+            .split_first()
+            .is_some_and(|(head, tail)| glob_match(part, head) && path_glob_match(rest, tail)),
+    }
 }
 
 fn shell_words(cmd: &str) -> Vec<String> {
@@ -253,6 +341,71 @@ pub fn classify_file(path: &Path, plugin_dir: &Path, frontend_dir: Option<&Path>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rel(path: &str) -> Vec<String> {
+        path.split('/').map(String::from).collect()
+    }
+
+    #[test]
+    fn workspace_patterns_read_the_packages_list_only() {
+        let yaml = "packages:\n  - packages/*\n  - 'plugins/*/frontend' # plugins\n  - \"!plugins/old/frontend\"\n\ncatalog:\n  tsdown: 0.21.10\n";
+        assert_eq!(
+            workspace_patterns(yaml),
+            vec!["packages/*", "plugins/*/frontend", "!plugins/old/frontend"]
+        );
+    }
+
+    #[test]
+    fn membership_follows_pnpm_globs_and_negations() {
+        let patterns: Vec<String> = [
+            "packages/*",
+            "plugins/*/frontend",
+            "docs/**",
+            "!plugins/old/frontend",
+        ]
+        .map(String::from)
+        .into();
+        assert!(is_workspace_member(&[], &patterns));
+        assert!(is_workspace_member(&rel("packages/web"), &patterns));
+        assert!(is_workspace_member(
+            &rel("plugins/icpc/frontend"),
+            &patterns
+        ));
+        assert!(is_workspace_member(&rel("docs/a/b"), &patterns));
+        assert!(!is_workspace_member(
+            &rel("plugins/old/frontend"),
+            &patterns
+        ));
+        assert!(!is_workspace_member(&rel("plugins/icpc"), &patterns));
+        assert!(!is_workspace_member(&rel("examples/p/frontend"), &patterns));
+        assert!(is_workspace_member(
+            &rel("packages/web-sdk"),
+            &["packages/web-*".into()]
+        ));
+    }
+
+    #[test]
+    fn install_ignores_the_workspace_only_for_a_non_member() {
+        let root = std::env::temp_dir().join(format!("broccoli-dev-cli-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["plugins/a/frontend", "examples/b/frontend"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - plugins/*/frontend\n",
+        )
+        .unwrap();
+        assert_eq!(
+            default_install_cmd(&root.join("plugins/a/frontend")),
+            ["pnpm", "install"]
+        );
+        assert_eq!(
+            default_install_cmd(&root.join("examples/b/frontend")),
+            ["pnpm", "install", "--ignore-workspace"]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn test_glob_match() {

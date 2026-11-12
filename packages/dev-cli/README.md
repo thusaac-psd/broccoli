@@ -98,8 +98,9 @@ frontend_build_cmd = "pnpm build"
 Without that file, the CLI tries to infer the frontend directory from
 `[web].root`, then falls back to `frontend/`, or the plugin root if a
 `package.json` is present. The default install command is `pnpm install`, so a
-plugin frontend that is a member of a pnpm workspace installs through that
-workspace's lockfile.
+frontend that is a member of a pnpm workspace installs through that workspace's
+lockfile; one that sits inside a workspace without being listed in its
+`pnpm-workspace.yaml` gets `--ignore-workspace` and installs on its own.
 
 ### `broccoli-dev plugin watch`
 
