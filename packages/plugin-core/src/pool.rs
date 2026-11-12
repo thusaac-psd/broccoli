@@ -42,7 +42,9 @@
 //! idle timeout, so it cannot take an instance out from under steady traffic.
 
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use parking_lot::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use extism::{Error, Plugin};
@@ -137,7 +139,7 @@ impl<T> RecyclingPool<T> {
     /// `Ok(None)` if none became available within `timeout`.
     pub fn get(&self, timeout: Duration) -> Result<Option<PoolLease<T>>, Error> {
         let deadline = Instant::now() + timeout;
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock();
         loop {
             if let Some(slot) = state.free.pop() {
                 return Ok(Some(self.lease(slot)));
@@ -154,7 +156,7 @@ impl<T> RecyclingPool<T> {
                         idle_since: Instant::now(),
                     }))),
                     Err(e) => {
-                        self.shared.state.lock().unwrap().live -= 1;
+                        self.shared.state.lock().live -= 1;
                         self.shared.returned.notify_one();
                         Err(e)
                     }
@@ -164,12 +166,7 @@ impl<T> RecyclingPool<T> {
             if now >= deadline {
                 return Ok(None);
             }
-            state = self
-                .shared
-                .returned
-                .wait_timeout(state, deadline - now)
-                .unwrap()
-                .0;
+            self.shared.returned.wait_for(&mut state, deadline - now);
         }
     }
 
@@ -182,14 +179,14 @@ impl<T> RecyclingPool<T> {
 
     /// Number of instances the pool currently owns (free or leased).
     pub fn count(&self) -> usize {
-        self.shared.state.lock().unwrap().live
+        self.shared.state.lock().live
     }
 
     /// Drop every free instance that has been idle for at least `idle_for`,
     /// returning how many were dropped. Leased instances are never touched.
     pub fn evict_idle(&self, idle_for: Duration) -> usize {
         let evicted: Vec<Slot<T>> = {
-            let mut state = self.shared.state.lock().unwrap();
+            let mut state = self.shared.state.lock();
             // `free` is ordered by return time, so the idle ones are a prefix.
             let stale = state
                 .free
@@ -275,7 +272,7 @@ impl<T> Drop for PoolLease<T> {
     fn drop(&mut self) {
         if let Some(mut slot) = self.slot.take() {
             slot.idle_since = Instant::now();
-            self.shared.state.lock().unwrap().free.push(slot);
+            self.shared.state.lock().free.push(slot);
             self.shared.returned.notify_one();
         }
     }

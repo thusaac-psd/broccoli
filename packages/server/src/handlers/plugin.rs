@@ -129,14 +129,16 @@ pub async fn list_registries(
 pub async fn list_active_plugins(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ActivePluginResponse>>, AppError> {
-    let active_plugins = state
+    let loaded = state
         .plugins
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .filter(|p| p.status == PluginStatus::Loaded && p.manifest.has_web())
-        .map(ActivePluginResponse::from)
-        .collect();
+        .filter(|p| p.status == PluginStatus::Loaded);
+    let mut active_plugins = Vec::new();
+    for info in loaded {
+        active_plugins.extend(ActivePluginResponse::for_web_plugin(info).await);
+    }
 
     Ok(Json(active_plugins))
 }

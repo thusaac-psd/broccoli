@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone, utoipa::ToSchema, Default)]
@@ -43,26 +41,21 @@ impl I18nRegistry {
     }
 
     pub fn clear(&self) {
-        self.data.write().unwrap().clear();
+        self.data.write().clear();
     }
 
     pub fn merge(&self, lang: String, translation: TranslationMap) {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write();
         let entry = data.entry(lang).or_default();
         entry.extend(translation);
     }
 
     pub fn get_locales(&self) -> Vec<String> {
-        self.data
-            .read()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<String>>()
+        self.data.read().keys().cloned().collect::<Vec<String>>()
     }
 
     pub fn get_translations(&self, lang: &str) -> Option<TranslationMap> {
-        self.data.read().unwrap().get(lang).cloned()
+        self.data.read().get(lang).cloned()
     }
 }
 

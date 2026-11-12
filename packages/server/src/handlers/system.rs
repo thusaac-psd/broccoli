@@ -592,30 +592,32 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
     for key in &keys {
         pipe.cmd("PTTL").arg(key);
     }
-    let mut replies: Vec<redis::Value> = match pipe.query_async(&mut conn).await {
+    let replies: Vec<redis::Value> = match pipe.query_async(&mut conn).await {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "Worker heartbeat MGET/PTTL failed");
             return Vec::new();
         }
     };
-    if replies.len() != keys.len() + 1 {
+    let mut replies = replies.into_iter();
+    let (Some(mget), ttls) = (replies.next(), replies) else {
+        warn!("Worker heartbeat pipeline returned no replies");
+        return Vec::new();
+    };
+    let ttls_ms: Vec<i64> = ttls
+        .map(|v| redis::from_redis_value(v).unwrap_or(-2))
+        .collect();
+    if ttls_ms.len() != keys.len() {
         warn!("Worker heartbeat pipeline returned an unexpected reply count");
         return Vec::new();
     }
-    let ttls_ms: Vec<i64> = replies
-        .split_off(1)
-        .into_iter()
-        .map(|v| redis::from_redis_value(v).unwrap_or(-2))
-        .collect();
-    let values: Vec<Option<String>> =
-        match redis::from_redis_value(replies.pop().expect("one MGET reply")) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "Worker heartbeat MGET reply unparseable");
-                return Vec::new();
-            }
-        };
+    let values: Vec<Option<String>> = match redis::from_redis_value(mget) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "Worker heartbeat MGET reply unparseable");
+            return Vec::new();
+        }
+    };
 
     let mut workers: Vec<WorkerInfo> = values
         .into_iter()

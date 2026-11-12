@@ -4650,6 +4650,7 @@ dependencies = [
  "extism",
  "matchit 0.9.1",
  "opentelemetry",
+ "parking_lot",
  "serde",
  "serde_json",
  "tempfile",

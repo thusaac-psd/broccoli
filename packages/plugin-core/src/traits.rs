@@ -417,7 +417,10 @@ pub trait PluginManager: PluginInvoker {
     /// WASM memory, so run it off the async runtime.
     fn evict_idle_instances(&self, idle_for: std::time::Duration) -> usize {
         let pools: Vec<(String, crate::pool::RecyclingPool)> = {
-            let registry = self.get_registry().read().unwrap();
+            let registry = self
+                .get_registry()
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry
                 .values()
                 .filter_map(|entry| Some((entry.id.clone(), entry.runtime.clone()?)))

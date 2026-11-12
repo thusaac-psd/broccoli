@@ -79,6 +79,7 @@ jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 matchit = "0.9.1"
 mime_guess = "2.0.5"
 mq = { path = "packages/mq" }
+parking_lot = "0.12.5"
 plugin-core = { path = "packages/plugin-core" }
 rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }

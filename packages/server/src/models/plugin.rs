@@ -238,57 +238,43 @@ pub enum PluginStatusResponse {
     Failed,
 }
 
-impl From<PluginInfo> for ActivePluginResponse {
-    fn from(info: PluginInfo) -> Self {
-        let web_manifest = info.manifest.web.as_ref().expect(
-            "PluginInfo should only be converted to ActivePluginResponse if it has a web component",
-        );
-
-        let entry = {
-            let base = format!("/assets/{}/{}", info.id, web_manifest.entry);
-            let entry_path = info
-                .root_dir
-                .join(&web_manifest.root)
-                .join(&web_manifest.entry);
-            let mtime = std::fs::metadata(&entry_path)
-                .and_then(|m| m.modified())
-                .map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                })
-                .unwrap_or(0);
-            format!("{}?t={}", base, mtime)
-        };
-
-        let css: Vec<String> = web_manifest
-            .css
-            .iter()
-            .map(|css_file| {
-                let base = format!("/assets/{}/{}", info.id, css_file);
-                let css_path = info.root_dir.join(&web_manifest.root).join(css_file);
-                let mtime = std::fs::metadata(&css_path)
-                    .and_then(|m| m.modified())
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                    })
-                    .unwrap_or(0);
-                format!("{}?t={}", base, mtime)
-            })
-            .collect();
-
-        Self {
-            id: info.id.clone(),
-            name: info.manifest.name,
-            entry,
-            components: web_manifest.components.clone(),
-            slots: web_manifest.slots.clone(),
-            routes: web_manifest.routes.clone(),
-            css,
+impl ActivePluginResponse {
+    /// The frontend description of a plugin, or `None` when it has no web
+    /// component. Asset URLs carry the file's modification time so browsers
+    /// refetch them after an update.
+    pub async fn for_web_plugin(info: PluginInfo) -> Option<Self> {
+        let web = info.manifest.web.as_ref()?;
+        let web_root = info.root_dir.join(&web.root);
+        let entry = versioned_asset_url(&info.id, &web_root, &web.entry).await;
+        let mut css = Vec::with_capacity(web.css.len());
+        for css_file in &web.css {
+            css.push(versioned_asset_url(&info.id, &web_root, css_file).await);
         }
+        Some(Self {
+            id: info.id.clone(),
+            entry,
+            components: web.components.clone(),
+            slots: web.slots.clone(),
+            routes: web.routes.clone(),
+            css,
+            name: info.manifest.name,
+        })
     }
+}
+
+/// `/assets/<plugin>/<file>?t=<mtime seconds>`, with `t=0` when the file's
+/// modification time cannot be read.
+async fn versioned_asset_url(plugin_id: &str, web_root: &std::path::Path, file: &str) -> String {
+    let mtime = tokio::fs::metadata(web_root.join(file))
+        .await
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
+        .unwrap_or(0);
+    format!("/assets/{plugin_id}/{file}?t={mtime}")
 }
 
 impl From<PluginStatus> for PluginStatusResponse {
