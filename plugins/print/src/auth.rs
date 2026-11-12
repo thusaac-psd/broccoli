@@ -9,7 +9,10 @@ use crate::config::{self, StationCredential};
 const SCHEME: &str = "PrintStation ";
 
 /// An authenticated station. `name` comes from the credential that matched,
-/// never from the request, so a station can only act as itself.
+/// never from the request, so a station can only act as itself. It is
+/// qualified by the config scope that lists the credential (`global/<name>` or
+/// `contest-<id>/<name>`), so a contest's stations can never take the
+/// identity of a deployment-wide station or another contest's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StationAuth {
     pub name: String,
@@ -60,7 +63,7 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
     let global = config::load_global_config(host);
     if let Some(name) = station_for(&token, &global.stations) {
         return Ok(StationAuth {
-            name: name.to_string(),
+            name: format!("global/{name}"),
             contest_filter: None,
         });
     }
@@ -73,7 +76,7 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
         let contest = config::load_contest_config(host, contest_id);
         if let Some(name) = station_for(&token, &contest.stations) {
             return Ok(StationAuth {
-                name: name.to_string(),
+                name: format!("contest-{contest_id}/{name}"),
                 contest_filter: Some(contest_id),
             });
         }
@@ -132,7 +135,7 @@ mod tests {
         let req = req_with_auth(Some("PrintStation G"), None);
         let auth = authenticate_station(&host, &req).unwrap();
         assert_eq!(auth.contest_filter, None);
-        assert_eq!(auth.name, "hall");
+        assert_eq!(auth.name, "global/hall");
     }
 
     #[test]
@@ -147,7 +150,7 @@ mod tests {
         let req = req_with_auth(Some("PrintStation C7"), Some("7"));
         let auth = authenticate_station(&host, &req).unwrap();
         assert_eq!(auth.contest_filter, Some(7));
-        assert_eq!(auth.name, "room-7");
+        assert_eq!(auth.name, "contest-7/room-7");
     }
 
     #[test]
@@ -192,5 +195,18 @@ mod tests {
         let req = req_with_auth(None, None);
         let err = authenticate_station(&host, &req).unwrap_err();
         assert_eq!(err.into_response().status, 401);
+    }
+
+    #[test]
+    fn a_contest_station_never_shares_a_global_station_identity() {
+        let host = Host::mock();
+        let hall = |token: &str| json!({ "stations": [{ "name": "hall", "token": token }] });
+        host.config.seed("plugin", "", config::NAMESPACE, hall("G"));
+        host.config
+            .seed("contest", "7", config::NAMESPACE, hall("C7"));
+        let global = authenticate_station(&host, &req_with_auth(Some("PrintStation G"), None));
+        let contest =
+            authenticate_station(&host, &req_with_auth(Some("PrintStation C7"), Some("7")));
+        assert_ne!(global.unwrap().name, contest.unwrap().name);
     }
 }

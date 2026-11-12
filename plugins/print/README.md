@@ -53,7 +53,9 @@ In the contest's admin config, open **Printing**:
   give every station its own token.
 
 A **plugin-scoped** (global) station serves every contest on the deployment; a
-**contest-scoped** station is limited to that contest.
+**contest-scoped** station is limited to that contest. The queue shows a station
+qualified by where it is configured, `global/<name>` or `contest-<id>/<name>`,
+so a contest's station can never act as a global one of the same name.
 
 ## Run a print station
 
