@@ -23,6 +23,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS_DIR="${ROOT_DIR}/plugins"
 cd "${ROOT_DIR}"
+# One target directory for every plugin crate (see scripts/build-plugins.sh),
+# so the dependencies they share build once.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target/plugins}"
 
 if [[ ! -d "${PLUGINS_DIR}" ]]; then
   echo "no plugins directory at ${PLUGINS_DIR}" >&2

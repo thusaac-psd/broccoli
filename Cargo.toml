@@ -28,9 +28,6 @@ default-members = [
 exclude = [
   "examples",
   "plugins",
-  "packages/plugins/icpc-contest",
-  "packages/plugins/standard-evaluators",
-  "packages/plugins/standard-checkers",
   # Locally-patched copy of the broccoli_queue crate (see VENDOR-PATCHES.md and
   # the [patch.crates-io] table below). Excluded so it is not treated as a
   # workspace member (it is edition 2021 with its own dev-deps/benches/tests).

@@ -33,22 +33,11 @@ test-crate crate:
 test-plugin path:
     cargo test --manifest-path {{path}}/Cargo.toml
 
-# Test all root plugin crates explicitly; root plugins stay out of Cargo workspace
+# Test every plugin crate (they stay out of the Cargo workspace)
 test-plugins:
-    cargo test --manifest-path plugins/batch-evaluator/Cargo.toml
-    cargo test --manifest-path plugins/codelink-bracket/Cargo.toml
-    cargo test --manifest-path plugins/codelink-qualifier/Cargo.toml
-    cargo test --manifest-path plugins/communication-evaluator/Cargo.toml
-    cargo test --manifest-path plugins/cooldown/Cargo.toml
-    cargo test --manifest-path plugins/icpc/Cargo.toml
-    cargo test --manifest-path plugins/ioi/Cargo.toml
-    cargo test --manifest-path plugins/print/Cargo.toml
-    cargo test --manifest-path plugins/standard-checkers/Cargo.toml
-    cargo test --manifest-path plugins/standard-languages/Cargo.toml
-    cargo test --manifest-path plugins/submission-limit/Cargo.toml
+    ./scripts/test-plugins.sh
 
-# Run the suites that judge real programs in isolate, as the `sandbox` CI job
-# does. Needs isolate installed with its cgroup v2 setup.
+# Run the isolate suites as the sandbox CI job does (needs isolate and cgroup v2)
 test-sandbox:
     cargo build -p broccoli-compare
     cargo test -p worker --test worker_isolate_sandbox -- --ignored --test-threads=1
@@ -62,9 +51,14 @@ test-server-bundled-downloads:
 test-stress:
     cargo test -p stress-test
 
-# Run clippy on all workspace crates
+# Run clippy on all workspace crates, as CI does
 clippy:
-    cargo clippy --workspace
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+
+# Run clippy on every plugin crate and on the server SDK's guest surface
+clippy-plugins:
+    ./scripts/clippy-plugins.sh
+    ./scripts/clippy-server-sdk-guest.sh
 
 # Run the backend server
 server:
@@ -114,33 +108,9 @@ format:
 format-check:
     pnpm format:check
 
-# Build all WASM plugins (debug)
-build-plugins *args:
-    cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-bracket {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-qualifier {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/icpc {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/ioi {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/print {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-checkers {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-languages {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/submission-limit {{args}}
-
-# Build all WASM plugins (release)
-build-plugins-release:
-    cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-bracket --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-qualifier --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/icpc --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/ioi --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/print --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-checkers --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-languages --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/submission-limit --install --release
+# Build every plugin and server test fixture plugin (WASM and frontends)
+build-plugins:
+    ./scripts/build-plugins.sh
 
 # Build a single WASM plugin (e.g., just build-plugin plugins/standard-checkers)
 build-plugin path *args:
@@ -190,8 +160,8 @@ publish-cli-dry:
 publish-cli:
     cargo publish -p broccoli-dev-cli
 
-# Run baseline checks (clippy + baseline Rust tests + JS lint + format check)
-check-all: clippy test lint-js format-check
+# Run the checks CI runs on Rust and JS code, plugins included
+check-all: clippy clippy-plugins build-plugins test test-plugins lint-js format-check
 
 # ---------------------------------------------------------------------------
 # Docker E2E testing (full stack with real isolate sandbox)

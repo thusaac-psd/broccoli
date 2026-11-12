@@ -44,18 +44,14 @@ jobs:
 
       # `plugins` is excluded from the root workspace (wasm32 targets, own
       # `[workspace]` pins), so `cargo fmt --all --check` above never looks at
-      # plugin crates. This iterates over them separately; see the script for
-      # why a script beats a hardcoded crate list here.
+      # plugin crates. The script discovers and checks them.
       - name: Check plugin formatting
         run: ./scripts/fmt-plugins.sh
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # Same exclusion problem as formatting: `cargo clippy --workspace`
-      # above never looks at plugin crates, so their lint findings never ran
-      # in CI. See the script for why a script beats a hardcoded crate list
-      # here.
+      # `cargo clippy --workspace` above does not reach plugin crates either.
       - name: Clippy plugins
         run: ./scripts/clippy-plugins.sh
 
@@ -80,9 +76,7 @@ jobs:
           E2E_SANDBOX_BACKEND: mock
         run: cargo test --workspace --locked -- --test-threads=4
 
-      # Same exclusion problem as formatting: `cargo test --workspace` never
-      # touches plugin crates, so their tests (including the ICPC
-      # submission-freeze mask and IOI feedback mask tests) never ran in CI.
+      # `cargo test --workspace` does not reach plugin crates either.
       - name: Test plugins
         run: ./scripts/test-plugins.sh
 
@@ -91,11 +85,7 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
-      # `plugins` is excluded from the root workspace, so the step above never
-      # documents a plugin crate -- the same gap already closed for fmt,
-      # clippy and tests. A broken intra-doc link in a plugin went undetected
-      # by every other gate until this one existed. See the script for why it
-      # discovers crates rather than listing them.
+      # `cargo doc --workspace` does not reach plugin crates either.
       - name: Documentation (plugins)
         run: ./scripts/doc-plugins.sh
 
