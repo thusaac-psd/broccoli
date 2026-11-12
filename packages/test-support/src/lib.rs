@@ -228,6 +228,7 @@ pub async fn shared_redis_port() -> u16 {
     let (_, port) = SHARED_REDIS
         .get_or_init(|| async {
             let container = Redis::default()
+                .with_tag("7-alpine")
                 .start()
                 .await
                 .expect("Failed to start Redis container");

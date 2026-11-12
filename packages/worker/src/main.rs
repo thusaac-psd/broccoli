@@ -5,7 +5,6 @@
 
 mod config;
 mod consumer;
-mod dedup;
 mod error;
 mod fairness;
 mod heartbeat;

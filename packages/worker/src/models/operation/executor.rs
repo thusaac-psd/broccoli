@@ -392,7 +392,6 @@ impl Executor for OperationTaskExecutor {
                 task_type: None,
                 operation: None,
                 worker_id: None,
-                enqueued_at_unix_ms: None,
             }),
             // Propagate infra/execution errors (blob fetch, sandbox setup, IO) so
             // the worker can classify transient failures and retry them via the

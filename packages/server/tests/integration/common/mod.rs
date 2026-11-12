@@ -384,8 +384,7 @@ pub struct TestApp {
     pub db: DatabaseConnection,
     /// A clone of the `AppState` the router was built from. Lets a test call
     /// a dispatcher-internal `pub` function directly (e.g.
-    /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP -
-    /// the same pattern `scaling.rs` uses for `dispatcher::sweeper::sweep_once`.
+    /// `dispatcher::plugin_timer::tick_once`) instead of going through HTTP.
     pub state: AppState,
     /// The test database this app runs on; pass it as
     /// [`SpawnOptions::shared_db`] to spawn another replica on it.
@@ -572,16 +571,9 @@ impl TestApp {
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
                 steal_batch_size: 8,
-                sweep_interval_secs: 300,
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
                 max_stuck_retries: 5,
-                sweeper_dry_run: true,
-                operation_reaper_enabled: false,
-                operation_reaper_interval_secs: 30,
-                operation_reaper_grace_secs: 30,
-                operation_reaper_max_requeues_per_tick: 1000,
-                operation_reaper_dry_run: false,
                 cancel_primitive_enabled: false,
                 max_blocking_threads: None,
                 batch_evaluator_fanout_concurrency: 64,
@@ -772,9 +764,7 @@ impl TestApp {
         let dispatcher = options.start_dispatcher.then(|| {
             server::dispatcher::Dispatcher::spawn(server::dispatcher::DispatcherDeps {
                 state: state.clone(),
-                redis_client: None,
                 server_id: "integration-test-server".to_string(),
-                operation_result_queue_base: "operation_results".to_string(),
                 config: state.config.server.clone(),
             })
         });

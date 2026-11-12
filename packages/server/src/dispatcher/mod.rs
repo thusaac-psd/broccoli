@@ -1,12 +1,10 @@
 pub mod claim;
 pub mod fanout;
 pub mod lease;
-pub mod operation_reaper;
 pub mod permits;
 pub mod plugin_timer;
 pub mod queue_depth;
 pub mod steal;
-pub mod sweeper;
 pub mod system_error_retry;
 
 use tokio::sync::watch;
@@ -73,9 +71,7 @@ pub(crate) fn prefer_local_handler_for(table: &str, local_types: &str) -> String
 
 pub struct DispatcherDeps {
     pub state: AppState,
-    pub redis_client: Option<redis::Client>,
     pub server_id: String,
-    pub operation_result_queue_base: String,
     pub config: ServerConfig,
 }
 
@@ -127,15 +123,6 @@ impl Dispatcher {
                 handles,
             };
         }
-
-        // Capture the operation-reaper inputs before the lease/steal block below
-        // conditionally moves `deps.state` / `deps.redis_client`. The reaper is
-        // independent of the lease/steal toggle (that governs submission judging,
-        // not the operation MQ) but needs both a Redis client and an MQ handle.
-        let reaper_redis = deps.redis_client.clone();
-        let reaper_mq = deps.state.mq.clone();
-        let reaper_shared_queue = deps.state.config.mq.operation_queue_name.clone();
-        let reaper_cancel = cancel_rx.clone();
 
         if claim_enabled {
             // Fail loudly at startup on a 0 batch-size rather than logging
@@ -206,18 +193,6 @@ impl Dispatcher {
                 deps.config.max_dispatch_retries,
                 cancel_rx.clone(),
             )));
-
-            if let Some(redis_client) = deps.redis_client {
-                handles.push(tokio::spawn(sweeper::run(
-                    redis_client,
-                    deps.operation_result_queue_base,
-                    deps.config.sweep_interval_secs,
-                    deps.config.sweeper_dry_run,
-                    cancel_rx,
-                )));
-            } else {
-                info!("Reply-queue sweeper disabled because Redis client is unavailable");
-            }
         } else {
             // Without lease refresh a live peer's heartbeat goes stale too, so
             // stealing by lease age is off. Work a server explicitly released
@@ -238,30 +213,6 @@ impl Dispatcher {
             );
         }
 
-        if deps.config.operation_reaper_enabled {
-            match (reaper_redis, reaper_mq) {
-                (Some(redis_client), Some(mq)) => {
-                    handles.push(tokio::spawn(operation_reaper::run(
-                        redis_client,
-                        mq,
-                        operation_reaper::ReaperConfig {
-                            shared_queue: reaper_shared_queue,
-                            interval_secs: deps.config.operation_reaper_interval_secs,
-                            grace_secs: deps.config.operation_reaper_grace_secs,
-                            max_requeues_per_tick: deps
-                                .config
-                                .operation_reaper_max_requeues_per_tick,
-                            dry_run: deps.config.operation_reaper_dry_run,
-                        },
-                        reaper_cancel,
-                    )));
-                }
-                _ => info!(
-                    "Operation reaper disabled because the Redis client or MQ handle is unavailable"
-                ),
-            }
-        }
-
         info!(
             server_id = %deps.server_id,
             lease_steal_enabled,
@@ -272,8 +223,6 @@ impl Dispatcher {
             lease_refresh_interval_secs = deps.config.lease_refresh_interval_secs,
             steal_scan_interval_secs = deps.config.steal_scan_interval_secs,
             steal_batch_size = deps.config.steal_batch_size,
-            sweep_interval_secs = deps.config.sweep_interval_secs,
-            sweeper_dry_run = deps.config.sweeper_dry_run,
             max_dispatch_retries = deps.config.max_dispatch_retries,
             max_system_error_retries = deps.config.max_system_error_retries,
             "Dispatcher background tasks started"

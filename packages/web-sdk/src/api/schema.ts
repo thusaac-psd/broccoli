@@ -229,7 +229,7 @@ export interface paths {
     };
     /**
      * List MQ queue depths
-     * @description Returns the current depth of each Broccoli MQ queue (operation tasks, results, DLQ). Requires `system:view` permission.
+     * @description Returns the depth of each message queue stream (shared operation tasks, each live worker's pinned tasks, this server's replies, dead letters), split into unread and pending entries. Requires `system:view` permission.
      */
     get: operations['listSystemQueues'];
     put?: never;
@@ -3604,13 +3604,16 @@ export interface components {
       samples: components['schemas']['SampleCase'][];
     };
     QueueInfo: {
-      /** @description Per-state breakdown (e.g. `{"queued": 0, "processing": 0, "failed": 0}`). */
+      /**
+       * @description `unread` (no consumer has taken them) and `pending` (taken, not yet
+       *     acknowledged), e.g. `{"unread": 0, "pending": 0}`.
+       */
       breakdown: {
         [key: string]: number;
       };
       /**
        * Format: int64
-       * @description Total messages across all sub-queues (pending, processing, etc.).
+       * @description Entries in the stream: unread plus pending.
        * @example 0
        */
       depth: number;

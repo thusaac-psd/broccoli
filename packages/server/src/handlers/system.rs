@@ -59,7 +59,7 @@ pub async fn list_workers(
     tag = "System",
     operation_id = "listSystemQueues",
     summary = "List MQ queue depths",
-    description = "Returns the current depth of each Broccoli MQ queue (operation tasks, results, DLQ). Requires `system:view` permission.",
+    description = "Returns the depth of each message queue stream (shared operation tasks, each live worker's pinned tasks, this server's replies, dead letters), split into unread and pending entries. Requires `system:view` permission.",
     responses(
         (status = 200, description = "Queue depths", body = QueuesResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -229,20 +229,11 @@ async fn record_submission_lifecycle_metrics(
 }
 
 fn queue_role(state: &AppState, queue_name: &str) -> &'static str {
-    if queue_name == state.config.mq.operation_queue_name {
-        "operation"
-    } else if queue_name
-        .strip_prefix(&state.config.mq.operation_queue_name)
-        .is_some_and(|suffix| suffix.starts_with(":worker:"))
-    {
-        "operation_private"
-    } else if queue_name == state.config.mq.operation_result_queue_name {
-        "operation_result"
-    } else if queue_name == state.config.mq.operation_dlq_queue_name {
-        "operation_dlq"
-    } else {
-        "unknown"
-    }
+    state
+        .mq
+        .as_ref()
+        .and_then(|mq| mq.topology().role_of(queue_name))
+        .map_or("unknown", mq::StreamRole::as_str)
 }
 
 fn queue_depth_deltas(
@@ -571,43 +562,43 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
         .collect()
 }
 
+/// Depth of every stream of the queue: the shared and dead-letter streams,
+/// each live worker's private stream and this server's reply stream.
 pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
     let Some(mq) = state.mq.as_ref() else {
         return Vec::new();
     };
-
-    let mut queue_names = vec![
-        state.config.mq.operation_queue_name.clone(),
-        state.config.mq.operation_result_queue_name.clone(),
-        state.config.mq.operation_dlq_queue_name.clone(),
+    let topology = mq.topology();
+    let mut keys = vec![
+        topology.shared(),
+        topology.dead_letter(),
+        topology.reply(&state.config.server.id),
     ];
-
-    for worker in read_workers(state).await {
-        queue_names.push(format!(
-            "{}:worker:{}",
-            state.config.mq.operation_queue_name, worker.id
-        ));
-    }
-    queue_names.sort();
-    queue_names.dedup();
-
-    let mut out = Vec::with_capacity(queue_names.len());
-    for name in queue_names {
-        let breakdown: HashMap<String, u64> = match mq.size(&name).await {
-            Ok(map) => map,
-            Err(e) => {
-                warn!(queue = %name, error = %e, "MQ size lookup failed");
-                HashMap::new()
-            }
-        };
-        let depth: u64 = breakdown.values().sum();
-        out.push(QueueInfo {
-            name,
-            depth,
-            breakdown,
-        });
-    }
-    out
+    keys.extend(
+        read_workers(state)
+            .await
+            .iter()
+            .map(|worker| topology.private(&worker.id)),
+    );
+    keys.sort();
+    let depths = match mq.depths(&keys).await {
+        Ok(depths) => depths,
+        Err(e) => {
+            warn!(error = %e, "MQ depth lookup failed");
+            return Vec::new();
+        }
+    };
+    depths
+        .into_iter()
+        .map(|d| QueueInfo {
+            name: d.key,
+            depth: d.unread + d.pending,
+            breakdown: HashMap::from([
+                ("unread".to_string(), d.unread),
+                ("pending".to_string(), d.pending),
+            ]),
+        })
+        .collect()
 }
 
 #[cfg(test)]

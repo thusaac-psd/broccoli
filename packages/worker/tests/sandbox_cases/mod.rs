@@ -256,12 +256,9 @@ async fn run_task<B: Backend>(
         task_type: "operation".to_string(),
         executor_name: "operation".to_string(),
         payload: serde_json::to_value(operation).unwrap(),
-        result_queue: "test_results".into(),
+        reply_to: "test-server".into(),
         operation_batch_id: None,
-        reply_queue: None,
-        priority: None,
         trace_context: None,
-        enqueued_at_unix_ms: None,
     };
 
     let result = worker.execute_task(task).await.unwrap();

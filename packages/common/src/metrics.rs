@@ -25,7 +25,7 @@ pub struct Metrics {
     pub sandbox_wall_time_used: Histogram<f64>,
     pub sandbox_memory_used: Histogram<f64>,
     pub task_retries_total: Counter<u64>,
-    pub task_dedup_claims_total: Counter<u64>,
+    pub mq_redeliveries_total: Counter<u64>,
     pub dlq_messages_total: Counter<u64>,
 
     pub plugin_call_duration: Histogram<f64>,
@@ -254,9 +254,11 @@ impl Metrics {
                 .u64_counter("broccoli.task.retries")
                 .with_description("Total number of task retries")
                 .build(),
-            task_dedup_claims_total: meter
-                .u64_counter("broccoli.task.dedup.claims")
-                .with_description("Total number of worker task dedup claim outcomes")
+            mq_redeliveries_total: meter
+                .u64_counter("broccoli.mq.redeliveries")
+                .with_description(
+                    "Operation tasks taken over from a consumer that stopped refreshing them",
+                )
                 .build(),
             dlq_messages_total: meter
                 .u64_counter("broccoli.dlq.messages")

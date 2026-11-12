@@ -7,7 +7,7 @@
 //! renewed only by the process that created it (the value carries a per-process
 //! `instance` token), and deleted on graceful shutdown. A second process booting
 //! with an ID that a live node holds therefore refuses to start instead of
-//! silently sharing its queues, dedup claims and leases.
+//! silently sharing its streams, pending entries and leases.
 //!
 //! The value is the role's JSON heartbeat payload plus the `instance` field,
 //! which readers of the payload ignore.
@@ -34,15 +34,11 @@ const LOST_CLAIM_EXIT_CODE: i32 = 75;
 /// The JSON field holding the per-process token that owns a claim.
 const INSTANCE_FIELD: &str = "instance";
 
-/// Returns true if `id` is safe as a node ID: it is embedded in Redis queue
-/// names, so alphanumeric plus `-_.`, 1 to 128 chars, and no suffix that the
-/// queue's own bookkeeping keys use.
+/// Returns true if `id` is safe as a node ID: it is embedded in Redis keys
+/// that use `:` as a separator, so alphanumeric plus `-_.`, 1 to 128 chars.
 pub fn is_valid_node_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && !id.ends_with("_processing")
-        && !id.ends_with("_failed")
-        && !id.ends_with("_fairness_set")
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
@@ -53,9 +49,8 @@ pub enum NodeIdError {
     #[error("{role}.id must be explicitly set to a valid value", role = .0.as_str())]
     ExplicitIdRequired(NodeRole),
     #[error(
-        "{role}.id {id:?} is invalid: use 1 to 128 of A-Z a-z 0-9 - _ . \
-         (and no _processing, _failed or _fairness_set suffix), or leave it empty \
-         to derive one for this host",
+        "{role}.id {id:?} is invalid: use 1 to 128 of A-Z a-z 0-9 - _ ., \
+         or leave it empty to derive one for this host",
         role = .role.as_str()
     )]
     Invalid { role: NodeRole, id: String },
@@ -204,28 +199,37 @@ pub enum RenewOutcome {
 }
 
 /// Renew iff the key still carries our instance token; take it again if it is
-/// gone. Returns 1 (renewed), 2 (reacquired) or 0 (held by someone else).
+/// gone. The owned streams (`KEYS[2..]`) get the same TTL, and are created
+/// empty when missing. Returns 1 (renewed), 2 (reacquired) or 0 (held by
+/// someone else).
 const RENEW_LUA: &str = r#"
 local cur = redis.call('GET', KEYS[1])
-if not cur then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-  return 2
+local code = 2
+if cur then
+  local ok, doc = pcall(cjson.decode, cur)
+  if not (ok and type(doc) == 'table' and doc.instance == ARGV[1]) then
+    return 0
+  end
+  code = 1
 end
-local ok, doc = pcall(cjson.decode, cur)
-if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
-  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-  return 1
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+for i = 2, #KEYS do
+  if redis.call('EXISTS', KEYS[i]) == 0 then
+    redis.call('XADD', KEYS[i], 'MAXLEN', 0, '*', '_', '')
+  end
+  redis.call('PEXPIRE', KEYS[i], ARGV[3])
 end
-return 0
+return code
 "#;
 
-/// Delete the key iff it still carries our instance token.
+/// Delete the key and the owned streams iff the key still carries our instance
+/// token.
 const RELEASE_LUA: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local ok, doc = pcall(cjson.decode, cur)
 if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
+  return redis.call('DEL', unpack(KEYS))
 end
 return 0
 "#;
@@ -238,6 +242,8 @@ pub struct NodeClaim {
     key: String,
     instance: String,
     ttl: Duration,
+    /// Streams that live exactly as long as this claim.
+    owned_streams: Vec<String>,
     conn: Mutex<Option<MultiplexedConnection>>,
 }
 
@@ -274,6 +280,7 @@ impl NodeClaim {
             key: role.key(id),
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
+            owned_streams: Vec::new(),
             conn: Mutex::new(None),
         };
         let value = claim.value(payload);
@@ -323,6 +330,15 @@ impl NodeClaim {
         &self.id
     }
 
+    /// Make stream `key` live exactly as long as this claim: every renewal
+    /// creates it empty if it is missing and gives it the claim's TTL, and the
+    /// release deletes it. A crashed node's stream therefore expires with its
+    /// liveness key. Takes effect from the next renewal.
+    pub fn own_stream(mut self, key: String) -> Self {
+        self.owned_streams.push(key);
+        self
+    }
+
     /// Refresh the claim with a new payload. See [`RenewOutcome`].
     pub async fn renew(
         &self,
@@ -333,6 +349,7 @@ impl NodeClaim {
             .with_conn(|mut conn| async move {
                 redis::Script::new(RENEW_LUA)
                     .key(&self.key)
+                    .key(&self.owned_streams)
                     .arg(&self.instance)
                     .arg(&value)
                     .arg(self.ttl.as_millis() as u64)
@@ -354,6 +371,7 @@ impl NodeClaim {
             .with_conn(|mut conn| async move {
                 redis::Script::new(RELEASE_LUA)
                     .key(&self.key)
+                    .key(&self.owned_streams)
                     .arg(&self.instance)
                     .invoke_async(&mut conn)
                     .await
@@ -726,6 +744,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_owned_stream_lives_and_dies_with_the_claim() {
+        let (client, _c) = redis().await;
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let claim = NodeClaim::claim_at_boot(
+            client.clone(),
+            NodeRole::Server,
+            "s1",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap()
+        .own_stream("replies:s1".into());
+
+        // Renewing creates the stream empty, with the claim's TTL.
+        claim.renew(serde_json::json!({})).await.unwrap();
+        let (len, pttl): (u64, i64) = redis::pipe()
+            .cmd("XLEN")
+            .arg("replies:s1")
+            .cmd("PTTL")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+        assert!(pttl > 0 && pttl <= TTL.as_millis() as i64);
+
+        // An entry survives the next renewal; the release deletes the stream.
+        let _: String = redis::cmd("XADD")
+            .arg("replies:s1")
+            .arg("*")
+            .arg("p")
+            .arg("x")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        claim.renew(serde_json::json!({})).await.unwrap();
+        let len: u64 = redis::cmd("XLEN")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(len, 1);
+        claim.release().await.unwrap();
+        let exists: bool = redis::cmd("EXISTS")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
     async fn a_node_whose_id_is_held_by_a_live_twin_stops() {
         let (client, _c) = redis().await;
         let ttl = Duration::from_secs(5);
@@ -750,6 +820,7 @@ mod tests {
             key: owner.key.clone(),
             instance: "twin".into(),
             ttl,
+            owned_streams: Vec::new(),
             conn: Mutex::new(None),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();

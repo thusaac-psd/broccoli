@@ -49,15 +49,15 @@ impl Drop for TaskMetricGuard {
     }
 }
 
+/// Record a reply publish; replies all go to reply streams.
 pub fn record_mq_publish(
     metrics: &Metrics,
-    queue: &str,
     message_type: &'static str,
     outcome: &'static str,
     start: std::time::Instant,
 ) {
     let attrs = [
-        KeyValue::new("queue", queue.to_string()),
+        KeyValue::new("queue", mq::StreamRole::Reply.as_str()),
         KeyValue::new("message.type", message_type),
         KeyValue::new("outcome", outcome),
     ];
@@ -67,19 +67,19 @@ pub fn record_mq_publish(
     metrics.mq_publish_messages_total.add(1, &attrs);
 }
 
+/// Record how one operation task delivery ended.
 pub fn record_mq_consume(
     metrics: &Metrics,
-    queue: &str,
-    message_type: &'static str,
+    stream: mq::StreamRole,
     outcome: &'static str,
-    attempts: u8,
+    deliveries: u32,
     start: std::time::Instant,
 ) {
     let attrs = [
-        KeyValue::new("queue", queue.to_string()),
-        KeyValue::new("message.type", message_type),
+        KeyValue::new("queue", stream.as_str()),
+        KeyValue::new("message.type", "operation_task"),
         KeyValue::new("outcome", outcome),
-        KeyValue::new("attempts", attempts as i64),
+        KeyValue::new("attempts", i64::from(deliveries)),
     ];
     metrics
         .mq_consume_duration

@@ -52,10 +52,11 @@ pub struct WorkersResponse {
 pub struct QueueInfo {
     #[schema(example = "operation_tasks")]
     pub name: String,
-    /// Total messages across all sub-queues (pending, processing, etc.).
+    /// Entries in the stream: unread plus pending.
     #[schema(example = 0)]
     pub depth: u64,
-    /// Per-state breakdown (e.g. `{"queued": 0, "processing": 0, "failed": 0}`).
+    /// `unread` (no consumer has taken them) and `pending` (taken, not yet
+    /// acknowledged), e.g. `{"unread": 0, "pending": 0}`.
     pub breakdown: std::collections::HashMap<String, u64>,
 }
 

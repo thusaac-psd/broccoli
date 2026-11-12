@@ -4,8 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use common::worker::{Executor, Task, TaskResult};
-use mq::{BrokerMessage, MqConfig, init_mq};
+use common::worker::{Executor, TaskReply, TaskResult};
 use plugin_core::config::PluginConfig;
 use reqwest::Client;
 use sea_orm::{
@@ -97,6 +96,9 @@ pub struct E2eTestApp {
     claim_handle: Option<JoinHandle<()>>,
     worker_handle: Option<JoinHandle<()>>,
     result_consumer_handle: Option<JoinHandle<()>>,
+    /// The in-process server's liveness key; dropping it releases the key
+    /// and the reply stream. `None` against an external server.
+    _node_heartbeat: Option<common::node_identity::NodeHeartbeat>,
     /// A contest type this server actually registers, for problem creation
     /// (which requires one): `icpc` from the real plugins, or the stub
     /// `standard` a plugin-less server registers instead.
@@ -207,6 +209,7 @@ impl E2eTestApp {
             claim_handle: None,
             worker_handle: None,
             result_consumer_handle: None,
+            _node_heartbeat: None,
             // An external server runs with the real plugins.
             contest_type: "icpc",
         }
@@ -229,17 +232,22 @@ impl E2eTestApp {
         let redis_url = format!("redis://127.0.0.1:{redis_port}");
 
         let operation_queue = format!("e2e_{test_id}_ops");
-        let result_queue = format!("e2e_{test_id}_results");
-        let dlq_queue = format!("e2e_{test_id}_dlq");
+        let server_id = format!("e2e-{test_id}");
 
-        let mq = Arc::new(
-            init_mq(MqConfig {
-                url: redis_url.clone(),
-                pool_size: 5,
-            })
+        let mq = mq::Mq::connect(&redis_url, &operation_queue)
             .await
-            .expect("Failed to initialize MQ"),
-        );
+            .expect("Failed to initialize MQ");
+        // The server's liveness key, owning its reply stream, as at boot.
+        let node_heartbeat = common::node_identity::NodeClaim::claim_at_boot(
+            redis::Client::open(redis_url.as_str()).expect("redis client"),
+            common::liveness::NodeRole::Server,
+            &server_id,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("claim the e2e server id")
+        .own_stream(mq.topology().reply(&server_id))
+        .spawn_heartbeat(|| serde_json::json!({}));
 
         let blob_store = common::storage::config::create_blob_store(
             &BlobStoreConfig::default(),
@@ -261,7 +269,7 @@ impl E2eTestApp {
                 frontend_dist: PathBuf::from("/srv/dist"),
                 trusted_proxies: vec![],
                 rate_limit_auth: false,
-                id: String::new(),
+                id: server_id.clone(),
                 expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
@@ -274,16 +282,9 @@ impl E2eTestApp {
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
                 steal_batch_size: 8,
-                sweep_interval_secs: 300,
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
                 max_stuck_retries: 5,
-                sweeper_dry_run: true,
-                operation_reaper_enabled: false,
-                operation_reaper_interval_secs: 30,
-                operation_reaper_grace_secs: 30,
-                operation_reaper_max_requeues_per_tick: 1000,
-                operation_reaper_dry_run: false,
                 cancel_primitive_enabled: false,
                 max_blocking_threads: None,
                 batch_evaluator_fanout_concurrency: 64,
@@ -322,10 +323,7 @@ impl E2eTestApp {
             mq: MqAppConfig {
                 enabled: true,
                 url: redis_url.clone(),
-                pool_size: 5,
                 operation_queue_name: operation_queue.clone(),
-                operation_result_queue_name: result_queue.clone(),
-                operation_dlq_queue_name: dlq_queue.clone(),
                 ..Default::default()
             },
             observability: common::config::ObservabilityConfig::default(),
@@ -355,7 +353,7 @@ impl E2eTestApp {
                 // restriction is proven directly against a real DB in
                 // `server::database`'s unit tests.
                 privileged_db: db.clone(),
-                mq: Some(Arc::clone(&mq)),
+                mq: Some(mq.clone()),
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),
                 contest_type_registry: contest_type_registry.clone(),
@@ -381,7 +379,7 @@ impl E2eTestApp {
             plugins,
             db: db.clone(),
             config: app_config,
-            mq: Some(Arc::clone(&mq)),
+            mq: Some(mq.clone()),
             redis_client: None,
             blob_store: blob_store.clone(),
             registries: server::state::RegistryState {
@@ -421,28 +419,18 @@ impl E2eTestApp {
                     .join("; ")
             );
 
-            let consumer_mq = Arc::clone(&mq);
-            let consumer_waiters = operation_waiters.clone();
-            let consumer_evaluate_ops_registry = evaluate_ops_registry.clone();
-            let consumer_queue = result_queue.clone();
-            let consumer_metrics = e2e_metrics.clone();
-            result_consumer_handle_opt = Some(tokio::spawn(async move {
-                consume_operation_results(
-                    consumer_mq,
-                    consumer_waiters,
-                    consumer_evaluate_ops_registry,
-                    consumer_queue,
-                    consumer_metrics,
-                    std::time::Duration::from_millis(20),
-                )
-                .await;
-            }));
+            result_consumer_handle_opt = Some(tokio::spawn(consume_operation_results(
+                mq.reply_inbox(&server_id),
+                operation_waiters.clone(),
+                evaluate_ops_registry.clone(),
+                e2e_metrics.clone(),
+            )));
 
             let (claim_cancel_tx, claim_cancel_rx) = watch::channel(false);
             claim_cancel_opt = Some(claim_cancel_tx);
             claim_handle_opt = Some(tokio::spawn(server::dispatcher::claim::run(
                 state.clone(),
-                format!("e2e-{test_id}"),
+                server_id.clone(),
                 state.config.server.claim_poll_interval_ms,
                 state.config.server.claim_batch_size,
                 state.config.server.max_in_flight_submissions,
@@ -463,47 +451,44 @@ impl E2eTestApp {
                 .await
                 .expect("Failed to initialize e2e operation executor"),
             );
-            let worker_queue = operation_queue.clone();
-            let worker_mq = Arc::clone(&mq);
-            let worker_mq_for_publish = Arc::clone(&mq);
-
+            let tasks = mq.task_consumer(&format!("e2e-worker-{test_id}"));
+            tasks
+                .ensure_groups()
+                .await
+                .expect("create the worker groups");
+            let worker_mq = mq.clone();
+            // A minimal worker: run each task, reply, acknowledge.
             worker_handle_opt = Some(tokio::spawn(async move {
-                let executor = executor;
-                let mq_pub = worker_mq_for_publish;
-                let _ = worker_mq
-                    .process_messages(
-                        &worker_queue,
-                        None,
-                        None,
-                        move |message: BrokerMessage<Task>| {
-                            let executor = Arc::clone(&executor);
-                            let mq = Arc::clone(&mq_pub);
-                            async move {
-                                let task = message.payload;
-                                let err_str: String;
-                                let result = match executor.execute(task.clone()).await {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        err_str = e.to_string();
-                                        TaskResult {
-                                            task_id: task.id.clone(),
-                                            success: false,
-                                            output: serde_json::Value::String(err_str.clone()),
-                                            error: Some(err_str),
-                                            task_type: Some(task.task_type.clone()),
-                                            operation: Some(task.executor_name.clone()),
-                                            worker_id: None,
-                                            enqueued_at_unix_ms: task.enqueued_at_unix_ms,
-                                        }
-                                    }
-                                };
-                                mq.publish(task.reply_queue_name(), None, &result, None)
-                                    .await?;
-                                Ok(())
-                            }
-                        },
-                    )
-                    .await;
+                let mut reader = tasks.reader();
+                loop {
+                    let Ok(batch) = reader.read(8).await else {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    };
+                    for delivery in batch {
+                        let Ok(task) = delivery.payload else {
+                            let _ = tasks.ack(&delivery.entry).await;
+                            continue;
+                        };
+                        let result = match executor.execute(task.clone()).await {
+                            Ok(r) => r,
+                            Err(e) => TaskResult {
+                                task_id: task.id.clone(),
+                                success: false,
+                                output: serde_json::Value::String(e.to_string()),
+                                error: Some(e.to_string()),
+                                task_type: Some(task.task_type.clone()),
+                                operation: Some(task.executor_name.clone()),
+                                worker_id: None,
+                            },
+                        };
+                        let reply = TaskReply::Completed { result };
+                        if let Err(e) = worker_mq.publish_reply(&task.reply_to, &reply).await {
+                            tracing::warn!(error = %e, "e2e worker: publishing a reply failed");
+                        }
+                        let _ = tasks.ack(&delivery.entry).await;
+                    }
+                }
             }));
         } else {
             state.registries.evaluator_registry.write().await.insert(
@@ -568,6 +553,7 @@ impl E2eTestApp {
             claim_handle: claim_handle_opt,
             worker_handle: worker_handle_opt,
             result_consumer_handle: result_consumer_handle_opt,
+            _node_heartbeat: Some(node_heartbeat),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }

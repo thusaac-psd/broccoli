@@ -100,19 +100,21 @@ The trim drops everything the previous read returned, so the stream holds only
 replies the server has not seen. `BLOCK` wakes on the first `XADD`, so a reply
 waits no polling interval.
 
-The reply stream lives exactly as long as the server's liveness key. The server
-creates it at boot (after its node claim succeeds, so no twin can be using it)
-as an empty stream with `XADD ... MAXLEN 0`, and its node heartbeat renews the
-stream's TTL in the same script that renews the liveness key, recreating the
-stream if it is missing. Graceful shutdown deletes both. A crashed server's
-reply stream therefore expires with its liveness key, on the Redis clock, and
-nothing has to sweep it.
+The reply stream lives exactly as long as the server's liveness key: the
+server's node claim owns it (`NodeClaim::own_stream`). The same script that
+renews the liveness key creates the stream empty (`XADD ... MAXLEN 0`) when it
+is missing and gives it the liveness key's TTL; the first renewal runs as the
+heartbeat starts, before the server publishes anything. Graceful shutdown
+deletes both. A crashed server's reply stream therefore expires with its
+liveness key, on the Redis clock, and nothing has to sweep it. A server that
+restarts within the TTL reads the replies its previous run left behind; they
+reach no waiter.
 
-Workers publish replies with `XADD NOMKSTREAM` inside a script that tells the
-three cases apart: the stream exists (delivered), the stream is missing but the
-server is live (the heartbeat is about to recreate it, so the worker retries),
-or both are gone (the server died, so the worker drops the reply). A reply can
-never create a stream without a TTL.
+Workers publish replies with a script that tells three cases apart: the stream
+exists (the reply is added), the stream is missing but the server is live (the
+next renewal recreates it, so the worker retries), or both are gone (the
+server died, so the worker drops the reply). A reply never creates a stream,
+so no stream exists without a TTL.
 
 ## Delivery, redelivery and liveness of in flight work
 
