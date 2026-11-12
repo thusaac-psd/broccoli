@@ -186,6 +186,7 @@ impl Client {
     pub fn upload_plugin(&self, archive: &[u8]) -> ClientResult<()> {
         const MAX_RETRIES: u32 = 3;
         const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
         let boundary = "----broccolicli7MA4YWxkTrZu0gWupload";
         let mut body = Vec::with_capacity(archive.len() + 256);
@@ -218,7 +219,11 @@ impl Client {
             if !transient || attempt == MAX_RETRIES {
                 return result;
             }
-            std::thread::sleep(INITIAL_DELAY * 2u32.pow(attempt));
+            std::thread::sleep(crate::backoff::exponential(
+                INITIAL_DELAY,
+                attempt,
+                MAX_DELAY,
+            ));
             attempt += 1;
         }
     }

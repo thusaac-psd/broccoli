@@ -18,6 +18,7 @@ use ratatui::widgets::*;
 
 use broccoli_cli_core::api::clarification::{ClarificationListResponse, ClarificationResponse};
 use broccoli_cli_core::api::submission::SubmissionListResponse;
+use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, ClientError, ClientResult};
 use broccoli_cli_core::config;
 use broccoli_cli_core::fmt;
@@ -267,6 +268,11 @@ impl AppData {
     }
 }
 
+/// Time between polls while the server answers.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Longest wait between polls while the server keeps failing.
+const MAX_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
 enum PollUpdate {
     Submissions(SubmissionListResponse),
     Clarifications(ClarificationListResponse),
@@ -419,6 +425,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
 
     let poller = thread::spawn(move || {
         let mut last = PollOutcome::Ok;
+        let mut failures = 0u32;
         'outer: while poller_running.load(Ordering::Relaxed) {
             // A rejected session resumes only through a new login, which may
             // be another user's: re-read who we are before scoping the polls.
@@ -455,8 +462,19 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
                 break 'outer;
             }
             last = outcome;
-            // ~2s between polls, but wake early on refresh request.
-            for _ in 0..20 {
+            failures = if outcome == PollOutcome::Failed {
+                failures + 1
+            } else {
+                0
+            };
+            // Every POLL_INTERVAL, backing off while the server keeps failing;
+            // `r` wakes the poller early.
+            let wait = match failures {
+                0 => POLL_INTERVAL,
+                n => backoff::exponential(POLL_INTERVAL, n, MAX_POLL_INTERVAL),
+            };
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline {
                 if !poller_running.load(Ordering::Relaxed)
                     || poller_refresh.swap(false, Ordering::Relaxed)
                 {
