@@ -92,15 +92,12 @@ fn list(client: &Client, contest: &str) -> anyhow::Result<()> {
             resolved
         );
         println!("    {}: {}", style(&c.author_name).dim(), c.content);
-        if let Some(reply) = &c.reply_content
-            && !reply.is_empty()
-        {
-            let who = c.reply_author_name.as_deref().unwrap_or("staff");
+        for reply in &c.replies {
             println!(
                 "    {} {}: {}",
                 style("↳").green(),
-                style(who).green(),
-                reply
+                style(&reply.author_name).green(),
+                reply.content
             );
         }
         println!();
