@@ -1,8 +1,9 @@
-//! The statements behind a plugin's writes to the judgement it was
-//! dispatched with (`host.submission.*`). The host function layer binds and
-//! executes them.
+//! The statements behind a plugin's writes to the judgement or code run it
+//! was dispatched with (`host.submission.*`, `host.code_run.*`). The host
+//! function layer binds and executes them.
 
-use broccoli_server_sdk::types::{SqlBindSink, SubmissionUpdate, push_judge_sets};
+use broccoli_server_sdk::types::{CodeRunUpdate, SqlBindSink, SubmissionUpdate, push_judge_sets};
+use common::StatusPhase;
 
 use super::unit::judgement_mirror;
 
@@ -65,5 +66,46 @@ pub(crate) fn judgement_write<P: SqlBindSink>(
         sets = sets.join(", "),
         fence = write_fence("t", &judgement, &submission, &epoch),
         mirror = judgement_mirror(),
+    ))
+}
+
+/// The write fence every plugin write to a code run goes through: the run
+/// (`alias`) the caller names, at the epoch it was dispatched with, still in
+/// flight. A requeue gives the run a new epoch, so a lost dispatch cannot
+/// write.
+pub(crate) fn code_run_write_fence(alias: &str, code_run: &str, epoch: &str) -> String {
+    format!(
+        "{alias}.id = {code_run} AND {alias}.judge_epoch = {epoch} \
+         AND {alias}.status IN {in_flight}",
+        in_flight = StatusPhase::InFlight.sql_list(),
+    )
+}
+
+/// The statement for a plugin's code-run progress or result update, behind
+/// [`code_run_write_fence`]; a terminal status stamps `judged_at`. Its row
+/// count is the number of runs written. `None` when the update sets nothing.
+pub(crate) fn code_run_write<P: SqlBindSink>(p: &mut P, update: &CodeRunUpdate) -> Option<String> {
+    let mut sets = Vec::new();
+    push_judge_sets(
+        p,
+        &mut sets,
+        &update.status,
+        &update.verdict,
+        &update.score,
+        &update.time_used,
+        &update.memory_used,
+        &update.compile_output,
+        &update.error_code,
+        &update.error_message,
+    );
+    if sets.is_empty() {
+        return None;
+    }
+    let id = p.bind_value(update.code_run_id.into());
+    let epoch = p.bind_value(update.judge_epoch.into());
+    Some(format!(
+        "UPDATE code_run t SET {sets} WHERE {fence}",
+        sets = sets.join(", "),
+        fence = code_run_write_fence("t", &id, &epoch),
     ))
 }

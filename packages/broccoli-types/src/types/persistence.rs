@@ -251,17 +251,53 @@ pub struct TestCaseResultRow {
     pub stderr: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodeRunUpdate {
     pub code_run_id: i32,
     pub judge_epoch: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SubmissionStatus>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub verdict: Option<Option<Verdict>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_opt_f64"
+    )]
     pub score: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub time_used: Option<Option<i32>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub memory_used: Option<Option<i32>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub compile_output: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub error_code: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub error_message: Option<Option<String>>,
 }
 
@@ -274,12 +310,13 @@ impl CodeRunUpdate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeRunResultRow {
     pub code_run_id: i32,
     pub judge_epoch: i32,
     pub run_index: i32,
     pub verdict: Verdict,
+    #[serde(serialize_with = "serialize_finite_f64")]
     pub score: f64,
     pub time_used: Option<i32>,
     pub memory_used: Option<i32>,
@@ -435,6 +472,28 @@ mod tests {
         let b = serde_json::to_string(&explicit_null).unwrap();
         assert!(!a.contains("verdict"), "absent field must be omitted: {a}");
         assert!(b.contains("\"verdict\":null"), "null must be present: {b}");
+    }
+
+    #[test]
+    fn code_run_update_round_trips_with_absent_and_null_distinct() {
+        let update = CodeRunUpdate {
+            code_run_id: 4,
+            judge_epoch: 5,
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(None),
+            ..Default::default()
+        };
+        let wire = serde_json::to_string(&update).unwrap();
+        assert!(
+            !wire.contains("score"),
+            "absent field must be omitted: {wire}"
+        );
+        assert!(
+            wire.contains("\"verdict\":null"),
+            "null must be present: {wire}"
+        );
+        let back: CodeRunUpdate = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, update);
     }
 
     #[test]

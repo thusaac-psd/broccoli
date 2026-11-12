@@ -452,6 +452,28 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
         )
     });
 
+    let db_clone = privileged_db.clone();
+    hr.register("submission", move |plugin_id| {
+        Function::new(
+            "code_run_update",
+            [ValType::I64],
+            [ValType::I64],
+            host_data((plugin_id.to_string(), db_clone.clone())),
+            submissions::code_run_update,
+        )
+    });
+
+    let db_clone = privileged_db.clone();
+    hr.register("submission", move |plugin_id| {
+        Function::new(
+            "code_run_insert_results",
+            [ValType::I64],
+            [ValType::I64],
+            host_data((plugin_id.to_string(), db_clone.clone())),
+            submissions::code_run_insert_results,
+        )
+    });
+
     let contest_reg = deps.system.contest_type_registry.clone();
     let eval_reg = deps.system.evaluator_registry.clone();
     let checker_stage_reg = deps.system.checker_stage_registry.clone();

@@ -74,7 +74,7 @@ macro_rules! str_host_fns {
     };
 }
 
-// Gated to match their only consumers: every one of these 26 wrappers is
+// Gated to match their only consumers: every one of these wrappers is
 // called exclusively from `#[cfg(target_arch = "wasm32")]`-gated code in
 // `sdk/db.rs`, `sdk/eval.rs`, `sdk/config.rs`, `sdk/submissions.rs`,
 // `sdk/operations.rs`, `sdk/checker.rs`, `sdk/language.rs`, `sdk/timer.rs`
@@ -115,6 +115,8 @@ str_host_fns! {
     submission_insert_results(input),
     submission_delete_results(input),
     submission_query_test_cases(input),
+    code_run_update(input),
+    code_run_insert_results(input),
     timer_schedule(input),
     timer_cancel(input),
 }

@@ -1,5 +1,5 @@
 //! Structured, capability-gated host functions for the plugin core-WRITE path
-//! (`host.submission.*`).
+//! (`host.submission.*` and `host.code_run.*`).
 //!
 //! Phase 1 of the SQL capability redesign splits the judge's own submission
 //! writes off the raw `db_execute`/`db_query` channel. The guest now serializes
@@ -14,7 +14,10 @@
 //! The raw `sql` capability is now restricted to the read-only `broccoli_plugin`
 //! role; this module carries the judge's structured core-write path.
 
-use broccoli_server_sdk::types::{SubmissionUpdate, TestCaseResultRow, sanitize_result_text_field};
+use broccoli_server_sdk::types::{
+    CodeRunResultRow, CodeRunUpdate, SubmissionUpdate, TestCaseResultRow,
+    sanitize_result_text_field,
+};
 use std::sync::Arc;
 
 use extism::host_fn;
@@ -217,6 +220,84 @@ host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnect
 
 /// The write fence against real Postgres, driven through the same builders and
 /// in the same order as `submission_update`.
+/// The statement behind `code_run_update`, with its bound arguments.
+/// `None` when the update sets nothing.
+fn code_run_update_statement(update: &CodeRunUpdate) -> Option<(String, Vec<JsonValue>)> {
+    let mut p = Params::new();
+    let sql = judging::code_run_write(&mut p, update)?;
+    Some((sql, p.into_args()))
+}
+
+host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "code_run_update")?;
+    let (plugin_id, db) = &*call;
+
+    let update: CodeRunUpdate = serde_json::from_str(&input)
+        .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
+    let Some((sql, args)) = code_run_update_statement(&update) else {
+        return ok_affected(0);
+    };
+    let args = serde_json::to_string(&args)?;
+    super::sql::execute_on_pool(db, plugin_id, sql, args)
+});
+
+/// `code_run_insert_results`' statement: the rows land only while their run
+/// is still in flight at their epoch. `None` for an empty batch.
+fn code_run_results_statement(results: &[CodeRunResultRow]) -> Option<(String, Vec<JsonValue>)> {
+    if results.is_empty() {
+        return None;
+    }
+    let mut p = Params::new();
+    let mut rows = Vec::with_capacity(results.len());
+    for r in results {
+        let score_val = if r.score.is_finite() { r.score } else { 0.0 };
+        let message = r.message.as_deref().map(sanitize_result_text_field);
+        let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
+        let stderr = r.stderr.as_deref().map(sanitize_result_text_field);
+        rows.push(format!(
+            "({}, {}, {}, {}, {}, {}, {}, {}::text, {}::text, {}::text, NOW())",
+            p.bind(r.code_run_id),
+            p.bind(r.judge_epoch),
+            p.bind(r.run_index),
+            p.bind(r.verdict.to_db_str()),
+            p.bind(score_val),
+            p.bind_optional_int(r.time_used),
+            p.bind_optional_int(r.memory_used),
+            p.bind(json!(message.as_deref())),
+            p.bind(json!(stdout.as_deref())),
+            p.bind(json!(stderr.as_deref())),
+        ));
+    }
+    let sql = format!(
+        "INSERT INTO code_run_result \
+         (code_run_id, judge_epoch, run_index, verdict, score, \
+          time_used, memory_used, checker_output, stdout, stderr, created_at) \
+         SELECT v.code_run_id, v.judge_epoch, v.run_index, v.verdict, v.score, \
+                v.time_used, v.memory_used, v.checker_output, v.stdout, v.stderr, v.created_at \
+         FROM (VALUES {}) AS v( \
+             code_run_id, judge_epoch, run_index, verdict, score, \
+             time_used, memory_used, checker_output, stdout, stderr, created_at \
+         ) \
+         JOIN code_run cr ON {}",
+        rows.join(", "),
+        judging::code_run_write_fence("cr", "v.code_run_id", "v.judge_epoch"),
+    );
+    Some((sql, p.into_args()))
+}
+
+host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
+    let call = super::HostCall::enter(&user_data, "code_run_insert_results")?;
+    let (plugin_id, db) = &*call;
+
+    let results: Vec<CodeRunResultRow> = serde_json::from_str(&input)
+        .map_err(|e| extism::Error::msg(format!("Invalid code_run_insert_results input: {e}")))?;
+    let Some((sql, args)) = code_run_results_statement(&results) else {
+        return ok_affected(0);
+    };
+    let args = serde_json::to_string(&args)?;
+    super::sql::execute_on_pool(db, plugin_id, sql, args)
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +552,79 @@ mod tests {
         assert_eq!(again, 0, "a finalized judgement accepts no further writes");
         let s = submission_row(&db, sub.id).await;
         assert_eq!(s.verdict, Some(common::Verdict::Accepted));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_code_run_write_lands_only_at_its_in_flight_epoch() {
+        use crate::entity::{code_run, code_run_result};
+        use broccoli_server_sdk::types::{CodeRunResultRow, CodeRunUpdate};
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (user_id, problem_id) = crate::test_support::seed_user_and_problem(&db).await;
+        let run = code_run::ActiveModel {
+            files: Set(serde_json::json!([])),
+            language: Set("cpp".into()),
+            user_id: Set(user_id),
+            problem_id: Set(problem_id),
+            status: Set(common::SubmissionStatus::Running),
+            judge_epoch: Set(2),
+            custom_test_cases: Set(serde_json::json!([])),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("code run");
+
+        let write = |epoch: i32| {
+            let db = db.clone();
+            let id = run.id;
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let result = CodeRunResultRow {
+                        code_run_id: id,
+                        judge_epoch: epoch,
+                        run_index: 0,
+                        verdict: Verdict::Accepted,
+                        score: 1.0,
+                        time_used: None,
+                        memory_used: None,
+                        message: None,
+                        stdout: None,
+                        stderr: None,
+                    };
+                    let (rsql, rargs) = code_run_results_statement(&[result]).expect("rows");
+                    let inserted = execute(&db, rsql, rargs);
+                    let update = CodeRunUpdate {
+                        code_run_id: id,
+                        judge_epoch: epoch,
+                        status: Some(SubmissionStatus::Judged),
+                        verdict: Some(Some(Verdict::Accepted)),
+                        ..Default::default()
+                    };
+                    let (sql, args) = code_run_update_statement(&update).expect("sets");
+                    (inserted, execute(&db, sql, args))
+                })
+                .await
+                .expect("join")
+            }
+        };
+
+        assert_eq!(write(1).await, (0, 0), "a stale epoch writes nothing");
+        assert_eq!(write(2).await, (1, 1));
+        assert_eq!(write(2).await, (0, 0), "a finished run accepts no writes");
+        let after = code_run::Entity::find_by_id(run.id)
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("run");
+        assert_eq!(after.status, common::SubmissionStatus::Judged);
+        assert!(after.judged_at.is_some());
+        let results = code_run_result::Entity::find()
+            .filter(code_run_result::Column::CodeRunId.eq(run.id))
+            .count(&db)
+            .await
+            .expect("count");
+        assert_eq!(results, 1);
     }
 }

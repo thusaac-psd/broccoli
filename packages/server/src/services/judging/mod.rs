@@ -84,7 +84,9 @@ pub(crate) use open::{
     ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
     open_judgement,
 };
-pub(crate) use plugin_writes::{judgement_write, write_fence};
+pub(crate) use plugin_writes::{
+    code_run_write, code_run_write_fence, judgement_write, write_fence,
+};
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
     reclaim_abandoned, refresh_leases, retry_system_errors,
