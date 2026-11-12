@@ -198,10 +198,7 @@ pub trait ContestJudge: Serialize + DeserializeOwned + Sized {
 #[derive(Serialize, serde::Deserialize)]
 #[serde(bound(serialize = "J: Serialize", deserialize = "J: DeserializeOwned"))]
 pub struct DetachedEval<J: ContestJudge> {
-    // Serialized as `request` for compatibility: a session started by an
-    // older plugin build carries the full input under that name, and the
-    // narrower type simply ignores the extra fields.
-    request: JudgedSubmission,
+    submission: JudgedSubmission,
     scoring_cases: Vec<ScoringCase>,
     outcomes: Vec<CaseOutcome>,
     recorded_ids: HashSet<i32>,
@@ -254,7 +251,7 @@ impl<J: ContestJudge> DetachedEval<J> {
         // ~0.33 s extra per case with 50 x 150 KB cases, and most of the
         // guest's ~20x memory amplification.
         let mut state = DetachedEval {
-            request: JudgedSubmission::from(request),
+            submission: JudgedSubmission::from(request),
             scoring_cases: scoring_cases.iter().map(ScoringCase::from).collect(),
             outcomes: Vec::new(),
             recorded_ids: HashSet::new(),
@@ -352,9 +349,9 @@ impl<J: ContestJudge> DetachedEval<J> {
         // First real result flips the submission to Running (once).
         if !self.marked_running {
             let affected = host.submission.set_running(
-                self.request.submission_id,
-                self.request.judgement_id,
-                self.request.judge_epoch,
+                self.submission.submission_id,
+                self.submission.judgement_id,
+                self.submission.judge_epoch,
             )?;
             if affected == 0 {
                 return Err(SdkError::StaleEpoch);
@@ -366,7 +363,7 @@ impl<J: ContestJudge> DetachedEval<J> {
 
         let step = {
             let DetachedEval {
-                request,
+                submission,
                 scoring_cases,
                 outcomes,
                 recorded_ids,
@@ -374,7 +371,7 @@ impl<J: ContestJudge> DetachedEval<J> {
                 ..
             } = self;
             let progress = JudgeProgress {
-                submission: request,
+                submission,
                 scoring_cases,
                 outcomes,
                 last: outcomes.last(),
@@ -439,7 +436,7 @@ impl<J: ContestJudge> DetachedEval<J> {
             Some(tc) => self.policy.db_score(&outcome, tc),
             None => 0.0,
         };
-        let row = build_tc_row(&self.request, &outcome, score, tc);
+        let row = build_tc_row(&self.submission, &outcome, score, tc);
         host.submission.insert_results(&[row])?;
 
         self.recorded_ids.insert(outcome.test_case_id);
@@ -472,7 +469,7 @@ impl<J: ContestJudge> DetachedEval<J> {
 
     fn finalize(&self, host: &Host) -> Result<(), SdkError> {
         let progress = JudgeProgress {
-            submission: &self.request,
+            submission: &self.submission,
             scoring_cases: &self.scoring_cases,
             outcomes: &self.outcomes,
             last: None,
@@ -521,9 +518,6 @@ pub fn without_bodies(tc: &TestCaseRow) -> TestCaseRow {
 /// evaluate batch, which the host keeps. A policy therefore cannot read them
 /// after start (a compile error, not a silently empty list), and the session
 /// state copied on every result callback stays small.
-///
-/// Field names match `OnSubmissionInput`, so a session state written by an
-/// older plugin build (which stored the whole input) still deserializes.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct JudgedSubmission {
     pub submission_id: i32,
@@ -560,19 +554,14 @@ impl From<&OnSubmissionInput> for JudgedSubmission {
 }
 
 /// A test case as policies see it: identity and weight, never its data.
-/// Field names match `TestCaseRow` for the same compatibility reason as
-/// [`JudgedSubmission`].
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct ScoringCase {
     pub id: i32,
     pub score: f64,
     pub is_sample: bool,
     pub position: i32,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
     pub is_custom: bool,
 }
 
