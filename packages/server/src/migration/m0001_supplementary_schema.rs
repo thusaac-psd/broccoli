@@ -44,10 +44,10 @@ const SCHEMA: &[&str] = &[
     r#"DROP INDEX "idx-submission_judgement-submission_id""#,
     r#"CREATE UNIQUE INDEX idx_submission_judgement_one_current
         ON submission_judgement (submission_id) WHERE is_current"#,
+    // Lookups by problem alone are served by the leading column of the
+    // problem_attachment and additional_file unique keys on their entities.
     r#"CREATE INDEX idx_submission_user_created ON submission (user_id, created_at)"#,
     r#"CREATE INDEX idx_dlq_resolved_created ON dead_letter_message (resolved, created_at)"#,
-    r#"CREATE INDEX idx_problem_attachment_problem_id ON problem_attachment (problem_id)"#,
-    r#"CREATE INDEX idx_additional_file_problem_id ON additional_file (problem_id)"#,
     r#"CREATE INDEX idx_clarification_contest_created ON clarification (contest_id, created_at)"#,
     r#"CREATE INDEX idx_test_case_result_judgement ON test_case_result (judgement_id)"#,
     // Problem-scoped lookups resolve the contests a problem belongs to; the
