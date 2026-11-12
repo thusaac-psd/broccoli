@@ -302,7 +302,7 @@ async fn build_test_handler(
     );
     OperationHandler::with_cache_leader(
         Box::new(sandbox),
-        Box::new(file_cacher),
+        Arc::new(file_cacher),
         task_cache,
         elector,
         Duration::from_millis(100),

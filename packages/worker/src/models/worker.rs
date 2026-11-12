@@ -2,9 +2,7 @@ use common::worker::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::WorkerAppConfig;
 use crate::error::WorkerError;
-use crate::models::operation::OperationTaskExecutor;
 
 /// Runs tasks on the executor registered under each task's `executor_name`.
 /// The executors are fixed at construction.
@@ -17,15 +15,6 @@ impl Worker {
         Self {
             executors: executors.into_iter().collect(),
         }
-    }
-
-    pub async fn from_config(
-        config: &WorkerAppConfig,
-        metrics: common::metrics::Metrics,
-    ) -> anyhow::Result<Self> {
-        let operation: Arc<dyn Executor> =
-            Arc::new(OperationTaskExecutor::from_app_config(config, metrics).await?);
-        Ok(Self::new([("operation".to_string(), operation)]))
     }
 
     pub async fn execute_task(&self, task: Task) -> Result<TaskResult, WorkerError> {

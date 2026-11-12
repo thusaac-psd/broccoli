@@ -107,6 +107,12 @@ impl OperationTaskExecutor {
         })
     }
 
+    /// The file cacher jobs materialize blobs through, for the pre-warm
+    /// subscriber to fill the same cache.
+    pub fn file_cacher(&self) -> Arc<dyn FileCacher> {
+        self.operation_executor.file_cacher()
+    }
+
     /// Apply `[worker] box_slot_lock_dir` before any sandbox is created (the
     /// box-id slot is claimed lazily on first use, so it must be set first).
     ///
@@ -283,7 +289,7 @@ impl OperationTaskExecutor {
     async fn caching_from_config(
         config: &WorkerAppConfig,
         metrics: common::metrics::Metrics,
-    ) -> Result<(Box<dyn FileCacher>, Box<dyn TaskCacheStore>)> {
+    ) -> Result<(Arc<dyn FileCacher>, Box<dyn TaskCacheStore>)> {
         let blob_store_config = config.storage.blob_store.clone();
         let cache_dir = config.storage.cache_dir.clone();
         let max_cache_size = config.storage.max_cache_size;
@@ -325,7 +331,7 @@ impl OperationTaskExecutor {
                 }
             };
 
-        let file_cacher: Box<dyn FileCacher> = match BlobStoreFileCacher::new(
+        let file_cacher: Arc<dyn FileCacher> = match BlobStoreFileCacher::new(
             blob_store,
             PathBuf::from(&cache_dir),
             max_cache_size,
@@ -333,7 +339,7 @@ impl OperationTaskExecutor {
         )
         .await
         {
-            Ok(cacher) => Box::new(cacher),
+            Ok(cacher) => Arc::new(cacher),
             Err(e) => {
                 error!(
                     error = %e,

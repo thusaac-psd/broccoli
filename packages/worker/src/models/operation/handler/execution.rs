@@ -32,7 +32,7 @@ impl OperationHandler {
     ) -> Self {
         Self::with_cache_leader(
             sandbox_manager,
-            file_cacher,
+            Arc::from(file_cacher),
             Arc::from(task_cache),
             Arc::new(NoopCacheLeaderElector),
             Duration::from_millis(250),
@@ -45,7 +45,7 @@ impl OperationHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn with_cache_leader(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
-        file_cacher: Box<dyn FileCacher>,
+        file_cacher: Arc<dyn FileCacher>,
         task_cache: Arc<dyn TaskCacheStore>,
         cache_leader: Arc<dyn CacheLeaderElector>,
         follower_poll_interval: Duration,
@@ -64,6 +64,13 @@ impl OperationHandler {
             metrics,
             tools_dir: None,
         }
+    }
+
+    /// The file cacher this handler materializes blobs through. Anything else
+    /// writing the same cache directory must use it too, so the directory has
+    /// one size cap.
+    pub fn file_cacher(&self) -> Arc<dyn FileCacher> {
+        self.file_cacher.clone()
     }
 
     /// Set the worker-local platform tools directory (builder style so existing

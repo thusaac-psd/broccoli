@@ -18,7 +18,7 @@ use crate::toolchain_fingerprint::ToolchainFingerprint;
 
 pub struct OperationHandler {
     sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
-    file_cacher: Box<dyn FileCacher>,
+    file_cacher: Arc<dyn FileCacher>,
     task_cache: Arc<dyn TaskCacheStore>,
     cache_leader: Arc<dyn CacheLeaderElector>,
     follower_poll_interval: Duration,
