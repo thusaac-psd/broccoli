@@ -366,6 +366,7 @@ function PoolCard({
   onDragStart: (e: React.DragEvent) => void;
   isDuplicate?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <HoverCard openDelay={0} closeDelay={300}>
       <HoverCardTrigger asChild>
