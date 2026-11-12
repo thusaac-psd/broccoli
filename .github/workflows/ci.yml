@@ -5,9 +5,17 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # release.yml runs this same workflow on the tagged commit before it
+  # publishes anything.
+  workflow_call:
 
+permissions:
+  contents: read
+
+# A fixed prefix, not `github.workflow`: when release.yml calls this workflow,
+# `github.workflow` names the caller, and sharing its group would deadlock.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:

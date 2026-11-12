@@ -22,6 +22,14 @@ env:
   ACR_NAMESPACE: broccoli
 
 jobs:
+  # The full CI suite on the tagged commit: nothing is published unless it
+  # passes.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   docker-lint:
     name: Dockerfile lint
     runs-on: ubuntu-latest
@@ -326,7 +334,7 @@ jobs:
 
   build-images:
     name: Build image ${{ matrix.name }}
-    needs: [docker-lint, build-stress-test]
+    needs: [ci, docker-lint, build-stress-test]
     runs-on: ubuntu-latest
     environment: release
     strategy:
@@ -649,6 +657,7 @@ jobs:
     name: Publish GitHub Release
     needs:
       [
+        ci,
         build-images,
         build-stress-test,
         build-print-client,
