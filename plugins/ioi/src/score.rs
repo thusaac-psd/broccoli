@@ -54,8 +54,6 @@ struct MaxScore {
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 pub(crate) struct TcResultRow {
-    #[allow(dead_code)]
-    submission_id: i32,
     test_case_id: i32,
     score: f64,
     verdict: Verdict,
@@ -93,22 +91,18 @@ pub(crate) struct SubtaskScoreDetail {
     max_score: f64,
 }
 
-// Only constructed by the wasm32-gated `recompute_sum_best_subtask` below,
-// and used as a type from `api.rs`'s wasm32-gated handlers.
+// Only constructed by the wasm32-gated `recompute_sum_best_subtask` below.
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
-pub(crate) struct TcMaxScore {
-    #[allow(dead_code)]
+struct TcMaxScore {
     test_case_id: i32,
-    pub(crate) max_score: f64,
+    max_score: f64,
 }
 
 // Only constructed by the wasm32-gated `compute_official_task_score` below.
 #[cfg(target_arch = "wasm32")]
 #[derive(Deserialize)]
 struct SubmissionScore {
-    #[allow(dead_code)]
-    id: i32,
     score: f64,
 }
 
@@ -156,7 +150,7 @@ pub(crate) fn load_current_submission_test_case_results(
 ) -> Result<Vec<TcResultRow>, SdkError> {
     let mut p = Params::new();
     let sql = format!(
-        "SELECT tcr.submission_id, tcr.test_case_id, tcr.score, tcr.verdict \
+        "SELECT tcr.test_case_id, tcr.score, tcr.verdict \
          FROM test_case_result tcr \
          JOIN submission s ON s.id = tcr.submission_id \
          JOIN submission_judgement sj \
@@ -229,7 +223,13 @@ fn recompute_sum_best_subtask(
         p.bind(problem_id),
         p.bind(contest_id)
     );
-    let tc_results: Vec<TcResultRow> = host.db.query_with_args(&sql, &p.into_args())?;
+    #[derive(Deserialize)]
+    struct SubmissionTcResult {
+        submission_id: i32,
+        #[serde(flatten)]
+        result: TcResultRow,
+    }
+    let tc_results: Vec<SubmissionTcResult> = host.db.query_with_args(&sql, &p.into_args())?;
 
     let mut p = Params::new();
     let sql = format!(
@@ -249,7 +249,11 @@ fn recompute_sum_best_subtask(
         .collect();
 
     let mut by_submission: HashMap<i32, HashMap<String, f64>> = HashMap::new();
-    for row in &tc_results {
+    for SubmissionTcResult {
+        submission_id,
+        result: row,
+    } in &tc_results
+    {
         let tc_max = max_map.get(&row.test_case_id).copied().unwrap_or(0.0);
         let raw_score = normalized_raw_score(&row.verdict, row.score, tc_max);
         let label = id_to_label
@@ -257,7 +261,7 @@ fn recompute_sum_best_subtask(
             .cloned()
             .unwrap_or_else(|| row.test_case_id.to_string());
         by_submission
-            .entry(row.submission_id)
+            .entry(*submission_id)
             .or_default()
             .insert(label, raw_score);
     }
@@ -390,7 +394,7 @@ pub(crate) fn compute_official_task_score(
             // until the newer submission actually completes. `s.id DESC` breaks a
             // same-created_at tie deterministically. Mirrors the scoreboard query.
             let sql = format!(
-                "SELECT s.id, COALESCE(sj.score, 0.0) as score \
+                "SELECT COALESCE(sj.score, 0.0) as score \
                  FROM submission s \
                  JOIN submission_judgement sj \
                    ON sj.submission_id = s.id \
@@ -523,13 +527,11 @@ mod tests {
         }];
         let current_rows = vec![
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 11,
                 score: 50.0,
                 verdict: Verdict::Accepted,
             },
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 12,
                 score: 0.0,
                 verdict: Verdict::WrongAnswer,
@@ -573,13 +575,11 @@ mod tests {
         let subtasks = build_default_subtasks(&test_cases);
         let current_rows = vec![
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 11,
                 score: 10.0,
                 verdict: Verdict::Accepted,
             },
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 12,
                 score: 0.0,
                 verdict: Verdict::WrongAnswer,
@@ -634,13 +634,11 @@ mod tests {
         // Both members passed (Accepted), persisted score 0 because point value 0.
         let current_rows = vec![
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 11,
                 score: 0.0,
                 verdict: Verdict::Accepted,
             },
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 12,
                 score: 0.0,
                 verdict: Verdict::Accepted,
@@ -657,13 +655,11 @@ mod tests {
         // And a FAILED member (not Accepted) must still zero the GroupMin subtask.
         let failed_rows = vec![
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 11,
                 score: 0.0,
                 verdict: Verdict::Accepted,
             },
             TcResultRow {
-                submission_id: 1,
                 test_case_id: 12,
                 score: 0.0,
                 verdict: Verdict::WrongAnswer,

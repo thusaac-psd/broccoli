@@ -20,7 +20,7 @@ use crate::feedback::{
     can_view_privileged_submission_feedback, viewer_has_token_feedback_for_submission,
 };
 #[cfg(target_arch = "wasm32")]
-use crate::score::{TcMaxScore, score_submission_subtask_details};
+use crate::score::score_submission_subtask_details;
 #[cfg(target_arch = "wasm32")]
 use crate::score::{compute_official_task_score, load_current_submission_test_case_results};
 #[cfg(target_arch = "wasm32")]
@@ -489,12 +489,17 @@ pub(crate) fn handle_scoreboard(
         let max: f64 = if task_config.subtasks.is_empty() {
             let mut p = Params::new();
             let sql = format!(
-                "SELECT id as test_case_id, score as max_score \
+                "SELECT COALESCE(SUM(score), 0)::float8 AS max_score \
                  FROM test_case WHERE problem_id = {}",
                 p.bind(pid)
             );
-            let tc_rows: Vec<TcMaxScore> = host.db.query_with_args(&sql, &p.into_args())?;
-            tc_rows.iter().map(|t| t.max_score).sum()
+            #[derive(Deserialize)]
+            struct ProblemMax {
+                max_score: f64,
+            }
+            host.db
+                .query_one_with_args::<ProblemMax>(&sql, &p.into_args())?
+                .map_or(0.0, |r| r.max_score)
         } else {
             task_config.subtasks.iter().map(|s| s.max_score).sum()
         };
