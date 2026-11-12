@@ -51,22 +51,24 @@ time.
 | **Require approval**       | When on, every request waits as _Awaiting approval_ until a volunteer approves it. Leave it off to send prints straight to the printers.           |
 | **Max pages per job**      | A request whose estimated length is over this limit is rejected the moment a contestant submits it, with a clear message. This guards against an accidental 900-page print. |
 | **Header banner**          | Optional text printed at the top of every page, usually the contest name.                                                                          |
-| **Station tokens**         | The shared secrets that let your print stations connect. See [Station tokens](#station-tokens) below.                                              |
+| **Print stations**         | One entry per print station, a name and a token. See [Print stations](#print-stations) below.                                                       |
 
-### Station tokens
+### Print stations
 
-A station token is a password that lets a print station fetch and print a
-contest's jobs. You choose the value. Any long, hard-to-guess string works, such
-as the output of a password generator. Add it to the **Station tokens** list, and
-give the same value to each print station you trust.
+Each print station gets its own entry in the **Print stations** list: a name,
+which the print queue shows next to every job the station claims, and a token,
+a password that lets that station fetch and print jobs. You choose the token.
+Any long, hard-to-guess string works, such as the output of a password
+generator. Give every station its own token, because the server knows a station
+only by the entry whose token it presents.
 
-There are two kinds of token.
+There are two kinds of entry.
 
-- A **contest token**, set in a contest's Printing section, works only for that
-  contest.
-- A **global token**, set in the plugin's deployment-wide settings, works for
-  every contest on the server. This is convenient when one print desk serves a
-  whole event.
+- A **contest station**, listed in a contest's Printing section, works only for
+  that contest. The queue shows it as `contest-<id>/<name>`.
+- A **global station**, listed in the plugin's deployment-wide settings, works
+  for every contest on the server. This is convenient when one print desk serves
+  a whole event. The queue shows it as `global/<name>`.
 
 :::warning[Treat tokens like passwords]
 
@@ -250,7 +252,7 @@ placeholder box rather than vanishing.
 | Symptom                              | Likely cause and fix                                                                                                       |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `doctor` cannot reach the server     | Wrong server address, or the machine is not on the contest network. Check the `url` in `print-client.toml`.                |
-| `doctor` says the token was rejected | The token is not in the contest's (or the global) **Station tokens** list, or it has a typo. Copy it again.                |
+| `doctor` says the token was rejected | The token is not in the contest's (or the global) **Print stations** list, or it has a typo. Copy it again.                |
 | A printer is not found               | The `os_id` does not match the operating system's printer name. Run `lpstat -p` (macOS, Linux) or check Printers & scanners (Windows). |
 | Jobs sit at _Awaiting approval_      | **Require approval** is on. Approve them from the Print Queue, or turn the setting off.                                     |
 | A request is rejected as too long    | It is over **Max pages per job**. Raise the limit, or ask the contestant to trim the file.                                 |
