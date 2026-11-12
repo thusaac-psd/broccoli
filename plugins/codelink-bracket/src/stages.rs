@@ -1,5 +1,14 @@
-//! Shared stage clocks. An unavailable predecessor at the scheduled instant
-//! requires a new staff schedule; timer delivery time never shifts the clock.
+//! Opening stages. This module is the only writer of a setup's stage
+//! progress (`Setup::opened_rounds` and `Setup::stage_clocks`).
+//!
+//! Opening freezes the stage's rules (and a scheduled stage's shared clock)
+//! in the setup document, then creates the stage's matches with create-only
+//! writes. The two cannot be one write, so a recovery wakeup is armed before
+//! the freeze and cancelled only once every match exists; redelivery repeats
+//! the creation idempotently.
+//!
+//! An unavailable predecessor at a scheduled instant requires a new staff
+//! schedule; timer delivery time never shifts the clock.
 use broccoli_server_sdk::prelude::*;
 
 use crate::model::{MatchState, Phase, Setup, StageClock};
@@ -104,6 +113,46 @@ pub fn decide_clock(
     Ok(planned)
 }
 
+/// Keep `previous`'s stage progress in an edited setup: opened stages stay
+/// opened, and a frozen clock survives only while its stage's start is
+/// unchanged.
+pub fn carry_progress(previous: Setup, next: &mut Setup) {
+    next.opened_rounds = previous.opened_rounds;
+    next.stage_clocks = previous
+        .stage_clocks
+        .into_iter()
+        .filter(|(round, clock)| {
+            next.rounds
+                .get(usize::from(round.saturating_sub(1)))
+                .is_some_and(|config| config.start_at_ms == Some(clock.start_at_ms))
+        })
+        .collect();
+}
+
+/// Create every match of an opened `round` whose players are known, and
+/// start the shared ordering clock of a scheduled stage's new matches. Errors
+/// while a feeder slot is still empty, so the caller's recovery wakeup stays.
+fn create_matches(host: &Host, contest: i32, setup: &Setup, round: u8) -> Result<(), SdkError> {
+    for pos in 0..setup.match_count(round) {
+        storage::create_match_if_both_slots_filled(host, contest, setup, round, pos)?;
+    }
+    let created: Vec<_> = storage::load_all_matches(host, contest)?
+        .into_iter()
+        .filter(|(_, m)| m.round == round)
+        .collect();
+    if crate::machine::is_scheduled(setup, round) {
+        for (id, m) in &created {
+            if m.phase == Phase::Ordering {
+                executor::tick(host, contest, *id)?;
+            }
+        }
+    }
+    if created.len() != usize::from(setup.match_count(round)) {
+        return Err(SdkError::Other("Stage is waiting for feeder slots".into()));
+    }
+    Ok(())
+}
+
 /// Open a scheduled stage at its start; false for an unscheduled stage.
 pub fn try_open_scheduled(host: &Host, contest: i32, round: u8) -> Result<bool, SdkError> {
     let key = storage::setup_key(contest);
@@ -158,21 +207,7 @@ pub fn try_open_scheduled(host: &Host, contest: i32, round: u8) -> Result<bool, 
             host.timer.cancel(&timer)?;
             return Ok(true);
         }
-        for pos in 0..setup.match_count(round) {
-            storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
-        }
-        let created: Vec<_> = storage::load_all_matches(host, contest)?
-            .into_iter()
-            .filter(|(_, m)| m.round == round)
-            .collect();
-        for (id, m) in &created {
-            if m.phase == Phase::Ordering {
-                executor::tick(host, contest, *id)?;
-            }
-        }
-        if created.len() != usize::from(setup.match_count(round)) {
-            return Err(SdkError::Other("Stage is waiting for feeder slots".into()));
-        }
+        create_matches(host, contest, &setup, round)?;
         host.timer.cancel(&timer)?;
         return Ok(true);
     }
@@ -238,17 +273,7 @@ pub fn try_open_stage(host: &Host, contest: i32, round: u8) -> Result<(), SdkErr
                 continue;
             }
         }
-        for pos in 0..setup.match_count(round) {
-            storage::create_match_if_both_slots_filled(host, contest, &setup, round, pos)?;
-        }
-        let created = storage::load_all_matches(host, contest)?;
-        if created.iter().filter(|(_, m)| m.round == round).count()
-            != usize::from(setup.match_count(round))
-        {
-            return Err(SdkError::Other(
-                "Stage is waiting for winner slots; retry opening".into(),
-            ));
-        }
+        create_matches(host, contest, &setup, round)?;
         host.timer.cancel(&timer_key)?;
         return Ok(());
     }

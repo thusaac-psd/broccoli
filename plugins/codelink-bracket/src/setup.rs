@@ -265,17 +265,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             let previous: Setup = serde_json::from_str(&previous.value)?;
             validate_edit(&previous, &setup, info.phase != "before")
                 .map_err(|msg| PluginHttpResponse::error(409, msg))?;
-            setup.opened_rounds = previous.opened_rounds;
-            setup.stage_clocks = previous
-                .stage_clocks
-                .into_iter()
-                .filter(|(round, clock)| {
-                    setup
-                        .rounds
-                        .get(usize::from(round.saturating_sub(1)))
-                        .is_some_and(|config| config.start_at_ms == Some(clock.start_at_ms))
-                })
-                .collect();
+            crate::stages::carry_progress(previous, &mut setup);
         }
         let previous: Option<Setup> = snapshot
             .as_ref()
