@@ -84,10 +84,7 @@ pub async fn detect_once(state: &AppState, config: &DlqConfig) -> anyhow::Result
 
 async fn observe_old_queued_backlog(db: &DatabaseConnection) -> anyhow::Result<()> {
     for unit in [Unit::Judgement, Unit::CodeRun] {
-        let table = match unit {
-            Unit::Judgement => "submission_judgement",
-            Unit::CodeRun => "code_run",
-        };
+        let table = unit.table();
         let row = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,

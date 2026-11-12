@@ -1,18 +1,10 @@
-//! Structured, capability-gated host functions for the plugin core-WRITE path
-//! (`host.submission.*` and `host.code_run.*`).
-//!
-//! Phase 1 of the SQL capability redesign splits the judge's own submission
-//! writes off the raw `db_execute`/`db_query` channel. The guest now serializes
-//! *structured* input (a `SubmissionUpdate`, a batch of `TestCaseResultRow`s,
-//! etc.) and the SERVER owns the SQL. Every write to a
-//! judgement's results is fenced by `JUDGEMENT_WRITE_FENCE`. The
-//! statements run on the PRIVILEGED pool (the app role) - not the restricted
-//! `broccoli_plugin` pool that backs the raw `sql` channel - but still through
-//! the SAME NUL-sanitization / arg-parsing / poisoned-connection recovery choke
-//! point as raw plugin SQL (`sql::execute_on_pool` / `sql::query_on_pool`).
-//!
-//! The raw `sql` capability is now restricted to the read-only `broccoli_plugin`
-//! role; this module carries the judge's structured core-write path.
+//! Structured, capability-gated host functions through which a plugin
+//! writes the judgement or code run it was dispatched with
+//! (`host.submission.*` and `host.code_run.*`). The guest sends structured
+//! input; the host builds every statement (see `services::judging`), fenced on
+//! the unit and its epoch. The statements run on the privileged pool, through
+//! the same NUL sanitization, argument parsing and poisoned-connection
+//! recovery as raw plugin SQL (`sql::execute_on_pool`).
 
 use broccoli_server_sdk::types::{
     CodeRunResultRow, CodeRunUpdate, SubmissionUpdate, TestCaseResultRow,
@@ -71,17 +63,6 @@ impl judging::SqlBindSink for Params {
     }
 }
 
-/// Deserialized view of the `HostDbResponse` envelope `sql::execute_on_pool`
-/// returns, for tests that read a statement's row count.
-#[cfg(test)]
-#[derive(serde::Deserialize)]
-struct ExecEnvelope {
-    #[serde(default)]
-    data: Option<JsonValue>,
-    #[serde(default)]
-    error: Option<String>,
-}
-
 fn ok_affected(n: u64) -> Result<String, extism::Error> {
     Ok(json!({ "data": n }).to_string())
 }
@@ -101,6 +82,7 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
 
+    // An update that sets nothing is not a fenced-out write.
     let Some((sql, args)) = submission_update_statement(&update) else {
         return ok_affected(1);
     };
@@ -336,8 +318,9 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
 
     let update: CodeRunUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_update input: {e}")))?;
+    // An update that sets nothing is not a fenced-out write.
     let Some((sql, args)) = code_run_update_statement(&update) else {
-        return ok_affected(0);
+        return ok_affected(1);
     };
     let args = serde_json::to_string(&args)?;
     super::sql::execute_on_pool(db, plugin_id, sql, args)
@@ -395,6 +378,16 @@ mod tests {
         ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
         Set, TransactionTrait,
     };
+
+    /// Deserialized view of the `HostDbResponse` envelope `sql::execute_on_pool`
+    /// returns, for tests that read a statement's row count.
+    #[derive(serde::Deserialize)]
+    struct ExecEnvelope {
+        #[serde(default)]
+        data: Option<JsonValue>,
+        #[serde(default)]
+        error: Option<String>,
+    }
 
     fn execute(db: &DatabaseConnection, sql: String, args: Vec<JsonValue>) -> u64 {
         let args = serde_json::to_string(&args).expect("args");
@@ -722,7 +715,7 @@ mod tests {
         use crate::entity::dead_letter_message;
 
         let (_pg, db) = crate::test_support::postgres().await;
-        let (sub, v1) = seed_judged(&db).await;
+        let (sub, _) = seed_judged(&db).await;
         let dead_letter = || async {
             DlqService::new(&db)
                 .dead_letter(
@@ -740,8 +733,6 @@ mod tests {
                 .expect("db")
                 .expect("row")
         };
-        let _ = v1;
-
         // A system-error verdict leaves it open.
         dead_letter().await;
         let j = open(

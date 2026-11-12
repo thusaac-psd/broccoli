@@ -1,7 +1,9 @@
 use broccoli_server_sdk::permissions as perm;
 use common::storage::BlobStore;
 use sea_orm::*;
-use sea_query::{Expr, Index, IndexCreateStatement, PostgresQueryBuilder, Query, SelectStatement};
+use sea_query::{
+    Expr, Index, IndexCreateStatement, IndexOrder, PostgresQueryBuilder, Query, SelectStatement,
+};
 use tracing::{error, info};
 
 use crate::config::BootstrapConfig;
@@ -341,6 +343,18 @@ fn boot_indexes() -> Vec<BootIndex> {
             "idx_submission_judgement_one_current",
             &[submission_judgement::Column::SubmissionId],
             Some(Expr::col(submission_judgement::Column::IsCurrent)),
+        ),
+        // The claim fiber's scan: queued judgements, live work first.
+        BootIndex::plain(
+            Index::create()
+                .name("idx_submission_judgement_claim")
+                .table(submission_judgement::Entity)
+                .col((submission_judgement::Column::IsCurrent, IndexOrder::Desc))
+                .col(submission_judgement::Column::CreatedAt)
+                .and_where(
+                    Expr::col(submission_judgement::Column::Status)
+                        .eq(common::SubmissionStatus::Queued.as_str()),
+                ),
         ),
         BootIndex::plain(
             Index::create()

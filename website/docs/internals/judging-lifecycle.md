@@ -21,7 +21,7 @@ current judgement from the moment it exists.
 | Transition | From | To | Writer |
 | --- | --- | --- | --- |
 | claim | `Queued` | `Pending`, owned, lease stamped | claim fiber |
-| progress | in flight | `Compiling`, `Running` | plugin (`host.submission.update`) |
+| progress | in flight | `Compiling`, `Running` | plugin (`host.submission.update`, `host.code_run.update`) |
 | finish | in flight | `Judged`, `CompilationError` (finalized) | plugin |
 | fail | in flight | `SystemError` (finalized) | dispatch (`fail_dispatch`) |
 | requeue | in flight | `Queued`, new epoch, no owner | `release_leases`, `reclaim_abandoned` |

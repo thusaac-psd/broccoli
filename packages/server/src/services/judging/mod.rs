@@ -25,7 +25,9 @@
 //!   clock. Only the claim fiber claims, so the in-flight cap and dispatcher
 //!   admission apply to every dispatch, first or retried.
 //! * **plugin writes** move an in-flight unit to `Compiling`/`Running` or
-//!   finalize it, fenced on the unit id, its epoch and `is_finalized = FALSE`.
+//!   finalize it, fenced on the unit id and its epoch, and on the unit still
+//!   being open: `is_finalized = FALSE` for a judgement, an in-flight status
+//!   for a code run.
 //! * **requeue** (in flight or finalized `SystemError` → `Queued`) gives the
 //!   unit a fresh epoch, clears its output, its owner and its lease, and
 //!   deletes its results. Every recovery is a requeue: a server releasing its

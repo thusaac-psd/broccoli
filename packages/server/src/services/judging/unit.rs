@@ -23,7 +23,7 @@ pub enum Unit {
 }
 
 impl Unit {
-    fn table(self) -> &'static str {
+    pub(crate) fn table(self) -> &'static str {
         match self {
             Unit::Judgement => "submission_judgement",
             Unit::CodeRun => "code_run",

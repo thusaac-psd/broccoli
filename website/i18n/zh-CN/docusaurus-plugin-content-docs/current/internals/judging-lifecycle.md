@@ -15,7 +15,7 @@ sidebar_position: 2
 | 转换 | 起始状态 | 目标状态 | 写入方 |
 | --- | --- | --- | --- |
 | claim | `Queued` | `Pending`，有属主，租约已盖戳 | 认领纤程 |
-| progress | 进行中 | `Compiling`、`Running` | 插件（`host.submission.update`） |
+| progress | 进行中 | `Compiling`、`Running` | 插件（`host.submission.update`、`host.code_run.update`） |
 | finish | 进行中 | `Judged`、`CompilationError`（已定稿） | 插件 |
 | fail | 进行中 | `SystemError`（已定稿） | 分发（`fail_dispatch`） |
 | requeue | 进行中 | `Queued`，新纪元，无属主 | `release_leases`、`reclaim_abandoned` |
