@@ -201,7 +201,7 @@ impl EvaluateBatches {
     }
 
     /// See [`EvaluateCases::should_extend`]. A batch that is no longer live
-    /// extends: its removal disconnects the wait.
+    /// does not extend.
     pub(crate) fn should_extend_wait(
         &self,
         batch_id: &str,
@@ -209,7 +209,7 @@ impl EvaluateBatches {
         now: Instant,
     ) -> bool {
         self.read(batch_id, |cases| cases.should_extend(timeout, now))
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 }
 

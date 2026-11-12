@@ -154,6 +154,14 @@ impl<'a, T: BatchResult, S, P: WaitPolicy<T, S>> BatchWait<'a, T, S, P> {
     fn step(&self, received: Received<T>) -> Option<anyhow::Result<Option<T>>> {
         match received {
             Received::Result(result) => Some(Ok(Some(self.deliver(result)))),
+            // Removed (cancelled, superseded, reaped): nothing more will be
+            // taken from it, so the wait ends at once instead of lasting until
+            // its ceiling. The waiter's receiver clone keeps the channel open,
+            // so removal alone never disconnects it.
+            Received::Empty if !self.ctx.batches.contains(self.ctx.batch_id) => {
+                self.ctx.record_outcome("removed", None);
+                Some(Err(anyhow!(P::DISCONNECTED)))
+            }
             Received::Empty
                 if self.ctx.pending_count.load(Ordering::SeqCst) > 0
                     && self.policy.extend(&self.ctx) =>
@@ -309,6 +317,17 @@ mod tests {
         tx.deliver(result(3));
         let wait = open(&batches, Duration::ZERO);
         assert_eq!(id(wait.give_up()).as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn removing_a_pending_batch_ends_its_wait() {
+        let (batches, _tx) = batch(&[1]);
+        let wait = open(&batches, Duration::from_secs(3600));
+        batches.remove("b", crate::services::batch_table::Removal::Superseded);
+        assert_eq!(
+            wait.blocking().unwrap_err().to_string(),
+            "test channel disconnected"
+        );
     }
 
     #[tokio::test]
