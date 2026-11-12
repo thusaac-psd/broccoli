@@ -188,9 +188,8 @@ mod tests {
 
     /// The session state is copied into the host and back on every result
     /// callback, so it must not carry test data or the source: those belong
-    /// to the evaluate batch alone. Before this, each callback re-parsed and
-    /// re-serialized the whole inline test data (measured ~0.33 s per case at
-    /// 50 x 150 KB), and it drove most of the guest's memory amplification.
+    /// to the evaluate batch alone. Carrying them would make every callback
+    /// re-parse and re-serialize the whole inline test data.
     #[test]
     fn session_state_carries_no_test_bodies_or_source() {
         let host = Host::mock();

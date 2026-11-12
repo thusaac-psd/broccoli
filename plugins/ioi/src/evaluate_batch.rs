@@ -694,7 +694,7 @@ mod tests {
         );
     }
 
-    /// Regression: two disjoint group_min subtasks. A WA on the first
+    /// Two disjoint group_min subtasks. A WA on the first
     /// subtask's first case cancels the rest of that subtask, but the
     /// callback must keep `refill` enabled so the host still dispatches
     /// the second subtask's cases instead of breaking the session and
