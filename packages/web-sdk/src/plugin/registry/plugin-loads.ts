@@ -13,7 +13,8 @@ import type {
 // - `loading`: its module is being fetched and initialized. A second load
 //   of the same plugin joins this one instead of starting another.
 // - `loaded`: initialized; its components and routes are registered.
-// - `failed`: every attempt failed. It stays so until it is reloaded.
+// - `failed`: every attempt failed. The next sync with the server's list
+//   tries it again, for as long as the server lists it.
 //
 // Components, routes and errors are derived from the map, never kept beside
 // it, so a plugin is registered exactly while it is `loaded`. A load that
@@ -33,6 +34,8 @@ export type PluginLoad = {
 );
 
 export type PluginLoads = ReadonlyMap<string, PluginLoad>;
+
+export type SyncResult = 'ok' | 'failed' | 'unreachable';
 
 export interface PluginRegistryDeps {
   /** The server's active plugins, or null when it could not be asked. */
@@ -172,24 +175,25 @@ export function createPluginRegistry(deps: PluginRegistryDeps) {
 
   /**
    * Bring the remote plugins in line with the server's active list: unload
-   * those it no longer lists, load those not loaded yet. Failed plugins are
-   * left for `reload`. Resolves to false when the list could not be fetched.
+   * those it no longer lists, load those not loaded yet, failed ones
+   * included. `unreachable` when the list could not be fetched, `failed`
+   * when a listed plugin did not load: either is worth another sync later.
    */
-  const sync = async (fresh = false): Promise<boolean> => {
+  const sync = async (fresh = false): Promise<SyncResult> => {
     const active = await deps.fetchActive();
-    if (!active) return false;
+    if (!active) return 'unreachable';
     const listed = new Set(active.map((manifest) => manifest.id));
     const removed = [...loads.values()].filter(
       (entry) => entry.source === 'remote' && !listed.has(entry.manifest.id),
     );
     await Promise.all(removed.map((entry) => unload(entry.manifest.id)));
-    await Promise.all(
-      active
-        .filter((manifest) => loads.get(manifest.id)?.status !== 'failed')
-        .map((manifest) => loadRemote(manifest, fresh)),
-    );
+    await Promise.all(active.map((manifest) => loadRemote(manifest, fresh)));
     await deps.refreshI18n();
-    return true;
+    return active.some(
+      (manifest) => loads.get(manifest.id)?.status === 'failed',
+    )
+      ? 'failed'
+      : 'ok';
   };
 
   /** Unload one remote plugin and load it afresh from the server. */

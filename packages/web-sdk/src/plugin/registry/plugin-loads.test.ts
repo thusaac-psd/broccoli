@@ -121,20 +121,27 @@ test('a failing onInit is retried, and success clears the error', async () => {
   assert.equal(view.plugins.size, 1);
 });
 
-test('a plugin that keeps failing is failed, not retried forever', async () => {
-  const { r, imports, removed } = registry({
+test('a plugin whose tries are spent is failed, and the next sync tries it again', async () => {
+  let down = true;
+  let imports = 0;
+  const { r, removed } = registry({
     importRemote: async () => {
-      throw new TypeError('Failed to fetch dynamically imported module');
+      imports += 1;
+      if (down)
+        throw new TypeError('Failed to fetch dynamically imported module');
+      return moduleFor();
     },
   });
-  await r.sync();
-  await r.sync();
+  assert.equal(await r.sync(), 'failed');
   const view = registryView(r.getLoads());
   assert.equal(view.errors.get('a')?.message.includes('Failed to fetch'), true);
   assert.equal(view.routes.length, 0);
   assert.deepEqual(removed, ['a']);
-  // Three tries in the first sync; the second leaves the failure alone.
-  assert.equal(imports.length, 0);
+  assert.equal(imports, 3);
+
+  down = false;
+  assert.equal(await r.sync(), 'ok');
+  assert.equal(registryView(r.getLoads()).plugins.size, 1);
 });
 
 test('retries and reloads fetch fresh copies', async () => {
@@ -174,7 +181,7 @@ test('an unreachable list changes nothing', async () => {
   const { r, setActive } = registry();
   await r.sync();
   setActive(null);
-  assert.equal(await r.sync(), false);
+  assert.equal(await r.sync(), 'unreachable');
   assert.equal(registryView(r.getLoads()).plugins.size, 1);
 });
 

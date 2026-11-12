@@ -23,10 +23,11 @@ import type {
 import { backoffDelay, type BackoffPolicy } from '@/utils/backoff';
 import { retryImport, retryLoad } from '@/utils/chunk-load';
 
-// While the server cannot be asked for its plugin list (a gateway 502 while
-// it restarts), ask again with backoff, so the page does not stay without
-// its plugin views until a manual reload.
-const LIST_RETRY: BackoffPolicy = { baseMs: 1_000, maxMs: 30_000 };
+// While the server cannot be asked for its plugin list, or a plugin it lists
+// would not load (a gateway 502 while the server restarts), sync again with
+// backoff, so the page does not stay without its plugin views until a manual
+// reload.
+const SYNC_RETRY: BackoffPolicy = { baseMs: 1_000, maxMs: 60_000 };
 
 /** Tries per plugin load, the first included. */
 const PLUGIN_LOAD_ATTEMPTS = 4;
@@ -165,20 +166,22 @@ export function PluginRegistryProvider({
       }),
     );
 
-    const syncUntilListed = async (attempt: number) => {
-      const ok = await registry.sync();
+    const syncUntilLoaded = async (attempt: number) => {
+      const result = await registry.sync();
       if (cancelled) return;
-      if (!ok) {
-        timer = setTimeout(
-          () => void syncUntilListed(attempt + 1),
-          backoffDelay(attempt, LIST_RETRY),
-        );
-        return;
+      if (result !== 'unreachable') {
+        await local;
+        if (cancelled) return;
+        setListed(true);
       }
-      await local;
-      if (!cancelled) setListed(true);
+      if (result !== 'ok') {
+        timer = setTimeout(
+          () => void syncUntilLoaded(attempt + 1),
+          backoffDelay(attempt, SYNC_RETRY),
+        );
+      }
     };
-    void syncUntilListed(0);
+    void syncUntilLoaded(0);
 
     return () => {
       cancelled = true;
