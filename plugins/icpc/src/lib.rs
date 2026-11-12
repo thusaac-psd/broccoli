@@ -1060,9 +1060,7 @@ fn decide_visibility_decisions(
     let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
         "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
-                CASE WHEN NOW() < c.start_time THEN 'before' \
-                     WHEN NOW() > c.end_time THEN 'after' \
-                     ELSE 'during' END AS phase, \
+                {phase} AS phase, \
                 EXTRACT(EPOCH FROM c.start_time) * 1000 AS start_epoch_ms, \
                 EXTRACT(EPOCH FROM (c.end_time - c.start_time)) * 1000 AS duration_ms, \
                 EXTRACT(EPOCH FROM (NOW() - c.start_time)) * 1000 AS now_elapsed_ms, \
@@ -1070,7 +1068,8 @@ fn decide_visibility_decisions(
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
          WHERE s.id IN ({})",
-        placeholders.join(",")
+        placeholders.join(","),
+        phase = broccoli_server_sdk::contest::phase_sql("c"),
     );
     let rows: Vec<SubmissionFreezeRow> = host.db.query_with_args(&sql, &p.into_args())?;
     let rows_by_id: HashMap<i32, SubmissionFreezeRow> =
