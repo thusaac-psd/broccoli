@@ -8,7 +8,7 @@
 //! `SystemError` in any shape while their submission has system-error
 //! retries left (`max_system_error_retries`), and the claim fiber judges them
 //! again. Only when that budget is spent does the `SystemError` stand. See
-//! [`crate::services::judging::retry_system_errors`].
+//! `services::judging::retry_system_errors`.
 
 use std::time::Duration;
 

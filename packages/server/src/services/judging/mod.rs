@@ -30,14 +30,14 @@
 //!   unit a fresh epoch, clears its output, its owner and its lease, and
 //!   deletes its results. Every recovery is a requeue: a server releasing its
 //!   own work ([`release_leases`]), a lapsed lease or a stuck job
-//!   ([`reclaim_abandoned`]) and a system-error retry
-//!   ([`retry_system_errors`]).
+//!   (`reclaim_abandoned`) and a system-error retry
+//!   (`retry_system_errors`).
 //! * **exhaust** finalizes an abandoned unit as `SystemError` once its
 //!   dispatch-retry budget is spent and dead-letters it.
 //!
 //! A judgement additionally moves between current and non-current through
-//! [`open_judgement`] (rejudge), [`apply_judgement`] and
-//! [`discard_judgement`]. A submission and its first judgement are inserted
+//! `open_judgement` (rejudge), `apply_judgement` and
+//! `discard_judgement`. A submission and its first judgement are inserted
 //! together by [`create_submission`], so every submission has a current
 //! judgement from the moment it exists.
 //!
@@ -59,7 +59,7 @@
 //!
 //! # Retry budgets
 //!
-//! [`RetryBudget`] is the one rule for every budget: another retry is allowed
+//! `RetryBudget` is the one rule for every budget: another retry is allowed
 //! while fewer than `max` retries were spent. A unit's `dispatch_retries`
 //! counts requeues after it was abandoned (budget `max_dispatch_retries`);
 //! a submission's `system_error_retries` counts system-error retries since
