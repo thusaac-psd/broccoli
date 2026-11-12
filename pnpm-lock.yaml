@@ -97,8 +97,8 @@ importers:
         specifier: ^7.13.0
         version: 7.13.0(typescript@5.9.3)
       prettier:
-        specifier: ^3.10.1
-        version: 3.10.1
+        specifier: ~3.6.2
+        version: 3.6.2
       typescript-eslint:
         specifier: ^8.72.2
         version: 8.72.2(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
@@ -4198,8 +4198,8 @@ packages:
     resolution: {integrity: sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==}
     engines: {node: '>= 0.8.0'}
 
-  prettier@3.10.1:
-    resolution: {integrity: sha512-70vp3ZUYoPlFbF9uiTdXHUUCGEIp7d4+6p+8DYbkm2jP7x/3i/paXVF6dopSI3zd/CEitrZN1rc4i85xWmmXlg==}
+  prettier@3.6.2:
+    resolution: {integrity: sha512-I7AIg5boAr5R0FFtJ6rCfD+LFsWHp81dolrFD8S79U9tb8Az2nGrJncnMSnys+bpQJfRUzqs9hnA81OAA3hCuQ==}
     engines: {node: '>=14'}
     hasBin: true
 
@@ -6095,7 +6095,7 @@ snapshots:
       pathe: 1.1.2
       picocolors: 1.1.1
       pkg-types: 2.4.0
-      prettier: 3.10.1
+      prettier: 3.6.2
       react-refresh: 0.14.2
       react-router: 7.18.5(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       semver: 7.8.6
@@ -8772,7 +8772,7 @@ snapshots:
 
   prelude-ls@1.2.1: {}
 
-  prettier@3.10.1: {}
+  prettier@3.6.2: {}
 
   process-nextick-args@2.0.1: {}
 
