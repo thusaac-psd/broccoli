@@ -8,7 +8,7 @@ use crate::entity::{
     submission, submission_judgement, test_case_result,
 };
 
-use super::{STUCK_RECOVERY_STATUSES, StuckRecovery, detector_retry_lease};
+use super::{StuckRecovery, detector_retry_lease};
 use crate::services::judgement_lifecycle::{
     AllocateJudgeEpoch, OpenJudgement, RedispatchReason, RetryBudget, allocated_epoch,
     open_judgement, redispatch_current_submission,
@@ -92,7 +92,7 @@ pub(super) async fn recover_stuck_code_run_without_steal(
         .clear_judgement_columns()
         .filter(code_run::Column::Id.eq(run.id))
         .filter(code_run::Column::JudgeEpoch.eq(run.judge_epoch))
-        .filter(code_run::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(code_run::Column::Status.is_in(common::StatusPhase::InFlight.statuses()))
         .exec(txn)
         .await?;
 
@@ -141,7 +141,7 @@ pub(super) async fn recover_stuck_judgement_without_steal(
             RetryBudget::AtLeast(new_retry_count),
         )
         .filter(submission::Column::JudgeEpoch.eq(judgement.judge_epoch))
-        .filter(submission::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(submission::Column::Status.is_in(common::StatusPhase::InFlight.statuses()))
     } else {
         submission::Entity::update_many()
             .filter(submission::Column::Id.eq(judgement.submission_id))
@@ -181,7 +181,9 @@ pub(super) async fn recover_stuck_judgement_without_steal(
         .clear_judgement_columns()
         .filter(submission_judgement::Column::Id.eq(judgement.id))
         .filter(submission_judgement::Column::JudgeEpoch.eq(judgement.judge_epoch))
-        .filter(submission_judgement::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(
+            submission_judgement::Column::Status.is_in(common::StatusPhase::InFlight.statuses()),
+        )
         .filter(submission_judgement::Column::IsFinalized.eq(false))
         .exec_with_returning(txn)
         .await?

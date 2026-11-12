@@ -11,16 +11,6 @@ mod tests;
 
 pub use scan::*;
 
-// Rows in these states have been claimed by a dispatcher and are either
-// waiting for plugin-side dispatch or already evaluating. `Queued` is
-// deliberately excluded: a deep durable queue is backlog, not a row-level
-// failure. Old queued rows are observed as an aggregate dispatcher-health
-// signal instead, without mutating them.
-const STUCK_RECOVERY_STATUSES: [SubmissionStatus; 3] = [
-    SubmissionStatus::Pending,
-    SubmissionStatus::Compiling,
-    SubmissionStatus::Running,
-];
 const QUEUED_OBSERVABILITY_THRESHOLD_SECS: i64 = 5 * 60;
 const PENDING_ORPHAN_TIMEOUT_SECS: i64 = 5 * 60;
 /// A finalized current judgement should propagate onto its submission row
@@ -83,7 +73,7 @@ fn stuck_disposition(
         };
     }
 
-    if !STUCK_RECOVERY_STATUSES.contains(status) {
+    if !status.is_in_flight() {
         return StuckDisposition::Ignore;
     }
 

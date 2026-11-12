@@ -29,7 +29,7 @@
 //! reset cannot drift apart between them.
 
 use chrono::Utc;
-use common::{SubmissionDlqErrorCode, SubmissionStatus};
+use common::{StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::sea_query::{Expr, SimpleExpr};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, ExprTrait,
@@ -129,13 +129,6 @@ pub(crate) fn redispatch_current_submission(
         .col_expr(submission::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
         .col_expr(submission::Column::LeasedAt, Expr::cust("NOW()"))
 }
-
-/// Statuses of a judgement that is still being dispatched or judged.
-const IN_FLIGHT: [SubmissionStatus; 3] = [
-    SubmissionStatus::Pending,
-    SubmissionStatus::Compiling,
-    SubmissionStatus::Running,
-];
 
 /// Why `open_judgement` opens a new judgement row.
 pub(crate) enum OpenJudgement {
@@ -272,7 +265,7 @@ pub(crate) async fn open_judgement<C: ConnectionTrait>(
             ..
         } => redispatch_current_submission(submission_id, owner_server_id, RetryBudget::Spend)
             .filter(submission::Column::JudgeEpoch.eq(*expected_epoch))
-            .filter(submission::Column::Status.is_in(IN_FLIGHT)),
+            .filter(submission::Column::Status.is_in(StatusPhase::InFlight.statuses())),
     };
     let Some(sub) = update.exec_with_returning(txn).await?.into_iter().next() else {
         return Ok(None);

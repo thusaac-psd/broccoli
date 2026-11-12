@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use common::SubmissionStatus;
+use common::StatusPhase;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
     Statement, sea_query::Expr,
@@ -9,12 +9,6 @@ use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::entity::{code_run, submission};
-
-const LEASED_STATUSES: [SubmissionStatus; 3] = [
-    SubmissionStatus::Pending,
-    SubmissionStatus::Compiling,
-    SubmissionStatus::Running,
-];
 
 pub async fn run(
     db: DatabaseConnection,
@@ -61,7 +55,7 @@ pub async fn refresh_owned_leases(
     let submissions = submission::Entity::update_many()
         .col_expr(submission::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
         .filter(submission::Column::OwnerServerId.eq(server_id))
-        .filter(submission::Column::Status.is_in(LEASED_STATUSES))
+        .filter(submission::Column::Status.is_in(StatusPhase::InFlight.statuses()))
         .exec(db)
         .await?
         .rows_affected;
@@ -69,7 +63,7 @@ pub async fn refresh_owned_leases(
     let code_runs = code_run::Entity::update_many()
         .col_expr(code_run::Column::LeaseHeartbeatAt, Expr::cust("NOW()"))
         .filter(code_run::Column::OwnerServerId.eq(server_id))
-        .filter(code_run::Column::Status.is_in(LEASED_STATUSES))
+        .filter(code_run::Column::Status.is_in(StatusPhase::InFlight.statuses()))
         .exec(db)
         .await?
         .rows_affected;
@@ -77,19 +71,22 @@ pub async fn refresh_owned_leases(
     let judgements = db
         .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"
+            format!(
+                r#"
             UPDATE submission_judgement j
                SET lease_heartbeat_at = NOW()
              WHERE j.owner_server_id = $1
                AND j.is_current = TRUE
                AND j.is_finalized = FALSE
-               AND j.status IN ('Pending', 'Compiling', 'Running')
+               AND j.status IN {in_flight}
                AND j.version = (
                    SELECT MAX(j2.version)
                      FROM submission_judgement j2
                     WHERE j2.submission_id = j.submission_id
                )
             "#,
+                in_flight = StatusPhase::InFlight.sql_list()
+            ),
             [server_id.into()],
         ))
         .await?

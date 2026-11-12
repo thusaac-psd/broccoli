@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use common::{DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode, SubmissionStatus};
+use common::{DlqErrorCode, DlqMessageType, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, EntityTrait,
     ExprTrait, QueryFilter, QueryResult, Statement, TransactionTrait,
@@ -338,13 +338,7 @@ pub async fn release_owned_leases(
     // from `server_id` so the lease fiber's `owner = server_id` refresh skips
     // it. The `#orphaned` suffix cannot collide with a real server id.
     let released_owner = format!("{server_id}{RELEASED_OWNER_SUFFIX}");
-    let leased = || {
-        [
-            SubmissionStatus::Pending,
-            SubmissionStatus::Compiling,
-            SubmissionStatus::Running,
-        ]
-    };
+    let leased = || StatusPhase::InFlight.statuses();
 
     let submissions = submission::Entity::update_many()
         .col_expr(
@@ -861,12 +855,13 @@ async fn claim_rows(
     let sql = format!(
         r#"SELECT id, judge_epoch, retry_count
            FROM {table}
-           WHERE status IN ('Pending', 'Compiling', 'Running')
+           WHERE status IN {in_flight}
              AND {reclaimable}
              AND {handled}
            ORDER BY created_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#,
+        in_flight = StatusPhase::InFlight.sql_list(),
         handled = super::prefer_local_handler_for(table, "$3"),
     );
     let rows = txn
@@ -892,12 +887,13 @@ async fn claim_deferred_judgement_rows(
            FROM submission_judgement
            WHERE is_current = TRUE
              AND is_finalized = FALSE
-             AND status IN ('Pending', 'Compiling', 'Running')
+             AND status IN {in_flight}
              AND {reclaimable}
              AND {handled}
            ORDER BY created_at
            LIMIT $2
            FOR UPDATE SKIP LOCKED"#,
+        in_flight = StatusPhase::InFlight.sql_list(),
         handled = super::prefer_local_handler_for("submission_judgement", "$3"),
     );
     let rows = txn

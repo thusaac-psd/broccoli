@@ -327,9 +327,10 @@ async fn read_status_count_samples(
         r#"
         SELECT status::text AS state, COUNT(*)::bigint AS count
           FROM {table}
-         WHERE status IN ('Queued', 'Pending', 'Compiling', 'Running')
+         WHERE status NOT IN {terminal}
          GROUP BY status
-        "#
+        "#,
+        terminal = common::StatusPhase::Terminal.sql_list()
     );
     let rows = state
         .db

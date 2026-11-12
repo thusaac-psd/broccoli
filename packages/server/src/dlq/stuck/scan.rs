@@ -16,7 +16,7 @@ use super::handlers::{
 };
 use super::{
     PENDING_ORPHAN_TIMEOUT_SECS, QUEUED_OBSERVABILITY_THRESHOLD_SECS,
-    RECONCILE_FINALIZED_GRACE_SECS, STUCK_RECOVERY_STATUSES,
+    RECONCILE_FINALIZED_GRACE_SECS,
 };
 
 pub async fn run_stuck_job_detector(state: AppState, config: DlqConfig) {
@@ -174,7 +174,7 @@ async fn detect_and_handle_stuck_jobs(
     let stuck_submission_ids: Vec<i32> = submission::Entity::find()
         .select_only()
         .column(submission::Column::Id)
-        .filter(submission::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(submission::Column::Status.is_in(common::StatusPhase::InFlight.statuses()))
         .filter(
             Condition::any()
                 .add(
@@ -230,7 +230,7 @@ async fn detect_and_handle_stuck_jobs(
     let stuck_code_run_ids: Vec<i32> = code_run::Entity::find()
         .select_only()
         .column(code_run::Column::Id)
-        .filter(code_run::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(code_run::Column::Status.is_in(common::StatusPhase::InFlight.statuses()))
         .filter(
             Condition::any()
                 .add(
@@ -281,7 +281,9 @@ async fn detect_and_handle_stuck_jobs(
     let stuck_judgement_ids: Vec<i32> = submission_judgement::Entity::find()
         .select_only()
         .column(submission_judgement::Column::Id)
-        .filter(submission_judgement::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+        .filter(
+            submission_judgement::Column::Status.is_in(common::StatusPhase::InFlight.statuses()),
+        )
         .filter(submission_judgement::Column::IsFinalized.eq(false))
         .filter(
             Condition::any()
@@ -354,7 +356,8 @@ async fn reconcile_finalized_submissions(
 ) -> anyhow::Result<()> {
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
-        r#"UPDATE submission s
+        format!(
+            r#"UPDATE submission s
            SET status = j.status,
                verdict = j.verdict,
                score = j.score,
@@ -370,7 +373,9 @@ async fn reconcile_finalized_submissions(
              AND j.is_finalized = TRUE
              AND j.judge_epoch = s.judge_epoch
              AND j.finalized_at < NOW() - CAST($1 AS INTERVAL)
-             AND s.status NOT IN ('Judged', 'CompilationError', 'SystemError')"#,
+             AND s.status NOT IN {terminal}"#,
+            terminal = common::StatusPhase::Terminal.sql_list()
+        ),
         vec![format!("{stuck_timeout_secs} seconds").into()],
     );
     let res = db.execute_raw(stmt).await?;

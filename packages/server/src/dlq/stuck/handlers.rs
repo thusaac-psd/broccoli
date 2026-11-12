@@ -17,10 +17,10 @@ use super::recovery::{
     recover_stuck_submission_without_steal,
 };
 use super::{
-    PENDING_ORPHAN_TIMEOUT_SECS, QUEUED_OBSERVABILITY_THRESHOLD_SECS, STUCK_RECOVERY_STATUSES,
-    StuckDisposition, StuckRecovery, inflight_capped, should_recover_directly,
-    stuck_code_run_message_id, stuck_disposition, stuck_retries_exceeded_message,
-    stuck_retry_budget_exhausted, stuck_submission_judgement_message_id,
+    PENDING_ORPHAN_TIMEOUT_SECS, QUEUED_OBSERVABILITY_THRESHOLD_SECS, StuckDisposition,
+    StuckRecovery, inflight_capped, should_recover_directly, stuck_code_run_message_id,
+    stuck_disposition, stuck_retries_exceeded_message, stuck_retry_budget_exhausted,
+    stuck_submission_judgement_message_id,
 };
 
 pub(super) async fn handle_stuck_submission(
@@ -418,7 +418,10 @@ pub(super) async fn handle_stuck_submission_judgement(
                 sea_orm::sea_query::Expr::cust("NOW()"),
             )
             .filter(submission_judgement::Column::Id.eq(judgement.id))
-            .filter(submission_judgement::Column::Status.is_in(STUCK_RECOVERY_STATUSES))
+            .filter(
+                submission_judgement::Column::Status
+                    .is_in(common::StatusPhase::InFlight.statuses()),
+            )
             .filter(submission_judgement::Column::IsFinalized.eq(false))
             .exec(&txn)
             .await?;

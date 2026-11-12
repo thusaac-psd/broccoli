@@ -172,7 +172,7 @@ fn submission_cache_update(update: &SubmissionUpdate) -> Option<(String, Vec<Jso
     }
     let sql = format!(
         "UPDATE submission SET {} WHERE id = {} AND judge_epoch = {} \
-         AND status NOT IN ('Judged', 'CompilationError', 'SystemError') \
+         AND status NOT IN {terminal} \
          AND EXISTS ( \
              SELECT 1 FROM submission_judgement j \
              WHERE j.id = {} \
@@ -184,6 +184,7 @@ fn submission_cache_update(update: &SubmissionUpdate) -> Option<(String, Vec<Jso
         p.bind(update.submission_id),
         p.bind(update.judge_epoch),
         p.bind(update.judgement_id),
+        terminal = common::StatusPhase::Terminal.sql_list(),
     );
     Some((sql, p.into_args()))
 }

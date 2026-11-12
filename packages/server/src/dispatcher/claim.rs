@@ -263,8 +263,11 @@ pub async fn count_in_flight(state: &AppState, server_id: &str) -> anyhow::Resul
         .db
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT COUNT(*)::bigint AS n FROM submission \
-             WHERE owner_server_id = $1 AND status IN ('Pending', 'Compiling', 'Running')",
+            format!(
+                "SELECT COUNT(*)::bigint AS n FROM submission \
+                 WHERE owner_server_id = $1 AND status IN {}",
+                common::StatusPhase::InFlight.sql_list()
+            ),
             [server_id.into()],
         ))
         .await?;
@@ -639,11 +642,12 @@ fn queued_rows_sql(table: &str) -> String {
     format!(
         r#"SELECT id
            FROM {table}
-           WHERE status = 'Queued'
+           WHERE status IN {queued}
              AND {handled}
            ORDER BY created_at
            LIMIT $1
            FOR UPDATE SKIP LOCKED"#,
+        queued = common::StatusPhase::Queued.sql_list(),
         handled = super::prefer_local_handler_for(table, "$2"),
     )
 }
@@ -669,7 +673,7 @@ mod tests {
             let sql = queued_rows_sql(table);
             assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "{sql}");
             assert!(sql.contains("LIMIT $1"), "{sql}");
-            assert!(sql.contains("status = 'Queued'"), "{sql}");
+            assert!(sql.contains("status IN ('Queued')"), "{sql}");
             assert!(sql.contains("ORDER BY created_at"), "{sql}");
             assert!(sql.contains("ANY($2)"), "{sql}");
         }

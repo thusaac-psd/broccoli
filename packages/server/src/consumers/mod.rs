@@ -5,7 +5,7 @@ pub use operation_dlq::consume_operation_dlq;
 pub use operation_result::consume_operation_results;
 
 use broccoli_server_sdk::types::sanitize_text_field;
-use common::SubmissionStatus;
+use common::{StatusPhase, SubmissionStatus};
 use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
@@ -60,9 +60,11 @@ pub async fn mark_submission_system_error_with_epoch<C: ConnectionTrait>(
     let safe_message = sanitize_text_field(error_message);
     let (sql, values) = if let Some(epoch) = judge_epoch {
         (
-            r#"UPDATE submission SET status = $1, error_code = $2, error_message = $3
-               WHERE id = $4 AND judge_epoch = $5
-                 AND status NOT IN ('Judged', 'CompilationError', 'SystemError')"#,
+            format!(
+                "UPDATE submission SET status = $1, error_code = $2, error_message = $3 \
+                 WHERE id = $4 AND judge_epoch = $5 AND status NOT IN {}",
+                StatusPhase::Terminal.sql_list()
+            ),
             vec![
                 SubmissionStatus::SystemError.to_string().into(),
                 safe_code.as_ref().to_string().into(),
@@ -73,8 +75,9 @@ pub async fn mark_submission_system_error_with_epoch<C: ConnectionTrait>(
         )
     } else {
         (
-            r#"UPDATE submission SET status = $1, error_code = $2, error_message = $3
-               WHERE id = $4"#,
+            "UPDATE submission SET status = $1, error_code = $2, error_message = $3 \
+             WHERE id = $4"
+                .to_string(),
             vec![
                 SubmissionStatus::SystemError.to_string().into(),
                 safe_code.as_ref().to_string().into(),
@@ -157,9 +160,11 @@ pub async fn mark_code_run_system_error_with_epoch<C: ConnectionTrait>(
     let safe_message = sanitize_text_field(error_message);
     let (sql, values) = if let Some(epoch) = judge_epoch {
         (
-            r#"UPDATE code_run SET status = $1, error_code = $2, error_message = $3
-               WHERE id = $4 AND judge_epoch = $5
-                 AND status NOT IN ('Judged', 'CompilationError', 'SystemError')"#,
+            format!(
+                "UPDATE code_run SET status = $1, error_code = $2, error_message = $3 \
+                 WHERE id = $4 AND judge_epoch = $5 AND status NOT IN {}",
+                StatusPhase::Terminal.sql_list()
+            ),
             vec![
                 SubmissionStatus::SystemError.to_string().into(),
                 safe_code.as_ref().to_string().into(),
@@ -170,8 +175,9 @@ pub async fn mark_code_run_system_error_with_epoch<C: ConnectionTrait>(
         )
     } else {
         (
-            r#"UPDATE code_run SET status = $1, error_code = $2, error_message = $3
-               WHERE id = $4"#,
+            "UPDATE code_run SET status = $1, error_code = $2, error_message = $3 \
+             WHERE id = $4"
+                .to_string(),
             vec![
                 SubmissionStatus::SystemError.to_string().into(),
                 safe_code.as_ref().to_string().into(),

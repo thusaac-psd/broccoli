@@ -30,12 +30,64 @@ pub enum SubmissionStatus {
     SystemError,
 }
 
+/// Where a status sits in the judging lifecycle. Every status belongs to
+/// exactly one phase; [`SubmissionStatus::phase`] is the one definition the
+/// in-flight and terminal sets (and their SQL forms) are derived from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StatusPhase {
+    /// Accepted and waiting for a claim fiber.
+    Queued,
+    /// Claimed by a server and being dispatched or judged.
+    InFlight,
+    /// Finished; nothing writes the row again until it is re-opened.
+    Terminal,
+}
+
+impl StatusPhase {
+    /// The statuses in this phase as a SQL list, e.g. `('Pending', 'Running')`,
+    /// for statements that are built as text.
+    pub fn sql_list(self) -> &'static str {
+        static LISTS: std::sync::LazyLock<[String; 3]> = std::sync::LazyLock::new(|| {
+            [
+                StatusPhase::Queued,
+                StatusPhase::InFlight,
+                StatusPhase::Terminal,
+            ]
+            .map(|phase| {
+                let quoted: Vec<String> = phase
+                    .statuses()
+                    .map(|s| format!("'{}'", s.as_str()))
+                    .collect();
+                format!("({})", quoted.join(", "))
+            })
+        });
+        &LISTS[self as usize]
+    }
+
+    /// The statuses in this phase.
+    pub fn statuses(self) -> impl Iterator<Item = SubmissionStatus> + Clone {
+        SubmissionStatus::ALL
+            .iter()
+            .filter(move |s| s.phase() == self)
+            .cloned()
+    }
+}
+
 impl SubmissionStatus {
+    pub fn phase(&self) -> StatusPhase {
+        match self {
+            Self::Queued => StatusPhase::Queued,
+            Self::Pending | Self::Compiling | Self::Running => StatusPhase::InFlight,
+            Self::Judged | Self::CompilationError | Self::SystemError => StatusPhase::Terminal,
+        }
+    }
+
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Judged | Self::CompilationError | Self::SystemError
-        )
+        self.phase() == StatusPhase::Terminal
+    }
+
+    pub fn is_in_flight(&self) -> bool {
+        self.phase() == StatusPhase::InFlight
     }
 
     pub fn is_judged(&self) -> bool {
@@ -305,8 +357,21 @@ impl From<broccoli_types::types::Verdict> for Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{SubmissionStatus, Verdict};
+    use super::{StatusPhase, SubmissionStatus, Verdict};
     use std::str::FromStr;
+
+    #[test]
+    fn phase_sql_lists_name_each_phase_statuses() {
+        assert_eq!(StatusPhase::Queued.sql_list(), "('Queued')");
+        assert_eq!(
+            StatusPhase::InFlight.sql_list(),
+            "('Pending', 'Compiling', 'Running')"
+        );
+        assert_eq!(
+            StatusPhase::Terminal.sql_list(),
+            "('Judged', 'CompilationError', 'SystemError')"
+        );
+    }
 
     #[test]
     fn queued_status_round_trip_and_predicates() {
