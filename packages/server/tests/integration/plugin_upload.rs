@@ -132,9 +132,31 @@ async fn set_blob(app: &TestApp, hash: &str, data: Vec<u8>) {
         .unwrap();
 }
 
-async fn upload(app: &TestApp, token: &str, archive: Vec<u8>) -> Value {
+/// What inspecting `archive` reports it replaces, as the form's
+/// `replaces` value: `new`, `bundle` or the published archive's hash.
+async fn replaces(app: &TestApp, token: &str, archive: Vec<u8>) -> String {
     let res = app
-        .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD, archive, token)
+        .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD_INSPECT, archive, &[], token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let current = &res.body["current"];
+    match current["source"].as_str() {
+        None => "new".into(),
+        Some("bundle") => "bundle".into(),
+        Some(_) => current["archive_hash"].as_str().unwrap().into(),
+    }
+}
+
+/// Inspect, then upload, as the admin UI does.
+async fn upload(app: &TestApp, token: &str, archive: Vec<u8>) -> Value {
+    let replaces = replaces(app, token, archive.clone()).await;
+    let res = app
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive,
+            &[("replaces", &replaces)],
+            token,
+        )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     res.body
@@ -230,6 +252,63 @@ async fn an_upload_takes_precedence_over_the_bundled_copy() {
     assert_eq!(registered(&b, BUNDLED).0, "0.2.0");
 }
 
+/// An upload states what it replaces, as inspecting the archive reported:
+/// if another upload landed in between, it is refused instead of silently
+/// replacing a version the admin never saw.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_is_refused_when_what_it_replaces_changed_meanwhile() {
+    let a = TestApp::spawn_with_plugins().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+    let seen = replaces(&a, &token, archive(BUNDLED, "0.3.0")).await;
+    assert_eq!(seen, "bundle");
+
+    // Another admin publishes 0.2.0 through B in the meantime.
+    let other = upload(&b, &token, archive(BUNDLED, "0.2.0")).await;
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive(BUNDLED, "0.3.0"),
+            &[("replaces", &seen)],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert_eq!(res.body["code"], "CONFLICT", "{}", res.text);
+    let published = row(&a, BUNDLED).await.unwrap();
+    assert_eq!(
+        published.archive_hash.as_deref(),
+        other["archive_hash"].as_str()
+    );
+    assert_eq!(published.version.as_deref(), Some("0.2.0"));
+    assert_eq!(
+        registered(&a, BUNDLED),
+        ("0.1.0".into(), fixture(BUNDLED)),
+        "A rolled back"
+    );
+
+    // A new plugin is only ever created by an upload that expects it to be new.
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive(UPLOAD_ONLY, "1.0.0"),
+            &[("replaces", "bundle")],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert!(row(&a, UPLOAD_ONLY).await.is_none());
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            archive(UPLOAD_ONLY, "1.0.0"),
+            &[],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 400, "replaces is required: {}", res.text);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inspecting_an_archive_reports_what_it_would_publish() {
     let a = TestApp::spawn_with_plugins().await;
@@ -239,6 +318,7 @@ async fn inspecting_an_archive_reports_what_it_would_publish() {
         .post_plugin_archive(
             routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
             archive(BUNDLED, "0.2.0"),
+            &[],
             &token,
         )
         .await;
@@ -258,6 +338,7 @@ async fn inspecting_an_archive_reports_what_it_would_publish() {
         .post_plugin_archive(
             routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
             archive(UPLOAD_ONLY, "1.0.0"),
+            &[],
             &token,
         )
         .await;
@@ -296,7 +377,9 @@ async fn a_corrupt_archive_is_rejected_and_publishes_nothing() {
             routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
             routes::ADMIN_PLUGIN_UPLOAD,
         ] {
-            let res = a.post_plugin_archive(path, bytes.clone(), &token).await;
+            let res = a
+                .post_plugin_archive(path, bytes.clone(), &[], &token)
+                .await;
             assert_eq!(res.status, 400, "{path}: {}", res.text);
             assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
             assert!(
@@ -329,7 +412,12 @@ async fn a_plugin_that_fails_to_load_here_is_not_published() {
     ]);
 
     let res = a
-        .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD, broken, &token)
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            broken,
+            &[("replaces", "bundle")],
+            &token,
+        )
         .await;
     assert_eq!(res.status, 422, "{}", res.text);
     assert_eq!(res.body["code"], "PLUGIN_LOAD_FAILED", "{}", res.text);
@@ -356,7 +444,12 @@ async fn a_new_plugin_that_fails_to_load_leaves_nothing_behind() {
     ]);
 
     let res = a
-        .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD, broken, &token)
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD,
+            broken,
+            &[("replaces", "new")],
+            &token,
+        )
         .await;
     assert_eq!(res.status, 422, "{}", res.text);
     assert!(row(&a, UPLOAD_ONLY).await.is_none());
@@ -595,7 +688,7 @@ async fn a_server_with_uploads_disabled_runs_only_bundled_code() {
         routes::ADMIN_PLUGIN_UPLOAD,
     ] {
         let res = locked
-            .post_plugin_archive(path, tiny_archive(), &token)
+            .post_plugin_archive(path, tiny_archive(), &[], &token)
             .await;
         assert_eq!(res.status, 403, "{path}: {}", res.text);
         assert_eq!(res.body["code"], "PLUGIN_UPLOAD_DISABLED", "{}", res.text);
@@ -642,7 +735,7 @@ async fn contestants_cannot_upload_or_remove_plugins() {
         routes::ADMIN_PLUGIN_UPLOAD,
     ] {
         let res = a
-            .post_plugin_archive(path, tiny_archive(), &contestant)
+            .post_plugin_archive(path, tiny_archive(), &[], &contestant)
             .await;
         assert_eq!(res.status, 403, "{path}: {}", res.text);
         assert_eq!(res.body["code"], "PERMISSION_DENIED");

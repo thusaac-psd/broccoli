@@ -966,22 +966,28 @@ impl TestApp {
         TestResponse::from_response(res).await
     }
 
-    /// POST a plugin archive as the `plugin` form field.
+    /// POST a plugin archive as the `plugin` form field, after the text
+    /// `fields`.
     pub async fn post_plugin_archive(
         &self,
         path: &str,
         archive: Vec<u8>,
+        fields: &[(&str, &str)],
         token: &str,
     ) -> TestResponse {
         let part = reqwest::multipart::Part::bytes(archive)
             .file_name("plugin.tar.gz")
             .mime_str("application/gzip")
             .expect("Failed to set MIME type");
+        let mut form = reqwest::multipart::Form::new();
+        for (name, value) in fields {
+            form = form.text(name.to_string(), value.to_string());
+        }
         let res = self
             .client
             .post(self.url(path))
             .header("Authorization", format!("Bearer {token}"))
-            .multipart(reqwest::multipart::Form::new().part("plugin", part))
+            .multipart(form.part("plugin", part))
             .send()
             .await
             .expect("Failed to send plugin archive");

@@ -16,10 +16,24 @@ import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 /** The upload endpoints read the archive from this multipart field. */
-function archiveForm(file: File): FormData {
+function archiveForm(file: File, replaces?: string): FormData {
   const form = new FormData();
+  if (replaces) form.append('replaces', replaces);
   form.append('plugin', file);
   return form;
+}
+
+/**
+ * What the archive replaces, as the inspection reported it: the server
+ * refuses the upload if that changed since, instead of replacing a version
+ * the admin never saw.
+ */
+function replacesOf(summary: PluginArchiveSummary): string {
+  const current = summary.current;
+  if (!current) return 'new';
+  return current.source === 'upload' && current.archive_hash
+    ? current.archive_hash
+    : 'bundle';
 }
 
 function formatBytes(bytes: number): string {
@@ -90,9 +104,10 @@ export function PluginUploadDialog({
     if (!file || !summary) return;
     setPublishing(true);
     try {
+      const replaces = replacesOf(summary);
       const { data, error } = await apiClient.POST('/admin/plugins/upload', {
-        body: { plugin: file },
-        bodySerializer: () => archiveForm(file),
+        body: { plugin: file, replaces },
+        bodySerializer: () => archiveForm(file, replaces),
       });
       if (error || !data) {
         setError(getErrorMessage(error, t('plugins.upload.error')));

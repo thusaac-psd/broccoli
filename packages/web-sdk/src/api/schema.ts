@@ -59,7 +59,7 @@ export interface paths {
     put?: never;
     /**
      * Upload and publish a plugin archive
-     * @description Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.
+     * @description Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. The form's `replaces` field states what the upload replaces, as inspecting the archive reported it, so an upload never silently replaces a change made meanwhile. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.
      */
     post: operations['uploadPlugin'];
     delete?: never;
@@ -3399,9 +3399,10 @@ export interface components {
       permission: string;
     };
     /**
-     * @description The multipart form the plugin upload endpoints read (documentation only:
-     *     the handlers stream the field themselves, so a refused upload is
-     *     answered before its body is read).
+     * @description The multipart form the plugin upload endpoints read. Documentation only:
+     *     the handlers read the field themselves, after the permission and
+     *     upload-policy checks, so a refused upload is answered before its body is
+     *     read.
      */
     PluginArchiveForm: {
       /**
@@ -3410,6 +3411,14 @@ export interface components {
        *     plugin id, containing `plugin.toml`.
        */
       plugin: Blob;
+      /**
+       * @description Upload only: what the archive replaces, as inspecting it reported:
+       *     `new` (no such plugin yet), `bundle`, or the hash of the uploaded
+       *     archive now published. A mismatch means another change landed since,
+       *     and the upload is refused with `409 CONFLICT`.
+       * @example bundle
+       */
+      replaces?: string | null;
     };
     /** @description What a plugin archive would publish, for the admin to confirm. */
     PluginArchiveSummary: {
@@ -3564,7 +3573,7 @@ export interface components {
       version?: string | null;
     };
     /**
-     * @description Where a plugin's files come from (see `crate::plugin_distribution`).
+     * @description Where a plugin's files come from, as the admin API reports it.
      * @enum {string}
      */
     PluginSourceKind: 'bundle' | 'upload';
@@ -3728,6 +3737,11 @@ export interface components {
     };
     /** @description What the fleet currently publishes for a plugin id. */
     PublishedPluginResponse: {
+      /**
+       * @description Hash of the uploaded archive, when `source` is `upload`. An upload
+       *     that replaces this plugin sends it (or `bundle`) as `replaces`.
+       */
+      archive_hash?: string | null;
       enabled: boolean;
       source: components['schemas']['PluginSourceKind'];
       /**
@@ -4856,7 +4870,16 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Archive too large */
+      /** @description What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT) */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Archive too large (PAYLOAD_TOO_LARGE) */
       413: {
         headers: {
           [name: string]: unknown;
@@ -4925,7 +4948,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Archive too large */
+      /** @description Archive too large (PAYLOAD_TOO_LARGE) */
       413: {
         headers: {
           [name: string]: unknown;

@@ -252,10 +252,14 @@ pub fn upload_body_limit() -> DefaultBodyLimit {
 }
 
 /// Read and validate the `plugin` field of an upload form.
-async fn read_archive(
-    state: &AppState,
-    mut multipart: Multipart,
-) -> Result<PluginArchive, AppError> {
+/// The fields of a plugin upload form.
+struct ArchiveForm {
+    archive: PluginArchive,
+    /// The `replaces` field, if sent.
+    replaces: Option<String>,
+}
+
+async fn read_archive(state: &AppState, mut multipart: Multipart) -> Result<ArchiveForm, AppError> {
     if !state.config.plugin.uploads_enabled {
         return Err(AppError::PluginUploadDisabled);
     }
@@ -272,11 +276,12 @@ async fn read_archive(
             AppError::Validation(format!("Failed to read the upload: {e}"))
         }
     };
-    let mut bytes = None;
+    let (mut bytes, mut replaces) = (None, None);
     while let Some(field) = multipart.next_field().await.map_err(unreadable)? {
-        if field.name() == Some("plugin") {
-            bytes = Some(field.bytes().await.map_err(unreadable)?);
-            break;
+        match field.name() {
+            Some("plugin") => bytes = Some(field.bytes().await.map_err(unreadable)?),
+            Some("replaces") => replaces = Some(field.text().await.map_err(unreadable)?),
+            _ => {}
         }
     }
     let bytes = bytes
@@ -285,10 +290,32 @@ async fn read_archive(
         return Err(too_large());
     }
     // Decompressing and checking up to the unpacked limit is CPU work.
-    tokio::task::spawn_blocking(move || PluginArchive::parse(bytes))
+    let archive = tokio::task::spawn_blocking(move || PluginArchive::parse(bytes))
         .await
         .map_err(|e| AppError::Internal(format!("Archive check task failed: {e}")))?
-        .map_err(|e| AppError::Validation(e.to_string()))
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+    Ok(ArchiveForm { archive, replaces })
+}
+
+/// The `replaces` field: `new` for a plugin that does not exist yet,
+/// `bundle`, or the hash of the uploaded archive being replaced, exactly as
+/// inspecting the archive reported the current source.
+fn parse_replaces(value: Option<&str>) -> Result<Option<PluginSource>, AppError> {
+    let missing = || {
+        AppError::Validation(
+            "The 'replaces' field must be 'new', 'bundle' or the archive hash being replaced, \
+             as inspecting the archive reported it"
+                .into(),
+        )
+    };
+    match value.ok_or_else(missing)?.trim() {
+        "new" => Ok(None),
+        "bundle" => Ok(Some(PluginSource::Bundle)),
+        hash => {
+            let hash = common::storage::ContentHash::from_hex(hash).map_err(|_| missing())?;
+            Ok(Some(PluginSource::Upload(hash.to_hex())))
+        }
+    }
 }
 
 /// One archive at a time per server: each holds up to [`MAX_ARCHIVE_BYTES`]
@@ -354,12 +381,13 @@ pub async fn inspect_plugin_archive(
 ) -> Result<Json<PluginArchiveSummary>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let _intake = archive_intake().await?;
-    let archive = read_archive(&state, multipart).await?;
+    let archive = read_archive(&state, multipart).await?.archive;
     let current = plugin_entity::Entity::find_by_id(archive.id().as_str())
         .one(&state.db)
         .await?
         .map(|row| PublishedPluginResponse {
             source: PluginSource::of(row.archive_hash.as_deref()).kind(),
+            archive_hash: row.archive_hash,
             version: row.version,
             enabled: row.is_enabled,
         });
@@ -388,7 +416,7 @@ pub async fn inspect_plugin_archive(
     tag = "Admin",
     operation_id = "uploadPlugin",
     summary = "Upload and publish a plugin archive",
-    description = "Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.",
+    description = "Publishes a tar.gz plugin archive to every server replica. The archive is validated, stored in the shared blob store under its content hash, and loaded on the serving replica; only if that load succeeds is it recorded as the plugin's source and enabled, and every other replica then fetches it, verifies its hash and loads it within a few seconds. The archive replaces the plugin's files entirely, and takes precedence over a copy bundled with the nodes until the upload is removed. The form's `replaces` field states what the upload replaces, as inspecting the archive reported it, so an upload never silently replaces a change made meanwhile. A replica that cannot load it keeps serving the version it had. Requires `plugin:manage` permission.",
     request_body(content_type = "multipart/form-data", content = PluginArchiveForm),
     responses(
         (status = 200, description = "Plugin published and loaded on the serving replica", body = PluginUploadResponse),
@@ -396,6 +424,7 @@ pub async fn inspect_plugin_archive(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
         (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
+        (status = 409, description = "What the archive replaces (`replaces`) is no longer what is published: another change landed since the archive was inspected (CONFLICT)", body = ErrorBody),
         (status = 422, description = "The plugin failed to load on the serving replica; nothing was published (PLUGIN_LOAD_FAILED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -408,11 +437,12 @@ pub async fn upload_plugin(
 ) -> Result<Json<PluginUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let _intake = archive_intake().await?;
-    let archive = read_archive(&state, multipart).await?;
+    let ArchiveForm { archive, replaces } = read_archive(&state, multipart).await?;
+    let replaces = parse_replaces(replaces.as_deref())?;
     let plugin_id = archive.id().to_string();
     let version = archive.manifest().version.clone();
     let archive_hash = archive.hash().to_hex();
-    crate::plugin_lifecycle::install(&state, archive).await?;
+    crate::plugin_lifecycle::install(&state, archive, replaces).await?;
     Ok(Json(PluginUploadResponse {
         message: format!("Plugin '{plugin_id}' v{version} uploaded and published"),
         plugin_id,

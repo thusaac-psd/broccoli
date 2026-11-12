@@ -104,12 +104,21 @@ Rollback is publishing again: upload the previous archive, or remove the upload.
 
 ## Concurrency guards
 
-Publishing writes are conditional on the source the serving replica loaded, so
-a change made through one replica never silently undoes one made through
-another: Enable and Reload only apply while `archive_hash` still equals the
-source they loaded, and removing an upload only applies while that same upload
-is published. A refused write answers `409 CONFLICT` and rolls this replica back
-to what it had, like any unpublished change.
+Publishing writes are conditional on the source they expect, so a change made
+through one replica never silently undoes one made through another:
+
+- Enable and Reload apply only while `archive_hash` still equals the source the
+  serving replica loaded.
+- Upload carries `replaces`, the source the admin saw when the archive was
+  inspected (`new`, `bundle` or an archive hash). It inserts a row only when
+  `new` was expected, and updates one only while that exact source is
+  published.
+- Removing an upload applies only while that same upload is published.
+
+A refused write answers `409 CONFLICT` and rolls this replica back to what it
+had, like any unpublished change. Disable needs no condition: it changes only
+`is_enabled` and keeps whichever source is published, so it cannot undo a
+change it did not see.
 
 ## Operator switch
 

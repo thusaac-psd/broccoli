@@ -802,14 +802,17 @@ enum Change<'a> {
     /// published a different source meanwhile, so an enable never undoes an
     /// upload it did not load.
     Enable,
-    /// Disable. Keeps the published source.
+    /// Disable. Unconditional: it changes only `is_enabled` and keeps
+    /// whichever source is published, so it cannot undo another change.
     Disable,
     /// Re-apply an enabled plugin. Never enables: if another admin disabled
     /// the plugin meanwhile, the reload is refused instead of undoing that;
     /// likewise if the published source changed.
     Reload,
     /// Publish an uploaded archive as the plugin's source, and enable it.
-    Upload,
+    /// Carries what the uploader saw published when it checked the archive
+    /// (`None`: no such plugin yet), and is refused if that changed since.
+    Upload(Option<&'a PluginSource>),
     /// Remove the uploaded archive with this hash, so the bundled copy is
     /// the source again. Refused if a different upload was published since.
     RemoveUpload(&'a str),
@@ -832,7 +835,7 @@ async fn publish(
     let version = fingerprint.map(|f| f.version.clone());
     let hash = fingerprint.map(|f| f.hash.clone());
     let archive = source.archive_hash().map(str::to_string);
-    let upsert = |enabled: bool, set_archive: &str, condition: &str| {
+    let upsert = |enabled: bool, condition: &str| {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
@@ -844,7 +847,6 @@ async fn publish(
                          updated_at = NOW(),
                          version = COALESCE(EXCLUDED.version, plugin.version),
                          content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash)
-                         {set_archive}
                    {condition}
                    RETURNING generation"#
             ),
@@ -860,11 +862,39 @@ async fn publish(
     let statement = match change {
         Change::Enable => upsert(
             true,
-            "",
             "WHERE plugin.archive_hash IS NOT DISTINCT FROM EXCLUDED.archive_hash",
         ),
-        Change::Disable => upsert(false, "", ""),
-        Change::Upload => upsert(true, ", archive_hash = EXCLUDED.archive_hash", ""),
+        Change::Disable => upsert(false, ""),
+        // Inserts only when the uploader expected a new plugin, updates only
+        // when it expected exactly the source that is published. The
+        // candidate row exists whenever a plugin row does, so the conflict
+        // clause decides; without either, nothing is written.
+        Change::Upload(replaces) => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO plugin (id, is_enabled, generation, updated_at, version, content_hash, archive_hash)
+               SELECT $1, TRUE, 1, NOW(), $2, $3, $4
+                WHERE $5 OR EXISTS (SELECT 1 FROM plugin WHERE id = $1)
+               ON CONFLICT (id) DO UPDATE
+                 SET is_enabled = TRUE,
+                     generation = plugin.generation + 1,
+                     updated_at = NOW(),
+                     version = COALESCE(EXCLUDED.version, plugin.version),
+                     content_hash = COALESCE(EXCLUDED.content_hash, plugin.content_hash),
+                     archive_hash = EXCLUDED.archive_hash
+                 WHERE NOT $5 AND plugin.archive_hash IS NOT DISTINCT FROM $6
+               RETURNING generation"#,
+            [
+                plugin_id.into(),
+                version.into(),
+                hash.into(),
+                archive.into(),
+                replaces.is_none().into(),
+                replaces
+                    .and_then(PluginSource::archive_hash)
+                    .map(str::to_string)
+                    .into(),
+            ],
+        ),
         Change::Reload => Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE plugin
@@ -1176,9 +1206,15 @@ pub async fn reload(state: &AppState, id: &PluginId) -> Result<(), AppError> {
 /// store, load it here, then record it as the plugin's source and enable it.
 /// Every other replica fetches it from the blob store on its next poll.
 ///
-/// A load failure here is returned as [`AppError::PluginLoadFailed`] and
-/// publishes nothing.
-pub async fn install(state: &AppState, archive: PluginArchive) -> Result<(), AppError> {
+/// `replaces` is the source the admin saw published when the archive was
+/// checked (`None`: a new plugin). If another change landed since, nothing
+/// is published and the upload is refused as a conflict. A load failure
+/// here is returned as [`AppError::PluginLoadFailed`] and publishes nothing.
+pub async fn install(
+    state: &AppState,
+    archive: PluginArchive,
+    replaces: Option<PluginSource>,
+) -> Result<(), AppError> {
     let stored = state.blob_store.put(archive.bytes()).await?;
     if stored != archive.hash() {
         return Err(AppError::Internal(format!(
@@ -1192,7 +1228,10 @@ pub async fn install(state: &AppState, archive: PluginArchive) -> Result<(), App
         // Unpack from the bytes in hand rather than fetching them back.
         let stored = plugin_distribution::store(state, archive).await;
         let result = match stored {
-            Ok(_) => load_then_publish(state, applied, &id, Change::Upload, &source).await,
+            Ok(_) => {
+                let change = Change::Upload(replaces.as_ref());
+                load_then_publish(state, applied, &id, change, &source).await
+            }
             Err(e) => Err(ChangeError::Load(e)),
         };
         refresh_cache(state).await;

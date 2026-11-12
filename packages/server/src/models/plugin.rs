@@ -474,6 +474,12 @@ pub struct PluginArchiveForm {
     /// plugin id, containing `plugin.toml`.
     #[schema(value_type = String, format = Binary)]
     pub plugin: Vec<u8>,
+    /// Upload only: what the archive replaces, as inspecting it reported:
+    /// `new` (no such plugin yet), `bundle`, or the hash of the uploaded
+    /// archive now published. A mismatch means another change landed since,
+    /// and the upload is refused with `409 CONFLICT`.
+    #[schema(example = "bundle")]
+    pub replaces: Option<String>,
 }
 
 /// What a plugin archive would publish, for the admin to confirm.
@@ -502,6 +508,9 @@ pub struct PluginArchiveSummary {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct PublishedPluginResponse {
     pub source: PluginSourceKind,
+    /// Hash of the uploaded archive, when `source` is `upload`. An upload
+    /// that replaces this plugin sends it (or `bundle`) as `replaces`.
+    pub archive_hash: Option<String>,
     /// Published manifest version, once one has been published.
     #[schema(example = "1.1.0")]
     pub version: Option<String>,
