@@ -311,7 +311,8 @@ async fn build_test_handler(
             // Identical fingerprint across all 3 handlers -> identical cache_key.
             toolchain_fingerprint: worker::toolchain_fingerprint::ToolchainFingerprint::Known(
                 "deterministic-test-fingerprint".to_string(),
-            ),
+            )
+            .into(),
         },
         metrics,
     )

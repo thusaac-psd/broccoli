@@ -262,9 +262,8 @@ impl OperationHandler {
         argv: &[String],
         key_inputs: &[String],
     ) -> Result<String> {
-        let fingerprint = self
-            .cache
-            .toolchain_fingerprint
+        let fingerprint = self.cache.toolchain_fingerprint.current();
+        let fingerprint = fingerprint
             .cache_key_part()
             .context("Toolchain fingerprint is unreliable; compile cache disabled")?;
         let mut input_files = Vec::new();

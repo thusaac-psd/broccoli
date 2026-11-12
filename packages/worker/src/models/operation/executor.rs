@@ -37,10 +37,12 @@ impl OperationTaskExecutor {
         metrics: common::metrics::Metrics,
     ) -> Result<Self> {
         Self::configure_box_slot_lock_dir(config);
-        let fingerprint =
-            toolchain_fingerprint::compute(toolchain_fingerprint::default_probes()).await;
+        let fingerprint = toolchain_fingerprint::SharedFingerprint::probe(
+            toolchain_fingerprint::default_probes(),
+        )
+        .await;
         info!(
-            worker_toolchain_fingerprint = %fingerprint,
+            worker_toolchain_fingerprint = %fingerprint.current(),
             "Computed toolchain fingerprint for compile cache key"
         );
         let sandbox_manager =

@@ -45,6 +45,7 @@ libc = "0.2"
 test-support = []
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 worker = { path = ".", features = ["test-support"] }
 hdrhistogram = { workspace = true }
 serial_test = "3"

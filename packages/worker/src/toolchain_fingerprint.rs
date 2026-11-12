@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -83,6 +84,73 @@ impl std::fmt::Display for ToolchainFingerprint {
         match self {
             Self::Known(fingerprint) => f.write_str(fingerprint),
             Self::Unreliable => f.write_str("unreliable"),
+        }
+    }
+}
+
+/// This worker's current fingerprint. One that starts out unreliable is
+/// probed again in the background until it is known, so a transient probe
+/// failure at boot does not disable the compile cache for the life of the
+/// process. Cloning shares it.
+#[derive(Clone, Debug)]
+pub struct SharedFingerprint(Arc<RwLock<ToolchainFingerprint>>);
+
+impl From<ToolchainFingerprint> for SharedFingerprint {
+    fn from(fingerprint: ToolchainFingerprint) -> Self {
+        Self(Arc::new(RwLock::new(fingerprint)))
+    }
+}
+
+/// First and longest delay between re-probes of an unreliable fingerprint.
+const REPROBE_START: Duration = Duration::from_secs(5);
+const REPROBE_MAX: Duration = Duration::from_secs(300);
+
+impl SharedFingerprint {
+    pub fn current(&self) -> ToolchainFingerprint {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Probe `probes` now, and keep re-probing in the background while the
+    /// result is unreliable.
+    pub async fn probe(probes: &'static [Probe]) -> Self {
+        Self::probe_with(move || compute(probes)).await
+    }
+
+    async fn probe_with<F, Fut>(probe: F) -> Self
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ToolchainFingerprint> + Send,
+    {
+        let shared = Self::from(probe().await);
+        if shared.current() == ToolchainFingerprint::Unreliable {
+            warn!(
+                "Toolchain fingerprint unreliable; compile cache disabled until a re-probe succeeds"
+            );
+            let retry = shared.clone();
+            tokio::spawn(async move { retry.reprobe(probe).await });
+        }
+        shared
+    }
+
+    async fn reprobe<F, Fut>(&self, probe: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = ToolchainFingerprint>,
+    {
+        let mut delay = REPROBE_START;
+        loop {
+            tokio::time::sleep(delay).await;
+            let fingerprint = probe().await;
+            if fingerprint != ToolchainFingerprint::Unreliable {
+                info!(fingerprint = %fingerprint, "Toolchain re-probe succeeded; compile cache enabled");
+                *self.0.write().unwrap_or_else(|e| e.into_inner()) = fingerprint;
+                return;
+            }
+            delay = (delay * 2).min(REPROBE_MAX);
+            warn!(
+                retry_in_secs = delay.as_secs(),
+                "Toolchain re-probe still unreliable"
+            );
         }
     }
 }
@@ -229,6 +297,34 @@ mod tests {
             args: &["v2"],
         }];
         assert_ne!(compute(&p1).await, compute(&p2).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreliable_fingerprint_is_reprobed_until_known() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe = {
+            let calls = calls.clone();
+            move || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        ToolchainFingerprint::Unreliable
+                    } else {
+                        ToolchainFingerprint::Known("fp".into())
+                    }
+                }
+            }
+        };
+        let shared = SharedFingerprint::probe_with(probe).await;
+        assert_eq!(shared.current(), ToolchainFingerprint::Unreliable);
+
+        // Paused time auto-advances to each sleep: 5s, then 10s.
+        while shared.current() == ToolchainFingerprint::Unreliable {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert_eq!(shared.current(), ToolchainFingerprint::Known("fp".into()));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

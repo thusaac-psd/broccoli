@@ -14,7 +14,7 @@ mod execution;
 mod metrics;
 mod paths;
 
-use crate::toolchain_fingerprint::ToolchainFingerprint;
+use crate::toolchain_fingerprint::{SharedFingerprint, ToolchainFingerprint};
 
 pub struct OperationHandler {
     sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
@@ -39,7 +39,7 @@ pub struct CompileCache {
     /// How long a follower waits before running the step itself.
     pub follower_max_wait: Duration,
     /// Part of every cache key, so only matching toolchains share outputs.
-    pub toolchain_fingerprint: ToolchainFingerprint,
+    pub toolchain_fingerprint: SharedFingerprint,
 }
 
 impl CompileCache {
@@ -53,7 +53,7 @@ impl CompileCache {
             leader: Arc::new(super::cache_leader::NoopCacheLeaderElector),
             follower_poll_interval: Duration::from_millis(250),
             follower_max_wait: Duration::from_secs(30),
-            toolchain_fingerprint,
+            toolchain_fingerprint: toolchain_fingerprint.into(),
         }
     }
 }
