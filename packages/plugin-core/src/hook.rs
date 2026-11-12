@@ -205,7 +205,7 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
         // busy but a free slot will appear shortly. Retrying transparently
         // here matches the synchronous evaluator path and prevents a
         // fail-closed Reject (HTTP 500) for what is purely a server-side
-        // overload signal (UP#14h).
+        // overload signal.
         let call_result = call_raw_with_pool_retry(
             self.plugin_manager.as_ref(),
             &self.plugin_id,

@@ -37,7 +37,7 @@ pub struct ServerRuntime {
     /// lifecycle before its replica row is retired.
     state: AppState,
     /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
-    /// [`crate::healthz_runtime`] (UP#14e). `None` when `server.healthz_listen`
+    /// [`crate::healthz_runtime`]. `None` when `server.healthz_listen`
     /// is unset. The thread runs for the process lifetime and is reaped by
     /// the OS on exit, so we hold the handle for ownership but never `join()`
     /// it - hence the underscore prefix to silence dead-code warnings.
@@ -284,7 +284,7 @@ impl ServerRuntime {
 
         // NOTE: the stuck job detector is spawned later (after AppState is
         // built) so it can re-dispatch stuck rows via the same dispatcher
-        // entry as the lease/steal scanner. See UP#5.
+        // entry as the lease/steal scanner.
 
         let contest_type_registry = Arc::new(RwLock::new(HashMap::new()));
         let evaluator_registry = Arc::new(RwLock::new(HashMap::new()));
@@ -508,7 +508,7 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Failed to bind to {}", addr))?;
 
-        // UP#14e: optional dedicated runtime + listener for /healthz + /metrics.
+        // Optional dedicated runtime + listener for /healthz + /metrics.
         // When configured, probe traffic survives main-runtime saturation.
         let healthz_handle = if let Some(ref addr_str) = app_config.server.healthz_listen {
             let healthz_addr: SocketAddr = addr_str

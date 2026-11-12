@@ -44,7 +44,7 @@ mod code_run_creation {
         assert_eq!(res.status, 201);
         assert!(res.body["id"].as_i64().is_some());
         assert_eq!(res.body["language"], "cpp");
-        // UP#37: fresh code-runs land in `Queued`; the claim fiber
+        // Fresh code-runs land in `Queued`; the claim fiber
         // promotes to `Pending` asynchronously.
         assert_eq!(res.body["status"], "Queued");
         assert_eq!(res.body["problem_id"], problem_id);

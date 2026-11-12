@@ -86,10 +86,10 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn spawn(deps: DispatcherDeps) -> Self {
-        // The claim fiber (UP#38) is **independent** of the lease/steal
-        // toggle: it implements the durable-accept path that UP#37's
-        // `Queued`-on-POST relies on, and turning it off without also
-        // reverting UP#37 strands rows. We therefore spawn it as long as
+        // The claim fiber is **independent** of the lease/steal
+        // toggle: it implements the durable-accept path that
+        // `Queued`-on-POST relies on, and turning it off strands every
+        // row the POST handlers write. We therefore spawn it as long as
         // `claim_fiber_enabled` is set, regardless of the lease/steal
         // master switch.
         let lease_steal_enabled = deps.config.dispatcher_lease_steal_enabled;
@@ -157,8 +157,8 @@ impl Dispatcher {
             )));
         } else {
             info!(
-                "Claim fiber disabled by config. UP#37's Queued rows will not be promoted \
-                 to Pending until the fiber is re-enabled — this is intended only as an \
+                "Claim fiber disabled by config. Queued rows will not be promoted \
+                 to Pending until the fiber is re-enabled; this is intended only as an \
                  incident-response escape hatch."
             );
         }

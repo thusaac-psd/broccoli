@@ -1,4 +1,4 @@
-//! Integration tests for the Redis-backed cache leader-election layer (UP#33).
+//! Integration tests for the Redis-backed cache leader-election layer.
 //!
 //! Tests 1-4 spin up a real Redis container via `testcontainers` so we can
 //! verify the SETNX/heartbeat/CAS-release dance against a live server. Test 5
@@ -449,7 +449,7 @@ async fn end_to_end_concurrent_compile_runs_once() {
     assert_eq!(successes, 3, "all 3 handlers should succeed");
 
     // 2. Exactly one sandbox.execute() was called across all 3 handlers -
-    //    this is the load-bearing UP#33 acceptance criterion.
+    //    this is the property leader election exists to guarantee.
     assert_eq!(
         exec_count.load(Ordering::SeqCst),
         1,

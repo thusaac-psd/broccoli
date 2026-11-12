@@ -325,7 +325,7 @@ pub async fn retry_dlq_message(
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<DlqRetryResponse>, AppError> {
     auth_user.require_permission(perm::DLQ_MANAGE)?;
-    // UP#39 backpressure-on-post: DLQ retry flips the submission back
+    // Backpressure on POST: DLQ retry flips the submission back
     // into `Queued` (see `retry_stuck_submission`). Treat it as a
     // fresh durable-accept and apply the same cap.
     enforce_queue_depth_admission(&state).await?;
@@ -409,7 +409,7 @@ pub async fn bulk_retry_dlq(
 ) -> Result<Json<BulkRetryDlqResponse>, AppError> {
     auth_user.require_permission(perm::DLQ_MANAGE)?;
     validate_bulk_retry_dlq(&payload)?;
-    // UP#39 backpressure-on-post: bulk DLQ retry flips many
+    // Backpressure on POST: bulk DLQ retry flips many
     // submissions back to `Queued` in a single call. The check here
     // samples the depth **once at the start** of the bulk insert,
     // which is intentionally permissive: the cap is a steady-state
@@ -497,10 +497,10 @@ pub async fn bulk_retry_dlq(
         }
     }
 
-    // UP#37: each reset submission is now in `Queued`; the claim fiber
-    // (UP#38, `dispatcher/claim.rs`) takes it from there. We no longer
-    // reload + spawn per row - that path was the very silent-loss
-    // vector this PR closes.
+    // Each reset submission is now in `Queued`; the claim fiber
+    // (`dispatcher/claim.rs`) takes it from there. Do not reload and
+    // spawn a dispatch per row here: a crash between commit and spawn
+    // would silently lose the retry.
 
     info!(
         retried,

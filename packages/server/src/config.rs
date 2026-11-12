@@ -169,17 +169,16 @@ pub struct ServerConfig {
     #[serde(default = "default_dispatcher_concurrency")]
     pub dispatcher_concurrency: u32,
     /// Per-server cap on in-process dispatch tasks waiting on the
-    /// dispatcher semaphore. Post-UP#37 the durable accept path
-    /// (POST -> INSERT `Queued` -> claim fiber -> dispatch) no longer
-    /// passes through the dispatcher semaphore at ingress - only the
+    /// dispatcher semaphore. The durable accept path
+    /// (POST -> INSERT `Queued` -> claim fiber -> dispatch) does not
+    /// pass through the dispatcher semaphore at ingress - only the
     /// steal-scanner (`dispatcher/steal.rs`) still calls
     /// `dispatcher_permits.reserve()` before spawning a re-dispatch
     /// task. Tune this to bound spawn bursts on a single server when
     /// the steal scanner picks up many orphaned rows at once.
     ///
-    /// Historically named `max_queued_submissions`; renamed in UP#39
-    /// so that name could be repurposed as the **DB-row backpressure
-    /// cap** at POST ingress, matching its plain-English meaning.
+    /// Not to be confused with `max_queued_submissions`, which is the
+    /// **DB-row backpressure cap** at POST ingress.
     #[serde(default = "default_dispatcher_admission_queue_max")]
     pub dispatcher_admission_queue_max: u32,
     /// Per-server cap on the **durable `Queued` queue depth** observed
@@ -187,7 +186,7 @@ pub struct ServerConfig {
     /// tables combined. When the live count is at or above this value,
     /// POST endpoints that would insert a new `Queued` row reject with
     /// `503 Service Unavailable` + `Retry-After` rather than enqueueing
-    /// more work (UP#39 backpressure-on-post).
+    /// more work (backpressure on POST).
     ///
     /// Multi-replica deployments share the DB, so this cap is observed
     /// fleet-wide via `SELECT COUNT(*) WHERE status='Queued'` - not
@@ -277,10 +276,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub max_blocking_threads: Option<usize>,
     /// Per-server cap on concurrent live evaluator-batch test-case dispatch
-    /// tasks (UP#14b). `start_evaluate_batch` historically spawned one tokio
-    /// task per test case in an unbounded loop; under a 1000-submission burst
-    /// with ICPC's 20 testcases/submission that produced 20,000 simultaneous
-    /// tasks contending on the inner plugin-pool semaphore. This bounds the
+    /// tasks. Unbounded, `start_evaluate_batch` would spawn one tokio task per
+    /// test case; a 1000-submission burst with ICPC's 20 testcases/submission
+    /// would then put 20,000 simultaneous tasks in contention on the inner
+    /// plugin-pool semaphore. This bounds the
     /// **spawn** itself: the dispatcher acquires a permit before spawning the
     /// per-test-case task and holds it for the task's lifetime.
     ///
@@ -292,10 +291,10 @@ pub struct ServerConfig {
     #[serde(default = "default_batch_evaluator_fanout_concurrency")]
     pub batch_evaluator_fanout_concurrency: u32,
     /// Per-batch cap on concurrent in-flight `mq.publish` + blob-externalize
-    /// operations inside `start_operation_batch` (UP#14c). Historically the
-    /// batch loop awaited each publish sequentially, so a 1000-op batch with
-    /// 5ms publishes serialized to ~5s of wall time before the first worker
-    /// could pick up a task. With `buffer_unordered(N)` the same batch takes
+    /// operations inside `start_operation_batch`. Awaiting each publish
+    /// sequentially would serialize a 1000-op batch with 5ms publishes to ~5s
+    /// of wall time before the first worker could pick up a task. With
+    /// `buffer_unordered(N)` the same batch takes
     /// roughly `total_publish_ms / N` plus MQ-broker throughput limits.
     ///
     /// Default 32. Trade-off: higher values reduce dispatch latency but
@@ -307,7 +306,7 @@ pub struct ServerConfig {
     pub operation_batch_publish_concurrency: u32,
     /// Address (e.g. `"0.0.0.0:9091"`) for an **optional** dedicated TCP
     /// listener that serves only `/livez`, `/healthz` (both liveness-only
-    /// there) and `/metrics` on its own tokio runtime + OS thread (UP#14e).
+    /// there) and `/metrics` on its own tokio runtime + OS thread.
     /// When `None`, these endpoints are served only on the main router and
     /// therefore share the main runtime's scheduler.
     ///
@@ -320,29 +319,29 @@ pub struct ServerConfig {
     #[serde(default)]
     pub healthz_listen: Option<String>,
     /// Number of tokio worker threads for the dedicated healthz/metrics
-    /// runtime (UP#14e). Two is plenty: the only handlers running here are
+    /// runtime. Two is plenty: the only handlers running here are
     /// a Prometheus encode (CPU-bound, microseconds) and a 2s DB/MQ ping.
     /// Increase only if you also use the healthz listener for high-volume
     /// scraping fan-in.
     #[serde(default = "default_healthz_worker_threads")]
     pub healthz_worker_threads: u32,
-    /// Master switch for the UP#38 claim fiber. When `true` (default), the
+    /// Master switch for the claim fiber. When `true` (default), the
     /// per-server claim fiber polls the `submission` and `code_run` tables
     /// for `status='Queued'` rows, transitions them to `Pending`, and
     /// dispatches them via the existing plugin path. When `false`, the
-    /// fiber never starts - UP#37's POST handlers still write `Queued`, but
-    /// no one will claim the rows, so they will accumulate until a
-    /// configuration roll-forward. Only flip this off if you need to pin a
-    /// deployment to the pre-UP#37 dispatch behavior while debugging.
+    /// fiber never starts - POST handlers still write `Queued`, but no one
+    /// claims the rows, so they accumulate until the fiber is re-enabled.
+    /// Only flip this off to stop a server from dispatching new work while
+    /// debugging.
     #[serde(default = "default_claim_fiber_enabled")]
     pub claim_fiber_enabled: bool,
-    /// Poll interval (ms) for the UP#38 claim fiber. Default 1000ms. Lower
+    /// Poll interval (ms) for the claim fiber. Default 1000ms. Lower
     /// values reduce POST->Pending latency but increase background SQL load
     /// (a no-op poll is a single `SELECT ... LIMIT $batch FOR UPDATE SKIP
     /// LOCKED` per table).
     #[serde(default = "default_claim_poll_interval_ms")]
     pub claim_poll_interval_ms: u64,
-    /// Bounded SELECT LIMIT for the UP#38 claim fiber. The fiber claims at
+    /// Bounded SELECT LIMIT for the claim fiber. The fiber claims at
     /// most this many rows per table per tick. Defaults to 32 to match
     /// `dispatcher_concurrency`'s order of magnitude; raise it on
     /// deployments with bursty submission patterns so a single tick can
@@ -457,7 +456,7 @@ fn default_dispatcher_admission_queue_max() -> u32 {
 }
 
 fn default_max_queued_submissions() -> u32 {
-    // 5000 - the durable `Queued` row depth at which UP#39
+    // 5000 - the durable `Queued` row depth at which POST
     // backpressure kicks in. Set to `0` to disable.
     5000
 }

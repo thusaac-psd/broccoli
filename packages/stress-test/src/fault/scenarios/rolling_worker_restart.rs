@@ -1,6 +1,6 @@
 //! Rolling worker restart / cache-leader race scenario.
 //!
-//! This probes the Redis contract used by UP#33's worker cache leader election:
+//! This probes the Redis contract used by the worker cache leader election:
 //! a follower must observe the leader-held lease and poll rather than compile,
 //! then a follower must be able to become leader once the abandoned lease
 //! expires after the worker restart.

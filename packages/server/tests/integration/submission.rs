@@ -60,7 +60,7 @@ mod submission_creation {
 
         assert_eq!(res.status, 201);
         assert_eq!(res.body["language"], "cpp");
-        // UP#37: fresh submissions land in `Queued`; the per-server
+        // Fresh submissions land in `Queued`; the per-server
         // claim fiber promotes them to `Pending` asynchronously, but
         // the POST response reflects the just-committed row.
         assert_eq!(res.body["status"], "Queued");
@@ -721,7 +721,7 @@ mod rejudge {
             .await;
 
         assert_eq!(res.status, 200);
-        // UP#37: rejudge (apply_immediately defaults to true) writes the
+        // Rejudge (apply_immediately defaults to true) writes the
         // submission back to `Queued`. The claim fiber owns the
         // promotion to `Pending`. We assert on the POST body which
         // reflects the just-committed row, not the eventual state.
@@ -2111,7 +2111,7 @@ mod contest_submission_visibility {
     }
 }
 
-/// UP#38 - claim-fiber coverage.
+/// Claim-fiber coverage.
 ///
 /// These tests exercise the durable-accept path end-to-end: rows that
 /// land in `Queued` (either via a POST or a direct DB write that
@@ -2150,8 +2150,8 @@ mod claim_fiber {
         }
     }
 
-    /// Posting a submission goes through the UP#37 durable-accept path
-    /// (POST inserts `Queued` and returns 201). The UP#38 claim fiber
+    /// Posting a submission goes through the durable-accept path
+    /// (POST inserts `Queued` and returns 201). The claim fiber
     /// running in the test app's runtime must promote the row to
     /// `Pending` (or further) without any other actor intervening.
     #[tokio::test]
@@ -2172,7 +2172,7 @@ mod claim_fiber {
             .post_with_token(&routes::problem_submissions(problem_id), &body, &user_token)
             .await;
         assert_eq!(res.status, 201);
-        // UP#37 contract: POST response reflects the just-committed row.
+        // Contract: POST response reflects the just-committed row.
         assert_eq!(res.body["status"], "Queued");
         let submission_id = res.body["id"]
             .as_i64()
@@ -2190,7 +2190,7 @@ mod claim_fiber {
 
         // Verify the fiber also wrote ownership metadata. Without these
         // a stuck row would have no path to recovery via the existing
-        // dispatcher/steal scanner (UP#15).
+        // dispatcher/steal scanner.
         let row = submission::Entity::find_by_id(submission_id)
             .one(&app.db)
             .await
@@ -2206,7 +2206,7 @@ mod claim_fiber {
         );
     }
 
-    /// Simulates an api crash between the POST handler's INSERT (UP#37)
+    /// Simulates an api crash between the POST handler's INSERT
     /// and any client-visible response: write a `Queued` row directly
     /// via sea-orm, then verify the claim fiber picks it up. This is
     /// the strongest assertion we can make in-process without
@@ -2255,7 +2255,7 @@ mod claim_fiber {
         );
     }
 
-    /// UP#37 residual fix: a non-current `submission_judgement` row
+    /// A non-current `submission_judgement` row
     /// inserted at `status=Queued` (simulating the deferred-rejudge
     /// post-commit state) must be picked up by the claim fiber's
     /// judgement scan and promoted to Pending. Without this path the
@@ -2361,7 +2361,7 @@ mod claim_fiber {
     }
 }
 
-/// UP#39 backpressure-on-post - `server.max_queued_submissions` caps
+/// Backpressure on POST - `server.max_queued_submissions` caps
 /// the durable `Queued` row depth across `submission`, `code_run`,
 /// and `submission_judgement`. POST endpoints that would insert a
 /// new `Queued` row return 503 + `Retry-After` when the cap is hit

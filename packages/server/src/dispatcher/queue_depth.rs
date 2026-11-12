@@ -1,10 +1,10 @@
-//! UP#39 backpressure-on-post: counts and admission-control for the
+//! Backpressure on POST: counts and admission-control for the
 //! durable `Queued` row depth.
 //!
-//! Post-UP#37 the API no longer dispatches submissions in-process at
-//! the request boundary; instead, each POST handler inserts a row with
+//! The API does not dispatch submissions in-process at the request
+//! boundary; instead, each POST handler inserts a row with
 //! `status='Queued'` and returns 201 immediately. The per-server
-//! UP#38 claim fiber (`dispatcher/claim.rs`) drains these rows by
+//! claim fiber (`dispatcher/claim.rs`) drains these rows by
 //! flipping them to `Pending` and handing them off to the existing
 //! plugin path.
 //!
@@ -55,7 +55,7 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 /// `packages/server/src/entity/code_run.rs`, and
 /// `packages/server/src/entity/submission_judgement.rs` (no
 /// `#[sea_orm(indexed)]` on `Status`). Each COUNT is therefore a
-/// sequential scan. At the UP#39 default cap of ~5000 live `Queued`
+/// sequential scan. At the default cap of ~5000 live `Queued`
 /// rows across the three tables, a seq scan on Postgres is
 /// sub-millisecond and the three round-trips dominate wall time -
 /// not a real cost in practice.
@@ -68,8 +68,8 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 /// the partial form keeps the index tiny because only `Queued` rows
 /// are indexed (steady-state size = the cap, ~5000 rows). Partial
 /// indexes require a raw SQL migration outside SeaORM's schema-sync
-/// flow, which is out of scope for UP#39; track that as a follow-up
-/// PR if production telemetry shows the COUNTs becoming a hotspot.
+/// flow, so add one only if production telemetry shows the COUNTs
+/// becoming a hotspot.
 ///
 /// A single UNION ALL would shave a round-trip but complicates the
 /// SeaORM call surface for negligible benefit.
@@ -105,8 +105,7 @@ where
 /// past the cap and the next concurrent POST would still squeak in
 /// before observing the new state.
 ///
-/// Status-code choice: the UP#39 spec text reads "503 + Retry-After".
-/// We match that literally. Per RFC 7231 §6.6.4, 503 means "the
+/// Status-code choice: 503 + Retry-After. Per RFC 7231 §6.6.4, 503 means "the
 /// server is currently unable to handle the request due to a
 /// temporary overload" - the exact semantics of durable-queue
 /// backpressure (the service as a whole is past capacity, not "this
@@ -125,7 +124,7 @@ pub async fn enforce_queue_depth_admission(state: &AppState) -> Result<(), AppEr
         tracing::warn!(
             queue_depth = depth,
             cap,
-            "Rejecting POST: durable Queued depth at or above cap (UP#39 backpressure)"
+            "Rejecting POST: durable Queued depth at or above cap (backpressure)"
         );
         return Err(AppError::Overloaded {
             retry_after: RETRY_AFTER_SECS,

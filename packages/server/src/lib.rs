@@ -366,7 +366,7 @@ pub fn build_router(state: AppState) -> axum::Router {
     // `/livez` is the shallow liveness probe for load balancers (no dependency
     // calls); `/healthz` is the deep readiness check (DB + Redis).
     // `/metrics`, `/livez` and `/healthz` are also served on a dedicated tokio runtime
-    // + listener when `server.healthz_listen` is configured - see UP#14e in
+    // + listener when `server.healthz_listen` is configured - see
     // `healthz_runtime`. Operators are encouraged to point load-balancer
     // probes and Prometheus scrapes at the dedicated listener so main-runtime
     // saturation (submission bursts, scheduler thrash) does not stall

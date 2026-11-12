@@ -20,13 +20,13 @@ id = ""
 # server to 256, same throughput, ~13% less peak memory. 0 = no cap.
 max_in_flight_submissions = 256
 
-# UP#39 backpressure-on-post: cap on durable `Queued` rows across
+# Backpressure on POST: cap on durable `Queued` rows across
 # `submission`, `code_run`, and `submission_judgement` combined. When
 # the live depth is at or above this value, POST endpoints that would
 # insert a new `Queued` row return 503 + Retry-After (code
 # `QUEUE_OVERLOADED`) instead of accepting more work. Set to 0 to
-# disable. Default 5000.
-# See UPGRADE-NOTES.md for the pre-UP#39 -> post-UP#39 migration.
+# disable. Default 5000. Not the same as `dispatcher_admission_queue_max`
+# below, which bounds in-process dispatch tasks rather than database rows.
 max_queued_submissions = 5000
 # Per-server cap on in-process dispatch tasks waiting on the
 # dispatcher semaphore. Bounds spawn bursts when the steal-scanner

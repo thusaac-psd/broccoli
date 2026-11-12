@@ -14,7 +14,7 @@
 //!
 //! Companion to (but intentionally simpler than) `DispatcherSemaphore` in
 //! [`crate::dispatcher::permits`]: that one has a queue + reject policy for
-//! admission control at the public API boundary, this one just blocks. UP#14b.
+//! admission control at the public API boundary, this one just blocks.
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -267,7 +267,7 @@ impl E2eTestApp {
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
                 dispatcher_admission_queue_max: 0,
-                // UP#39: disable durable Queued-depth backpressure in e2e
+                // Disable durable Queued-depth backpressure in e2e
                 // by default; tests opt in if they need to exercise it.
                 max_queued_submissions: 0,
                 lease_ttl_secs: 60,
