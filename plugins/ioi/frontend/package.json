@@ -58,7 +58,7 @@
     "@tsdown/css": "^0.21.4",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.6",
-    "lucide-react": "^0.500.0",
+    "lucide-react": "^1.7.0",
     "postcss": "^8.4.0",
     "postcss-import": "^16.1.1",
     "react-router": "^7.0.0",
