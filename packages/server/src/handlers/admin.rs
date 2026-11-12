@@ -260,28 +260,48 @@ async fn read_archive(
     if !state.config.plugin.uploads_enabled {
         return Err(AppError::PluginUploadDisabled);
     }
+    let too_large = || {
+        AppError::PayloadTooLarge(format!(
+            "Plugin archives are limited to {} MiB",
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        ))
+    };
+    let unreadable = |e: axum::extract::multipart::MultipartError| {
+        if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            too_large()
+        } else {
+            AppError::Validation(format!("Failed to read the upload: {e}"))
+        }
+    };
     let mut bytes = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| AppError::Validation(format!("Multipart error: {}", e)))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(unreadable)? {
         if field.name() == Some("plugin") {
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::Validation(format!("Failed to read upload: {}", e)))?;
-            bytes = Some(data.to_vec());
+            bytes = Some(field.bytes().await.map_err(unreadable)?);
             break;
         }
     }
     let bytes = bytes
         .ok_or_else(|| AppError::Validation("Missing 'plugin' field in multipart form".into()))?;
+    if bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(too_large());
+    }
     // Decompressing and checking up to the unpacked limit is CPU work.
     tokio::task::spawn_blocking(move || PluginArchive::parse(bytes))
         .await
         .map_err(|e| AppError::Internal(format!("Archive check task failed: {e}")))?
         .map_err(|e| AppError::Validation(e.to_string()))
+}
+
+/// One archive at a time per server: each holds up to [`MAX_ARCHIVE_BYTES`]
+/// in memory while it is read and checked, so uploads and inspections queue
+/// here instead of adding up.
+static ARCHIVE_INTAKE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn archive_intake() -> Result<tokio::sync::SemaphorePermit<'static>, AppError> {
+    ARCHIVE_INTAKE
+        .acquire()
+        .await
+        .map_err(|e| AppError::Internal(format!("archive intake closed: {e}")))
 }
 
 #[utoipa::path(
@@ -323,7 +343,7 @@ pub async fn get_plugin_upload_policy(
         (status = 400, description = "Invalid archive (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
-        (status = 413, description = "Archive too large", body = ErrorBody),
+        (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -334,6 +354,7 @@ pub async fn inspect_plugin_archive(
     multipart: Multipart,
 ) -> Result<Json<PluginArchiveSummary>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    let _intake = archive_intake().await?;
     let archive = read_archive(&state, multipart).await?;
     let current = plugin_entity::Entity::find_by_id(archive.id().as_str())
         .one(&state.db)
@@ -379,7 +400,7 @@ pub async fn inspect_plugin_archive(
         (status = 400, description = "Invalid archive (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED, PLUGIN_UPLOAD_DISABLED)", body = ErrorBody),
-        (status = 413, description = "Archive too large", body = ErrorBody),
+        (status = 413, description = "Archive too large (PAYLOAD_TOO_LARGE)", body = ErrorBody),
         (status = 422, description = "The plugin failed to load on the serving replica; nothing was published (PLUGIN_LOAD_FAILED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -391,6 +412,7 @@ pub async fn upload_plugin(
     multipart: Multipart,
 ) -> Result<Json<PluginUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+    let _intake = archive_intake().await?;
     let archive = read_archive(&state, multipart).await?;
     let plugin_id = archive.id().to_string();
     let version = archive.manifest().version.clone();

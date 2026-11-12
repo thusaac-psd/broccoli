@@ -463,9 +463,10 @@ impl PluginFullDetailResponse {
     }
 }
 
-/// The multipart form the plugin upload endpoints read (documentation only:
-/// the handlers stream the field themselves, so a refused upload is
-/// answered before its body is read).
+/// The multipart form the plugin upload endpoints read. Documentation only:
+/// the handlers read the field themselves, after the permission and
+/// upload-policy checks, so a refused upload is answered before its body is
+/// read.
 #[derive(utoipa::ToSchema)]
 pub struct PluginArchiveForm {
     /// A tar.gz archive with a single top-level directory, named after the

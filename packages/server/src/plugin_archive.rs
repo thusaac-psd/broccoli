@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use axum::body::Bytes;
 use common::storage::ContentHash;
 
 use crate::plugin_id::PluginId;
@@ -52,7 +53,7 @@ pub struct PluginArchive {
     id: PluginId,
     manifest: PluginManifest,
     hash: ContentHash,
-    bytes: Vec<u8>,
+    bytes: Bytes,
 }
 
 impl std::fmt::Debug for PluginArchive {
@@ -71,7 +72,8 @@ impl PluginArchive {
     /// path stays inside the plugin root, that `plugin.toml` parses and
     /// declares valid routes, and that every path it names is inside the
     /// plugin root and its entry points are in the archive.
-    pub fn parse(bytes: Vec<u8>) -> Result<Self, ArchiveError> {
+    pub fn parse(bytes: impl Into<Bytes>) -> Result<Self, ArchiveError> {
+        let bytes: Bytes = bytes.into();
         if bytes.len() > MAX_ARCHIVE_BYTES {
             return Err(reject(format!(
                 "Archive exceeds the maximum size of {} MiB",
