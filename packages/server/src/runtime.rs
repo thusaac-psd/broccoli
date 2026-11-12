@@ -92,7 +92,6 @@ impl ServerRuntime {
         boot.migrate().await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
-        crate::seed::backfill_submission_judgements(boot.conn()).await?;
 
         let db = crate::database::connect_main_pool(
             &app_config.database.url,
@@ -185,8 +184,6 @@ impl ServerRuntime {
             "Blob storage initialized (backend: {})",
             app_config.storage.backend
         );
-
-        crate::seed::spawn_large_test_case_body_backfill(db.clone(), Arc::clone(&blob_store));
 
         let mq = if app_config.mq.enabled {
             match init_mq(MqConnConfig {

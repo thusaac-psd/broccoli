@@ -1397,7 +1397,7 @@ mod deferred_steal_db_tests {
         // the pre-bump epoch.
         test_case_result::ActiveModel {
             submission_id: Set(sub_id),
-            judgement_id: Set(Some(jid)),
+            judgement_id: Set(jid),
             judge_epoch: Set(0),
             verdict: Set(common::Verdict::Accepted),
             score: Set(1.0),

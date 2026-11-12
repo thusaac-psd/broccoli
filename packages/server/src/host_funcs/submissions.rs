@@ -550,7 +550,7 @@ mod tests {
         .await;
         test_case_result::ActiveModel {
             submission_id: Set(sub.id),
-            judgement_id: Set(Some(first.id)),
+            judgement_id: Set(first.id),
             judge_epoch: Set(first.judge_epoch),
             verdict: Set(common::Verdict::Accepted),
             score: Set(1.0),

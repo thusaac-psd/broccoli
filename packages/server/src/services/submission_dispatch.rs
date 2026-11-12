@@ -1208,7 +1208,7 @@ mod tests {
     async fn seed_tcr(db: &DatabaseConnection, sub_id: i32, judgement_id: i32, epoch: i32) {
         test_case_result::ActiveModel {
             submission_id: Set(sub_id),
-            judgement_id: Set(Some(judgement_id)),
+            judgement_id: Set(judgement_id),
             judge_epoch: Set(epoch),
             verdict: Set(Verdict::SystemError),
             score: Set(0.0),
