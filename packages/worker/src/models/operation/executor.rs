@@ -5,7 +5,9 @@ use std::time::Duration;
 use super::cache_leader::{
     CacheLeaderElector, CacheLeaderOpts, NoopCacheLeaderElector, RedisCacheLeaderElector,
 };
-use super::file_cacher::{BlobStoreFileCacher, FileCacher, NoopFileCacher};
+#[cfg(any(test, feature = "test-support"))]
+use super::file_cacher::NoopFileCacher;
+use super::file_cacher::{BlobStoreFileCacher, FileCacher};
 use super::models::{MountSource, OperationTask};
 use super::sandbox::SandboxManager;
 use super::sandbox::isolate::IsolateSandboxManager;
@@ -204,7 +206,7 @@ impl OperationTaskExecutor {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_sandbox_manager(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         metrics: common::metrics::Metrics,
@@ -221,7 +223,7 @@ impl OperationTaskExecutor {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn new_with_sandbox_manager_and_blob_store(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         blob_store: Arc<dyn common::storage::BlobStore>,

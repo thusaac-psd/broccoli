@@ -479,8 +479,8 @@ mod tests {
         redis_url: &str,
         calls: Arc<AtomicUsize>,
     ) -> WorkerConsumer {
-        let worker = Worker::with_no_executors();
-        worker.register_executor("operation", Arc::new(CountingExecutor { calls }));
+        let executor: Arc<dyn Executor> = Arc::new(CountingExecutor { calls });
+        let worker = Worker::new([("operation".to_string(), executor)]);
         let mq = mq::init_mq(mq::MqConfig {
             url: redis_url.to_string(),
             pool_size: 1,

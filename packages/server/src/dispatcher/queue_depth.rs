@@ -48,28 +48,9 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 /// `status='Queued'`. The three tables are queried sequentially with
 /// short SELECTs - three round-trips dominate the cost.
 ///
-/// **Index status (honesty disclaimer):** the `status` column on
-/// `submission`, `code_run`, and `submission_judgement` does **not**
-/// carry a btree index today - see the entity definitions at
-/// `packages/server/src/entity/submission.rs`,
-/// `packages/server/src/entity/code_run.rs`, and
-/// `packages/server/src/entity/submission_judgement.rs` (no
-/// `#[sea_orm(indexed)]` on `Status`). Each COUNT is therefore a
-/// sequential scan. At the default cap of ~5000 live `Queued`
-/// rows across the three tables, a seq scan on Postgres is
-/// sub-millisecond and the three round-trips dominate wall time -
-/// not a real cost in practice.
-///
-/// **Escape hatch if load testing later shows it matters:** a
-/// *partial* index - `CREATE INDEX ... ON submission (status) WHERE
-/// status = 'Queued'` (and likewise on the other two tables) - is the
-/// right tool. Low-cardinality status enums benefit more from a
-/// partial index keyed on the hot value than from a full btree, and
-/// the partial form keeps the index tiny because only `Queued` rows
-/// are indexed (steady-state size = the cap, ~5000 rows). Partial
-/// indexes require a raw SQL migration outside SeaORM's schema-sync
-/// flow, so add one only if production telemetry shows the COUNTs
-/// becoming a hotspot.
+/// Each COUNT reads the partial `<table>_queued_idx` index over the table's
+/// `Queued` rows (migration `m0014_queued_partial_indexes`), which stays as
+/// small as the cap.
 ///
 /// A single UNION ALL would shave a round-trip but complicates the
 /// SeaORM call surface for negligible benefit.

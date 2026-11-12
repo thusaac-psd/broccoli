@@ -112,6 +112,8 @@ fn ensure_world_readable(path: &Path) {
 #[cfg(not(unix))]
 fn ensure_world_readable(_path: &Path) {}
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait FileCacher: Send + Sync {
     async fn fetch_to_path(&self, content_hash: &str, dest: &Path) -> Result<(), String>;
@@ -124,8 +126,11 @@ pub trait FileCacher: Send + Sync {
     async fn warm(&self, content_hash: &str) -> Result<u64, String>;
 }
 
+/// Caches nothing and fetches nothing, for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub struct NoopFileCacher;
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl FileCacher for NoopFileCacher {
     async fn fetch_to_path(&self, _content_hash: &str, _dest: &Path) -> Result<(), String> {
@@ -139,12 +144,13 @@ impl FileCacher for NoopFileCacher {
     }
 }
 
-#[allow(dead_code)]
+/// Fails every blob operation, as if blob storage were down, for tests.
+#[cfg(any(test, feature = "test-support"))]
 pub struct UnavailableFileCacher {
     reason: String,
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, feature = "test-support"))]
 impl UnavailableFileCacher {
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
@@ -153,6 +159,7 @@ impl UnavailableFileCacher {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl FileCacher for UnavailableFileCacher {
     async fn fetch_to_path(&self, content_hash: &str, _dest: &Path) -> Result<(), String> {

@@ -105,6 +105,8 @@ fn record_pool_acquire_metrics(
 /// accessors declared here are exactly the state that
 /// [`call_raw_with_host_context`](PluginInvoker::call_raw_with_host_context)
 /// needs; the wider management surface lives on the [`PluginManager`] subtrait.
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PluginInvoker: Send + Sync {
     fn get_registry(&self) -> &PluginRegistry;
@@ -328,6 +330,8 @@ pub trait PluginInvoker: Send + Sync {
     }
 }
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PluginInvokerExt: PluginInvoker {
     async fn call<T, R>(&self, plugin_id: &str, func_name: &str, input: T) -> Result<R, PluginError>

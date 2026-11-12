@@ -28,6 +28,8 @@ use crate::services::windowed_session::{
 
 const INLINE_FILE_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait OperationTaskPublisher: Send + Sync {
     async fn publish_operation_task(

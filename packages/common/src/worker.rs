@@ -1,4 +1,3 @@
-use crate::event::Event;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -334,24 +333,8 @@ mod reply_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TaskEvent {
-    Started { task: Task },
-    Completed { result: TaskResult },
-    Failed { task: Task, error: String },
-}
-
-impl Event for TaskEvent {
-    fn topic(&self) -> &str {
-        match self {
-            TaskEvent::Started { .. } => "task_started",
-            TaskEvent::Completed { .. } => "task_completed",
-            TaskEvent::Failed { .. } => "task_failed",
-        }
-    }
-}
-
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Executor: Send + Sync {
     fn if_accept(&self, _task_type: &str) -> bool;

@@ -13,9 +13,7 @@ pub mod submissions;
 pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
-use common::metrics::Metrics;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
-use opentelemetry::KeyValue;
 use plugin_core::host::HostFunctionRegistry;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -129,26 +127,6 @@ pub(crate) fn write_bytes(
     let handle = plugin.memory_new(bytes)?;
     outputs[0] = Val::I64(handle.offset() as i64);
     Ok(())
-}
-
-// Counts a host function entering `block_in_place`. Host functions run inside
-// `spawn_blocking` and must not call it, so nothing in shipping code calls
-// this: a non-zero `broccoli.host_fn.block_in_place` count means one does, and
-// the stress wave in `tests/integration/source_invariants.rs` fails on it.
-#[track_caller]
-#[allow(dead_code)]
-pub(crate) fn record_block_in_place_regression(metrics: &Option<Metrics>, host_fn: &str) {
-    if let Some(m) = metrics {
-        let loc = std::panic::Location::caller();
-        m.host_fn_block_in_place_total.add(
-            1,
-            &[
-                KeyValue::new("host_fn", host_fn.to_string()),
-                KeyValue::new("file", loc.file().to_string()),
-                KeyValue::new("line", loc.line() as i64),
-            ],
-        );
-    }
 }
 
 pub(crate) fn host_fn_span(host_fn: &'static str, plugin_id: &str) -> Span {
@@ -551,25 +529,6 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `record_block_in_place_regression` is `#[allow(dead_code)]` and
-    /// has no production callers; without this test it would never be
-    /// exercised. The `None` branch must be a no-op (calls into a
-    /// missing `Metrics` would panic and bring down a host function).
-    #[test]
-    fn record_block_in_place_regression_no_metrics_is_noop() {
-        record_block_in_place_regression(&None, "test_host_fn");
-    }
-
-    /// With a real `Metrics` instance, the recorder must run cleanly
-    /// (we can't easily assert the counter incremented without an
-    /// OTLP harness - non-panic is the contract under test here).
-    #[test]
-    fn record_block_in_place_regression_with_metrics_runs() {
-        let _guard = crate::metrics_test_lock();
-        let (metrics, _registry) = common::observability::init_metrics("broccoli-test");
-        record_block_in_place_regression(&Some(metrics), "test_host_fn");
-    }
 
     #[test]
     fn host_call_snapshots_context_and_releases_the_lock() {

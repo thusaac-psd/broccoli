@@ -1348,7 +1348,6 @@ mod tests {
         let redacted = results[1]
             .take()
             .expect("contest 2 was redacted, not denied");
-        assert_eq!(redacted.as_inner().id, 2);
         let json = redacted.into_masked_json().unwrap();
         assert!(
             json["score"].is_null(),

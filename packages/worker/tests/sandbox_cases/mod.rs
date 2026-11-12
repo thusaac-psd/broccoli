@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use common::worker::{Task, TaskResult};
+use common::worker::{Executor, Task, TaskResult};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -243,14 +243,11 @@ async fn run_task<B: Backend>(
     operation: OperationTask,
 ) -> (TaskResult, OperationResult) {
     let (metrics, _registry) = common::observability::init_metrics("broccoli-worker-test");
-    let worker = Worker::with_no_executors();
-    worker.register_executor(
-        "operation",
-        Arc::new(OperationTaskExecutor::new_with_sandbox_manager(
-            B::manager(),
-            metrics,
-        )),
-    );
+    let executor: Arc<dyn Executor> = Arc::new(OperationTaskExecutor::new_with_sandbox_manager(
+        B::manager(),
+        metrics,
+    ));
+    let worker = Worker::new([("operation".to_string(), executor)]);
     let task = Task {
         id: task_id.to_string(),
         task_type: "operation".to_string(),

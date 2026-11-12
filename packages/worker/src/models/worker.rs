@@ -1,22 +1,21 @@
-use common::hook::{Hook, HookRegistry};
 use common::worker::*;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::config::WorkerAppConfig;
 use crate::error::WorkerError;
 use crate::models::operation::OperationTaskExecutor;
 
+/// Runs tasks on the executor registered under each task's `executor_name`.
+/// The executors are fixed at construction.
 pub struct Worker {
-    executors: Arc<Mutex<HashMap<String, Arc<dyn Executor>>>>,
-    hook_registry: Arc<Mutex<HookRegistry>>,
+    executors: HashMap<String, Arc<dyn Executor>>,
 }
 
 impl Worker {
-    pub fn with_no_executors() -> Self {
+    pub fn new(executors: impl IntoIterator<Item = (String, Arc<dyn Executor>)>) -> Self {
         Self {
-            executors: Arc::new(Mutex::new(HashMap::new())),
-            hook_registry: Arc::new(Mutex::new(HookRegistry::new(()))),
+            executors: executors.into_iter().collect(),
         }
     }
 
@@ -24,47 +23,13 @@ impl Worker {
         config: &WorkerAppConfig,
         metrics: common::metrics::Metrics,
     ) -> anyhow::Result<Self> {
-        let worker = Self::with_no_executors();
-
-        worker.register_executor(
-            "operation",
-            Arc::new(OperationTaskExecutor::from_app_config(config, metrics).await?),
-        );
-        Ok(worker)
-    }
-
-    pub fn register_executor(&self, name: &str, executor: Arc<dyn Executor>) {
-        self.executors
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), executor);
-    }
-
-    #[allow(dead_code)]
-    pub fn add_hook<H: Hook<TaskEvent, Context = ()> + 'static>(
-        &self,
-        hook: H,
-    ) -> Result<(), WorkerError> {
-        self.hook_registry
-            .lock()
-            .unwrap()
-            .add_hook(hook)
-            .map_err(|e| WorkerError::Internal(e.to_string()))
+        let operation: Arc<dyn Executor> =
+            Arc::new(OperationTaskExecutor::from_app_config(config, metrics).await?);
+        Ok(Self::new([("operation".to_string(), operation)]))
     }
 
     pub async fn execute_task(&self, task: Task) -> Result<TaskResult, WorkerError> {
-        let hook_manager = { self.hook_registry.lock().unwrap().clone() };
-
-        let _ = hook_manager
-            .trigger(&TaskEvent::Started { task: task.clone() })
-            .await;
-
-        let executor = self
-            .executors
-            .lock()
-            .unwrap()
-            .get(&task.executor_name)
-            .cloned();
+        let executor = self.executors.get(&task.executor_name).cloned();
 
         let result = if let Some(executor) = executor {
             if !executor.if_accept(&task.task_type) {
@@ -74,22 +39,9 @@ impl Worker {
                 )));
             }
             match executor.execute(task.clone()).await {
-                Ok(result) => {
-                    let _ = hook_manager
-                        .trigger(&TaskEvent::Completed {
-                            result: result.clone(),
-                        })
-                        .await;
-                    result
-                }
+                Ok(result) => result,
                 Err(e) => {
                     let error_msg = e.to_string();
-                    let _ = hook_manager
-                        .trigger(&TaskEvent::Failed {
-                            task: task.clone(),
-                            error: error_msg.clone(),
-                        })
-                        .await;
                     if !is_permanent_execution_failure(&error_msg) {
                         // Transient infra/IO failure (cold blob fetch under load,
                         // interrupted stream, sandbox hiccup). Return an error so the

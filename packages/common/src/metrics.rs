@@ -50,7 +50,6 @@ pub struct Metrics {
 
     pub host_fn_duration: Histogram<f64>,
     pub host_fn_calls_total: Counter<u64>,
-    pub host_fn_block_in_place_total: Counter<u64>,
 
     pub batch_started_total: Counter<u64>,
     pub batch_cancelled_total: Counter<u64>,
@@ -335,14 +334,6 @@ impl Metrics {
                 .u64_counter("broccoli.host_fn.calls")
                 .with_description("Total number of host function invocations by outcome")
                 .build(),
-            host_fn_block_in_place_total: meter
-                .u64_counter("broccoli.host_fn.block_in_place")
-                .with_description(
-                    "Sentinel: increments when a host_fn enters block_in_place. Host functions \
-                     run inside spawn_blocking and must not call it, so this is always zero.",
-                )
-                .build(),
-
             batch_started_total: meter
                 .u64_counter("broccoli.batch.started")
                 .with_description("Total number of plugin-dispatched batches started")

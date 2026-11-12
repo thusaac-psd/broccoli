@@ -29,6 +29,7 @@ mod m0010_plugin_submission_feedback;
 mod m0011_user_display_name;
 mod m0012_max_judge_epoch;
 mod m0013_idempotency_purge_credentials;
+mod m0014_queued_partial_indexes;
 
 pub(crate) use m0011_user_display_name::prepare_column as prepare_user_display_name;
 
@@ -51,6 +52,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0011_user_display_name::Migration),
             Box::new(m0012_max_judge_epoch::Migration),
             Box::new(m0013_idempotency_purge_credentials::Migration),
+            Box::new(m0014_queued_partial_indexes::Migration),
         ]
     }
 }

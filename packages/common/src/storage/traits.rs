@@ -8,6 +8,8 @@ use super::hash::ContentHash;
 
 pub type BoxReader = Box<dyn AsyncRead + Unpin + Send>;
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     async fn put(&self, data: &[u8]) -> Result<ContentHash, StorageError> {
