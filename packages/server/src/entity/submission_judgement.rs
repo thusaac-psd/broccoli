@@ -69,7 +69,12 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub dispatch_retries: i32,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
+    /// When the unit last became `Queued` (created, rejudged or requeued), by
+    /// the database clock: what a queue backlog's age is measured from.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub queued_at: DateTimeUtc,
     pub finalized_at: Option<DateTimeUtc>,
 
     #[sea_orm(belongs_to, from = "submission_id", to = "id")]

@@ -1,11 +1,11 @@
 //! Transitions that create judgements or move "current" between them.
 
-use chrono::Utc;
 use common::{SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
-    EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement, UpdateMany,
+    EntityTrait, ExprTrait, NotSet, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    UpdateMany,
 };
 
 use super::unit::mirror_current;
@@ -69,11 +69,13 @@ fn new_judgement(
         lease_heartbeat_at: Set(None),
         leased_at: Set(None),
         dispatch_retries: Set(0),
-        created_at: Set(if version == 1 {
-            sub.created_at
+        // The first judgement carries its submission's arrival time; a
+        // rejudge's is stamped by the database.
+        created_at: if version == 1 {
+            Set(sub.created_at)
         } else {
-            Utc::now()
-        }),
+            NotSet
+        },
         finalized_at: Set(None),
         ..Default::default()
     }

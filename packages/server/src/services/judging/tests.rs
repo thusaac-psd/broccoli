@@ -790,3 +790,48 @@ async fn discarding_a_dead_lettered_judgement_resolves_its_dead_letter() {
     assert!(row.resolved);
     assert_eq!(row.resolved_by, Some(7));
 }
+
+#[tokio::test]
+async fn the_in_flight_cap_counts_judgements_and_code_runs() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    new_code_run(&db).await;
+    assert_eq!(
+        claim_code_runs(&db, "srv", 10, NO_TYPES)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(count_in_flight(&db, "srv").await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_requeue_restarts_the_queue_age_but_keeps_the_arrival_time() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (_, j) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    exec(
+        &db,
+        "UPDATE submission_judgement SET created_at = NOW() - INTERVAL '1 day', \
+         queued_at = NOW() - INTERVAL '1 day'",
+    )
+    .await;
+    release_leases(&db, "srv").await.unwrap();
+    let row = db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "SELECT queued_at > NOW() - INTERVAL '1 minute' AS fresh, \
+                        created_at < NOW() - INTERVAL '1 hour' AS old \
+                 FROM submission_judgement WHERE id = {}",
+                j.id
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.try_get::<bool>("", "fresh").unwrap());
+    assert!(row.try_get::<bool>("", "old").unwrap());
+}

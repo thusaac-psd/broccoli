@@ -283,15 +283,29 @@ pub(crate) async fn claim_code_runs(
         .await
 }
 
-/// Judgements `server_id` owns that are in flight: the claim fiber's
-/// in-flight cap.
+/// Units (judgements and code runs) `server_id` owns that are in flight:
+/// what the claim fiber's in-flight cap counts.
 pub async fn count_in_flight(db: &DatabaseConnection, server_id: &str) -> Result<u64, DbErr> {
-    use sea_orm::PaginatorTrait;
-    submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::OwnerServerId.eq(server_id))
-        .filter(submission_judgement::Column::Status.is_in(StatusPhase::InFlight.statuses()))
-        .count(db)
-        .await
+    let count = |unit: Unit| {
+        format!(
+            "(SELECT COUNT(*) FROM {table} WHERE owner_server_id = $1 AND status IN {in_flight})",
+            table = unit.table(),
+            in_flight = StatusPhase::InFlight.sql_list(),
+        )
+    };
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "SELECT ({} + {})::bigint AS n",
+                count(Unit::Judgement),
+                count(Unit::CodeRun)
+            ),
+            [server_id.into()],
+        ))
+        .await?;
+    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 /// Rows of each unit a lease operation touched.
@@ -417,8 +431,8 @@ async fn requeue(
         return Ok(0);
     }
     let sets = format!(
-        "status = '{queued}', owner_server_id = NULL, lease_heartbeat_at = NULL, \
-         leased_at = NULL, dispatch_retries = {retries}, {cleared}",
+        "status = '{queued}', queued_at = NOW(), owner_server_id = NULL, \
+         lease_heartbeat_at = NULL, leased_at = NULL, dispatch_retries = {retries}, {cleared}",
         queued = SubmissionStatus::Queued,
         retries = why.dispatch_retries(),
         cleared = unit.cleared_output_sets(),

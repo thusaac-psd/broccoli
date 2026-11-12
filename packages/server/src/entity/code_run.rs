@@ -62,6 +62,10 @@ pub struct Model {
     pub judge_epoch: i32,
 
     pub created_at: DateTimeUtc,
+    /// When the unit last became `Queued` (created, rejudged or requeued), by
+    /// the database clock: what a queue backlog's age is measured from.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub queued_at: DateTimeUtc,
     pub judged_at: Option<DateTimeUtc>,
 }
 

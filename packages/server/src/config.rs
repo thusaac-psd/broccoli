@@ -169,21 +169,17 @@ pub struct ServerConfig {
     #[serde(default = "default_dispatcher_concurrency")]
     pub dispatcher_concurrency: u32,
     /// Per-server cap on in-process dispatch tasks waiting on the
-    /// dispatcher semaphore. The durable accept path
-    /// (POST -> INSERT `Queued` -> claim fiber -> dispatch) does not
-    /// pass through the dispatcher semaphore at ingress - only the
-    /// steal-scanner (`dispatcher/steal.rs`) still calls
-    /// `dispatcher_permits.reserve()` before spawning a re-dispatch
-    /// task. Tune this to bound spawn bursts on a single server when
-    /// the steal scanner picks up many orphaned rows at once.
+    /// dispatcher semaphore. The claim fiber reserves a dispatcher slot for
+    /// every unit it claims and claims fewer when this queue is full, so
+    /// work it cannot start stays `Queued` for any server to claim.
     ///
     /// Not to be confused with `max_queued_submissions`, which is the
     /// **DB-row backpressure cap** at POST ingress.
     #[serde(default = "default_dispatcher_admission_queue_max")]
     pub dispatcher_admission_queue_max: u32,
-    /// Per-server cap on the **durable `Queued` queue depth** observed
-    /// in the `submission`, `code_run`, and `submission_judgement`
-    /// tables combined. When the live count is at or above this value,
+    /// Per-server cap on the **durable `Queued` queue depth**: queued
+    /// judgements (a queued submission counts through its judgement) and
+    /// code runs combined. When the live count is at or above this value,
     /// POST endpoints that would insert a new `Queued` row reject with
     /// `503 Service Unavailable` + `Retry-After` rather than enqueueing
     /// more work (backpressure on POST).
@@ -318,9 +314,9 @@ pub struct ServerConfig {
     #[serde(default = "default_healthz_worker_threads")]
     pub healthz_worker_threads: u32,
     /// Master switch for the claim fiber. When `true` (default), the
-    /// per-server claim fiber polls the `submission` and `code_run` tables
-    /// for `status='Queued'` rows, transitions them to `Pending`, and
-    /// dispatches them via the existing plugin path. When `false`, the
+    /// per-server claim fiber claims `Queued` judgements and code runs,
+    /// moves them to `Pending` and dispatches them; it is the only path
+    /// into flight. When `false`, the
     /// fiber never starts - POST handlers still write `Queued`, but no one
     /// claims the rows, so they accumulate until the fiber is re-enabled.
     /// Only flip this off to stop a server from dispatching new work while
@@ -340,8 +336,8 @@ pub struct ServerConfig {
     /// drain a spike.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
-    /// Floor for how many submissions this server judges at once (claimed,
-    /// not finished). The cap in force is the larger of this and 8 x the
+    /// Floor for how many judgements and code runs this server judges at
+    /// once (claimed, not finished). The cap in force is the larger of this and 8 x the
     /// live worker slots seen in heartbeats, so it grows with the cluster
     /// and never throttles below worker capacity. The claim fiber takes at
     /// most `cap - in_flight` rows per tick, so a burst stays `Queued` in the

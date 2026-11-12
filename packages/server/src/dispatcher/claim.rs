@@ -138,11 +138,15 @@ pub async fn claim_once(
     // `dispatcher::prefer_local_handler`.
     let contest_types = super::local_contest_types(state).await;
 
-    let slots = reserve_slots(state, claim_budget(batch_size, max_in_flight, in_flight));
+    // Judgements and code runs share the in-flight cap; judgements go first.
+    let budget = claim_budget(batch_size, max_in_flight, in_flight);
+    let mut claimed_judgements = 0;
+    let slots = reserve_slots(state, budget);
     if !slots.is_empty() {
         let claimed =
             judging::claim_judgements(&state.db, server_id, slots.len() as u32, &contest_types)
                 .await?;
+        claimed_judgements = claimed.len() as u32;
         record_judgement_claim_transitions(state, &claimed, Utc::now()).await;
         if !claimed.is_empty() {
             info!(
@@ -159,7 +163,12 @@ pub async fn claim_once(
         }
     }
 
-    let slots = reserve_slots(state, batch_size);
+    let code_run_budget = if max_in_flight == 0 {
+        batch_size
+    } else {
+        budget.saturating_sub(claimed_judgements)
+    };
+    let slots = reserve_slots(state, code_run_budget);
     if !slots.is_empty() {
         let claimed =
             judging::claim_code_runs(&state.db, server_id, slots.len() as u32, &contest_types)

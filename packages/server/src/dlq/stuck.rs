@@ -94,7 +94,7 @@ async fn observe_old_queued_backlog(db: &DatabaseConnection) -> anyhow::Result<(
                 format!(
                     "SELECT COUNT(*)::bigint AS n FROM {table} \
                      WHERE status IN {queued} \
-                       AND created_at < NOW() - make_interval(secs => $1)",
+                       AND queued_at < NOW() - make_interval(secs => $1)",
                     queued = StatusPhase::Queued.sql_list(),
                 ),
                 [(QUEUED_OBSERVABILITY_THRESHOLD_SECS as f64).into()],

@@ -3,13 +3,11 @@ use std::time::Duration;
 
 use axum::{Json, extract::State};
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
 use redis::AsyncCommands;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
-    Statement,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
 };
 use tracing::{instrument, warn};
 
@@ -20,7 +18,7 @@ use common::worker::HeartbeatPayload;
 // `contestant_cannot_list_queues`, and `contestant_cannot_view_system_overview`.
 // This is aggregate operator telemetry (worker/queue/DLQ counts), never a
 // per-row Contest/Problem/Submission/Clarification view the kernel governs.
-use crate::entity::{code_run, dead_letter_message, submission, submission_judgement};
+use crate::entity::{dead_letter_message, submission};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::AuthUser;
 use crate::models::system::{
@@ -357,75 +355,38 @@ struct PendingAgeSample {
     age_seconds: f64,
 }
 
+/// How long each `Pending` dispatch unit has waited since its lease was last
+/// stamped (or since it was created), measured on the database clock that
+/// stamps the lease. A submission is counted through its judgement.
 async fn read_pending_submission_ages(state: &AppState) -> Result<Vec<PendingAgeSample>, AppError> {
-    let now = Utc::now();
     let mut samples = Vec::new();
-
-    // Only the two timestamp columns are needed to compute age. Select just those
-    // rather than hydrating whole rows: submission/code_run each carry a `files`
-    // JSON blob (and code_run also `custom_test_cases`) that can reach tens of MB,
-    // and this runs on the admin system-overview poll every few seconds — loading
-    // every column of every pending row would shovel that much data each tick
-    // under a judging backlog.
-    type PendingTs = (Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>);
-
-    // A submission's dispatch lease lives on its current judgement.
-    let submission_ts: Vec<PendingTs> = submission::Entity::find()
-        .select_only()
-        .column_as(
-            sea_orm::sea_query::Expr::cust(
-                "(SELECT j.lease_heartbeat_at FROM submission_judgement j \
-                         WHERE j.submission_id = submission.id AND j.is_current)",
-            ),
-            "lease_heartbeat_at",
-        )
-        .column(submission::Column::CreatedAt)
-        .filter(submission::Column::Status.eq(SubmissionStatus::Pending))
-        .into_tuple()
-        .all(&state.db)
-        .await?;
-    for (heartbeat, created_at) in submission_ts {
-        samples.push(PendingAgeSample {
-            row_kind: "submission",
-            age_seconds: age_seconds(heartbeat.unwrap_or(created_at), now),
-        });
+    for (row_kind, table) in [
+        ("submission_judgement", "submission_judgement"),
+        ("code_run", "code_run"),
+    ] {
+        let rows = state
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT GREATEST(EXTRACT(EPOCH FROM \
+                         NOW() - COALESCE(lease_heartbeat_at, created_at)), 0)::float8 AS age \
+                     FROM {table} WHERE status = $1"
+                ),
+                [SubmissionStatus::Pending.as_str().into()],
+            ))
+            .await?;
+        for row in rows {
+            let age_seconds = row
+                .try_get::<f64>("", "age")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            samples.push(PendingAgeSample {
+                row_kind,
+                age_seconds,
+            });
+        }
     }
-
-    let code_run_ts: Vec<PendingTs> = code_run::Entity::find()
-        .select_only()
-        .column(code_run::Column::LeaseHeartbeatAt)
-        .column(code_run::Column::CreatedAt)
-        .filter(code_run::Column::Status.eq(SubmissionStatus::Pending))
-        .into_tuple()
-        .all(&state.db)
-        .await?;
-    for (heartbeat, created_at) in code_run_ts {
-        samples.push(PendingAgeSample {
-            row_kind: "code_run",
-            age_seconds: age_seconds(heartbeat.unwrap_or(created_at), now),
-        });
-    }
-
-    let judgement_ts: Vec<PendingTs> = submission_judgement::Entity::find()
-        .select_only()
-        .column(submission_judgement::Column::LeaseHeartbeatAt)
-        .column(submission_judgement::Column::CreatedAt)
-        .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Pending))
-        .into_tuple()
-        .all(&state.db)
-        .await?;
-    for (heartbeat, created_at) in judgement_ts {
-        samples.push(PendingAgeSample {
-            row_kind: "submission_judgement",
-            age_seconds: age_seconds(heartbeat.unwrap_or(created_at), now),
-        });
-    }
-
     Ok(samples)
-}
-
-fn age_seconds(created_at: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> f64 {
-    std::cmp::max(now.signed_duration_since(created_at).num_milliseconds(), 0) as f64 / 1_000.0
 }
 
 fn submission_judge_queue_depth_delta(previous: &mut u64, current: u64) -> i64 {
