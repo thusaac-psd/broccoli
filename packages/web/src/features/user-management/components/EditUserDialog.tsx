@@ -1,5 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAsyncDialog } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -39,7 +40,7 @@ export function EditUserDialog({
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const dialog = useAsyncDialog({ open, onOpenChange });
 
   useEffect(() => {
     if (!open || !user) return;
@@ -77,29 +78,31 @@ export function EditUserDialog({
       return;
     }
 
-    setIsSubmitting(true);
-    const { error } = await apiClient.PATCH('/users/{id}', {
-      params: { path: { id: user.id } },
-      body,
+    const editedId = user.id;
+    await dialog.submit(async () => {
+      const { error } = await apiClient.PATCH('/users/{id}', {
+        params: { path: { id: editedId } },
+        body,
+      });
+      if (error) {
+        toast.error(getErrorMessage(error, t('users.users.updateUserError')));
+        throw error;
+      }
+      toast.success(t('users.users.updateUserSuccess'));
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      queryClient.invalidateQueries({
+        queryKey: ['admin-user-detail', editedId],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ['all-users-for-participants'],
+      });
+      queryClient.invalidateQueries({ queryKey: ['contest-participants'] });
+      if (signedInUser?.id === editedId) await refresh();
     });
-    setIsSubmitting(false);
-
-    if (error) {
-      toast.error(getErrorMessage(error, t('users.users.updateUserError')));
-      return;
-    }
-
-    toast.success(t('users.users.updateUserSuccess'));
-    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
-    queryClient.invalidateQueries({ queryKey: ['admin-user-detail', user.id] });
-    queryClient.invalidateQueries({ queryKey: ['all-users-for-participants'] });
-    queryClient.invalidateQueries({ queryKey: ['contest-participants'] });
-    if (signedInUser?.id === user.id) await refresh();
-    onOpenChange(false);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{t('users.users.editUser')}</DialogTitle>
@@ -122,7 +125,7 @@ export function EditUserDialog({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder={t('users.users.usernamePlaceholder')}
-              disabled={isSubmitting}
+              disabled={dialog.submitting}
             />
           </div>
 
@@ -131,7 +134,7 @@ export function EditUserDialog({
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             required
-            disabled={isSubmitting}
+            disabled={dialog.submitting}
           />
 
           <div className="space-y-2">
@@ -144,7 +147,7 @@ export function EditUserDialog({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={t('users.users.passwordPlaceholder')}
-              disabled={isSubmitting}
+              disabled={dialog.submitting}
             />
           </div>
 
@@ -152,13 +155,13 @@ export function EditUserDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
-              disabled={isSubmitting}
+              onClick={() => dialog.onOpenChange(false)}
+              disabled={dialog.submitting}
             >
               {t('users.common.cancel')}
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting && (
+            <Button type="submit" disabled={dialog.submitting}>
+              {dialog.submitting && (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               )}
               {t('users.users.saveUser')}
