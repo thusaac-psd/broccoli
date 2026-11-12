@@ -41,6 +41,9 @@ services:
       BROCCOLI__AUTH__JWT_SECRET: "${BROCCOLI__AUTH__JWT_SECRET}"
       BROCCOLI__AUTH__SECURE_COOKIES: "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
       BROCCOLI__PLUGIN__PLUGINS_DIR: /plugins
+      BROCCOLI__PLUGIN__CACHE_DIR: /var/cache/broccoli/plugins
+      # false: refuse plugin uploads and run bundled plugin code only.
+      BROCCOLI__PLUGIN__UPLOADS_ENABLED: "${BROCCOLI__PLUGIN__UPLOADS_ENABLED:-true}"
       # Per-replica plugin capacity; docs/operator-runbook.md explains both.
       BROCCOLI__PLUGIN__POOL_MAX_INSTANCES: "${BROCCOLI__PLUGIN__POOL_MAX_INSTANCES:-64}"
       BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM: "${BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM:-64}"
@@ -59,9 +62,10 @@ services:
       BROCCOLI__OBSERVABILITY__LOG_FORMAT: "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
       BROCCOLI__OBSERVABILITY__LOG_FILTER: "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
     volumes:
-      # Read-only on purpose: plugins ship in the bundle to every node, and
-      # admin plugin upload is unsupported here (see README.md).
+      # The bundled plugins, only ever read. Uploaded plugins come from the
+      # shared blob store and are unpacked into the writable cache below.
       - ./plugins:/plugins:ro
+      - plugin_cache:/var/cache/broccoli/plugins
       - server_data:/data
     healthcheck:
       test: ["CMD", "/usr/local/bin/broccoli-server", "--healthcheck"]
@@ -71,3 +75,4 @@ services:
 
 volumes:
   server_data:
+  plugin_cache:

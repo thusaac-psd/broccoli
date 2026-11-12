@@ -54,10 +54,42 @@ For server redundancy, restart one server machine at a time and confirm the
 gateway stays healthy before moving to the next server. Avoid restarting infra
 during a contest window.
 
-## Plugin Reload
+## Plugin Updates
 
-The server image contains the default plugins and also mounts `./plugins`. To
-roll out new plugin files:
+A plugin runs from one of two sources, shown on the admin Plugins page:
+
+- **Bundled**: the files in `./plugins` on each node (mounted read-only).
+- **Uploaded**: an archive published through the admin UI, stored in the shared
+  blob storage. It takes precedence over a bundled copy of the same plugin.
+
+### Uploading
+
+1. On the admin Plugins page select **Upload plugin** and choose the archive: a
+   `.tar.gz` with one top-level folder named after the plugin id, containing
+   `plugin.toml` and the files it names (build output, not sources).
+2. Check the id, version, the version it replaces and the host permissions it
+   requests, then select **Publish**.
+3. The server that handles the click validates the archive, stores it, and loads
+   it. Only if that load works is it published; otherwise the page shows the
+   load error and nothing changes anywhere. Every other server then fetches it,
+   checks its hash, and loads it within a few seconds.
+
+Each server unpacks uploads into its own `plugin_cache` volume
+(`BROCCOLI__PLUGIN__CACHE_DIR`). It is a cache: deleting it costs one download
+per uploaded plugin on the next start. Archives are limited to 256 MiB
+compressed and 512 MiB unpacked.
+
+To roll back, upload the previous archive again, or open the plugin's details
+and select **Remove upload**: every server returns to the bundled version, or,
+for a plugin that is not bundled, the plugin is removed from every server (its
+configuration is kept for a later upload).
+
+Set `BROCCOLI__PLUGIN__UPLOADS_ENABLED=false` on every server to switch uploads
+off. Upload requests are then refused, and a server refuses to load an uploaded
+version, so it runs only bundled code; a plugin whose published version is an
+upload shows as failed on that server until the upload is removed.
+
+### Updating bundled files
 
 1. Copy the same files to `./plugins` on **every** server node.
 2. Select **Reload** for the plugin (or **Reload All**) once, on the admin
@@ -65,12 +97,18 @@ roll out new plugin files:
    only if that works is the change published, and every other server reloads
    from its own `./plugins` within a few seconds.
 
+A plugin with an uploaded version keeps running the upload; remove the upload to
+run the bundled files.
+
+### When a server lags
+
 The Plugins page shows each server's state. A server that cannot load the new
 version keeps running the version it had and shows **Running previous version**;
 a server whose files differ from the published ones shows **Different files**.
-Fix that node's files and select **Retry** (or **Reload**) again. Enable,
-disable and reload all act on every server; there is no need to restart servers
-or repeat the action per node.
+Fix the cause (that node's files, or the blob storage for an upload) and select
+**Retry** (or **Reload**) again. Enable, disable, reload, upload and remove act
+on every server; there is no need to restart servers or repeat the action per
+node.
 
 Upgrade all server nodes together. Servers from before this mechanism do not
 publish plugin changes to their peers, so in a mixed fleet a change made through
