@@ -1,12 +1,15 @@
 import type { ApiClient } from '@broccoli/web-sdk/api';
+import type { ServerTableParams } from '@broccoli/web-sdk/hooks';
 import type {
-  ServerTableParams,
-  ServerTableResponse,
-} from '@broccoli/web-sdk/hooks';
-import type {
+  SubmissionListPagination,
   SubmissionStatus,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
+
+export interface SubmissionListPage {
+  data: SubmissionSummary[];
+  pagination: SubmissionListPagination;
+}
 
 export async function fetchSubmissions(
   apiClient: ApiClient,
@@ -15,7 +18,7 @@ export async function fetchSubmissions(
     language?: string | null;
     status?: SubmissionStatus | null;
   },
-): Promise<ServerTableResponse<SubmissionSummary>> {
+): Promise<SubmissionListPage> {
   const { data, error } = await apiClient.GET('/submissions', {
     params: {
       query: {

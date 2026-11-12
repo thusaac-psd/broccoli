@@ -155,6 +155,15 @@ fn visibility_queriers(state: &AppState) -> Result<(Vec<VisibilityQuerier>, Blin
     Ok((queriers, blind))
 }
 
+/// Whether any visibility plugin can narrow decisions on this replica: one
+/// is loaded, or one is enabled but missing here (its resources are denied).
+/// A poisoned registry counts as narrowing, since it denies everything.
+pub(super) fn plugins_may_narrow(state: &AppState) -> bool {
+    visibility_queriers(state).map_or(true, |(queriers, blind)| {
+        !queriers.is_empty() || blind != Blind::Nothing
+    })
+}
+
 /// Deny the resources the missing plugins govern; leave the rest to the
 /// queriers. A resource is governed when it sits in a contest of one of
 /// `types`, judged from the core schema the host owns:

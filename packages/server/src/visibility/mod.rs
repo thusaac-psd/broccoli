@@ -169,6 +169,14 @@ impl<'a> VisibilityKernel<'a> {
         Ok(self.decide_batch(action, &[resource]).await?.remove(0))
     }
 
+    /// Whether a visibility plugin may narrow what the host rules allow this
+    /// subject. When it may not, a list query that encodes the host rules in
+    /// SQL counts exactly the rows the caller is shown; when it may, such a
+    /// count would disclose rows the plugin hides.
+    pub fn plugins_may_narrow(&self) -> bool {
+        !self.subject.is_admin_override() && plugin_query::plugins_may_narrow(self.state)
+    }
+
     /// Batched, memoized, per-viewer reachability decision, for this
     /// kernel's fixed `Subject` (see the struct docs for why `Subject` is
     /// not a parameter here).

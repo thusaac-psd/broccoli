@@ -16,6 +16,25 @@ pub struct Pagination {
     pub total_pages: u64,
 }
 
+/// Pagination of a list that a visibility plugin may narrow below what its
+/// SQL matches. A count of matching rows would then disclose rows the caller
+/// is not shown, so `total` and `total_pages` are present only when the count
+/// is exact for this caller; `has_more` is always present.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ListPagination {
+    #[schema(example = 1)]
+    pub page: u64,
+    #[schema(example = 20)]
+    pub per_page: u64,
+    #[schema(example = 47)]
+    pub total: Option<u64>,
+    #[schema(example = 3)]
+    pub total_pages: Option<u64>,
+    /// Whether a page after this one has matching rows.
+    #[schema(example = true)]
+    pub has_more: bool,
+}
+
 /// A validated page request: the only place an SQL `OFFSET` is derived from
 /// caller-supplied `page`/`per_page`.
 ///
@@ -77,6 +96,26 @@ impl PageWindow {
     /// Rows to skip; always fits in a Postgres `bigint`.
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Rows to fetch for [`Self::finish_page`]: one beyond the page, to learn
+    /// whether a next page exists without counting.
+    pub fn limit_with_lookahead(&self) -> u64 {
+        self.per_page.saturating_add(1)
+    }
+
+    /// Trim `rows`, fetched with [`Self::limit_with_lookahead`], to the page,
+    /// and describe it. `total` is `None` when the count is withheld.
+    pub fn finish_page<T>(&self, rows: &mut Vec<T>, total: Option<u64>) -> ListPagination {
+        let has_more = rows.len() as u64 > self.per_page;
+        rows.truncate(self.per_page as usize);
+        ListPagination {
+            page: self.page,
+            per_page: self.per_page,
+            total,
+            total_pages: total.map(|t| t.div_ceil(self.per_page)),
+            has_more,
+        }
     }
 
     /// Response metadata for this window given the total row count.
@@ -157,6 +196,22 @@ pub fn validate_bulk_ids(ids: &[i32], name: &str, max: usize) -> Result<(), AppE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_page_trims_the_lookahead_row_and_reports_more() {
+        let window = PageWindow::new(Some(2), Some(3)).unwrap();
+        assert_eq!(window.limit_with_lookahead(), 4);
+        let mut rows = vec![1, 2, 3, 4];
+        let page = window.finish_page(&mut rows, None);
+        assert_eq!(rows, vec![1, 2, 3]);
+        assert!(page.has_more);
+        assert_eq!((page.total, page.total_pages), (None, None));
+
+        let mut last = vec![7];
+        let page = window.finish_page(&mut last, Some(4));
+        assert!(!page.has_more);
+        assert_eq!((page.total, page.total_pages), (Some(4), Some(2)));
+    }
 
     #[test]
     fn page_window_defaults_and_clamps() {

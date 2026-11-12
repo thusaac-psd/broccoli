@@ -238,7 +238,7 @@ pub async fn create_submission(
     tag = "Submissions",
     operation_id = "listSubmissions",
     summary = "List submissions",
-    description = "Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions.",
+    description = "Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.",
     params(SubmissionListQuery),
     responses(
         (status = 200, description = "List of submissions", body = SubmissionListResponse),
@@ -327,47 +327,13 @@ pub async fn list_submissions(
         }
     }
 
-    // KNOWN RESIDUAL LEAK, accepted: `total` (and therefore `total_pages`)
-    // is computed from `base_select` BEFORE the per-row kernel filter below
-    // runs, i.e. it counts rows this SQL predicate matches, not rows the
-    // viewer will actually be shown. For a caller whose page ends up
-    // narrower than this count, the response DOES disclose two things: that
-    // at least one more matching submission exists beyond what `data`
-    // contains, and the exact count of such submissions. It discloses
-    // NOTHING about their CONTENT - no ids, users, verdicts, code, or
-    // contest identity leak through this number, only a count.
-    //
-    // Task 17 / Step 2b (I2): the mechanism that can cause this divergence
-    // is plugin-level narrowing via `Decision::meet` below, NOT
-    // `decide_submission`'s participation / `submissions_visible` branch -
-    // that branch is unreachable from this endpoint. Every row `base_select`
-    // can return is already host-`Allow` before the kernel is even asked:
-    // a non-`submission:view_all` caller's query is filtered to
-    // `UserId.eq(auth_user.user_id)` above, which hits `decide_submission`'s
-    // unconditional owner bypass, and a `submission:view_all` caller hits its
-    // permission bypass - both `Allow` unconditionally, never reaching the
-    // participation/`submissions_visible` check at all. A registered
-    // visibility plugin can still `Deny` a host-`Allow`ed row via
-    // `Decision::meet` (`meet(Allow, Deny) == Deny`), and `apply_filter_to_list`
-    // drops denied rows outright rather than rendering a placeholder - that
-    // plugin-level narrowing is the only source of `total` vs `data.len()`
-    // divergence here.
-    //
-    // This is NOT fixed the way `list_contest_submissions` is fixed below,
-    // because there is no single-contest static predicate to push into SQL
-    // here: this endpoint is GLOBAL and unscoped, one page can span many
-    // contests plus contest-less submissions, and which plugin (if any) would
-    // narrow a given row depends on THAT row's own contest's registered
-    // contest type - not one fixed predicate known up front. Making `total`
-    // exact would mean running the full kernel decision (a plugin round trip
-    // for every row) over every row the filters match in the WHOLE TABLE, not
-    // just the current page - unbounded work per list request, scaling with
-    // total submissions rather than `per_page`. That cost is why this leak is
-    // left in place rather than closed; `list_contest_submissions` is scoped
-    // to one contest and can hoist the static part of its own
-    // (`decide_submission`-derived) rule into `WHERE`, so it does not have
-    // this excuse.
-    let total = base_select.clone().count(&state.db).await?;
+    // The kernel OWNS the subject: one kernel per request per subject.
+    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
+    // Every row `base_select` matches is host-`Allow` for this viewer (a
+    // non-`submission:view_all` caller is restricted to their own rows
+    // above), so only a visibility plugin can hide a matching row. A count
+    // is exact, and reported, only when none can.
+    let total = list_total(&state, &kernel, &base_select).await?;
 
     let select = base_select.find_also_related(user::Entity);
 
@@ -386,15 +352,14 @@ pub async fn list_submissions(
         _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
     };
 
-    let submissions = select
+    let mut submissions = select
         .offset(Some(window.offset()))
-        .limit(Some(window.limit()))
+        .limit(Some(window.limit_with_lookahead()))
         .all(&state.db)
         .await?;
+    let pagination = window.finish_page(&mut submissions, total);
 
     let data = build_submission_list_items(&state.db, submissions).await?;
-    // The kernel OWNS the subject: one kernel per request per subject.
-    let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     // This list is GLOBAL - it can span several contests plus contest-less
     // submissions in one page. One `decide_batch` (via `fetch_visible_batch`)
     // over every listed submission's own `Resource::Submission(id)` resolves
@@ -405,8 +370,23 @@ pub async fn list_submissions(
     let data = apply_filter_to_list(&kernel, data).await?;
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": window.pagination(total),
+        "pagination": pagination,
     })))
+}
+
+/// The exact number of rows `select` matches, or `None` when a visibility
+/// plugin may hide some of them from this viewer (see
+/// [`VisibilityKernel::plugins_may_narrow`]). `select` must already encode
+/// the host visibility rules for the viewer.
+async fn list_total(
+    state: &AppState,
+    kernel: &VisibilityKernel<'_>,
+    select: &Select<submission::Entity>,
+) -> Result<Option<u64>, AppError> {
+    if kernel.plugins_may_narrow() {
+        return Ok(None);
+    }
+    Ok(Some(select.clone().count(&state.db).await?))
 }
 
 #[utoipa::path(
@@ -875,7 +855,7 @@ pub async fn create_contest_submission(
     tag = "Submissions",
     operation_id = "listContestSubmissions",
     summary = "List contest submissions",
-    description = "Returns submissions for a contest.",
+    description = "Returns submissions for a contest. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         SubmissionListQuery
@@ -955,9 +935,9 @@ pub async fn list_contest_submissions(
     // (`Decision::meet(Deny, plugin) == Deny` - see
     // `visibility::VisibilityKernel::decide_batch`) and every row excluded
     // here is exactly a row `decide_submission` denies host-side for this
-    // subject. So `total`, computed against this predicate below, can never
-    // undercount what the per-row filter would allow - it stays a safe upper
-    // bound, just a far tighter one than counting the whole contest.
+    // subject. So this predicate encodes every host rule, and `list_total`
+    // below counts exactly what the viewer is shown unless a visibility
+    // plugin may narrow it further.
     let can_see_all = if can_view_all {
         true
     } else if !contest_model.submissions_visible {
@@ -999,7 +979,7 @@ pub async fn list_contest_submissions(
         );
     }
 
-    let total = base_select.clone().count(&state.db).await?;
+    let total = list_total(&state, &kernel, &base_select).await?;
 
     let select = base_select.find_also_related(user::Entity);
 
@@ -1018,11 +998,12 @@ pub async fn list_contest_submissions(
         _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
     };
 
-    let submissions = select
+    let mut submissions = select
         .offset(Some(window.offset()))
-        .limit(Some(window.limit()))
+        .limit(Some(window.limit_with_lookahead()))
         .all(&state.db)
         .await?;
+    let pagination = window.finish_page(&mut submissions, total);
 
     let data = build_submission_list_items(&state.db, submissions).await?;
     // Reuses the same kernel instance the top-level `Resource::Contest` gate
@@ -1040,7 +1021,7 @@ pub async fn list_contest_submissions(
     let data = apply_filter_to_list(&kernel, data).await?;
     Ok(Json(serde_json::json!({
         "data": data,
-        "pagination": window.pagination(total),
+        "pagination": pagination,
     })))
 }
 

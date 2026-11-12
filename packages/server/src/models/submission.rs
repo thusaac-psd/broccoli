@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
-use super::shared::Pagination;
+use super::shared::{ListPagination, Pagination};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmissionFile {
@@ -205,7 +205,7 @@ pub struct SubmissionListItem {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct SubmissionListResponse {
     pub data: Vec<SubmissionListItem>,
-    pub pagination: Pagination,
+    pub pagination: ListPagination,
 }
 
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]

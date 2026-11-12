@@ -1,12 +1,11 @@
 import type { ApiClient } from '@broccoli/web-sdk/api';
-import type {
-  ServerTableParams,
-  ServerTableResponse,
-} from '@broccoli/web-sdk/hooks';
+import type { ServerTableParams } from '@broccoli/web-sdk/hooks';
 import type {
   SubmissionStatus,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
+
+import type { SubmissionListPage } from '@/features/submission/api/fetch-submissions';
 
 export async function fetchContestSubmissions(
   apiClient: ApiClient,
@@ -17,7 +16,7 @@ export async function fetchContestSubmissions(
     status?: SubmissionStatus | null;
     userId?: number | undefined;
   },
-): Promise<ServerTableResponse<SubmissionSummary>> {
+): Promise<SubmissionListPage> {
   const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
     params: {
       path: { id: params.contestId },
@@ -51,9 +50,9 @@ export async function fetchAllContestSubmissions(
 ): Promise<SubmissionSummary[]> {
   const all: SubmissionSummary[] = [];
   let page = 1;
-  let totalPages = 1;
+  let hasMore = true;
 
-  while (page <= totalPages) {
+  while (hasMore) {
     const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
       params: {
         path: { id: params.contestId },
@@ -70,7 +69,7 @@ export async function fetchAllContestSubmissions(
     if (error) throw error;
 
     all.push(...data.data);
-    totalPages = Math.max(1, data.pagination.total_pages);
+    hasMore = data.pagination.has_more;
     page += 1;
   }
 

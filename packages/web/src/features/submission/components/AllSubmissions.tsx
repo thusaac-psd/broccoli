@@ -6,21 +6,16 @@ import {
   type SubmissionStatusFilterValue,
   toSubmissionStatus,
 } from '@broccoli/web-sdk/submission';
-import { Button, FilterDropdown, Input } from '@broccoli/web-sdk/ui';
+import { FilterDropdown, Input } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
-import {
-  ChevronLeft,
-  ChevronRight,
-  Code2,
-  ListFilter,
-  Search,
-} from 'lucide-react';
+import { Code2, ListFilter, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 import { fetchSubmissions } from '@/features/submission/api/fetch-submissions';
 
+import { SubmissionListPager } from './SubmissionListPager';
 import { SubmissionsTable } from './SubmissionsTable';
 
 const PER_PAGE = 25;
@@ -219,37 +214,10 @@ export function AllSubmissions() {
         )}
       </div>
 
-      {pagination && pagination.total_pages > 1 && (
-        <div className="flex items-center justify-between text-sm text-muted-foreground">
-          <span className="tabular-nums">
-            {(page - 1) * PER_PAGE + 1}–
-            {Math.min(page * PER_PAGE, pagination.total)} of {pagination.total}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8"
-              disabled={page <= 1}
-              onClick={() => updateSearchParams({ page: page - 1 })}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-            <span className="px-3 text-sm tabular-nums">
-              {page} / {pagination.total_pages}
-            </span>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8"
-              disabled={page >= pagination.total_pages}
-              onClick={() => updateSearchParams({ page: page + 1 })}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      )}
+      <SubmissionListPager
+        pagination={pagination}
+        onPageChange={(next) => updateSearchParams({ page: next })}
+      />
     </div>
   );
 }

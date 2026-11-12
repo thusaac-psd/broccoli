@@ -1071,7 +1071,7 @@ export interface paths {
     };
     /**
      * List contest submissions
-     * @description Returns submissions for a contest.
+     * @description Returns submissions for a contest. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.
      */
     get: operations['listContestSubmissions'];
     put?: never;
@@ -1793,7 +1793,7 @@ export interface paths {
     };
     /**
      * List submissions
-     * @description Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions.
+     * @description Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.
      */
     get: operations['listSubmissions'];
     put?: never;
@@ -3254,6 +3254,39 @@ export interface components {
        */
       template: string;
     };
+    /**
+     * @description Pagination of a list that a visibility plugin may narrow below what its
+     *     SQL matches. A count of matching rows would then disclose rows the caller
+     *     is not shown, so `total` and `total_pages` are present only when the count
+     *     is exact for this caller; `has_more` is always present.
+     */
+    ListPagination: {
+      /**
+       * @description Whether a page after this one has matching rows.
+       * @example true
+       */
+      has_more: boolean;
+      /**
+       * Format: int64
+       * @example 1
+       */
+      page: number;
+      /**
+       * Format: int64
+       * @example 20
+       */
+      per_page: number;
+      /**
+       * Format: int64
+       * @example 47
+       */
+      total?: number | null;
+      /**
+       * Format: int64
+       * @example 3
+       */
+      total_pages?: number | null;
+    };
     LoginRequest: {
       /** @example s3cure_P@ss! */
       password: string;
@@ -3899,7 +3932,7 @@ export interface components {
     };
     SubmissionListResponse: {
       data: components['schemas']['SubmissionListItem'][];
-      pagination: components['schemas']['Pagination'];
+      pagination: components['schemas']['ListPagination'];
     };
     SubmissionResponse: {
       /**
