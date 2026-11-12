@@ -62,7 +62,10 @@ own pending entries again. Each worker creates the group at boot with
 means entries published before any worker existed are still delivered.
 
 A delivered entry sits in the group's pending entries list (PEL) until the
-worker acknowledges it with `XACK` and `XDEL` in one `MULTI`. The `XDEL` keeps a
+worker settles it. Every settle (acknowledge, dead-letter, requeue) is one
+script that first checks with `XPENDING <stream> <group> <id> <id> 1 <consumer>`
+that this consumer still owns the entry: a worker that stalled past the claim
+threshold finds the entry handed over and changes nothing. The `XDEL` keeps a
 stream as long as its backlog plus its in flight work, so no `MAXLEN` trimming
 is needed, and trimming a work stream would drop unread tasks.
 
@@ -92,13 +95,18 @@ so redelivering one to a restarted server would only reach the `no_waiter`
 path. Each read is one pipelined round trip:
 
 ```text
-XTRIM <q>:reply:<server_id> MINID <last read id + 1>
+XDEL <q>:reply:<server_id> <ids the previous read returned>
 XREAD COUNT 512 BLOCK 2000 STREAMS <q>:reply:<server_id> <last read id>
+EVAL <last-generated-id of the stream>
 ```
 
-The trim drops everything the previous read returned, so the stream holds only
-replies the server has not seen. `BLOCK` wakes on the first `XADD`, so a reply
-waits no polling interval.
+The `XDEL` removes exactly what the previous read returned, so the stream
+holds only replies the server has not seen, and nothing unread is ever
+deleted. `BLOCK` wakes on the first `XADD`, so a reply waits no polling
+interval. A stream recreated after it was lost takes its ids from the Redis
+clock, which can be behind the cursor; when the stream's last generated id is
+behind the cursor, or the stream is missing, the reader starts again from the
+beginning.
 
 The reply stream lives exactly as long as the server's liveness key: the
 server's node claim owns it (`NodeClaim::own_stream`). The same script that
@@ -165,8 +173,8 @@ Two different limits apply.
 A task whose payload does not decode is dead lettered at once
 (`DeserializationError`); retrying cannot fix it.
 
-Dead lettering is one script: `XADD <q>:dlq * p <envelope>`, `XACK`, `XDEL` on
-the source entry. A poison entry therefore never stays in a work stream and is
+Dead lettering is one script: the ownership check, then `XADD <q>:dlq * p
+<envelope>`, `XACK`, `XDEL` on the source entry. A poison entry therefore never stays in a work stream and is
 never lost between the two. Servers consume `<q>:dlq` in the `servers` group,
 write the envelope to `dead_letter_message` in a transaction, and then
 acknowledge it. A failed write leaves the entry pending; any server reclaims it
@@ -219,7 +227,7 @@ that means:
 work or in flight work, and eviction would drop either silently. When Redis is
 full, `XADD` fails with `OOM`, the publish returns an error, and the server
 fails the operation batch instead of losing its tasks. Acknowledged entries are
-deleted at once, reply streams are trimmed on every read and expire with their
+deleted at once, each read deletes the replies before it and reply streams expire with their
 server, and the DLQ stream drains into Postgres, so memory tracks the live
 backlog.
 

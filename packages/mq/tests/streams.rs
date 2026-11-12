@@ -405,6 +405,83 @@ async fn replies_reach_only_their_server_and_a_gone_server_drops_them() {
     assert!(!exists, "a reply never creates a stream");
 }
 
+fn completed(id: &str) -> TaskReply {
+    TaskReply::Completed {
+        result: TaskResult {
+            task_id: id.to_string(),
+            success: true,
+            output: serde_json::json!({}),
+            error: None,
+            task_type: None,
+            operation: None,
+            worker_id: None,
+        },
+    }
+}
+
+fn task_ids(batch: Vec<Result<TaskReply, mq::DecodeError>>) -> Vec<String> {
+    batch
+        .into_iter()
+        .map(|r| match r.unwrap() {
+            TaskReply::Completed { result } => result.task_id,
+            TaskReply::Started { notification } => notification.task_id,
+        })
+        .collect()
+}
+
+/// Only replies already returned are deleted, and a stream recreated with
+/// ids behind the cursor (a Redis clock behind the old one) is read from the
+/// start.
+#[tokio::test]
+async fn the_reply_inbox_deletes_what_it_read_and_survives_a_recreated_stream() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let key = mq.topology().reply("s1");
+    let add = |id: &'static str, reply: TaskReply| {
+        let key = key.clone();
+        let url = url.clone();
+        async move {
+            let _: String = redis::cmd("XADD")
+                .arg(&key)
+                .arg(id)
+                .arg("p")
+                .arg(serde_json::to_string(&reply).unwrap())
+                .query_async(&mut admin(&url).await)
+                .await
+                .unwrap();
+        }
+    };
+    let mut inbox = mq.reply_inbox("s1");
+    add("5000-0", completed("r0")).await;
+    assert_eq!(task_ids(inbox.next_batch().await.unwrap()), ["r0"]);
+    add("5000-1", completed("r1")).await;
+    assert_eq!(task_ids(inbox.next_batch().await.unwrap()), ["r1"]);
+    assert_eq!(
+        xlen(&mut conn, &key).await,
+        1,
+        "r0 is deleted; r1 waits for the next read"
+    );
+
+    // The stream is lost and recreated with lower ids.
+    let _: () = redis::cmd("DEL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    add("10-0", completed("after-recreate")).await;
+    let mut got = Vec::new();
+    while got.is_empty() {
+        got = task_ids(inbox.next_batch().await.unwrap());
+    }
+    assert_eq!(got, ["after-recreate"]);
+    assert_eq!(
+        xlen(&mut conn, &key).await,
+        1,
+        "a recreated reply is never trimmed unread"
+    );
+}
+
 #[tokio::test]
 async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_dies() {
     let (_c, url) = redis().await;
