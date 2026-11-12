@@ -7,15 +7,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
+use broccoli_types::manifest::PluginManifest;
 use clap::Args;
 use console::style;
 use notify::{Event, RecursiveMode, Watcher};
-use serde::Deserialize;
 
 use crate::dev_config::{self, FileKind, ResolvedDevConfig};
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config;
 
+use super::read_manifest;
 use super::wasm::copy_wasm_artifact;
 
 #[derive(Args)]
@@ -37,27 +38,6 @@ pub struct WatchPluginArgs {
 
     #[arg(long, default_value = "500")]
     pub debounce: u64,
-}
-
-#[derive(Deserialize)]
-struct WatchManifest {
-    name: Option<String>,
-    server: Option<ServerSection>,
-    web: Option<WebSection>,
-    #[serde(default)]
-    translations: std::collections::HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct ServerSection {
-    entry: String,
-}
-
-#[derive(Deserialize)]
-struct WebSection {
-    root: String,
-    #[allow(dead_code)]
-    entry: String,
 }
 
 enum ChangeKind {
@@ -87,7 +67,7 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
     let client = Client::new(creds);
 
     let manifest = read_manifest(&manifest_path)?;
-    let plugin_name = manifest.name.as_deref().unwrap_or("plugin");
+    let plugin_name = manifest.name.as_str();
 
     println!(
         "{}  Watching plugin {}...",
@@ -325,11 +305,6 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_manifest(path: &Path) -> anyhow::Result<WatchManifest> {
-    let content = std::fs::read_to_string(path).context("Failed to read plugin.toml")?;
-    toml::from_str(&content).context("Failed to parse plugin.toml")
-}
-
 fn fingerprint_file(path: &Path) -> anyhow::Result<u64> {
     let content =
         std::fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -554,7 +529,7 @@ fn build_frontend(dev: &ResolvedDevConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn package_plugin(plugin_dir: &Path, manifest: &WatchManifest) -> anyhow::Result<Vec<u8>> {
+fn package_plugin(plugin_dir: &Path, manifest: &PluginManifest) -> anyhow::Result<Vec<u8>> {
     let plugin_id = plugin_dir
         .file_name()
         .and_then(|n| n.to_str())
