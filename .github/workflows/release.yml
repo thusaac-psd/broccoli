@@ -398,13 +398,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         if: matrix.name == 'server'
-        with:
-          version: 10.33.0
 
       - uses: actions/setup-node@v4
         if: matrix.name == 'server'
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: pnpm
 
       - name: Build plugin assets
@@ -548,12 +546,10 @@ jobs:
           key: release-bundle-plugin-assets
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.33.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: pnpm
 
       - uses: docker/login-action@v3
