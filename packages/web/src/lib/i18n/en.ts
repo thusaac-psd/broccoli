@@ -982,6 +982,30 @@ export const en: Record<string, string> = {
   'clarification.private': 'Private',
   'clarification.public': 'Public',
   'clarification.send': 'Send',
+  'clarification.sending': 'Sending…',
+  'clarification.ask.trigger': 'Ask Question',
+  'clarification.ask.title': 'Ask a Question',
+  'clarification.ask.placeholder':
+    'Describe your issue clearly (e.g., problem ID, specific error)...',
+  'clarification.ask.hint':
+    'Your question will be visible only to judges until they decide to make it public.',
+  'clarification.announce.trigger': 'Announcement',
+  'clarification.announce.title': 'Post Announcement',
+  'clarification.announce.placeholder':
+    'Write an announcement visible to all participants...',
+  'clarification.announce.hint':
+    'This announcement will be immediately visible to all participants.',
+  'clarification.announce.submit': 'Post',
+  'clarification.dm.trigger': 'Message',
+  'clarification.dm.title': 'Send Direct Message',
+  'clarification.dm.recipient': 'Recipient',
+  'clarification.dm.userId': 'ID: {id}',
+  'clarification.dm.change': 'Change',
+  'clarification.dm.searchPlaceholder': 'Search participants...',
+  'clarification.dm.noParticipants': 'No participants found',
+  'clarification.dm.placeholder': 'Write a message to this participant...',
+  'clarification.dm.hint':
+    'This message will only be visible to the selected participant.',
   'clarification.makePublic': 'Make public',
   'clarification.makePrivate': 'Make private',
   'clarification.publishReplyOnly': 'Publish reply only',
