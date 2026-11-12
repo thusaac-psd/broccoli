@@ -24,8 +24,7 @@ use crate::models::plugin::{
     RemoveUploadResponse,
 };
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
-use crate::plugin_distribution::bundled_root;
-use crate::plugin_fleet::PluginSourceKind;
+use crate::plugin_distribution::{PluginSource, bundled_root};
 use crate::plugin_id::PluginId;
 use crate::plugin_lifecycle::UploadRemoval;
 use crate::state::AppState;
@@ -360,11 +359,7 @@ pub async fn inspect_plugin_archive(
         .one(&state.db)
         .await?
         .map(|row| PublishedPluginResponse {
-            source: if row.archive_hash.is_some() {
-                PluginSourceKind::Upload
-            } else {
-                PluginSourceKind::Bundle
-            },
+            source: PluginSource::of(row.archive_hash.as_deref()).kind(),
             version: row.version,
             enabled: row.is_enabled,
         });

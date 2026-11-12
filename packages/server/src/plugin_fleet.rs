@@ -21,6 +21,7 @@ use utoipa::ToSchema;
 
 use crate::entity::plugin as plugin_entity;
 use crate::entity::plugin_replica;
+use crate::plugin_distribution::{PluginSource, PluginSourceKind};
 
 /// A replica's row counts as live while it was touched within this window.
 /// Replicas touch at least every [`TOUCH_INTERVAL`], so a live one is never
@@ -131,7 +132,7 @@ pub struct FleetView {
 struct DesiredRow {
     enabled: bool,
     generation: i64,
-    archive_hash: Option<String>,
+    source: PluginSource,
 }
 
 struct LiveReplica {
@@ -149,7 +150,7 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
             let row = DesiredRow {
                 enabled: p.is_enabled,
                 generation: p.generation,
-                archive_hash: p.archive_hash,
+                source: PluginSource::of(p.archive_hash.as_deref()),
             };
             (p.id, row)
         })
@@ -175,17 +176,6 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
         })
         .collect();
     Ok(FleetView { desired, replicas })
-}
-
-/// Where a plugin's files come from (see `crate::plugin_distribution`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginSourceKind {
-    /// The copy shipped in each node's plugins directory.
-    Bundle,
-    /// An archive uploaded through the admin API, served from the shared
-    /// blob store. Takes precedence over a bundled copy.
-    Upload,
 }
 
 /// The source the fleet runs a plugin from.
@@ -260,17 +250,13 @@ impl FleetView {
     /// Where the fleet takes `plugin_id`'s files from. `bundled` is whether
     /// the serving replica's bundle has a copy.
     pub fn source(&self, plugin_id: &str, bundled: bool) -> PluginSourceResponse {
-        let archive_hash = self
+        let source = self
             .desired
             .get(plugin_id)
-            .and_then(|row| row.archive_hash.clone());
+            .map_or(PluginSource::Bundle, |row| row.source.clone());
         PluginSourceResponse {
-            kind: if archive_hash.is_some() {
-                PluginSourceKind::Upload
-            } else {
-                PluginSourceKind::Bundle
-            },
-            archive_hash,
+            kind: source.kind(),
+            archive_hash: source.archive_hash().map(str::to_string),
             bundled,
         }
     }

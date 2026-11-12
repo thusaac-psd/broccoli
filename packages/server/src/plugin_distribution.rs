@@ -60,6 +60,26 @@ impl PluginSource {
     }
 }
 
+/// Where a plugin's files come from, as the admin API reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSourceKind {
+    /// The copy shipped in each node's plugins directory.
+    Bundle,
+    /// An archive uploaded through the admin API, served from the shared
+    /// blob store. Takes precedence over a bundled copy.
+    Upload,
+}
+
+impl PluginSource {
+    pub fn kind(&self) -> PluginSourceKind {
+        match self {
+            PluginSource::Bundle => PluginSourceKind::Bundle,
+            PluginSource::Upload(_) => PluginSourceKind::Upload,
+        }
+    }
+}
+
 /// The plugin's directory in this node's bundle, if the bundle has it.
 pub fn bundled_root(state: &AppState, plugin_id: &PluginId) -> Option<PathBuf> {
     let root = state.config.plugin.plugins_dir.join(plugin_id.as_str());

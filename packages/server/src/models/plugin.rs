@@ -1,4 +1,5 @@
-use crate::plugin_fleet::{FleetView, PluginFleetResponse, PluginSourceKind, PluginSourceResponse};
+use crate::plugin_distribution::PluginSourceKind;
+use crate::plugin_fleet::{FleetView, PluginFleetResponse, PluginSourceResponse};
 use plugin_core::manifest::{ComponentMap, ServerRouteConfig, WebRouteConfig, WebSlotConfig};
 use plugin_core::registry::{PluginInfo, PluginStatus};
 use serde::Serialize;
