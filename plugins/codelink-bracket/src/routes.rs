@@ -737,7 +737,7 @@ mod tests {
         let key = crate::timers::TimerKey::Match {
             contest: 7,
             match_id,
-            timer: crate::machine::MatchTimer::Deadline,
+            timer: crate::machine::MatchTimer::Deadline { game: 0 },
         };
         assert!(host.timer.is_scheduled(&key.encode()));
     }

@@ -64,7 +64,10 @@ pub struct Inputs<'a> {
 }
 
 /// A wakeup purpose of one match. Every match wakeup ticks the match; the
-/// purpose only keeps the wakeups of different phases apart.
+/// purpose only keeps the wakeups of different phases apart. A purpose a
+/// match can need more than once names the game or closure it belongs to,
+/// so cancelling one after its commit can never remove the wakeup a later
+/// transition armed for the next game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchTimer {
     /// An unscheduled stage's match may start.
@@ -74,7 +77,7 @@ pub enum MatchTimer {
     /// A scheduled stage's preparation ends and its first games open.
     GameStart,
     /// The open game's deadline, or the contest end if that comes first.
-    Deadline,
+    Deadline { game: u8 },
     /// The moment no new opponent submission can beat an accepted one. Each
     /// accepted submission owns its own wakeup, and one moved earlier by
     /// opponent penalties also names its time (`at_us`), so a callback that
@@ -84,12 +87,30 @@ pub enum MatchTimer {
         submission_id: i32,
         at_us: Option<i64>,
     },
-    /// The judging grace of [`Phase::AwaitingJudge`] runs out.
-    JudgeWait,
-    /// The break before the next game ends.
-    Intermission,
+    /// The judging grace of [`Phase::AwaitingJudge`] on `game` runs out.
+    JudgeWait { game: u8 },
+    /// The break before `before_game` opens ends.
+    Intermission { before_game: u8 },
     /// Retry of a closed match's closing work.
-    Closing,
+    Closing(Closure),
+}
+
+/// Which closed phase a [`MatchTimer::Closing`] wakeup retries the work of.
+/// An adjudicated match can still be awarded, so the two have separate keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closure {
+    Decision,
+    Adjudication,
+}
+
+impl Closure {
+    fn of(phase: &Phase) -> Option<Closure> {
+        match phase {
+            Phase::Decided { .. } => Some(Closure::Decision),
+            Phase::NeedsAdjudication { .. } => Some(Closure::Adjudication),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,9 +217,9 @@ fn finish(
         .filter(|_| left != phase_timer(&next, inputs.setup))
         .map(Effect::Cancel);
     let publish = (!next.xiaoju.is_empty()).then_some(Effect::PublishFeedback);
-    let effects = if next.phase.is_closed() {
+    let effects = if let Some(closure) = Closure::of(&next.phase) {
         wakeups.push(Wakeup {
-            timer: MatchTimer::Closing,
+            timer: MatchTimer::Closing(closure),
             at_ms: inputs.clock.now.saturating_add(CLOSING_RETRY_MS),
         });
         let advance = next
@@ -207,7 +228,7 @@ fn finish(
         left.into_iter()
             .chain(publish)
             .chain(advance)
-            .chain([Effect::Cancel(MatchTimer::Closing)])
+            .chain([Effect::Cancel(MatchTimer::Closing(closure))])
             .collect()
     } else {
         publish.into_iter().chain(left).collect()
@@ -225,11 +246,23 @@ fn phase_timer(m: &MatchState, setup: &Setup) -> Option<MatchTimer> {
         Phase::Ordering if is_scheduled(setup, m.round) => Some(MatchTimer::OrderingClose),
         Phase::Ordering => Some(MatchTimer::Start),
         Phase::Preparing => Some(MatchTimer::GameStart),
-        Phase::Playing => Some(MatchTimer::Deadline),
-        Phase::Intermission { .. } => Some(MatchTimer::Intermission),
-        Phase::AwaitingJudge { .. } => Some(MatchTimer::JudgeWait),
+        Phase::Playing => Some(MatchTimer::Deadline { game: last_game(m) }),
+        Phase::Intermission { .. } => Some(MatchTimer::Intermission {
+            before_game: next_game(m),
+        }),
+        Phase::AwaitingJudge { .. } => Some(MatchTimer::JudgeWait { game: last_game(m) }),
         Phase::Decided { .. } | Phase::NeedsAdjudication { .. } => None,
     }
+}
+
+fn last_game(m: &MatchState) -> u8 {
+    m.xiaoju.last().map_or(0, |game| game.index)
+}
+
+/// The index the next game opens with. Setup validation keeps every game
+/// index within a byte.
+fn next_game(m: &MatchState) -> u8 {
+    u8::try_from(m.xiaoju.len()).unwrap_or(u8::MAX)
 }
 
 /// Whether `round` follows a shared stage schedule.
@@ -309,7 +342,12 @@ fn tick(
                 return Ok(());
             }
             if now < next_game_at_ms {
-                wake(wakeups, MatchTimer::Intermission, next_game_at_ms);
+                let before_game = next_game(m);
+                wake(
+                    wakeups,
+                    MatchTimer::Intermission { before_game },
+                    next_game_at_ms,
+                );
                 return Ok(());
             }
             open_game(m, inputs, next_game_at_ms, wakeups)
@@ -361,7 +399,7 @@ fn play(
     match outcome {
         XiaojuOutcome::NotYet => {
             m.phase = Phase::Playing;
-            wake(wakeups, MatchTimer::Deadline, cutoff);
+            wake(wakeups, MatchTimer::Deadline { game: index }, cutoff);
             wakeups.extend(effective_wakeups(m, inputs, index, cutoff));
         }
         XiaojuOutcome::AwaitingJudge {
@@ -389,7 +427,11 @@ fn play(
                     blocking_submission_id,
                     escalate_at_ms,
                 };
-                wake(wakeups, MatchTimer::JudgeWait, escalate_at_ms);
+                wake(
+                    wakeups,
+                    MatchTimer::JudgeWait { game: index },
+                    escalate_at_ms,
+                );
             }
         }
         XiaojuOutcome::Decided { .. } => match decide::match_outcome(m, &round_def) {
@@ -417,7 +459,8 @@ fn play(
                     m.phase = Phase::Intermission {
                         next_game_at_ms: at,
                     };
-                    wake(wakeups, MatchTimer::Intermission, at);
+                    let before_game = next_game(m);
+                    wake(wakeups, MatchTimer::Intermission { before_game }, at);
                 }
             }
         },
@@ -517,7 +560,7 @@ fn open_game(
     m.phase = Phase::Playing;
     wake(
         wakeups,
-        MatchTimer::Deadline,
+        MatchTimer::Deadline { game: index },
         inputs.clock.cutoff(deadline_ms),
     );
     Ok(())
@@ -525,6 +568,7 @@ fn open_game(
 
 #[cfg(test)]
 mod tests {
+    use super::Closure;
     use super::*;
     use crate::decide::SubmissionLifecycle;
     use crate::model::{GameKind, StageClock};
@@ -615,7 +659,10 @@ mod tests {
         assert_eq!(t.next.order_b, Some(m.group_b.clone()));
         assert_eq!(t.next.order_a, m.order_a, "a real ranking is kept");
         assert_eq!(t.next.xiaoju[0].opened_at_ms, 1_000);
-        assert_eq!(wakeup(&t, MatchTimer::Deadline), Some(1_801_000));
+        assert_eq!(
+            wakeup(&t, MatchTimer::Deadline { game: 0 }),
+            Some(1_801_000)
+        );
         assert_eq!(
             t.effects,
             [Effect::PublishFeedback, Effect::Cancel(MatchTimer::Start)]
@@ -727,14 +774,17 @@ mod tests {
         let m = started(&setup, 0);
         let t = tick_at(&m, &setup, 1_000, &[]);
         assert_eq!(t.next, m);
-        assert_eq!(wakeup(&t, MatchTimer::Deadline), Some(1_800_000));
+        assert_eq!(
+            wakeup(&t, MatchTimer::Deadline { game: 0 }),
+            Some(1_800_000)
+        );
         assert_eq!(t.effects, [Effect::PublishFeedback]);
         let ending = Clock {
             now: 1_000,
             contest_end: Some(900_000),
         };
         let t = transition(&m, Event::Tick, &inputs(&setup, ending, &[])).unwrap();
-        assert_eq!(wakeup(&t, MatchTimer::Deadline), Some(900_000));
+        assert_eq!(wakeup(&t, MatchTimer::Deadline { game: 0 }), Some(900_000));
     }
 
     #[test]
@@ -749,15 +799,24 @@ mod tests {
     }
 
     #[test]
-    fn a_scoreless_deadline_opens_the_next_game_under_the_same_wakeup() {
+    fn a_scoreless_deadline_opens_the_next_game_and_releases_its_own_wakeup() {
         let setup = setup_two_rounds();
         let m = started(&setup, 0);
         let t = settle(&m, &setup, None);
         assert_eq!((t.next.score_a, t.next.score_b), (0, 0));
         assert_eq!(t.next.xiaoju.len(), 2);
         assert_eq!(t.next.xiaoju[1].opened_at_ms, 1_800_000);
-        assert_eq!(wakeup(&t, MatchTimer::Deadline), Some(3_600_000));
-        assert_eq!(t.effects, [Effect::PublishFeedback]);
+        assert_eq!(
+            wakeup(&t, MatchTimer::Deadline { game: 1 }),
+            Some(3_600_000)
+        );
+        assert_eq!(
+            t.effects,
+            [
+                Effect::PublishFeedback,
+                Effect::Cancel(MatchTimer::Deadline { game: 0 })
+            ]
+        );
     }
 
     #[test]
@@ -827,17 +886,17 @@ mod tests {
         assert_eq!(
             t.wakeups,
             [Wakeup {
-                timer: MatchTimer::Closing,
+                timer: MatchTimer::Closing(Closure::Decision),
                 at_ms: now + CLOSING_RETRY_MS
             }]
         );
         assert_eq!(
             t.effects,
             [
-                Effect::Cancel(MatchTimer::Deadline),
+                Effect::Cancel(MatchTimer::Deadline { game: 1 }),
                 Effect::PublishFeedback,
                 Effect::AdvanceBracket { winner: B },
-                Effect::Cancel(MatchTimer::Closing),
+                Effect::Cancel(MatchTimer::Closing(Closure::Decision)),
             ]
         );
         // Re-evaluating the closed match repeats only its closing work.
@@ -848,7 +907,7 @@ mod tests {
             [
                 Effect::PublishFeedback,
                 Effect::AdvanceBracket { winner: B },
-                Effect::Cancel(MatchTimer::Closing),
+                Effect::Cancel(MatchTimer::Closing(Closure::Decision)),
             ]
         );
     }
@@ -884,7 +943,10 @@ mod tests {
                 adjudication: Adjudication::TiebreakExhausted
             }
         );
-        assert!(t.effects.contains(&Effect::Cancel(MatchTimer::Closing)));
+        assert!(
+            t.effects
+                .contains(&Effect::Cancel(MatchTimer::Closing(Closure::Adjudication)))
+        );
         assert!(
             !t.effects
                 .iter()
@@ -904,12 +966,15 @@ mod tests {
                 next_game_at_ms: 100_000
             }
         );
-        assert_eq!(wakeup(&t, MatchTimer::Intermission), Some(100_000));
+        assert_eq!(
+            wakeup(&t, MatchTimer::Intermission { before_game: 1 }),
+            Some(100_000)
+        );
         assert_eq!(
             t.effects,
             [
                 Effect::PublishFeedback,
-                Effect::Cancel(MatchTimer::Deadline)
+                Effect::Cancel(MatchTimer::Deadline { game: 0 })
             ]
         );
         let early = tick_at(&t.next, &setup, 99_999, &[]);
@@ -921,7 +986,7 @@ mod tests {
             late.effects,
             [
                 Effect::PublishFeedback,
-                Effect::Cancel(MatchTimer::Intermission)
+                Effect::Cancel(MatchTimer::Intermission { before_game: 1 })
             ]
         );
     }
@@ -984,19 +1049,25 @@ mod tests {
                 escalate_at_ms: escalate_at
             }
         );
-        assert_eq!(wakeup(&blocked, MatchTimer::JudgeWait), Some(escalate_at));
+        assert_eq!(
+            wakeup(&blocked, MatchTimer::JudgeWait { game: 0 }),
+            Some(escalate_at)
+        );
         assert_eq!(
             blocked.effects,
             [
                 Effect::PublishFeedback,
-                Effect::Cancel(MatchTimer::Deadline)
+                Effect::Cancel(MatchTimer::Deadline { game: 0 })
             ]
         );
 
         // A later tick never pushes the grace further out.
         let still = tick_at(&blocked.next, &setup, deadline + 60_000, &subs);
         assert_eq!(still.next, blocked.next);
-        assert_eq!(wakeup(&still, MatchTimer::JudgeWait), Some(escalate_at));
+        assert_eq!(
+            wakeup(&still, MatchTimer::JudgeWait { game: 0 }),
+            Some(escalate_at)
+        );
 
         let stuck = tick_at(&blocked.next, &setup, escalate_at, &subs);
         assert_eq!(
@@ -1009,7 +1080,7 @@ mod tests {
         assert!(
             stuck
                 .effects
-                .contains(&Effect::Cancel(MatchTimer::JudgeWait))
+                .contains(&Effect::Cancel(MatchTimer::JudgeWait { game: 0 }))
         );
     }
 
@@ -1034,7 +1105,10 @@ mod tests {
         assert_eq!(t.next.score_b, 1);
         assert_eq!(t.next.phase, Phase::Playing);
         assert_eq!(t.next.xiaoju.len(), 2);
-        assert!(t.effects.contains(&Effect::Cancel(MatchTimer::JudgeWait)));
+        assert!(
+            t.effects
+                .contains(&Effect::Cancel(MatchTimer::JudgeWait { game: 0 }))
+        );
     }
 
     #[test]
@@ -1128,7 +1202,10 @@ mod tests {
             }
         );
         assert_eq!(t.next.blocking_submission_id(), None);
-        assert_eq!(t.effects[0], Effect::Cancel(MatchTimer::JudgeWait));
+        assert_eq!(
+            t.effects[0],
+            Effect::Cancel(MatchTimer::JudgeWait { game: 0 })
+        );
         assert_eq!(award(&t.next, B), Err(Rejection::AlreadyDecided));
 
         let from_ordering = award(&ordering(), B).unwrap();
@@ -1137,7 +1214,7 @@ mod tests {
             [
                 Effect::Cancel(MatchTimer::Start),
                 Effect::AdvanceBracket { winner: B },
-                Effect::Cancel(MatchTimer::Closing),
+                Effect::Cancel(MatchTimer::Closing(Closure::Decision)),
             ]
         );
     }

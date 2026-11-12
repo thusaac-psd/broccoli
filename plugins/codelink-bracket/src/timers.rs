@@ -10,7 +10,7 @@ use broccoli_server_sdk::error::SdkError;
 use serde::{Deserialize, Serialize};
 
 use crate::executor;
-use crate::machine::MatchTimer;
+use crate::machine::{Closure, MatchTimer};
 
 /// How many times a failing delivery re-arms itself, a second apart, before
 /// it is left to the host's own bounded redelivery.
@@ -41,7 +41,7 @@ impl TimerKey {
                     MatchTimer::Start => "start".to_string(),
                     MatchTimer::OrderingClose => "ordering-close".to_string(),
                     MatchTimer::GameStart => "game-start".to_string(),
-                    MatchTimer::Deadline => "deadline".to_string(),
+                    MatchTimer::Deadline { game } => format!("deadline:{game}"),
                     MatchTimer::Effective {
                         game,
                         submission_id,
@@ -52,9 +52,14 @@ impl TimerKey {
                         submission_id,
                         at_us: Some(at),
                     } => format!("effective:{game}:{submission_id}:at:{at}"),
-                    MatchTimer::JudgeWait => "judge-wait".to_string(),
-                    MatchTimer::Intermission => "intermission".to_string(),
-                    MatchTimer::Closing => "closing".to_string(),
+                    MatchTimer::JudgeWait { game } => format!("judge-wait:{game}"),
+                    MatchTimer::Intermission { before_game } => {
+                        format!("intermission:{before_game}")
+                    }
+                    MatchTimer::Closing(Closure::Decision) => "closing:decision".to_string(),
+                    MatchTimer::Closing(Closure::Adjudication) => {
+                        "closing:adjudication".to_string()
+                    }
                 };
                 format!("match:{contest}:{match_id}:{purpose}")
             }
@@ -79,10 +84,17 @@ impl TimerKey {
                     ["start"] => MatchTimer::Start,
                     ["ordering-close"] => MatchTimer::OrderingClose,
                     ["game-start"] => MatchTimer::GameStart,
-                    ["deadline"] => MatchTimer::Deadline,
-                    ["judge-wait"] => MatchTimer::JudgeWait,
-                    ["intermission"] => MatchTimer::Intermission,
-                    ["closing"] => MatchTimer::Closing,
+                    ["deadline", game] => MatchTimer::Deadline {
+                        game: game.parse().ok()?,
+                    },
+                    ["judge-wait", game] => MatchTimer::JudgeWait {
+                        game: game.parse().ok()?,
+                    },
+                    ["intermission", game] => MatchTimer::Intermission {
+                        before_game: game.parse().ok()?,
+                    },
+                    ["closing", "decision"] => MatchTimer::Closing(Closure::Decision),
+                    ["closing", "adjudication"] => MatchTimer::Closing(Closure::Adjudication),
                     ["effective", game, submission] => MatchTimer::Effective {
                         game: game.parse().ok()?,
                         submission_id: submission.parse().ok()?,
@@ -180,7 +192,7 @@ mod tests {
             MatchTimer::Start,
             MatchTimer::OrderingClose,
             MatchTimer::GameStart,
-            MatchTimer::Deadline,
+            MatchTimer::Deadline { game: 2 },
             MatchTimer::Effective {
                 game: 2,
                 submission_id: 41,
@@ -191,9 +203,10 @@ mod tests {
                 submission_id: 41,
                 at_us: Some(1_500_000),
             },
-            MatchTimer::JudgeWait,
-            MatchTimer::Intermission,
-            MatchTimer::Closing,
+            MatchTimer::JudgeWait { game: 2 },
+            MatchTimer::Intermission { before_game: 3 },
+            MatchTimer::Closing(Closure::Decision),
+            MatchTimer::Closing(Closure::Adjudication),
         ]
         .map(|timer| TimerKey::Match {
             contest: 7,
@@ -219,8 +232,10 @@ mod tests {
             "",
             "match:7:3",
             "match:7:3:unknown",
-            "match:x:3:deadline",
-            "match:7:3:deadline:extra",
+            "match:x:3:deadline:0",
+            "match:7:3:deadline",
+            "match:7:3:deadline:0:extra",
+            "match:7:3:closing:other",
             "stage:7:2",
             "other:7:3:deadline",
         ] {
@@ -235,7 +250,7 @@ mod tests {
         TimerKey::Match {
             contest: 7,
             match_id: 3,
-            timer: MatchTimer::Deadline,
+            timer: MatchTimer::Deadline { game: 0 },
         }
         .encode()
     }

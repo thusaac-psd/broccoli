@@ -249,6 +249,8 @@ fn fetch_subs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::Clock;
+    use crate::machine::Closure;
     use crate::model::{Adjudication, XiaojuState};
     use crate::test_support::{queue_now, seed, setup_two_rounds};
     use crate::timers::handle_timer;
@@ -357,7 +359,7 @@ mod tests {
             seed(&host, 7, &setup, id, &other);
             bracket::write_next_round_slots(&host, 7, &setup, &other, other.player_a).unwrap();
         }
-        let deadline = key(MatchTimer::Deadline);
+        let deadline = key(MatchTimer::Deadline { game: 2 });
         let effective = key(MatchTimer::Effective {
             game: 2,
             submission_id: 10,
@@ -383,7 +385,8 @@ mod tests {
         // stands in for the game's deadline.
         assert!(!host.timer.is_scheduled(&deadline));
         assert_eq!(
-            host.timer.scheduled_at(&key(MatchTimer::Closing)),
+            host.timer
+                .scheduled_at(&key(MatchTimer::Closing(Closure::Decision))),
             Some(31_000)
         );
         assert_eq!(host.timer.scheduled_at(&effective), Some(31_000));
@@ -402,7 +405,10 @@ mod tests {
             queue_now(&host, 30_000 + attempt * 1_000);
             let payload = format!(r#"{{"retry":{attempt}}}"#);
             assert!(handle_timer(&host, &effective, &payload, 30_000 + attempt * 1_000).is_err());
-            assert!(host.timer.is_scheduled(&key(MatchTimer::Closing)));
+            assert!(
+                host.timer
+                    .is_scheduled(&key(MatchTimer::Closing(Closure::Decision)))
+            );
             assert_eq!(
                 host.timer.scheduled_at(&effective),
                 Some(31_000 + attempt * 1_000)
@@ -414,7 +420,11 @@ mod tests {
             .queue_query_result(serde_json::json!([{ "start_ms": 0.0 }]));
         queue_now(&host, 41_000);
         handle_timer(&host, &effective, r#"{"retry":11}"#, 41_000).unwrap();
-        for timer in [effective, deadline, key(MatchTimer::Closing)] {
+        for timer in [
+            effective,
+            deadline,
+            key(MatchTimer::Closing(Closure::Decision)),
+        ] {
             assert!(!host.timer.is_scheduled(&timer), "{timer}");
         }
         assert_eq!(
@@ -438,7 +448,7 @@ mod tests {
         host.submission
             .queue_feedback_query_error(SdkError::Other("publication failed".into()));
         assert!(drive(&host, 7, 0, Event::Award { winner: 10 }).is_err());
-        let closing = key(MatchTimer::Closing);
+        let closing = key(MatchTimer::Closing(Closure::Decision));
         assert_eq!(host.timer.scheduled_at(&closing), Some(31_000));
         assert_eq!(
             storage::load_match(&host, 7, 0).unwrap().unwrap().winner(),
@@ -479,7 +489,8 @@ mod tests {
         assert!(host.timer.is_scheduled(&effective));
         let next_deadline = committed.xiaoju[1].deadline_ms;
         assert_eq!(
-            host.timer.scheduled_at(&key(MatchTimer::Deadline)),
+            host.timer
+                .scheduled_at(&key(MatchTimer::Deadline { game: 1 })),
             Some(next_deadline)
         );
 
@@ -489,7 +500,8 @@ mod tests {
         handle_timer(&host, &effective, r#"{"retry":1}"#, 31_000).unwrap();
         assert!(!host.timer.is_scheduled(&effective));
         assert_eq!(
-            host.timer.scheduled_at(&key(MatchTimer::Deadline)),
+            host.timer
+                .scheduled_at(&key(MatchTimer::Deadline { game: 1 })),
             Some(next_deadline)
         );
         assert_eq!(
@@ -524,7 +536,8 @@ mod tests {
         assert_eq!(started.xiaoju[0].opened_at_ms, 60_000);
         assert!(!host.timer.is_scheduled(&key(MatchTimer::Start)));
         assert_eq!(
-            host.timer.scheduled_at(&key(MatchTimer::Deadline)),
+            host.timer
+                .scheduled_at(&key(MatchTimer::Deadline { game: 0 })),
             Some(started.xiaoju[0].deadline_ms)
         );
     }
@@ -581,5 +594,78 @@ mod tests {
         assert_eq!(settled.score_a, 1);
         assert_eq!(settled.extra_time_remaining_ms, 3_000);
         assert_eq!(settled.xiaoju[0].extra_time_used_ms, 2_000);
+    }
+
+    #[test]
+    fn a_stale_cancel_from_an_older_commit_keeps_the_next_games_deadline() {
+        let host = Host::mock();
+        let setup = setup_two_rounds();
+        let m = match_in_progress();
+        seed(&host, 7, &setup, 0, &m);
+        let deadline = m.xiaoju[0].deadline_ms;
+        let judging = SubmissionRecord {
+            submission_id: 5,
+            user_id: 20,
+            problem_id: 203,
+            submitted_at_us: 5_000_000,
+            effective_at_us: 5_000_000,
+            verdict: None,
+            status: SubmissionLifecycle::Running,
+        };
+
+        // X: the deadline tick sees the submission still judging and commits
+        // the wait, but has not applied its effects yet.
+        let key_x = storage::match_key(7, 0);
+        let snapshot = host.storage.snapshot(&key_x).unwrap().unwrap();
+        let x = machine::transition(
+            &m,
+            Event::Tick,
+            &Inputs {
+                setup: &setup,
+                clock: Clock::at(deadline),
+                subs: std::slice::from_ref(&judging),
+                start_at_ms: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(x.next.phase, Phase::AwaitingJudge { .. }));
+        assert!(
+            x.effects
+                .contains(&Effect::Cancel(MatchTimer::Deadline { game: 0 }))
+        );
+        assert!(
+            host.storage
+                .compare_and_set_snapshot(
+                    &key_x,
+                    Some(&snapshot),
+                    &serde_json::to_string(&x.next).unwrap()
+                )
+                .unwrap()
+        );
+
+        // Y: the verdict lands, the game settles scoreless and the next game
+        // opens with its own deadline wakeup.
+        queue_now(&host, deadline + 1_000);
+        queue_subs(
+            &host,
+            vec![serde_json::json!({
+                "id": 5, "user_id": 20, "problem_id": 203, "submitted_at_us": 5_000_000,
+                "verdict": "WrongAnswer", "status": "Judged",
+            })],
+        );
+        let y = drive(&host, 7, 0, Event::Tick).unwrap();
+        assert_eq!(y.xiaoju.len(), 2);
+        let next_deadline = key(MatchTimer::Deadline { game: 1 });
+        assert_eq!(
+            host.timer.scheduled_at(&next_deadline),
+            Some(y.xiaoju[1].deadline_ms)
+        );
+
+        // X's effects arrive last and touch only game 0's wakeup.
+        apply(&host, 7, 0, &setup, &x.next, &x.effects).unwrap();
+        assert_eq!(
+            host.timer.scheduled_at(&next_deadline),
+            Some(y.xiaoju[1].deadline_ms)
+        );
     }
 }
