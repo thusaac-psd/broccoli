@@ -36,13 +36,26 @@ async fn post_problem(
         .expect("send")
 }
 
-/// Seed a `pending` claim aged `age_secs` by the DATABASE clock, as if a
-/// request on another replica had claimed it and then died.
-async fn seed_pending(app: &TestApp, key: &str, user_id: i32, age_secs: i64) {
+/// The fingerprint the middleware stores for `body` sent as JSON.
+fn fingerprint(body: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(serde_json::to_vec(body).expect("json")))
+}
+
+/// Seed a `pending` claim for `body` aged `age_secs` by the DATABASE clock, as
+/// if a request on another replica had claimed it and then died.
+async fn seed_pending(
+    app: &TestApp,
+    key: &str,
+    user_id: i32,
+    body: &serde_json::Value,
+    age_secs: i64,
+) {
+    let fp = fingerprint(body);
     app.db
         .execute_unprepared(&format!(
-            "INSERT INTO idempotency_key (key, user_id, request_path, request_method, status, created_at) \
-             VALUES ('{key}', {user_id}, '/v1/problems', 'POST', 'pending', NOW() - INTERVAL '{age_secs} seconds')"
+            "INSERT INTO idempotency_key (key, user_id, request_path, request_method, request_fingerprint, status, created_at) \
+             VALUES ('{key}', {user_id}, '/v1/problems', 'POST', '{fp}', 'pending', NOW() - INTERVAL '{age_secs} seconds')"
         ))
         .await
         .expect("seed pending key");
@@ -55,7 +68,7 @@ async fn fresh_pending_key_is_in_progress() {
         .create_user_with_role("idem_admin", "password123", "admin")
         .await;
     let user_id = app.get_with_token(routes::ME, &token).await.id();
-    seed_pending(&app, "idem-fresh", user_id, 5).await;
+    seed_pending(&app, "idem-fresh", user_id, &problem_body("P"), 5).await;
 
     let res = post_problem(&app, &token, "idem-fresh", &problem_body("P")).await;
     assert_eq!(res.status().as_u16(), 409);
@@ -70,7 +83,7 @@ async fn stale_pending_key_is_reclaimed_and_completed() {
         .create_user_with_role("idem_admin", "password123", "admin")
         .await;
     let user_id = app.get_with_token(routes::ME, &token).await.id();
-    seed_pending(&app, "idem-stale", user_id, 600).await;
+    seed_pending(&app, "idem-stale", user_id, &problem_body("P"), 600).await;
 
     let res = post_problem(&app, &token, "idem-stale", &problem_body("P")).await;
     assert_eq!(res.status().as_u16(), 201);
@@ -82,7 +95,7 @@ async fn stale_pending_key_is_reclaimed_and_completed() {
         .expect("db")
         .expect("row");
     assert_eq!(row.status, "completed");
-    assert!(row.request_fingerprint.is_some());
+    assert!(!row.request_fingerprint.is_empty());
 
     let replay = post_problem(&app, &token, "idem-stale", &problem_body("P")).await;
     assert_eq!(replay.status().as_u16(), 201);
@@ -349,10 +362,11 @@ async fn unknown_key_status_fails_closed() {
         .create_user_with_role("idem_admin", "password123", "admin")
         .await;
     let user_id = app.get_with_token(routes::ME, &token).await.id();
+    let fp = fingerprint(&problem_body("P"));
     app.db
         .execute_unprepared(&format!(
-            "INSERT INTO idempotency_key (key, user_id, request_path, request_method, status, created_at) \
-             VALUES ('idem-future', {user_id}, '/v1/problems', 'POST', 'some_future_status', NOW())"
+            "INSERT INTO idempotency_key (key, user_id, request_path, request_method, request_fingerprint, status, created_at) \
+             VALUES ('idem-future', {user_id}, '/v1/problems', 'POST', '{fp}', 'some_future_status', NOW())"
         ))
         .await
         .expect("seed key");

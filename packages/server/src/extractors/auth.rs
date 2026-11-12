@@ -118,8 +118,8 @@ where
             .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
             .ok_or(AppError::TokenInvalid)?;
 
-        // Tokens predating the last credential change (including legacy tokens
-        // with no `iat`, which decode as 0) are stale -> force a re-auth. Both
+        // Tokens predating the last credential change are stale -> force a
+        // re-auth. Both
         // sides of the comparison are DB-clock values (`iat` is stamped from
         // `statement_timestamp()` in `services::auth_tokens`), so it holds even
         // when server replicas' clocks disagree.
