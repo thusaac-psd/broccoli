@@ -256,10 +256,12 @@ boundary.
 
 `common::liveness` holds the only definition: a node is live while its key
 `broccoli:<role>:heartbeat:<id>` exists. The key has a 15 s TTL that the node
-renews every 3 s with a 5 s deadline per renewal, so a few slow renewals never expire it; it doubles as the node's ID claim. The system dashboard,
-the pin routing script, the private stream drain script and the reply publish
-script all ask that one question of that one key. A worker's in flight tasks do
-not use it at all: their PEL idle time answers whether their owner is alive.
+renews every 3 s with a 5 s deadline per renewal, so a few slow renewals never
+expire it; it doubles as the node's ID claim. The system dashboard, the pin
+routing script and the private stream drain script all ask that one question
+of that one key. A worker's in flight tasks do not use it at all: their PEL
+idle time answers whether their owner is alive. Replies do not use it either:
+the reply stream outlives the liveness key on purpose.
 
 ## Observability
 
