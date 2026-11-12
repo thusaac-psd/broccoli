@@ -894,6 +894,7 @@ name = "broccoli-types"
 version = "0.1.1"
 dependencies = [
  "extism-pdk",
+ "sea-orm",
  "serde",
  "serde_json",
  "toml 0.9.12+spec-1.1.0",

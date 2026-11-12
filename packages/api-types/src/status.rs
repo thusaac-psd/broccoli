@@ -5,116 +5,9 @@ use std::str::FromStr;
 #[cfg(feature = "sea-orm")]
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default, utoipa::ToSchema)]
-#[cfg_attr(
-    feature = "sea-orm",
-    derive(DeriveValueType),
-    sea_orm(value_type = "String")
-)]
-#[serde(rename_all = "PascalCase")]
-pub enum SubmissionStatus {
-    /// Durable accept state: submission has been persisted by the API but
-    /// not yet claimed by a server's claim fiber for dispatch. Set by the
-    /// POST handlers (`INSERT ... status='Queued'`). The claim fiber
-    /// transitions to `Pending` once it acquires the row. Distinguishing
-    /// `Queued` from `Pending` lets per-state stuck-detector thresholds
-    /// apply different timeouts and avoids false-positive 5-min
-    /// "no owner" alarms on rows that simply haven't been claimed yet.
-    Queued,
-    #[default]
-    Pending,
-    Compiling,
-    Running,
-    Judged,
-    CompilationError,
-    SystemError,
-}
-
-impl SubmissionStatus {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Judged | Self::CompilationError | Self::SystemError
-        )
-    }
-
-    pub fn is_judged(&self) -> bool {
-        matches!(self, Self::Judged)
-    }
-
-    pub fn is_error(&self) -> bool {
-        matches!(self, Self::CompilationError | Self::SystemError)
-    }
-
-    pub const ALL: &'static [SubmissionStatus] = &[
-        Self::Queued,
-        Self::Pending,
-        Self::Compiling,
-        Self::Running,
-        Self::Judged,
-        Self::CompilationError,
-        Self::SystemError,
-    ];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "Queued",
-            Self::Pending => "Pending",
-            Self::Compiling => "Compiling",
-            Self::Running => "Running",
-            Self::Judged => "Judged",
-            Self::CompilationError => "CompilationError",
-            Self::SystemError => "SystemError",
-        }
-    }
-}
-
-impl fmt::Display for SubmissionStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseStatusError {
-    invalid: String,
-}
-
-impl fmt::Display for ParseStatusError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Invalid status '{}'. Valid values: {}",
-            self.invalid,
-            SubmissionStatus::ALL
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
-impl std::error::Error for ParseStatusError {}
-
-impl FromStr for SubmissionStatus {
-    type Err = ParseStatusError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "Queued" => Ok(Self::Queued),
-            "Pending" => Ok(Self::Pending),
-            "Compiling" => Ok(Self::Compiling),
-            "Running" => Ok(Self::Running),
-            "Judged" => Ok(Self::Judged),
-            "CompilationError" => Ok(Self::CompilationError),
-            "SystemError" => Ok(Self::SystemError),
-            _ => Err(ParseStatusError {
-                invalid: s.to_string(),
-            }),
-        }
-    }
-}
+/// The REST API's name for the submission lifecycle; one definition shared
+/// with the guest SDK.
+pub use broccoli_types::types::SubmissionLifecycle as SubmissionStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, utoipa::ToSchema, Default)]
 #[cfg_attr(
@@ -305,28 +198,8 @@ impl From<broccoli_types::types::Verdict> for Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{SubmissionStatus, Verdict};
+    use super::Verdict;
     use std::str::FromStr;
-
-    #[test]
-    fn queued_status_round_trip_and_predicates() {
-        let raw = serde_json::to_string(&SubmissionStatus::Queued).expect("serialize status");
-        assert_eq!(raw, "\"Queued\"");
-        let parsed: SubmissionStatus = serde_json::from_str(&raw).expect("deserialize status");
-        assert_eq!(parsed, SubmissionStatus::Queued);
-        assert_eq!(SubmissionStatus::Queued.as_str(), "Queued");
-        assert_eq!(
-            SubmissionStatus::from_str("Queued").expect("parse Queued"),
-            SubmissionStatus::Queued
-        );
-        // Queued is pre-Pending: not terminal, not judged, not error.
-        assert!(!SubmissionStatus::Queued.is_terminal());
-        assert!(!SubmissionStatus::Queued.is_judged());
-        assert!(!SubmissionStatus::Queued.is_error());
-        // Queued must be in the ALL listing so callers iterating over all
-        // statuses (registries, metrics labels) see it.
-        assert!(SubmissionStatus::ALL.contains(&SubmissionStatus::Queued));
-    }
 
     #[test]
     fn parse_tagged_other_verdict() {
@@ -358,16 +231,6 @@ mod tests {
         let verdict: Verdict =
             serde_json::from_str("\"PluginStatus\"").expect("deserialize verdict");
         assert_eq!(verdict, Verdict::Other("PluginStatus".to_string()));
-    }
-
-    #[test]
-    fn lifecycle_statuses_match_the_sdk_for_every_host_state() {
-        for status in SubmissionStatus::ALL {
-            let wire = serde_json::to_value(status).unwrap();
-            let sdk: broccoli_types::types::SubmissionLifecycle =
-                serde_json::from_value(wire.clone()).unwrap();
-            assert_eq!(serde_json::to_value(sdk).unwrap(), wire);
-        }
     }
 
     #[test]

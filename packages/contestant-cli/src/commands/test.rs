@@ -205,7 +205,7 @@ fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse
 
     loop {
         let cr = client.get_code_run(run_id)?;
-        let status = cr.status.clone();
+        let status = cr.status;
         if !status.is_in_progress() {
             eprint!("\r\x1b[K");
             std::io::stderr().flush().ok();

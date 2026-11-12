@@ -4011,7 +4011,10 @@ export interface components {
       /** @example alice */
       username?: string | null;
     };
-    /** @enum {string} */
+    /**
+     * @description Where a submission is in its lifecycle.
+     * @enum {string}
+     */
     SubmissionStatus:
       | 'Queued'
       | 'Pending'

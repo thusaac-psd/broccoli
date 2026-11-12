@@ -243,7 +243,7 @@ pub(crate) async fn ensure_active_judgement_id(
         triggered_by_user_id: Set(None),
         target_worker_id: Set(sub.target_worker_id.clone()),
         note: Set(None),
-        status: Set(sub.status.clone()),
+        status: Set(sub.status),
         verdict: Set(sub.verdict.clone()),
         score: Set(sub.score),
         time_used: Set(sub.time_used),

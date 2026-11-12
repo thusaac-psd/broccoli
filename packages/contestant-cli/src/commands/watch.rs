@@ -1159,7 +1159,7 @@ fn update_submissions(app: &mut AppData, data: &SubmissionListResponse) {
             id: s.id.to_string(),
             problem_id: s.problem_id.to_string(),
             problem: s.problem_title.clone(),
-            status: s.status.clone(),
+            status: s.status,
             verdict: s.verdict.clone(),
             score: s.score,
             time_used: s.time_used.map(i64::from),

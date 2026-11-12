@@ -10,10 +10,10 @@ repository = "https://github.com/THUSAAC-PSD/broccoli"
 default = []
 # `DeriveValueType` for the status enums and `FromQueryResult` for row-shaped
 # responses; enabled by the server through `common/sea-orm`.
-sea-orm = ["dep:sea-orm"]
+sea-orm = ["dep:sea-orm", "broccoli-types/sea-orm"]
 
 [dependencies]
-broccoli-types.workspace = true
+broccoli-types = { workspace = true, features = ["utoipa"] }
 chrono.workspace = true
 sea-orm = { workspace = true, optional = true, default-features = false, features = ["macros", "with-chrono"] }
 serde.workspace = true

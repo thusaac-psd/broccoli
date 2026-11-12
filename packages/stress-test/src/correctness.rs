@@ -129,7 +129,7 @@ async fn run_scenario(
                 .as_ref()
                 .and_then(|r| r.verdict.as_ref())
                 .cloned();
-            let ok = scenario_passes(scenario, actual_status.clone(), actual_verdict.as_ref());
+            let ok = scenario_passes(scenario, actual_status, actual_verdict.as_ref());
 
             if !ok {
                 warn!(
@@ -260,12 +260,10 @@ mod tests {
                 .mount(server)
                 .await;
 
-            let (status, verdict) = outcomes.get(scenario.id).cloned().unwrap_or_else(|| {
-                (
-                    scenario.expected_status.clone(),
-                    scenario.expected_verdict.clone(),
-                )
-            });
+            let (status, verdict) = outcomes
+                .get(scenario.id)
+                .cloned()
+                .unwrap_or_else(|| (scenario.expected_status, scenario.expected_verdict.clone()));
             Mock::given(method("GET"))
                 .and(path(get_path))
                 .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
@@ -446,7 +444,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 Event::ScenarioFinished { id, ok, status, .. } if id == scenario.id => {
-                    Some((*ok, status.clone()))
+                    Some((*ok, *status))
                 }
                 _ => None,
             })

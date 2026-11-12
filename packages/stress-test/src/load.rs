@@ -268,7 +268,7 @@ pub async fn run(
         let last_completion = last_completion.clone();
         let scenario_clone = scenario.clone();
         let per_job_timeout = config.per_job_timeout;
-        let expected_status = scenario.expected_status.clone();
+        let expected_status = scenario.expected_status;
         let expected_verdict = scenario.expected_verdict.clone();
         let validate_expected_verdicts = config.validate_expected_verdicts;
 
@@ -319,9 +319,9 @@ pub async fn run(
                         .and_then(|r| r.verdict.as_ref())
                         .cloned();
                     let ok = if validate_expected_verdicts {
-                        scenario_passes(&scenario_clone, actual_status.clone(), actual_verdict.as_ref())
+                        scenario_passes(&scenario_clone, actual_status, actual_verdict.as_ref())
                     } else {
-                        terminal_status_passes(actual_status.clone())
+                        terminal_status_passes(actual_status)
                     };
                     let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -510,12 +510,10 @@ mod tests {
                 "/api/v1/contests/{}/problems/{}/submissions",
                 TEST_CONTEST_ID, problem_id
             );
-            let (status, verdict) = outcomes.get(scenario.id).cloned().unwrap_or_else(|| {
-                (
-                    scenario.expected_status.clone(),
-                    scenario.expected_verdict.clone(),
-                )
-            });
+            let (status, verdict) = outcomes
+                .get(scenario.id)
+                .cloned()
+                .unwrap_or_else(|| (scenario.expected_status, scenario.expected_verdict.clone()));
             let final_submission = MockFinalSubmission {
                 status,
                 verdict,
