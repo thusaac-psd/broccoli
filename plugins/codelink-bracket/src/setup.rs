@@ -391,6 +391,7 @@ pub fn handle_get_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{queue_bracket_contest_info, queue_bracket_contest_phase};
 
     fn valid_seeds() -> [i32; 16] {
         std::array::from_fn(|i| (i as i32) + 1)
@@ -773,19 +774,6 @@ mod tests {
                 permissions: vec![perm::CONTEST_MANAGE.to_string()],
             }),
         }
-    }
-
-    fn queue_bracket_contest_info(host: &Host) {
-        queue_bracket_contest_phase(host, "during");
-    }
-
-    fn queue_bracket_contest_phase(host: &Host, phase: &str) {
-        host.db.queue_query_result(serde_json::json!([{
-            "contest_type": "codelink-bracket",
-            "is_public": true,
-            "is_active": true,
-            "phase": phase,
-        }]));
     }
 
     fn queue_stage_open_now(host: &Host) {

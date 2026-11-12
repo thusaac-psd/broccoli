@@ -16,6 +16,8 @@ pub mod routes;
 pub mod setup;
 pub mod stages;
 pub mod storage;
+#[cfg(test)]
+mod test_support;
 pub mod visibility;
 
 #[cfg(target_arch = "wasm32")]

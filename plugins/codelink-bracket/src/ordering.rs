@@ -196,6 +196,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::queue_bracket_contest_info;
     use std::collections::HashMap;
 
     use super::*;
@@ -282,15 +283,6 @@ mod tests {
     }
 
     // -- handle_order (host wiring) --
-
-    fn queue_bracket_contest_info(host: &Host) {
-        host.db.queue_query_result(serde_json::json!([{
-            "contest_type": "codelink-bracket",
-            "is_public": true,
-            "is_active": true,
-            "phase": "during",
-        }]));
-    }
 
     fn order_request(
         contest_id: i32,
