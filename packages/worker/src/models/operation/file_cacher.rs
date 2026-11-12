@@ -250,8 +250,9 @@ impl CacheIndex {
         evicted
     }
 
-    fn touch(&mut self, key: &str) {
-        self.entries.get(key);
+    /// Mark `key` most recent; returns whether the index holds it.
+    fn touch(&mut self, key: &str) -> bool {
+        self.entries.get(key).is_some()
     }
 }
 
@@ -378,8 +379,17 @@ impl BlobStoreFileCacher {
         self.remove_evicted(evicted, delta).await;
     }
 
-    fn touch(&self, hash_hex: &str) {
-        self.index().touch(hash_hex);
+    /// Mark a cached blob most recent. A file on disk the index does not
+    /// hold (its eviction failed to unlink it) is indexed again with its
+    /// size, so the cap keeps counting it.
+    async fn touch(&self, hash_hex: &str) {
+        if self.index().touch(hash_hex) {
+            return;
+        }
+        if let Ok(meta) = tokio::fs::metadata(self.cache_path(hash_hex)).await {
+            self.record_cache_entry(hash_hex.to_string(), meta.len())
+                .await;
+        }
     }
 
     /// Ensure the blob `hash` is present in the local cache, fetching it from the
@@ -391,7 +401,7 @@ impl BlobStoreFileCacher {
         let cached = self.cache_path(hash_hex);
 
         if cached.exists() {
-            self.touch(hash_hex);
+            self.touch(hash_hex).await;
             if let Some(metrics) = &self.metrics {
                 metrics
                     .blob_cache_hits_total
@@ -407,7 +417,7 @@ impl BlobStoreFileCacher {
         // Re-check after acquiring the fetch lock: a concurrent fetch may have
         // populated the cache while we waited.
         if cached.exists() {
-            self.touch(hash_hex);
+            self.touch(hash_hex).await;
             if let Some(metrics) = &self.metrics {
                 metrics
                     .blob_cache_hits_total
@@ -622,7 +632,7 @@ impl FileCacher for BlobStoreFileCacher {
                 let _ = tokio::fs::remove_file(&temp_path).await;
             }
         } else {
-            self.touch(&hash_hex);
+            self.touch(&hash_hex).await;
         }
 
         Ok(hash_hex)
@@ -653,6 +663,28 @@ mod tests {
             .await
             .unwrap();
         (cacher, dir, store)
+    }
+
+    #[tokio::test]
+    async fn a_hit_on_an_unindexed_cached_file_counts_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            FilesystemBlobStore::new(dir.path().join("blobs"), 1_000_000)
+                .await
+                .unwrap(),
+        );
+        let cacher = BlobStoreFileCacher::new(store, dir.path().join("cache"), 1_000, None)
+            .await
+            .unwrap();
+        // A file left on disk by an eviction whose unlink failed.
+        let hash = "a".repeat(64);
+        tokio::fs::write(cacher.cache_path(&hash), b"12345")
+            .await
+            .unwrap();
+        assert_eq!(cacher.current_size().await, 0);
+
+        cacher.touch(&hash).await;
+        assert_eq!(cacher.current_size().await, 5);
     }
 
     #[test]
