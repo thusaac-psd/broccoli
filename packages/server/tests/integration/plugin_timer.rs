@@ -18,7 +18,9 @@ use server::dispatcher::plugin_timer::{TimerConfig, tick_once};
 use crate::common::{SpawnOptions, TestApp, routes};
 
 fn fixtures_timer_negative_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_timer_negative")
+    test_support::require_built_plugins(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_timer_negative"),
+    )
 }
 
 async fn spawn_timer_app() -> TestApp {

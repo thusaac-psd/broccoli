@@ -87,6 +87,7 @@ fn merged_plugins_dir() -> tempfile::TempDir {
         .to_path_buf();
 
     let copy_plugin = |src_dir: std::path::PathBuf, dest_name: &str, wasm_file: &str| {
+        test_support::require_built_plugin(&src_dir);
         let dest_dir = tmp.path().join(dest_name);
         std::fs::create_dir_all(&dest_dir).expect("create plugin subdir");
         std::fs::copy(src_dir.join("plugin.toml"), dest_dir.join("plugin.toml"))

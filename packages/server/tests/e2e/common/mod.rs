@@ -81,12 +81,14 @@ fn create_sandbox_manager()
 }
 
 fn plugins_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("plugins")
+    test_support::require_built_plugins(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("plugins"),
+    )
 }
 
 /// Worker platform-tools dir (`broccoli-compare`, ...) for real-sandbox judging.

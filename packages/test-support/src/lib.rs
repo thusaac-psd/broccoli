@@ -233,6 +233,49 @@ pub fn close_database_pool(db: DatabaseConnection) {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin builds
+// ---------------------------------------------------------------------------
+
+/// Panics unless the plugin in `plugin_dir` has its built WASM module. Plugin
+/// and fixture WASM is git-ignored build output, so a test that loads a plugin
+/// first checks it was built, instead of running without it.
+pub fn require_built_plugin(plugin_dir: &std::path::Path) {
+    let manifest = plugin_dir.join("plugin.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+    let parsed: toml::Table =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", manifest.display()));
+    let Some(entry) = parsed
+        .get("server")
+        .and_then(|server| server.get("entry"))
+        .and_then(|entry| entry.as_str())
+    else {
+        return;
+    };
+    let wasm = plugin_dir.join(entry);
+    assert!(
+        wasm.is_file(),
+        "{} is missing. Plugin WASM is build output: run `just build-plugins` \
+         (or ./scripts/build-plugins.sh) before the server tests",
+        wasm.display()
+    );
+}
+
+/// [`require_built_plugin`] for every plugin directly under `plugins_dir`,
+/// which is returned for use as the server's plugins directory.
+pub fn require_built_plugins(plugins_dir: std::path::PathBuf) -> std::path::PathBuf {
+    let entries = std::fs::read_dir(&plugins_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", plugins_dir.display()));
+    for entry in entries {
+        let dir = entry.expect("plugins dir entry").path();
+        if dir.join("plugin.toml").is_file() {
+            require_built_plugin(&dir);
+        }
+    }
+    plugins_dir
+}
+
+// ---------------------------------------------------------------------------
 // Database clock
 // ---------------------------------------------------------------------------
 

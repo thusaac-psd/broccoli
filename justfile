@@ -18,11 +18,11 @@ build-profiling-crate crate *args:
 # Run baseline Rust workspace tests.
 # This excludes root plugins (they are intentionally not workspace members) and
 # the stress-test harness. Use test-plugins/test-stress for those opt-in suites.
-test:
+test: build-plugins
     cargo test --workspace --exclude stress-test
 
 # Run every Rust workspace test, including the stress-test harness
-test-workspace-all:
+test-workspace-all: build-plugins
     cargo test --workspace
 
 # Test a single crate (e.g., just test-crate plugin-core)
@@ -38,7 +38,7 @@ test-plugins:
     ./scripts/test-plugins.sh
 
 # Run the isolate suites as the sandbox CI job does (needs isolate and cgroup v2)
-test-sandbox:
+test-sandbox: build-plugins
     cargo build -p broccoli-compare
     cargo test -p worker --test worker_isolate_sandbox -- --ignored --test-threads=1
     E2E_SANDBOX_BACKEND=isolate BROCCOLI_WORKER_TOOLS_DIR={{justfile_directory()}}/target/debug cargo test -p server --test e2e -- --ignored --test-threads=1
@@ -162,7 +162,7 @@ publish-cli:
     cargo publish -p broccoli-dev-cli
 
 # Run the checks CI runs on Rust and JS code, plugins included
-check-all: clippy clippy-plugins build-plugins test test-plugins lint-js format-check
+check-all: clippy clippy-plugins test test-plugins lint-js format-check
 
 # ---------------------------------------------------------------------------
 # Docker E2E testing (full stack with real isolate sandbox)
@@ -181,7 +181,7 @@ e2e-docker-test *args:
     E2E_SERVER_URL=http://127.0.0.1:3000 E2E_DATABASE_URL=postgres://postgres:password@127.0.0.1:5433/broccoli cargo test -p server --test e2e -- --test-threads=8 {{args}}
 
 # Run E2E tests in-process (testcontainers mode, no Docker stack needed)
-e2e-local *args:
+e2e-local *args: build-plugins
     E2E_SANDBOX_BACKEND=mock cargo test -p server --test e2e -- --test-threads=4 {{args}}
 
 # Full E2E cycle: build images, start stack, run tests, tear down

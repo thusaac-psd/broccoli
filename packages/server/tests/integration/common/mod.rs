@@ -407,7 +407,9 @@ impl Drop for TestApp {
 }
 
 fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    test_support::require_built_plugins(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+    )
 }
 
 /// Read a matching JSON snapshot without losing frames split across HTTP chunks.
