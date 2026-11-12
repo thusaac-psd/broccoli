@@ -41,6 +41,7 @@ use crate::models::plugin::{ReloadAllResponse, ReloadFailure};
 use crate::plugin_archive::PluginArchive;
 use crate::plugin_distribution::{self, PluginSource};
 use crate::plugin_fleet::{self, ReplicaPluginState, ReplicaPluginStatus, ReplicaReport};
+use crate::plugin_id::PluginId;
 use crate::state::AppState;
 use crate::utils::plugin::{
     self as plugin_utils, Fingerprint, LoadFailure, PluginActivationFailure,
@@ -487,7 +488,8 @@ async fn reconcile_locked(
         // plugin is still loading here, the visibility kernel must already
         // treat it as enabled-but-not-loaded (fail closed), not as disabled.
         state.plugin_lifecycle.set_desired(&row.id, row.is_enabled);
-        if let Err(error) = apply(state, applied, &row.id, desired, now).await {
+        let Some(id) = row_id(&row) else { continue };
+        if let Err(error) = apply(state, applied, &id, desired, now).await {
             failures.push(PluginActivationFailure {
                 plugin_id: row.id.clone(),
                 error,
@@ -498,6 +500,15 @@ async fn reconcile_locked(
         retain_cache(state, published_archives).await;
     }
     Ok(failures)
+}
+
+/// The row's plugin id, if it is a valid one. A row with an invalid id was
+/// not written by this host; it is never applied, so its id never reaches a
+/// path.
+fn row_id(row: &plugin_entity::Model) -> Option<PluginId> {
+    PluginId::parse(row.id.as_str())
+        .inspect_err(|e| tracing::warn!(error = %e, "Ignoring a plugin row"))
+        .ok()
 }
 
 /// The cache entries every published upload maps to.
@@ -540,10 +551,11 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
 async fn apply(
     state: &AppState,
     applied: &mut HashMap<String, Applied>,
-    plugin_id: &str,
+    id: &PluginId,
     desired: Desired,
     now: Instant,
 ) -> Result<(), PluginError> {
+    let plugin_id = id.as_str();
     let loaded = state.plugins.is_plugin_loaded(plugin_id).unwrap_or(false);
 
     if !desired.enabled {
@@ -556,7 +568,7 @@ async fn apply(
         if changed {
             // Keep the published version's manifest listed here while it is
             // off, so the admin pages describe what enabling would load.
-            match plugin_distribution::locate(state, plugin_id, &desired.source).await {
+            match plugin_distribution::locate(state, id, &desired.source).await {
                 Ok(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
                 Err(e) => {
                     tracing::debug!(plugin_id, error = %e, "Disabled plugin's files are not available here");
@@ -594,7 +606,7 @@ async fn apply(
     // nothing running here, load them anyway and flag the difference, so a
     // fleet restarted onto new files without a Reload still serves.
     let (local, differs, result) =
-        match plugin_distribution::locate(state, plugin_id, &desired.source).await {
+        match plugin_distribution::locate(state, id, &desired.source).await {
             Err(error) => (
                 None,
                 None,
@@ -666,10 +678,19 @@ async fn deactivate(state: &AppState, plugin_id: &str) -> Result<(), PluginError
 /// enabled (a newly installed plugin is on by default). Idempotent, so
 /// replicas booting together cannot fail on the primary key.
 async fn register_rows(state: &AppState, ids: &[String]) -> Result<(), DbErr> {
+    // A bundle directory whose name is not a valid id is never a plugin.
+    let ids: Vec<&String> = ids
+        .iter()
+        .filter(|id| {
+            PluginId::parse(id.as_str())
+                .inspect_err(|e| tracing::warn!(error = %e, "Ignoring a bundled plugin directory"))
+                .is_ok()
+        })
+        .collect();
     if ids.is_empty() {
         return Ok(());
     }
-    plugin_entity::Entity::insert_many(ids.iter().map(|id| plugin_entity::ActiveModel {
+    plugin_entity::Entity::insert_many(ids.into_iter().map(|id| plugin_entity::ActiveModel {
         id: Set(id.clone()),
         is_enabled: Set(true),
         generation: Set(0),
@@ -907,12 +928,13 @@ impl From<ChangeError> for AppError {
 async fn load_then_publish(
     state: &AppState,
     applied: &mut HashMap<String, Applied>,
-    plugin_id: &str,
+    id: &PluginId,
     change: Change<'_>,
     source: &PluginSource,
 ) -> Result<(), ChangeError> {
+    let plugin_id = id.as_str();
     let loaded = async {
-        let root = plugin_distribution::locate(state, plugin_id, source)
+        let root = plugin_distribution::locate(state, id, source)
             .await
             .map_err(|error| LoadFailure {
                 error,
@@ -988,15 +1010,14 @@ async fn refused(state: &AppState, plugin_id: &str, change: Change<'_>) -> Chang
 
 /// The source the fleet publishes for `plugin_id`: the row's, or this
 /// replica's bundled copy for a plugin with no row yet.
-async fn published_source(state: &AppState, plugin_id: &str) -> Result<PluginSource, AppError> {
+async fn published_source(state: &AppState, id: &PluginId) -> Result<PluginSource, AppError> {
+    let plugin_id = id.as_str();
     match plugin_entity::Entity::find_by_id(plugin_id)
         .one(&state.db)
         .await?
     {
         Some(row) => Ok(PluginSource::of(row.archive_hash.as_deref())),
-        None if plugin_distribution::bundled_root(state, plugin_id).is_some() => {
-            Ok(PluginSource::Bundle)
-        }
+        None if plugin_distribution::bundled_root(state, id).is_some() => Ok(PluginSource::Bundle),
         None => Err(AppError::NotFound(format!(
             "Plugin '{plugin_id}' not found"
         ))),
@@ -1006,15 +1027,16 @@ async fn published_source(state: &AppState, plugin_id: &str) -> Result<PluginSou
 /// Enable a plugin fleet-wide.
 ///
 /// Also the retry for a plugin that is enabled but failed on this replica.
-pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+pub async fn enable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
-        let source = published_source(state, plugin_id).await?;
+        let source = published_source(state, id).await?;
         if state.plugins.is_plugin_loaded(plugin_id).unwrap_or(false) {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is already enabled"
             )));
         }
-        Ok(load_then_publish(state, applied, plugin_id, Change::Enable, &source).await?)
+        Ok(load_then_publish(state, applied, id, Change::Enable, &source).await?)
     })
     .await
 }
@@ -1024,14 +1046,15 @@ pub async fn enable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
 ///
 /// Keyed on the desired state, not on this replica's load state, so a plugin
 /// that failed to load here can still be turned off.
-pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+pub async fn disable(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
         if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not currently enabled"
             )));
         }
-        let source = published_source(state, plugin_id).await?;
+        let source = published_source(state, id).await?;
         let generation = publish(state, plugin_id, Change::Disable, None, &source)
             .await?
             .ok_or_else(|| AppError::Internal("plugin upsert returned no row".into()))?;
@@ -1042,7 +1065,7 @@ pub async fn disable(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
             published: None,
             source,
         };
-        apply(state, applied, plugin_id, desired, Instant::now()).await?;
+        apply(state, applied, id, desired, Instant::now()).await?;
         delete_timers(state, plugin_id).await;
         Ok(())
     })
@@ -1068,15 +1091,16 @@ async fn delete_timers(state: &AppState, plugin_id: &str) {
 /// this replica's own load state, and a successful load here bumps the
 /// generation, so every failing replica retries at once instead of waiting
 /// out its backoff.
-pub async fn reload(state: &AppState, plugin_id: &str) -> Result<(), AppError> {
+pub async fn reload(state: &AppState, id: &PluginId) -> Result<(), AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
-        let source = published_source(state, plugin_id).await?;
+        let source = published_source(state, id).await?;
         if !state.plugin_lifecycle.is_desired_enabled(plugin_id) {
             return Err(AppError::Conflict(format!(
                 "Plugin '{plugin_id}' is not enabled. Use enable instead."
             )));
         }
-        Ok(load_then_publish(state, applied, plugin_id, Change::Reload, &source).await?)
+        Ok(load_then_publish(state, applied, id, Change::Reload, &source).await?)
     })
     .await
 }
@@ -1095,13 +1119,13 @@ pub async fn install(state: &AppState, archive: PluginArchive) -> Result<(), App
             archive.hash()
         )));
     }
-    let plugin_id = archive.id().to_string();
+    let id = archive.id().clone();
     let source = PluginSource::Upload(archive.hash().to_hex());
     with_applied(state, async |applied| {
         // Unpack from the bytes in hand rather than fetching them back.
         let stored = plugin_distribution::store(state, archive).await;
         let result = match stored {
-            Ok(_) => load_then_publish(state, applied, &plugin_id, Change::Upload, &source).await,
+            Ok(_) => load_then_publish(state, applied, &id, Change::Upload, &source).await,
             Err(e) => Err(ChangeError::Load(e)),
         };
         refresh_cache(state).await;
@@ -1135,7 +1159,8 @@ pub enum UploadRemoval {
 /// this replica, that copy becomes the source again (loaded here first if
 /// the plugin is enabled); without one, the plugin's row is deleted, which
 /// unloads it on every replica, and its pending timers go with it.
-pub async fn remove_upload(state: &AppState, plugin_id: &str) -> Result<UploadRemoval, AppError> {
+pub async fn remove_upload(state: &AppState, id: &PluginId) -> Result<UploadRemoval, AppError> {
+    let plugin_id = id.as_str();
     with_applied(state, async |applied| {
         let row = plugin_entity::Entity::find_by_id(plugin_id)
             .one(&state.db)
@@ -1148,9 +1173,9 @@ pub async fn remove_upload(state: &AppState, plugin_id: &str) -> Result<UploadRe
         };
         let change = Change::RemoveUpload(&archive);
         let stale = || ChangeError::Stale(plugin_id.to_string());
-        let outcome = match plugin_distribution::bundled_root(state, plugin_id) {
+        let outcome = match plugin_distribution::bundled_root(state, id) {
             Some(_) if row.is_enabled => {
-                load_then_publish(state, applied, plugin_id, change, &PluginSource::Bundle).await?;
+                load_then_publish(state, applied, id, change, &PluginSource::Bundle).await?;
                 UploadRemoval::BundleRestored
             }
             Some(root) => {
@@ -1170,7 +1195,7 @@ pub async fn remove_upload(state: &AppState, plugin_id: &str) -> Result<UploadRe
                     published: fingerprint,
                     source: PluginSource::Bundle,
                 };
-                apply(state, applied, plugin_id, desired, Instant::now()).await?;
+                apply(state, applied, id, desired, Instant::now()).await?;
                 UploadRemoval::BundleRestored
             }
             None => {
@@ -1201,21 +1226,21 @@ pub async fn remove_upload(state: &AppState, plugin_id: &str) -> Result<UploadRe
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
     with_applied(state, async |applied| {
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
-        let enabled: Vec<(String, PluginSource)> = rows
+        let enabled: Vec<(PluginId, PluginSource)> = rows
             .iter()
             .filter(|r| state.plugin_lifecycle.is_desired_enabled(&r.id))
-            .map(|r| (r.id.clone(), PluginSource::of(r.archive_hash.as_deref())))
+            .filter_map(|r| Some((row_id(r)?, PluginSource::of(r.archive_hash.as_deref()))))
             .collect();
 
         let mut reloaded = Vec::new();
         let mut failed = Vec::new();
         for (id, source) in enabled {
             match load_then_publish(state, applied, &id, Change::Reload, &source).await {
-                Ok(()) => reloaded.push(id),
+                Ok(()) => reloaded.push(id.to_string()),
                 Err(e) => {
                     tracing::error!(plugin_id = %id, error = %e, "Failed to reload plugin");
                     failed.push(ReloadFailure {
-                        id,
+                        id: id.to_string(),
                         error: e.to_string(),
                     });
                 }
@@ -1232,8 +1257,9 @@ pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError>
         let rows = plugin_entity::Entity::find().all(&state.db).await?;
         let now = Instant::now();
         for row in rows.into_iter().filter(|r| new_ids.contains(&r.id)) {
+            let Some(id) = row_id(&row) else { continue };
             let desired = Desired::of(&row);
-            if let Err(e) = apply(state, applied, &row.id, desired, now).await {
+            if let Err(e) = apply(state, applied, &id, desired, now).await {
                 tracing::error!(plugin_id = %row.id, error = %e, "Failed to load new plugin");
                 failed.push(ReloadFailure {
                     id: row.id.clone(),

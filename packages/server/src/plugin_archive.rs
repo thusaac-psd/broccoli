@@ -15,6 +15,8 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use common::storage::ContentHash;
+
+use crate::plugin_id::PluginId;
 use plugin_core::manifest::PluginManifest;
 use plugin_core::registry::PluginEntry;
 
@@ -45,21 +47,9 @@ fn reject(message: impl Into<String>) -> ArchiveError {
     ArchiveError(message.into())
 }
 
-/// The canonical plugin-id rule, shared by the archive check and the
-/// plugin-config handlers. A plugin id becomes a filesystem path segment, so
-/// it is strict: 1 to 128 characters, starting with an ASCII letter or digit,
-/// otherwise only ASCII letters, digits, `_` and `-`.
-pub fn is_valid_plugin_id(id: &str) -> bool {
-    id.len() <= 128
-        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
 /// A validated plugin archive.
 pub struct PluginArchive {
-    id: String,
+    id: PluginId,
     manifest: PluginManifest,
     hash: ContentHash,
     bytes: Vec<u8>,
@@ -110,7 +100,7 @@ impl PluginArchive {
         let manifest =
             PluginManifest::parse(&manifest_source).map_err(|e| reject(e.to_string()))?;
         // Route and timer declarations are checked without touching disk.
-        PluginEntry::new(id.clone(), PathBuf::new(), manifest.clone())
+        PluginEntry::new(id.to_string(), PathBuf::new(), manifest.clone())
             .map_err(|e| reject(e.to_string()))?;
         for path in manifest.loaded_paths() {
             if !stays_inside(Path::new(path)) {
@@ -138,7 +128,7 @@ impl PluginArchive {
         })
     }
 
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &PluginId {
         &self.id
     }
 
@@ -158,7 +148,7 @@ impl PluginArchive {
     /// Unpack into `dest`, which must not exist yet, as `dest/<id>/...`.
     /// Returns the plugin directory. Blocking.
     pub fn unpack(&self, dest: &Path) -> Result<PathBuf, ArchiveError> {
-        let root = dest.join(&self.id);
+        let root = dest.join(self.id.as_str());
         let io = |e: std::io::Error| reject(format!("Failed to unpack the archive: {e}"));
         std::fs::create_dir_all(&root).map_err(io)?;
         walk(&self.bytes, |path, file| {
@@ -271,7 +261,7 @@ fn only_files_and_dirs() -> ArchiveError {
 }
 
 struct Walked {
-    id: String,
+    id: PluginId,
     files: BTreeSet<PathBuf>,
 }
 
@@ -286,7 +276,7 @@ fn walk(
     check_records(bytes)?;
     let mut archive = open(bytes);
     let entries = archive.entries().map_err(unreadable)?;
-    let mut id: Option<String> = None;
+    let mut id: Option<PluginId> = None;
     let mut files = BTreeSet::new();
     let mut count = 0usize;
     let mut budget = MAX_UNPACKED_BYTES;
@@ -332,18 +322,13 @@ fn walk(
         };
         let top = top.to_string_lossy();
         match &id {
-            Some(existing) if *existing != top => {
+            Some(existing) if existing.as_str() != top.as_ref() => {
                 return Err(reject(
                     "Archive must contain exactly one top-level directory",
                 ));
             }
             Some(_) => {}
-            None if !is_valid_plugin_id(&top) => {
-                return Err(reject(format!(
-                    "Invalid plugin ID '{top}'. Must match [a-zA-Z0-9][a-zA-Z0-9_-]*"
-                )));
-            }
-            None => id = Some(top.into_owned()),
+            None => id = Some(PluginId::parse(top).map_err(|e| reject(e.to_string()))?),
         }
         let path: PathBuf = rest.iter().collect();
         if path.as_os_str().is_empty() {
@@ -464,7 +449,7 @@ permissions = ["storage"]
     fn a_valid_archive_parses_and_unpacks_under_its_id() {
         let bytes = valid();
         let archive = PluginArchive::parse(bytes.clone()).unwrap();
-        assert_eq!(archive.id(), "demo");
+        assert_eq!(archive.id().as_str(), "demo");
         assert_eq!(archive.manifest().version, "1.2.0");
         assert_eq!(archive.hash(), ContentHash::compute(&bytes));
 
@@ -629,16 +614,5 @@ permissions = ["storage"]
         let err = std::io::copy(&mut capped, &mut std::io::sink()).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
         assert!(unreadable(err).to_string().contains("unpacks to more than"));
-    }
-
-    #[test]
-    fn plugin_id_rule() {
-        assert!(is_valid_plugin_id("a"));
-        assert!(is_valid_plugin_id("Plugin_1-x"));
-        assert!(!is_valid_plugin_id(""));
-        assert!(!is_valid_plugin_id("_a"));
-        assert!(!is_valid_plugin_id("a.b"));
-        assert!(!is_valid_plugin_id(&"a".repeat(129)));
-        assert!(is_valid_plugin_id(&"a".repeat(128)));
     }
 }

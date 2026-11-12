@@ -26,8 +26,14 @@ use crate::models::plugin::{
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
 use crate::plugin_distribution::bundled_root;
 use crate::plugin_fleet::PluginSourceKind;
+use crate::plugin_id::PluginId;
 use crate::plugin_lifecycle::UploadRemoval;
 use crate::state::AppState;
+
+/// Whether this replica's bundle has a copy of the plugin `id`.
+fn is_bundled(state: &AppState, id: &str) -> bool {
+    PluginId::parse(id).is_ok_and(|id| bundled_root(state, &id).is_some())
+}
 
 #[utoipa::path(
     get,
@@ -57,7 +63,7 @@ pub async fn list_all_plugins(
         .map_err(AppError::from)?
         .into_iter()
         .map(|info| {
-            let bundled = bundled_root(&state, &info.id).is_some();
+            let bundled = is_bundled(&state, &info.id);
             PluginDetailResponse::new(info, &fleet, bundled)
         })
         .collect();
@@ -69,9 +75,11 @@ pub async fn list_all_plugins(
         .filter(|id| !local.contains(*id))
         .collect();
     remote.sort_unstable();
-    plugins.extend(remote.into_iter().map(|id| {
-        PluginDetailResponse::without_manifest(id, &fleet, bundled_root(&state, id).is_some())
-    }));
+    plugins.extend(
+        remote
+            .into_iter()
+            .map(|id| PluginDetailResponse::without_manifest(id, &fleet, is_bundled(&state, id))),
+    );
 
     Ok(Json(plugins))
 }
@@ -96,7 +104,7 @@ pub async fn list_all_plugins(
 pub async fn get_plugin_details(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<PluginFullDetailResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -105,12 +113,12 @@ pub async fn get_plugin_details(
         .list_plugins()
         .map_err(AppError::from)?
         .into_iter()
-        .find(|p| p.id == id);
+        .find(|p| p.id == id.as_str());
     let fleet = crate::plugin_fleet::read(&state.db).await?;
     let bundled = bundled_root(&state, &id).is_some();
     match plugin {
         Some(plugin) => Ok(Json(PluginFullDetailResponse::new(plugin, &fleet, bundled))),
-        None if fleet.plugin_ids().any(|known| known == id) => Ok(Json(
+        None if fleet.plugin_ids().any(|known| known == id.as_str()) => Ok(Json(
             PluginFullDetailResponse::without_manifest(&id, &fleet, bundled),
         )),
         None => Err(AppError::NotFound(format!("Plugin '{}' not found", id))),
@@ -138,7 +146,7 @@ pub async fn get_plugin_details(
 pub async fn enable_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -170,7 +178,7 @@ pub async fn enable_plugin(
 pub async fn disable_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -202,7 +210,7 @@ pub async fn disable_plugin(
 pub async fn reload_plugin(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
 
@@ -327,7 +335,7 @@ pub async fn inspect_plugin_archive(
 ) -> Result<Json<PluginArchiveSummary>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let archive = read_archive(&state, multipart).await?;
-    let current = plugin_entity::Entity::find_by_id(archive.id())
+    let current = plugin_entity::Entity::find_by_id(archive.id().as_str())
         .one(&state.db)
         .await?
         .map(|row| PublishedPluginResponse {
@@ -417,7 +425,7 @@ pub async fn upload_plugin(
 pub async fn remove_plugin_upload(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
-    AppPath(id): AppPath<String>,
+    AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<RemoveUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
     let outcome = crate::plugin_lifecycle::remove_upload(&state, &id).await?;

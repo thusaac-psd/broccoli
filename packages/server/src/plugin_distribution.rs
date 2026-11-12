@@ -28,6 +28,7 @@ use common::storage::ContentHash;
 use plugin_core::error::PluginError;
 
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
+use crate::plugin_id::PluginId;
 use crate::state::AppState;
 
 /// Where the fleet takes a plugin's files from.
@@ -60,8 +61,8 @@ impl PluginSource {
 }
 
 /// The plugin's directory in this node's bundle, if the bundle has it.
-pub fn bundled_root(state: &AppState, plugin_id: &str) -> Option<PathBuf> {
-    let root = state.config.plugin.plugins_dir.join(plugin_id);
+pub fn bundled_root(state: &AppState, plugin_id: &PluginId) -> Option<PathBuf> {
+    let root = state.config.plugin.plugins_dir.join(plugin_id.as_str());
     root.join("plugin.toml").is_file().then_some(root)
 }
 
@@ -69,13 +70,12 @@ pub fn bundled_root(state: &AppState, plugin_id: &str) -> Option<PathBuf> {
 /// unpacking an uploaded archive first if it is not cached here yet.
 pub async fn locate(
     state: &AppState,
-    plugin_id: &str,
+    plugin_id: &PluginId,
     source: &PluginSource,
 ) -> Result<PathBuf, PluginError> {
     match source {
-        PluginSource::Bundle => {
-            bundled_root(state, plugin_id).ok_or_else(|| PluginError::NotFound(plugin_id.into()))
-        }
+        PluginSource::Bundle => bundled_root(state, plugin_id)
+            .ok_or_else(|| PluginError::NotFound(plugin_id.to_string())),
         PluginSource::Upload(hash) => {
             if !state.config.plugin.uploads_enabled {
                 return Err(PluginError::LoadFailed(
@@ -89,13 +89,13 @@ pub async fn locate(
     }
 }
 
-fn cached_root(state: &AppState, hash: &ContentHash, plugin_id: &str) -> PathBuf {
+fn cached_root(state: &AppState, hash: &ContentHash, plugin_id: &PluginId) -> PathBuf {
     state
         .config
         .plugin
         .cache_dir
         .join(hash.to_hex())
-        .join(plugin_id)
+        .join(plugin_id.as_str())
 }
 
 fn load_failed(message: impl std::fmt::Display) -> PluginError {
@@ -104,7 +104,7 @@ fn load_failed(message: impl std::fmt::Display) -> PluginError {
 
 async fn materialize(
     state: &AppState,
-    plugin_id: &str,
+    plugin_id: &PluginId,
     hash: &str,
 ) -> Result<PathBuf, PluginError> {
     let hash = ContentHash::from_hex(hash)

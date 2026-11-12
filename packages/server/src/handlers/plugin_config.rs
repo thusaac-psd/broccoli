@@ -150,15 +150,9 @@ async fn list_config_inner<C: ConnectionTrait>(
 }
 
 fn validate_plugin_id(id: &str) -> Result<(), AppError> {
-    if crate::plugin_archive::is_valid_plugin_id(id) {
-        Ok(())
-    } else {
-        Err(AppError::Validation(
-            "Plugin ID must be 1-128 characters, start with a letter or digit, and contain only \
-             alphanumeric, hyphen, or underscore characters"
-                .into(),
-        ))
-    }
+    crate::plugin_id::PluginId::parse(id)
+        .map(drop)
+        .map_err(|e| AppError::Validation(e.to_string()))
 }
 
 #[utoipa::path(

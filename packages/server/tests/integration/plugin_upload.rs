@@ -582,3 +582,41 @@ async fn contestants_cannot_upload_or_remove_plugins() {
     assert_eq!(res.status, 403);
     assert!(row(&a, UPLOAD_ONLY).await.is_none());
 }
+
+/// An id from the URL is a path segment only once it is a valid plugin id:
+/// a decoded `../` can never point the lifecycle at another directory, such
+/// as this server's upload cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_ids_from_the_url_must_be_valid() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let body = upload(&a, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
+    let hash = body["archive_hash"].as_str().unwrap();
+    let cache = a.plugin_cache.path().display().to_string();
+    let escape = format!("..{cache}/{hash}/{UPLOAD_ONLY}").replace('/', "%2F");
+
+    for path in [
+        routes::admin_plugin_enable(&escape),
+        routes::admin_plugin_reload(&escape),
+        routes::admin_plugin_disable(&escape),
+    ] {
+        let res = a.post_with_token(&path, &json!({}), &token).await;
+        assert_eq!(res.status, 400, "{path}: {}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
+    }
+    let res = a
+        .delete_with_token(&routes::admin_plugin_upload(&escape), &token)
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    let res = a
+        .get_with_token(&routes::admin_plugin_details(&escape), &token)
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+
+    let rows = plugin_entity::Entity::find().all(&a.db).await.unwrap();
+    assert!(
+        rows.iter()
+            .all(|r| server::plugin_id::PluginId::parse(r.id.as_str()).is_ok()),
+        "{rows:?}"
+    );
+}
