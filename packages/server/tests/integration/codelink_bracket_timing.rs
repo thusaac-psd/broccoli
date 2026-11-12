@@ -14,8 +14,9 @@
 //! `AwaitingJudge` test from taking 120s, and a non-zero intermission
 //! exercises the round-2 start gate).
 //!
-//! Several tests wait out real wall-clock deadlines of a few seconds, then
-//! force timer delivery with `tick_once`.
+//! Tests never sleep through a deadline: they move the test database's clock
+//! past it (`TestApp::clock`), which the plugin's time queries and the timer
+//! dispatcher both read, then force timer delivery with `tick_once`.
 
 use crate::codelink_bracket::{
     Player, RoundProblems, XIAOJU_SECONDS, bracket_route, create_all_round_problems,
@@ -386,7 +387,7 @@ async fn earliest_submitted_wins_and_the_intermediate_awaiting_state_is_pinned()
     let prob_a = fx.rounds[0].group_a[0];
     let prob_b = fx.rounds[0].group_b[0];
 
-    let t0 = Utc::now();
+    let t0 = db_now(&fx.app).await;
     let t1 = t0 + ChronoDuration::milliseconds(50);
 
     // A submits FIRST (t0) but is still being judged.
@@ -466,7 +467,7 @@ async fn force_decide_overrides_a_match_with_a_submission_mid_judge_and_a_later_
         prob_a,
         SubmissionStatus::Running,
         None,
-        Utc::now(),
+        db_now(&fx.app).await,
     )
     .await;
 
@@ -613,12 +614,9 @@ async fn two_sibling_matches_decided_simultaneously_both_land_in_the_shared_roun
 /// Drives the full `AwaitingJudge` -> escalation -> `NeedsAdjudication` path
 /// end to end via `server::dispatcher::plugin_timer::tick_once`, matching
 /// `tests/integration/plugin_timer.rs`'s pattern, rather than sleeping and
-/// polling for the background dispatcher loop to get around to it. The only
-/// sleeps here wait out the unavoidable real wall-clock deadlines
-/// (`xiaoju_seconds` and `escalation_grace_seconds` are computed from real
-/// `NOW()`), and they are derived from the deadline the server reports, not
-/// guessed; delivery itself is always forced deterministically via
-/// `tick_once` immediately afterwards.
+/// polling for the background dispatcher loop to get around to it. The
+/// deadlines are passed by moving the database clock to the deadline the
+/// server reports, and delivery is forced via `tick_once` right after.
 ///
 /// Both submissions are inserted directly with fixed verdicts. Sending B's
 /// AC through the real judging pipeline with a short game is flaky: under
@@ -640,7 +638,7 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     // A's submission never resolves; B's, submitted later, is already an
     // AC. That makes A's submission a blocker rather than simply the only
     // submission on the board (a separate test below covers that case).
-    let t0 = Utc::now();
+    let t0 = db_now(&fx.app).await;
     let stuck = insert_submission(&fx, a.id, prob_a, SubmissionStatus::Running, None, t0).await;
     insert_submission(
         &fx,
@@ -663,7 +661,7 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
         .as_i64()
         .expect("game 1 is open and has a deadline");
     assert!(
-        Utc::now().timestamp_millis() < deadline_ms,
+        fx.app.clock().now_ms().await < deadline_ms,
         "the pre-deadline check ran after the {GAME_SECONDS}s deadline; the run is too \
          slow for this test to say anything"
     );
@@ -678,13 +676,13 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
     // The first AC wakeup cannot decide while A is unresolved. The independent
     // deadline timer must remain armed after that wakeup is delivered.
     let config = TimerConfig::default();
-    sleep_until_ms(t0.timestamp_millis() + 1_250).await;
+    advance_clock_to_ms(&fx.app, t0.timestamp_millis() + 1_250).await;
     tick_once(&fx.app.state, &config)
         .await
         .expect("early AC wakeup");
 
     // Wait out the real deadline, then force delivery deterministically.
-    sleep_until_ms(deadline_ms + 250).await;
+    advance_clock_to_ms(&fx.app, deadline_ms + 250).await;
     tick_once(&fx.app.state, &config)
         .await
         .expect("tick_once (xiaoju deadline) failed");
@@ -715,7 +713,11 @@ async fn awaiting_judge_end_to_end_then_escalates_to_needs_adjudication() {
 
     // The escalation timer was armed during the tick above, so the grace
     // period is over GRACE_SECONDS after it returned.
-    sleep_until_ms(Utc::now().timestamp_millis() + GRACE_SECONDS * 1_000 + 250).await;
+    advance_clock_to_ms(
+        &fx.app,
+        fx.app.clock().now_ms().await + GRACE_SECONDS * 1_000 + 250,
+    )
+    .await;
     tick_once(&fx.app.state, &config)
         .await
         .expect("tick_once (escalation) failed");
@@ -748,7 +750,7 @@ async fn a_game_cut_off_by_the_contest_end_goes_to_staff() {
         ))
         .await
         .expect("move the contest end");
-    sleep_until_ms(Utc::now().timestamp_millis() + 1_500).await;
+    advance_clock_to_ms(&fx.app, fx.app.clock().now_ms().await + 1_500).await;
 
     // Anything that looks at the match after the end (a verdict landing, a
     // timer, this nudge) must see that the game can no longer be played.
@@ -778,11 +780,40 @@ async fn a_game_cut_off_by_the_contest_end_goes_to_staff() {
     assert_eq!(res.status, 400, "staff start after the end: {}", res.text);
 }
 
-async fn sleep_until_ms(at_ms: i64) {
-    let wait = at_ms - Utc::now().timestamp_millis();
-    if wait > 0 {
-        tokio::time::sleep(Duration::from_millis(wait as u64)).await;
-    }
+/// Moves the database clock to `at_ms`, past which the plugin and the timer
+/// dispatcher see the deadline as passed.
+async fn advance_clock_to_ms(app: &TestApp, at_ms: i64) {
+    app.clock().advance_to_ms(at_ms).await;
+}
+
+/// When the plugin's timer `key` is due, in epoch milliseconds. Waits for the
+/// plugin to schedule it, which happens asynchronously after a verdict.
+async fn timer_fire_at_ms(app: &TestApp, key: &str) -> i64 {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = app
+                .db
+                .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                    sea_orm::DbBackend::Postgres,
+                    "SELECT (EXTRACT(EPOCH FROM fire_at) * 1000)::bigint AS ms FROM plugin_timer \
+                     WHERE plugin_id = 'codelink-bracket' AND key = $1",
+                    [key.into()],
+                ))
+                .await
+                .expect("read plugin_timer");
+            if let Some(row) = row {
+                return row.try_get::<i64>("", "ms").expect("ms column");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("plugin timer {key} was never scheduled"))
+}
+
+/// The database's current time: the clock deadlines are computed from.
+async fn db_now(app: &TestApp) -> chrono::DateTime<Utc> {
+    chrono::DateTime::from_timestamp_millis(app.clock().now_ms().await).expect("db time")
 }
 
 #[tokio::test]
@@ -801,7 +832,7 @@ async fn shared_extra_time_settles_a_real_submission_once_through_the_host() {
 
     // Exercise the real submission hook during extra time, then the fixture
     // evaluator's callback through the freshly built WASM plugin.
-    sleep_until_ms(base + 200).await;
+    advance_clock_to_ms(&fx.app, base + 200).await;
     let response = submit(
         &fx.app,
         fx.contest_id,
@@ -864,7 +895,7 @@ async fn shared_extra_time_timeout_leaves_later_games_and_tiebreaks_at_base_dura
         let before = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
         assert_eq!(before["current_xiaoju_index"], index);
         let deadline = before["current_xiaoju_deadline_ms"].as_i64().unwrap();
-        sleep_until_ms(deadline + 100).await;
+        advance_clock_to_ms(&fx.app, deadline + 100).await;
         tick_once(&fx.app.state, &TimerConfig::default())
             .await
             .unwrap();
@@ -908,11 +939,14 @@ async fn a_lone_in_flight_submission_blocks_a_scoreless_decision_at_the_deadline
         prob_a,
         SubmissionStatus::Running,
         None,
-        Utc::now(),
+        db_now(&fx.app).await,
     )
     .await;
 
-    tokio::time::sleep(Duration::from_secs(XIAOJU_SECONDS as u64 + 1)).await;
+    fx.app
+        .clock()
+        .advance(Duration::from_secs(XIAOJU_SECONDS as u64 + 1))
+        .await;
     let config = TimerConfig::default();
     tick_once(&fx.app.state, &config)
         .await
@@ -934,28 +968,37 @@ async fn a_lone_in_flight_submission_blocks_a_scoreless_decision_at_the_deadline
 /// early (on a real AC) is a no-op: a timer whose 小局 has already resolved
 /// is discarded (see `xiaoju_timer_key` in the plugin's `judge.rs`), and it
 /// must not decide the next 小局 prematurely.
-/// Uses a wide xiaoju_seconds window and an artificial delay before
-/// submitting so the stale timer's original fire time sits comfortably
-/// before the next 小局's own fresh deadline.
+/// 小局 1 opens when the AC is judged, so its fresh deadline lies after the
+/// stale timer's original fire time, which the test moves the clock just past.
 #[tokio::test]
 async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
     let fx = setup_fixture_with_timing(6, 0, 120).await;
     order_match_0(&fx).await;
     start_match_0(&fx).await;
+    let stale_fire_at_ms =
+        get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await["current_xiaoju_deadline_ms"]
+            .as_i64()
+            .expect("xiaoju 0 has a deadline");
 
     let a = &fx.players[0];
     let prob_a = fx.rounds[0].group_a[0];
 
-    // ~2s in, 小局 0 resolves early via a real AC, well ahead of its
-    // original 6s deadline. The original xiaoju-0 timer still fires at
-    // (match start + 6s); xiaoju-1 (opened at ~2s) has its own fresh
-    // deadline at ~(2s + 6s) = ~8s, a ~2s margin after the stale fire.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // 小局 0 resolves early via a real AC, well ahead of its original 6s
+    // deadline. The original xiaoju-0 timer still fires at (match start +
+    // 6s); xiaoju-1 opens once the AC is judged, so its own fresh deadline
+    // lies after the stale fire.
     let res = submit(&fx.app, fx.contest_id, prob_a, &a.token, "ACCEPT").await;
     assert_eq!(res.status, 201, "A's submission failed: {}", res.text);
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let after_early_decision = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
+    let after_early_decision = crate::codelink_bracket::poll_match(
+        &fx.app,
+        fx.contest_id,
+        0,
+        &fx.staff_token,
+        Duration::from_secs(15),
+        |view| view["score_a"].as_i64() == Some(1),
+    )
+    .await;
     assert_eq!(after_early_decision["score_a"].as_i64(), Some(1));
     assert_eq!(after_early_decision["state"], "in_progress");
     assert_eq!(
@@ -963,10 +1006,14 @@ async fn a_stale_xiaoju_deadline_timer_after_early_resolution_is_a_noop() {
         Some(1),
         "xiaoju 1 should now be open, got {after_early_decision}"
     );
+    assert!(
+        after_early_decision["current_xiaoju_deadline_ms"].as_i64() > Some(stale_fire_at_ms + 1),
+        "xiaoju 1's deadline must lie after the stale fire, got {after_early_decision}"
+    );
 
-    // Wait until just past the original (now stale) xiaoju-0 deadline
-    // (match start + 6s) and force delivery deterministically.
-    tokio::time::sleep(Duration::from_millis(3_800)).await; // 2s + 0.5s already elapsed -> land at ~6.3s
+    // Move just past the original (now stale) xiaoju-0 deadline and force
+    // delivery deterministically.
+    advance_clock_to_ms(&fx.app, stale_fire_at_ms + 1).await;
     let config = TimerConfig::default();
     tick_once(&fx.app.state, &config)
         .await
@@ -1137,7 +1184,11 @@ async fn setup_is_refused_once_a_stage_has_opened() {
     wait_published(&fx, reply.id(), &b.token).await;
     let third = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
     assert_eq!(third["current_xiaoju_index"], 2);
-    sleep_until_ms(third["current_xiaoju_deadline_ms"].as_i64().unwrap() + 150).await;
+    advance_clock_to_ms(
+        &fx.app,
+        third["current_xiaoju_deadline_ms"].as_i64().unwrap() + 150,
+    )
+    .await;
     assert_eq!(force_decide(&fx, 0, None).await.status, 200);
     let tiebreak = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
     assert_eq!(tiebreak["state"], "tiebreak", "{tiebreak}");
@@ -1412,7 +1463,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
     };
     let seeds: Vec<_> = fx.players[..4].iter().map(|player| player.id).collect();
     let mut body = full_setup_body(&fx.rounds[..2], &seeds, 60, 0, 120);
-    let first_at = Utc::now().timestamp_millis() + 1_000;
+    let first_at = fx.app.clock().now_ms().await + 1_000;
     let missed_at = first_at + 2_000;
     body["third_place"] = json!({"mode":"shared"});
     for (index, at) in [first_at, missed_at].into_iter().enumerate() {
@@ -1442,7 +1493,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
     assert_eq!(ordering["starts_at_ms"], first_at + 210_000);
     assert_eq!(start_match(&fx, 0).await.status, 409);
 
-    sleep_until_ms(missed_at + 100).await;
+    advance_clock_to_ms(&fx.app, missed_at + 100).await;
     // An ordinary setup retry also recovers a delayed stage timer.
     let retried = fx
         .app
@@ -1469,7 +1520,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
             .status,
         404
     );
-    let rescheduled_at = Utc::now().timestamp_millis() + 1_000;
+    let rescheduled_at = fx.app.clock().now_ms().await + 1_000;
     body["rounds"][1]["start_at_ms"] = json!(rescheduled_at);
     let saved = fx
         .app
@@ -1550,7 +1601,7 @@ async fn round2_waits_for_every_match_and_stage_opening_before_ordering() {
         "staff cannot bypass opening"
     );
 
-    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    fx.app.clock().advance(Duration::from_millis(5_500)).await;
     tick_once(&fx.app.state, &TimerConfig::default())
         .await
         .expect("stage timer failed");
@@ -1848,7 +1899,7 @@ async fn slow_earlier_judge_withholds_only_correct_opponent_results() {
             fx.rounds[0].group_a[0],
             SubmissionStatus::Running,
             None,
-            Utc::now(),
+            db_now(&fx.app).await,
         )
         .await;
         let wrong = submit(
@@ -2005,7 +2056,7 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
             .unwrap()
             .token,
         ),
-        latest_arrival_ms: Some(Utc::now().timestamp_millis() + 120_000),
+        latest_arrival_ms: Some(fx.app.clock().now_ms().await + 120_000),
     };
     let new = submission::ActiveModel {
         user_id: Set(fx.players[0].id),
@@ -2015,11 +2066,11 @@ async fn atomic_admission_accepts_only_one_concurrent_submission_and_checks_cuto
         files: Set(json!([])),
         language: Set("cpp".into()),
         status: Set(SubmissionStatus::Running),
-        created_at: Set(Utc::now()),
+        created_at: Set(db_now(&fx.app).await),
         ..Default::default()
     };
     let mut too_late = admission.clone();
-    too_late.latest_arrival_ms = Some(Utc::now().timestamp_millis() - 10_000);
+    too_late.latest_arrival_ms = Some(fx.app.clock().now_ms().await - 10_000);
     let rejected = server::services::submission_feedback::insert_admitted(
         &fx.app.state,
         new.clone(),
@@ -2101,7 +2152,7 @@ async fn penalty_ac_releases_at_effective_time_without_another_submission() {
     assert_eq!(accepted.status, 201, "{}", accepted.text);
     let raw = wait_raw_judgement(&fx, accepted.id()).await;
     assert_feedback_withheld(&fx, accepted.id(), &a.token).await;
-    sleep_until_ms(raw.created_at.timestamp_millis() + 20_250).await;
+    advance_clock_to_ms(&fx.app, raw.created_at.timestamp_millis() + 20_250).await;
     assert_eq!(
         wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
         "Accepted"
@@ -2123,7 +2174,7 @@ async fn score_penalty_does_not_shorten_shared_extra_time_or_block_a_timely_ac()
     let wrong = submit(&fx.app, fx.contest_id, problem, &a.token, "WRONG").await;
     assert_eq!(wrong.status, 201, "{}", wrong.text);
     wait_published(&fx, wrong.id(), &a.token).await;
-    sleep_until_ms(base + 200).await;
+    advance_clock_to_ms(&fx.app, base + 200).await;
     let accepted = submit(&fx.app, fx.contest_id, problem, &a.token, "ACCEPT").await;
     assert_eq!(
         accepted.status, 201,
@@ -2134,7 +2185,7 @@ async fn score_penalty_does_not_shorten_shared_extra_time_or_block_a_timely_ac()
     assert!(raw.created_at.timestamp_millis() + 20_000 > deadline);
     let used = raw.created_at.timestamp_millis() - base;
     assert!((1..3_000).contains(&used));
-    sleep_until_ms(deadline + 100).await;
+    advance_clock_to_ms(&fx.app, deadline + 100).await;
     tick_once(&fx.app.state, &TimerConfig::default())
         .await
         .unwrap();
@@ -2298,7 +2349,6 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
     assert_eq!(accepted.status, 201, "{}", accepted.text);
     let raw = wait_raw_judgement(&fx, accepted.id()).await;
     assert_eq!(raw.verdict, Some(Verdict::Accepted));
-    let effective_at_ms = raw.created_at.timestamp_millis() + 3_000;
     fx.app
         .db
         .execute_unprepared(&format!(
@@ -2319,8 +2369,8 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
         ..Default::default()
     };
     let key = format!("xiaoju:{}:0:1:effective:{}", fx.contest_id, accepted.id());
-    for attempt in 0..2 {
-        sleep_until_ms(effective_at_ms + attempt * 1_000 + 150).await;
+    for _ in 0..2 {
+        advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
         tick_once(&fx.app.state, &config).await.unwrap();
         let committed = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
         assert_eq!(committed["state"], "decided", "{committed}");
@@ -2354,7 +2404,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
     fx.app.db.execute_unprepared(
         "DROP TRIGGER reject_feedback_publication ON submission_feedback; DROP FUNCTION reject_feedback_publication()"
     ).await.unwrap();
-    sleep_until_ms(effective_at_ms + 2_150).await;
+    advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
     tick_once(&fx.app.state, &config).await.unwrap();
     assert_eq!(
         wait_published(&fx, accepted.id(), &a.token).await["result"]["verdict"],
@@ -2390,7 +2440,7 @@ async fn plugin_reload_upgrades_its_own_old_storage_without_a_core_data_migratio
             plugin_id: Set("codelink-bracket".into()),
             collection: Set("default".into()),
             key: Set(format!("slot:{}:1:{pos}", fx.contest_id)),
-            created_at: Set(Utc::now()),
+            created_at: Set(db_now(&fx.app).await),
             data: Set(json!(player.id.to_string())),
             ..Default::default()
         }
@@ -2495,7 +2545,7 @@ async fn variable_bracket_size_and_five_game_stage_run_through_the_real_host() {
         .unwrap()
         .unwrap();
     let mut row = row.into_active_model();
-    row.start_time = Set(Utc::now() + ChronoDuration::hours(1));
+    row.start_time = Set(db_now(&app).await + ChronoDuration::hours(1));
     row.update(&app.db).await.unwrap();
     let seeds: Vec<_> = players.iter().map(|p| p.id).collect();
     let original = full_setup_body(&rounds, &seeds, 60, 0, 120);
@@ -2527,7 +2577,7 @@ async fn variable_bracket_size_and_five_game_stage_run_through_the_real_host() {
         .unwrap()
         .unwrap();
     let mut row = row.into_active_model();
-    row.start_time = Set(Utc::now() - ChronoDuration::seconds(1));
+    row.start_time = Set(db_now(&app).await - ChronoDuration::seconds(1));
     row.update(&app.db).await.unwrap();
     assert_eq!(
         app.post_with_token(&bracket_route(contest_id, "/setup"), &smaller, &staff)

@@ -35,7 +35,7 @@ use server::utils::plugin::sync_plugins;
 
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-pub use test_support::TestResponse;
+pub use test_support::{DbClock, TestResponse};
 use test_support::{close_database_pool, create_test_database, test_database_url};
 
 struct TestPluginManager {
@@ -493,6 +493,12 @@ pub struct SpawnOptions {
 }
 
 impl TestApp {
+    /// This test's database clock, which the test advances instead of
+    /// sleeping.
+    pub fn clock(&self) -> DbClock {
+        DbClock::new(&self.db)
+    }
+
     pub async fn spawn() -> Self {
         Self::spawn_internal(false, SpawnOptions::default()).await
     }

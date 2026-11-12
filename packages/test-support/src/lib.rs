@@ -4,8 +4,8 @@
 //! harnesses were forked; this dev-dependency is the one place their shared
 //! infrastructure lives: the per-process Postgres and Redis containers, the
 //! migrated and seeded `template_test` database every test database is cloned
-//! from, the admin connection that clones it, pool teardown, and the HTTP
-//! response wrapper. Each tree keeps its own app fixture (`TestApp`,
+//! from, the admin connection that clones it, the database clock tests
+//! advance ([`DbClock`]), pool teardown, and the HTTP response wrapper. Each tree keeps its own app fixture (`TestApp`,
 //! `E2eTestApp`) and re-exports what it needs from here.
 
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -127,6 +127,10 @@ pub async fn shared_pg_port() -> u16 {
             server::seed::ensure_indexes(&template_db, false)
                 .await
                 .expect("Failed to create indexes");
+            template_db
+                .execute_unprepared(INSTALL_CLOCK)
+                .await
+                .expect("Failed to install the test clock");
             drop(template_db);
 
             (container, port)
@@ -178,6 +182,15 @@ async fn clone_template(port: u16, db_name: &str) {
                 ))
                 .await
                 .expect("Failed to create test database from template");
+            // A database-level setting, so every session on the clone (the
+            // server's pools and the plugin login's) resolves the clock.
+            admin
+                .execute_raw(Statement::from_string(
+                    DbBackend::Postgres,
+                    format!("ALTER DATABASE \"{db_name}\" SET search_path = {CLOCK_SEARCH_PATH}"),
+                ))
+                .await
+                .expect("Failed to point the test database at its clock");
         })
         .await
         .expect("admin runtime task panicked");
@@ -217,6 +230,95 @@ pub fn close_database_pool(db: DatabaseConnection) {
             };
             let _ = runtime.block_on(db.close_by_ref());
         });
+}
+
+// ---------------------------------------------------------------------------
+// Database clock
+// ---------------------------------------------------------------------------
+
+/// `search_path` of every test database. `public` stays first, so unqualified
+/// DDL still creates tables there. `broccoli_test_clock` comes before an
+/// explicitly placed `pg_catalog`, so an unqualified `now()` (or one of its
+/// siblings) resolves to the shadowing function in [`INSTALL_CLOCK`].
+const CLOCK_SEARCH_PATH: &str = "public, broccoli_test_clock, pg_catalog";
+
+/// Installs the clock into the template: real time plus an offset the test
+/// owns. An offset rather than a pinned instant keeps time moving, so rows
+/// written one after another still order by their timestamps.
+const INSTALL_CLOCK: &str = r#"
+CREATE SCHEMA broccoli_test_clock;
+CREATE TABLE broccoli_test_clock.state (offset_us bigint NOT NULL);
+INSERT INTO broccoli_test_clock.state VALUES (0);
+CREATE FUNCTION broccoli_test_clock.shift() RETURNS interval LANGUAGE sql STABLE
+  AS $$ SELECT make_interval(secs => offset_us / 1000000.0) FROM broccoli_test_clock.state $$;
+CREATE FUNCTION broccoli_test_clock.now() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.now() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.transaction_timestamp() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.transaction_timestamp() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.statement_timestamp() RETURNS timestamptz LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.statement_timestamp() + broccoli_test_clock.shift() $$;
+CREATE FUNCTION broccoli_test_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE
+  AS $$ SELECT pg_catalog.clock_timestamp() + broccoli_test_clock.shift() $$;
+GRANT USAGE ON SCHEMA broccoli_test_clock TO PUBLIC;
+GRANT SELECT ON broccoli_test_clock.state TO PUBLIC;
+"#;
+
+/// The clock of one test database, which a test moves forward instead of
+/// sleeping.
+///
+/// Time comparisons in this codebase run in SQL against the database clock:
+/// timer due-ness (`dispatcher::plugin_timer`), the timer host functions, a
+/// plugin's own time queries and the server's own SQL. In a test database
+/// every unqualified `now()`, `transaction_timestamp()`,
+/// `statement_timestamp()` and `clock_timestamp()` reads real time plus this
+/// clock's offset, so [`DbClock::advance`] moves all of them at once. Column
+/// defaults and `CURRENT_TIMESTAMP` keep real time, and so does any timestamp
+/// the server takes from its own process clock.
+#[derive(Clone)]
+pub struct DbClock {
+    db: DatabaseConnection,
+}
+
+impl DbClock {
+    pub fn new(db: &DatabaseConnection) -> Self {
+        Self { db: db.clone() }
+    }
+
+    /// Moves the database clock forward by `by`.
+    pub async fn advance(&self, by: Duration) {
+        let micros = i64::try_from(by.as_micros()).expect("advance fits in i64 microseconds");
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE broccoli_test_clock.state SET offset_us = offset_us + $1",
+                [micros.into()],
+            ))
+            .await
+            .expect("advance the test clock");
+    }
+
+    /// The database's current time, in epoch milliseconds.
+    pub async fn now_ms(&self) -> i64 {
+        let row = self
+            .db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT (EXTRACT(EPOCH FROM now()) * 1000)::bigint AS ms".to_string(),
+            ))
+            .await
+            .expect("read the test clock")
+            .expect("one row");
+        row.try_get("", "ms").expect("ms column")
+    }
+
+    /// Moves the clock to `at_ms` epoch milliseconds, or leaves it if the
+    /// database is already there.
+    pub async fn advance_to_ms(&self, at_ms: i64) {
+        let behind = at_ms - self.now_ms().await;
+        if behind > 0 {
+            self.advance(Duration::from_millis(behind as u64)).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
