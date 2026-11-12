@@ -20,7 +20,7 @@ import type {
   PluginModule,
   SlotConfig,
 } from '@/plugin/types';
-import { backoffDelay,type BackoffPolicy } from '@/utils/backoff';
+import { backoffDelay, type BackoffPolicy } from '@/utils/backoff';
 import { retryImport, retryLoad } from '@/utils/chunk-load';
 
 // While the server cannot be asked for its plugin list (a gateway 502 while

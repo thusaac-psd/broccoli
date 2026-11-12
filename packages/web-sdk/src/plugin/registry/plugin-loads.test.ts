@@ -202,3 +202,19 @@ test('a load that settles after its plugin was unloaded is discarded', async () 
   assert.equal(r.getLoads().size, 0);
   assert.equal(destroyed, 1);
 });
+
+test('a failed onInit is retried on the module already imported', async () => {
+  let inits = 0;
+  const { r, imports } = registry({
+    importRemote: async (m, fresh) => {
+      imports.push({ id: m.id, fresh });
+      return moduleFor(async () => {
+        inits += 1;
+        if (inits === 1) throw new Error('config fetch failed');
+      });
+    },
+  });
+  await r.sync();
+  assert.equal(inits, 2);
+  assert.deepEqual(imports, [{ id: 'a', fresh: false }]);
+});

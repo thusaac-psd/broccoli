@@ -79,12 +79,15 @@ export function createPluginRegistry(deps: PluginRegistryDeps) {
   /**
    * Load one plugin with `importModule`, unless it is loading or loaded
    * already. Failures (of the import or of `onInit`) are retried; once the
-   * retries are spent the plugin is `failed`.
+   * retries are spent the plugin is `failed`. The module is imported once: a
+   * failed `onInit` runs again on the same module, since a second copy would
+   * not share state with the chunks the first one loaded. `importModule` is
+   * told to bypass caches only after an import failed.
    */
   const load = (
     manifest: ActivePluginManifest,
     source: PluginSource,
-    importModule: (attempt: number) => Promise<PluginModule>,
+    importModule: (fresh: boolean) => Promise<PluginModule>,
   ): Promise<void> => {
     const existing = loads.get(manifest.id);
     if (existing?.status === 'loading') return existing.promise;
@@ -97,9 +100,19 @@ export function createPluginRegistry(deps: PluginRegistryDeps) {
     const promise: Promise<void> = (async () => {
       // Lets the entry below be in place before the first attempt starts.
       await Promise.resolve();
+      let imported: PluginModule | null = null;
+      let importFailed = false;
       try {
-        const module = await deps.retry(async (attempt) => {
-          const candidate = await importModule(attempt);
+        const module = await deps.retry(async () => {
+          if (!imported) {
+            try {
+              imported = await importModule(importFailed);
+            } catch (error) {
+              importFailed = true;
+              throw error;
+            }
+          }
+          const candidate = imported;
           try {
             await candidate.onInit?.();
           } catch (error) {
@@ -131,8 +144,8 @@ export function createPluginRegistry(deps: PluginRegistryDeps) {
   };
 
   const loadRemote = (manifest: ActivePluginManifest, fresh: boolean) =>
-    load(manifest, 'remote', (attempt) =>
-      deps.importRemote(manifest, fresh || attempt > 0),
+    load(manifest, 'remote', (retrying) =>
+      deps.importRemote(manifest, fresh || retrying),
     );
 
   const unload = async (pluginId: string) => {
