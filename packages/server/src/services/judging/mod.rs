@@ -43,6 +43,13 @@
 //! together by [`create_submission`], so every submission has a current
 //! judgement from the moment it exists.
 //!
+//! # Claim wake-ups
+//!
+//! A trigger on both unit tables notifies claim fibers from the transaction
+//! that queues a unit or takes one out of flight (see `notify`), so the
+//! claim fiber reacts to every transition above without any of them sending
+//! a statement of its own.
+//!
 //! # The submission row is a cache of its current judgement
 //!
 //! `submission.status`, `judge_epoch` and the judged-output columns are a
@@ -75,6 +82,7 @@
 //! each other in a cycle.
 
 mod budget;
+mod notify;
 mod open;
 mod plugin_writes;
 mod unit;
@@ -83,6 +91,8 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
+pub use notify::CLAIM_CHANNEL;
+pub(crate) use notify::{ClaimWake, install_claim_notify};
 pub use open::create_submission;
 pub(crate) use open::{
     ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,

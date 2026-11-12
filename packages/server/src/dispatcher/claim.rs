@@ -13,13 +13,17 @@
 //! production should always run with the fiber enabled.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use tokio::sync::watch;
+use sqlx::postgres::PgListener;
+use tokio::sync::{Notify, watch};
 use tracing::{error, info, warn};
 
 use crate::dispatcher::permits::DispatcherReservation;
@@ -54,8 +58,22 @@ fn record_submission_state_transition(
     );
 }
 
-/// Long-running fiber loop. Polls every `interval_ms` until the cancel
-/// channel fires.
+/// Least time between two claim passes that a notification starts, so a burst
+/// of submissions is claimed in batches instead of one query per submission.
+const COALESCE: Duration = Duration::from_millis(10);
+
+/// Longest wait before listening again after the notification connection
+/// fails; the poll tick keeps claiming meanwhile.
+const LISTEN_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// Long-running fiber loop until the cancel channel fires.
+///
+/// A claim pass runs when a claim notification arrives (see
+/// [`judging::ClaimWake`]) or, as a fallback, `interval_ms` after the last
+/// pass. Wakes that arrive during a pass fold into one more pass, and passes
+/// repeat while each fills its batch and room is left, so a backlog drains at
+/// claim speed rather than one batch per tick. Replicas all wake on the same
+/// notification; `SKIP LOCKED` in the claim splits the work between them.
 pub async fn run(
     state: AppState,
     server_id: String,
@@ -78,42 +96,179 @@ pub async fn run(
         "Claim fiber started"
     );
 
+    let wake = Arc::new(Notify::new());
+    let saturated = Arc::new(AtomicBool::new(false));
+    tokio::spawn(listen(
+        state.config.database.url.clone(),
+        server_id.clone(),
+        wake.clone(),
+        saturated.clone(),
+        cancel.clone(),
+    ));
+
     // Live worker slots, refreshed every `SLOTS_REFRESH` from heartbeats
-    // (a Redis SCAN, too costly to repeat every tick). Sizes the in-flight
+    // (a Redis SCAN, too costly to repeat every pass). Sizes the in-flight
     // cap so it scales with the cluster; see [`effective_cap`].
     let mut live_slots: u64 = 0;
-    let mut slots_checked: Option<std::time::Instant> = None;
+    let mut slots_checked: Option<Instant> = None;
+    let mut last_pass: Option<Instant> = None;
 
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                common::deadline::bounded("dispatcher.claim", common::deadline::BACKGROUND_STEP, async {
-                    if max_in_flight > 0
-                        && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH)
-                    {
-                        live_slots = live_worker_slots(&state).await;
-                        slots_checked = Some(std::time::Instant::now());
-                    }
-                    let cap = effective_cap(max_in_flight, live_slots);
-                    if let Err(e) = claim_once(&state, &server_id, batch_size, cap).await {
-                        error!(server_id = %server_id, error = %e, "Claim fiber tick failed");
-                    }
-                })
-                .await;
+            _ = interval.tick() => {}
+            _ = wake.notified() => {
+                if let Some(at) = last_pass {
+                    tokio::time::sleep_until((at + COALESCE).into()).await;
+                }
             }
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow() {
                     info!(server_id = %server_id, "Claim fiber shutting down");
                     return;
                 }
+                continue;
             }
+        }
+        common::deadline::bounded(
+            "dispatcher.claim",
+            common::deadline::BACKGROUND_STEP,
+            async {
+                if max_in_flight > 0 && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
+                    live_slots = live_worker_slots(&state).await;
+                    slots_checked = Some(Instant::now());
+                }
+                let cap = effective_cap(max_in_flight, live_slots);
+                loop {
+                    match claim_once(&state, &server_id, batch_size, cap).await {
+                        Ok(pass) => {
+                            saturated.store(pass.waits_for_room(), Ordering::Relaxed);
+                            if !pass.more_may_wait() || pass.held_back {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!(server_id = %server_id, error = %e, "Claim pass failed");
+                            break;
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+        last_pass = Some(Instant::now());
+        interval.reset();
+    }
+}
+
+/// Turns claim notifications into wakes of the claim fiber until `cancel`
+/// fires. A `Queued` notification always wakes it; a freed one only when it
+/// is for this server and the last pass was held back for room. Notifications
+/// sent while this is not listening are lost, so every (re)connect wakes the
+/// fiber too.
+async fn listen(
+    url: String,
+    server_id: String,
+    wake: Arc<Notify>,
+    saturated: Arc<AtomicBool>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    const LISTEN_RETRY_MIN: Duration = Duration::from_millis(500);
+    let mut retry = LISTEN_RETRY_MIN;
+    loop {
+        let started = Instant::now();
+        tokio::select! {
+            result = listen_session(&url, &server_id, &wake, &saturated) => {
+                let Err(error) = result;
+                warn!(
+                    server_id = %server_id,
+                    error = %error,
+                    retry_secs = retry.as_secs_f64(),
+                    "Claim notifications unavailable; claiming on the poll interval until they return"
+                );
+            }
+            _ = cancelled(&mut cancel) => return,
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(retry) => {}
+            _ = cancelled(&mut cancel) => return,
+        }
+        // A session that held up for a while starts the backoff over.
+        retry = if started.elapsed() > LISTEN_RETRY_MAX {
+            LISTEN_RETRY_MIN
+        } else {
+            std::cmp::min(retry * 2, LISTEN_RETRY_MAX)
+        };
+    }
+}
+
+/// One listening connection; ends only when it fails and cannot reconnect.
+async fn listen_session(
+    url: &str,
+    server_id: &str,
+    wake: &Notify,
+    saturated: &AtomicBool,
+) -> Result<Infallible, sqlx::Error> {
+    let mut listener = PgListener::connect(url).await?;
+    listener.listen(judging::CLAIM_CHANNEL).await?;
+    wake.notify_one();
+    loop {
+        let Some(notification) = listener.try_recv().await? else {
+            // Reconnected after a lost connection.
+            wake.notify_one();
+            continue;
+        };
+        let wanted = match judging::ClaimWake::parse(notification.payload()) {
+            Some(judging::ClaimWake::Queued) => true,
+            Some(judging::ClaimWake::Freed { server_id: owner }) => {
+                owner == server_id && saturated.load(Ordering::Relaxed)
+            }
+            None => false,
+        };
+        if wanted {
+            wake.notify_one();
         }
     }
 }
 
-/// One claim cycle: judgements within the in-flight cap, then code runs.
+/// Resolves once `cancel` fires or its sender is gone.
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    while !*cancel.borrow_and_update() {
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// What one claim pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimPass {
+    /// Judgements claimed, and the room they had.
+    pub judgements: (u32, u32),
+    /// Code runs claimed, and the room they had.
+    pub code_runs: (u32, u32),
+    /// The in-flight cap or dispatcher admission gave the pass less room than
+    /// a full batch.
+    pub held_back: bool,
+}
+
+impl ClaimPass {
+    /// Some kind of unit filled all of its room, so more of it may be queued.
+    pub fn more_may_wait(&self) -> bool {
+        let filled = |(claimed, room): (u32, u32)| room > 0 && claimed == room;
+        filled(self.judgements) || filled(self.code_runs)
+    }
+
+    /// Queued work may be waiting for in-flight room: the pass was held back
+    /// and either had no room at all or used all it had.
+    pub fn waits_for_room(&self) -> bool {
+        let no_room = self.judgements.1 == 0 && self.code_runs.1 == 0;
+        self.held_back && (no_room || self.more_may_wait())
+    }
+}
+
+/// One claim pass: judgements within the in-flight cap, then code runs.
 /// Errors are returned to the caller so the fiber loop can log; whatever is
-/// still `Queued` is claimed next tick.
+/// still `Queued` is claimed by the next pass.
 ///
 /// **Crash-recovery contract:** dispatch runs detached after the claim
 /// committed. If this server crashes in between, the claimed rows stay in
@@ -121,14 +276,14 @@ pub async fn run(
 /// boots again ([`judging::release_leases`]), or, with lease/steal on, by a
 /// peer's steal scanner once their lease lapses, or by the stuck detector.
 ///
-/// `pub` so integration tests can drive one cycle directly, like
+/// `pub` so integration tests can drive one pass directly, like
 /// `plugin_timer::tick_once`.
 pub async fn claim_once(
     state: &AppState,
     server_id: &str,
     batch_size: u32,
     max_in_flight: u32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ClaimPass> {
     let in_flight = if max_in_flight == 0 {
         0
     } else {
@@ -140,12 +295,14 @@ pub async fn claim_once(
 
     // Judgements and code runs share the in-flight cap; judgements go first.
     let budget = claim_budget(batch_size, max_in_flight, in_flight);
-    let mut claimed_judgements = 0;
+    let mut held_back = budget < batch_size;
     let slots = reserve_slots(state, budget);
+    held_back |= (slots.len() as u32) < budget;
+    let judgement_room = slots.len() as u32;
+    let mut claimed_judgements = 0;
     if !slots.is_empty() {
         let claimed =
-            judging::claim_judgements(&state.db, server_id, slots.len() as u32, &contest_types)
-                .await?;
+            judging::claim_judgements(&state.db, server_id, judgement_room, &contest_types).await?;
         claimed_judgements = claimed.len() as u32;
         record_judgement_claim_transitions(state, &claimed, Utc::now()).await;
         if !claimed.is_empty() {
@@ -169,10 +326,13 @@ pub async fn claim_once(
         budget.saturating_sub(claimed_judgements)
     };
     let slots = reserve_slots(state, code_run_budget);
+    held_back |= (slots.len() as u32) < code_run_budget;
+    let code_run_room = slots.len() as u32;
+    let mut claimed_code_runs = 0;
     if !slots.is_empty() {
         let claimed =
-            judging::claim_code_runs(&state.db, server_id, slots.len() as u32, &contest_types)
-                .await?;
+            judging::claim_code_runs(&state.db, server_id, code_run_room, &contest_types).await?;
+        claimed_code_runs = claimed.len() as u32;
         record_code_run_claim_transitions(state, &claimed, Utc::now()).await;
         if !claimed.is_empty() {
             info!(
@@ -190,7 +350,11 @@ pub async fn claim_once(
         }
     }
 
-    Ok(())
+    Ok(ClaimPass {
+        judgements: (claimed_judgements, judgement_room),
+        code_runs: (claimed_code_runs, code_run_room),
+        held_back,
+    })
 }
 
 /// Up to `n` dispatcher admission slots; fewer when the dispatcher queue is
@@ -345,6 +509,28 @@ mod tests {
         assert_eq!(claim_budget(32, 256, 300), 0);
         // 0 means no cap.
         assert_eq!(claim_budget(32, 0, 10_000), 32);
+    }
+
+    #[test]
+    fn a_pass_repeats_while_it_fills_its_room_and_waits_for_room_when_held_back() {
+        let pass = |judgements, code_runs, held_back| ClaimPass {
+            judgements,
+            code_runs,
+            held_back,
+        };
+        // A full batch of judgements: more may be queued.
+        assert!(pass((32, 32), (0, 32), false).more_may_wait());
+        // Code runs filled theirs.
+        assert!(pass((3, 32), (32, 32), false).more_may_wait());
+        // Both kinds left room: the queue is drained.
+        assert!(!pass((3, 32), (0, 32), false).more_may_wait());
+        // Held back by the cap with all its room used, or with none at all:
+        // waiting for room.
+        assert!(pass((6, 6), (0, 0), true).waits_for_room());
+        assert!(pass((0, 0), (0, 0), true).waits_for_room());
+        // Held back but drained, or not held back: not waiting.
+        assert!(!pass((2, 6), (0, 4), true).waits_for_room());
+        assert!(!pass((32, 32), (0, 0), false).waits_for_room());
     }
 
     #[test]

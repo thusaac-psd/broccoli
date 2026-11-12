@@ -9,6 +9,13 @@ use testcontainers_modules::postgres::Postgres;
 /// unit tests that need real SQL semantics `MockDatabase` cannot give. Keep
 /// the container alive for the test's duration.
 pub(crate) async fn postgres() -> (ContainerAsync<Postgres>, DatabaseConnection) {
+    let (container, db, _) = postgres_with_url().await;
+    (container, db)
+}
+
+/// [`postgres`], plus the database URL, for tests that open their own
+/// connections.
+pub(crate) async fn postgres_with_url() -> (ContainerAsync<Postgres>, DatabaseConnection, String) {
     let container = Postgres::default()
         .with_tag("17-alpine")
         .start()
@@ -22,7 +29,7 @@ pub(crate) async fn postgres() -> (ContainerAsync<Postgres>, DatabaseConnection)
     let db = crate::database::init_db(&url)
         .await
         .expect("init schema on test db");
-    (container, db)
+    (container, db, url)
 }
 
 /// A user and a problem to hang test submissions on. Returns their ids.

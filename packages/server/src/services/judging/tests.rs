@@ -844,3 +844,59 @@ async fn a_requeue_restarts_the_queue_age_but_keeps_the_arrival_time() {
     assert!(row.try_get::<bool>("", "fresh").unwrap());
     assert!(row.try_get::<bool>("", "old").unwrap());
 }
+
+/// The next claim notification on `listener`.
+async fn next_claim_wake(listener: &mut sqlx::postgres::PgListener) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(30), listener.recv())
+        .await
+        .expect("a claim notification")
+        .expect("listener connection")
+        .payload()
+        .to_string()
+}
+
+#[tokio::test]
+async fn queuing_a_unit_or_freeing_its_room_notifies_the_claim_fibers() {
+    let (_pg, db, url) = crate::test_support::postgres_with_url().await;
+    // Boot installed it already; a reboot installs it again.
+    install_claim_notify(&db).await.unwrap();
+    let mut listener = sqlx::postgres::PgListener::connect(&url).await.unwrap();
+    listener.listen(CLAIM_CHANNEL).await.unwrap();
+
+    let (s, _) = new_submission(&db).await;
+    assert_eq!(
+        ClaimWake::parse(&next_claim_wake(&mut listener).await),
+        Some(ClaimWake::Queued)
+    );
+
+    // Claiming and moving within flight say nothing: the next notification
+    // is the one that frees the owner's room.
+    let claimed = claim_one(&db, "srv").await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission_judgement SET status = 'Running' WHERE id = {}",
+            claimed.judgement.id
+        ),
+    )
+    .await;
+    finish(&db, &claimed.judgement, Verdict::Accepted).await;
+    assert_eq!(
+        ClaimWake::parse(&next_claim_wake(&mut listener).await),
+        Some(ClaimWake::Freed { server_id: "srv" })
+    );
+
+    // A rejudge queues a new judgement.
+    rejudge(&db, s.id, true).await;
+    assert_eq!(
+        ClaimWake::parse(&next_claim_wake(&mut listener).await),
+        Some(ClaimWake::Queued)
+    );
+
+    // A code run is a unit too.
+    new_code_run(&db).await;
+    assert_eq!(
+        ClaimWake::parse(&next_claim_wake(&mut listener).await),
+        Some(ClaimWake::Queued)
+    );
+}

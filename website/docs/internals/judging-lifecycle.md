@@ -44,6 +44,29 @@ recovery is a requeue:
 Every lease age is compared on the database clock: claims and refreshes stamp
 `NOW()`, and the scans compare against `NOW()`.
 
+## Claiming
+
+A claim fiber on each server claims work when it is told there is some. A
+trigger on `submission_judgement` and `code_run` sends a Postgres
+notification on the `broccoli_claim` channel from the transaction that
+changes the row, so the submit path pays no extra statement and no path that
+queues work can forget it:
+
+- `queued` when a unit becomes `Queued`: a new submission or code run, a
+  rejudge, a requeue, a system-error retry or a DLQ retry. Postgres folds
+  identical notifications of one transaction into one.
+- `freed:<server id>` when a unit owned by that server leaves flight. Only a
+  fiber whose last pass was held back by its in-flight cap or by dispatcher
+  admission acts on it.
+
+A woken fiber claims a batch, and repeats while each pass fills its batch and
+room is left. Wakes that arrive during a pass fold into one more pass, at
+least 10 ms after the last one, so a burst is claimed in batches. Every
+replica wakes on the same notification; `SKIP LOCKED` in the claim splits the
+work. `claim_poll_interval_ms` is a fallback tick for notifications lost
+while the listening connection was down; every reconnect also wakes the
+fiber.
+
 ## The submission row is a cache
 
 `submission.status`, `judge_epoch`, `target_worker_id` and the judged output

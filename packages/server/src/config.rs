@@ -323,24 +323,23 @@ pub struct ServerConfig {
     /// debugging.
     #[serde(default = "default_claim_fiber_enabled")]
     pub claim_fiber_enabled: bool,
-    /// Poll interval (ms) for the claim fiber. Default 1000ms. Lower
-    /// values reduce POST->Pending latency but increase background SQL load
-    /// (a no-op poll is a single `SELECT ... LIMIT $batch FOR UPDATE SKIP
-    /// LOCKED` per table).
+    /// Fallback poll interval (ms) for the claim fiber. Default 1000ms. The
+    /// fiber claims as soon as a claim notification says work was queued or
+    /// room freed up; this tick only covers notifications lost while its
+    /// listening connection was down. A no-op poll is one in-flight count
+    /// and one `SELECT ... LIMIT $batch FOR UPDATE SKIP LOCKED` per table.
     #[serde(default = "default_claim_poll_interval_ms")]
     pub claim_poll_interval_ms: u64,
-    /// Bounded SELECT LIMIT for the claim fiber. The fiber claims at
-    /// most this many rows per table per tick. Defaults to 32 to match
-    /// `dispatcher_concurrency`'s order of magnitude; raise it on
-    /// deployments with bursty submission patterns so a single tick can
-    /// drain a spike.
+    /// Bounded SELECT LIMIT for one claim pass: at most this many rows per
+    /// table. Passes repeat while each fills its batch and in-flight room
+    /// is left, so this bounds one statement, not how fast a backlog drains.
     #[serde(default = "default_claim_batch_size")]
     pub claim_batch_size: u32,
     /// Floor for how many judgements and code runs this server judges at
     /// once (claimed, not finished). The cap in force is the larger of this and 8 x the
     /// live worker slots seen in heartbeats, so it grows with the cluster
     /// and never throttles below worker capacity. The claim fiber takes at
-    /// most `cap - in_flight` rows per tick, so a burst stays `Queued` in the
+    /// most `cap - in_flight` rows, so a burst stays `Queued` in the
     /// database (claimable by any server) instead of piling into one
     /// process. Judging is detached after dispatch, so nothing else bounds
     /// this. 0 = no cap.

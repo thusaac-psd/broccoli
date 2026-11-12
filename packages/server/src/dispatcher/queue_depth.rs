@@ -34,14 +34,13 @@ use crate::state::AppState;
 /// `Retry-After` seconds returned to clients when the durable queue
 /// is full.
 ///
-/// The default `server.claim_poll_interval_ms` is `1000` (1s); 2s is
-/// one claim tick plus a small jitter buffer so retried requests are
-/// likely to land after at least one drain pass has run. Hard-coded
-/// rather than configurable to match the existing
-/// `permits::RETRY_AFTER_SECS = 1` convention - the latency horizon
-/// of a single claim tick is the right unit, and adding a knob to
-/// turn what's effectively "wait one tick" into "wait N ticks" would
-/// just invite operators to set it too high.
+/// A full queue drains as fast as in-flight room frees up, and the
+/// claim fiber's fallback tick (`server.claim_poll_interval_ms`, 1s by
+/// default) bounds how long freed room can go unnoticed; 2s is one tick
+/// plus a small buffer so a retried request is likely to land after room
+/// was taken. Hard-coded rather than configurable to match the existing
+/// `permits::RETRY_AFTER_SECS = 1` convention; a knob would just invite
+/// operators to set it too high.
 pub const RETRY_AFTER_SECS: u64 = 2;
 
 /// Counts queued dispatch units: judgements (current or deferred) and code
