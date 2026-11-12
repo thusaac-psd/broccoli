@@ -212,7 +212,11 @@ fn role_routes() -> OpenApiRouter<AppState> {
 
 fn admin_routes() -> OpenApiRouter<AppState> {
     let upload = OpenApiRouter::new()
-        .routes(routes!(handlers::admin::upload_plugin))
+        .routes(routes!(
+            handlers::admin::upload_plugin,
+            handlers::admin::get_plugin_upload_policy
+        ))
+        .routes(routes!(handlers::admin::inspect_plugin_archive))
         .layer(handlers::admin::upload_body_limit());
 
     OpenApiRouter::new()
@@ -222,6 +226,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::admin::disable_plugin))
         .routes(routes!(handlers::admin::reload_plugin))
         .routes(routes!(handlers::admin::reload_all_plugins))
+        .routes(routes!(handlers::admin::remove_plugin_upload))
         .routes(routes!(handlers::submission::admin_fan_out_submission))
         .merge(upload)
         .nest("/plugins/{id}/config", plugin_global_config_routes())

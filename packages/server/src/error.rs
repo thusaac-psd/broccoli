@@ -46,6 +46,12 @@ pub enum AppError {
     Conflict(String),
     UsernameTaken,
     PluginNotReady(String),
+    /// A valid plugin archive whose plugin failed to load or initialize on
+    /// the serving replica; nothing was published.
+    PluginLoadFailed(String),
+    /// Plugin uploads are switched off on this server
+    /// (`plugin.uploads_enabled`).
+    PluginUploadDisabled,
     RateLimited {
         retry_after: u64,
     },
@@ -125,6 +131,17 @@ impl AppError {
             AppError::PluginNotReady(msg) => {
                 (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
             }
+            AppError::PluginLoadFailed(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                simple("PLUGIN_LOAD_FAILED", msg),
+            ),
+            AppError::PluginUploadDisabled => (
+                StatusCode::FORBIDDEN,
+                simple(
+                    "PLUGIN_UPLOAD_DISABLED",
+                    "Plugin uploads are disabled on this server".into(),
+                ),
+            ),
             AppError::RateLimited { retry_after } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 simple(

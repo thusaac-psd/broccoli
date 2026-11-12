@@ -150,9 +150,7 @@ async fn list_config_inner<C: ConnectionTrait>(
 }
 
 fn validate_plugin_id(id: &str) -> Result<(), AppError> {
-    // Delegate to the single canonical validator so the upload path and the
-    // config handlers enforce exactly the same rule.
-    if crate::handlers::admin::is_valid_plugin_id(id) {
+    if crate::plugin_archive::is_valid_plugin_id(id) {
         Ok(())
     } else {
         Err(AppError::Validation(

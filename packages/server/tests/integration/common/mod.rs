@@ -138,6 +138,13 @@ pub mod routes {
         format!("/api/v1/admin/plugins/{id}/reload")
     }
 
+    pub const ADMIN_PLUGIN_UPLOAD: &str = "/api/v1/admin/plugins/upload";
+    pub const ADMIN_PLUGIN_UPLOAD_INSPECT: &str = "/api/v1/admin/plugins/upload/inspect";
+
+    pub fn admin_plugin_upload(id: &str) -> String {
+        format!("/api/v1/admin/plugins/{id}/upload")
+    }
+
     pub fn plugin_proxy(id: &str, path: &str) -> String {
         let path = path.trim_start_matches('/');
         format!("/api/v1/p/{id}/{path}")
@@ -390,6 +397,9 @@ pub struct TestApp {
     /// The test database this app runs on; pass it as
     /// [`SpawnOptions::shared_db`] to spawn another replica on it.
     pub db_name: String,
+    /// This app's own plugin cache (`plugin.cache_dir`): replicas never
+    /// share one.
+    pub plugin_cache: tempfile::TempDir,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -490,6 +500,8 @@ pub struct SpawnOptions {
     /// spawned app is another server replica of the app whose `db_name` this
     /// is (same Postgres, own process-local state). See [`TestApp::spawn_replica`].
     pub shared_db: Option<String>,
+    /// Sets `plugin.uploads_enabled = false`.
+    pub plugin_uploads_disabled: bool,
 }
 
 impl TestApp {
@@ -540,6 +552,7 @@ impl TestApp {
             .await
             .expect("Failed to initialize blob store");
 
+        let plugin_cache = tempfile::tempdir().expect("plugin cache dir");
         let mut app_config = AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
@@ -616,6 +629,8 @@ impl TestApp {
             },
             plugin: PluginConfig {
                 plugins_dir: options.plugins_dir.clone().unwrap_or_else(fixtures_dir),
+                cache_dir: plugin_cache.path().to_path_buf(),
+                uploads_enabled: !options.plugin_uploads_disabled,
                 ..Default::default()
             },
             submission: SubmissionConfig::default(),
@@ -837,6 +852,7 @@ impl TestApp {
             db,
             state: state_for_app,
             db_name,
+            plugin_cache,
             server_handle: Some(server_handle),
             dispatcher,
         }
@@ -947,6 +963,28 @@ impl TestApp {
             .await
             .expect("Failed to send DELETE request with body");
 
+        TestResponse::from_response(res).await
+    }
+
+    /// POST a plugin archive as the `plugin` form field.
+    pub async fn post_plugin_archive(
+        &self,
+        path: &str,
+        archive: Vec<u8>,
+        token: &str,
+    ) -> TestResponse {
+        let part = reqwest::multipart::Part::bytes(archive)
+            .file_name("plugin.tar.gz")
+            .mime_str("application/gzip")
+            .expect("Failed to set MIME type");
+        let res = self
+            .client
+            .post(self.url(path))
+            .header("Authorization", format!("Bearer {token}"))
+            .multipart(reqwest::multipart::Form::new().part("plugin", part))
+            .send()
+            .await
+            .expect("Failed to send plugin archive");
         TestResponse::from_response(res).await
     }
 

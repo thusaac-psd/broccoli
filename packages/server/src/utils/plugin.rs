@@ -124,21 +124,16 @@ pub(crate) struct Fingerprint {
     pub hash: String,
 }
 
-/// Fingerprint the plugin as it is on this replica's disk now. Blocking file
-/// reads, so it runs off the async runtime. A referenced file that is missing
-/// hashes as missing rather than failing, so a half-copied plugin simply
-/// fingerprints differently.
-pub(crate) async fn fingerprint(state: &AppState, plugin_id: &str) -> Option<Fingerprint> {
-    let (root, manifest) = {
-        let registry = state.plugins.get_registry().read().ok()?;
-        let entry = registry.get(plugin_id)?;
-        (entry.root_dir.clone(), entry.manifest.clone())
-    };
+/// Fingerprint the plugin in `root` as it is on disk now; `None` if its
+/// manifest does not parse. Blocking file reads, so it runs off the async
+/// runtime. A referenced file that is missing hashes as missing rather than
+/// failing, so a half-copied plugin simply fingerprints differently.
+pub(crate) async fn fingerprint(root: &std::path::Path) -> Option<Fingerprint> {
+    let root = root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        // Re-read the manifest: the registry's copy may predate the files.
         let manifest = plugin_core::registry::PluginEntry::from_dir(&root)
-            .map(|e| e.manifest)
-            .unwrap_or(manifest);
+            .ok()?
+            .manifest;
         let mut files = vec![std::path::PathBuf::from("plugin.toml")];
         for path in manifest.loaded_paths() {
             collect_files(&root, std::path::Path::new(path), &mut files);
@@ -158,13 +153,14 @@ pub(crate) async fn fingerprint(state: &AppState, plugin_id: &str) -> Option<Fin
                 Err(_) => hasher.update([0]),
             }
         }
-        Fingerprint {
+        Some(Fingerprint {
             version: manifest.version,
             hash: hex::encode(hasher.finalize()),
-        }
+        })
     })
     .await
     .ok()
+    .flatten()
 }
 
 /// `rel` itself if it is a file (or missing), else every file below it.
@@ -266,17 +262,18 @@ pub(crate) struct LoadFailure {
     pub kept_previous: bool,
 }
 
-/// Load `plugin_id` afresh from its directory (re-reading the manifest,
-/// rebuilding the runtime, registering hooks, running `init()`) WITHOUT
-/// losing a version that is already loaded: the old registry entry and
-/// registrations are set aside first and put back if anything fails, so a
-/// reload that cannot load never turns a working plugin into a failed one.
+/// Load `plugin_id` afresh from `root_dir` (reading the manifest, building
+/// the runtime, registering hooks, running `init()`) WITHOUT losing a version
+/// that is already loaded: the old registry entry and registrations are set
+/// aside first and put back if anything fails, so a reload that cannot load
+/// never turns a working plugin into a failed one.
 ///
 /// On success the set-aside version is returned, so a caller that must
 /// still confirm the change (publish it to the fleet) can [`roll_back`] to it.
-pub(crate) async fn reload_from_disk(
+pub(crate) async fn load_from_dir(
     state: &AppState,
     plugin_id: &str,
+    root_dir: &std::path::Path,
 ) -> Result<Option<PreviousVersion>, LoadFailure> {
     let fail = |error, kept_previous| LoadFailure {
         error,
@@ -285,19 +282,14 @@ pub(crate) async fn reload_from_disk(
     let registry = state.plugins.get_registry();
     let lock_err = || PluginError::Internal("Failed to acquire plugin registry lock".into());
 
-    let (root_dir, was_loaded) = {
-        let reg = registry.read().map_err(|_| fail(lock_err(), false))?;
-        let entry = reg
-            .get(plugin_id)
-            .ok_or_else(|| fail(PluginError::NotFound(plugin_id.to_string()), false))?;
-        (
-            entry.root_dir.clone(),
-            entry.status == plugin_core::registry::PluginStatus::Loaded,
-        )
-    };
+    let was_loaded = registry
+        .read()
+        .map_err(|_| fail(lock_err(), false))?
+        .get(plugin_id)
+        .is_some_and(|entry| entry.status == plugin_core::registry::PluginStatus::Loaded);
     // Parse first: a broken manifest leaves everything as it was.
     let fresh =
-        plugin_core::registry::PluginEntry::from_dir(&root_dir).map_err(|e| fail(e, was_loaded))?;
+        plugin_core::registry::PluginEntry::from_dir(root_dir).map_err(|e| fail(e, was_loaded))?;
 
     let registrations = if was_loaded {
         Registrations::capture(&state.registries, plugin_id).await
@@ -326,7 +318,27 @@ pub(crate) async fn reload_from_disk(
     }
 }
 
-/// Put back the version [`reload_from_disk`] replaced.
+/// Point this replica's registry at `root` for a plugin that is not loaded,
+/// so its manifest is listed (a disabled plugin). Leaves a loaded plugin
+/// alone. Best-effort: a manifest that does not parse is logged.
+pub(crate) fn register_unloaded(state: &AppState, plugin_id: &str, root: &std::path::Path) {
+    let Ok(mut registry) = state.plugins.get_registry().write() else {
+        return;
+    };
+    match registry.get(plugin_id) {
+        Some(entry)
+            if entry.status == plugin_core::registry::PluginStatus::Loaded
+                || entry.root_dir == root => {}
+        _ => match plugin_core::registry::PluginEntry::from_dir(root) {
+            Ok(entry) => {
+                registry.insert(plugin_id.to_string(), entry);
+            }
+            Err(e) => tracing::warn!(plugin_id, error = %e, "Failed to read a plugin manifest"),
+        },
+    }
+}
+
+/// Put back the version [`load_from_dir`] replaced.
 pub(crate) async fn roll_back(state: &AppState, plugin_id: &str, previous: PreviousVersion) {
     purge_plugin_registrations(&state.registries, plugin_id).await;
     let manifest = previous.entry.manifest.clone();

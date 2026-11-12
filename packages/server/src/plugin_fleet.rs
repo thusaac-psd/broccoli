@@ -124,8 +124,14 @@ pub async fn retire(db: &DatabaseConnection, server_id: &str) -> Result<(), DbEr
 
 /// Desired state plus every live replica's report.
 pub struct FleetView {
-    desired: HashMap<String, (bool, i64)>,
+    desired: HashMap<String, DesiredRow>,
     replicas: Vec<LiveReplica>,
+}
+
+struct DesiredRow {
+    enabled: bool,
+    generation: i64,
+    archive_hash: Option<String>,
 }
 
 struct LiveReplica {
@@ -139,7 +145,14 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
         .all(db)
         .await?
         .into_iter()
-        .map(|p| (p.id, (p.is_enabled, p.generation)))
+        .map(|p| {
+            let row = DesiredRow {
+                enabled: p.is_enabled,
+                generation: p.generation,
+                archive_hash: p.archive_hash,
+            };
+            (p.id, row)
+        })
         .collect();
     let rows = plugin_replica::Entity::find()
         .from_raw_sql(Statement::from_sql_and_values(
@@ -162,6 +175,29 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
         })
         .collect();
     Ok(FleetView { desired, replicas })
+}
+
+/// Where a plugin's files come from (see `crate::plugin_distribution`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSourceKind {
+    /// The copy shipped in each node's plugins directory.
+    Bundle,
+    /// An archive uploaded through the admin API, served from the shared
+    /// blob store. Takes precedence over a bundled copy.
+    Upload,
+}
+
+/// The source the fleet runs a plugin from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct PluginSourceResponse {
+    pub kind: PluginSourceKind,
+    /// Content hash of the uploaded archive, when `kind` is `upload`.
+    #[schema(example = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")]
+    pub archive_hash: Option<String>,
+    /// Whether the serving replica's bundle has a copy of the plugin: what
+    /// removing the upload falls back to.
+    pub bundled: bool,
 }
 
 /// Fleet-wide state of one plugin.
@@ -218,13 +254,32 @@ impl FleetView {
 
     /// Whether `plugin_id` is enabled in the desired state.
     pub fn is_enabled(&self, plugin_id: &str) -> bool {
-        self.desired
+        self.desired.get(plugin_id).is_some_and(|row| row.enabled)
+    }
+
+    /// Where the fleet takes `plugin_id`'s files from. `bundled` is whether
+    /// the serving replica's bundle has a copy.
+    pub fn source(&self, plugin_id: &str, bundled: bool) -> PluginSourceResponse {
+        let archive_hash = self
+            .desired
             .get(plugin_id)
-            .is_some_and(|(enabled, _)| *enabled)
+            .and_then(|row| row.archive_hash.clone());
+        PluginSourceResponse {
+            kind: if archive_hash.is_some() {
+                PluginSourceKind::Upload
+            } else {
+                PluginSourceKind::Bundle
+            },
+            archive_hash,
+            bundled,
+        }
     }
 
     pub fn plugin(&self, plugin_id: &str) -> PluginFleetResponse {
-        let (enabled, generation) = self.desired.get(plugin_id).copied().unwrap_or((false, 0));
+        let (enabled, generation) = self
+            .desired
+            .get(plugin_id)
+            .map_or((false, 0), |row| (row.enabled, row.generation));
         let replicas: Vec<PluginReplicaResponse> = self
             .replicas
             .iter()

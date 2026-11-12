@@ -1,4 +1,4 @@
-use crate::plugin_fleet::{FleetView, PluginFleetResponse};
+use crate::plugin_fleet::{FleetView, PluginFleetResponse, PluginSourceKind, PluginSourceResponse};
 use plugin_core::manifest::{ComponentMap, ServerRouteConfig, WebRouteConfig, WebSlotConfig};
 use plugin_core::registry::{PluginInfo, PluginStatus};
 use serde::Serialize;
@@ -146,6 +146,8 @@ pub struct PluginDetailResponse {
     pub enabled: bool,
     /// The plugin's load state on every live server replica.
     pub fleet: PluginFleetResponse,
+    /// Where the fleet takes the plugin's files from.
+    pub source: PluginSourceResponse,
 
     #[schema(example = "An Awesome Plugin")]
     pub name: String,
@@ -187,6 +189,8 @@ pub struct PluginFullDetailResponse {
     pub enabled: bool,
     /// The plugin's load state on every live server replica.
     pub fleet: PluginFleetResponse,
+    /// Where the fleet takes the plugin's files from.
+    pub source: PluginSourceResponse,
 
     #[schema(example = "An Awesome Plugin")]
     pub name: String,
@@ -318,12 +322,13 @@ impl PluginDetailResponse {
     /// A plugin the fleet knows about but whose files are not on the replica
     /// serving the request, so there is no manifest to describe it: only its
     /// id, desired state and per-replica states are known.
-    pub fn without_manifest(id: &str, fleet: &FleetView) -> Self {
+    pub fn without_manifest(id: &str, fleet: &FleetView, bundled: bool) -> Self {
         Self {
             id: id.to_string(),
             status: PluginStatusResponse::Unloaded,
             enabled: fleet.is_enabled(id),
             fleet: fleet.plugin(id),
+            source: fleet.source(id, bundled),
             name: id.to_string(),
             version: String::new(),
             description: None,
@@ -334,9 +339,11 @@ impl PluginDetailResponse {
         }
     }
 
-    /// `fleet` supplies the desired state and the per-replica load states.
-    pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
+    /// `fleet` supplies the desired state and the per-replica load states;
+    /// `bundled` is whether this replica's bundle has a copy.
+    pub fn new(info: PluginInfo, fleet: &FleetView, bundled: bool) -> Self {
         let enabled = fleet.is_enabled(&info.id);
+        let source = fleet.source(&info.id, bundled);
         let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
         let has_worker = info.manifest.has_worker();
@@ -360,6 +367,7 @@ impl PluginDetailResponse {
             status: info.status.into(),
             enabled,
             fleet,
+            source,
             name: info.manifest.name,
             version: info.manifest.version,
             description: info.manifest.description,
@@ -373,12 +381,13 @@ impl PluginDetailResponse {
 
 impl PluginFullDetailResponse {
     /// See [`PluginDetailResponse::without_manifest`].
-    pub fn without_manifest(id: &str, fleet: &FleetView) -> Self {
+    pub fn without_manifest(id: &str, fleet: &FleetView, bundled: bool) -> Self {
         Self {
             id: id.to_string(),
             status: PluginStatusResponse::Unloaded,
             enabled: fleet.is_enabled(id),
             fleet: fleet.plugin(id),
+            source: fleet.source(id, bundled),
             name: id.to_string(),
             version: String::new(),
             description: None,
@@ -393,9 +402,11 @@ impl PluginFullDetailResponse {
         }
     }
 
-    /// `fleet` supplies the desired state and the per-replica load states.
-    pub fn new(info: PluginInfo, fleet: &FleetView) -> Self {
+    /// `fleet` supplies the desired state and the per-replica load states;
+    /// `bundled` is whether this replica's bundle has a copy.
+    pub fn new(info: PluginInfo, fleet: &FleetView, bundled: bool) -> Self {
         let enabled = fleet.is_enabled(&info.id);
+        let source = fleet.source(&info.id, bundled);
         let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
         let has_worker = info.manifest.has_worker();
@@ -436,6 +447,7 @@ impl PluginFullDetailResponse {
             status: info.status.into(),
             enabled,
             fleet,
+            source,
             name: info.manifest.name,
             version: info.manifest.version,
             description: info.manifest.description,
@@ -449,4 +461,72 @@ impl PluginFullDetailResponse {
             config_schemas,
         }
     }
+}
+
+/// The multipart form the plugin upload endpoints read (documentation only:
+/// the handlers stream the field themselves, so a refused upload is
+/// answered before its body is read).
+#[derive(utoipa::ToSchema)]
+pub struct PluginArchiveForm {
+    /// A tar.gz archive with a single top-level directory, named after the
+    /// plugin id, containing `plugin.toml`.
+    #[schema(value_type = String, format = Binary)]
+    pub plugin: Vec<u8>,
+}
+
+/// What a plugin archive would publish, for the admin to confirm.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PluginArchiveSummary {
+    #[schema(example = "my-plugin")]
+    pub id: String,
+    #[schema(example = "My Plugin")]
+    pub name: String,
+    #[schema(example = "1.2.0")]
+    pub version: String,
+    pub description: Option<String>,
+    /// Host permissions the plugin's server component requests.
+    #[schema(example = json!(["storage", "sql"]))]
+    pub permissions: Vec<String>,
+    pub has_server: bool,
+    pub has_web: bool,
+    /// Content hash of the archive: its key in the blob store.
+    pub archive_hash: String,
+    pub size_bytes: u64,
+    /// What the fleet runs under this id now; `None` for a new plugin.
+    pub current: Option<PublishedPluginResponse>,
+}
+
+/// What the fleet currently publishes for a plugin id.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PublishedPluginResponse {
+    pub source: PluginSourceKind,
+    /// Published manifest version, once one has been published.
+    #[schema(example = "1.1.0")]
+    pub version: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PluginUploadResponse {
+    #[schema(example = "my-plugin")]
+    pub plugin_id: String,
+    #[schema(example = "1.2.0")]
+    pub version: String,
+    pub archive_hash: String,
+    pub message: String,
+}
+
+/// Whether this server accepts plugin uploads.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PluginUploadPolicy {
+    /// `false` when the operator switched uploads off (`plugin.uploads_enabled`).
+    pub enabled: bool,
+    /// Largest archive accepted, in bytes.
+    pub max_archive_bytes: u64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct RemoveUploadResponse {
+    pub outcome: crate::plugin_lifecycle::UploadRemoval,
+    pub message: String,
 }

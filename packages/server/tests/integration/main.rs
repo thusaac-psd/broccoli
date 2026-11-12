@@ -26,6 +26,7 @@ mod plugin;
 mod plugin_config;
 mod plugin_fleet;
 mod plugin_timer;
+mod plugin_upload;
 mod privilege_ceiling;
 mod problem;
 mod rejudge_visibility;

@@ -8,8 +8,9 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
     pub is_enabled: bool,
-    /// Bumped by every lifecycle change (enable, disable, reload, upload) so
-    /// each replica knows to re-apply this row. See `crate::plugin_lifecycle`.
+    /// Bumped by every lifecycle change (enable, disable, reload, upload,
+    /// removing an upload) so each replica knows to re-apply this row. See
+    /// `crate::plugin_lifecycle`.
     #[sea_orm(default_value = 0)]
     pub generation: i64,
     /// Manifest version and content hash of the plugin as published (by the
@@ -20,6 +21,11 @@ pub struct Model {
     pub version: Option<String>,
     #[sea_orm(nullable)]
     pub content_hash: Option<String>,
+    /// Content hash (hex) of the uploaded archive the fleet runs, in the
+    /// shared blob store; `None` runs the copy bundled on each node. See
+    /// `crate::plugin_distribution`.
+    #[sea_orm(nullable)]
+    pub archive_hash: Option<String>,
     /// What the plugin governs, as recorded by the last replica that loaded
     /// it (`crate::plugin_lifecycle::Governs`), so a replica that cannot load
     /// it still knows what to fail closed for. `None` until first loaded.
