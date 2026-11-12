@@ -145,6 +145,12 @@ pub mod routes {
         format!("/api/v1/admin/plugins/{id}/upload")
     }
 
+    /// Remove `id`'s upload, expecting `expect` (`bundle_restored` or
+    /// `removed`).
+    pub fn admin_plugin_remove_upload(id: &str, expect: &str) -> String {
+        format!("/api/v1/admin/plugins/{id}/upload?expect={expect}")
+    }
+
     pub fn plugin_proxy(id: &str, path: &str) -> String {
         let path = path.trim_start_matches('/');
         format!("/api/v1/p/{id}/{path}")

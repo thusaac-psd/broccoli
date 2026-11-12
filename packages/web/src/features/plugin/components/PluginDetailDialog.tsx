@@ -1,6 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import type { PluginFullDetail } from '@broccoli/web-sdk/plugin';
+import type { PluginFullDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
   Button,
@@ -180,7 +180,7 @@ function SourceSection({
   removingUpload,
 }: {
   plugin: PluginFullDetail;
-  onRemoveUpload?: (pluginId: string) => void;
+  onRemoveUpload?: (pluginId: string, expect: UploadRemoval) => void;
   removingUpload: boolean;
 }) {
   const { t } = useTranslation();
@@ -236,7 +236,12 @@ function SourceSection({
               disabled={removingUpload}
               onClick={() => {
                 setConfirming(false);
-                onRemoveUpload(plugin.id);
+                // The outcome this confirmation described: the server refuses
+                // if it would do the other.
+                onRemoveUpload(
+                  plugin.id,
+                  source.bundled ? 'bundle_restored' : 'removed',
+                );
               }}
             >
               {removingUpload && (
@@ -267,7 +272,7 @@ function PluginDetailContent({
   removingUpload,
 }: {
   plugin: PluginFullDetail;
-  onRemoveUpload?: (pluginId: string) => void;
+  onRemoveUpload?: (pluginId: string, expect: UploadRemoval) => void;
   removingUpload: boolean;
 }) {
   const { t } = useTranslation();
@@ -453,7 +458,7 @@ export function PluginDetailDialog({
   onRetry?: (pluginId: string) => void;
   retrying?: boolean;
   /** Remove the plugin's uploaded version on every server. */
-  onRemoveUpload?: (pluginId: string) => void;
+  onRemoveUpload?: (pluginId: string, expect: UploadRemoval) => void;
   removingUpload?: boolean;
 }) {
   const { t } = useTranslation();

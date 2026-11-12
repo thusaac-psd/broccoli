@@ -91,7 +91,12 @@ Rollback is publishing again: upload the previous archive, or remove the upload.
 
 ## Removing an upload
 
-`DELETE /admin/plugins/{id}/upload` (`plugin_lifecycle::remove_upload`):
+`DELETE /admin/plugins/{id}/upload?expect=bundle_restored|removed`
+(`plugin_lifecycle::remove_upload`). Which outcome happens depends on the
+serving replica's bundle, and the confirmation the admin saw came from
+whichever replica served the details page, so the request names the outcome
+it expects and is refused with `409 CONFLICT` if this replica would do the
+other:
 
 - The serving replica's bundle has the plugin: one update sets
   `archive_hash = NULL` with the bundle's fingerprint and bumps the generation.

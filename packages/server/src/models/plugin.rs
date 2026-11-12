@@ -536,6 +536,13 @@ pub struct PluginUploadPolicy {
     pub max_archive_bytes: u64,
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RemoveUploadQuery {
+    /// The outcome the admin confirmed: `bundle_restored` or `removed`.
+    pub expect: crate::plugin_lifecycle::UploadRemoval,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct RemoveUploadResponse {
     pub outcome: crate::plugin_lifecycle::UploadRemoval,

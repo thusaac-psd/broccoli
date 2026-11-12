@@ -1,7 +1,7 @@
 use axum::extract::DefaultBodyLimit;
 use axum::{
     Json,
-    extract::{Multipart, State},
+    extract::{Multipart, Query, State},
 };
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::EntityTrait;
@@ -21,7 +21,7 @@ use crate::extractors::path::AppPath;
 use crate::models::plugin::{
     PluginArchiveForm, PluginArchiveSummary, PluginDetailResponse, PluginFullDetailResponse,
     PluginUploadPolicy, PluginUploadResponse, PublishedPluginResponse, ReloadAllResponse,
-    RemoveUploadResponse,
+    RemoveUploadQuery, RemoveUploadResponse,
 };
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
 use crate::plugin_distribution::{PluginSource, bundled_root};
@@ -457,14 +457,14 @@ pub async fn upload_plugin(
     tag = "Admin",
     operation_id = "removePluginUpload",
     summary = "Remove a plugin's uploaded version",
-    description = "Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. Allowed even when uploads are switched off. Requires `plugin:manage` permission.",
-    params(("id" = String, Path, description = "Plugin ID")),
+    description = "Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. `expect` names the outcome the admin confirmed; if this replica would do the other, nothing changes and the call answers 409. Allowed even when uploads are switched off. Requires `plugin:manage` permission.",
+    params(("id" = String, Path, description = "Plugin ID"), RemoveUploadQuery),
     responses(
         (status = 200, description = "Upload removed", body = RemoveUploadResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Plugin not found (NOT_FOUND)", body = ErrorBody),
-        (status = 409, description = "The plugin has no uploaded version, or it changed through another replica meanwhile (CONFLICT)", body = ErrorBody),
+        (status = 409, description = "The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -473,9 +473,10 @@ pub async fn remove_plugin_upload(
     auth_user: FreshAuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
+    Query(query): Query<RemoveUploadQuery>,
 ) -> Result<Json<RemoveUploadResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
-    let outcome = crate::plugin_lifecycle::remove_upload(&state, &id).await?;
+    let outcome = crate::plugin_lifecycle::remove_upload(&state, &id, query.expect).await?;
     let message = match outcome {
         UploadRemoval::BundleRestored => {
             format!("Removed the upload; plugin '{id}' runs its bundled version again")

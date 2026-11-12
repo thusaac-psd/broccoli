@@ -582,7 +582,10 @@ async fn removing_an_upload_falls_back_to_the_bundled_copy() {
     assert_eq!(registered(&b, BUNDLED).0, "0.2.0");
 
     let res = a
-        .delete_with_token(&routes::admin_plugin_upload(BUNDLED), &token)
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(BUNDLED, "bundle_restored"),
+            &token,
+        )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(res.body["outcome"], "bundle_restored", "{}", res.text);
@@ -599,7 +602,10 @@ async fn removing_an_upload_falls_back_to_the_bundled_copy() {
     }
 
     let res = a
-        .delete_with_token(&routes::admin_plugin_upload(BUNDLED), &token)
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(BUNDLED, "bundle_restored"),
+            &token,
+        )
         .await;
     assert_eq!(res.status, 409, "nothing left to remove: {}", res.text);
 }
@@ -615,7 +621,10 @@ async fn removing_a_disabled_upload_restores_the_bundled_copy_disabled() {
     assert_eq!(res.status, 200, "{}", res.text);
 
     let res = a
-        .delete_with_token(&routes::admin_plugin_upload(BUNDLED), &token)
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(BUNDLED, "bundle_restored"),
+            &token,
+        )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     let published = row(&a, BUNDLED).await.unwrap();
@@ -634,8 +643,26 @@ async fn removing_an_upload_with_no_bundled_copy_removes_the_plugin_everywhere()
     plugin_lifecycle::reconcile(&b.state).await.unwrap();
     assert_eq!(status(&b, UPLOAD_ONLY), Some(PluginStatus::Loaded));
 
+    // The admin confirmed a fallback to a bundled copy this server does not
+    // have: nothing happens.
+    let res = a
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(UPLOAD_ONLY, "bundle_restored"),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 409, "{}", res.text);
+    assert!(row(&a, UPLOAD_ONLY).await.is_some());
     let res = a
         .delete_with_token(&routes::admin_plugin_upload(UPLOAD_ONLY), &token)
+        .await;
+    assert_eq!(res.status, 400, "expect is required: {}", res.text);
+
+    let res = a
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(UPLOAD_ONLY, "removed"),
+            &token,
+        )
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
     assert_eq!(res.body["outcome"], "removed", "{}", res.text);
@@ -745,7 +772,10 @@ async fn contestants_cannot_upload_or_remove_plugins() {
         .await;
     assert_eq!(res.status, 403);
     let res = a
-        .delete_with_token(&routes::admin_plugin_upload(BUNDLED), &contestant)
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(BUNDLED, "bundle_restored"),
+            &contestant,
+        )
         .await;
     assert_eq!(res.status, 403);
     assert!(row(&a, UPLOAD_ONLY).await.is_none());
@@ -773,7 +803,10 @@ async fn plugin_ids_from_the_url_must_be_valid() {
         assert_eq!(res.body["code"], "VALIDATION_ERROR", "{}", res.text);
     }
     let res = a
-        .delete_with_token(&routes::admin_plugin_upload(&escape), &token)
+        .delete_with_token(
+            &routes::admin_plugin_remove_upload(&escape, "removed"),
+            &token,
+        )
         .await;
     assert_eq!(res.status, 400, "{}", res.text);
     let res = a

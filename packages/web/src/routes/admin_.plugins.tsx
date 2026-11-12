@@ -2,7 +2,7 @@ import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
-import type { PluginDetail } from '@broccoli/web-sdk/plugin';
+import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
 import {
   Button,
@@ -184,12 +184,12 @@ export default function PluginsPage() {
   );
 
   const handleRemoveUpload = useCallback(
-    async (pluginId: string) => {
+    async (pluginId: string, expect: UploadRemoval) => {
       setRemovingUploadId(pluginId);
       try {
         const { data, error } = await apiClient.DELETE(
           '/admin/plugins/{id}/upload',
-          { params: { path: { id: pluginId } } },
+          { params: { path: { id: pluginId }, query: { expect } } },
         );
         if (error || !data) {
           toast.error(

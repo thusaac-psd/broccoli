@@ -1251,8 +1251,10 @@ async fn refresh_cache(state: &AppState) {
     }
 }
 
-/// What removing a plugin's upload did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+/// What removing a plugin's upload does.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum UploadRemoval {
     /// The bundled copy is the plugin's source again.
@@ -1265,7 +1267,15 @@ pub enum UploadRemoval {
 /// this replica, that copy becomes the source again (loaded here first if
 /// the plugin is enabled); without one, the plugin's row is deleted, which
 /// unloads it on every replica, and its pending timers go with it.
-pub async fn remove_upload(state: &AppState, id: &PluginId) -> Result<UploadRemoval, AppError> {
+///
+/// `expect` is the outcome the admin confirmed. Which one happens depends on
+/// this replica's bundle, so if it differs nothing is changed and the call
+/// is refused as a conflict.
+pub async fn remove_upload(
+    state: &AppState,
+    id: &PluginId,
+    expect: UploadRemoval,
+) -> Result<UploadRemoval, AppError> {
     let plugin_id = id.as_str();
     with_applied(state, async |applied| {
         let row = plugin_entity::Entity::find_by_id(plugin_id)
@@ -1277,9 +1287,26 @@ pub async fn remove_upload(state: &AppState, id: &PluginId) -> Result<UploadRemo
                 "Plugin '{plugin_id}' has no uploaded version"
             )));
         };
+        let bundled = plugin_distribution::bundled_root(state, id);
+        let would = match bundled {
+            Some(_) => UploadRemoval::BundleRestored,
+            None => UploadRemoval::Removed,
+        };
+        if would != expect {
+            return Err(AppError::Conflict(match would {
+                UploadRemoval::BundleRestored => format!(
+                    "This server has a bundled copy of '{plugin_id}', so removing the upload \
+                     would restore it rather than remove the plugin; confirm again"
+                ),
+                UploadRemoval::Removed => format!(
+                    "This server has no bundled copy of '{plugin_id}', so removing the upload \
+                     would remove the plugin from every server; confirm again"
+                ),
+            }));
+        }
         let change = Change::RemoveUpload(&archive);
         let stale = || ChangeError::Stale(plugin_id.to_string());
-        let outcome = match plugin_distribution::bundled_root(state, id) {
+        let outcome = match bundled {
             Some(_) if row.is_enabled => {
                 load_then_publish(state, applied, id, change, &PluginSource::Bundle).await?;
                 UploadRemoval::BundleRestored

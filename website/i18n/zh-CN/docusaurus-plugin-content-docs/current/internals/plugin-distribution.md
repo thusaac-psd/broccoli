@@ -49,7 +49,7 @@ sidebar_position: 3
 
 ## 移除上传
 
-`DELETE /admin/plugins/{id}/upload`（`plugin_lifecycle::remove_upload`）：
+`DELETE /admin/plugins/{id}/upload?expect=bundle_restored|removed`（`plugin_lifecycle::remove_upload`）。结果取决于处理请求的副本的内置目录，而管理员看到的确认信息来自提供详情页的那个副本，因此请求需注明预期的结果；如果本副本会执行另一种结果，则返回 `409 CONFLICT`：
 
 - 处理请求的副本的内置目录中有该插件：一次更新将 `archive_hash` 置为 `NULL`、写入内置版本的指纹并递增 generation。如果插件处于启用状态，会像其他变更一样先在本副本加载内置版本。插件保持原有的启用状态。
 - 没有内置版本：删除该行，待触发的定时器一并删除。每台服务器在协调时发现自己应用过的行消失，便遗忘该插件：清除注册内容、移除注册表条目、清理缓存。插件配置和存储行保留，因此再次上传该插件即可恢复其数据。

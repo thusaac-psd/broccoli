@@ -216,7 +216,7 @@ export interface paths {
     post?: never;
     /**
      * Remove a plugin's uploaded version
-     * @description Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. Allowed even when uploads are switched off. Requires `plugin:manage` permission.
+     * @description Removes the uploaded archive a plugin runs from, on every server replica. If the serving replica's bundle has a copy of the plugin, that copy becomes the source again (loaded on the serving replica first when the plugin is enabled); otherwise the plugin is removed from the fleet and its pending timers are deleted. `expect` names the outcome the admin confirmed; if this replica would do the other, nothing changes and the call answers 409. Allowed even when uploads are switched off. Requires `plugin:manage` permission.
      */
     delete: operations['removePluginUpload'];
     options?: never;
@@ -4467,7 +4467,7 @@ export interface components {
       files: components['schemas']['CheckerSourceFile'][];
     };
     /**
-     * @description What removing a plugin's upload did.
+     * @description What removing a plugin's upload does.
      * @enum {string}
      */
     UploadRemoval: 'bundle_restored' | 'removed';
@@ -5414,7 +5414,10 @@ export interface operations {
   };
   removePluginUpload: {
     parameters: {
-      query?: never;
+      query: {
+        /** @description The outcome the admin confirmed: `bundle_restored` or `removed`. */
+        expect: components['schemas']['UploadRemoval'];
+      };
       header?: never;
       path: {
         /** @description Plugin ID */
@@ -5460,7 +5463,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description The plugin has no uploaded version, or it changed through another replica meanwhile (CONFLICT) */
+      /** @description The plugin has no uploaded version, it changed through another replica meanwhile, or this replica would do something other than `expect` (CONFLICT) */
       409: {
         headers: {
           [name: string]: unknown;
