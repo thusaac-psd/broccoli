@@ -5,6 +5,7 @@
 'codelink-qualifier.loadError' = 'Unable to load the standings.'
 'codelink-qualifier.stale' = 'Refresh failed. The displayed standings may be out of date.'
 'codelink-qualifier.refresh' = 'Refresh'
+'codelink-qualifier.points' = '{points}pt'
 'codelink-qualifier.autoRefresh' = 'Auto refresh ({seconds}s)'
 'codelink-qualifier.manualRefreshOnly' = 'Manual refresh only'
 'codelink-qualifier.ranking.label' = 'Ranking view'

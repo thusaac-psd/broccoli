@@ -98,7 +98,7 @@ function PhaseBanner({
       </span>
       <button
         onClick={onDismiss}
-        aria-label="Dismiss"
+        aria-label={t('ioi.scoreboard.phaseChange.dismiss')}
         className="border-none bg-transparent cursor-pointer opacity-50 text-inherit p-0 px-1 leading-none flex items-center"
       >
         <svg

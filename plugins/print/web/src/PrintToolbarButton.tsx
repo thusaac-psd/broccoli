@@ -210,7 +210,9 @@ export function PrintToolbarButton() {
 
           <DialogFooter className="items-center sm:justify-between">
             <span className="text-xs text-muted-foreground tabular-nums">
-              {pages > 0 ? `~${pages}p` : ''}
+              {pages > 0
+                ? t('print.submission.estimatedPages', { count: pages })
+                : ''}
             </span>
             <div className="flex gap-2">
               <Button

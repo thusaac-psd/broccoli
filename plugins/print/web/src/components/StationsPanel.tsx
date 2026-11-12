@@ -103,7 +103,11 @@ export function StationsPanel() {
 
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground tabular-nums">
               <span>{formatRelative(s.last_seen)}</span>
-              {s.version && <span className="font-mono">v{s.version}</span>}
+              {s.version && (
+                <span className="font-mono">
+                  {t('print.stations.version', { version: s.version })}
+                </span>
+              )}
             </div>
           </div>
         );

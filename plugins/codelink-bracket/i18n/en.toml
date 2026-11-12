@@ -69,6 +69,7 @@
 'codelink-bracket.game.lost' = 'Loss'
 'codelink-bracket.game.noScore' = 'No points'
 'codelink-bracket.match.number' = 'Match {n}'
+'codelink-bracket.match.format' = 'BO{bestOf} / FT{winsToAdvance}'
 'codelink-bracket.match.openSubmission' = 'Open #{id}'
 'codelink-bracket.match.rejudge' = 'Rejudge #{id}'
 'codelink-bracket.match.contestEnded' = 'The contest ended before this match finished, so nobody can submit any more. Staff must decide it.'

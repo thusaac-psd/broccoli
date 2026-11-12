@@ -69,7 +69,10 @@ export function MyMatchPanel({
             {' · '}
             {t('codelink-bracket.my.vs', { name: opponentName })}
             {' · '}
-            BO{match.group_a.length} / FT{match.wins_to_advance}
+            {t('codelink-bracket.match.format', {
+              bestOf: match.group_a.length,
+              winsToAdvance: match.wins_to_advance,
+            })}
           </span>
         </div>
         <div className="ml-auto flex items-center gap-3">

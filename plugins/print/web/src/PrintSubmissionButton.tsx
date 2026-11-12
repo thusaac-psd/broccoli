@@ -131,7 +131,9 @@ export function PrintSubmissionButton({ submission }: Props) {
                   </code>
                 </span>
                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                  ~{estimatePages(f.content)}p
+                  {t('print.submission.estimatedPages', {
+                    count: estimatePages(f.content),
+                  })}
                 </span>
               </div>
             ))}

@@ -218,6 +218,9 @@ function parseRanges(input: string): number[] {
 /** Monospace font class shorthand. */
 const monoClass = 'font-mono tabular-nums';
 
+/** Glyph on the buttons that remove a test case or subtask. */
+const REMOVE_GLYPH = '\u2715';
+
 /** Shared preview content for test case hover cards. */
 function PreviewContent({ tc }: { tc: TestCaseListItem }) {
   const { t } = useTranslation();
@@ -238,7 +241,7 @@ function PreviewContent({ tc }: { tc: TestCaseListItem }) {
           </span>
         )}
         <span className={cn(monoClass, 'text-[11px] opacity-50 ml-auto')}>
-          {tc.score} pts
+          {t('ioi.subtask.points', { score: tc.score })}
         </span>
       </div>
       {tc.description && (
@@ -291,6 +294,7 @@ function TcChip({
   onDragStart?: (e: React.DragEvent) => void;
   isDuplicate?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <HoverCard openDelay={0} closeDelay={300}>
       <HoverCardTrigger asChild>
@@ -332,9 +336,10 @@ function TcChip({
               e.stopPropagation();
               onRemove();
             }}
+            aria-label={t('ioi.subtask.removeTestCase', { label: tcLabel(tc) })}
             className="bg-transparent border-none cursor-pointer text-[10px] opacity-30 px-px py-0 text-inherit leading-none transition-opacity duration-150 hover:opacity-80"
           >
-            ✕
+            {REMOVE_GLYPH}
           </button>
         </span>
       </HoverCardTrigger>
@@ -713,7 +718,7 @@ function UnifiedSearch({
         ref={listboxRef}
         id={listboxId}
         role="listbox"
-        aria-label="Search results"
+        aria-label={t('ioi.subtask.searchResults')}
         className={ddClass}
         style={dropdownPositionStyle}
         onMouseDown={(e) => {
@@ -789,11 +794,11 @@ function UnifiedSearch({
               </span>
               {tc.is_sample && (
                 <span className="text-[8px] font-bold uppercase px-1 rounded-[3px] bg-indigo-500/10 text-indigo-500">
-                  S
+                  {t('ioi.subtask.sampleAbbr')}
                 </span>
               )}
               <span className={cn(monoClass, 'text-[9px] opacity-35 ml-auto')}>
-                {tc.score} pts
+                {t('ioi.subtask.points', { score: tc.score })}
               </span>
               {otherOwner !== null && (
                 <span className="text-[9px] italic opacity-60">
@@ -1344,7 +1349,7 @@ export function SubtaskEditor({
                     : 'bg-amber-500/10 text-amber-600',
                 )}
               >
-                {totalMax} pts
+                {t('ioi.subtask.points', { score: totalMax })}
               </span>
             </>
           )}
@@ -1706,7 +1711,7 @@ export function SubtaskEditor({
                   title={t('ioi.subtask.removeSubtask')}
                   className="size-[30px] opacity-30 hover:opacity-100 hover:text-destructive hover:border-destructive hover:bg-red-500/[0.06] transition-all duration-150"
                 >
-                  ✕
+                  {REMOVE_GLYPH}
                 </Button>
               </div>
 
@@ -1765,7 +1770,7 @@ export function SubtaskEditor({
                 {/* Assigned chips */}
                 <div
                   className="flex flex-wrap gap-1 min-h-7 max-h-40 overflow-y-auto items-center"
-                  title="Hover over a chip to preview test case data"
+                  title={t('ioi.subtask.chipPreviewHint')}
                 >
                   {subtask.test_cases.map((tcId) => {
                     const tc = tcByLabel.get(tcId);
@@ -1789,9 +1794,12 @@ export function SubtaskEditor({
                                 ),
                               })
                             }
+                            aria-label={t('ioi.subtask.removeTestCase', {
+                              label: tcId,
+                            })}
                             className="bg-transparent border-none cursor-pointer text-[10px] opacity-50 px-px py-0 text-inherit"
                           >
-                            ✕
+                            {REMOVE_GLYPH}
                           </button>
                         </span>
                       );

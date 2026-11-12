@@ -49,6 +49,15 @@ type DisplaySubtaskResult = {
   score: number;
 };
 
+/** Per-test-case output streams, in display order. */
+const TEST_CASE_OUTPUT_FIELDS = [
+  'checker_output',
+  'stdout',
+  'stderr',
+  'input',
+  'expected_output',
+] as const;
+
 const METHOD_META: Record<string, { abbrKey: string; color: string }> = {
   group_min: { abbrKey: 'ioi.submission.method.groupMin', color: '#ef4444' },
   sum: { abbrKey: 'ioi.submission.method.sum', color: '#10b981' },
@@ -234,15 +243,7 @@ function TestCaseDetailPanel({
           </span>
         )}
       </div>
-      {(
-        [
-          'checker_output',
-          'stdout',
-          'stderr',
-          'input',
-          'expected_output',
-        ] as const
-      ).map((field) => (
+      {TEST_CASE_OUTPUT_FIELDS.map((field) => (
         <TestCaseOutput
           key={field}
           submissionId={submission.id}

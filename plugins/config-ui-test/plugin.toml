@@ -2,6 +2,10 @@ name = "config-ui-test"
 version = "0.1.0"
 description = "Stress-test plugin for config UI"
 
+[translations]
+en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
+
 [web]
 root = "frontend/dist"
 entry = "index.js"

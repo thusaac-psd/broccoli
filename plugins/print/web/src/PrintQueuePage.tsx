@@ -471,7 +471,9 @@ export function PrintQueuePage() {
   if (!user?.permissions.includes('contest:manage')) {
     return (
       <div className="flex h-[60vh] items-center justify-center p-6">
-        <p className="text-sm text-muted-foreground">403 — staff access only</p>
+        <p className="text-sm text-muted-foreground">
+          {t('print.queue.staffOnly')}
+        </p>
       </div>
     );
   }

@@ -171,7 +171,10 @@ function MatchDetail({
           {match.kind === 'elimination' && (
             <>{t('codelink-bracket.match.number', { n: match.pos + 1 })} · </>
           )}
-          BO{match.group_a.length} / FT{match.wins_to_advance}
+          {t('codelink-bracket.match.format', {
+            bestOf: match.group_a.length,
+            winsToAdvance: match.wins_to_advance,
+          })}
         </p>
         <SheetDescription asChild>
           <div className="pt-3">

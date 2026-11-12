@@ -5,6 +5,7 @@
  * Receives: { children } (the default SchemaField rendering for scoring)
  */
 
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { type ReactNode, useState } from 'react';
 
@@ -13,6 +14,7 @@ interface CollapsibleWrapperProps {
 }
 
 export function CollapsibleWrapper({ children }: CollapsibleWrapperProps) {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -25,8 +27,12 @@ export function CollapsibleWrapper({ children }: CollapsibleWrapperProps) {
           onClick={() => setCollapsed((v) => !v)}
           className="text-[11px] opacity-70 hover:opacity-100"
         >
-          {collapsed ? 'Expand' : 'Collapse'}
-          <span className="ml-1 text-[10px] text-amber-600">(plugin)</span>
+          {collapsed
+            ? t('configUiTest.collapsible.expand')
+            : t('configUiTest.collapsible.collapse')}
+          <span className="ml-1 text-[10px] text-amber-600">
+            {t('configUiTest.pluginBadge')}
+          </span>
         </Button>
       </div>
       <div
@@ -41,7 +47,7 @@ export function CollapsibleWrapper({ children }: CollapsibleWrapperProps) {
       </div>
       {collapsed && (
         <div className="rounded-lg border border-dashed border-muted-foreground p-4 text-center text-xs opacity-50">
-          Scoring section collapsed — click Expand to configure
+          {t('configUiTest.collapsible.collapsedHint')}
         </div>
       )}
     </div>
