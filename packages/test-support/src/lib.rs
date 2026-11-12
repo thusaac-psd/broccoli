@@ -271,9 +271,17 @@ GRANT SELECT ON broccoli_test_clock.state TO PUBLIC;
 /// plugin's own time queries and the server's own SQL. In a test database
 /// every unqualified `now()`, `transaction_timestamp()`,
 /// `statement_timestamp()` and `clock_timestamp()` reads real time plus this
-/// clock's offset, so [`DbClock::advance`] moves all of them at once. Column
-/// defaults and `CURRENT_TIMESTAMP` keep real time, and so does any timestamp
-/// the server takes from its own process clock.
+/// clock's offset, so [`DbClock::advance`] moves all of them at once.
+///
+/// What the clock does not move: column defaults and `CURRENT_TIMESTAMP`, and
+/// every time the server reads from its own process clock (`Utc::now()`).
+/// That includes the handlers' contest-time checks (whether a contest has
+/// started or ended, `submission.created_at`). After an advance, SQL and the
+/// handlers disagree by the offset, a split production never has. A test may
+/// therefore only rely on SQL time once it has advanced. `advance` refuses to
+/// move past a contest's start or end, where that split would change what a
+/// handler decides; a test that crosses one and depends only on SQL time says
+/// so with [`DbClock::advance_across_contest_boundary`].
 #[derive(Clone)]
 pub struct DbClock {
     db: DatabaseConnection,
@@ -284,9 +292,45 @@ impl DbClock {
         Self { db: db.clone() }
     }
 
-    /// Moves the database clock forward by `by`.
+    /// Moves the database clock forward by `by`. Panics if that would pass a
+    /// contest's start or end time (see the type docs).
     pub async fn advance(&self, by: Duration) {
-        let micros = i64::try_from(by.as_micros()).expect("advance fits in i64 microseconds");
+        let micros = Self::micros(by);
+        let crossed = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM contest WHERE deleted_at IS NULL \
+                 AND (start_time > now() AND start_time <= now() + make_interval(secs => $1 / 1000000.0) \
+                  OR end_time > now() AND end_time <= now() + make_interval(secs => $1 / 1000000.0))",
+                [micros.into()],
+            ))
+            .await
+            .expect("check contest boundaries")
+            .expect("one row")
+            .try_get::<i64>("", "n")
+            .expect("n column");
+        assert_eq!(
+            crossed, 0,
+            "advancing the test clock by {by:?} passes a contest's start or end time, \
+             where handlers (process clock) and SQL (test clock) would disagree; use \
+             advance_across_contest_boundary if the test depends only on SQL time"
+        );
+        self.shift(micros).await;
+    }
+
+    /// Like [`DbClock::advance`], for a test that passes a contest boundary and
+    /// depends only on SQL time (the plugin and the timer dispatcher), never on
+    /// a handler's contest-time check.
+    pub async fn advance_across_contest_boundary(&self, by: Duration) {
+        self.shift(Self::micros(by)).await;
+    }
+
+    fn micros(by: Duration) -> i64 {
+        i64::try_from(by.as_micros()).expect("advance fits in i64 microseconds")
+    }
+
+    async fn shift(&self, micros: i64) {
         self.db
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
