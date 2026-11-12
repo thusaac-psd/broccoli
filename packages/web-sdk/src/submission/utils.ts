@@ -68,7 +68,7 @@ const STATUS_LABEL_KEYS = {
 } as const satisfies Record<SubmissionStatus, string>;
 
 /** Every submission status, in lifecycle order. */
-export const SUBMISSION_STATUSES = Object.keys(
+const SUBMISSION_STATUSES = Object.keys(
   STATUS_LABEL_KEYS,
 ) as SubmissionStatus[];
 
