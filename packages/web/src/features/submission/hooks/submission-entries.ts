@@ -3,7 +3,7 @@ import type {
   Submission,
   SubmissionError,
 } from '@broccoli/web-sdk/submission';
-import { backoffDelay,type BackoffPolicy } from '@broccoli/web-sdk/utils';
+import { backoffDelay, type BackoffPolicy } from '@broccoli/web-sdk/utils';
 
 // The submissions and code runs started from one problem page, each moving
 // through `submitting -> polling -> done`, or into `error` from either of the
@@ -126,11 +126,22 @@ export interface PollDeps {
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   dispatch: (action: EntryAction) => void;
   toError: (error: unknown) => SubmissionError;
+  /** Whether nobody is signed in (as opposed to a token being renewed). */
+  isSignedOut: () => boolean;
 }
 
-// Asking again cannot change these: the entry is gone or hidden from this
-// user, or the session is over.
-const PERMANENT_STATUSES = new Set([401, 403, 404]);
+/**
+ * Whether asking again cannot change a failed poll's answer: the entry is
+ * gone or hidden from this user (403, 404), or a 401 arrived with nobody
+ * signed in. A 401 while a session exists only means its token is being
+ * renewed (after a laptop wakes, say), so polling carries on.
+ */
+export function isPermanentPollFailure(
+  status: number | null,
+  signedOut: boolean,
+): boolean {
+  return status === 403 || status === 404 || (status === 401 && signedOut);
+}
 
 /**
  * Poll one entry until it is final, one request at a time: the next poll is
@@ -162,10 +173,7 @@ export async function pollEntry(
       deps.dispatch({ type: 'polled', id: entryId, result: response.result });
       if (response.result.terminal) return;
       failures = 0;
-    } else if (
-      response.status !== null &&
-      PERMANENT_STATUSES.has(response.status)
-    ) {
+    } else if (isPermanentPollFailure(response.status, deps.isSignedOut())) {
       deps.dispatch({
         type: 'failed',
         id: entryId,

@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -88,6 +89,7 @@ export function useSubmissions({
   // whose response was lost), while edited code or another language gets a
   // fresh key, so the server can never replay the old code in its place.
   const sendIdempotent = useIdempotentRequest();
+  const session = useSessionView();
 
   // One poller per entry in `polling`, started and stopped from the entries
   // themselves: an entry that is final, failed or gone has none.
@@ -134,9 +136,10 @@ export function useSubmissions({
         sleep,
         dispatch,
         toError: parseSubmissionError,
+        isSignedOut: () => session.getState().status === 'signedOut',
       });
     }
-  }, [entries, apiClient]);
+  }, [entries, apiClient, session]);
 
   useEffect(() => {
     const pollers = pollersRef.current;

@@ -89,7 +89,7 @@ test('a run result lands in the code run, not the submission', () => {
   assert.equal(next[0].submission, null);
 });
 
-function poller(responses: PollResponse[]) {
+function poller(responses: PollResponse[], signedOut = false) {
   const actions: EntryAction[] = [];
   const sleeps: number[] = [];
   const controller = new AbortController();
@@ -109,6 +109,7 @@ function poller(responses: PollResponse[]) {
     },
     dispatch: (action) => actions.push(action),
     toError: () => error,
+    isSignedOut: () => signedOut,
   });
   return { run, actions, sleeps, fetches: () => fetches };
 }
@@ -127,17 +128,36 @@ test('polling stops at the first final result', async () => {
   );
 });
 
-for (const status of [401, 403, 404]) {
-  test(`a ${status} fails the entry and stops polling`, async () => {
-    const p = poller([
-      { ok: false, status, error: {} },
-      { ok: true, result: result('Judged', true) },
-    ]);
+for (const [status, signedOut] of [
+  [403, false],
+  [404, false],
+  [401, true],
+] as const) {
+  test(`a ${status}${signedOut ? ' when signed out' : ''} fails the entry and stops polling`, async () => {
+    const p = poller(
+      [
+        { ok: false, status, error: {} },
+        { ok: true, result: result('Judged', true) },
+      ],
+      signedOut,
+    );
     await p.run;
     assert.equal(p.fetches(), 1);
     assert.deepEqual(p.actions, [{ type: 'failed', id: 1, error }]);
   });
 }
+
+test('a 401 while the session is renewing its token keeps polling', async () => {
+  const p = poller([
+    { ok: false, status: 401, error: {} },
+    { ok: true, result: result('Judged', true) },
+  ]);
+  await p.run;
+  assert.deepEqual(
+    p.actions.map((a) => a.type),
+    ['polled'],
+  );
+});
 
 test('transient failures back off and polling resumes its pace after', async () => {
   const p = poller([
@@ -163,6 +183,7 @@ test('an aborted poller sends nothing more', async () => {
     sleep: async () => {},
     dispatch: () => assert.fail('dispatched after abort'),
     toError: () => error,
+    isSignedOut: () => false,
   });
   assert.equal(fetches, 0);
 });
