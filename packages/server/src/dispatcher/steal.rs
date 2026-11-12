@@ -1204,9 +1204,11 @@ mod deferred_steal_db_tests {
         judge_epoch: i32,
     ) -> i32 {
         let now = chrono::Utc::now();
+        // A test may seed several submissions; each gets its own user.
+        let username = format!("steal-test-user-{}", uuid::Uuid::new_v4());
         let u = user::ActiveModel {
-            username: Set("steal-test-user".to_string()),
-            display_name: Set("steal-test-user".to_string()),
+            username: Set(username.clone()),
+            display_name: Set(username),
             password: Set("x".to_string()),
             created_at: Set(now),
             ..Default::default()
