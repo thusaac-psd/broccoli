@@ -58,7 +58,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sandbox-backend", default="mock")
     p.add_argument("--tools-dir", default="/tools",
                    help="worker tools dir; must be /tools with the mock sandbox")
-    p.add_argument("--poll-interval-ms", type=int, default=50)
+    p.add_argument("--poll-interval-ms", type=int, default=50,
+                   help="client poll interval at concurrency 1 (latency points)")
+    p.add_argument("--load-poll-interval-ms", type=int, default=1000,
+                   help="client poll interval at concurrency > 1, so polling does not "
+                        "dominate server and database load")
     p.add_argument("--idle-secs", type=int, default=0)
     p.add_argument("--server-env", action="append", default=[])
     p.add_argument("--worker-env", action="append", default=[])
@@ -222,7 +226,7 @@ def run_point(a, topo: Topology, tc: int, conc: int, rep: int, out: Path) -> dic
            "--admin-username", a.admin_username, "--admin-password", a.admin_password,
            "--contest-type", a.contest_type, "--scenario", a.scenario,
            "--test-cases", str(tc), "--submissions", str(subs), "--concurrency", str(conc),
-           "--poll-interval-ms", str(a.poll_interval_ms), "--idle-secs", str(a.idle_secs),
+           "--poll-interval-ms", str(a.poll_interval_ms if conc == 1 else a.load_poll_interval_ms), "--idle-secs", str(a.idle_secs),
            "--database-url", a.db_url, "--redis-url", a.redis_url,
            "--metrics-url", ",".join(metrics), "--out", str(path)]
     cpu0 = topo.cpu()
