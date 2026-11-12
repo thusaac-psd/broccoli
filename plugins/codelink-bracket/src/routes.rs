@@ -61,7 +61,7 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         .get(usize::from(current.round.saturating_sub(1)))
         .is_some_and(|r| r.start_at_ms.is_some())
     {
-        let now = judge::now_ms(host)?;
+        let now = crate::clock::now_ms(host)?;
         let ready = setup
             .stage_clocks
             .get(&current.round)
@@ -82,7 +82,7 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0) else {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         };
-        if judge::now_ms(host)? < stage_at {
+        if crate::clock::now_ms(host)? < stage_at {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         }
     }
@@ -93,7 +93,7 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     force_start(&mut probe).map_err(|msg| PluginHttpResponse::error(400, msg))?;
 
     let updated = storage::update_match(host, contest_id, match_id, |m| {
-        let clock = judge::clock(host, contest_id)?;
+        let clock = crate::clock::clock(host, contest_id)?;
         force_start(m).map_err(|e| SdkError::Other(e.to_string()))?;
         judge::open_xiaoju(host, contest_id, match_id, &setup, clock, m)
     })?;
@@ -471,7 +471,7 @@ fn attach_start_times(
     matches: &[(u8, MatchState)],
     views: &mut [MatchView],
 ) -> Option<i64> {
-    let times = judge::contest_times(host, contest).ok()?;
+    let times = crate::clock::contest_times(host, contest).ok()?;
     for v in views.iter_mut() {
         if let Some((_, m)) = matches.iter().find(|(id, _)| *id == v.id) {
             v.starts_at_ms = bracket::start_at_ms(setup, matches, m, times.start_ms);
@@ -574,7 +574,7 @@ pub fn handle_get_bracket(
     attach_player_names(host, &mut views);
     attach_own_feedback(host, contest_id, &setup, &matches, &mut views, viewer)?;
     let contest_end_ms = attach_start_times(host, contest_id, &setup, &matches, &mut views);
-    let server_now_ms = judge::now_ms(host).ok();
+    let server_now_ms = crate::clock::now_ms(host).ok();
     let stages = crate::stages::views(&setup, &matches, server_now_ms.unwrap_or(0));
 
     Ok(PluginHttpResponse {

@@ -6,10 +6,12 @@
 //! matches or 小局.
 
 pub mod bracket;
+pub mod clock;
 pub mod decide;
 pub mod feedback;
 pub mod gate;
 pub mod judge;
+pub mod judging;
 pub mod model;
 pub mod ordering;
 pub mod routes;

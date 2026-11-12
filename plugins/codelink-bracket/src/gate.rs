@@ -254,7 +254,7 @@ fn resolve_rejection(
         .last()
         .ok_or_else(|| SdkError::Other("no open game".into()))?;
     let delay_seconds = feedback.delay_seconds;
-    let clock = crate::judge::clock(host, contest_id)?;
+    let clock = crate::clock::clock(host, contest_id)?;
     if !game.contains_submission_at_us(clock.now.saturating_mul(1_000)) {
         return Ok(Err(Rejection::xiaoju_closed()));
     }

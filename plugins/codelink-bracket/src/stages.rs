@@ -120,7 +120,7 @@ pub fn try_open_scheduled(host: &Host, contest: i32, round: u8) -> Result<bool, 
         let Some(start_at_ms) = config.start_at_ms else {
             return Ok(false);
         };
-        let now = judge::clock(host, contest)?;
+        let now = crate::clock::clock(host, contest)?;
         if now.contest_ended() {
             return Ok(true);
         }
@@ -130,7 +130,7 @@ pub fn try_open_scheduled(host: &Host, contest: i32, round: u8) -> Result<bool, 
             return Ok(true);
         }
         let matches = storage::load_all_matches(host, contest)?;
-        let times = judge::contest_times(host, contest)?;
+        let times = crate::clock::contest_times(host, contest)?;
         let clock = decide_clock(&setup, &matches, round, times.start_ms)?;
         if setup.stage_clocks.get(&round) != Some(&clock) {
             setup.stage_clocks.insert(round, clock.clone());

@@ -124,13 +124,13 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     // only after the complete preceding round and its intermission.
     if let Some(setup) = storage::load_setup(host, contest_id)? {
         let matches = storage::load_all_matches(host, contest_id)?;
-        let contest_start = crate::judge::contest_times(host, contest_id)?.start_ms;
+        let contest_start = crate::clock::contest_times(host, contest_id)?.start_ms;
         let Some(stage_at) =
             bracket::stage_open_at_ms(&setup, &matches, current.round, contest_start)
         else {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         };
-        if crate::judge::now_ms(host)? < stage_at {
+        if crate::clock::now_ms(host)? < stage_at {
             return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
         }
     }
@@ -151,7 +151,7 @@ pub fn handle_order(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
 
     let result = storage::update_match(host, contest_id, match_id, |m| {
         if let Some((start, end)) = ordering_window {
-            let now = crate::judge::now_ms(host)?;
+            let now = crate::clock::now_ms(host)?;
             if now < start || now >= end {
                 return Err(SdkError::Other(ORDERING_CLOSED_MSG.into()));
             }

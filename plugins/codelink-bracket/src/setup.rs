@@ -245,7 +245,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
     if setup.rounds.iter().any(|r| r.start_at_ms.is_some()) {
-        let times = crate::judge::contest_times(host, contest_id)?;
+        let times = crate::clock::contest_times(host, contest_id)?;
         for round in &setup.rounds {
             if let Some(at) = round.start_at_ms
                 && (at < times.start_ms || times.end_ms.is_some_and(|end| at >= end))
@@ -297,7 +297,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             })
             .collect();
         if !changed_starts.is_empty() {
-            let now = crate::judge::now_ms(host)?;
+            let now = crate::clock::now_ms(host)?;
             if changed_starts.iter().any(|at| *at <= now) {
                 return Err(PluginHttpResponse::error(
                     400,
@@ -377,7 +377,7 @@ pub fn handle_get_setup(
             PluginHttpResponse::error(403, "Editing the bracket requires contest:manage").into(),
         );
     }
-    let times = crate::judge::contest_times(host, contest_id).ok();
+    let times = crate::clock::contest_times(host, contest_id).ok();
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
