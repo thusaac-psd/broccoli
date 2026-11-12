@@ -567,7 +567,7 @@ mod tests {
             let host = Host::mock();
             let mut games = open_xiaoju(0, false);
             games[0].opened_at_ms = 1_000;
-            games[0].base_deadline_ms = Some(5_000);
+            games[0].base_deadline_ms = 5_000;
             seed_match(&host, 7, MatchPhase::InProgress, games);
             host.db.queue_query_result(serde_json::json!([]));
             host.db

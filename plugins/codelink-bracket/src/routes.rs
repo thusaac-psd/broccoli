@@ -432,7 +432,7 @@ fn match_view(
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
-        current_game_base_deadline_ms: current.map(|x| x.base_deadline_ms()),
+        current_game_base_deadline_ms: current.map(|x| x.base_deadline_ms),
         match_extra_time_seconds: m.match_extra_time_seconds,
         extra_time_remaining_ms: m.extra_time_remaining_ms,
         games: m
@@ -450,7 +450,7 @@ fn match_view(
                     problem_b: mask(b),
                     opened_at_ms: x.opened_at_ms,
                     deadline_ms: x.deadline_ms,
-                    base_deadline_ms: x.base_deadline_ms(),
+                    base_deadline_ms: x.base_deadline_ms,
                     extra_time_used_ms: x.extra_time_used_ms,
                     winner: x.winner,
                     decided: x.decided,
@@ -1136,7 +1136,7 @@ mod tests {
         m.extra_time_remaining_ms = 3_000;
         m.xiaoju.push(XiaojuState {
             opened_at_ms: 1_000,
-            base_deadline_ms: Some(11_000),
+            base_deadline_ms: 11_000,
             deadline_ms: 14_000,
             ..Default::default()
         });

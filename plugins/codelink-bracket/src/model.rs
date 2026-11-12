@@ -24,29 +24,19 @@ pub struct Setup {
     pub seeds: Vec<i32>,
     /// Optional bronze match, played alongside the final using the final
     /// stage's timing and BO/FT settings, with its own problem groups.
-    #[serde(default)]
     pub third_place: Option<ThirdPlaceConfig>,
     /// Prefix of stages whose rules are frozen, including interrupted openings.
     pub opened_rounds: usize,
-    #[serde(default)]
     pub stage_clocks: BTreeMap<u8, StageClock>,
     /// Shared by both players across this match's regular games only.
-    #[serde(default)]
     pub match_extra_time_seconds: i64,
     /// Score penalty added to subsequent submissions for each WA/TLE/MLE/RE
     /// in a regular game, without shortening the submission window or spending
-    /// extra time. Tiebreaks never apply penalties. Zero disables penalties;
-    /// older setups retain the 20s default.
-    #[serde(default = "default_penalty_seconds")]
+    /// extra time. Tiebreaks never apply penalties. Zero disables penalties.
     pub penalty_seconds: i64,
     /// How long a match may sit in `MatchPhase::AwaitingJudge` (blocked on
     /// an in-flight submission past its 小局 deadline) before escalating to
-    /// `MatchPhase::NeedsAdjudication` for staff. `#[serde(default)]` so
-    /// both a persisted `Setup` document written before this field existed,
-    /// and a `/setup` request body that omits it, fall back to
-    /// [`default_escalation_grace_seconds`] rather than failing to
-    /// deserialize or silently becoming `0`.
-    #[serde(default = "default_escalation_grace_seconds")]
+    /// `MatchPhase::NeedsAdjudication` for staff.
     pub escalation_grace_seconds: i64,
 }
 
@@ -105,7 +95,8 @@ pub struct RoundDef {
     #[serde(default)]
     pub wins_to_advance: Option<usize>,
     /// UTC time at which the whole stage starts its 180-second ordering phase.
-    /// Missing only on legacy stages, which retain their original pacing.
+    /// Without one, the stage opens once the previous stage and its break are
+    /// complete, and each match starts once both rankings arrive.
     #[serde(default)]
     pub start_at_ms: Option<i64>,
     #[serde(default)]
@@ -265,7 +256,6 @@ pub struct MatchState {
     pub score_a: u8,
     pub score_b: u8,
     pub state: MatchPhase,
-    #[serde(default)]
     pub next_game_at_ms: Option<i64>,
     pub winner: Option<i32>,
     /// Index into this round's `RoundDef::tiebreak` list of the 附加赛
@@ -287,20 +277,15 @@ pub struct MatchState {
     pub awaiting_submission_id: Option<i32>,
     /// Why the match is in `NeedsAdjudication`, so staff (and the UI) are
     /// told the actual cause instead of guessing it from other fields.
-    /// `None` in any other phase, and for documents written before this
-    /// field existed (`#[serde(default)]`).
-    #[serde(default)]
+    /// `None` in any other phase.
     pub adjudication_reason: Option<AdjudicationReason>,
     /// None until the first game opens. Both durations then remain fixed for
     /// this match, even if staff correct the stage setup during play.
     pub game_durations: Option<GameDurations>,
-    /// Pinned at the first game along with the base duration. Legacy matches
-    /// that already opened a game keep a zero allowance.
-    #[serde(default)]
+    /// Pinned at the first game along with the base duration.
     pub match_extra_time_seconds: i64,
     /// Balance after settled games. While a game is open, its deadlines
     /// describe the running clock; only settlement changes this balance.
-    #[serde(default)]
     pub extra_time_remaining_ms: i64,
 }
 
@@ -317,21 +302,17 @@ pub struct MatchState {
 pub struct XiaojuState {
     pub index: u8,
     pub opened_at_ms: i64,
-    /// Missing in old documents, whose final deadline is also their base deadline.
-    #[serde(default)]
-    pub base_deadline_ms: Option<i64>,
+    /// The deadline without shared extra time.
+    pub base_deadline_ms: i64,
+    /// The deadline including the shared extra time still available when the
+    /// game opened.
     pub deadline_ms: i64,
-    #[serde(default)]
     pub extra_time_used_ms: i64,
     pub winner: Option<i32>,
     pub decided: bool,
 }
 
 impl XiaojuState {
-    pub fn base_deadline_ms(&self) -> i64 {
-        self.base_deadline_ms.unwrap_or(self.deadline_ms)
-    }
-
     /// The same half-open window is enforced at submission and settlement.
     /// Use i128 for the comparison so even an unbounded test deadline is safe.
     pub fn contains_submission_at_us(&self, submitted_at_us: i64) -> bool {

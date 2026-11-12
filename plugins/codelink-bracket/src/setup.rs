@@ -201,8 +201,7 @@ struct SetupRequest {
     #[serde(default = "crate::model::default_penalty_seconds")]
     penalty_seconds: i64,
     /// Optional: a request that omits this falls back to
-    /// [`crate::model::default_escalation_grace_seconds`], same as a
-    /// persisted `Setup` document written before this field existed.
+    /// [`crate::model::default_escalation_grace_seconds`].
     #[serde(default = "crate::model::default_escalation_grace_seconds")]
     escalation_grace_seconds: i64,
     seeds: Vec<i32>,
@@ -530,17 +529,6 @@ mod tests {
         let request: SetupRequest =
             serde_json::from_value(manage_request(7).body.unwrap()).unwrap();
         assert_eq!(request.match_extra_time_seconds, 0);
-        let mut stored = serde_json::to_value(valid_setup()).unwrap();
-        stored
-            .as_object_mut()
-            .unwrap()
-            .remove("match_extra_time_seconds");
-        assert_eq!(
-            serde_json::from_value::<Setup>(stored)
-                .unwrap()
-                .match_extra_time_seconds,
-            0
-        );
     }
 
     fn valid_setup() -> Setup {
@@ -751,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_penalties_and_defaults_older_setup_documents_to_twenty_seconds() {
+    fn validates_penalties_including_zero() {
         assert_eq!(Setup::default().penalty_seconds, 20);
         let mut setup = valid_setup();
         setup.penalty_seconds = -1;
@@ -762,15 +750,6 @@ mod tests {
         );
         setup.penalty_seconds = 0;
         assert!(validate_setup(&setup, &valid_seeds()).is_ok());
-
-        let mut legacy = serde_json::to_value(&setup).unwrap();
-        legacy.as_object_mut().unwrap().remove("penalty_seconds");
-        assert_eq!(
-            serde_json::from_value::<Setup>(legacy)
-                .unwrap()
-                .penalty_seconds,
-            20
-        );
     }
 
     fn manage_request(contest_id: i32) -> PluginHttpRequest {

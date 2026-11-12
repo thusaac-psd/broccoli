@@ -179,13 +179,6 @@ The setup API accepts the same edits through the complete setup request. Use
 and its `opened_rounds` count. Bracket size can change only before the contest
 starts. During play you cannot add or remove elimination stages.
 
-Existing configured brackets are upgraded when the plugin reloads. Their
-seeding, games, scores and clocks are preserved. Opened stages keep their
-previous rule of playing all regular games. Unopened stages without an FT
-target receive the majority default and remain editable. Stages without
-`start_at_ms` retain their legacy pacing. Add schedules to unopened stages to
-use the shared ordering and preparation windows.
-
 ### Shared extra time
 
 Set **Shared extra time per match** within each stage to give its matches an allowance shared by

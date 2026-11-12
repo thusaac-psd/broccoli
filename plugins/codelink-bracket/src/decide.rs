@@ -210,7 +210,7 @@ pub(crate) fn decide_game_at_cutoff(
     // Copy out what's needed before taking a mutable borrow of `m` below --
     // `current` is a shared borrow of `m.xiaoju`'s last element.
     let deadline_ms = current.deadline_ms;
-    let base_deadline_ms = current.base_deadline_ms();
+    let base_deadline_ms = current.base_deadline_ms;
     let regular = m.is_regular_game(current.index);
     let eligible = subs.iter().filter(|s| {
         current.contains_submission_at_us(s.submitted_at_us)
@@ -474,7 +474,7 @@ mod tests {
     fn game_with_extra_time() -> MatchState {
         let mut m = match_in_progress_at_xiaoju_with_deadline(0, 3_000);
         m.xiaoju[0].opened_at_ms = 1_000;
-        m.xiaoju[0].base_deadline_ms = Some(2_000);
+        m.xiaoju[0].base_deadline_ms = 2_000;
         m.extra_time_remaining_ms = 1_000;
         m
     }
@@ -667,7 +667,7 @@ mod tests {
         penalty_seconds: i64,
     ) -> (MatchState, Vec<SubmissionRecord>) {
         let mut m = match_in_progress_at_xiaoju_with_deadline(0, 960_000);
-        m.xiaoju[0].base_deadline_ms = Some(360_000);
+        m.xiaoju[0].base_deadline_ms = 360_000;
         m.extra_time_remaining_ms = 600_000;
         let mut subs = Vec::new();
         for (user, problem, count) in [(10, 103, a_errors), (20, 203, b_errors)] {

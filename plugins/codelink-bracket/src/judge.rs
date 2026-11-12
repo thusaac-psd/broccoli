@@ -207,11 +207,9 @@ pub fn parse_stage_timer_key(key: &str) -> Option<(i32, u8)> {
     }
     let contest: i32 = parts.next()?.parse().ok()?;
     let round: u8 = parts.next()?.parse().ok()?;
-    // Earlier releases used the unsuffixed key. Wake times distinguish edits:
-    // a stale callback cannot replace a newly scheduled, earlier opening.
-    if let Some(at) = parts.next() {
-        at.parse::<i64>().ok()?;
-    }
+    // The wake time distinguishes edits: a stale callback cannot replace a
+    // newly scheduled, earlier opening.
+    parts.next()?.parse::<i64>().ok()?;
     parts.next().is_none().then_some((contest, round))
 }
 
@@ -702,7 +700,7 @@ fn open_xiaoju_at(
     m.xiaoju.push(XiaojuState {
         index,
         opened_at_ms: now,
-        base_deadline_ms: Some(base_deadline_ms),
+        base_deadline_ms,
         deadline_ms,
         extra_time_used_ms: 0,
         winner: None,
@@ -1502,7 +1500,7 @@ mod tests {
         let mut m = match_in_progress();
         m.xiaoju.clear();
         open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
-        assert_eq!(m.xiaoju[0].base_deadline_ms(), 11_000);
+        assert_eq!(m.xiaoju[0].base_deadline_ms, 11_000);
         assert_eq!(m.xiaoju[0].deadline_ms, 16_000);
         seed(&host, 7, &setup, 0, &m);
 
@@ -1541,7 +1539,7 @@ mod tests {
         assert_eq!(after.extra_time_remaining_ms, 0);
         assert_eq!(after.match_extra_time_seconds, 5);
         assert_eq!(after.xiaoju[1].extra_time_used_ms, 3_000);
-        assert_eq!(after.xiaoju[2].base_deadline_ms(), 37_000);
+        assert_eq!(after.xiaoju[2].base_deadline_ms, 37_000);
         assert_eq!(after.xiaoju[2].deadline_ms, 37_000);
     }
 
@@ -1566,7 +1564,7 @@ mod tests {
         }
         assert_eq!(m.state, MatchPhase::Tiebreak);
         assert_eq!(m.xiaoju[0].extra_time_used_ms, 5_000);
-        assert_eq!(m.xiaoju[3].base_deadline_ms(), m.xiaoju[3].deadline_ms);
+        assert_eq!(m.xiaoju[3].base_deadline_ms, m.xiaoju[3].deadline_ms);
     }
 
     #[test]
@@ -1619,40 +1617,6 @@ mod tests {
         assert_eq!(settled.score_a, 1);
         assert_eq!(settled.extra_time_remaining_ms, 3_000);
         assert_eq!(settled.xiaoju[0].extra_time_used_ms, 2_000);
-    }
-
-    #[test]
-    fn legacy_running_match_is_not_granted_extra_time_by_a_new_setup() {
-        let host = Host::mock();
-        let mut setup = setup_two_rounds();
-        setup.match_extra_time_seconds = 100;
-        let mut raw = serde_json::to_value(match_in_progress()).unwrap();
-        raw.as_object_mut()
-            .unwrap()
-            .remove("match_extra_time_seconds");
-        raw.as_object_mut()
-            .unwrap()
-            .remove("extra_time_remaining_ms");
-        raw["xiaoju_seconds"] = serde_json::json!(10);
-        raw.as_object_mut().unwrap().remove("game_durations");
-        raw["xiaoju"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("base_deadline_ms");
-        raw["xiaoju"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("extra_time_used_ms");
-        host.storage
-            .set(&[(storage::match_key(7, 0).as_str(), raw.to_string().as_str())])
-            .unwrap();
-        crate::migration::run(&host).unwrap();
-        let mut m = storage::load_match(&host, 7, 0).unwrap().unwrap();
-        assert_eq!(m.xiaoju[0].base_deadline_ms(), m.xiaoju[0].deadline_ms);
-        open_xiaoju(&host, 7, 0, &setup, Clock::at(1_000), &mut m).unwrap();
-        assert_eq!(m.extra_time_remaining_ms, 0);
-        assert_eq!(m.match_extra_time_seconds, 0);
-        assert_eq!(m.xiaoju[1].deadline_ms, 11_000);
     }
 
     fn queue_subs(host: &Host, rows: Vec<serde_json::Value>) {
