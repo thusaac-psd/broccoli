@@ -7,6 +7,7 @@ import {
   parseSubmissionError,
   type Submission,
 } from '@broccoli/web-sdk/submission';
+import { sleep } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -33,21 +34,6 @@ const codeRunResult = (codeRun: CodeRun): EntryResult => ({
   codeRun,
   terminal: isTerminalStatus(codeRun.status),
 });
-
-/** Resolves after `ms`, or as soon as `signal` aborts. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-}
 
 interface SubmissionFile {
   filename: string;

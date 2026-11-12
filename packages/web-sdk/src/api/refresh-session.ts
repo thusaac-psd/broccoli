@@ -1,5 +1,7 @@
 import type { components } from '@/api/schema';
 
+import { backoffDelay, type BackoffPolicy, sleep } from '../utils/backoff.ts';
+
 export type RefreshedSession = components['schemas']['LoginResponse'];
 
 /**
@@ -42,8 +44,7 @@ const REFRESH_TIMEOUT_MS = 20_000;
 // After the quick retry, transient failures back off exponentially up to
 // this cap. The jitter keeps a room full of contestants from all retrying at
 // the instant the server comes back.
-const BACKOFF_BASE_MS = 2_000;
-const BACKOFF_MAX_MS = 30_000;
+const BACKOFF: BackoffPolicy = { baseMs: 2_000, maxMs: 30_000 };
 
 // Only these, on a 401/403 from the refresh endpoint itself, mean the server
 // looked at the cookie and refused it. Anything else (a gateway error page, a
@@ -69,7 +70,7 @@ export interface RefreshDeps {
 
 const defaultDeps: RefreshDeps = {
   fetch: (input, init) => fetch(input, init),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: (ms) => sleep(ms),
   withLock: async (run) =>
     typeof navigator !== 'undefined' && navigator.locks?.request
       ? await navigator.locks.request(REFRESH_LOCK, run)
@@ -212,7 +213,7 @@ export function refreshSession(
     .then((verdict): RefreshOutcome => {
       if (verdict === 'transient') {
         current.failures += 1;
-        const retryInMs = backoffMs(current.failures, d.random);
+        const retryInMs = backoffDelay(current.failures - 1, BACKOFF, d.random);
         current.retryAt = d.now() + retryInMs;
         return { status: 'unavailable', retryInMs };
       }
@@ -297,13 +298,4 @@ async function classify(
     return code === 'TOKEN_INVALID' ? 'lost-race' : 'rejected';
   }
   return 'transient';
-}
-
-function backoffMs(failures: number, random: () => number): number {
-  const ceiling = Math.min(
-    BACKOFF_MAX_MS,
-    BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
-  );
-  // "Equal jitter": somewhere in the upper half of the window.
-  return Math.round(ceiling / 2 + (random() * ceiling) / 2);
 }

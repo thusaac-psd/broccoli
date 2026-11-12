@@ -10,6 +10,8 @@
 // retry has to import a different URL: `retryImport` re-imports the failed
 // module with a cache-busting query.
 
+import { backoffDelay, type BackoffPolicy, sleep } from './backoff.ts';
+
 const CHUNK_LOAD_MESSAGE =
   /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|is not a valid JavaScript MIME type|Unable to preload CSS|Loading (CSS )?chunk .+ failed/i;
 
@@ -56,8 +58,7 @@ export interface RetryLoadOptions {
   whenOnline?: () => Promise<void>;
 }
 
-const RETRY_BASE_MS = 1_000;
-const RETRY_MAX_MS = 15_000;
+const RETRY_BACKOFF: BackoffPolicy = { baseMs: 1_000, maxMs: 15_000 };
 const DEFAULT_ATTEMPTS = 4;
 
 /**
@@ -71,7 +72,7 @@ export async function retryLoad<T>(
   {
     attempts = DEFAULT_ATTEMPTS,
     shouldRetry = isChunkLoadError,
-    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleep: wait = (ms) => sleep(ms),
     whenOnline: online = whenOnline,
   }: RetryLoadOptions = {},
 ): Promise<T> {
@@ -80,7 +81,7 @@ export async function retryLoad<T>(
       return await load(attempt);
     } catch (error) {
       if (attempt + 1 >= attempts || !shouldRetry(error)) throw error;
-      await sleep(Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt));
+      await wait(backoffDelay(attempt, RETRY_BACKOFF));
       await online();
     }
   }

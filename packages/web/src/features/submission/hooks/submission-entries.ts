@@ -3,6 +3,7 @@ import type {
   Submission,
   SubmissionError,
 } from '@broccoli/web-sdk/submission';
+import { backoffDelay,type BackoffPolicy } from '@broccoli/web-sdk/utils';
 
 // The submissions and code runs started from one problem page, each moving
 // through `submitting -> polling -> done`, or into `error` from either of the
@@ -113,7 +114,7 @@ export function pollTarget(
 }
 
 export const POLL_INTERVAL_MS = 1_000;
-const POLL_BACKOFF_MAX_MS = 15_000;
+const POLL_BACKOFF: BackoffPolicy = { baseMs: POLL_INTERVAL_MS, maxMs: 15_000 };
 
 /** One poll: the result, or the HTTP status and body of a failed request. */
 export type PollResponse =
@@ -142,9 +143,13 @@ export async function pollEntry(
   signal: AbortSignal,
   deps: PollDeps,
 ): Promise<void> {
-  let delay = POLL_INTERVAL_MS;
+  // Consecutive transient failures.
+  let failures = 0;
   while (!signal.aborted) {
-    await deps.sleep(delay, signal);
+    await deps.sleep(
+      failures === 0 ? POLL_INTERVAL_MS : backoffDelay(failures, POLL_BACKOFF),
+      signal,
+    );
     if (signal.aborted) return;
     let response: PollResponse;
     try {
@@ -156,7 +161,7 @@ export async function pollEntry(
     if (response.ok) {
       deps.dispatch({ type: 'polled', id: entryId, result: response.result });
       if (response.result.terminal) return;
-      delay = POLL_INTERVAL_MS;
+      failures = 0;
     } else if (
       response.status !== null &&
       PERMANENT_STATUSES.has(response.status)
@@ -168,7 +173,7 @@ export async function pollEntry(
       });
       return;
     } else {
-      delay = Math.min(POLL_BACKOFF_MAX_MS, delay * 2);
+      failures += 1;
     }
   }
 }

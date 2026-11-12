@@ -20,13 +20,13 @@ import type {
   PluginModule,
   SlotConfig,
 } from '@/plugin/types';
+import { backoffDelay,type BackoffPolicy } from '@/utils/backoff';
 import { retryImport, retryLoad } from '@/utils/chunk-load';
 
 // While the server cannot be asked for its plugin list (a gateway 502 while
 // it restarts), ask again with backoff, so the page does not stay without
 // its plugin views until a manual reload.
-const LIST_RETRY_BASE_MS = 1_000;
-const LIST_RETRY_MAX_MS = 30_000;
+const LIST_RETRY: BackoffPolicy = { baseMs: 1_000, maxMs: 30_000 };
 
 /** Tries per plugin load, the first included. */
 const PLUGIN_LOAD_ATTEMPTS = 4;
@@ -57,11 +57,11 @@ function injectPluginCss(
 ) {
   for (const file of manifest.css ?? []) {
     const href = resolve(file);
-    const existing = [
-      ...document.querySelectorAll<HTMLLinkElement>(
+    const existing = Array.from(
+      document.querySelectorAll<HTMLLinkElement>(
         `link[data-plugin-id="${CSS.escape(manifest.id)}"]`,
       ),
-    ].find((link) => link.dataset.cssFile === file);
+    ).find((link) => link.dataset.cssFile === file);
     if (existing) {
       existing.href = href;
       continue;
@@ -174,7 +174,7 @@ export function PluginRegistryProvider({
       if (!ok) {
         timer = setTimeout(
           () => void syncUntilListed(attempt + 1),
-          Math.min(LIST_RETRY_MAX_MS, LIST_RETRY_BASE_MS * 2 ** attempt),
+          backoffDelay(attempt, LIST_RETRY),
         );
         return;
       }
