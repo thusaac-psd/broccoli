@@ -286,7 +286,7 @@ impl E2eTestApp {
                 operation_reaper_dry_run: false,
                 cancel_primitive_enabled: false,
                 max_blocking_threads: None,
-                batch_evaluator_fanout_concurrency: 64,
+                evaluate_batch_fanout_concurrency: 64,
                 operation_batch_publish_concurrency: 32,
                 healthz_listen: None,
                 healthz_worker_threads: 2,

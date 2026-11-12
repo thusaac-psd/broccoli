@@ -286,10 +286,10 @@ pub struct ServerConfig {
     /// Default 64. Relationship to `plugin.evaluator_parallelism`: this is the
     /// outer bound on live test-case tasks server-wide; `evaluator_parallelism`
     /// is the inner bound on concurrent plugin-pool acquisitions. Configure so
-    /// that `batch_evaluator_fanout_concurrency >= evaluator_parallelism`,
+    /// that `evaluate_batch_fanout_concurrency >= evaluator_parallelism`,
     /// otherwise the inner pool is never fully utilized.
-    #[serde(default = "default_batch_evaluator_fanout_concurrency")]
-    pub batch_evaluator_fanout_concurrency: u32,
+    #[serde(default = "default_evaluate_batch_fanout_concurrency")]
+    pub evaluate_batch_fanout_concurrency: u32,
     /// Per-batch cap on concurrent in-flight `mq.publish` + blob-externalize
     /// operations inside `start_operation_batch`. Awaiting each publish
     /// sequentially would serialize a 1000-op batch with 5ms publishes to ~5s
@@ -419,7 +419,7 @@ impl Default for ServerConfig {
             operation_reaper_dry_run: default_operation_reaper_dry_run(),
             cancel_primitive_enabled: false,
             max_blocking_threads: None,
-            batch_evaluator_fanout_concurrency: default_batch_evaluator_fanout_concurrency(),
+            evaluate_batch_fanout_concurrency: default_evaluate_batch_fanout_concurrency(),
             operation_batch_publish_concurrency: default_operation_batch_publish_concurrency(),
             healthz_listen: None,
             healthz_worker_threads: default_healthz_worker_threads(),
@@ -521,7 +521,7 @@ fn default_operation_reaper_dry_run() -> bool {
     false
 }
 
-fn default_batch_evaluator_fanout_concurrency() -> u32 {
+fn default_evaluate_batch_fanout_concurrency() -> u32 {
     64
 }
 

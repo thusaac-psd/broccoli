@@ -463,7 +463,7 @@ fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunct
     // per submission fanned out as parallel tokio tasks), this should be
     // bumped well above core count via `BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM`.
     let evaluator_parallelism = deps.system.config.plugin.resolve_evaluator_parallelism();
-    let fanout_concurrency = deps.system.config.server.batch_evaluator_fanout_concurrency as usize;
+    let fanout_concurrency = deps.system.config.server.evaluate_batch_fanout_concurrency as usize;
     tracing::info!(
         evaluator_parallelism,
         fanout_concurrency,
