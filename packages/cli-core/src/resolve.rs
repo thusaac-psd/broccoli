@@ -82,7 +82,7 @@ pub fn problem_id(client: &Client, contest: &str, input: &str) -> anyhow::Result
 
 /// Pure matcher for [`problem_id`], split out for unit testing without a server.
 fn match_problem(
-    problems: &[crate::client::ContestProblemResponse],
+    problems: &[crate::api::contest::ContestProblemResponse],
     q: &str,
 ) -> anyhow::Result<i32> {
     let lower = q.to_lowercase();
@@ -132,7 +132,7 @@ fn match_problem(
     }
 }
 
-fn available(problems: &[crate::client::ContestProblemResponse]) -> String {
+fn available(problems: &[crate::api::contest::ContestProblemResponse]) -> String {
     problems
         .iter()
         .map(|p| format!("{} ({})", p.label, p.problem_title))
@@ -143,7 +143,7 @@ fn available(problems: &[crate::client::ContestProblemResponse]) -> String {
 #[cfg(test)]
 mod tests {
     use super::match_problem;
-    use crate::client::ContestProblemResponse;
+    use crate::api::contest::ContestProblemResponse;
 
     fn p(problem_id: i32, label: &str, position: i32, title: &str) -> ContestProblemResponse {
         ContestProblemResponse {

@@ -1,11 +1,24 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, bail};
+use broccoli_api_types::auth::{
+    CliRefreshRequest, CliTokenResponse, DeviceCodeResponse, DeviceTokenRequest, LoginRequest,
+    LoginResponse, MeResponse,
+};
+use broccoli_api_types::clarification::{
+    ClarificationListResponse, ClarificationResponse, CreateClarificationRequest,
+};
+use broccoli_api_types::code_run::{CodeRunResponse, CustomTestCaseInput, RunCodeRequest};
+use broccoli_api_types::contest::{
+    ContestListResponse, ContestProblemResponse, ContestResponse, ContestUserContextResponse,
+};
+use broccoli_api_types::error::ErrorBody;
+use broccoli_api_types::problem::{ProblemResponse, ProblemSamplesResponse};
+use broccoli_api_types::submission::{
+    CreateSubmissionRequest, SubmissionFileDto, SubmissionListResponse, SubmissionResponse,
+};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 use crate::config::{Credentials, save_credentials, save_credentials_full};
-use crate::model::{SubmissionStatus, Verdict};
 use crate::tokenstore::{TokenStore, Tokens};
 
 /// Shared API client; refreshes the access token and retries once on 401.
@@ -60,11 +73,6 @@ impl Client {
 
     pub fn server(&self) -> &str {
         &self.server
-    }
-
-    pub fn get_json_value(&self, path: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self.get(path)?;
-        self.parse_response(resp)
     }
 
     fn bearer(&self) -> String {
@@ -151,7 +159,9 @@ impl Client {
             let resp = self
                 .agent
                 .post(&format!("{}/api/v1/auth/cli-refresh", self.server))
-                .send_json(serde_json::json!({ "refresh_token": refresh_token }))
+                .send_json(CliRefreshRequest {
+                    refresh_token: refresh_token.to_string(),
+                })
                 .with_context(|| {
                     format!(
                         "Could not reach {} — check your network connection.",
@@ -213,17 +223,17 @@ impl Client {
         self.with_refresh(&used, resp, send)
     }
 
-    fn post(
+    fn post<B: Serialize>(
         &self,
         path: &str,
-        body: serde_json::Value,
+        body: &B,
     ) -> anyhow::Result<http::Response<ureq::Body>> {
         let url = format!("{}{}", self.server, path);
         let send = || {
             self.agent
                 .post(&url)
                 .header("Authorization", &self.bearer())
-                .send_json(&body)
+                .send_json(body)
                 .with_context(|| {
                     format!(
                         "Could not reach {} — check your network connection.",
@@ -260,24 +270,10 @@ impl Client {
         resp: http::Response<ureq::Body>,
     ) -> anyhow::Result<http::Response<ureq::Body>> {
         let status = resp.status().as_u16();
-        if status == 401 {
-            bail!(
-                "Authentication failed (401).\n\
-                 Run `broccoli login` to re-authenticate."
-            );
+        if (200..300).contains(&status) {
+            return Ok(resp);
         }
-        if !(200..300).contains(&status) {
-            let mut body = resp.into_body();
-            let text = body.read_to_string().unwrap_or_default();
-            // prefer the structured message over raw JSON
-            if let Ok(err) = serde_json::from_str::<ServerError>(&text) {
-                if !err.message.is_empty() {
-                    bail!("{}", err.message);
-                }
-            }
-            bail!("Server returned {}: {}", status, text);
-        }
-        Ok(resp)
+        Err(ApiError::from_response(resp).into())
     }
 
     /// Check status, then parse the body.
@@ -298,7 +294,10 @@ impl Client {
     }
 
     pub fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginResponse> {
-        let body = serde_json::json!({ "username": username, "password": password });
+        let body = LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
         let resp = self
             .agent
             .post(&format!("{}/api/v1/auth/login", self.server))
@@ -327,7 +326,9 @@ impl Client {
     }
 
     pub fn poll_device_token(&self, device_code: &str) -> anyhow::Result<PollResponse> {
-        let body = serde_json::json!({ "device_code": device_code });
+        let body = DeviceTokenRequest {
+            device_code: device_code.to_string(),
+        };
         let resp = self
             .agent
             .post(&format!("{}/api/v1/auth/device-token", self.server))
@@ -348,7 +349,7 @@ impl Client {
 
     /// Exchange the access token for a refresh token; called once after login.
     pub fn issue_cli_token(&self) -> anyhow::Result<CliTokenResponse> {
-        let resp = self.post("/api/v1/auth/cli-token", serde_json::json!({}))?;
+        let resp = self.post("/api/v1/auth/cli-token", &serde_json::json!({}))?;
         self.parse_response(resp)
     }
 
@@ -370,7 +371,7 @@ impl Client {
     pub fn register_for_contest(&self, id: &str) -> anyhow::Result<()> {
         let resp = self.post(
             &format!("/api/v1/contests/{}/register", id),
-            serde_json::json!({}),
+            &serde_json::json!({}),
         )?;
         self.parse_empty(resp)
     }
@@ -402,13 +403,15 @@ impl Client {
         contest_id: &str,
         content: &str,
     ) -> anyhow::Result<ClarificationResponse> {
-        let body = serde_json::json!({
-            "content": content,
-            "clarification_type": "question",
-        });
+        let body = CreateClarificationRequest {
+            content: content.to_string(),
+            clarification_type: "question".to_string(),
+            recipient_id: None,
+            is_public: None,
+        };
         let resp = self.post(
             &format!("/api/v1/contests/{}/clarifications", contest_id),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -416,7 +419,7 @@ impl Client {
     /// A standalone problem, read outside every contest. A problem reached
     /// through a contest must use [`Client::get_contest_problem`] instead, or
     /// another contest holding the same problem can hide it.
-    pub fn get_problem(&self, problem_id: &str) -> anyhow::Result<ProblemDetailResponse> {
+    pub fn get_problem(&self, problem_id: &str) -> anyhow::Result<ProblemResponse> {
         let resp = self.get(&format!("/api/v1/problems/{}", problem_id))?;
         self.parse_response(resp)
     }
@@ -427,7 +430,7 @@ impl Client {
         &self,
         contest_id: &str,
         problem_id: &str,
-    ) -> anyhow::Result<ProblemDetailResponse> {
+    ) -> anyhow::Result<ProblemResponse> {
         let resp = self.get(&format!(
             "/api/v1/contests/{}/problems/{}",
             contest_id, problem_id
@@ -455,17 +458,17 @@ impl Client {
         language: &str,
         contest_type: Option<&str>,
     ) -> anyhow::Result<SubmissionResponse> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "contest_type": contest_type,
-        });
+        let body = CreateSubmissionRequest {
+            files,
+            language: language.to_string(),
+            contest_type: contest_type.map(String::from),
+        };
         let resp = self.post(
             &format!(
                 "/api/v1/contests/{}/problems/{}/submissions",
                 contest_id, problem_id
             ),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -478,14 +481,14 @@ impl Client {
         language: &str,
         contest_type: Option<&str>,
     ) -> anyhow::Result<SubmissionResponse> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "contest_type": contest_type,
-        });
+        let body = CreateSubmissionRequest {
+            files,
+            language: language.to_string(),
+            contest_type: contest_type.map(String::from),
+        };
         let resp = self.post(
             &format!("/api/v1/problems/{}/submissions", problem_id),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -527,7 +530,7 @@ impl Client {
     }
 
     /// Fetch a code-run by ID (used to poll for asynchronous results).
-    pub fn get_code_run(&self, id: i64) -> anyhow::Result<serde_json::Value> {
+    pub fn get_code_run(&self, id: i32) -> anyhow::Result<CodeRunResponse> {
         let resp = self.get(&format!("/api/v1/code-runs/{}", id))?;
         self.parse_response(resp)
     }
@@ -540,18 +543,18 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "custom_test_cases": custom_test_cases,
-        });
+    ) -> anyhow::Result<CodeRunResponse> {
+        let body = RunCodeRequest {
+            files,
+            language: language.to_string(),
+            custom_test_cases,
+        };
         let resp = self.post(
             &format!(
                 "/api/v1/contests/{}/problems/{}/code-runs",
                 contest_id, problem_id
             ),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -563,13 +566,13 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "custom_test_cases": custom_test_cases,
-        });
-        let resp = self.post(&format!("/api/v1/problems/{}/code-runs", problem_id), body)?;
+    ) -> anyhow::Result<CodeRunResponse> {
+        let body = RunCodeRequest {
+            files,
+            language: language.to_string(),
+            custom_test_cases,
+        };
+        let resp = self.post(&format!("/api/v1/problems/{}/code-runs", problem_id), &body)?;
         self.parse_response(resp)
     }
 }
@@ -593,245 +596,64 @@ pub fn persist_session(server: &str, access_token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Standard server error body (`{code, message, details}`).
-#[derive(Debug, Clone, Deserialize)]
-struct ServerError {
-    #[allow(dead_code)]
-    #[serde(default)]
-    code: String,
-    #[serde(default)]
-    message: String,
+/// A request the server answered with a non-2xx status. `code` is the
+/// machine-readable [`ErrorBody::code`] (an API contract); callers match on it
+/// instead of on the human message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
 }
 
-/// Response from `/auth/cli-token` and `/auth/cli-refresh`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CliTokenResponse {
-    pub token: String,
-    pub refresh_token: String,
+impl ApiError {
+    /// The `code` of a body that is not an [`ErrorBody`] (a proxy page, an
+    /// empty body).
+    pub const UNSTRUCTURED: &'static str = "UNSTRUCTURED";
+
+    fn from_response(resp: http::Response<ureq::Body>) -> Self {
+        let status = resp.status().as_u16();
+        let text = resp.into_body().read_to_string().unwrap_or_default();
+        match serde_json::from_str::<ErrorBody>(&text) {
+            Ok(body) => Self {
+                status,
+                code: body.code,
+                message: body.message,
+            },
+            Err(_) => Self {
+                status,
+                code: Self::UNSTRUCTURED.to_string(),
+                message: text,
+            },
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoginResponse {
-    pub token: String,
-    pub id: i32,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub permissions: Vec<String>,
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code.as_str() {
+            "TOKEN_MISSING" | "TOKEN_INVALID" => write!(
+                f,
+                "{} Run `broccoli login` to re-authenticate.",
+                self.message
+            ),
+            Self::UNSTRUCTURED if self.message.is_empty() => {
+                write!(f, "Server returned {}", self.status)
+            }
+            Self::UNSTRUCTURED => write!(f, "Server returned {}: {}", self.status, self.message),
+            _ => f.write_str(&self.message),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MeResponse {
-    pub id: i32,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub permissions: Vec<String>,
-}
+impl std::error::Error for ApiError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Body of `POST /auth/device-token`: `token` once the device is authorized,
+/// otherwise an RFC 8628 `error`.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct PollResponse {
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestListItem {
-    pub id: i32,
-    pub title: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub is_public: bool,
-    #[serde(default)]
-    pub contest_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestListResponse {
-    pub data: Vec<ContestListItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestResponse {
-    pub id: i32,
-    pub title: String,
-    pub description: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub is_public: bool,
-    #[serde(default)]
-    pub contest_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestUserContextResponse {
-    pub contest_id: i32,
-    pub user_id: i32,
-    pub is_registered: bool,
-    pub registered_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionFileDto {
-    pub filename: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionResponse {
-    pub id: i32,
-    pub language: String,
-    pub status: SubmissionStatus,
-    pub problem_id: i32,
-    #[serde(default)]
-    pub problem_title: String,
-    #[serde(default)]
-    pub contest_id: Option<i32>,
-    pub created_at: String,
-    #[serde(default)]
-    pub result: Option<JudgeResultResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JudgeResultResponse {
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-    #[serde(default)]
-    pub compile_output: Option<String>,
-    #[serde(default)]
-    pub error_message: Option<String>,
-    #[serde(default)]
-    pub judged_at: Option<String>,
-    #[serde(default)]
-    pub test_case_results: Vec<TestCaseResultResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestCaseResultResponse {
-    pub id: i32,
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-    #[serde(default)]
-    pub input: Option<String>,
-    #[serde(default)]
-    pub expected_output: Option<String>,
-    #[serde(default)]
-    pub stdout: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionListItem {
-    pub id: i32,
-    pub language: String,
-    pub status: SubmissionStatus,
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    pub problem_id: i32,
-    #[serde(default)]
-    pub problem_title: String,
-    #[serde(default)]
-    pub contest_id: Option<i32>,
-    pub created_at: String,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionListResponse {
-    pub data: Vec<SubmissionListItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestProblemResponse {
-    pub contest_id: i32,
-    pub problem_id: i32,
-    pub label: String,
-    pub position: i32,
-    pub problem_title: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SampleCase {
-    pub input: String,
-    pub output: String,
-    /// Optional markdown note explaining this sample. Absent on older servers.
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProblemSamplesResponse {
-    pub samples: Vec<SampleCase>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProblemDetailResponse {
-    pub id: i32,
-    pub title: String,
-    pub content: String,
-    #[serde(default)]
-    pub time_limit: i32,
-    #[serde(default)]
-    pub memory_limit: i32,
-    #[serde(default)]
-    pub problem_type: String,
-    /// Required filenames per language, when the problem fixes them.
-    #[serde(default)]
-    pub submission_format: Option<HashMap<String, Vec<String>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomTestCaseInput {
-    pub input: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_output: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationResponse {
-    pub id: i32,
-    pub contest_id: i32,
-    #[serde(default)]
-    pub author_name: String,
-    pub content: String,
-    pub clarification_type: String,
-    #[serde(default)]
-    pub is_public: bool,
-    #[serde(default)]
-    pub reply_content: Option<String>,
-    #[serde(default)]
-    pub reply_author_name: Option<String>,
-    #[serde(default)]
-    pub resolved: bool,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationListResponse {
-    pub data: Vec<ClarificationResponse>,
 }

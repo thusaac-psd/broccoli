@@ -6,7 +6,8 @@ use anyhow::{Context, bail};
 use clap::Args;
 use console::style;
 
-use broccoli_cli_core::client::{Client, DeviceCodeResponse, PollResponse, persist_session};
+use broccoli_cli_core::api::auth::DeviceCodeResponse;
+use broccoli_cli_core::client::{Client, PollResponse, persist_session};
 use broccoli_cli_core::config::Credentials;
 use broccoli_cli_core::tls;
 

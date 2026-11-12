@@ -7,9 +7,11 @@ use anyhow::{Context, bail};
 use clap::Args;
 use console::style;
 
-use broccoli_cli_core::client::{Client, CustomTestCaseInput, SubmissionFileDto};
+use broccoli_cli_core::api::code_run::{CodeRunResponse, CustomTestCaseInput};
+use broccoli_cli_core::api::submission::SubmissionFileDto;
+use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
-use broccoli_cli_core::model::SubmissionStatus;
+use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
 
 use super::context;
@@ -164,11 +166,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
     let created = client
         .run_contest_code(contest_id, problem_id, files, &language, custom)
         .context("Failed to start code run")?;
-    let run_id = created["id"]
-        .as_i64()
-        .context("Server did not return a code-run id")?;
-
-    let result = poll_code_run(&client, run_id)?;
+    let result = poll_code_run(&client, created.id)?;
     print_remote_result(&result)?;
 
     Ok(())
@@ -178,7 +176,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
 fn load_cached_samples(
     contest_id: &str,
     problem_id: &str,
-) -> Option<Vec<broccoli_cli_core::client::SampleCase>> {
+) -> Option<Vec<broccoli_cli_core::api::problem::SampleCase>> {
     let samples_dir = config::problem_cache_dir(contest_id, problem_id).join("samples");
     let mut cases = Vec::new();
     for i in 1.. {
@@ -187,7 +185,7 @@ fn load_cached_samples(
         match (fs::read_to_string(&in_path), fs::read_to_string(&out_path)) {
             (Ok(input), Ok(output)) => {
                 let description = fs::read_to_string(samples_dir.join(format!("{}.md", i))).ok();
-                cases.push(broccoli_cli_core::client::SampleCase {
+                cases.push(broccoli_cli_core::api::problem::SampleCase {
                     input,
                     output,
                     description,
@@ -199,7 +197,7 @@ fn load_cached_samples(
     if cases.is_empty() { None } else { Some(cases) }
 }
 
-fn poll_code_run(client: &Client, run_id: i64) -> anyhow::Result<serde_json::Value> {
+fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
     use std::io::Write;
     use std::time::{Duration, Instant};
     let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
@@ -207,9 +205,7 @@ fn poll_code_run(client: &Client, run_id: i64) -> anyhow::Result<serde_json::Val
 
     loop {
         let cr = client.get_code_run(run_id)?;
-        // Reuse the shared status model so pre-judging states (Queued, Judging, ...)
-        // keep polling; unknown statuses stop, like `submit -w`.
-        let status: SubmissionStatus = cr["status"].as_str().unwrap_or("").parse().unwrap(); // Infallible
+        let status = cr.status.clone();
         if !status.is_in_progress() {
             eprint!("\r\x1b[K");
             std::io::stderr().flush().ok();
@@ -223,7 +219,7 @@ fn poll_code_run(client: &Client, run_id: i64) -> anyhow::Result<serde_json::Val
         eprint!(
             "\r\x1b[K  {} Running... {} ({:.0}s)",
             spinner.next(),
-            status,
+            status.human(),
             start.elapsed().as_secs_f64()
         );
         std::io::stderr().flush().ok();
@@ -234,7 +230,7 @@ fn poll_code_run(client: &Client, run_id: i64) -> anyhow::Result<serde_json::Val
 fn run_samples_locally(
     files: &[SubmissionFileDto],
     language: &str,
-    samples: &[broccoli_cli_core::client::SampleCase],
+    samples: &[broccoli_cli_core::api::problem::SampleCase],
     config: &broccoli_cli_core::config::UserConfig,
 ) -> anyhow::Result<()> {
     let mut passed = 0usize;
@@ -447,11 +443,10 @@ fn default_runtime(lang: &str) -> String {
     }
 }
 
-fn print_remote_result(result: &serde_json::Value) -> anyhow::Result<()> {
-    let status: SubmissionStatus = result["status"].as_str().unwrap_or("").parse().unwrap(); // Infallible
-    let judge = &result["result"];
+fn print_remote_result(run: &CodeRunResponse) -> anyhow::Result<()> {
+    let judge = run.result.as_ref();
 
-    if let Some(compile) = judge["compile_output"].as_str() {
+    if let Some(compile) = judge.and_then(|r| r.compile_output.as_deref()) {
         if !compile.trim().is_empty() {
             println!("  {} Compilation output:", style("!").yellow());
             for line in compile.lines() {
@@ -460,42 +455,35 @@ fn print_remote_result(result: &serde_json::Value) -> anyhow::Result<()> {
         }
     }
 
-    if status == SubmissionStatus::CompilationError {
+    if run.status == SubmissionStatus::CompilationError {
         bail!("Compilation failed.");
     }
 
-    if let Some(cases) = judge["test_case_results"].as_array() {
-        if cases.is_empty() {
-            bail!(
-                "The server returned no test results (status: {}).",
-                status.human()
-            );
-        }
-        let mut passed = 0usize;
-        for (i, case) in cases.iter().enumerate() {
-            let verdict = case["verdict"].as_str().unwrap_or("?");
-            if verdict == "Accepted" {
-                println!("  Sample {}: {} PASSED", i + 1, style("\u{2713}").green());
-                passed += 1;
-            } else {
-                println!(
-                    "  Sample {}: {} {} — got {:?}",
-                    i + 1,
-                    style("\u{2717}").red(),
-                    verdict,
-                    case["stdout"].as_str().unwrap_or("").trim()
-                );
-            }
-        }
-        println!("  {}/{} passed.", passed, cases.len());
-    } else {
+    let cases = judge.map(|r| r.test_case_results.as_slice()).unwrap_or(&[]);
+    if cases.is_empty() {
         // A run that stopped without producing results is an error, not a success:
         // exiting 0 here would tell the contestant "finished" with zero information.
         bail!(
             "Code run ended with status {} but returned no results.",
-            status.human()
+            run.status.human()
         );
     }
+    let mut passed = 0usize;
+    for (i, case) in cases.iter().enumerate() {
+        if case.verdict.is_accepted() {
+            println!("  Sample {}: {} PASSED", i + 1, style("\u{2713}").green());
+            passed += 1;
+        } else {
+            println!(
+                "  Sample {}: {} {} — got {:?}",
+                i + 1,
+                style("\u{2717}").red(),
+                case.verdict.human(),
+                case.stdout.as_deref().unwrap_or("").trim()
+            );
+        }
+    }
+    println!("  {}/{} passed.", passed, cases.len());
 
     Ok(())
 }

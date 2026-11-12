@@ -1,8 +1,10 @@
 use super::context;
 use anyhow::Context;
-use broccoli_cli_core::client::{Client, SubmissionFileDto};
+use broccoli_cli_core::api::submission::SubmissionFileDto;
+use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
 use broccoli_cli_core::fmt;
+use broccoli_cli_core::model::{StatusDisplay, VerdictDisplay};
 use broccoli_cli_core::resolve;
 use clap::Args;
 use console::style;
@@ -206,7 +208,7 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
             eprint!(
                 "\r\x1b[K  {} Judging... {} ({:.1}s)",
                 spinner.next(),
-                sub.status,
+                sub.status.human(),
                 elapsed.as_secs_f64()
             );
             std::io::stderr().flush().ok();
@@ -222,8 +224,8 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
                 .is_some_and(|v| v.is_accepted());
             // judged verdict if present, else lifecycle status
             let label = match sub.result.as_ref().and_then(|r| r.verdict.as_ref()) {
-                Some(v) => v.to_string(),
-                None => sub.status.to_string(),
+                Some(v) => v.human().to_string(),
+                None => sub.status.human().to_string(),
             };
             let score = sub.result.as_ref().and_then(|r| r.score);
 

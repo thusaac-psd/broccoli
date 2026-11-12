@@ -132,7 +132,7 @@ fn download_problem(client: &Client, contest: &str, problem_id: &str) -> anyhow:
 fn write_problem(
     dir: &std::path::Path,
     statement: &str,
-    samples: &[broccoli_cli_core::client::SampleCase],
+    samples: &[broccoli_cli_core::api::problem::SampleCase],
 ) -> anyhow::Result<()> {
     let samples_dir = dir.join("samples");
     std::fs::create_dir_all(&samples_dir)?;
