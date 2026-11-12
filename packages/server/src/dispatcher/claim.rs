@@ -639,11 +639,12 @@ fn queued_rows_sql(table: &str) -> String {
     format!(
         r#"SELECT id
            FROM {table}
-           WHERE status = 'Queued'
+           WHERE {queued}
              AND {handled}
            ORDER BY created_at
            LIMIT $1
            FOR UPDATE SKIP LOCKED"#,
+        queued = super::QUEUED_PREDICATE,
         handled = super::prefer_local_handler_for(table, "$2"),
     )
 }

@@ -21,7 +21,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
         for table in TABLES {
             db.execute_unprepared(&format!(
-                "CREATE INDEX IF NOT EXISTS {table}_queued_idx ON {table} (created_at) \
+                "CREATE INDEX IF NOT EXISTS idx_{table}_queued ON {table} (created_at) \
                  WHERE status = 'Queued'"
             ))
             .await?;
@@ -32,7 +32,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
         for table in TABLES {
-            db.execute_unprepared(&format!("DROP INDEX IF EXISTS {table}_queued_idx"))
+            db.execute_unprepared(&format!("DROP INDEX IF EXISTS idx_{table}_queued"))
                 .await?;
         }
         Ok(())

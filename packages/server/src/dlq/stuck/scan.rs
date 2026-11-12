@@ -88,7 +88,7 @@ async fn observe_old_queued_backlog(
     queued_observability_threshold: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
     let old_submissions = submission::Entity::find()
-        .filter(submission::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(crate::dispatcher::is_queued())
         .filter(submission::Column::OwnerServerId.is_null())
         .filter(submission::Column::CreatedAt.lt(queued_observability_threshold))
         .count(db)
@@ -103,7 +103,7 @@ async fn observe_old_queued_backlog(
     }
 
     let old_code_runs = code_run::Entity::find()
-        .filter(code_run::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(crate::dispatcher::is_queued())
         .filter(code_run::Column::OwnerServerId.is_null())
         .filter(code_run::Column::CreatedAt.lt(queued_observability_threshold))
         .count(db)
@@ -118,7 +118,7 @@ async fn observe_old_queued_backlog(
     }
 
     let old_judgements = submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(crate::dispatcher::is_queued())
         .filter(submission_judgement::Column::OwnerServerId.is_null())
         .filter(submission_judgement::Column::IsFinalized.eq(false))
         .filter(submission_judgement::Column::CreatedAt.lt(queued_observability_threshold))

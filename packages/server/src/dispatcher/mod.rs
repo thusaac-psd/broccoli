@@ -16,6 +16,21 @@ use tracing::info;
 use crate::config::ServerConfig;
 use crate::state::AppState;
 
+/// The `status = 'Queued'` predicate as an inline SQL literal.
+///
+/// The partial `idx_<table>_queued` indexes (migration
+/// `m0014_queued_partial_indexes`) are only usable when the planner can prove
+/// the query's predicate implies the index's, which a bound `$n` parameter
+/// does not allow once Postgres switches a prepared statement to its generic
+/// plan. Every scan over the `Queued` rows therefore filters with this literal
+/// instead of a bound status value.
+pub(crate) const QUEUED_PREDICATE: &str = "status = 'Queued'";
+
+/// [`QUEUED_PREDICATE`] as a SeaORM filter.
+pub(crate) fn is_queued() -> sea_orm::sea_query::SimpleExpr {
+    sea_orm::sea_query::Expr::cust(QUEUED_PREDICATE)
+}
+
 /// The contest types this replica has a handler for right now, sorted.
 pub(crate) async fn local_contest_types(state: &AppState) -> Vec<String> {
     let mut types: Vec<String> = state
@@ -309,5 +324,18 @@ impl Dispatcher {
 impl Drop for Dispatcher {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+#[cfg(test)]
+mod queued_predicate_tests {
+    use common::SubmissionStatus;
+
+    #[test]
+    fn queued_predicate_names_the_queued_status() {
+        assert_eq!(
+            super::QUEUED_PREDICATE,
+            format!("status = '{}'", SubmissionStatus::Queued.as_str())
+        );
     }
 }

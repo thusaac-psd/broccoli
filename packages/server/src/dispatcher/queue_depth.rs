@@ -23,9 +23,7 @@
 //! load shedding, not strict admission, so racing past the threshold
 //! by a few dozen rows is acceptable.
 
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
-
-use common::SubmissionStatus;
+use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
 use crate::entity::{code_run, submission, submission_judgement};
 use crate::error::AppError;
@@ -48,9 +46,10 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 /// `status='Queued'`. The three tables are queried sequentially with
 /// short SELECTs - three round-trips dominate the cost.
 ///
-/// Each COUNT reads the partial `<table>_queued_idx` index over the table's
+/// Each COUNT reads the partial `idx_<table>_queued` index over the table's
 /// `Queued` rows (migration `m0014_queued_partial_indexes`), which stays as
-/// small as the cap.
+/// small as the cap. The filter is the inline [`super::QUEUED_PREDICATE`] so
+/// the index stays usable under a generic plan.
 ///
 /// A single UNION ALL would shave a round-trip but complicates the
 /// SeaORM call surface for negligible benefit.
@@ -59,15 +58,15 @@ where
     C: ConnectionTrait,
 {
     let submissions = submission::Entity::find()
-        .filter(submission::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(super::is_queued())
         .count(db)
         .await?;
     let code_runs = code_run::Entity::find()
-        .filter(code_run::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(super::is_queued())
         .count(db)
         .await?;
     let judgements = submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Queued))
+        .filter(super::is_queued())
         .count(db)
         .await?;
     Ok(submissions + code_runs + judgements)
