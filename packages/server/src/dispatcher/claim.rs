@@ -1,5 +1,5 @@
 //! Per-server background fiber that pulls submissions out of `Queued`
-//! and into `Pending` (UP#38). Pairs with UP#37: the api's POST handler
+//! and into `Pending`. Pairs with the durable accept path: the api's POST handler
 //! persists `status='Queued'` and returns 201; this fiber claims rows
 //! through `SELECT ... FOR UPDATE SKIP LOCKED`, transitions them to
 //! `Pending`, sets `owner_server_id`, bumps `retry_count`, and finally
@@ -7,9 +7,9 @@
 //!
 //! The fiber lives for the lifetime of the api process. When
 //! `server.claim_fiber_enabled` is `false`, it never starts - meaning
-//! UP#37's `Queued` rows have no one to claim them and will accumulate
-//! until the flag is flipped back on. That escape hatch exists only to
-//! pin a deployment to the pre-UP#37 behavior during incident response;
+//! `Queued` rows have no one to claim them and will accumulate until
+//! the flag is flipped back on. That escape hatch exists only to stop
+//! a server from dispatching new work during incident response;
 //! production should always run with the fiber enabled.
 
 use std::collections::HashMap;
@@ -178,7 +178,7 @@ pub async fn claim_once(
         });
     }
 
-    // Deferred-rejudge path (UP#37 residual fix). Non-current
+    // Deferred-rejudge path. Non-current
     // judgements created by `apply_immediately=false` start at
     // `status=Queued` so the post-commit silent-loss window is closed
     // symmetrically with the submission path. The parent submission's

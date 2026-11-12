@@ -6,7 +6,7 @@
 //! the leader stores its output - or until a max-wait elapses and the
 //! follower falls back to executing on its own.
 //!
-//! Design notes (see UP#33):
+//! Design notes:
 //! - `acquire` uses `SET key token NX EX ttl`. On NX-success we are leader.
 //!   On NX-conflict we are follower. On any Redis transport error we return
 //!   `Err(...)` and the caller treats it the same as leader (we never block

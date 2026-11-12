@@ -105,7 +105,7 @@ pub async fn create_submission(
         state.config.submission.rate_limit_per_minute,
     )
     .await?;
-    // UP#39 backpressure-on-post: shed load before touching the DB so
+    // Backpressure on POST: shed load before touching the DB so
     // the rejected request never holds a connection or a row lock.
     enforce_queue_depth_admission(&state).await?;
 
@@ -196,11 +196,11 @@ pub async fn create_submission(
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language.clone()),
-        // UP#37: persist `Queued` and return 201 immediately. The
-        // per-server claim fiber (UP#38, see
+        // Persist `Queued` and return 201 immediately. The
+        // per-server claim fiber (see
         // `dispatcher/claim.rs`) promotes the row to `Pending` and
-        // dispatches it. Replacing the previous `tokio::spawn(dispatch_to_plugin)`
-        // closes the silent-loss window where an api crash between
+        // dispatches it. Spawning `dispatch_to_plugin` from the handler
+        // instead would leave a silent-loss window: an api crash between
         // commit and spawn would lose the submission with no MQ
         // message and no recoverable state.
         status: Set(SubmissionStatus::Queued),
@@ -718,7 +718,7 @@ pub async fn create_contest_submission(
         state.config.submission.rate_limit_per_minute,
     )
     .await?;
-    // UP#39 backpressure-on-post: same rationale as `create_submission`.
+    // Backpressure on POST: same rationale as `create_submission`.
     enforce_queue_depth_admission(&state).await?;
 
     let contest_id = id;
@@ -825,7 +825,7 @@ pub async fn create_contest_submission(
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language.clone()),
-        // UP#37: see the contest-free `create_submission` handler for the
+        // See the contest-free `create_submission` handler for the
         // full rationale - `Queued` is the durable-accept state the claim
         // fiber transitions to `Pending`.
         status: Set(SubmissionStatus::Queued),

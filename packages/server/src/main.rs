@@ -76,7 +76,7 @@ fn main() -> anyhow::Result<()> {
 /// Used by the Docker `HEALTHCHECK` directive in `Dockerfile.server`. Skips
 /// observability initialization so the probe stays fast and silent.
 ///
-/// Prefers the port of `server.healthz_listen` (the dedicated runtime, UP#14e)
+/// Prefers the port of `server.healthz_listen` (the dedicated runtime)
 /// when configured, so the in-container probe gets the same isolation
 /// benefits as external probes. Falls back to the main listener port
 /// otherwise.

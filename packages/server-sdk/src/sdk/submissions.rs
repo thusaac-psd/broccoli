@@ -132,8 +132,8 @@ pub(super) struct SubmissionsMock {
     tc_results: RefCell<Vec<TestCaseResultRow>>,
     /// Number of `insert_results` calls that actually issued an INSERT
     /// (empty-slice calls early-return and are not counted). Used by the
-    /// UP#34 bulk-insert-results regression tests to assert that plugins
-    /// batch their per-testcase rows rather than calling once per row.
+    /// bulk-insert tests to assert that plugins batch their per-testcase
+    /// rows rather than calling once per row.
     insert_call_count: RefCell<usize>,
 }
 
@@ -258,9 +258,9 @@ impl Submissions {
 
     /// Number of `insert_results` calls that actually issued an INSERT.
     /// Empty-slice calls early-return and are not counted. Plugins are
-    /// expected to batch per-testcase rows (UP#34) - assert
+    /// expected to batch per-testcase rows - assert
     /// `insert_call_count() <= ceil(rows / threshold) + small_constant` in
-    /// regression tests.
+    /// tests.
     pub fn insert_call_count(&self) -> usize {
         *self.inner.insert_call_count.borrow()
     }

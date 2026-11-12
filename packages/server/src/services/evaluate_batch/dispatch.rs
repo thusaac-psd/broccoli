@@ -1,7 +1,7 @@
 // NOTE: `start_evaluate_batch` is not exercised by direct unit tests here. It
 // consumes a full `EvaluateHostDeps` graph (plugin manager, DB connection,
 // blob store, evaluator/operation registries) that can only be wired up in the
-// integration suite. The FanoutSemaphore introduced for UP#14b is tested in
+// integration suite. The FanoutSemaphore that bounds fan-out is tested in
 // `crate::dispatcher::fanout` and the end-to-end bounded fan-out behaviour
 // relies on the integration suite + stress-test harness for verification.
 
@@ -80,7 +80,7 @@ pub async fn start_evaluate_batch(
         return Ok(batch_id);
     }
 
-    // Bounded fan-out (UP#14b): a dedicated dispatcher task acquires one fan-out
+    // Bounded fan-out: a dedicated dispatcher task acquires one fan-out
     // permit per test case BEFORE spawning the per-tc worker. The permit is
     // held inside the spawned task for its whole lifetime, so the count of
     // live test-case tasks server-wide is bounded by `fanout_slots` regardless

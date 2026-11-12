@@ -305,8 +305,8 @@ pub trait PluginInvoker: Send + Sync {
                 metrics.plugin_call_failures.add(1, &attrs);
             }
 
-            // UP#13: also expose per-host-fn duration + call totals. After UP#1
-            // the spawn_blocking above is where every plugin entry/exit can be
+            // Also expose per-host-fn duration + call totals. The spawn_blocking
+            // above is the one place every plugin entry/exit can be
             // observed; we tag with the function name so dashboards can break
             // out latency by host_fn (e.g. "evaluate.start_batch").
             let host_fn_attrs = [

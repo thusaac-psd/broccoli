@@ -14,11 +14,11 @@ use sea_orm::entity::prelude::*;
 #[serde(rename_all = "PascalCase")]
 pub enum SubmissionStatus {
     /// Durable accept state: submission has been persisted by the API but
-    /// not yet claimed by a server's claim fiber for dispatch. Set by
-    /// UP#37 (`INSERT ... status='Queued'` on POST). The claim fiber
+    /// not yet claimed by a server's claim fiber for dispatch. Set by the
+    /// POST handlers (`INSERT ... status='Queued'`). The claim fiber
     /// transitions to `Pending` once it acquires the row. Distinguishing
     /// `Queued` from `Pending` lets per-state stuck-detector thresholds
-    /// (UP#43) apply different timeouts and avoids false-positive 5-min
+    /// apply different timeouts and avoids false-positive 5-min
     /// "no owner" alarms on rows that simply haven't been claimed yet.
     Queued,
     #[default]

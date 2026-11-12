@@ -51,8 +51,8 @@ pub enum AppError {
     },
     /// Server is overloaded; client should retry after the given duration.
     /// Distinct from `RateLimited` (429): 429 means "your client is too fast",
-    /// 503 means "the system as a whole is past capacity". UP#39 uses this
-    /// for durable-queue depth backpressure.
+    /// 503 means "the system as a whole is past capacity". Used for
+    /// durable-queue depth backpressure.
     /// The serving replica has no handler for this contest type right now
     /// (its plugin is still loading, or failed to load, here). Retryable: the
     /// load balancer will likely route the retry to a replica that has it.
@@ -284,7 +284,7 @@ impl From<PluginError> for AppError {
             // `plugin_core::retry::call_raw_with_pool_retry`, so by the time a
             // PoolTimeout reaches HTTP error mapping the server is genuinely
             // overloaded - a 429 would misleadingly tell the *client* to back
-            // off when the right signal is server-internal failure (UP#4).
+            // off when the right signal is server-internal failure.
             _ => AppError::Internal(err.to_string()),
         }
     }
@@ -325,7 +325,7 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
-    /// UP#39 follow-up: durable-queue backpressure must surface as
+    /// Durable-queue backpressure must surface as
     /// `503 Service Unavailable` with code `QUEUE_OVERLOADED` and the
     /// `Retry-After` header populated from the variant payload. This
     /// pins the contract so a future refactor that re-tags the

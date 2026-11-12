@@ -221,7 +221,7 @@ pub async fn rejudge_submission(
         serde_json::from_slice::<RejudgeRequest>(&body)
             .map_err(|e| AppError::Validation(format!("Invalid rejudge request body: {e}")))?
     };
-    // UP#39 backpressure-on-post: covers both branches of this
+    // Backpressure on POST: covers both branches of this
     // handler - `apply_immediately=true` inserts a `Queued` row into
     // `submission`, `apply_immediately=false` inserts one into
     // `submission_judgement`. Both are counted in
@@ -337,7 +337,7 @@ pub async fn bulk_rejudge_submissions(
 ) -> Result<Json<BulkRejudgeResponse>, AppError> {
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
     validate_bulk_rejudge(&payload)?;
-    // UP#39 backpressure-on-post: bulk rejudge can insert hundreds of
+    // Backpressure on POST: bulk rejudge can insert hundreds of
     // `Queued` rows in one call. The check here samples the depth
     // **before** the bulk insert, which is intentionally permissive:
     // the cap is a steady-state circuit-breaker, not a strict per-row
@@ -455,7 +455,7 @@ pub async fn admin_fan_out_submission(
         &payload.language,
         state.config.submission.max_size,
     )?;
-    // UP#39 backpressure-on-post: admin fan-out inserts one `Queued`
+    // Backpressure on POST: admin fan-out inserts one `Queued`
     // row per target worker, so the same sampling-before-bulk-insert
     // tradeoff applies as `bulk_rejudge_submissions`. A successful
     // fan-out may temporarily exceed the cap; subsequent callers
@@ -525,8 +525,8 @@ pub async fn admin_fan_out_submission(
         let new_submission = submission::ActiveModel {
             files: Set(files_json.clone()),
             language: Set(language.clone()),
-            // UP#37: admin fan-out submissions enter the same
-            // durable-accept lifecycle. The claim fiber (UP#38)
+            // Admin fan-out submissions enter the same
+            // durable-accept lifecycle. The claim fiber
             // promotes each row from `Queued` to `Pending` and
             // dispatches via the worker-pinned route already encoded
             // in `target_worker_id`.

@@ -179,9 +179,9 @@ pub async fn start_operation_batch(
             .add(1, &[KeyValue::new("batch.kind", "operation")]);
     }
 
-    // UP#14c: parallelize per-op blob-externalize + mq.publish via
+    // Parallelize per-op blob-externalize + mq.publish via
     // buffer_unordered. Each per-op future preserves the waiter-insert ->
-    // publish ordering invariant (UP#14d) by sequential await inside one
+    // publish ordering invariant by sequential await inside one
     // closure; cross-op ordering is intentionally unordered. First error
     // short-circuits via try_collect; in-flight peers are dropped.
     let publish_concurrency = deps.operation_batch_publish_concurrency.max(1);
@@ -197,7 +197,8 @@ pub async fn start_operation_batch(
         async move {
             let (op_tx, op_rx) = tokio::sync::oneshot::channel();
 
-            // Waiter insert must precede publish for THIS op (UP#14d). These
+            // Waiter insert must precede publish for THIS op, or a fast
+            // reply could arrive before anyone is waiting for it. These
             // two sync calls happen before the awaits below.
             deps.operation_waiters.insert(
                 correlation_id.clone(),

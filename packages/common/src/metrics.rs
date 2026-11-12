@@ -338,8 +338,8 @@ impl Metrics {
             host_fn_block_in_place_total: meter
                 .u64_counter("broccoli.host_fn.block_in_place")
                 .with_description(
-                    "Regression sentinel: increments when a host_fn enters block_in_place. \
-                     Should always be zero in shipping code (see UP#14g).",
+                    "Sentinel: increments when a host_fn enters block_in_place. Host functions \
+                     run inside spawn_blocking and must not call it, so this is always zero.",
                 )
                 .build(),
 
@@ -380,7 +380,7 @@ impl Metrics {
                 .with_unit("ms")
                 .with_description(
                     "Duration spent waiting for a server-wide evaluator fan-out permit before \
-                     spawning a per-test-case dispatch task (UP#14b)",
+                     spawning a per-test-case dispatch task",
                 )
                 .with_boundaries(FANOUT_WAIT_BUCKETS_MS.to_vec())
                 .build(),
@@ -388,7 +388,7 @@ impl Metrics {
                 .u64_counter("broccoli.batch_evaluator.fanout.saturated")
                 .with_description(
                     "Total number of evaluator fan-out acquires that had to block on a permit \
-                     (vs. acquiring immediately). UP#14b backpressure signal.",
+                     (vs. acquiring immediately). Fan-out backpressure signal.",
                 )
                 .build(),
 

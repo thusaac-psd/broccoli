@@ -163,7 +163,7 @@ pub async fn run_code(
         state.config.submission.rate_limit_per_minute,
     )
     .await?;
-    // UP#39 backpressure-on-post: code-run rows ride the same
+    // Backpressure on POST: code-run rows ride the same
     // durable-accept lifecycle as submissions (see
     // `submission::create_submission`) and are counted toward the
     // same cap.
@@ -214,9 +214,9 @@ pub async fn run_code(
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language),
-        // UP#37: code-run rows ride the same durable-accept lifecycle
+        // Code-run rows ride the same durable-accept lifecycle
         // as submissions - see `handlers/submission.rs::create_submission`
-        // for the gap being closed and `dispatcher/claim.rs` for the
+        // for the crash window this closes and `dispatcher/claim.rs` for the
         // claim fiber that picks `Queued` rows off this table too.
         status: Set(SubmissionStatus::Queued),
         user_id: Set(auth_user.user_id),
@@ -273,7 +273,7 @@ pub async fn run_contest_code(
         state.config.submission.rate_limit_per_minute,
     )
     .await?;
-    // UP#39 backpressure-on-post: same rationale as `run_code`.
+    // Backpressure on POST: same rationale as `run_code`.
     enforce_queue_depth_admission(&state).await?;
 
     let contest_id = id;
@@ -306,7 +306,7 @@ pub async fn run_contest_code(
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
         language: Set(language),
-        // UP#37: durable-accept - see `run_code` above for the rationale.
+        // Durable accept - see `run_code` above for the rationale.
         status: Set(SubmissionStatus::Queued),
         user_id: Set(auth_user.user_id),
         problem_id: Set(problem_id),

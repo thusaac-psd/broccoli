@@ -14,8 +14,8 @@ pub use scan::*;
 // Rows in these states have been claimed by a dispatcher and are either
 // waiting for plugin-side dispatch or already evaluating. `Queued` is
 // deliberately excluded: a deep durable queue is backlog, not a row-level
-// failure. UP#43 observes old queued rows as an aggregate dispatcher-health
-// signal without mutating them.
+// failure. Old queued rows are observed as an aggregate dispatcher-health
+// signal instead, without mutating them.
 const STUCK_RECOVERY_STATUSES: [SubmissionStatus; 3] = [
     SubmissionStatus::Pending,
     SubmissionStatus::Compiling,

@@ -1,4 +1,4 @@
-//! Dedicated tokio runtime + listener for `/livez`, `/healthz` and `/metrics` (UP#14e).
+//! Dedicated tokio runtime + listener for `/livez`, `/healthz` and `/metrics`.
 //!
 //! Under deliberate api-runtime saturation (large submission bursts, scheduler
 //! thrash, blocking work pinned to the main runtime's worker threads), the
@@ -61,7 +61,7 @@ pub fn spawn_healthz_runtime(
     info!(
         addr = %bound_addr,
         worker_threads,
-        "Starting dedicated /livez + /healthz + /metrics runtime (UP#14e)"
+        "Starting dedicated /livez + /healthz + /metrics runtime"
     );
 
     let handle = thread::Builder::new()

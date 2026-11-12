@@ -448,16 +448,16 @@ pub(crate) async fn sse_snapshot(
 /// the entire fixture in the test.
 #[derive(Debug, Default, Clone)]
 pub struct SpawnOptions {
-    /// UP#39: cap on durable `Queued` rows accepted at POST time.
+    /// Cap on durable `Queued` rows accepted at POST time.
     /// `Some(0)` (the fixture default) disables the cap; `Some(n)`
     /// trips backpressure once depth reaches `n`. `None` keeps the
     /// fixture default (disabled).
     pub max_queued_submissions: Option<u32>,
-    /// Disable the UP#38 claim fiber. Required for backpressure
+    /// Disable the claim fiber. Required for backpressure
     /// tests that pre-stage `Queued` rows directly - otherwise the
     /// fiber drains them before the test can observe the cap.
     pub disable_claim_fiber: bool,
-    /// Start the UP#38 claim fiber in this integration fixture. Most
+    /// Start the claim fiber in this integration fixture. Most
     /// handler tests assert API commit state only; claim-fiber tests
     /// opt in so the shared test database is not hammered by hundreds
     /// of background pollers during parallel integration runs.
@@ -563,7 +563,7 @@ impl TestApp {
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
                 dispatcher_admission_queue_max: 0,
-                // UP#39: 0 disables the durable Queued-depth cap so the
+                // 0 disables the durable Queued-depth cap so the
                 // bulk of integration tests don't have to reason about
                 // backpressure. Tests that exercise the cap call
                 // `spawn_with_options(SpawnOptions { max_queued_submissions: ... })`.
@@ -588,8 +588,8 @@ impl TestApp {
                 operation_batch_publish_concurrency: 32,
                 healthz_listen: None,
                 healthz_worker_threads: 2,
-                // Enable the UP#38 claim fiber by default so integration
-                // tests that rely on the UP#37 `Queued`-on-POST flow see the
+                // Enable the claim fiber by default so integration
+                // tests that rely on the `Queued`-on-POST flow see the
                 // row transition all the way to dispatch.
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,

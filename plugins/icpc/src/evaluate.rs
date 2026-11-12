@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// Auto-flush threshold for buffered `TestCaseResultRow`s. With typical
 /// ICPC contests in the 15-25 testcase range this yields 2-3 bulk
-/// INSERTs per submission instead of one INSERT per testcase (UP#34).
+/// INSERTs per submission instead of one INSERT per testcase.
 #[cfg(test)]
 const RESULT_BATCH_FLUSH_THRESHOLD: usize = 8;
 
@@ -201,7 +201,7 @@ pub fn evaluate_short_circuit(
 
     let mut outcomes: Vec<EvalOutcome> = Vec::new();
     let mut recorded_ids: HashSet<i32> = HashSet::new();
-    // Per-submission row buffer (UP#34). Filled by `record_outcome`,
+    // Per-submission row buffer. Filled by `record_outcome`,
     // periodically drained by the threshold flush inside that helper,
     // and force-flushed before any early return so the caller still
     // observes terminal verdicts in `test_case_result`.
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(host.eval.result_timeouts(), vec![0]);
     }
 
-    /// UP#34 regression: 20 accepted testcases must produce strictly
+    /// 20 accepted testcases must produce strictly
     /// fewer than 20 `insert_results` calls. With
     /// `RESULT_BATCH_FLUSH_THRESHOLD = 8` we expect 3 calls (two full
     /// chunks of 8 + one tail flush of 4).
@@ -803,7 +803,7 @@ mod tests {
         );
     }
 
-    /// UP#34 regression: a short-circuited failure should still take at
+    /// A short-circuited failure should still take at
     /// most 2 INSERTs (one for the partial run, one tail flush for the
     /// fill rows).
     #[test]

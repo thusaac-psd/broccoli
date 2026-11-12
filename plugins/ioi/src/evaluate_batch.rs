@@ -17,7 +17,7 @@ use crate::subtasks::test_case_reference_keys;
 /// Auto-flush threshold for buffered `TestCaseResultRow`s. IOI problems
 /// commonly have 20-50 testcases across many subtasks; an 8-row chunk
 /// keeps the per-submission INSERT count in the 2-6 range instead of
-/// one INSERT per testcase (UP#34).
+/// one INSERT per testcase.
 #[cfg(test)]
 const RESULT_BATCH_FLUSH_THRESHOLD: usize = 8;
 
@@ -228,7 +228,7 @@ pub fn evaluate_all(
         .delete_results(submission_id, req.judgement_id, req.judge_epoch);
 
     let mut outcomes: Vec<EvalOutcome> = Vec::new();
-    // Per-submission row buffer (UP#34). Drained by the threshold flush
+    // Per-submission row buffer. Drained by the threshold flush
     // inside `record_outcome` and force-flushed before every early
     // return so callers see terminal verdicts in `test_case_result`.
     let mut row_buf: Vec<TestCaseResultRow> = Vec::new();
@@ -1381,7 +1381,7 @@ mod tests {
         );
     }
 
-    /// UP#34 regression: 20 accepted testcases must produce strictly
+    /// 20 accepted testcases must produce strictly
     /// fewer than 20 `insert_results` calls. With
     /// `RESULT_BATCH_FLUSH_THRESHOLD = 8` we expect 3 calls (two full
     /// chunks of 8 + one tail flush of 4).
