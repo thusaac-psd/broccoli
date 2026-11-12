@@ -121,10 +121,18 @@ export function failedModuleUrl(error: unknown): string | null {
   return match ? match[1] : null;
 }
 
-/** `url` with a query that makes the browser fetch it as a new module. */
-export function retryUrl(url: string, attempt: number): string {
+// Counts every retry in the page, so no two retries share a URL: one the
+// browser already failed would fail again without a request.
+let retries = 0;
+
+/**
+ * `url` with a query no earlier retry used, which makes the browser fetch it
+ * as a new module.
+ */
+export function retryUrl(url: string): string {
+  retries += 1;
   const next = new URL(url);
-  next.searchParams.set('retry', String(attempt));
+  next.searchParams.set('retry', String(retries));
   return next.toString();
 }
 
@@ -139,10 +147,10 @@ export function retryImport<T>(
   options?: RetryLoadOptions,
 ): Promise<T> {
   let failedUrl: string | null = null;
-  return retryLoad(async (attempt) => {
+  return retryLoad(async () => {
     try {
       return failedUrl
-        ? ((await import(/* @vite-ignore */ retryUrl(failedUrl, attempt))) as T)
+        ? ((await import(/* @vite-ignore */ retryUrl(failedUrl))) as T)
         : await load();
     } catch (error) {
       failedUrl = failedModuleUrl(error) ?? failedUrl;

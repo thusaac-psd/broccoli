@@ -101,7 +101,7 @@ test('a bug in the loaded code is not retried by default', async () => {
   assert.equal(calls, 1);
 });
 
-test('the failed module is named by its URL, and a retry gets a fresh one', () => {
+test('the failed module is named by its URL, and every retry gets a new one', () => {
   const chromium = new TypeError(
     'Failed to fetch dynamically imported module: https://oj.lan/assets/cpp-x1.js?v=3',
   );
@@ -117,10 +117,11 @@ test('the failed module is named by its URL, and a retry gets a fresh one', () =
     failedModuleUrl(new TypeError('Importing a module script failed.')),
     null,
   );
-  assert.equal(
-    retryUrl(retryUrl('https://oj.lan/assets/cpp-x1.js?v=3', 1), 2),
-    'https://oj.lan/assets/cpp-x1.js?v=3&retry=2',
-  );
+  const first = retryUrl('https://oj.lan/assets/cpp-x1.js?v=3');
+  const again = retryUrl(first);
+  assert.match(first, /^https:\/\/oj\.lan\/assets\/cpp-x1\.js\?v=3&retry=\d+$/);
+  assert.match(again, /\?v=3&retry=\d+$/);
+  assert.notEqual(first, again);
 });
 
 test('a stylesheet that failed to preload is left to a page reload', async () => {
