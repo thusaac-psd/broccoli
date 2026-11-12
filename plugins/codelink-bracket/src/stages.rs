@@ -140,7 +140,7 @@ fn create_matches(host: &Host, contest: i32, setup: &Setup, round: u8) -> Result
         .into_iter()
         .filter(|(_, m)| m.round == round)
         .collect();
-    if crate::machine::is_scheduled(setup, round) {
+    if setup.is_scheduled(round) {
         for (id, m) in &created {
             if m.phase == Phase::Ordering {
                 executor::tick(host, contest, *id)?;

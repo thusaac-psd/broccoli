@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bracket;
 use crate::executor::{self, DriveError};
-use crate::machine::{self, Event, Rejection};
+use crate::machine::{Event, Rejection};
 use crate::model::{AdjudicationReason, MatchState, Phase, PhaseName, RoundDef, Setup};
 use crate::storage;
 use crate::visibility::{self, VisibilityCtx};
@@ -59,7 +59,7 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     if info.phase == "after" {
         return Err(PluginHttpResponse::error(400, "The contest has ended").into());
     }
-    let event = if machine::is_scheduled(&setup, current.round) {
+    let event = if setup.is_scheduled(current.round) {
         let now = crate::clock::now_ms(host)?;
         let ready = setup
             .stage_clocks

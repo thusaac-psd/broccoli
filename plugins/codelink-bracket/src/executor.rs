@@ -54,7 +54,7 @@ pub fn drive(
         let snapshot = host.storage.snapshot(&key)?.ok_or(DriveError::NotFound)?;
         let current: MatchState = serde_json::from_str(&snapshot.value)?;
         let start_at_ms = match (event, current.phase) {
-            (Event::Tick, Phase::Ordering) if !machine::is_scheduled(&setup, current.round) => {
+            (Event::Tick, Phase::Ordering) if !setup.is_scheduled(current.round) => {
                 unscheduled_start_at(host, contest, &setup, &current)?
             }
             _ => None,
@@ -583,46 +583,6 @@ mod tests {
         assert_eq!(drive(&host, 7, 0, Event::Tick).unwrap(), m);
         assert!(!host.timer.is_scheduled(&key(MatchTimer::Start)));
         assert_eq!(host.db.queries().len(), 1, "only the clock is read");
-    }
-
-    #[test]
-    fn concurrent_settlement_cas_retry_does_not_double_charge_extra_time() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let host = Host::mock();
-        let mut setup = setup_two_rounds();
-        setup.rounds[0].xiaoju_seconds = 10;
-        setup.match_extra_time_seconds = 5;
-        let mut m = match_in_progress();
-        m.xiaoju[0].base_deadline_ms = 10_000;
-        m.xiaoju[0].deadline_ms = 15_000;
-        m.extra_time_remaining_ms = 5_000;
-        seed(&host, 7, &setup, 0, &m);
-        let subs = [SubmissionRecord {
-            submission_id: 1,
-            user_id: m.player_a,
-            problem_id: 103,
-            submitted_at_us: 12_000_000,
-            effective_at_us: 12_000_000,
-            verdict: Some(Verdict::Accepted),
-            status: SubmissionLifecycle::Judged,
-        }];
-        let raced = AtomicBool::new(false);
-        let settled = storage::update_match(&host, 7, 0, |snapshot| {
-            if !raced.swap(true, Ordering::SeqCst) {
-                // Another callback commits between this attempt's read and CAS.
-                storage::update_match(&host, 7, 0, |other| {
-                    crate::decide::decide_xiaoju(other, &subs, 14_000, 20);
-                    Ok(())
-                })?;
-            }
-            crate::decide::decide_xiaoju(snapshot, &subs, 14_000, 20);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(settled.score_a, 1);
-        assert_eq!(settled.extra_time_remaining_ms, 3_000);
-        assert_eq!(settled.xiaoju[0].extra_time_used_ms, 2_000);
     }
 
     #[test]

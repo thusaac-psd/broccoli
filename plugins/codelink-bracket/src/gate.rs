@@ -35,14 +35,14 @@ use broccoli_server_sdk::prelude::*;
 /// frontend can distinguish "wrong problem" from "小局 closed" from
 /// "eliminated" rather than showing one generic error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rejection {
+pub struct SubmissionRejection {
     pub code: String,
     pub message: String,
 }
 
-impl Rejection {
+impl SubmissionRejection {
     fn new(code: &str, message: &str) -> Self {
-        Rejection {
+        SubmissionRejection {
             code: code.to_string(),
             message: message.to_string(),
         }
@@ -92,12 +92,12 @@ pub fn check(
     round_def: &RoundDef,
     viewer: i32,
     problem_id: i32,
-) -> Result<(), Rejection> {
+) -> Result<(), SubmissionRejection> {
     if m.current_problem(round_def, viewer) != Some(problem_id) {
-        return Err(Rejection::not_your_problem());
+        return Err(SubmissionRejection::not_your_problem());
     }
     if m.xiaoju.last().is_some_and(|game| game.decided) {
-        return Err(Rejection::xiaoju_closed());
+        return Err(SubmissionRejection::xiaoju_closed());
     }
     Ok(())
 }
@@ -105,22 +105,22 @@ pub fn check(
 fn resolve_rejection(
     host: &Host,
     event: &BeforeSubmissionEvent,
-) -> Result<Result<SubmissionAdmission, Rejection>, SdkError> {
+) -> Result<Result<SubmissionAdmission, SubmissionRejection>, SdkError> {
     let Some(contest_id) = event.contest_id else {
-        return Ok(Err(Rejection::not_in_match()));
+        return Ok(Err(SubmissionRejection::not_in_match()));
     };
     let Some(setup) = storage::load_setup(host, contest_id)? else {
-        return Ok(Err(Rejection::not_in_match()));
+        return Ok(Err(SubmissionRejection::not_in_match()));
     };
     let Some(round) = setup.problem_round(event.problem_id) else {
         // Not part of this bracket at all this round -- certainly not
         // "yours" to submit to.
-        return Ok(Err(Rejection::not_your_problem()));
+        return Ok(Err(SubmissionRejection::not_your_problem()));
     };
 
     let matches = storage::load_all_matches(host, contest_id)?;
     let Some(m) = storage::find_players_match(&matches, round, event.user_id) else {
-        return Ok(Err(Rejection::not_in_match()));
+        return Ok(Err(SubmissionRejection::not_in_match()));
     };
     let round_def = setup
         .round_for_match(m.round, m.pos)
@@ -136,7 +136,7 @@ fn resolve_rejection(
         .ok_or_else(|| SdkError::Other("match disappeared during submission".into()))?;
     let m: MatchState = serde_json::from_str(&snapshot.value)?;
     if m.phase != Phase::Playing {
-        return Ok(Err(Rejection::match_not_started()));
+        return Ok(Err(SubmissionRejection::match_not_started()));
     }
 
     if let Err(rejection) = check(&m, &round_def, event.user_id, event.problem_id) {
@@ -151,7 +151,7 @@ fn resolve_rejection(
         setup.penalty_seconds,
     )?;
     if feedback.pending_submission_id.is_some() {
-        return Ok(Err(Rejection::new(
+        return Ok(Err(SubmissionRejection::new(
             "SUBMISSION_IN_FLIGHT",
             "Wait for your previous submission's result before submitting again.",
         )));
@@ -163,11 +163,11 @@ fn resolve_rejection(
     let delay_seconds = feedback.delay_seconds;
     let clock = crate::clock::clock(host, contest_id)?;
     if !game.contains_submission_at_us(clock.now.saturating_mul(1_000)) {
-        return Ok(Err(Rejection::xiaoju_closed()));
+        return Ok(Err(SubmissionRejection::xiaoju_closed()));
     }
     let deadline_ms = clock.cutoff(game.deadline_ms);
     if clock.now >= deadline_ms {
-        return Ok(Err(Rejection::new(
+        return Ok(Err(SubmissionRejection::new(
             "SUBMISSION_TOO_LATE",
             "The submission window for this game has closed.",
         )));

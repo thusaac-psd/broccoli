@@ -165,24 +165,16 @@ pub enum XiaojuOutcome {
 /// An unresolved submission only blocks an AC with a later effective arrival.
 /// After the deadline, such a blocker enters `AwaitingJudge`.
 ///
+/// `cutoff_ms` is the game's deadline, or the contest end if that comes
+/// first: submissions close then. Without an AC, an early contest-end cutoff
+/// is left to the caller's staff adjudication rather than scored as a normal
+/// timeout, since the game's own deadline has not passed.
+///
 /// Does not validate that `problem_id` is the player's actual current
 /// problem -- that is `gate.rs`'s job (submissions to the wrong problem are
 /// rejected before they exist at all); this function trusts every record it
 /// is handed.
 pub fn decide_xiaoju(
-    m: &mut MatchState,
-    subs: &[SubmissionRecord],
-    now_ms: i64,
-    penalty_seconds: i64,
-) -> XiaojuOutcome {
-    let cutoff_ms = m.xiaoju.last().map_or(now_ms, |game| game.deadline_ms);
-    decide_game_at_cutoff(m, subs, now_ms, cutoff_ms, penalty_seconds)
-}
-
-/// The contest end can close submissions before the game's own deadline.
-/// Without an AC, that early cutoff still goes through the caller's staff
-/// adjudication path rather than being scored as a normal timeout.
-pub(crate) fn decide_game_at_cutoff(
     m: &mut MatchState,
     subs: &[SubmissionRecord],
     now_ms: i64,
@@ -364,6 +356,17 @@ pub fn match_outcome(m: &MatchState, round_def: &RoundDef) -> Option<MatchOutcom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decide with the game's own deadline as the cutoff.
+    fn at_deadline(
+        m: &mut MatchState,
+        subs: &[SubmissionRecord],
+        now_ms: i64,
+        penalty_seconds: i64,
+    ) -> XiaojuOutcome {
+        let cutoff_ms = m.xiaoju.last().map_or(now_ms, |game| game.deadline_ms);
+        decide_xiaoju(m, subs, now_ms, cutoff_ms, penalty_seconds)
+    }
     use crate::model::{Phase, Setup, XiaojuState};
 
     fn match_in_progress_at_xiaoju(index: u8) -> MatchState {
@@ -414,12 +417,12 @@ mod tests {
             let mut m = game_with_extra_time();
             let subs = [sub(10, 103, submitted_at_us, Some(Verdict::Accepted))];
             // The verdict arrives long after the final deadline.
-            let outcome = decide_xiaoju(&mut m, &subs, 10_000, 20);
+            let outcome = at_deadline(&mut m, &subs, 10_000, 20);
             assert_eq!(outcome, XiaojuOutcome::Decided { winner: Some(10) });
             assert_eq!(m.extra_time_remaining_ms, 1_000 - used);
             assert_eq!(m.xiaoju[0].extra_time_used_ms, used);
             let settled = m.clone();
-            assert_eq!(decide_xiaoju(&mut m, &subs, 20_000, 20), outcome);
+            assert_eq!(at_deadline(&mut m, &subs, 20_000, 20), outcome);
             assert_eq!(m, settled, "a repeated callback must not charge twice");
         }
     }
@@ -429,7 +432,7 @@ mod tests {
         let mut m = game_with_extra_time();
         let mut subs = [sub(20, 203, 2_400_000, None)];
         assert!(matches!(
-            decide_xiaoju(&mut m, &subs, 3_000, 20),
+            at_deadline(&mut m, &subs, 3_000, 20),
             XiaojuOutcome::AwaitingJudge { .. }
         ));
         assert_eq!(m.extra_time_remaining_ms, 1_000);
@@ -437,7 +440,7 @@ mod tests {
         subs[0].verdict = Some(Verdict::Accepted);
         subs[0].status = SubmissionLifecycle::Judged;
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 8_000, 20),
+            at_deadline(&mut m, &subs, 8_000, 20),
             XiaojuOutcome::Decided { winner: Some(20) }
         );
         assert_eq!(m.extra_time_remaining_ms, 600);
@@ -449,13 +452,10 @@ mod tests {
         let mut accepted = sub(10, 103, 1_500_000, Some(Verdict::Accepted));
         accepted.effective_at_us = 2_500_000;
         let subs = [accepted];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 2_400, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 2_400, 20), XiaojuOutcome::NotYet);
         assert_eq!(m.extra_time_remaining_ms, 1_000);
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 8_000, 20),
+            at_deadline(&mut m, &subs, 8_000, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
         assert_eq!(m.extra_time_remaining_ms, 1_000);
@@ -469,7 +469,7 @@ mod tests {
             let mut accepted = sub(10, 103, 2_500_000, Some(Verdict::Accepted));
             accepted.effective_at_us = effective_at_us;
             assert_eq!(
-                decide_xiaoju(&mut m, &[accepted], 3_000, 20),
+                at_deadline(&mut m, &[accepted], 3_000, 20),
                 XiaojuOutcome::Decided { winner: Some(10) }
             );
             assert_eq!(m.extra_time_remaining_ms, 500);
@@ -483,7 +483,7 @@ mod tests {
         let mut accepted = sub(10, 103, 2_200_000, Some(Verdict::Accepted));
         accepted.effective_at_us = 20_000_000;
         assert_eq!(
-            decide_game_at_cutoff(&mut m, &[accepted], 2_500, 2_500, 20),
+            decide_xiaoju(&mut m, &[accepted], 2_500, 2_500, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
         assert_eq!(m.extra_time_remaining_ms, 800);
@@ -497,7 +497,7 @@ mod tests {
         let mut b = sub(20, 203, 2_500_000, Some(Verdict::Accepted));
         b.effective_at_us = 10_000_000;
         assert_eq!(
-            decide_xiaoju(&mut m, &[a, b], 3_000, 20),
+            at_deadline(&mut m, &[a, b], 3_000, 20),
             XiaojuOutcome::Decided { winner: Some(20) }
         );
         assert_eq!(m.extra_time_remaining_ms, 500);
@@ -512,7 +512,7 @@ mod tests {
                 sub(20, 203, 3_000_000, verdict),
             ];
             assert_eq!(
-                decide_xiaoju(&mut m, &subs, 3_000, 20),
+                at_deadline(&mut m, &subs, 3_000, 20),
                 XiaojuOutcome::Decided { winner: None }
             );
             assert_eq!(m.extra_time_remaining_ms, 0);
@@ -524,7 +524,7 @@ mod tests {
     fn a_tiebreak_does_not_charge_the_regular_games_allowance() {
         let mut m = game_with_extra_time();
         m.xiaoju[0].index = 3;
-        decide_xiaoju(&mut m, &[], 3_000, 20);
+        at_deadline(&mut m, &[], 3_000, 20);
         assert_eq!(m.extra_time_remaining_ms, 1_000);
         assert_eq!(m.xiaoju[0].extra_time_used_ms, 0);
     }
@@ -574,12 +574,12 @@ mod tests {
         let mut a = sub(10, 103, 250_000_000, Some(Verdict::Accepted)); // 04:10
         a.effective_at_us += 20_000_000; // 04:30
         assert_eq!(
-            decide_xiaoju(&mut m, &[a.clone()], 251_000, 20),
+            at_deadline(&mut m, &[a.clone()], 251_000, 20),
             XiaojuOutcome::NotYet
         );
         let b = sub(20, 203, 260_000_000, Some(Verdict::Accepted)); // 04:20
         assert_eq!(
-            decide_xiaoju(&mut m, &[a, b], 261_000, 20),
+            at_deadline(&mut m, &[a, b], 261_000, 20),
             XiaojuOutcome::Decided { winner: Some(20) }
         );
     }
@@ -626,7 +626,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                decide_xiaoju(&mut m, &subs, 391_000, 20),
+                at_deadline(&mut m, &subs, 391_000, 20),
                 XiaojuOutcome::Decided {
                     winner: Some(winner)
                 }
@@ -642,11 +642,11 @@ mod tests {
             let (mut m, subs) = race_with_penalties(2, 1, penalty_seconds);
             let at_ms = 390_000 + penalty_seconds * 1_000;
             assert_eq!(
-                decide_xiaoju(&mut m, &subs, at_ms - 1, penalty_seconds),
+                at_deadline(&mut m, &subs, at_ms - 1, penalty_seconds),
                 XiaojuOutcome::NotYet
             );
             assert_eq!(
-                decide_xiaoju(&mut m, &subs, at_ms, penalty_seconds),
+                at_deadline(&mut m, &subs, at_ms, penalty_seconds),
                 XiaojuOutcome::Decided { winner: Some(10) }
             );
         }
@@ -665,14 +665,14 @@ mod tests {
                 pending.effective_at_us = effective_at_us;
                 subs.push(pending);
                 assert_eq!(
-                    decide_xiaoju(&mut m, &subs, 391_000, 20),
+                    at_deadline(&mut m, &subs, 391_000, 20),
                     XiaojuOutcome::NotYet
                 );
                 let pending = subs.last_mut().unwrap();
                 pending.status = SubmissionLifecycle::Judged;
                 pending.verdict = Some(Verdict::Accepted);
                 assert_eq!(
-                    decide_xiaoju(&mut m, &subs, 392_000, 20),
+                    at_deadline(&mut m, &subs, 392_000, 20),
                     XiaojuOutcome::Decided { winner: Some(20) }
                 );
             }
@@ -686,7 +686,7 @@ mod tests {
         pending.effective_at_us = 420_000_000;
         subs.push(pending);
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 391_000, 20),
+            at_deadline(&mut m, &subs, 391_000, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -698,7 +698,7 @@ mod tests {
         b.effective_at_us = 440_000_000;
         subs.push(b);
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 401_000, 20),
+            at_deadline(&mut m, &subs, 401_000, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -747,11 +747,11 @@ mod tests {
         let mut a = sub(10, 103, 300_000_000, Some(Verdict::Accepted));
         a.effective_at_us += 4 * 20_000_000;
         assert_eq!(
-            decide_xiaoju(&mut m, &[a.clone()], 379_999, 20),
+            at_deadline(&mut m, &[a.clone()], 379_999, 20),
             XiaojuOutcome::NotYet
         );
         assert_eq!(
-            decide_xiaoju(&mut m, &[a], 380_000, 20),
+            at_deadline(&mut m, &[a], 380_000, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -763,7 +763,7 @@ mod tests {
         a.effective_at_us += 20_000_000;
         let b = sub(20, 203, 61_000_000, Some(Verdict::Accepted));
         assert_eq!(
-            decide_xiaoju(&mut m, &[a, b], 62_000, 20),
+            at_deadline(&mut m, &[a, b], 62_000, 20),
             XiaojuOutcome::Decided { winner: Some(20) }
         );
     }
@@ -781,7 +781,7 @@ mod tests {
             };
             let mut a = sub(10, 103, 350_000_000, verdict);
             a.effective_at_us += 20_000_000;
-            assert_eq!(decide_xiaoju(&mut m, &[a], 360_000, 20), expected);
+            assert_eq!(at_deadline(&mut m, &[a], 360_000, 20), expected);
         }
     }
 
@@ -811,7 +811,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
+            at_deadline(&mut m, &subs, 9_999, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -833,10 +833,7 @@ mod tests {
                 SubmissionLifecycle::Judged,
             ),
         ];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 9_999, 20), XiaojuOutcome::NotYet);
     }
 
     #[test]
@@ -860,7 +857,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
+            at_deadline(&mut m, &subs, 9_999, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -875,10 +872,7 @@ mod tests {
             sub(10, 103, 1_000, None),
             sub(20, 203, 1_500, Some(Verdict::Accepted)),
         ];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 9_999, 20), XiaojuOutcome::NotYet);
     }
 
     #[test]
@@ -891,7 +885,7 @@ mod tests {
             sub(20, 203, 2_000, None),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
+            at_deadline(&mut m, &subs, 9_999, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -902,7 +896,7 @@ mod tests {
         let mut m = match_in_progress_at_xiaoju_with_deadline(0, 5_000);
         let subs = [sub(10, 103, 1_000, Some(Verdict::WrongAnswer))];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 5_001, 20),
+            at_deadline(&mut m, &subs, 5_001, 20),
             XiaojuOutcome::Decided { winner: None }
         );
     }
@@ -911,10 +905,7 @@ mod tests {
     fn before_the_deadline_with_no_ac_is_not_yet_decided() {
         let mut m = match_in_progress_at_xiaoju_with_deadline(0, 5_000);
         let subs = [sub(10, 103, 1_000, Some(Verdict::WrongAnswer))];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 4_999, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 4_999, 20), XiaojuOutcome::NotYet);
     }
 
     #[test]
@@ -924,9 +915,9 @@ mod tests {
         // result.
         let mut m = match_in_progress_at_xiaoju(0);
         let subs = [sub(10, 103, 1_000, Some(Verdict::Accepted))];
-        let first = decide_xiaoju(&mut m, &subs, 9_999, 20);
+        let first = at_deadline(&mut m, &subs, 9_999, 20);
         let score_after_first = (m.score_a, m.score_b);
-        let second = decide_xiaoju(&mut m, &subs, 9_999, 20);
+        let second = at_deadline(&mut m, &subs, 9_999, 20);
         assert_eq!(first, second);
         assert_eq!(
             (m.score_a, m.score_b),
@@ -956,10 +947,7 @@ mod tests {
                 SubmissionLifecycle::Judged,
             ),
         ];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 9_999, 20), XiaojuOutcome::NotYet);
     }
 
     #[test]
@@ -990,10 +978,7 @@ mod tests {
                 SubmissionLifecycle::Judged,
             ),
         ];
-        assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
-            XiaojuOutcome::NotYet
-        );
+        assert_eq!(at_deadline(&mut m, &subs, 9_999, 20), XiaojuOutcome::NotYet);
     }
 
     #[test]
@@ -1013,7 +998,7 @@ mod tests {
             SubmissionLifecycle::Judged,
         )];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 5_001, 20),
+            at_deadline(&mut m, &subs, 5_001, 20),
             XiaojuOutcome::AwaitingJudge {
                 blocking_submission_id: 7
             }
@@ -1048,7 +1033,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 9_999, 20),
+            at_deadline(&mut m, &subs, 9_999, 20),
             XiaojuOutcome::Decided { winner: Some(20) }
         );
     }
@@ -1074,7 +1059,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 5_001, 20),
+            at_deadline(&mut m, &subs, 5_001, 20),
             XiaojuOutcome::AwaitingJudge {
                 blocking_submission_id: 77
             }
@@ -1107,7 +1092,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            decide_xiaoju(&mut m, &subs, 5_001, 20),
+            at_deadline(&mut m, &subs, 5_001, 20),
             XiaojuOutcome::Decided { winner: Some(10) }
         );
     }
@@ -1303,5 +1288,48 @@ mod tests {
             outcome(&m, &setup()),
             Some(MatchOutcome::TiebreaksExhausted)
         );
+    }
+
+    #[test]
+    fn a_settlement_retried_after_a_lost_write_charges_extra_time_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::storage;
+        use crate::test_support::{seed, setup_two_rounds};
+        use broccoli_server_sdk::Host;
+
+        let host = Host::mock();
+        let mut setup = setup_two_rounds();
+        setup.rounds[0].xiaoju_seconds = 10;
+        setup.match_extra_time_seconds = 5;
+        let mut m = match_in_progress_at_xiaoju_with_deadline(0, 15_000);
+        m.xiaoju[0].base_deadline_ms = 10_000;
+        m.extra_time_remaining_ms = 5_000;
+        seed(&host, 7, &setup, 0, &m);
+        let subs = [SubmissionRecord {
+            submission_id: 1,
+            user_id: m.player_a,
+            problem_id: 103,
+            submitted_at_us: 12_000_000,
+            effective_at_us: 12_000_000,
+            verdict: Some(Verdict::Accepted),
+            status: SubmissionLifecycle::Judged,
+        }];
+        let raced = AtomicBool::new(false);
+        let settled = storage::update_match(&host, 7, 0, |snapshot| {
+            if !raced.swap(true, Ordering::SeqCst) {
+                // Another callback commits between this attempt's read and CAS.
+                storage::update_match(&host, 7, 0, |other| {
+                    at_deadline(other, &subs, 14_000, 20);
+                    Ok(())
+                })?;
+            }
+            at_deadline(snapshot, &subs, 14_000, 20);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(settled.score_a, 1);
+        assert_eq!(settled.extra_time_remaining_ms, 3_000);
+        assert_eq!(settled.xiaoju[0].extra_time_used_ms, 2_000);
     }
 }

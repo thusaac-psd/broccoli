@@ -19,12 +19,7 @@ pub fn stage_open_at_ms(
     round: u8,
     contest_start_ms: i64,
 ) -> Option<i64> {
-    if setup
-        .rounds
-        .get(usize::from(round.checked_sub(1)?))?
-        .start_at_ms
-        .is_some()
-    {
+    if setup.is_scheduled(round) {
         let clock = setup.stage_clocks.get(&round)?;
         return (!clock.awaiting_reschedule).then_some(clock.start_at_ms);
     }
@@ -72,12 +67,7 @@ pub fn start_at_ms(
     m: &MatchState,
     contest_start_ms: i64,
 ) -> Option<i64> {
-    if setup
-        .rounds
-        .get(usize::from(m.round.checked_sub(1)?))?
-        .start_at_ms
-        .is_some()
-    {
+    if setup.is_scheduled(m.round) {
         let stage = setup.stage_clocks.get(&m.round)?;
         return (!stage.awaiting_reschedule
             && matches!(m.phase, Phase::Ordering | Phase::Preparing))

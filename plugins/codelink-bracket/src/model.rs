@@ -169,6 +169,15 @@ impl Setup {
         }
     }
 
+    /// Whether `round` follows a shared stage schedule (see
+    /// `RoundDef::start_at_ms`).
+    pub fn is_scheduled(&self, round: u8) -> bool {
+        round
+            .checked_sub(1)
+            .and_then(|index| self.rounds.get(usize::from(index)))
+            .is_some_and(|r| r.start_at_ms.is_some())
+    }
+
     pub fn problem_round(&self, problem: i32) -> Option<u8> {
         self.rounds
             .iter()

@@ -152,6 +152,9 @@ pub enum Rejection {
     NotParticipant(i32),
     AlreadyDecided,
     NotAwaitingStart,
+    /// Opening another game would exceed the byte game index; setup
+    /// validation caps a stage at 256 games.
+    TooManyGames,
     TimeOverflow(&'static str),
 }
 
@@ -163,6 +166,7 @@ impl std::fmt::Display for Rejection {
             }
             Rejection::AlreadyDecided => f.write_str("this match has already been decided"),
             Rejection::NotAwaitingStart => f.write_str("match is not awaiting start"),
+            Rejection::TooManyGames => f.write_str("this match has no game index left"),
             Rejection::TimeOverflow(what) => write!(f, "{what} is out of range"),
         }
     }
@@ -179,7 +183,7 @@ pub fn transition(
     match event {
         Event::Tick => tick(&mut next, inputs, &mut wakeups)?,
         Event::Start => {
-            if next.phase != Phase::Ordering || is_scheduled(inputs.setup, next.round) {
+            if next.phase != Phase::Ordering || inputs.setup.is_scheduled(next.round) {
                 return Err(Rejection::NotAwaitingStart);
             }
             bracket::fill_missing_orders(&mut next);
@@ -252,7 +256,7 @@ fn finish(
 /// The wakeup purpose a match waits on in its phase.
 fn phase_timer(m: &MatchState, setup: &Setup) -> Option<MatchTimer> {
     match m.phase {
-        Phase::Ordering if is_scheduled(setup, m.round) => Some(MatchTimer::OrderingClose),
+        Phase::Ordering if setup.is_scheduled(m.round) => Some(MatchTimer::OrderingClose),
         Phase::Ordering => Some(MatchTimer::Start),
         Phase::Preparing => Some(MatchTimer::GameStart),
         Phase::Playing => Some(MatchTimer::Deadline { game: last_game(m) }),
@@ -274,14 +278,6 @@ fn next_game(m: &MatchState) -> u8 {
     u8::try_from(m.xiaoju.len()).unwrap_or(u8::MAX)
 }
 
-/// Whether `round` follows a shared stage schedule.
-pub fn is_scheduled(setup: &Setup, round: u8) -> bool {
-    round
-        .checked_sub(1)
-        .and_then(|index| setup.rounds.get(usize::from(index)))
-        .is_some_and(|r| r.start_at_ms.is_some())
-}
-
 fn adjudicate(m: &mut MatchState, adjudication: Adjudication) {
     m.phase = Phase::NeedsAdjudication { adjudication };
 }
@@ -298,7 +294,7 @@ fn tick(
     let Inputs { setup, clock, .. } = *inputs;
     let now = clock.now;
     match m.phase {
-        Phase::Ordering | Phase::Preparing if is_scheduled(setup, m.round) => {
+        Phase::Ordering | Phase::Preparing if setup.is_scheduled(m.round) => {
             let Some(stage) = setup
                 .stage_clocks
                 .get(&m.round)
@@ -385,7 +381,7 @@ fn play(
     };
     let index = game.index;
     let cutoff = clock.cutoff(game.deadline_ms);
-    let mut outcome = decide::decide_game_at_cutoff(m, subs, now, cutoff, setup.penalty_seconds);
+    let mut outcome = decide::decide_xiaoju(m, subs, now, cutoff, setup.penalty_seconds);
 
     // Past the contest end nobody can submit, so an undecided game cannot be
     // won any more. A verdict still in flight may yet settle it (wait for it
@@ -538,7 +534,7 @@ fn open_game(
             .ok_or(Rejection::TimeOverflow("extra time"))?;
     }
     let durations = *m.game_durations.get_or_insert(round.game_durations());
-    let index = u8::try_from(m.xiaoju.len()).map_err(|_| Rejection::TimeOverflow("game index"))?;
+    let index = u8::try_from(m.xiaoju.len()).map_err(|_| Rejection::TooManyGames)?;
     let regular = m.is_regular_game(index);
     let seconds = if regular {
         durations.xiaoju_seconds

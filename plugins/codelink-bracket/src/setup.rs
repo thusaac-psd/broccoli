@@ -310,7 +310,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     // Also recover an interrupted opening of the most recently frozen stage.
     for round in 1..=setup.rounds.len() {
-        if setup.rounds[round - 1].start_at_ms.is_some()
+        if setup.is_scheduled(round as u8)
             || (setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()))
                 .contains(&round)
         {
