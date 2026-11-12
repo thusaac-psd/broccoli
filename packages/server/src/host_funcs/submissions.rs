@@ -627,4 +627,76 @@ mod tests {
             .expect("count");
         assert_eq!(results, 1);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_standing_verdict_resolves_the_submissions_dead_letter() {
+        use crate::dlq::{DlqService, DlqSubject};
+        use crate::entity::dead_letter_message;
+
+        let (_pg, db) = crate::test_support::postgres().await;
+        let (sub, v1) = seed_judged(&db).await;
+        let dead_letter = || async {
+            DlqService::new(&db)
+                .dead_letter(
+                    DlqSubject::Submission(sub.id),
+                    Some(sub.id),
+                    serde_json::json!({}),
+                    common::DlqErrorCode::StuckJob,
+                    "stuck",
+                )
+                .await
+                .expect("dead letter");
+            dead_letter_message::Entity::find()
+                .one(&db)
+                .await
+                .expect("db")
+                .expect("row")
+        };
+        let _ = v1;
+
+        // A system-error verdict leaves it open.
+        dead_letter().await;
+        let j = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        let mut update = finish(&j, Verdict::SystemError, 0.0);
+        update.verdict = Some(Some(Verdict::SystemError));
+        assert_eq!(submission_update(&db, update).await, 1);
+        let row = dead_letter_message::Entity::find()
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("row");
+        assert!(!row.resolved, "a system error does not resolve it");
+
+        // A verdict that stands resolves it, as the system rather than an operator.
+        dead_letter().await;
+        let j = open(
+            &db,
+            sub.id,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: sub.user_id,
+                target_worker_id: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            submission_update(&db, finish(&j, Verdict::WrongAnswer, 0.0)).await,
+            1
+        );
+        let row = dead_letter_message::Entity::find()
+            .one(&db)
+            .await
+            .expect("db")
+            .expect("row");
+        assert!(row.resolved);
+        assert!(row.resolved_at.is_some());
+        assert_eq!(row.resolved_by, None);
+    }
 }

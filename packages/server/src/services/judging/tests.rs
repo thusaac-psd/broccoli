@@ -616,3 +616,57 @@ async fn a_code_run_follows_the_same_claim_and_requeue_rules() {
         "the lost dispatch is fenced"
     );
 }
+
+async fn abandon(db: &DatabaseConnection, retries: i32) {
+    exec(
+        db,
+        &format!(
+            "UPDATE submission_judgement SET retry_count = {retries}, status = 'Running', \
+             is_finalized = FALSE, finalized_at = NULL, owner_server_id = 'dead', \
+             lease_heartbeat_at = NOW() - INTERVAL '2 minutes'"
+        ),
+    )
+    .await;
+}
+
+async fn steal(db: &DatabaseConnection) -> Reclaimed {
+    reclaim_abandoned(
+        db,
+        Unit::Judgement,
+        Abandoned::LeaseLapsed { lease_ttl_secs: 60 },
+        RetryBudget::new(0),
+        10,
+        NO_TYPES,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_recurring_exhaustion_reopens_the_one_dead_letter_of_its_submission() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    abandon(&db, 0).await;
+    assert_eq!(steal(&db).await.exhausted, 1);
+    let first = dead_letter_message::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    crate::dlq::DlqService::new(&db)
+        .resolve(first.id, 1)
+        .await
+        .unwrap();
+
+    abandon(&db, 0).await;
+    assert_eq!(steal(&db).await.exhausted, 1);
+    let rows = dead_letter_message::Entity::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1, "one row per subject");
+    let row = &rows[0];
+    assert_eq!(row.id, first.id);
+    assert_eq!(row.submission_id, Some(s.id));
+    assert!(!row.resolved, "the recurrence reopens it");
+    assert_eq!(row.resolved_by, None);
+    assert_eq!(row.retry_count, 2, "both occurrences are counted");
+    assert_eq!(row.retry_history.as_array().map(Vec::len), Some(2));
+}

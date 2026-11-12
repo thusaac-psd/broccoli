@@ -52,6 +52,10 @@ sidebar_position: 2
 - `submission_judgement.dispatch_retries` 与 `code_run.dispatch_retries` 统计分发被放弃后的重新入队次数，预算为 `server.max_dispatch_retries`。租约窃取与卡死任务检测器共享该预算。
 - `submission.system_error_retries` 统计自上次重新评测以来的系统错误重试次数，预算为 `server.max_system_error_retries`。每次这类重试都让评测记录获得全新的分发预算。重新评测会将其清零。
 
+## 死信
+
+耗尽分发重试的单元会以其主体写入死信队列：当前评测记录的主体是其提交，其余情况是评测记录或代码运行本身（`DlqSubject`）。每个主体至多有一行 `dead_letter_message`。再次写入同一主体会重新打开该行，并把这次发生追加到其重试历史，因此 `retry_count` 统计发生次数。当主体以成立的判定结束（系统错误以外的任何终态）时，同一条语句会解决该行，并让 `resolved_by` 保持为 NULL。运维人员的解决或死信重试会记录该运维人员。死信重试只会重新评测判定为 `SystemError` 的提交。
+
 ## 锁
 
 语句先锁提交行，再锁其评测记录。扫描用 `FOR UPDATE OF ... SKIP LOCKED` 同时锁定单元及其提交，因此扫描从不等待，也不会与重新评测或插件写入死锁。

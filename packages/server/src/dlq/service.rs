@@ -28,6 +28,57 @@ pub struct DlqStats {
     pub unresolved_by_error_code: HashMap<String, u64>,
 }
 
+/// What a stuck-work dead letter is about. Each subject has at most one
+/// row, keyed by [`DlqSubject::message_id`]: dead-lettering the same subject
+/// again reopens that row and appends the occurrence to its retry history,
+/// and the judging lifecycle resolves it automatically when the subject
+/// reaches a terminal state other than a system error (see
+/// `services::judging`), leaving `resolved_by` NULL. An operator resolution
+/// always names the operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DlqSubject {
+    /// A submission whose current judgement spent its dispatch retries.
+    Submission(i32),
+    /// A non-current (deferred rejudge) judgement that spent its retries.
+    Judgement(i32),
+    /// A code run that spent its retries.
+    CodeRun(i32),
+}
+
+impl DlqSubject {
+    fn prefix(self) -> &'static str {
+        match self {
+            DlqSubject::Submission(_) => "stuck-submission-",
+            DlqSubject::Judgement(_) => "stuck-submission-judgement-",
+            DlqSubject::CodeRun(_) => "stuck-code-run-",
+        }
+    }
+
+    fn id(self) -> i32 {
+        match self {
+            DlqSubject::Submission(id) | DlqSubject::Judgement(id) | DlqSubject::CodeRun(id) => id,
+        }
+    }
+
+    pub fn message_type(self) -> DlqMessageType {
+        match self {
+            DlqSubject::Submission(_) => DlqMessageType::StuckSubmission,
+            DlqSubject::Judgement(_) => DlqMessageType::StuckSubmissionJudgement,
+            DlqSubject::CodeRun(_) => DlqMessageType::StuckCodeRun,
+        }
+    }
+
+    pub fn message_id(self) -> String {
+        format!("{}{}", self.prefix(), self.id())
+    }
+
+    /// SQL for the message id of the subject of this kind whose id is the
+    /// SQL expression `id`.
+    pub(crate) fn sql_message_id(self, id: &str) -> String {
+        format!("('{}' || {id})", self.prefix())
+    }
+}
+
 pub struct DlqService<'a, C: ConnectionTrait> {
     conn: &'a C,
 }
@@ -67,34 +118,50 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         self.insert_entry(&envelope.message_id, model).await
     }
 
-    pub async fn create_entry(
+    /// Dead-letters `subject`: inserts its row, or reopens the existing one
+    /// with the new error and payload and appends this occurrence to its
+    /// retry history. `retry_count` is the number of occurrences.
+    pub async fn dead_letter(
         &self,
-        message_id: String,
-        message_type: DlqMessageType,
+        subject: DlqSubject,
         submission_id: Option<i32>,
         payload: serde_json::Value,
         error_code: DlqErrorCode,
-        error_message: String,
-    ) -> Result<dead_letter_message::Model, DbErr> {
-        let now = Utc::now();
-        let model = dead_letter_message::ActiveModel {
-            message_id: Set(message_id.clone()),
-            message_type: Set(message_type.to_string()),
-            submission_id: Set(submission_id),
-            payload: Set(payload),
-            error_message: Set(error_message),
-            error_code: Set(error_code.to_string()),
-            retry_count: Set(0),
-            retry_history: Set(serde_json::json!([])),
-            first_failed_at: Set(now),
-            created_at: Set(now),
-            resolved: Set(false),
-            resolved_at: Set(None),
-            resolved_by: Set(None),
-            ..Default::default()
-        };
-
-        self.insert_entry(&message_id, model).await
+        error_message: &str,
+    ) -> Result<(), DbErr> {
+        self.conn
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                r#"INSERT INTO dead_letter_message AS d
+                       (message_id, direction, submission_id, payload, error_message, error_code,
+                        retry_count, retry_history, first_failed_at, created_at, resolved)
+                   VALUES ($1, $2, $3, $4, $5, $6, 1,
+                           jsonb_build_array(jsonb_build_object(
+                               'attempt', 1, 'error', $5::text, 'timestamp', NOW())),
+                           NOW(), NOW(), FALSE)
+                   ON CONFLICT (message_id) DO UPDATE SET
+                       payload = EXCLUDED.payload,
+                       error_message = EXCLUDED.error_message,
+                       error_code = EXCLUDED.error_code,
+                       retry_history = d.retry_history || jsonb_build_array(jsonb_build_object(
+                           'attempt', jsonb_array_length(d.retry_history) + 1,
+                           'error', EXCLUDED.error_message,
+                           'timestamp', NOW())),
+                       retry_count = jsonb_array_length(d.retry_history) + 1,
+                       resolved = FALSE,
+                       resolved_at = NULL,
+                       resolved_by = NULL"#,
+                [
+                    subject.message_id().into(),
+                    subject.message_type().to_string().into(),
+                    submission_id.into(),
+                    payload.into(),
+                    error_message.into(),
+                    error_code.to_string().into(),
+                ],
+            ))
+            .await?;
+        Ok(())
     }
 
     async fn insert_entry(
@@ -175,7 +242,8 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             .await
     }
 
-    pub async fn resolve(&self, id: i32, resolved_by: Option<i32>) -> Result<ResolveResult, DbErr> {
+    /// Resolves message `id` on behalf of operator `resolved_by`.
+    pub async fn resolve(&self, id: i32, resolved_by: i32) -> Result<ResolveResult, DbErr> {
         let update = dead_letter_message::Entity::update_many()
             .col_expr(
                 dead_letter_message::Column::Resolved,
@@ -187,7 +255,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedBy,
-                sea_orm::sea_query::Expr::value(resolved_by),
+                sea_orm::sea_query::Expr::value(Some(resolved_by)),
             )
             .filter(dead_letter_message::Column::Id.eq(id))
             .filter(dead_letter_message::Column::Resolved.eq(false));
@@ -254,7 +322,8 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         })
     }
 
-    pub async fn resolve_many(&self, ids: &[i32], resolved_by: Option<i32>) -> Result<u64, DbErr> {
+    /// Resolves messages `ids` on behalf of operator `resolved_by`.
+    pub async fn resolve_many(&self, ids: &[i32], resolved_by: i32) -> Result<u64, DbErr> {
         let result = dead_letter_message::Entity::update_many()
             .col_expr(
                 dead_letter_message::Column::Resolved,
@@ -266,7 +335,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedBy,
-                sea_orm::sea_query::Expr::value(resolved_by),
+                sea_orm::sea_query::Expr::value(Some(resolved_by)),
             )
             .filter(dead_letter_message::Column::Id.is_in(ids.to_vec()))
             .filter(dead_letter_message::Column::Resolved.eq(false))
@@ -274,16 +343,6 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             .await?;
 
         Ok(result.rows_affected)
-    }
-
-    pub async fn has_unresolved_entry(&self, submission_id: i32) -> Result<bool, DbErr> {
-        let count = dead_letter_message::Entity::find()
-            .filter(dead_letter_message::Column::SubmissionId.eq(submission_id))
-            .filter(dead_letter_message::Column::Resolved.eq(false))
-            .count(self.conn)
-            .await?;
-
-        Ok(count > 0)
     }
 }
 

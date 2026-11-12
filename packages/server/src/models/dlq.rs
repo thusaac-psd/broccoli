@@ -36,15 +36,20 @@ pub struct DlqMessageResponse {
     pub error_code: String,
     #[schema(example = "Database connection timeout")]
     pub error_message: String,
+    /// Times this message was dead-lettered: a stuck job that is dead-lettered
+    /// again reopens its message and counts here.
     #[schema(example = 3)]
     pub retry_count: i32,
     #[schema(example = "2025-09-01T08:00:00Z")]
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
+    /// Resolved by an operator, or automatically once the stuck submission,
+    /// judgement or code run finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// The operator who resolved it; null when it was resolved automatically.
     pub resolved_by: Option<i32>,
 }
 
@@ -82,6 +87,8 @@ pub struct DlqMessageDetailResponse {
     pub error_code: String,
     #[schema(example = "Database connection timeout")]
     pub error_message: String,
+    /// Times this message was dead-lettered: a stuck job that is dead-lettered
+    /// again reopens its message and counts here.
     #[schema(example = 3)]
     pub retry_count: i32,
     pub retry_history: serde_json::Value,
@@ -89,9 +96,12 @@ pub struct DlqMessageDetailResponse {
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
+    /// Resolved by an operator, or automatically once the stuck submission,
+    /// judgement or code run finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// The operator who resolved it; null when it was resolved automatically.
     pub resolved_by: Option<i32>,
 }
 

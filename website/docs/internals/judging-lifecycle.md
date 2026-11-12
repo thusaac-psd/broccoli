@@ -89,6 +89,18 @@ are keyed on it.
   last rejudge, against `server.max_system_error_retries`. Each such retry
   starts the judgement with a fresh dispatch budget. A rejudge resets it.
 
+## Dead letters
+
+A unit that spends its dispatch retries is dead-lettered under its subject:
+its submission for a current judgement, otherwise the judgement or code run
+itself (`DlqSubject`). A subject has at most one `dead_letter_message` row.
+Dead-lettering it again reopens the row and appends the occurrence to its
+retry history, so `retry_count` counts occurrences. When the subject finishes
+with a verdict that stands (anything terminal but a system error), the same
+statement resolves the row and leaves `resolved_by` NULL. An operator's
+resolution or DLQ retry names the operator. A DLQ retry rejudges only a
+submission whose verdict is a `SystemError`.
+
 ## Locks
 
 Statements lock a submission row before its judgements. Scans lock the unit

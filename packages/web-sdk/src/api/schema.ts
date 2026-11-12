@@ -1133,7 +1133,7 @@ export interface paths {
     put?: never;
     /**
      * Bulk-retry DLQ messages
-     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError or Pending state are retryable; other message types are skipped. Requires `dlq:manage` permission.
+     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state are retryable; other message types are skipped. Requires `dlq:manage` permission.
      */
     post: operations['bulkRetryDlq'];
     delete?: never;
@@ -3016,14 +3016,23 @@ export interface components {
       /** @example stuck_submission */
       message_type: string;
       payload: unknown;
-      /** @example false */
+      /**
+       * @description Resolved by an operator, or automatically once the stuck submission,
+       *     judgement or code run finished with a verdict other than a system error.
+       * @example false
+       */
       resolved: boolean;
       /** Format: date-time */
       resolved_at?: string | null;
-      /** Format: int32 */
+      /**
+       * Format: int32
+       * @description The operator who resolved it; null when it was resolved automatically.
+       */
       resolved_by?: number | null;
       /**
        * Format: int32
+       * @description Times this message was dead-lettered: a stuck job that is dead-lettered
+       *     again reopens its message and counts here.
        * @example 3
        */
       retry_count: number;
@@ -3058,14 +3067,23 @@ export interface components {
       message_id: string;
       /** @example stuck_submission */
       message_type: string;
-      /** @example false */
+      /**
+       * @description Resolved by an operator, or automatically once the stuck submission,
+       *     judgement or code run finished with a verdict other than a system error.
+       * @example false
+       */
       resolved: boolean;
       /** Format: date-time */
       resolved_at?: string | null;
-      /** Format: int32 */
+      /**
+       * Format: int32
+       * @description The operator who resolved it; null when it was resolved automatically.
+       */
       resolved_by?: number | null;
       /**
        * Format: int32
+       * @description Times this message was dead-lettered: a stuck job that is dead-lettered
+       *     again reopens its message and counts here.
        * @example 3
        */
       retry_count: number;

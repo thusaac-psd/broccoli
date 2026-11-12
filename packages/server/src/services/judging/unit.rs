@@ -1,7 +1,7 @@
 //! Transitions of a dispatch unit (a judgement or a code run): claim, lease
 //! refresh, requeue, exhaust and dispatch failure.
 
-use common::{DlqErrorCode, DlqMessageType, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
+use common::{DlqErrorCode, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
     EntityTrait, QueryFilter, Statement, TransactionTrait, Value,
@@ -9,7 +9,7 @@ use sea_orm::{
 
 use super::RetryBudget;
 use crate::dispatcher::prefer_local_handler;
-use crate::dlq::DlqService;
+use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{code_run, submission, submission_judgement};
 
 /// The kind of row the dispatcher judges.
@@ -94,18 +94,56 @@ impl Unit {
         }
     }
 
-    /// CTEs (each with a leading comma) that rewrite the submission cache
-    /// from the rows of CTE `moved` that are current judgements. Empty for a
-    /// code run.
-    fn mirror(self) -> String {
+    /// CTEs (each with a leading comma) that keep derived rows in step with
+    /// the rows of CTE `moved`: a current judgement's submission cache, and
+    /// the dead letters of a unit (and of a current judgement's submission)
+    /// that just recovered.
+    fn cascade(self) -> String {
         match self {
             Unit::Judgement => format!(
                 ", mirrored AS (UPDATE submission s SET {MIRROR_SETS} FROM moved j \
-                 WHERE s.id = j.submission_id AND j.is_current RETURNING s.id, s.status)"
+                 WHERE s.id = j.submission_id AND j.is_current RETURNING s.id, s.status), \
+                 recovered AS (UPDATE dead_letter_message d \
+                     SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
+                     FROM moved j WHERE NOT d.resolved AND {recovered} \
+                       AND (d.message_id = {own} \
+                            OR (j.is_current AND d.message_id = {submission})))",
+                recovered = recovered("j"),
+                own = DlqSubject::Judgement(0).sql_message_id("j.id"),
+                submission = DlqSubject::Submission(0).sql_message_id("j.submission_id"),
             ),
-            Unit::CodeRun => String::new(),
+            Unit::CodeRun => format!(
+                ", recovered AS (UPDATE dead_letter_message d \
+                     SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
+                     FROM moved r WHERE NOT d.resolved AND {recovered} \
+                       AND d.message_id = {own})",
+                recovered = recovered("r"),
+                own = DlqSubject::CodeRun(0).sql_message_id("r.id"),
+            ),
         }
     }
+}
+
+/// SQL: the unit row `alias` finished as a system error in any shape, a
+/// `SystemError` status or a plugin's `SystemError` verdict.
+fn system_error(alias: &str) -> String {
+    format!(
+        "({alias}.status = '{system_error}' \
+          OR ({alias}.status = '{judged}' AND {alias}.verdict IS NOT DISTINCT FROM '{verdict}'))",
+        system_error = SubmissionStatus::SystemError,
+        judged = SubmissionStatus::Judged,
+        verdict = common::Verdict::SystemError,
+    )
+}
+
+/// SQL: the unit row `alias` finished with a verdict that stands, anything
+/// terminal but a system error. Its dead letters are resolved.
+fn recovered(alias: &str) -> String {
+    format!(
+        "({alias}.status IN {terminal} AND NOT {system_error})",
+        terminal = StatusPhase::Terminal.sql_list(),
+        system_error = system_error(alias),
+    )
 }
 
 /// The submission cache columns, each copied from its current judgement `j`.
@@ -115,29 +153,32 @@ const MIRROR_SETS: &str = "status = j.status, judge_epoch = j.judge_epoch, verdi
      error_message = j.error_message, judged_at = j.finalized_at, \
      target_worker_id = j.target_worker_id";
 
-/// The mirror CTEs of a judgement write, for the plugin write path.
-pub(super) fn judgement_mirror() -> String {
-    Unit::Judgement.mirror()
+/// The cascade CTEs of a unit write, for the plugin write path.
+pub(super) fn cascade(unit: Unit) -> String {
+    unit.cascade()
 }
 
-/// Rewrites a submission's cache from its current judgement and returns the
-/// submission.
+/// Rewrites a submission's cache from its current judgement (resolving its
+/// dead letter if the judgement's verdict stands) and returns the submission.
 pub(super) async fn mirror_current<C: ConnectionTrait>(
     conn: &C,
     submission_id: i32,
 ) -> Result<submission::Model, DbErr> {
-    submission::Entity::find()
-        .from_raw_sql(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!(
-                "UPDATE submission s SET {MIRROR_SETS} FROM submission_judgement j \
-                 WHERE j.submission_id = s.id AND j.is_current AND s.id = $1 RETURNING s.*"
-            ),
-            [submission_id.into()],
-        ))
+    conn.execute_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            "WITH moved AS (SELECT * FROM submission_judgement \
+                            WHERE submission_id = $1 AND is_current){cascade} \
+             SELECT 1",
+            cascade = Unit::Judgement.cascade(),
+        ),
+        [submission_id.into()],
+    ))
+    .await?;
+    submission::Entity::find_by_id(submission_id)
         .one(conn)
         .await?
-        .ok_or_else(|| DbErr::RecordNotFound(format!("current judgement of {submission_id}")))
+        .ok_or_else(|| DbErr::RecordNotFound(format!("submission {submission_id}")))
 }
 
 /// Positional `$n` parameters of a statement built as text.
@@ -190,7 +231,7 @@ fn claim_statement(unit: Unit, server_id: &str, limit: u32, local: &[String]) ->
         lock = unit.scan_lock(),
         table = unit.table(),
         pending = SubmissionStatus::Pending,
-        mirror = unit.mirror(),
+        mirror = unit.cascade(),
     ))
 }
 
@@ -436,7 +477,7 @@ async fn requeue(
                                     FROM v WHERE t.id = v.id RETURNING t.*), {wipe}{mirror} \
                      SELECT id FROM moved",
                     wipe = unit.wipe_results(),
-                    mirror = unit.mirror(),
+                    mirror = unit.cascade(),
                 ),
                 [moved.into(), epochs.into()],
             )
@@ -610,7 +651,7 @@ async fn finalize_system_error(
                 table = unit.table(),
                 system_error = SubmissionStatus::SystemError,
                 finalize = unit.finalize_sets(),
-                mirror = unit.mirror(),
+                mirror = unit.cascade(),
             ),
             [ids.into(), error_code.into(), message.into()],
         ))
@@ -619,7 +660,8 @@ async fn finalize_system_error(
     Ok(n)
 }
 
-/// Records an exhausted unit in the dead letter queue.
+/// Records an exhausted unit in the dead letter queue: a current judgement
+/// under its submission, any other unit under itself.
 async fn dead_letter(
     txn: &DatabaseTransaction,
     unit: Unit,
@@ -627,40 +669,22 @@ async fn dead_letter(
     error_code: DlqErrorCode,
     message: &str,
 ) -> Result<(), DbErr> {
-    let (message_type, message_id, submission_id) = match (unit, picked.submission_id) {
-        (Unit::Judgement, Some(submission_id)) if picked.is_current => (
-            DlqMessageType::StuckSubmission,
-            format!("stuck-submission-{submission_id}"),
-            Some(submission_id),
-        ),
-        (Unit::Judgement, submission_id) => (
-            DlqMessageType::StuckSubmissionJudgement,
-            format!("stuck-submission-judgement-{}", picked.id),
-            submission_id,
-        ),
-        (Unit::CodeRun, _) => (
-            DlqMessageType::StuckCodeRun,
-            format!("stuck-code-run-{}", picked.id),
-            None,
-        ),
+    let subject = match (unit, picked.submission_id) {
+        (Unit::Judgement, Some(submission_id)) if picked.is_current => {
+            DlqSubject::Submission(submission_id)
+        }
+        (Unit::Judgement, _) => DlqSubject::Judgement(picked.id),
+        (Unit::CodeRun, _) => DlqSubject::CodeRun(picked.id),
     };
     let payload = serde_json::json!({
         "unit": unit.table(),
         "id": picked.id,
-        "submission_id": submission_id,
+        "submission_id": picked.submission_id,
         "dispatch_retries": picked.dispatch_retries,
     });
     DlqService::new(txn)
-        .create_entry(
-            message_id,
-            message_type,
-            submission_id,
-            payload,
-            error_code,
-            message.to_string(),
-        )
-        .await?;
-    Ok(())
+        .dead_letter(subject, picked.submission_id, payload, error_code, message)
+        .await
 }
 
 /// Requeues up to `limit` current judgements that finalized as a
@@ -678,12 +702,10 @@ pub(crate) async fn retry_system_errors(
     let mut b = Binds::default();
     let filter = format!(
         "u.is_current AND u.is_finalized \
-         AND ((u.status = {judged} AND u.verdict = {verdict}) OR u.status = {system_error}) \
+         AND {system_error} \
          AND u.error_code IS DISTINCT FROM {refused} \
          AND s.retry_count < {max} AND {handled}",
-        judged = b.bind(SubmissionStatus::Judged.as_str()),
-        verdict = b.bind(common::Verdict::SystemError.as_str()),
-        system_error = b.bind(SubmissionStatus::SystemError.as_str()),
+        system_error = system_error("u"),
         refused = b.bind(SubmissionDlqErrorCode::PLUGIN_REFUSED),
         max = b.bind(budget.max()),
         handled = {
@@ -739,7 +761,7 @@ pub(crate) async fn fail_dispatch(
                 system_error = SubmissionStatus::SystemError,
                 finalize = unit.finalize_sets(),
                 in_flight = StatusPhase::InFlight.sql_list(),
-                mirror = unit.mirror(),
+                mirror = unit.cascade(),
             ),
             [
                 id.into(),

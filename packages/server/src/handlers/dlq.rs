@@ -248,7 +248,7 @@ async fn retry_stuck_submission(
     )
     .await?;
 
-    match dlq.resolve(message_id, Some(admin_user_id)).await? {
+    match dlq.resolve(message_id, admin_user_id).await? {
         ResolveResult::Resolved => {}
         ResolveResult::AlreadyResolved => {
             warn!(
@@ -363,7 +363,7 @@ pub async fn delete_dlq_message(
     auth_user.require_permission(perm::DLQ_MANAGE)?;
 
     let dlq = dlq_service(&state.db);
-    let result = dlq.resolve(id, Some(auth_user.user_id)).await?;
+    let result = dlq.resolve(id, auth_user.user_id).await?;
 
     match result {
         ResolveResult::Resolved => {
@@ -539,7 +539,7 @@ pub async fn bulk_delete_dlq(
 
     let dlq = dlq_service(&state.db);
     let rows_affected = dlq
-        .resolve_many(&payload.message_ids, Some(auth_user.user_id))
+        .resolve_many(&payload.message_ids, auth_user.user_id)
         .await?;
 
     info!(

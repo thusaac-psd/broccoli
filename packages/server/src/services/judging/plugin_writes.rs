@@ -5,7 +5,7 @@
 use broccoli_server_sdk::types::{CodeRunUpdate, SqlBindSink, SubmissionUpdate, push_judge_sets};
 use common::StatusPhase;
 
-use super::unit::judgement_mirror;
+use super::unit::{Unit, cascade};
 
 /// The write fence every plugin write to a judgement goes through: the row
 /// (`alias`) is the judgement the caller names, of the submission it names,
@@ -65,7 +65,7 @@ pub(crate) fn judgement_write<P: SqlBindSink>(
          SELECT 1 FROM moved",
         sets = sets.join(", "),
         fence = write_fence("t", &judgement, &submission, &epoch),
-        mirror = judgement_mirror(),
+        mirror = cascade(Unit::Judgement),
     ))
 }
 
@@ -104,8 +104,10 @@ pub(crate) fn code_run_write<P: SqlBindSink>(p: &mut P, update: &CodeRunUpdate) 
     let id = p.bind_value(update.code_run_id.into());
     let epoch = p.bind_value(update.judge_epoch.into());
     Some(format!(
-        "UPDATE code_run t SET {sets} WHERE {fence}",
+        "WITH moved AS (UPDATE code_run t SET {sets} WHERE {fence} RETURNING t.*){cascade} \
+         SELECT 1 FROM moved",
         sets = sets.join(", "),
         fence = code_run_write_fence("t", &id, &epoch),
+        cascade = cascade(Unit::CodeRun),
     ))
 }
