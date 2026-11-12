@@ -74,9 +74,8 @@ async fn limit_rejects_after_max_submissions() {
     )
     .await;
 
-    // The claim counter only advances for submissions that actually clear the
-    // `check_limit` hook, so the two "prior" submissions must be REAL POSTs
-    // (direct DB seeds are invisible to the gate under claim semantics).
+    // Back-to-back real POSTs inside the grace window: each committed attempt
+    // is counted once, through its submission rather than also its reservation.
     let sub_path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions");
     let submit_body = |n: i32| {
         json!({
@@ -176,11 +175,9 @@ async fn limit_zero_means_unlimited() {
     );
     assert_eq!(res.body["unlimited"].as_bool(), Some(true));
     assert_eq!(res.body["remaining"], serde_json::Value::Null);
-    // Claim semantics: max = 0 short-circuits to pass BEFORE any claim is taken,
-    // so the authoritative claim counter stays 0 even though 3 submissions were
-    // accepted. `submissions_made` reflects the claim counter, not the
-    // `submission` table.
-    assert_eq!(res.body["submissions_made"].as_u64(), Some(0));
+    // `submissions_made` counts the user's committed submissions whether or not
+    // a cap applies.
+    assert_eq!(res.body["submissions_made"].as_u64(), Some(3));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -362,88 +359,12 @@ async fn different_users_have_independent_limits() {
     assert_eq!(res.body["remaining"].as_u64(), Some(1));
 }
 
-/// Sequential companion to the concurrent race test below: proves the atomic
-/// claim gate still enforces the cap on the ordinary one-at-a-time POST path.
-/// Unlike the older seed-based tests, the prior submissions go through the REAL
-/// submission endpoint, so each one clears the `check_limit` hook and takes a
-/// claim. With max = 2, the first two POSTs are accepted and the third is
-/// rejected 429 SUBMISSION_LIMIT_EXCEEDED.
-#[tokio::test(flavor = "multi_thread")]
-async fn limit_sequential_real_posts_rejected_after_max() {
-    let app = E2eTestApp::spawn().await;
-
-    let admin = app
-        .create_user_with_role("sl_admin_seq", "password", "admin")
-        .await;
-    let contestant = app
-        .create_authenticated_user("sl_user_seq", "password")
-        .await;
-
-    let problem_id = app.create_problem(&admin, "Limit Problem Seq").await;
-    let contest_id = app
-        .create_typed_contest(&admin, "Limit Contest Seq", "icpc", true, true)
-        .await;
-    app.add_problem_to_contest(contest_id, problem_id, &admin)
-        .await;
-    app.register_for_contest(contest_id, &contestant).await;
-
-    let config_path = format!(
-        "/api/v1/contests/{contest_id}/problems/{problem_id}/config/submission-limit/limits"
-    );
-    app.put_with_token(
-        &config_path,
-        &json!({ "config": { "max_submissions": 2 }, "enabled": true }),
-        &admin,
-    )
-    .await;
-
-    let sub_path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions");
-    let submit = |n: i32| {
-        json!({
-            "files": [{"filename": "main.cpp", "content": format!("int main() {{ return {n}; }}")}],
-            "language": "cpp",
-        })
-    };
-
-    let r1 = app
-        .post_with_token(&sub_path, &submit(1), &contestant)
-        .await;
-    assert_eq!(
-        r1.status, 201,
-        "1st submission should be accepted: {}",
-        r1.text
-    );
-    let r2 = app
-        .post_with_token(&sub_path, &submit(2), &contestant)
-        .await;
-    assert_eq!(
-        r2.status, 201,
-        "2nd submission should be accepted: {}",
-        r2.text
-    );
-    let r3 = app
-        .post_with_token(&sub_path, &submit(3), &contestant)
-        .await;
-    assert_eq!(
-        r3.status, 429,
-        "3rd submission should be rejected once the cap is reached: {}",
-        r3.text
-    );
-    assert_eq!(
-        r3.body["code"].as_str().unwrap_or(""),
-        "SUBMISSION_LIMIT_EXCEEDED",
-        "rejection must carry SUBMISSION_LIMIT_EXCEEDED"
-    );
-}
-
-/// TOCTOU regression: with `max_submissions = 1`, fire N submissions for the
-/// same (user, problem, contest) SIMULTANEOUSLY and assert the atomic claim
-/// gate admits EXACTLY ONE. Before commit d749a3f the gate was a count-then-pass
-/// check: every concurrent POST read the same `COUNT(*) == 0` (the server
-/// inserts the submission row only after the hook returns), so all N slipped
-/// through and the cap was blown. The atomic `INSERT .. ON CONFLICT DO UPDATE ..
-/// WHERE count < max` claim must let exactly one win and reject the other N-1
-/// with 429 SUBMISSION_LIMIT_EXCEEDED.
+/// With `max_submissions = 1`, N simultaneous submissions for the same (user,
+/// problem, contest) admit exactly one. The server inserts the submission row
+/// only after the hook returns, so a count-then-pass check would let every
+/// concurrent POST through; the single-statement claim serializes them on the
+/// reservation row and rejects the other N-1 with 429
+/// SUBMISSION_LIMIT_EXCEEDED.
 ///
 /// The requests are made genuinely concurrent (not sequential): each runs in its
 /// own task with its own HTTP client/connection, and an N-party barrier parks
@@ -601,121 +522,89 @@ async fn user_id_of(app: &E2eTestApp, username: &str) -> i32 {
         .expect("user should exist")
         .id
 }
-
-/// A submission that claimed a slot but was then rejected by a later hook (or
-/// failed to insert) leaves an UNCONFIRMED reservation. The old monotonic
-/// counter burned that slot permanently; the reservation ledger must reclaim it
-/// once it ages past the grace window so the slot is not lost.
-#[tokio::test(flavor = "multi_thread")]
-async fn dangling_reservation_past_grace_is_reclaimed_not_burned() {
-    let app = E2eTestApp::spawn().await;
-
+/// A contest problem with `max_submissions = max` for one registered
+/// contestant. Returns (contestant token, user id, problem id, contest id).
+async fn limited_problem(app: &E2eTestApp, tag: &str, max: u32) -> (String, i32, i32, i32) {
     let admin = app
-        .create_user_with_role("sl_admin_reclaim", "password", "admin")
+        .create_user_with_role(&format!("sl_admin_{tag}"), "password", "admin")
         .await;
-    let contestant = app
-        .create_authenticated_user("sl_user_reclaim", "password")
-        .await;
-    let problem_id = app.create_problem(&admin, "Reclaim Problem").await;
+    let username = format!("sl_user_{tag}");
+    let contestant = app.create_authenticated_user(&username, "password").await;
+    let problem_id = app.create_problem(&admin, &format!("{tag} Problem")).await;
     let contest_id = app
-        .create_typed_contest(&admin, "Reclaim Contest", "icpc", true, true)
+        .create_typed_contest(&admin, &format!("{tag} Contest"), "icpc", true, true)
         .await;
     app.add_problem_to_contest(contest_id, problem_id, &admin)
         .await;
     app.register_for_contest(contest_id, &contestant).await;
-
     let config_path = format!(
         "/api/v1/contests/{contest_id}/problems/{problem_id}/config/submission-limit/limits"
     );
     app.put_with_token(
         &config_path,
-        &json!({ "config": { "max_submissions": 1 }, "enabled": true }),
+        &json!({ "config": { "max_submissions": max }, "enabled": true }),
         &admin,
     )
     .await;
-
-    // Simulate a failed submission's dangling PENDING claim: aged well past the
-    // grace window. With the old monotonic counter this permanently consumed the
-    // only slot; the pending must now be reclaimed.
-    let uid = user_id_of(&app, "sl_user_reclaim").await;
-    app.db
-        .execute_unprepared(&format!(
-            "INSERT INTO submission_limit_claim \
-               (user_id, problem_id, contest_id, confirmed, pending, oldest_pending_at) \
-             VALUES ({uid}, {problem_id}, {contest_id}, 0, 1, NOW() - INTERVAL '120 seconds')"
-        ))
-        .await
-        .expect("seed dangling pending claim");
-
-    let sub_path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions");
-    let body = json!({
-        "files": [{"filename": "main.cpp", "content": "int main() { return 0; }"}],
-        "language": "cpp",
-    });
-    let res = app.post_with_token(&sub_path, &body, &contestant).await;
-    assert_eq!(
-        res.status, 201,
-        "a dangling unconfirmed reservation past grace must be reclaimed, not burn the slot: {}",
-        res.text
-    );
+    let uid = user_id_of(app, &username).await;
+    (contestant, uid, problem_id, contest_id)
 }
 
-/// A CONFIRMED reservation (a real prior success) durably consumes a slot: with
-/// max=1 and one confirmed reservation already present, a new submission is
-/// rejected - the reclaim only frees UNCONFIRMED (failed) reservations.
-#[tokio::test(flavor = "multi_thread")]
-async fn confirmed_reservation_durably_consumes_a_slot() {
-    let app = E2eTestApp::spawn().await;
-
-    let admin = app
-        .create_user_with_role("sl_admin_confirmed", "password", "admin")
-        .await;
-    let contestant = app
-        .create_authenticated_user("sl_user_confirmed", "password")
-        .await;
-    let problem_id = app.create_problem(&admin, "Confirmed Problem").await;
-    let contest_id = app
-        .create_typed_contest(&admin, "Confirmed Contest", "icpc", true, true)
-        .await;
-    app.add_problem_to_contest(contest_id, problem_id, &admin)
-        .await;
-    app.register_for_contest(contest_id, &contestant).await;
-
-    let config_path = format!(
-        "/api/v1/contests/{contest_id}/problems/{problem_id}/config/submission-limit/limits"
-    );
-    app.put_with_token(
-        &config_path,
-        &json!({ "config": { "max_submissions": 1 }, "enabled": true }),
-        &admin,
-    )
-    .await;
-
-    // A confirmed submission still counts durably (no pending, so grace is
-    // irrelevant).
-    let uid = user_id_of(&app, "sl_user_confirmed").await;
+/// Store one reservation for `attempt_id`, taken `age_secs` ago.
+async fn seed_reservation(
+    app: &E2eTestApp,
+    (uid, problem_id, contest_id): (i32, i32, i32),
+    attempt_id: &str,
+    age_secs: i64,
+) {
     app.db
         .execute_unprepared(&format!(
-            "INSERT INTO submission_limit_claim \
-               (user_id, problem_id, contest_id, confirmed, pending, oldest_pending_at) \
-             VALUES ({uid}, {problem_id}, {contest_id}, 1, 0, NULL)"
+            "INSERT INTO submission_limit_claim (user_id, problem_id, contest_id, reservations) \
+             VALUES ({uid}, {problem_id}, {contest_id}, \
+               jsonb_build_object('{attempt_id}', EXTRACT(EPOCH FROM NOW()) - {age_secs}))"
         ))
         .await
-        .expect("seed confirmed claim");
+        .expect("seed reservation");
+}
 
+async fn submit(app: &E2eTestApp, token: &str, problem_id: i32, contest_id: i32) -> u16 {
     let sub_path = format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions");
     let body = json!({
         "files": [{"filename": "main.cpp", "content": "int main() { return 0; }"}],
         "language": "cpp",
     });
-    let res = app.post_with_token(&sub_path, &body, &contestant).await;
-    assert_eq!(
-        res.status, 429,
-        "a confirmed reservation must durably consume the slot: {}",
-        res.text
-    );
-    assert_eq!(
-        res.body["code"].as_str().unwrap_or(""),
-        "SUBMISSION_LIMIT_EXCEEDED"
-    );
+    app.post_with_token(&sub_path, &body, token).await.status
+}
+
+/// A submission that reserved a slot but was then rejected by a later hook (or
+/// failed to insert) leaves a reservation no submission carries. Once it ages
+/// past the grace window it frees its slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reservation_without_a_submission_frees_its_slot_after_the_grace() {
+    let app = E2eTestApp::spawn().await;
+    let (token, uid, problem_id, contest_id) = limited_problem(&app, "expired", 1).await;
+    let attempt = "00000000-0000-4000-8000-000000000001";
+    seed_reservation(&app, (uid, problem_id, contest_id), attempt, 120).await;
+    assert_eq!(submit(&app, &token, problem_id, contest_id).await, 201);
+}
+
+/// A reservation inside the grace window holds its slot while its submission
+/// has not committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_reservation_holds_its_slot() {
+    let app = E2eTestApp::spawn().await;
+    let (token, uid, problem_id, contest_id) = limited_problem(&app, "live", 1).await;
+    let attempt = "00000000-0000-4000-8000-000000000002";
+    seed_reservation(&app, (uid, problem_id, contest_id), attempt, 0).await;
+    assert_eq!(submit(&app, &token, problem_id, contest_id).await, 429);
+}
+
+/// Committed submissions count from the submission table, so a submission is
+/// counted even when no reservation of it survives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_committed_submission_consumes_a_slot() {
+    let app = E2eTestApp::spawn().await;
+    let (token, _uid, problem_id, contest_id) = limited_problem(&app, "committed", 1).await;
+    seed_counted_submission(&app, "sl_user_committed", problem_id, contest_id).await;
+    assert_eq!(submit(&app, &token, problem_id, contest_id).await, 429);
 }
