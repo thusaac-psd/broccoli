@@ -123,7 +123,8 @@ pub fn effective_time(row: &SubmissionFeedbackRecord) -> Result<i64, SdkError> {
 /// results remain withheld until judging finishes, but no longer own the
 /// contestant's admission slot. Published outcomes never transition again.
 /// Returns the effective-time wakeups of settled submissions, to cancel only
-/// after all post-commit work succeeds.
+/// after all post-commit work succeeds (see `MatchTimer::Effective` for the
+/// time-named ones it cannot name).
 pub fn publish(
     host: &Host,
     contest: i32,

@@ -81,7 +81,10 @@ pub enum MatchTimer {
     /// The moment no new opponent submission can beat an accepted one. Each
     /// accepted submission owns its own wakeup, and one moved earlier by
     /// opponent penalties also names its time (`at_us`), so a callback that
-    /// read an older snapshot cannot postpone it.
+    /// read an older snapshot cannot postpone it. Settlement cancels each
+    /// settled submission's wakeup without a time; one with a time is
+    /// recorded nowhere, so it fires once into the settled game, which a tick
+    /// leaves unchanged, and the host deletes it on delivery.
     Effective {
         game: u8,
         submission_id: i32,

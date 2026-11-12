@@ -48,6 +48,8 @@ pub fn drive(
 ) -> Result<MatchState, DriveError> {
     let setup = storage::load_setup(host, contest)?.ok_or(DriveError::NotFound)?;
     let key = storage::match_key(contest, match_id);
+    // Wakeups armed by attempts whose write was lost.
+    let mut stray = Vec::new();
     for _ in 0..100 {
         let snapshot = host.storage.snapshot(&key)?.ok_or(DriveError::NotFound)?;
         let current: MatchState = serde_json::from_str(&snapshot.value)?;
@@ -75,6 +77,10 @@ pub fn drive(
         };
         let transition =
             machine::transition(&current, event, &inputs).map_err(DriveError::Rejected)?;
+        // Arm before writing: if this process dies between the write and the
+        // effects, the new state's wakeup already exists. A lost write leaves
+        // a spurious wakeup, which only ticks the match again; it is cancelled
+        // below once a later attempt commits.
         for wakeup in &transition.wakeups {
             host.timer.schedule(
                 wakeup.at_ms,
@@ -89,6 +95,7 @@ pub fn drive(
                 &serde_json::to_string(&transition.next)?,
             )?
         {
+            stray.extend(transition.wakeups.iter().map(|w| w.timer));
             continue;
         }
         apply(
@@ -99,9 +106,31 @@ pub fn drive(
             &transition.next,
             &transition.effects,
         )?;
+        for timer in unneeded(&stray, &transition.wakeups) {
+            host.timer.cancel(&timer_key(contest, match_id, timer))?;
+        }
         return Ok(transition.next);
     }
     Err(SdkError::Other("Match update CAS retry limit exceeded".into()).into())
+}
+
+/// The wakeups lost attempts armed that the committed transition does not
+/// need. A match only moves forward through its games, and an accepted
+/// submission's settlement time only moves earlier as opponent errors are
+/// judged, so a wakeup the committed state does not arm is not needed by any
+/// later state either. `Closing` is kept: another process that closed the
+/// match may still be retrying its closing work under that key.
+fn unneeded(stray: &[MatchTimer], armed: &[machine::Wakeup]) -> Vec<MatchTimer> {
+    let mut unneeded: Vec<MatchTimer> = Vec::new();
+    for &timer in stray {
+        if !matches!(timer, MatchTimer::Closing(_))
+            && !armed.iter().any(|w| w.timer == timer)
+            && !unneeded.contains(&timer)
+        {
+            unneeded.push(timer);
+        }
+    }
+    unneeded
 }
 
 /// Tick match `match_id`: what every timer, judging result and stage
@@ -697,5 +726,18 @@ mod tests {
         let payload = format!(r#"{{"retry":{}}}"#, crate::timers::MAX_RETRIES);
         assert!(handle_timer(&host, &closing, &payload, at).is_err());
         assert!(!host.timer.is_scheduled(&closing));
+    }
+
+    #[test]
+    fn wakeups_armed_by_lost_writes_are_released_unless_the_commit_needs_them() {
+        use machine::Wakeup;
+        let deadline = |game| MatchTimer::Deadline { game };
+        let closing = MatchTimer::Closing(Closure::Decision);
+        let stray = [deadline(1), deadline(2), deadline(1), closing];
+        let armed = [Wakeup {
+            timer: deadline(2),
+            at_ms: 5,
+        }];
+        assert_eq!(unneeded(&stray, &armed), [deadline(1)]);
     }
 }
