@@ -39,7 +39,7 @@ export function DlqMessageRow({ message, onClick }: Props) {
           <span className="font-mono text-xs truncate max-w-[16ch]">
             {message.message_id}
           </span>
-          {message.submission_id !== null && (
+          {message.submission_id != null && (
             <span className="text-[10px] text-muted-foreground">
               {t('dlq.row.submission', { id: message.submission_id })}
             </span>

@@ -73,20 +73,25 @@ export async function resolveClarification(
 }
 
 export async function toggleReplyPublic(
-  apiFetch: (input: string | URL, init?: RequestInit) => Promise<Response>,
+  apiClient: ApiClient,
   contestId: number,
   clarificationId: number,
   replyId: number,
   includeQuestion?: boolean,
 ): Promise<ClarificationReply> {
-  const params = includeQuestion ? '?include_question=true' : '';
-  const res = await apiFetch(
-    `/api/v1/contests/${contestId}/clarifications/${clarificationId}/replies/${replyId}/toggle-public${params}`,
-    { method: 'POST' },
+  const { data, error } = await apiClient.POST(
+    '/contests/{id}/clarifications/{clarification_id}/replies/{reply_id}/toggle-public',
+    {
+      params: {
+        path: {
+          id: contestId,
+          clarification_id: clarificationId,
+          reply_id: replyId,
+        },
+        query: includeQuestion ? { include_question: true } : undefined,
+      },
+    },
   );
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.message ?? 'Failed to toggle reply visibility');
-  }
-  return res.json();
+  if (error) throw error;
+  return data as ClarificationReply;
 }

@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiFetch } from '@broccoli/web-sdk/api';
+import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -27,7 +27,7 @@ interface Props {
 
 export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const { t } = useTranslation();
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const open = messageId !== null;
 
@@ -41,12 +41,11 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
     if (!messageId) return;
     setBusy(true);
     try {
-      const res = await apiFetch(`/api/v1/dlq/${messageId}/retry`, {
-        method: 'POST',
+      const { error } = await apiClient.POST('/dlq/{id}/retry', {
+        params: { path: { id: messageId } },
       });
-      if (!res.ok) {
-        const body: unknown = await res.json().catch(() => null);
-        toast.error(getErrorMessage(body, t('dlq.detail.retryError')));
+      if (error) {
+        toast.error(getErrorMessage(error, t('dlq.detail.retryError')));
         return;
       }
       toast.success(t('dlq.detail.retrySuccess'));
@@ -65,12 +64,10 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
       destructive: true,
       failureMessage: t('dlq.detail.deleteError'),
       onConfirm: async () => {
-        const res = await apiFetch(`/api/v1/dlq/${messageId}`, {
-          method: 'DELETE',
+        const { error } = await apiClient.DELETE('/dlq/{id}', {
+          params: { path: { id: messageId } },
         });
-        if (!res.ok && res.status !== 204) {
-          throw await res.json().catch(() => null);
-        }
+        if (error) throw error;
         toast.success(t('dlq.detail.deleteSuccess'));
         await queryClient.invalidateQueries({ queryKey: ['dlq'] });
         onOpenChange(false);
