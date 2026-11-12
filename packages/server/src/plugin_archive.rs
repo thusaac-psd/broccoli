@@ -26,6 +26,15 @@ pub const MAX_ARCHIVE_BYTES: usize = 256 * MIB;
 pub const MAX_UNPACKED_BYTES: u64 = 512 * MIB as u64;
 /// Most entries (files and directories) an archive may hold.
 pub const MAX_ENTRIES: usize = 10_000;
+/// Largest GNU long-name or long-link record and largest PAX extension
+/// record. The tar reader holds each one in memory whole before it hands
+/// over the entry it describes.
+const MAX_EXTENSION_RECORD_BYTES: u64 = 64 * 1024;
+/// Decompressed bytes allowed beyond [`MAX_UNPACKED_BYTES`]: the 512-byte
+/// headers, block padding and extension records.
+const MAX_FRAMING_BYTES: u64 = 64 * MIB as u64;
+/// Most tar records (entries plus the extension records attached to them).
+const MAX_RECORDS: usize = 3 * MAX_ENTRIES;
 
 /// Why an archive was rejected. The message is shown to the admin.
 #[derive(Debug, thiserror::Error)]
@@ -177,7 +186,88 @@ fn stays_inside(path: &Path) -> bool {
 }
 
 fn unreadable(e: std::io::Error) -> ArchiveError {
+    if e.kind() == std::io::ErrorKind::FileTooLarge {
+        return too_large();
+    }
     reject(format!("Not a valid gzip-compressed tar archive: {e}"))
+}
+
+fn too_large() -> ArchiveError {
+    reject(format!(
+        "Archive unpacks to more than {} MiB",
+        MAX_UNPACKED_BYTES / MIB as u64
+    ))
+}
+
+/// A reader that fails with [`std::io::ErrorKind::FileTooLarge`] once more
+/// than `left` bytes have come through it.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.left = self
+            .left
+            .checked_sub(n as u64)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::FileTooLarge))?;
+        Ok(n)
+    }
+}
+
+/// The archive in `bytes`, decompressed through a cap on every byte the tar
+/// reader can pull: file contents, headers and extension records alike.
+fn open(bytes: &[u8]) -> tar::Archive<Capped<flate2::read::GzDecoder<&[u8]>>> {
+    tar::Archive::new(Capped {
+        inner: flate2::read::GzDecoder::new(bytes),
+        left: MAX_UNPACKED_BYTES + MAX_FRAMING_BYTES,
+    })
+}
+
+/// Check every raw tar record before [`walk`] reads the archive the usual
+/// way. In raw mode the tar reader buffers nothing, whereas the usual mode
+/// reads extension records (and GNU sparse maps) into memory before handing
+/// over an entry, so their size must be known to be small first.
+fn check_records(bytes: &[u8]) -> Result<(), ArchiveError> {
+    let mut archive = open(bytes);
+    let entries = archive.entries().map_err(unreadable)?.raw(true);
+    let mut declared: u64 = 0;
+    for (count, entry) in entries.enumerate() {
+        let entry = entry.map_err(unreadable)?;
+        if count >= MAX_RECORDS {
+            return Err(reject(format!(
+                "Archive has more than {MAX_ENTRIES} entries"
+            )));
+        }
+        match entry.header().entry_type() {
+            tar::EntryType::Regular => {
+                declared = declared.saturating_add(entry.size());
+                if declared > MAX_UNPACKED_BYTES {
+                    return Err(too_large());
+                }
+            }
+            tar::EntryType::Directory => {}
+            tar::EntryType::GNULongName
+            | tar::EntryType::GNULongLink
+            | tar::EntryType::XHeader
+            | tar::EntryType::XGlobalHeader => {
+                if entry.size() > MAX_EXTENSION_RECORD_BYTES {
+                    return Err(reject(format!(
+                        "Archive has a long-name or PAX extension record over {} KiB",
+                        MAX_EXTENSION_RECORD_BYTES / 1024
+                    )));
+                }
+            }
+            _ => return Err(only_files_and_dirs()),
+        }
+    }
+    Ok(())
+}
+
+fn only_files_and_dirs() -> ArchiveError {
+    reject("Archive may contain only regular files and directories")
 }
 
 struct Walked {
@@ -193,7 +283,8 @@ fn walk(
     bytes: &[u8],
     mut visit: impl FnMut(&Path, Option<&mut dyn Read>) -> Result<(), ArchiveError>,
 ) -> Result<Walked, ArchiveError> {
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    check_records(bytes)?;
+    let mut archive = open(bytes);
     let entries = archive.entries().map_err(unreadable)?;
     let mut id: Option<String> = None;
     let mut files = BTreeSet::new();
@@ -211,11 +302,7 @@ fn walk(
         let is_file = match kind {
             tar::EntryType::Regular => true,
             tar::EntryType::Directory => false,
-            _ => {
-                return Err(reject(
-                    "Archive may contain only regular files and directories",
-                ));
-            }
+            _ => return Err(only_files_and_dirs()),
         };
         count += 1;
         if count > MAX_ENTRIES {
@@ -277,12 +364,6 @@ fn walk(
                 raw.display()
             )));
         }
-        let too_large = || {
-            reject(format!(
-                "Archive unpacks to more than {} MiB",
-                MAX_UNPACKED_BYTES / MIB as u64
-            ))
-        };
         if entry.size() > budget {
             return Err(too_large());
         }
@@ -482,6 +563,72 @@ permissions = ["storage"]
         builder.append(&header, std::io::empty()).ok();
         let bytes = builder.into_inner().unwrap().finish().unwrap();
         assert!(error(bytes).contains("unpacks to more than"));
+    }
+
+    /// One raw tar record: a header of `kind` for `path`, then `data`.
+    fn record(out: &mut Vec<u8>, kind: tar::EntryType, path: &str, data: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_size(data.len() as u64);
+        set_raw_path(&mut header, path);
+        header.set_cksum();
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(data);
+        out.resize(out.len().div_ceil(512) * 512, 0);
+    }
+
+    fn gzip(tar: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(tar).unwrap();
+        encoder.write_all(&[0; 1024]).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Extension records compress to almost nothing: a few KiB on the wire
+    /// describing megabytes that the tar reader would hold in memory.
+    #[test]
+    fn rejects_oversized_extension_records_before_reading_them() {
+        for kind in [
+            tar::EntryType::XHeader,
+            tar::EntryType::GNULongName,
+            tar::EntryType::GNULongLink,
+        ] {
+            let mut tar = Vec::new();
+            let huge = vec![b'a'; 8 * MIB];
+            record(&mut tar, kind, "././@LongLink", &huge);
+            record(
+                &mut tar,
+                tar::EntryType::Regular,
+                "demo/plugin.toml",
+                MANIFEST.as_bytes(),
+            );
+            let bytes = gzip(&tar);
+            assert!(bytes.len() < 64 * 1024, "{kind:?}: {}", bytes.len());
+            let message = error(bytes);
+            assert!(
+                message.contains("extension record over 64 KiB"),
+                "{kind:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_sparse_files_before_reading_their_maps() {
+        let mut tar = Vec::new();
+        record(&mut tar, tar::EntryType::GNUSparse, "demo/sparse", &[]);
+        assert!(error(gzip(&tar)).contains("only regular files and directories"));
+    }
+
+    #[test]
+    fn the_decompression_cap_counts_every_byte() {
+        let mut capped = Capped {
+            inner: std::io::repeat(0),
+            left: 10_000,
+        };
+        let err = std::io::copy(&mut capped, &mut std::io::sink()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(unreadable(err).to_string().contains("unpacks to more than"));
     }
 
     #[test]
