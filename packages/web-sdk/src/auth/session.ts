@@ -141,10 +141,28 @@ export interface Session {
    */
   refresh: () => Promise<string | null>;
   /**
+   * The token to send again a request that was sent as `sent` and rejected
+   * as expired, or null when it must not be sent again: the session it was
+   * sent in has ended (signed out, or another account signed in), or no
+   * renewed token could be had. A token the session renewed meanwhile is
+   * returned as it is, without rotating the cookie again.
+   */
+  tokenForRetry: (sent: SentAs) => Promise<string | null>;
+  /**
    * Sign out now, then run `revoke` (the logout request) once no refresh is
    * rotating the cookie, so it revokes the cookie the browser ends up with.
    */
   signOut: (revoke: () => Promise<unknown>) => Promise<void>;
+}
+
+/** The session a request was sent in, and the token it carried. */
+export interface SentAs {
+  epoch: number;
+  token: string | null;
+}
+
+export function sentAs(state: SessionState): SentAs {
+  return { epoch: state.epoch, token: accessToken(state) };
 }
 
 /**
@@ -172,6 +190,18 @@ export function createSession(deps: SessionDeps): Session {
     listeners.forEach((listener) => listener(next, prev));
   };
 
+  const refresh = async () => {
+    const { epoch, status } = state;
+    if (status === 'signedOut') return null;
+    const outcome = await deps.refresh();
+    dispatch({ type: 'refresh-settled', epoch, outcome });
+    return outcome.status === 'refreshed' &&
+      state.status === 'active' &&
+      state.epoch === epoch
+      ? state.token
+      : null;
+  };
+
   return {
     getState: () => state,
     subscribe(listener) {
@@ -181,16 +211,12 @@ export function createSession(deps: SessionDeps): Session {
       };
     },
     dispatch,
-    async refresh() {
-      const { epoch, status } = state;
-      if (status === 'signedOut') return null;
-      const outcome = await deps.refresh();
-      dispatch({ type: 'refresh-settled', epoch, outcome });
-      return outcome.status === 'refreshed' &&
-        state.status === 'active' &&
-        state.epoch === epoch
-        ? state.token
-        : null;
+    refresh,
+    async tokenForRetry(sent) {
+      if (state.epoch !== sent.epoch) return null;
+      const current = accessToken(state);
+      if (current !== null && current !== sent.token) return current;
+      return refresh();
     },
     async signOut(revoke) {
       dispatch({ type: 'signed-out' });

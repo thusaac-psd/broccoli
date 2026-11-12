@@ -5,7 +5,7 @@ import { ApiClientContext } from '@/api/api-client-context';
 import { refreshSession, withSettledCookie } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
 import { fetchWithServerClock } from '@/api/server-clock';
-import { accessToken, createSession } from '@/auth/session';
+import { createSession, type SentAs, sentAs } from '@/auth/session';
 import { SessionContext } from '@/auth/session-context';
 
 interface ApiClientProviderProps {
@@ -89,26 +89,27 @@ export function ApiClientProvider({
       fetch: fetchWithServerClock,
     });
 
-    // Pristine clones of in-flight requests (keyed by middleware request id)
-    // so they can be replayed after a token refresh; request bodies are
-    // single-use streams, so the original cannot be re-fetched.
-    const replayableRequests = new Map<string, Request>();
+    // In-flight requests (keyed by middleware request id): the session each
+    // was sent in, and a pristine clone so it can be replayed with a renewed
+    // token (request bodies are single-use streams, so the original cannot
+    // be re-fetched).
+    const inFlight = new Map<string, { sent: SentAs; replay: Request }>();
 
     client.use({
       onRequest({ id, request }) {
-        const token = accessToken(session.getState());
-        if (token) {
-          request.headers.set('Authorization', `Bearer ${token}`);
+        const sent = sentAs(session.getState());
+        if (sent.token) {
+          request.headers.set('Authorization', `Bearer ${sent.token}`);
         }
-        replayableRequests.set(id, request.clone());
+        inFlight.set(id, { sent, replay: request.clone() });
         return request;
       },
       onError({ id }) {
-        replayableRequests.delete(id);
+        inFlight.delete(id);
       },
       async onResponse({ id, request, response }) {
-        const replay = replayableRequests.get(id);
-        replayableRequests.delete(id);
+        const pending = inFlight.get(id);
+        inFlight.delete(id);
 
         if (!(await isTokenInvalidResponse(response))) {
           return response;
@@ -120,12 +121,14 @@ export function ApiClientProvider({
         // decides when a session has ended.
         if (isRefreshUrl(request.url)) return response;
 
-        const token = await session.refresh();
+        // Never replayed into another session than the one it was sent in.
+        const token = pending && (await session.tokenForRetry(pending.sent));
         if (!token) {
           return response;
         }
 
-        const retryRequest = replay ?? (request.bodyUsed ? null : request);
+        const retryRequest =
+          pending?.replay ?? (request.bodyUsed ? null : request);
         if (!retryRequest) {
           // Cannot replay this request, but the token has been refreshed so
           // the caller's own retry (e.g. TanStack Query) will succeed.
@@ -144,9 +147,9 @@ export function ApiClientProvider({
     () => async (input: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       const hasCallerAuth = headers.has('Authorization');
-      const sentToken = accessToken(session.getState());
-      if (sentToken && !hasCallerAuth) {
-        headers.set('Authorization', `Bearer ${sentToken}`);
+      const sent = sentAs(session.getState());
+      if (sent.token && !hasCallerAuth) {
+        headers.set('Authorization', `Bearer ${sent.token}`);
       }
 
       const url = new URL(input, resolvedBaseUrl);
@@ -161,7 +164,7 @@ export function ApiClientProvider({
 
       if (isRefreshUrl(url.toString())) return response;
 
-      const token = await session.refresh();
+      const token = await session.tokenForRetry(sent);
       if (!token) {
         return response;
       }

@@ -6,6 +6,7 @@ import {
   createSession,
   INITIAL_SESSION,
   nextRefreshInMs,
+  sentAs,
   SESSION_REFRESH_INTERVAL_MS,
   sessionEffects,
   type SessionState,
@@ -193,4 +194,38 @@ test('a background renewal has no outside effects', () => {
     hint: null,
     queries: null,
   });
+});
+
+test('a request rejected after the account changed is not sent again as the new account', async () => {
+  const { session } = sessionWith(async () => refreshed('jwt-bob-2'));
+  session.dispatch({ type: 'signed-in', session: login('jwt-alice', 7) });
+  const sent = sentAs(session.getState());
+  await session.signOut(async () => undefined);
+  session.dispatch({ type: 'signed-in', session: login('jwt-bob', 8) });
+
+  assert.equal(await session.tokenForRetry(sent), null);
+});
+
+test('a request rejected after a renewal is sent again with the renewed token, without another refresh', async () => {
+  let refreshes = 0;
+  const { session } = sessionWith(async () => {
+    refreshes += 1;
+    return refreshed(`jwt-${refreshes + 1}`);
+  });
+  session.dispatch({ type: 'signed-in', session: login('jwt-1') });
+  const sent = sentAs(session.getState());
+  await session.refresh();
+
+  assert.equal(await session.tokenForRetry(sent), 'jwt-2');
+  assert.equal(refreshes, 1);
+});
+
+test('a request rejected with the current token refreshes it', async () => {
+  const { session } = sessionWith(async () => refreshed('jwt-2'));
+  session.dispatch({ type: 'signed-in', session: login('jwt-1') });
+
+  assert.equal(
+    await session.tokenForRetry(sentAs(session.getState())),
+    'jwt-2',
+  );
 });
