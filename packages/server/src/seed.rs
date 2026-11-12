@@ -8,9 +8,9 @@ use tracing::{error, info};
 
 use crate::config::BootstrapConfig;
 use crate::entity::{
-    additional_file, clarification, dead_letter_message, plugin_storage, problem_attachment,
-    refresh_token, role, role_permission, submission, submission_judgement, test_case,
-    test_case_result, user, user_role,
+    additional_file, clarification, code_run, dead_letter_message, plugin_storage,
+    problem_attachment, refresh_token, role, role_permission, submission, submission_judgement,
+    test_case, test_case_result, user, user_role,
 };
 use crate::services::privileges::SystemAdminLock;
 use crate::utils::hash;
@@ -356,6 +356,27 @@ fn boot_indexes() -> Vec<BootIndex> {
                         .eq(common::SubmissionStatus::Queued.as_str()),
                 ),
         ),
+        // The claim fiber's scan and in-flight count over code runs. A
+        // judgement's in-flight count uses the entity's `status` index. Without
+        // the claim index the planner prices the scan's per-row handler
+        // subquery over the whole table and JIT-compiles every claim.
+        BootIndex::plain(
+            Index::create()
+                .name("idx_code_run_claim")
+                .table(code_run::Entity)
+                .col(code_run::Column::CreatedAt)
+                .and_where(
+                    Expr::col(code_run::Column::Status)
+                        .eq(common::SubmissionStatus::Queued.as_str()),
+                ),
+        ),
+        BootIndex::plain(
+            Index::create()
+                .name("idx_code_run_in_flight")
+                .table(code_run::Entity)
+                .col(code_run::Column::OwnerServerId)
+                .and_where(Expr::col(code_run::Column::Status).is_in(in_flight())),
+        ),
         BootIndex::plain(
             Index::create()
                 .name("idx_test_case_result_judgement")
@@ -363,6 +384,14 @@ fn boot_indexes() -> Vec<BootIndex> {
                 .col(test_case_result::Column::JudgementId),
         ),
     ]
+}
+
+/// The in-flight statuses, for a partial index predicate.
+fn in_flight() -> Vec<&'static str> {
+    common::StatusPhase::InFlight
+        .statuses()
+        .map(|s| s.as_str())
+        .collect()
 }
 
 /// Create every `boot_indexes` entry that is missing.
