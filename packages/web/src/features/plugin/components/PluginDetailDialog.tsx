@@ -17,12 +17,15 @@ import {
   Cpu,
   Globe,
   Loader2,
+  Package,
   RefreshCw,
   Server,
   ServerCog,
 } from 'lucide-react';
+import { useState } from 'react';
 
 import type { PluginFleet } from '../fleet';
+import { PluginSourceBadge } from './PluginCard';
 import { PluginFleetBadge } from './PluginFleetBadge';
 
 // -- Section wrapper --
@@ -169,13 +172,113 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
   );
 }
 
+// -- Source --
+
+function SourceSection({
+  plugin,
+  onRemoveUpload,
+  removingUpload,
+}: {
+  plugin: PluginFullDetail;
+  onRemoveUpload?: (pluginId: string) => void;
+  removingUpload: boolean;
+}) {
+  const { t } = useTranslation();
+  const [confirming, setConfirming] = useState(false);
+  const { source } = plugin;
+  const uploaded = source.kind === 'upload';
+
+  return (
+    <Section
+      title={t('plugins.detail.source')}
+      icon={<Package className="h-4 w-4" />}
+    >
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <PluginSourceBadge kind={source.kind} />
+        <span className="text-muted-foreground">
+          {t(
+            uploaded
+              ? 'plugins.detail.sourceUpload'
+              : 'plugins.detail.sourceBundle',
+          )}
+        </span>
+      </div>
+      {source.archive_hash && (
+        <p className="font-mono text-[11px] text-muted-foreground break-all">
+          sha256 {source.archive_hash}
+        </p>
+      )}
+      {uploaded && onRemoveUpload && !confirming && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          disabled={removingUpload}
+          onClick={() => setConfirming(true)}
+        >
+          {t('plugins.detail.removeUpload')}
+        </Button>
+      )}
+      {uploaded && onRemoveUpload && confirming && (
+        <div className="rounded-md border border-destructive/50 p-2 space-y-2">
+          <p className="text-xs">
+            {t(
+              source.bundled
+                ? 'plugins.detail.removeUploadToBundle'
+                : 'plugins.detail.removeUploadDeletes',
+            )}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={removingUpload}
+              onClick={() => {
+                setConfirming(false);
+                onRemoveUpload(plugin.id);
+              }}
+            >
+              {removingUpload && (
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+              )}
+              {t('plugins.detail.removeUploadConfirm')}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => setConfirming(false)}
+            >
+              {t('plugins.detail.removeUploadCancel')}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 // -- Detail content --
 
-function PluginDetailContent({ plugin }: { plugin: PluginFullDetail }) {
+function PluginDetailContent({
+  plugin,
+  onRemoveUpload,
+  removingUpload,
+}: {
+  plugin: PluginFullDetail;
+  onRemoveUpload?: (pluginId: string) => void;
+  removingUpload: boolean;
+}) {
   const { t } = useTranslation();
 
   return (
     <div className="space-y-5">
+      <SourceSection
+        plugin={plugin}
+        onRemoveUpload={onRemoveUpload}
+        removingUpload={removingUpload}
+      />
       <FleetSection fleet={plugin.fleet} />
 
       {/* Server section */}
@@ -340,6 +443,8 @@ export function PluginDetailDialog({
   onOpenChange,
   onRetry,
   retrying = false,
+  onRemoveUpload,
+  removingUpload = false,
 }: {
   pluginId: string | null;
   open: boolean;
@@ -347,6 +452,9 @@ export function PluginDetailDialog({
   /** Reload the plugin on every server (the retry for a failed load). */
   onRetry?: (pluginId: string) => void;
   retrying?: boolean;
+  /** Remove the plugin's uploaded version on every server. */
+  onRemoveUpload?: (pluginId: string) => void;
+  removingUpload?: boolean;
 }) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
@@ -425,7 +533,13 @@ export function PluginDetailDialog({
           </div>
         )}
 
-        {plugin && <PluginDetailContent plugin={plugin} />}
+        {plugin && (
+          <PluginDetailContent
+            plugin={plugin}
+            onRemoveUpload={onRemoveUpload}
+            removingUpload={removingUpload}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );

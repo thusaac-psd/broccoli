@@ -10,7 +10,16 @@ import {
   CardTitle,
   Switch,
 } from '@broccoli/web-sdk/ui';
-import { Cpu, Globe, Loader2, RefreshCw, Server, Settings } from 'lucide-react';
+import {
+  Cpu,
+  Globe,
+  Loader2,
+  Package,
+  RefreshCw,
+  Server,
+  Settings,
+  Upload,
+} from 'lucide-react';
 import { useState } from 'react';
 
 import { ResourceConfigDialog } from '@/components/config';
@@ -80,6 +89,7 @@ export function PluginCard({
           <div className="flex items-end justify-between gap-4">
             <div className="flex flex-wrap gap-2">
               <PluginFleetBadge fleet={plugin.fleet} />
+              <PluginSourceBadge kind={plugin.source.kind} />
               {plugin.has_server && (
                 <Badge variant="outline" className="gap-1 text-xs">
                   <Server className="h-3 w-3" />
@@ -156,5 +166,21 @@ export function PluginCard({
         />
       )}
     </>
+  );
+}
+
+/** Where the fleet takes the plugin's files from. */
+export function PluginSourceBadge({
+  kind,
+}: {
+  kind: PluginDetail['source']['kind'];
+}) {
+  const { t } = useTranslation();
+  const Icon = kind === 'upload' ? Upload : Package;
+  return (
+    <Badge variant="outline" className="gap-1 text-xs">
+      <Icon className="h-3 w-3" />
+      {t(`plugins.source.${kind}`)}
+    </Badge>
   );
 }

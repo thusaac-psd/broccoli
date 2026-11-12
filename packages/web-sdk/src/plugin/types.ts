@@ -21,6 +21,9 @@ export type PluginDetail = components['schemas']['PluginDetailResponse'];
 export type PluginFullDetail =
   components['schemas']['PluginFullDetailResponse'];
 export type PluginStatus = components['schemas']['PluginStatusResponse'];
+export type PluginSource = components['schemas']['PluginSourceResponse'];
+export type PluginArchiveSummary =
+  components['schemas']['PluginArchiveSummary'];
 
 export interface ComponentBundle {
   [key: string]: ElementType;
