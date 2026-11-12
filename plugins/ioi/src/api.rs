@@ -652,10 +652,8 @@ pub(crate) enum SubtaskScoresAccess {
     Allowed { can_view_subtask_scores: bool },
 }
 
-/// Pure access-control core of `handle_submission_subtask_scores`, extracted
-/// out from behind `#[cfg(target_arch = "wasm32")]` so it is reachable by
-/// `cargo test` (this file previously had zero `#[cfg(test)]` coverage
-/// because every function in it only compiled for the wasm32 target).
+/// Pure access-control core of `handle_submission_subtask_scores`, kept out
+/// from behind `#[cfg(target_arch = "wasm32")]` so `cargo test` reaches it.
 ///
 /// Per `feedback.rs`'s `mask_for_level` doc comment, the
 /// `can_view_subtask_scores` computation below is the ONLY place
@@ -807,8 +805,6 @@ mod subtask_scores_access_tests {
 
     // The owner, mid-contest, with no token spent: the ONLY inputs varying
     // across these two calls are the feedback levels being distinguished.
-    // This is the direct pin for finding C2a -- previously nothing in
-    // `cargo test` could reach this branch at all.
     #[test]
     fn subtask_scores_are_visible_at_subtask_scores_level_but_not_total_only() {
         let subtask_scores = subtask_scores_access_decision(

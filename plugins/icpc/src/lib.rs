@@ -71,8 +71,8 @@ pub(crate) fn standings_restriction(
     }
 }
 
-/// Field mask covering every field `hide_submission_result` used to blank on
-/// EITHER host shape, unioned into one list. The host applies a mask with
+/// Field mask covering every result field on EITHER host shape, unioned into
+/// one list. The host applies a mask with
 /// `apply_mask` (`packages/server/src/visibility/mask.rs`), which is a
 /// documented no-op on a path that does not exist - a missing key, a type
 /// mismatch, or `*` on a non-array never inserts anything. That is what
@@ -623,13 +623,11 @@ mod filter_tests {
 
     #[test]
     fn decide_visibility_contest_manage_bypass_allows_everything_without_querying() {
-        // Task 17: a viewer holding `contest:manage` WITHOUT
-        // `submission:view_all` must ALSO bypass to Allow for the whole
-        // batch, without querying - mirroring the `SUBMISSION_VIEW_ALL`
-        // bypass above exactly, so a future change cannot special-case one
-        // permission's short-circuit without the other. This is the unit-level
-        // pin for the fix `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
-        // pins end to end.
+        // A viewer holding `contest:manage` WITHOUT `submission:view_all`
+        // also bypasses to Allow for the whole batch, without querying, the
+        // same as the `SUBMISSION_VIEW_ALL` bypass above.
+        // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
+        // checks the same rule end to end.
         let host = Host::mock();
         let mut sub = subject(Some(99));
         sub.permissions.push(perm::CONTEST_MANAGE.to_string());
@@ -842,8 +840,7 @@ mod filter_tests {
 
     #[test]
     fn decide_visibility_fails_hidden_on_contest_submission_mismatch() {
-        // No row at all for the submission id: the old code's "fail hidden
-        // rather than leak" branch.
+        // No row at all for the submission id: fail hidden rather than leak.
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([]));
 
@@ -862,21 +859,13 @@ mod filter_tests {
     #[test]
     fn decide_visibility_fails_hidden_even_for_a_viewer_who_would_be_the_owner_when_the_row_is_missing()
      {
-        // Deliberate, safe-direction ordering deviation from the old code:
-        // `filter_submission_for_viewer` was handed the submission's own JSON
-        // (already carrying its `user_id`) and checked ownership FIRST, so an
-        // owner could never reach the "hide it" branch. `decide_visibility`
-        // is handed only a resource id and has no `user_id` to compare until
-        // AFTER the batched query returns a row for that id. When the query
-        // returns no row at all (contest/submission id mismatch, or any other
-        // data-integrity gap), there is nothing to compare the viewer against,
-        // so the missing-row fail-hidden branch runs unconditionally - even
-        // for a viewer who would in fact be the submission's owner if a row
-        // existed. This can only over-hide (Redact), never leak (Allow), so
-        // it is intentionally left as-is. If you reorder these checks to
-        // "restore" the old owner-first semantics, you are removing this
-        // fail-hidden guarantee for the missing-row case - make sure that is
-        // actually what you want.
+        // `decide_visibility` is handed only a resource id, so it has no
+        // `user_id` to compare until the batched query returns a row. With no
+        // row (contest/submission id mismatch, or any other data-integrity
+        // gap) there is nothing to compare the viewer against, and the
+        // missing-row branch fails hidden even for a viewer who would be the
+        // owner. This can only over-hide (Redact), never leak (Allow); keep
+        // the missing-row check ahead of the ownership check.
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([]));
 
@@ -972,13 +961,11 @@ pub fn init() -> FnResult<String> {
 // element of the host's `Decision::meet` lattice, so it can never widen what
 // the host or another plugin already decided.
 //
-// Replaces the old `filter_submission_for_viewer` host-fn hook. Enforces on
-// the generic GET /submissions endpoints (list, detail, judgement history)
-// the SAME two scoreboard-integrity rules `handle_standings` enforces on its
-// own view - private standings during the contest, and the scoreboard
-// freeze - via a `Redact` field mask instead of a host-fn-supplied JSON
-// mutation. `must_hide_other_submission` is the same predicate that backed
-// the old mechanism, unchanged; only the output changed shape.
+// Enforces on the generic GET /submissions endpoints (list, detail,
+// judgement history) the SAME two scoreboard-integrity rules
+// `handle_standings` enforces on its own view - private standings during the
+// contest, and the scoreboard freeze - via a `Redact` field mask.
+// `must_hide_other_submission` is the predicate both share.
 
 /// Row shape for the batched freeze/private-standings query below: one row
 /// per submission resource in the batch, keyed by submission id.
@@ -1017,20 +1004,12 @@ fn decide_visibility_decisions(
     // Admin / view-all / organiser bypass, for the whole batch at once - it
     // does not depend on any individual resource.
     //
-    // `CONTEST_MANAGE` is checked here (Task 17) alongside the pre-existing
-    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE, not
-    // a regression fix: `git show d9860bc8^` confirms the pre-kernel
-    // `apply_scoreboard_filter` also checked only `SUBMISSION_VIEW_ALL`, so
-    // the kernel migration ported this inconsistency verbatim rather than
-    // introducing it. It contradicted `handle_standings` (below), which DOES
-    // check `CONTEST_MANAGE` so organisers see the unfrozen board, and the
-    // documented invariant in `config.rs`: "Organizers (`contest:manage`)
-    // always see the real board." A viewer holding `contest:manage` without
-    // `submission:view_all` - a plausible problem-setter or judge role - was
-    // wrongly redacted during the freeze window; see
+    // Both `SUBMISSION_VIEW_ALL` and `CONTEST_MANAGE` bypass, matching
+    // `handle_standings` and the rule in `config.rs`: organizers
+    // (`contest:manage`) always see the real board, including a problem-setter
+    // or judge role that lacks `submission:view_all`. See
     // `icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organizer`
-    // in `packages/server/tests/e2e/plugins/icpc.rs` for the viewer that
-    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
+    // in `packages/server/tests/e2e/plugins/icpc.rs`.
     if req
         .subject
         .permissions
@@ -1076,8 +1055,7 @@ fn decide_visibility_decisions(
     // filtered in the WHERE clause) so a submission belonging to a non-ICPC
     // contest can be told apart from a genuine contest/submission data
     // mismatch: the former must Allow (this plugin has no opinion on
-    // non-ICPC contests), the latter fails hidden like the old per-submission
-    // query's `None` branch did.
+    // non-ICPC contests), the latter fails hidden.
     let mut p = Params::new();
     let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
