@@ -1,13 +1,14 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useSlotPermissions } from '@broccoli/web-sdk/slot';
 import {
+  isTerminalStatus,
   type Submission,
   TestCaseOutput,
   type TestCaseResult,
   useTestCasePage,
 } from '@broccoli/web-sdk/submission';
 import { Badge, PaginatedList } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertCircle,
@@ -141,11 +142,6 @@ function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
-function formatKb(kb: number): string {
-  const mb = kb / 1024;
-  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
-}
-
 function createPlaceholderTestCase(
   label: string,
   testCaseId: number | undefined,
@@ -234,7 +230,7 @@ function TestCaseDetailPanel({
         )}
         {tc.memory_used != null && (
           <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
-            {formatKb(tc.memory_used)}
+            {formatKibibytes(tc.memory_used)}
           </span>
         )}
       </div>
@@ -383,7 +379,7 @@ function TestCaseResultList({ submission }: { submission: Submission }) {
                   )}
                   {tc.memory_used != null && (
                     <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                      {formatKb(tc.memory_used)}
+                      {formatKibibytes(tc.memory_used)}
                     </span>
                   )}
                   {clickable && (
@@ -661,7 +657,7 @@ function SubtaskCard({
                       )}
                       {tc.memory_used != null && (
                         <span className="font-mono tabular-nums text-[10px] text-muted-foreground">
-                          {formatKb(tc.memory_used)}
+                          {formatKibibytes(tc.memory_used)}
                         </span>
                       )}
                       {clickable && (
@@ -725,12 +721,6 @@ function LoadingSkeleton() {
   );
 }
 
-const TERMINAL_STATUSES = new Set([
-  'Judged',
-  'CompilationError',
-  'SystemError',
-]);
-
 export function IoiSubmissionResult({
   submission,
   testCases,
@@ -757,7 +747,7 @@ export function IoiSubmissionResult({
     prevStatusRef.current = curr;
     if (
       curr &&
-      TERMINAL_STATUSES.has(curr) &&
+      isTerminalStatus(curr) &&
       prev !== curr &&
       contestId &&
       problemId
@@ -1013,7 +1003,7 @@ export function IoiSubmissionResult({
           )}
           {submission.result.memory_used != null && (
             <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
-              {formatKb(submission.result.memory_used)}
+              {formatKibibytes(submission.result.memory_used)}
             </span>
           )}
         </div>

@@ -5,7 +5,7 @@ import {
   type TestCaseResult,
 } from '@broccoli/web-sdk/submission';
 import { Button } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
 import {
   AlertCircle,
   CheckCircle2,
@@ -78,11 +78,6 @@ const VERDICT_CONFIG: Record<
   },
 };
 
-export function formatMemory(kb: number): string {
-  const mb = kb / 1024;
-  return mb.toFixed(mb >= 10 ? 0 : 1);
-}
-
 export function TestCaseRow({
   testCase,
   index,
@@ -127,11 +122,7 @@ export function TestCaseRow({
             </div>
           )}
           {testCase.memory_used != null && (
-            <div>
-              {t('result.memoryValue', {
-                value: formatMemory(testCase.memory_used),
-              })}
-            </div>
+            <div>{formatKibibytes(testCase.memory_used)}</div>
           )}
         </div>
       </div>

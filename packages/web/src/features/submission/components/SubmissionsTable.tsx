@@ -5,7 +5,10 @@ import type {
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 import { Badge, Button } from '@broccoli/web-sdk/ui';
-import { formatRelativeDatetime } from '@broccoli/web-sdk/utils';
+import {
+  formatKibibytes,
+  formatRelativeDatetime,
+} from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
   Check,
@@ -26,7 +29,6 @@ import {
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
 
 import { SubmissionResult } from './SubmissionResult';
-import { formatMemory } from './TestCaseRow';
 
 export interface SubmissionsTableColumn {
   key:
@@ -414,7 +416,7 @@ function SubmissionRow({
         className={`${px} ${py} font-mono text-muted-foreground/60 text-right whitespace-nowrap tabular-nums`}
       >
         {submission.memory_used != null
-          ? `${formatMemory(submission.memory_used)}MB`
+          ? formatKibibytes(submission.memory_used)
           : '—'}
       </td>
     ),
