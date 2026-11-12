@@ -103,11 +103,11 @@ or on a running install:
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server and worker node first, then select **Reload All** once:
-it reaches every server replica within a few seconds, not only the one that
-served the click. A replica that is missing an enabled plugin, or failed to load
-one, keeps retrying and reports `"plugins": "degraded"` in `/healthz`; the admin
-Plugins page shows which server and why.
+a plugin on every server node first, then select **Reload All** once: it reaches
+every server replica within a few seconds, not only the one that served the
+click. A replica that is missing an enabled plugin, or failed to load one, keeps
+retrying and reports `"plugins": "degraded"` in `/healthz`; the admin Plugins
+page shows which server and why.
 
 To install or update a plugin without touching the nodes, select **Upload
 plugin** on the admin Plugins page and choose a `.tar.gz` archive with one

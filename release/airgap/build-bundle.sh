@@ -137,8 +137,8 @@ if [ "$SKIP_IMAGES" = "0" ]; then
     "${mirror_build_args[@]}" "${provenance_labels[@]}" \
     -t "broccoli-worker:$VERSION" "$repo"
 
-  # Default plugins for the bind-mount source. The server + worker compose
-  # templates mount ./plugins:/plugins:ro, which OVERLAYS the image-baked
+  # Default plugins for the bind-mount source. The server compose template
+  # mounts ./plugins:/plugins:ro, which OVERLAYS the image-baked
   # /plugins; if the bundle omits that source dir the overlay is empty and the
   # server boots with an empty plugin registry (discover_plugins scans the dir at
   # startup — no evaluators/checkers means nothing judges). Copy the built set

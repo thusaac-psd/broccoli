@@ -19,9 +19,4 @@ grep -q 'BROCCOLI__WORKER__SANDBOX_BACKEND: isolate' "$wt" \
 grep -q 'BROCCOLI__WORKER__ISOLATE_BIN: /usr/local/bin/isolate' "$wt" \
   || { echo "FAIL: worker template does not point ISOLATE_BIN at the baked binary"; exit 1; }
 
-# The worker runs evaluator/checker plugins, so the bundle's plugin set must be
-# mounted (same overlay the server uses; empty overlay => nothing to judge).
-grep -Eq '^[[:space:]]*-[[:space:]]*\./plugins:/plugins:ro' "$wt" \
-  || { echo "FAIL: worker template does not mount ./plugins:/plugins:ro (no evaluators/checkers)"; exit 1; }
-
 echo "PASS: worker template runs isolate from the baked config, no dir-over-file mount"

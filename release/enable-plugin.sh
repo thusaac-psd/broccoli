@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enable optional plugins shipped with this bundle, for example
 #   ./enable-plugin.sh codelink-qualifier codelink-bracket
-# Run it on each server and worker node, then select Reload All once on
+# Run it on each server node, then select Reload All once on
 # the admin Plugins page: every server replica picks it up within a few
 # seconds. Without arguments, lists the optional plugins in this bundle.
 set -euo pipefail
