@@ -12,10 +12,9 @@
 //!   row per installed plugin, so a poll is one tiny indexless scan.
 //! - The admin endpoints call the `enable` / `disable` / `reload` /
 //!   `reload_all` / `install` / `remove_upload` functions here, which apply
-//!   the change on the
-//!   serving replica first and only then publish it (one write to the row),
-//!   so a change that cannot even load here never reaches the rest of the
-//!   fleet. Every peer then picks it up on its next poll. A row that
+//!   the change on the serving replica first and only then publish it (one
+//!   write to the row), so a change that cannot even load here never reaches
+//!   the rest of the fleet. Every peer then picks it up on its next poll. A row that
 //!   disappears (an upload removed with no bundled copy to fall back to)
 //!   unloads the plugin everywhere.
 //!
@@ -508,7 +507,7 @@ fn published_archives(rows: &[plugin_entity::Model]) -> HashSet<String> {
         .collect()
 }
 
-/// Drop cached archives that are neither published (`published`) nor loaded
+/// Drop cached archives that are neither in `keep` (published) nor loaded
 /// here: a version kept serving after a failed update is still loaded, so
 /// its files stay until it is replaced.
 async fn retain_cache(state: &AppState, mut keep: HashSet<String>) {
