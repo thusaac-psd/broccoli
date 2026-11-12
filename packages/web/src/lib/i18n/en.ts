@@ -1010,6 +1010,8 @@ export const en: Record<string, string> = {
 
   // Common
   'common.cancel': 'Cancel',
+  'confirm.confirm': 'Confirm',
+  'confirm.failed': 'The action failed. Please try again.',
 
   // System / admin monitoring
   'sidebar.allSubmissions': 'All Submissions',
