@@ -14,7 +14,6 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertCircle,
-  Cpu,
   Globe,
   Loader2,
   Package,
@@ -390,33 +389,6 @@ function PluginDetailContent({
                 emptyMessage={t('plugins.detail.noRoutes')}
               />
             </>
-          )}
-        </Section>
-      )}
-
-      {/* Worker section */}
-      {plugin.worker && (
-        <Section
-          title={t('plugins.detail.worker')}
-          icon={<Cpu className="h-4 w-4" />}
-        >
-          {plugin.worker.permissions.length > 0 ? (
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-muted-foreground">
-                {t('plugins.detail.permissions')}
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {plugin.worker.permissions.map((p) => (
-                  <Badge key={p} variant="secondary" className="text-xs">
-                    {p}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">
-              {t('plugins.detail.permissions')}: —
-            </p>
           )}
         </Section>
       )}

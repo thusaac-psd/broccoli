@@ -569,7 +569,6 @@ mod tests {
                 }],
                 timers: vec![],
             }),
-            worker: None,
             web: None,
             translations: HashMap::new(),
             config: HashMap::new(),

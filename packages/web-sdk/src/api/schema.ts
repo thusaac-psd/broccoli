@@ -3474,8 +3474,6 @@ export interface components {
       has_server: boolean;
       /** @example true */
       has_web: boolean;
-      /** @example false */
-      has_worker: boolean;
       /** @example plugin-123 */
       id: string;
       /** @example An Awesome Plugin */
@@ -3532,8 +3530,6 @@ export interface components {
       has_server: boolean;
       /** @example true */
       has_web: boolean;
-      /** @example false */
-      has_worker: boolean;
       /** @example plugin-123 */
       id: string;
       /** @example An Awesome Plugin */
@@ -3550,7 +3546,6 @@ export interface components {
       /** @example 1.0.0 */
       version: string;
       web?: null | components['schemas']['WebDetailResponse'];
-      worker?: null | components['schemas']['WorkerDetailResponse'];
     };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {
@@ -4600,9 +4595,6 @@ export interface components {
     };
     WebVitalsPayload: {
       vitals: components['schemas']['WebVital'][];
-    };
-    WorkerDetailResponse: {
-      permissions: string[];
     };
     WorkerInfo: {
       /**

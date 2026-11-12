@@ -159,8 +159,6 @@ pub struct PluginDetailResponse {
 
     #[schema(example = true)]
     pub has_server: bool,
-    #[schema(example = false)]
-    pub has_worker: bool,
     #[schema(example = true)]
     pub has_web: bool,
 
@@ -202,13 +200,10 @@ pub struct PluginFullDetailResponse {
 
     #[schema(example = true)]
     pub has_server: bool,
-    #[schema(example = false)]
-    pub has_worker: bool,
     #[schema(example = true)]
     pub has_web: bool,
 
     pub server: Option<ServerDetailResponse>,
-    pub worker: Option<WorkerDetailResponse>,
     pub web: Option<WebDetailResponse>,
     pub translations: Vec<String>,
 
@@ -222,11 +217,6 @@ pub struct PluginFullDetailResponse {
 pub struct ServerDetailResponse {
     pub permissions: Vec<String>,
     pub routes: Vec<ServerRouteConfig>,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct WorkerDetailResponse {
-    pub permissions: Vec<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -334,7 +324,6 @@ impl PluginDetailResponse {
             version: String::new(),
             description: None,
             has_server: false,
-            has_worker: false,
             has_web: false,
             config_schemas: Vec::new(),
         }
@@ -347,7 +336,6 @@ impl PluginDetailResponse {
         let source = fleet.source(&info.id, bundled);
         let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
-        let has_worker = info.manifest.has_worker();
         let has_web = info.manifest.has_web();
 
         let mut config_schemas: Vec<_> = info
@@ -373,7 +361,6 @@ impl PluginDetailResponse {
             version: info.manifest.version,
             description: info.manifest.description,
             has_server,
-            has_worker,
             has_web,
             config_schemas,
         }
@@ -393,10 +380,8 @@ impl PluginFullDetailResponse {
             version: String::new(),
             description: None,
             has_server: false,
-            has_worker: false,
             has_web: false,
             server: None,
-            worker: None,
             web: None,
             translations: Vec::new(),
             config_schemas: Vec::new(),
@@ -410,16 +395,11 @@ impl PluginFullDetailResponse {
         let source = fleet.source(&info.id, bundled);
         let fleet = fleet.plugin(&info.id);
         let has_server = info.manifest.has_server();
-        let has_worker = info.manifest.has_worker();
         let has_web = info.manifest.has_web();
 
         let server = info.manifest.server.as_ref().map(|s| ServerDetailResponse {
             permissions: s.permissions.clone(),
             routes: s.routes.clone(),
-        });
-
-        let worker = info.manifest.worker.as_ref().map(|w| WorkerDetailResponse {
-            permissions: w.permissions.clone(),
         });
 
         let web = info.manifest.web.as_ref().map(|w| WebDetailResponse {
@@ -453,10 +433,8 @@ impl PluginFullDetailResponse {
             version: info.manifest.version,
             description: info.manifest.description,
             has_server,
-            has_worker,
             has_web,
             server,
-            worker,
             web,
             translations,
             config_schemas,

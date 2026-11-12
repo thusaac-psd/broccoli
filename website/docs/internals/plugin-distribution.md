@@ -22,7 +22,8 @@ clears the column and the bundled copy takes over again.
 
 Workers run no plugin code. Evaluators, checkers and contest types all execute
 on the servers, and workers only run the sandbox operations the servers send
-them, so a published version needs to reach servers only.
+them, so a published version needs to reach servers only. Plugin manifests
+have no worker section for the same reason.
 
 ## Publishing is one row write
 
@@ -33,7 +34,7 @@ them, so a published version needs to reach servers only.
    directories only, one top-level directory named after a valid plugin id,
    no path component other than a plain name, no duplicate files, a
    `plugin.toml` that parses with valid routes and timers, every manifest path
-   inside the plugin root, and the server and worker entry points present.
+   inside the plugin root, and the server entry point present.
 2. The bytes go to the blob store. `put` is content addressed, so the key is
    the hash `parse` computed.
 3. Under the lifecycle lock, the archive is unpacked into this server's cache

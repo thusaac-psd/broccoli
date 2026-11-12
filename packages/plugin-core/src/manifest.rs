@@ -15,8 +15,6 @@ pub struct PluginManifest {
 
     pub server: Option<ServerConfig>,
 
-    pub worker: Option<WorkerConfig>,
-
     pub web: Option<WebConfig>,
 
     #[serde(default)]
@@ -38,10 +36,6 @@ impl PluginManifest {
         self.server.is_some()
     }
 
-    pub fn has_worker(&self) -> bool {
-        self.worker.is_some()
-    }
-
     pub fn has_web(&self) -> bool {
         self.web.is_some()
     }
@@ -52,7 +46,7 @@ impl PluginManifest {
 
     /// Paths, relative to the plugin directory, of the files and
     /// directories the host loads for this plugin besides `plugin.toml`: the
-    /// server and worker entry points, the web root, translation files and
+    /// server entry point, the web root, translation files and
     /// included config schemas. Together they identify what a replica would
     /// actually run, without sweeping in build output or sources that happen
     /// to sit in the same directory.
@@ -60,9 +54,6 @@ impl PluginManifest {
         let mut paths = Vec::new();
         if let Some(server) = &self.server {
             paths.push(server.entry.as_str());
-        }
-        if let Some(worker) = &self.worker {
-            paths.push(worker.entry.as_str());
         }
         if let Some(web) = &self.web {
             paths.push(web.root.as_str());
@@ -75,7 +66,7 @@ impl PluginManifest {
     }
 
     pub fn is_hollow(&self) -> bool {
-        !self.has_server() && !self.has_worker() && !self.has_web() && !self.has_translations()
+        !self.has_server() && !self.has_web() && !self.has_translations()
     }
 
     pub fn resolve_schema_includes(&mut self, root_dir: &Path) -> Result<(), PluginError> {
@@ -194,14 +185,6 @@ pub struct ServerRouteConfig {
 
     #[serde(default)]
     pub permission: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct WorkerConfig {
-    pub entry: String,
-
-    #[serde(default)]
-    pub permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -727,7 +710,6 @@ mod tests {
             version: "1.0.0".into(),
             description: None,
             server: None,
-            worker: None,
             web: None,
             translations: HashMap::new(),
             config: HashMap::from([(
@@ -770,7 +752,6 @@ mod tests {
             version: "1.0.0".into(),
             description: None,
             server: None,
-            worker: None,
             web: None,
             translations: HashMap::new(),
             config: HashMap::from([(

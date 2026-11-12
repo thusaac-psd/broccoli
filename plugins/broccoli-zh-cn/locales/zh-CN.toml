@@ -541,7 +541,6 @@
 'plugins.disable' = '禁用插件'
 'plugins.component.server' = '后端'
 'plugins.component.web' = '前端'
-'plugins.component.worker' = '评测机'
 
 # Language switcher
 'locale.switch' = '语言'

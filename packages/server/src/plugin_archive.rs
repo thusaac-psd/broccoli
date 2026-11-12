@@ -71,7 +71,7 @@ impl PluginArchive {
     /// types (regular files and directories only), the layout, that every
     /// path stays inside the plugin root, that `plugin.toml` parses and
     /// declares valid routes, and that every path it names is inside the
-    /// plugin root and its entry points are in the archive.
+    /// plugin root and its server entry point is in the archive.
     pub fn parse(bytes: impl Into<Bytes>) -> Result<Self, ArchiveError> {
         let bytes: Bytes = bytes.into();
         if bytes.len() > MAX_ARCHIVE_BYTES {
@@ -111,16 +111,13 @@ impl PluginArchive {
                 )));
             }
         }
-        let entries = [
-            manifest.server.as_ref().map(|s| s.entry.as_str()),
-            manifest.worker.as_ref().map(|w| w.entry.as_str()),
-        ];
-        for entry in entries.into_iter().flatten() {
-            if !files.contains(Path::new(entry)) {
-                return Err(reject(format!(
-                    "plugin.toml names entry point '{entry}', which is not in the archive"
-                )));
-            }
+        if let Some(server) = &manifest.server
+            && !files.contains(Path::new(&server.entry))
+        {
+            return Err(reject(format!(
+                "plugin.toml names entry point '{}', which is not in the archive",
+                server.entry
+            )));
         }
         Ok(Self {
             id,

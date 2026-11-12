@@ -11,7 +11,6 @@ import {
   Switch,
 } from '@broccoli/web-sdk/ui';
 import {
-  Cpu,
   Globe,
   Loader2,
   Package,
@@ -100,12 +99,6 @@ export function PluginCard({
                 <Badge variant="outline" className="gap-1 text-xs">
                   <Globe className="h-3 w-3" />
                   {t('plugins.component.web')}
-                </Badge>
-              )}
-              {plugin.has_worker && (
-                <Badge variant="outline" className="gap-1 text-xs">
-                  <Cpu className="h-3 w-3" />
-                  {t('plugins.component.worker')}
                 </Badge>
               )}
             </div>
