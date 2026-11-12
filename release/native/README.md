@@ -167,7 +167,7 @@ problem list, submit one solution, confirm a worker judges it.
 
 ## Notes / limitations
 - **Plugin web UIs**: the bundle ships every judge `.wasm` (judging works) plus
-  the **print** plugin's staff web UI (`plugins/print/web/dist/` — print queue
+  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print queue
   panel + print buttons) and its backend `.wasm`. The other plugins' optional
   config-UI panels are only included if their frontends were built. Building any
   plugin frontend requires building `packages/web-sdk` first (it emits

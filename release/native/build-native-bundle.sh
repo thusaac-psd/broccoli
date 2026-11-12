@@ -139,7 +139,7 @@ done
 [ "$i18n_miss" = 0 ] || die "plugin translation file(s) missing -- aborting (would break plugin activation)"
 # print plugin: backend wasm is required (contest printing); staff web UI is best-effort
 [ -f "$WORK/plugins/print/print_plugin.wasm" ] && echo "  print backend wasm: included" || echo "  WARN: print backend wasm MISSING"
-[ -f "$WORK/plugins/print/web/dist/index.js" ] && echo "  print staff web UI: included" \
+[ -f "$WORK/plugins/print/frontend/dist/index.js" ] && echo "  print staff web UI: included" \
   || echo "  NOTE: print staff web UI not built (backend printing still works; build web/dist on a connected machine for the queue panel)"
 
 echo ">> packing"

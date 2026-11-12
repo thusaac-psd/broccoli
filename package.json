@@ -11,7 +11,7 @@
     "format:check": "pnpm prettier --check \"{.,packages/**,plugins/**}/*.{ts,tsx,css,scss,html,json,md}\"",
     "lint": "pnpm eslint .",
     "test": "node --experimental-strip-types --test $(find packages/web/src packages/web/plugins packages/web-sdk/src plugins -name '*.test.ts' -not -path '*/node_modules/*')",
-    "typecheck": "pnpm --filter @broccoli/web typecheck",
+    "typecheck": "pnpm -r typecheck",
     "prepare": "husky"
   },
   "keywords": [],

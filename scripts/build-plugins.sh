@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds every plugin in `plugins/*` that has buildable server or web assets in
 # plugin.toml. The CLI copies produced WASM modules to manifest entry paths and
-# builds plugin frontend bundles into their manifest web roots.
+# builds plugin frontend bundles into their manifest web roots. Plugin
+# frontends are pnpm workspace members, so one root install covers them all.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,7 +47,7 @@ for plugin_dir in "${PLUGINS_DIR}"/*/; do
   fi
 
   echo "==> Building plugin: ${plugin_name}"
-  (cd "${ROOT_DIR}" && cargo run -p broccoli-dev-cli --locked -- plugin build "plugins/${plugin_name}" --install --release)
+  (cd "${ROOT_DIR}" && cargo run -p broccoli-dev-cli --locked -- plugin build "plugins/${plugin_name}" --release)
   built_any=1
 done
 

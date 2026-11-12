@@ -44,7 +44,7 @@ pub fn resolve(plugin_dir: &Path, web_root: Option<&str>) -> ResolvedDevConfig {
 
     let frontend_install_cmd = match raw.build.frontend_install_cmd {
         Some(cmd) => shell_words(cmd.trim()),
-        None => vec!["pnpm".into(), "install".into(), "--ignore-workspace".into()],
+        None => vec!["pnpm".into(), "install".into()],
     };
 
     let frontend_build_cmd = match raw.build.frontend_build_cmd {
@@ -102,11 +102,9 @@ fn resolve_frontend_dir(
         }
     }
 
-    for subdir in &["web", "frontend"] {
-        let candidate = plugin_dir.join(subdir);
-        if candidate.join("package.json").exists() {
-            return Some(candidate);
-        }
+    let candidate = plugin_dir.join("frontend");
+    if candidate.join("package.json").exists() {
+        return Some(candidate);
     }
 
     if plugin_dir.join("package.json").exists() {

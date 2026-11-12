@@ -34,10 +34,17 @@ Also present but not part of the main Rust workspace members list:
 - plugin crates under `plugins/`
 - additional plugin-related work under `packages/plugins/`
 
-### JavaScript workspaces
+### JavaScript workspace
+
+One pnpm workspace and one `pnpm-lock.yaml` cover:
 
 - `packages/web-sdk`
 - `packages/web`
+- every plugin frontend, at `plugins/<plugin>/frontend`
+
+Shared tool and library versions live in the `catalog:` of
+`pnpm-workspace.yaml`. The documentation site under `website/` keeps its own
+lockfile.
 
 ## Commands That Actually Exist
 

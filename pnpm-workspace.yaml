@@ -1,7 +1,24 @@
-# Root plugin frontend packages are intentionally not workspace members because
-# root plugins may become submodules. Build them through their plugin manifests.
 packages:
   - packages/*
+  - plugins/*/frontend
+
+# One version for the toolchain and the libraries the web app shares with plugin
+# frontends. Packages reference these as `catalog:`.
+catalog:
+  "@monaco-editor/react": ^4.7.0
+  "@tailwindcss/postcss": ^4.2.1
+  "@tanstack/react-query": ^5.90.20
+  # @tsdown/css requires the exact tsdown version it was released with.
+  "@tsdown/css": 0.21.10
+  "@types/node": ^24.19.2
+  "@types/react": ^19.1.16
+  "@types/react-dom": ^19.1.9
+  postcss: ^8.4.49
+  postcss-import: ^16.1.1
+  react-router: ^7.13.2
+  tailwindcss: ^4.2.1
+  tsdown: 0.21.10
+  typescript: ~5.9.3
 
 onlyBuiltDependencies:
   - esbuild

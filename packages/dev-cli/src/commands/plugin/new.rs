@@ -72,7 +72,7 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
 
     let web_root = match kind {
         ScaffoldKind::Frontend => "dist".to_string(),
-        ScaffoldKind::Full => "web/dist".to_string(),
+        ScaffoldKind::Full => "frontend/dist".to_string(),
         ScaffoldKind::Backend => String::new(),
     };
 
@@ -96,11 +96,11 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
 
     if matches!(kind, ScaffoldKind::Frontend | ScaffoldKind::Full) {
         let fe_root = match kind {
-            ScaffoldKind::Full => output_dir.join("web"),
+            ScaffoldKind::Full => output_dir.join("frontend"),
             _ => output_dir.clone(),
         };
         let prefix = match kind {
-            ScaffoldKind::Full => "web/",
+            ScaffoldKind::Full => "frontend/",
             _ => "",
         };
         write_frontend_files(&fe_root, &vars, prefix, &mut created_files)?;
@@ -257,7 +257,7 @@ fn print_summary(name: &str, kind: ScaffoldKind, dir: &Path, files: &[String]) {
 
     if kind == ScaffoldKind::Full {
         println!(
-            "     cd {}/web && pnpm install && pnpm build",
+            "     cd {}/frontend && pnpm install && pnpm build",
             dir.display()
         );
     }
