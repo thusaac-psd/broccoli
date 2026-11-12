@@ -77,16 +77,12 @@ impl ObjectStorageBlobStore {
             bucket.set_path_style();
         }
 
-        // rust-s3 0.37's tokio backend builds its reqwest client with NO request
-        // timeout (the default 60s field is honoured only by the blocking/hyper
-        // backends). Without this, a half-open or stalled SeaweedFS connection
-        // hangs the op's future forever, pinning a worker task and leaking a
-        // pooled connection - they accumulate and stall the judge under load.
-        // with_request_timeout rebuilds the reqwest client WITH a per-request
-        // timeout and preserves path_style (so we set path_style first).
-        let bucket = bucket
-            .with_request_timeout(std::time::Duration::from_secs(S3_REQUEST_TIMEOUT_SECS))
-            .map_err(|e| StorageError::Backend(format!("failed to set request timeout: {e}")))?;
+        // Every request carries this timeout, so a half-open or stalled
+        // SeaweedFS connection fails the op instead of hanging its future
+        // forever, pinning a worker task and a pooled connection.
+        bucket.set_request_timeout(Some(std::time::Duration::from_secs(
+            S3_REQUEST_TIMEOUT_SECS,
+        )));
 
         let temp_dir = config.temp_dir.unwrap_or_else(std::env::temp_dir);
 
@@ -352,13 +348,12 @@ impl BlobStore for ObjectStorageBlobStore {
     async fn get_stream(&self, hash: &ContentHash) -> Result<BoxReader, StorageError> {
         let key = Self::object_key(hash);
 
-        // NOTE: rust-s3 0.37's streaming `get_object_stream` returns an
-        // `AsyncRead` adapter that TRUNCATES chunked-transfer responses from
-        // SeaweedFS - it signals EOF after the first chunk, so a 17 KB object
-        // is read back as ~12 KB of garbage-hashing bytes. Instead we stream
-        // the object ourselves via explicit byte ranges: each ranged GET has a
-        // definite Content-Length and reassembles losslessly, while memory
-        // stays bounded to a single window regardless of blob size.
+        // The object streams as explicit byte ranges rather than through
+        // rust-s3's `get_object_stream`, whose `AsyncRead` adapter can end a
+        // chunked-transfer response from SeaweedFS after its first chunk. Each
+        // ranged GET has a definite Content-Length and reassembles losslessly,
+        // while memory stays bounded to a single window regardless of blob
+        // size.
         //
         // A HEAD up front gives us the AUTHORITATIVE total length (so the loop
         // terminates against a real total, not a fragile "short read == EOF"

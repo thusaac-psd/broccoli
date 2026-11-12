@@ -140,7 +140,7 @@ done
 # print plugin: backend wasm is required (contest printing); staff web UI is best-effort
 [ -f "$WORK/plugins/print/print_plugin.wasm" ] && echo "  print backend wasm: included" || echo "  WARN: print backend wasm MISSING"
 [ -f "$WORK/plugins/print/frontend/dist/index.js" ] && echo "  print staff web UI: included" \
-  || echo "  NOTE: print staff web UI not built (backend printing still works; build web/dist on a connected machine for the queue panel)"
+  || echo "  NOTE: print staff web UI not built (backend printing still works; build frontend/dist on a connected machine for the queue panel)"
 
 echo ">> packing"
 tar --no-xattrs --exclude='.DS_Store' -C "$(dirname "$WORK")" -czf "$OUT_DIR/$NAME.tar.gz" "$NAME"
