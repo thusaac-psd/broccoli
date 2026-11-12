@@ -8,7 +8,6 @@
 //! [`Mq::dead_letter_consumer`]). The design, with its tradeoffs, is in the
 //! "Message queue" internals page of the docs site.
 
-mod conn;
 mod error;
 mod group;
 mod keys;
@@ -21,7 +20,6 @@ use common::DlqEnvelope;
 use common::liveness::NodeRole;
 use common::worker::{Task, TaskReply};
 
-pub use conn::{COMMAND_TIMEOUT, CONNECT_TIMEOUT};
 pub use error::MqError;
 pub use group::{
     BLOCK, CLAIM_IDLE, DecodeError, Delivery, EntryRef, GroupConsumer, GroupReader, MAX_DELIVERIES,
@@ -30,7 +28,7 @@ pub use group::{
 pub use keys::{SERVERS_GROUP, StreamRole, Topology, WORKERS_GROUP};
 pub use reply::{REPLY_BATCH, ReplyInbox};
 
-use crate::conn::Conn;
+use common::redis_conn::{COMMAND_TIMEOUT, Conn};
 
 /// Oldest Redis major version the queue runs on.
 pub const MIN_REDIS_MAJOR: u32 = 7;

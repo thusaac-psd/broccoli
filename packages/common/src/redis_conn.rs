@@ -1,4 +1,5 @@
-//! Redis connections with a deadline on every command.
+//! Redis connections with a deadline on every command, for the message queue
+//! and the node liveness keys alike.
 //!
 //! A command that gets no answer within its deadline fails with a timeout
 //! instead of hanging, which is how a half-open socket surfaces. A timeout or
@@ -17,14 +18,14 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A shared multiplexed connection for non-blocking commands, reopened after
 /// a failure.
-pub(crate) struct Conn {
+pub struct Conn {
     client: Client,
     response_timeout: Duration,
     cached: Mutex<Option<MultiplexedConnection>>,
 }
 
 impl Conn {
-    pub(crate) fn new(client: Client, response_timeout: Duration) -> Self {
+    pub fn new(client: Client, response_timeout: Duration) -> Self {
         Self {
             client,
             response_timeout,
@@ -32,7 +33,7 @@ impl Conn {
         }
     }
 
-    pub(crate) fn client(&self) -> &Client {
+    pub fn client(&self) -> &Client {
         &self.client
     }
 
@@ -54,7 +55,7 @@ impl Conn {
 
     /// Run `op` on the connection. A connection-level failure drops it, so the
     /// next call reconnects; the error is returned either way.
-    pub(crate) async fn run<T, F, Fut>(&self, op: F) -> Result<T, RedisError>
+    pub async fn run<T, F, Fut>(&self, op: F) -> Result<T, RedisError>
     where
         F: FnOnce(MultiplexedConnection) -> Fut,
         Fut: Future<Output = Result<T, RedisError>>,
@@ -77,6 +78,6 @@ fn breaks_connection(e: &RedisError) -> bool {
 
 /// The error code of a server reply error (`NOGROUP`, `BUSYGROUP`, ...).
 /// Errors raised by `redis.call` inside a script keep their code.
-pub(crate) fn has_code(e: &RedisError, code: &str) -> bool {
+pub fn has_code(e: &RedisError, code: &str) -> bool {
     e.code() == Some(code) || e.to_string().contains(code)
 }

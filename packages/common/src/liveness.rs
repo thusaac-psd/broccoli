@@ -18,8 +18,10 @@ use redis::aio::ConnectionLike;
 /// How long a liveness key lives without renewal: how long a crashed node still
 /// looks alive.
 pub const TTL: Duration = Duration::from_secs(15);
-/// How often a live node renews its liveness key.
-pub const RENEW_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a live node renews its liveness key: five renewals per TTL, so
+/// a few slow or failed renewals (a fork for `BGSAVE`, an AOF fsync stall)
+/// never let a live node's key expire.
+pub const RENEW_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {

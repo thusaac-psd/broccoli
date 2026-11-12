@@ -15,9 +15,9 @@ use std::time::Duration;
 use redis::streams::StreamReadReply;
 use serde::de::DeserializeOwned;
 
-use crate::conn::{COMMAND_TIMEOUT, Conn, has_code};
 use crate::error::MqError;
 use crate::scripts;
+use common::redis_conn::{COMMAND_TIMEOUT, Conn, has_code};
 
 /// An entry idle this long has lost its owner and may be reclaimed.
 pub const CLAIM_IDLE: Duration = Duration::from_secs(30);

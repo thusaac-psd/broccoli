@@ -16,17 +16,18 @@ use std::time::Duration;
 
 use redis::aio::MultiplexedConnection;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::liveness::{NodeRole, RENEW_INTERVAL, TTL};
+use crate::redis_conn::{COMMAND_TIMEOUT, Conn};
 
 /// Consecutive [`RenewOutcome::Lost`] renewals (about 15 s) after which the
 /// node stops: a live twin holds its ID. This also closes the fail-open boot
 /// path (booting unclaimed when Redis was unreachable), since such a twin loses
 /// its first renewals.
-const LOST_RENEWALS_BEFORE_EXIT: u32 = 3;
+const LOST_RENEWALS_BEFORE_EXIT: u32 = 5;
 /// Exit status after giving up a lost claim, so a supervisor restarts the node
 /// (whose boot claim then refuses to start while the twin is alive).
 const LOST_CLAIM_EXIT_CODE: i32 = 75;
@@ -236,7 +237,7 @@ return 0
 
 /// This process's claim on its node ID. See the module docs.
 pub struct NodeClaim {
-    client: redis::Client,
+    conn: Conn,
     role: NodeRole,
     id: String,
     key: String,
@@ -244,7 +245,6 @@ pub struct NodeClaim {
     ttl: Duration,
     /// Streams that live exactly as long as this claim.
     owned_streams: Vec<String>,
-    conn: Mutex<Option<MultiplexedConnection>>,
 }
 
 impl NodeClaim {
@@ -274,14 +274,15 @@ impl NodeClaim {
         interval: Duration,
     ) -> Result<Self, NodeClaimError> {
         let claim = Self {
-            client,
+            // Every renewal gets the command deadline: a renewal that hangs
+            // fails and the next one, an interval later, tries again.
+            conn: Conn::new(client, COMMAND_TIMEOUT),
             role,
             id: id.to_string(),
             key: role.key(id),
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
             owned_streams: Vec::new(),
-            conn: Mutex::new(None),
         };
         let value = claim.value(payload);
         let deadline = tokio::time::Instant::now() + ttl + interval;
@@ -513,29 +514,12 @@ impl NodeClaim {
         }
     }
 
-    /// Run `op` on the cached connection, dropping it on error so the next call
-    /// reconnects.
     async fn with_conn<T, F, Fut>(&self, op: F) -> Result<T, redis::RedisError>
     where
         F: FnOnce(MultiplexedConnection) -> Fut,
         Fut: std::future::Future<Output = Result<T, redis::RedisError>>,
     {
-        let conn = {
-            let mut guard = self.conn.lock().await;
-            match guard.as_ref() {
-                Some(conn) => conn.clone(),
-                None => {
-                    let conn = self.client.get_multiplexed_async_connection().await?;
-                    *guard = Some(conn.clone());
-                    conn
-                }
-            }
-        };
-        let result = op(conn).await;
-        if result.is_err() {
-            *self.conn.lock().await = None;
-        }
-        result
+        self.conn.run(op).await
     }
 }
 
@@ -814,14 +798,13 @@ mod tests {
         // A twin that booted unclaimed (e.g. Redis timed out at boot) and so
         // never held the key.
         let twin = NodeClaim {
-            client: client.clone(),
+            conn: Conn::new(client.clone(), COMMAND_TIMEOUT),
             role: NodeRole::Worker,
             id: owner.id.clone(),
             key: owner.key.clone(),
             instance: "twin".into(),
             ttl,
             owned_streams: Vec::new(),
-            conn: Mutex::new(None),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut _hb = twin.spawn_heartbeat_with(

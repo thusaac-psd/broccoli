@@ -10,9 +10,9 @@
 use common::worker::TaskReply;
 use redis::streams::StreamReadReply;
 
-use crate::conn::{COMMAND_TIMEOUT, Conn};
 use crate::error::MqError;
 use crate::group::{BLOCK, DecodeError};
+use common::redis_conn::{COMMAND_TIMEOUT, Conn};
 
 /// Replies returned by one read at most.
 pub const REPLY_BATCH: usize = 512;
