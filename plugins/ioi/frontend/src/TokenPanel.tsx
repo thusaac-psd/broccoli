@@ -18,6 +18,10 @@ interface TokenPanelProps {
   contestId?: number;
 }
 
+/** Fetches of the token status after a regeneration time passes, at most. */
+const REGEN_CHECKS = 5;
+const REGEN_RECHECK_MS = 2_000;
+
 function formatCountdown(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -82,12 +86,30 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
       ? formatCountdown(remainingSeconds)
       : null;
 
-  // Once per regeneration time: a status still showing a past time is left to
-  // the regular refetch rather than asked for again every second.
+  // Once the regeneration time passes, fetch the status that follows it. The
+  // server clock is estimated to within about a second, so the first fetch
+  // can come too early and still show the passed time: ask again a few times,
+  // a little apart, rather than wait for the regular refetch.
+  const [regenChecks, setRegenChecks] = useState<{
+    target: number | null;
+    count: number;
+  }>({ target: null, count: 0 });
   useEffect(() => {
-    if (!cId || !countdownExpired) return;
-    void queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
-  }, [cId, countdownExpired, queryClient]);
+    if (!cId || !countdownExpired || countdownTargetMs === null) return;
+    const count =
+      regenChecks.target === countdownTargetMs ? regenChecks.count : 0;
+    if (count >= REGEN_CHECKS) return;
+    const timer = setTimeout(
+      () => {
+        setRegenChecks({ target: countdownTargetMs, count: count + 1 });
+        void queryClient.invalidateQueries({
+          queryKey: ['ioi-token-status', cId],
+        });
+      },
+      count === 0 ? 0 : REGEN_RECHECK_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [cId, countdownExpired, countdownTargetMs, regenChecks, queryClient]);
 
   if (guardLoading || !isIoi || !showTokens) return null;
   if (!tokenStatus) return null;
