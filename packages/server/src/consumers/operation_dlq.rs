@@ -9,6 +9,13 @@ use crate::dlq::DlqService;
 
 /// Entries read per batch.
 const READ_BATCH: usize = 16;
+/// Deliveries after which a dead letter that still cannot be written is
+/// dropped: its write fails deterministically (a value Postgres rejects) or
+/// panics. Reclaims come every [`mq::CLAIM_IDLE`], so this rides out about ten
+/// minutes of database outage first. The envelope is logged in full, so it
+/// can still be recovered by hand.
+const MAX_PERSIST_DELIVERIES: u32 = 20;
+
 /// Deadline of one persist. Under [`mq::CLAIM_IDLE`], so an entry is not
 /// reclaimed while it is being written; a write that does outlast it is
 /// harmless because `send_to_dlq` is idempotent on `message_id`.
@@ -60,6 +67,15 @@ async fn handle(
     consumer: &GroupConsumer<DlqEnvelope>,
     delivery: Delivery<DlqEnvelope>,
 ) {
+    if delivery.deliveries > MAX_PERSIST_DELIVERIES {
+        error!(
+            deliveries = delivery.deliveries,
+            envelope = %delivery.raw_payload(),
+            "Dropping a dead letter that could not be written {MAX_PERSIST_DELIVERIES} times"
+        );
+        ack(consumer, &delivery).await;
+        return;
+    }
     let envelope = match &delivery.payload {
         Ok(envelope) => envelope,
         Err(e) => {

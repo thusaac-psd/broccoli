@@ -181,9 +181,12 @@ Dead lettering is one script: the ownership check, then `XADD <q>:dlq * p
 never lost between the two. Servers consume `<q>:dlq` in the `servers` group,
 write the envelope to `dead_letter_message` in a transaction, and then
 acknowledge it. A failed write leaves the entry pending; any server reclaims it
-after 30 s idle, so a database outage delays dead letters without losing them.
-An envelope that does not decode is logged and acknowledged, since no other
-consumer could read it either. The admin DLQ UI reads the table, not the
+after 30 s idle, so a database outage of up to about ten minutes delays dead
+letters without losing them. A dead letter still unwritten after 20 deliveries
+(its write fails deterministically, or panics) is logged in full at error
+level and acknowledged, so it cannot loop forever. An envelope that does not
+decode is logged and acknowledged, since no other consumer could read it
+either. The admin DLQ UI reads the table, not the
 stream.
 
 ## Batching
