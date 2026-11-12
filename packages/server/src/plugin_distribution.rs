@@ -159,11 +159,45 @@ pub async fn store(state: &AppState, archive: PluginArchive) -> Result<PathBuf, 
             std::fs::remove_dir_all(&partial).map_err(io)?;
         }
         archive.unpack(&partial).map_err(load_failed)?;
+        // Durable before it is visible: a cache entry that exists is
+        // trusted to be complete, even after a power loss.
+        sync_dirs(&partial).map_err(io)?;
         std::fs::rename(&partial, &hash_dir).map_err(io)?;
+        sync_dir(&cache_dir).map_err(io)?;
         Ok(root)
     })
     .await
     .map_err(|e| PluginError::Internal(format!("plugin cache task failed: {e}")))?
+}
+
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Flush `dir` and every directory below it (the files are flushed as they
+/// are written).
+fn sync_dirs(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_dirs(&entry.path())?;
+        }
+    }
+    sync_dir(dir)
+}
+
+/// Drop this server's unpacked copy of an uploaded archive, so the next
+/// [`locate`] fetches and verifies it again. Best-effort.
+pub async fn evict(state: &AppState, source: &PluginSource) {
+    let Some(entry) = source.archive_hash().and_then(cache_entry_for) else {
+        return;
+    };
+    let dir = state.config.plugin.cache_dir.join(entry);
+    if let Err(e) = tokio::fs::remove_dir_all(&dir).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %dir.display(), error = %e, "Failed to drop a plugin cache entry");
+    }
 }
 
 /// Delete every cache entry whose archive is not in `keep`: neither

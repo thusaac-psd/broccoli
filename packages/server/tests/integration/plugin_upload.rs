@@ -435,6 +435,50 @@ async fn a_replica_that_cannot_load_the_upload_keeps_serving_the_previous_versio
     assert_eq!(cache_entries(&b), vec![hash]);
 }
 
+/// A cache entry damaged after it was unpacked (a power loss, a disk
+/// fault) no longer matches the published fingerprint: the server drops it
+/// and fetches the archive again instead of trusting it forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_cache_entry_is_fetched_again() {
+    let a = TestApp::spawn_with_plugins().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let token = admin(&a).await;
+    let body = upload(&a, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
+    let hash = body["archive_hash"].as_str().unwrap().to_string();
+    plugin_lifecycle::reconcile(&b.state).await.unwrap();
+    let wasm = b
+        .plugin_cache
+        .path()
+        .join(&hash)
+        .join(UPLOAD_ONLY)
+        .join("server_plugin.wasm");
+    let intact = std::fs::read(&wasm).unwrap();
+    std::fs::write(&wasm, &intact[..intact.len() / 2]).unwrap();
+
+    // Any re-apply checks the copy: here, a reload through A.
+    let res = a
+        .post_with_token(
+            &routes::admin_plugin_reload(UPLOAD_ONLY),
+            &json!({}),
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let failures = plugin_lifecycle::reconcile(&b.state).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(std::fs::read(&wasm).unwrap(), intact, "B fetched it again");
+    assert_eq!(status(&b, UPLOAD_ONLY), Some(PluginStatus::Loaded));
+    let res = a
+        .get_with_token(&routes::admin_plugin_details(UPLOAD_ONLY), &token)
+        .await;
+    assert_eq!(
+        replica(&res.body["fleet"], &b)["status"],
+        "loaded",
+        "{}",
+        res.text
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn removing_an_upload_falls_back_to_the_bundled_copy() {
     let a = TestApp::spawn_with_plugins().await;

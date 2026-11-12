@@ -546,6 +546,32 @@ async fn forget(state: &AppState, applied: &mut HashMap<String, Applied>, plugin
     tracing::info!(plugin_id, "Plugin removed from the fleet; unloaded it here");
 }
 
+/// Locate the files `desired` publishes and fingerprint them. An uploaded
+/// copy that does not match the published fingerprint is a damaged cache
+/// entry (the archive itself was verified by hash when it was fetched), so
+/// it is dropped and fetched once more.
+async fn locate_published(
+    state: &AppState,
+    id: &PluginId,
+    desired: &Desired,
+) -> Result<(std::path::PathBuf, Option<Fingerprint>), PluginError> {
+    let root = plugin_distribution::locate(state, id, &desired.source).await?;
+    let local = plugin_utils::fingerprint(&root).await;
+    let damaged = matches!(desired.source, PluginSource::Upload(_))
+        && mismatch(desired.published.as_ref(), local.as_ref()).is_some();
+    if !damaged {
+        return Ok((root, local));
+    }
+    tracing::warn!(
+        plugin_id = %id,
+        "This server's copy of the uploaded plugin differs from the published one; fetching it again"
+    );
+    plugin_distribution::evict(state, &desired.source).await;
+    let root = plugin_distribution::locate(state, id, &desired.source).await?;
+    let local = plugin_utils::fingerprint(&root).await;
+    Ok((root, local))
+}
+
 /// Bring one plugin to `desired` on this replica, honouring the retry backoff
 /// of a previously failed load.
 async fn apply(
@@ -605,31 +631,29 @@ async fn apply(
     // published: this replica's copy may be stale or half-synced. With
     // nothing running here, load them anyway and flag the difference, so a
     // fleet restarted onto new files without a Reload still serves.
-    let (local, differs, result) =
-        match plugin_distribution::locate(state, id, &desired.source).await {
-            Err(error) => (
-                None,
-                None,
-                Err(LoadFailure {
-                    error,
-                    kept_previous: loaded,
+    let (local, differs, result) = match locate_published(state, id, &desired).await {
+        Err(error) => (
+            None,
+            None,
+            Err(LoadFailure {
+                error,
+                kept_previous: loaded,
+            }),
+        ),
+        Ok((root, local)) => {
+            let differs = mismatch(desired.published.as_ref(), local.as_ref());
+            let result = match &differs {
+                Some(reason) if loaded => Err(LoadFailure {
+                    error: PluginError::LoadFailed(reason.clone()),
+                    kept_previous: true,
                 }),
-            ),
-            Ok(root) => {
-                let local = plugin_utils::fingerprint(&root).await;
-                let differs = mismatch(desired.published.as_ref(), local.as_ref());
-                let result = match &differs {
-                    Some(reason) if loaded => Err(LoadFailure {
-                        error: PluginError::LoadFailed(reason.clone()),
-                        kept_previous: true,
-                    }),
-                    _ => plugin_utils::load_from_dir(state, plugin_id, &root)
-                        .await
-                        .map(drop),
-                };
-                (local, differs, result)
-            }
-        };
+                _ => plugin_utils::load_from_dir(state, plugin_id, &root)
+                    .await
+                    .map(drop),
+            };
+            (local, differs, result)
+        }
+    };
     if result.is_ok() {
         record_governs(state, plugin_id).await;
     }

@@ -147,8 +147,8 @@ impl PluginArchive {
         &self.bytes
     }
 
-    /// Unpack into `dest`, which must not exist yet, as `dest/<id>/...`.
-    /// Returns the plugin directory. Blocking.
+    /// Unpack into `dest`, which must not exist yet, as `dest/<id>/...`,
+    /// each file flushed to disk. Returns the plugin directory. Blocking.
     pub fn unpack(&self, dest: &Path) -> Result<PathBuf, ArchiveError> {
         let root = dest.join(self.id.as_str());
         let io = |e: std::io::Error| reject(format!("Failed to unpack the archive: {e}"));
@@ -163,7 +163,7 @@ impl PluginArchive {
                     }
                     let mut out = std::fs::File::create(&target).map_err(io)?;
                     std::io::copy(reader, &mut out).map_err(io)?;
-                    Ok(())
+                    out.sync_all().map_err(io)
                 }
             }
         })?;
