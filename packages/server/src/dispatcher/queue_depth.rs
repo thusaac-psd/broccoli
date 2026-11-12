@@ -48,7 +48,7 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 ///
 /// Each COUNT reads the partial `idx_<table>_queued` index over the table's
 /// `Queued` rows (migration `m0014_queued_partial_indexes`), which stays as
-/// small as the cap. The filter is the inline [`super::QUEUED_PREDICATE`] so
+/// small as the cap. The filter is the inline `QUEUED_PREDICATE` so
 /// the index stays usable under a generic plan.
 ///
 /// A single UNION ALL would shave a round-trip but complicates the
