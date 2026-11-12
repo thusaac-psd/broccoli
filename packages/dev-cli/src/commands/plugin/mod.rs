@@ -28,5 +28,9 @@ pub enum PluginCommand {
 
 fn read_manifest(path: &Path) -> anyhow::Result<PluginManifest> {
     let content = std::fs::read_to_string(path).context("Failed to read plugin.toml")?;
-    toml::from_str(&content).context("Failed to parse plugin.toml")
+    parse_manifest(&content)
+}
+
+fn parse_manifest(content: &str) -> anyhow::Result<PluginManifest> {
+    toml::from_str(content).context("Failed to parse plugin.toml")
 }

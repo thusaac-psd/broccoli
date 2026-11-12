@@ -16,8 +16,8 @@ use crate::dev_config::{self, FileKind, ResolvedDevConfig};
 use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config;
 
-use super::read_manifest;
 use super::wasm::copy_wasm_artifact;
+use super::{parse_manifest, read_manifest};
 
 #[derive(Args)]
 pub struct WatchPluginArgs {
@@ -38,6 +38,72 @@ pub struct WatchPluginArgs {
 
     #[arg(long, default_value = "500")]
     pub debounce: u64,
+}
+
+/// A parsed `plugin.toml` and the fingerprint of the bytes it was parsed from.
+struct ManifestSnapshot {
+    manifest: PluginManifest,
+    fingerprint: u64,
+}
+
+impl ManifestSnapshot {
+    fn read(path: &Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path).context("Failed to read plugin.toml")?;
+        Self::parse(&content)
+    }
+
+    fn parse(content: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            manifest: parse_manifest(content)?,
+            fingerprint: fingerprint_bytes(content.as_bytes()),
+        })
+    }
+}
+
+/// What the watch loop knows about the plugin as last built. It advances only
+/// when a backend build and upload succeeds, so a failed one is retried on the
+/// next trigger even if `plugin.toml` itself has not changed since.
+struct WatchState {
+    /// Fingerprint of the `plugin.toml` the last successful build used.
+    built_manifest: Option<u64>,
+    web_root: Option<PathBuf>,
+    server_entry: Option<PathBuf>,
+}
+
+impl WatchState {
+    fn new(plugin_dir: &Path, manifest: &PluginManifest) -> Self {
+        let mut state = Self {
+            built_manifest: None,
+            web_root: None,
+            server_entry: None,
+        };
+        state.track_paths(plugin_dir, manifest);
+        state
+    }
+
+    /// Whether the build that last succeeded already used a `plugin.toml`
+    /// with this fingerprint. An unreadable manifest (`None`) never counts as
+    /// built.
+    fn manifest_is_built(&self, current: Option<u64>) -> bool {
+        current.is_some() && current == self.built_manifest
+    }
+
+    /// Records a successful build and passes a failed one through untouched.
+    fn finish_build(
+        &mut self,
+        plugin_dir: &Path,
+        result: anyhow::Result<ManifestSnapshot>,
+    ) -> anyhow::Result<()> {
+        let built = result?;
+        self.built_manifest = Some(built.fingerprint);
+        self.track_paths(plugin_dir, &built.manifest);
+        Ok(())
+    }
+
+    fn track_paths(&mut self, plugin_dir: &Path, manifest: &PluginManifest) {
+        self.web_root = manifest.web.as_ref().map(|w| plugin_dir.join(&w.root));
+        self.server_entry = manifest.server.as_ref().map(|s| plugin_dir.join(&s.entry));
+    }
 }
 
 enum ChangeKind {
@@ -79,8 +145,7 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
     let web_root_str = manifest.web.as_ref().map(|w| w.root.as_str());
     let dev = dev_config::resolve(&plugin_dir, web_root_str);
 
-    let mut web_root_abs = manifest.web.as_ref().map(|w| plugin_dir.join(&w.root));
-    let mut server_entry_abs = manifest.server.as_ref().map(|s| plugin_dir.join(&s.entry));
+    let mut state = WatchState::new(&plugin_dir, &manifest);
     let mut last_uploaded_archive_fingerprint = None;
 
     let mut fe_child: Option<Child> = None;
@@ -170,21 +235,21 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
         style("✓").green().bold()
     );
 
-    if let Err(e) = initial_build_and_upload(
+    let initial = initial_build_and_upload(
         &plugin_dir,
         &manifest_path,
         &client,
         &dev,
         args.release,
         &mut last_uploaded_archive_fingerprint,
-    ) {
+    );
+    if let Err(e) = state.finish_build(&plugin_dir, initial) {
         eprintln!("{}  Initial build failed: {}", style("✗").red().bold(), e);
     }
 
     let debounce = Duration::from_millis(args.debounce);
     let mut last_build = Instant::now();
     let mut pending_changes: HashSet<PathBuf> = HashSet::new();
-    let mut last_manifest_fingerprint = fingerprint_file(&manifest_path)?;
 
     loop {
         match rx.recv_timeout(debounce) {
@@ -217,8 +282,8 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
         let change_kind = classify_changes(
             &pending_changes,
             &plugin_dir,
-            web_root_abs.as_deref(),
-            server_entry_abs.as_deref(),
+            state.web_root.as_deref(),
+            state.server_entry.as_deref(),
             dev.frontend_dir.as_deref(),
         );
         pending_changes.clear();
@@ -229,51 +294,30 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
         last_build = Instant::now();
 
         match change_kind {
-            ChangeKind::ManifestChanged => {
-                let current_manifest_fingerprint = fingerprint_file(&manifest_path)?;
-                if current_manifest_fingerprint == last_manifest_fingerprint {
-                    continue;
+            ChangeKind::ManifestChanged | ChangeKind::Backend => {
+                if let ChangeKind::ManifestChanged = change_kind {
+                    if state.manifest_is_built(fingerprint_file(&manifest_path)) {
+                        continue;
+                    }
+                    println!(
+                        "\n{}  plugin.toml changed, rebuilding backend...",
+                        style("→").blue().bold(),
+                    );
+                } else {
+                    println!(
+                        "\n{}  Backend changes detected, rebuilding...",
+                        style("→").blue().bold(),
+                    );
                 }
-                last_manifest_fingerprint = current_manifest_fingerprint;
 
-                println!(
-                    "\n{}  plugin.toml changed, rebuilding backend...",
-                    style("→").blue().bold(),
-                );
-
-                if let Err(e) = backend_build_and_upload(
+                let rebuilt = backend_build_and_upload(
                     &plugin_dir,
                     &manifest_path,
                     &client,
                     args.release,
                     &mut last_uploaded_archive_fingerprint,
-                ) {
-                    eprintln!("{}  Build/upload failed: {}", style("✗").red().bold(), e);
-                    eprintln!("   Waiting for next change...");
-                } else if let Ok(updated_manifest) = read_manifest(&manifest_path) {
-                    web_root_abs = updated_manifest
-                        .web
-                        .as_ref()
-                        .map(|w| plugin_dir.join(&w.root));
-                    server_entry_abs = updated_manifest
-                        .server
-                        .as_ref()
-                        .map(|s| plugin_dir.join(&s.entry));
-                }
-            }
-            ChangeKind::Backend => {
-                println!(
-                    "\n{}  Backend changes detected, rebuilding...",
-                    style("→").blue().bold(),
                 );
-
-                if let Err(e) = backend_build_and_upload(
-                    &plugin_dir,
-                    &manifest_path,
-                    &client,
-                    args.release,
-                    &mut last_uploaded_archive_fingerprint,
-                ) {
+                if let Err(e) = state.finish_build(&plugin_dir, rebuilt) {
                     eprintln!("{}  Build/upload failed: {}", style("✗").red().bold(), e);
                     eprintln!("   Waiting for next change...");
                 }
@@ -305,12 +349,10 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn fingerprint_file(path: &Path) -> anyhow::Result<u64> {
-    let content =
-        std::fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    Ok(hasher.finish())
+fn fingerprint_file(path: &Path) -> Option<u64> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| fingerprint_bytes(&bytes))
 }
 
 fn classify_changes(
@@ -405,8 +447,9 @@ fn initial_build_and_upload(
     dev: &ResolvedDevConfig,
     release: bool,
     last_uploaded_archive_fingerprint: &mut Option<u64>,
-) -> anyhow::Result<()> {
-    let manifest = read_manifest(manifest_path)?;
+) -> anyhow::Result<ManifestSnapshot> {
+    let snapshot = ManifestSnapshot::read(manifest_path)?;
+    let manifest = &snapshot.manifest;
 
     if manifest.server.is_some() {
         build_backend(plugin_dir, release)?;
@@ -420,12 +463,12 @@ fn initial_build_and_upload(
         build_frontend(dev)?;
     }
 
-    let archive = package_plugin(plugin_dir, &manifest)?;
+    let archive = package_plugin(plugin_dir, manifest)?;
     upload_plugin(&archive, client, last_uploaded_archive_fingerprint)?;
 
     println!("{}  Plugin uploaded to server", style("✓").green().bold());
 
-    Ok(())
+    Ok(snapshot)
 }
 
 fn backend_build_and_upload(
@@ -434,8 +477,9 @@ fn backend_build_and_upload(
     client: &Client,
     release: bool,
     last_uploaded_archive_fingerprint: &mut Option<u64>,
-) -> anyhow::Result<()> {
-    let manifest = read_manifest(manifest_path)?;
+) -> anyhow::Result<ManifestSnapshot> {
+    let snapshot = ManifestSnapshot::read(manifest_path)?;
+    let manifest = &snapshot.manifest;
 
     if manifest.server.is_some() {
         build_backend(plugin_dir, release)?;
@@ -445,12 +489,12 @@ fn backend_build_and_upload(
         }
     }
 
-    let archive = package_plugin(plugin_dir, &manifest)?;
+    let archive = package_plugin(plugin_dir, manifest)?;
     upload_plugin(&archive, client, last_uploaded_archive_fingerprint)?;
 
     println!("{}  Plugin reloaded on server", style("✓").green().bold());
 
-    Ok(())
+    Ok(snapshot)
 }
 
 fn package_and_upload(
@@ -628,4 +672,83 @@ fn upload_plugin(
     client.upload_plugin(archive)?;
     *last_uploaded_archive_fingerprint = Some(fingerprint);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::*;
+
+    const MANIFEST_V1: &str = r#"
+name = "demo"
+version = "0.1.0"
+
+[server]
+entry = "demo.wasm"
+"#;
+
+    const MANIFEST_V2: &str = r#"
+name = "demo"
+version = "0.1.0"
+
+[server]
+entry = "renamed.wasm"
+
+[web]
+root = "dist"
+entry = "index.js"
+"#;
+
+    fn snapshot(content: &str) -> ManifestSnapshot {
+        ManifestSnapshot::parse(content).unwrap()
+    }
+
+    #[test]
+    fn failed_build_is_retried_for_the_same_manifest() {
+        let dir = Path::new("/plugin");
+        let mut state = WatchState::new(dir, &snapshot(MANIFEST_V1).manifest);
+        let v1 = snapshot(MANIFEST_V1).fingerprint;
+
+        assert!(
+            state
+                .finish_build(dir, Err(anyhow!("build failed")))
+                .is_err()
+        );
+        assert!(!state.manifest_is_built(Some(v1)));
+
+        state.finish_build(dir, Ok(snapshot(MANIFEST_V1))).unwrap();
+        assert!(state.manifest_is_built(Some(v1)));
+    }
+
+    #[test]
+    fn failed_rebuild_keeps_the_last_successful_manifest() {
+        let dir = Path::new("/plugin");
+        let mut state = WatchState::new(dir, &snapshot(MANIFEST_V1).manifest);
+        state.finish_build(dir, Ok(snapshot(MANIFEST_V1))).unwrap();
+        let v2 = snapshot(MANIFEST_V2).fingerprint;
+
+        assert!(
+            state
+                .finish_build(dir, Err(anyhow!("build failed")))
+                .is_err()
+        );
+        assert!(!state.manifest_is_built(Some(v2)));
+        assert_eq!(state.server_entry, Some(dir.join("demo.wasm")));
+        assert_eq!(state.web_root, None);
+
+        state.finish_build(dir, Ok(snapshot(MANIFEST_V2))).unwrap();
+        assert!(state.manifest_is_built(Some(v2)));
+        assert_eq!(state.server_entry, Some(dir.join("renamed.wasm")));
+        assert_eq!(state.web_root, Some(dir.join("dist")));
+    }
+
+    #[test]
+    fn unreadable_manifest_is_never_built() {
+        let dir = Path::new("/plugin");
+        let mut state = WatchState::new(dir, &snapshot(MANIFEST_V1).manifest);
+        state.finish_build(dir, Ok(snapshot(MANIFEST_V1))).unwrap();
+
+        assert!(!state.manifest_is_built(None));
+    }
 }
