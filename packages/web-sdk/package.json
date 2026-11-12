@@ -4,12 +4,7 @@
   "private": false,
   "type": "module",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
     "./package.json": "./package.json",
-    "./tailwind-preset": "./dist/tailwind-preset.js",
     "./plugin.css": "./dist/plugin.css",
     "./*": {
       "types": "./dist/*/index.d.ts",
@@ -25,8 +20,6 @@
   },
   "tsdown": {
     "entry": [
-      "src/index.ts",
-      "src/tailwind-preset.ts",
       "src/*/index.ts"
     ],
     "platform": "neutral",

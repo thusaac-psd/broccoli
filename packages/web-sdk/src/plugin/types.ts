@@ -2,7 +2,7 @@
  * Core type definitions
  */
 
-import type { ElementType, ReactNode } from 'react';
+import type { ElementType } from 'react';
 
 import type { components } from '@/api/schema';
 import type { TranslationMap } from '@/i18n/types';
@@ -20,16 +20,8 @@ export type RouteConfig = components['schemas']['WebRouteConfig'];
 export type PluginDetail = components['schemas']['PluginDetailResponse'];
 export type PluginFullDetail =
   components['schemas']['PluginFullDetailResponse'];
-export type PluginStatus = components['schemas']['PluginStatusResponse'];
-
 export interface ComponentBundle {
   [key: string]: ElementType;
-}
-
-export interface SlotRenderContext {
-  slotName: string;
-  children?: ReactNode;
-  props?: Record<string, unknown>;
 }
 
 export interface PluginModule {

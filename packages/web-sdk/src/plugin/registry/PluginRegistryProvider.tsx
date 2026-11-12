@@ -28,11 +28,6 @@ interface PluginRegistryProviderProps {
   children: ReactNode;
   backendUrl: string;
   /**
-   * Eagerly loaded plugin modules (included in the main bundle).
-   * @deprecated Use `lazyPlugins` for code-splitting.
-   */
-  pluginModules?: PluginModule[];
-  /**
    * Lazy plugin loaders. Each loader is a function returning a dynamic
    * `import()` so Vite can code-split them into separate chunks.
    */
@@ -42,7 +37,6 @@ interface PluginRegistryProviderProps {
 export function PluginRegistryProvider({
   children,
   backendUrl,
-  pluginModules,
   lazyPlugins,
 }: PluginRegistryProviderProps) {
   const [plugins, setPlugins] = useState<Map<string, ActivePluginManifest>>(
@@ -200,9 +194,6 @@ export function PluginRegistryProvider({
         }
 
         setPlugins(new Map(activeManifests.current));
-        console.log(
-          `Plugin '${manifest.name}' with id '${manifest.id}' loaded successfully.`,
-        );
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
         console.error(
@@ -408,11 +399,6 @@ export function PluginRegistryProvider({
   // Load local plugin modules on mount (eager + lazy)
   useEffect(() => {
     const loadInitialPlugins = async () => {
-      // Load eagerly-imported plugins
-      const eagerLoads = (pluginModules ?? []).map(async (module) => {
-        await loadPlugin(module.manifest, module);
-      });
-
       // Load lazy plugins (code-split via dynamic import)
       const lazyLoads = (lazyPlugins ?? []).map(async (loader) => {
         try {
@@ -423,7 +409,7 @@ export function PluginRegistryProvider({
         }
       });
 
-      await Promise.all([...eagerLoads, ...lazyLoads]);
+      await Promise.all(lazyLoads);
       setLocalLoaded(true);
     };
     loadInitialPlugins();

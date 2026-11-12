@@ -945,10 +945,6 @@ export const en: Record<string, string> = {
 
   // Language switcher
   'locale.switch': 'Language',
-  // Amazing button plugin
-  'plugin.amazingButton.label': 'Amazing Button',
-  'plugin.amazingButton.alert': 'Amazing!',
-  'plugin.amazingButton.pageTitle': 'Amazing Page!',
 
   // Validation
   'validation.titleRequired': 'Title is required.',
