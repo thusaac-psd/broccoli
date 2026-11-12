@@ -1,20 +1,10 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 use broccoli_server_sdk::prelude::*;
 
-#[cfg(test)]
-use crate::config::round_score;
 use crate::config::{ContestConfig, SubtaskDef, TaskConfig};
-#[cfg(test)]
-use crate::evaluate_batch::evaluate_all;
 use crate::evaluate_batch::evaluate_all_detached;
-#[cfg(test)]
-use crate::persist::persist_results;
 use crate::subtasks::compute_scoring_test_case_ids;
-#[cfg(test)]
-use crate::subtasks::{score_all_subtasks, test_case_reference_keys};
 
 /// Context gathered from host functions, passed to pure judge logic.
 pub struct JudgeContext {
@@ -27,176 +17,19 @@ pub struct JudgeContext {
     pub subtask_defs: Vec<SubtaskDef>,
 }
 
-/// Result from judge_with_context.
-pub struct JudgeResult {
-    pub output: OnSubmissionOutput,
-    pub submission_score: Option<f64>,
-    pub subtask_scores: Option<Vec<f64>>,
-}
-
-#[cfg(test)]
-pub fn judge_with_context(
-    host: &Host,
-    req: &OnSubmissionInput,
-    ctx: &JudgeContext,
-) -> Result<JudgeResult, SdkError> {
-    if ctx.test_cases.is_empty() {
-        let _ = host
-            .log
-            .info("No test cases found, marking as judged with score 0");
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: ctx.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            verdict: Some(Some(Verdict::Accepted)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: None,
-            error_message: None,
-        })?;
-        if affected == 0 {
-            return Err(SdkError::StaleEpoch);
-        }
-        return Ok(JudgeResult {
-            output: OnSubmissionOutput::ok(),
-            submission_score: Some(0.0),
-            subtask_scores: Some(vec![]),
-        });
-    }
-
-    let scoring_test_case_ids: HashSet<i32> =
-        compute_scoring_test_case_ids(&ctx.subtask_defs, &ctx.test_cases)
-            .into_iter()
-            .collect();
-    let scoring_test_cases: Vec<TestCaseRow> = ctx
-        .test_cases
-        .iter()
-        .filter(|tc| scoring_test_case_ids.contains(&tc.id))
-        .cloned()
-        .collect();
-
-    if scoring_test_cases.is_empty() {
-        let _ =
-            host.submission
-                .delete_results(ctx.submission_id, req.judgement_id, req.judge_epoch);
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: ctx.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            verdict: Some(Some(Verdict::Accepted)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: None,
-            error_message: None,
-        })?;
-        if affected == 0 {
-            return Err(SdkError::StaleEpoch);
-        }
-        return Ok(JudgeResult {
-            output: OnSubmissionOutput::ok(),
-            submission_score: Some(0.0),
-            subtask_scores: Some(vec![0.0; ctx.subtask_defs.len()]),
-        });
-    }
-
-    let outcomes = match evaluate_all(
-        host,
-        req,
-        &scoring_test_cases,
-        ctx.submission_id,
-        |raw, tc| round_score(raw * tc.score),
-        &ctx.subtask_defs,
-    ) {
-        Ok(outcomes) => outcomes,
-        Err(SdkError::StaleEpoch) => {
-            // Submission was rejudged. This execution is stale. Stop gracefully
-            // without persisting anything (the new epoch's plugin will handle it).
-            let _ = host.log.info(&format!(
-                "Submission {} epoch {} is stale, stopping",
-                ctx.submission_id, req.judge_epoch
-            ));
-            return Ok(JudgeResult {
-                output: OnSubmissionOutput::ok(),
-                submission_score: None,
-                subtask_scores: None,
-            });
-        }
-        Err(e) => return Err(e),
-    };
-
-    let id_to_keys: HashMap<i32, Vec<String>> = ctx
-        .test_cases
-        .iter()
-        .map(|tc| (tc.id, test_case_reference_keys(tc)))
-        .collect();
-    let tc_scores: HashMap<String, f64> = outcomes
-        .iter()
-        .filter(|o| !o.verdict.is_skipped_or_cancelled())
-        .flat_map(|o| {
-            id_to_keys
-                .get(&o.test_case_id)
-                .into_iter()
-                .flat_map(|keys| keys.iter().cloned().map(|key| (key, o.raw_score)))
-        })
-        .collect();
-
-    let subtask_results = score_all_subtasks(&ctx.subtask_defs, &ctx.test_cases, &tc_scores);
-    let subtask_scores: Vec<f64> = subtask_results.iter().map(|r| r.score).collect();
-
-    let submission_score = round_score(subtask_scores.iter().sum());
-
-    let output = persist_results(
-        host,
-        ctx.submission_id,
-        req.judgement_id,
-        req.judge_epoch,
-        &outcomes,
-        submission_score,
-    )?;
-
-    Ok(JudgeResult {
-        output,
-        submission_score: Some(submission_score),
-        subtask_scores: Some(subtask_scores),
-    })
-}
-
+/// Judge a submission against `ctx`. A submission with nothing to score is
+/// finished here with score 0; otherwise a detached evaluation starts and its
+/// callbacks finish the submission.
 pub fn judge_with_context_detached(
     host: &Host,
     req: &OnSubmissionInput,
     ctx: &JudgeContext,
-) -> Result<JudgeResult, SdkError> {
+) -> Result<OnSubmissionOutput, SdkError> {
     if ctx.test_cases.is_empty() {
         let _ = host
             .log
             .info("No test cases found, marking as judged with score 0");
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: ctx.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            verdict: Some(Some(Verdict::Accepted)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: None,
-            error_message: None,
-        })?;
-        if affected == 0 {
-            return Err(SdkError::StaleEpoch);
-        }
-        return Ok(JudgeResult {
-            output: OnSubmissionOutput::ok(),
-            submission_score: Some(0.0),
-            subtask_scores: Some(vec![]),
-        });
+        return finish_with_zero_score(host, req, ctx);
     }
 
     let scoring_test_case_ids: HashSet<i32> =
@@ -214,43 +47,42 @@ pub fn judge_with_context_detached(
         let _ =
             host.submission
                 .delete_results(ctx.submission_id, req.judgement_id, req.judge_epoch);
-        let affected = host.submission.update(&SubmissionUpdate {
-            submission_id: ctx.submission_id,
-            judgement_id: req.judgement_id,
-            judge_epoch: req.judge_epoch,
-            status: Some(SubmissionStatus::Judged),
-            verdict: Some(Some(Verdict::Accepted)),
-            score: Some(0.0),
-            time_used: Some(None),
-            memory_used: Some(None),
-            compile_output: None,
-            error_code: None,
-            error_message: None,
-        })?;
-        if affected == 0 {
-            return Err(SdkError::StaleEpoch);
-        }
-        return Ok(JudgeResult {
-            output: OnSubmissionOutput::ok(),
-            submission_score: Some(0.0),
-            subtask_scores: Some(vec![0.0; ctx.subtask_defs.len()]),
-        });
+        return finish_with_zero_score(host, req, ctx);
     }
 
-    let output = evaluate_all_detached(
+    evaluate_all_detached(
         host,
         req,
         &ctx.test_cases,
         &scoring_test_cases,
         ctx.submission_id,
         &ctx.subtask_defs,
-    )?;
+    )
+}
 
-    Ok(JudgeResult {
-        output,
-        submission_score: None,
-        subtask_scores: None,
-    })
+/// Mark the submission judged with score 0 without evaluating anything.
+fn finish_with_zero_score(
+    host: &Host,
+    req: &OnSubmissionInput,
+    ctx: &JudgeContext,
+) -> Result<OnSubmissionOutput, SdkError> {
+    let affected = host.submission.update(&SubmissionUpdate {
+        submission_id: ctx.submission_id,
+        judgement_id: req.judgement_id,
+        judge_epoch: req.judge_epoch,
+        status: Some(SubmissionStatus::Judged),
+        verdict: Some(Some(Verdict::Accepted)),
+        score: Some(0.0),
+        time_used: Some(None),
+        memory_used: Some(None),
+        compile_output: None,
+        error_code: None,
+        error_message: None,
+    })?;
+    if affected == 0 {
+        return Err(SdkError::StaleEpoch);
+    }
+    Ok(OnSubmissionOutput::ok())
 }
 
 #[cfg(test)]
@@ -278,6 +110,33 @@ mod tests {
             judge_epoch: 0,
             target_worker_id: None,
         }
+    }
+
+    /// Judge `ctx` and feed `results` in order through the real detached
+    /// callback, the way the host delivers them.
+    fn judge(host: &Host, ctx: &JudgeContext, results: Vec<TestCaseVerdict>) -> OnSubmissionOutput {
+        let output = judge_with_context_detached(host, &sample_input(), ctx).unwrap();
+        let Some(start) = host.eval.detached_windowed_requests().pop() else {
+            assert!(results.is_empty(), "nothing was evaluated");
+            return output;
+        };
+        let mut state = start.state;
+        let total = start.batch.test_cases.len();
+        for (i, result) in results.into_iter().enumerate() {
+            let out = crate::evaluate_batch::handle_detached_eval_callback(
+                host,
+                DetachedEvaluateCallbackInput {
+                    session_id: "judge".into(),
+                    state,
+                    event: DetachedEvaluateCallbackEvent::Result { result },
+                    completed: i + 1,
+                    total,
+                },
+            )
+            .unwrap();
+            state = out.state;
+        }
+        output
     }
 
     fn default_ctx(test_cases: Vec<TestCaseRow>) -> JudgeContext {
@@ -315,8 +174,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 50.0);
         host.submission.add_test_case(2, 50.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::accepted(2));
 
         let tcs = vec![
             TestCaseRow {
@@ -343,11 +200,14 @@ mod tests {
             },
         ];
         let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        let result = judge(
+            &host,
+            &ctx,
+            vec![TestCaseVerdict::accepted(1), TestCaseVerdict::accepted(2)],
+        );
 
-        assert!(result.output.success);
-        assert_eq!(result.submission_score, Some(100.0));
-        assert_eq!(result.subtask_scores, Some(vec![100.0]));
+        assert!(result.success);
+        assert_eq!(host.submission.last_update().score, Some(100.0));
 
         // Compiling + Running + terminal = 3 submission updates
         let updates = host.submission.updates();
@@ -365,8 +225,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 0.0);
         host.submission.add_test_case(2, 100.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::wrong_answer(2));
 
         let tcs = vec![
             TestCaseRow {
@@ -393,9 +251,16 @@ mod tests {
             },
         ];
         let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::wrong_answer(2),
+            ],
+        );
 
-        assert_eq!(result.submission_score, Some(0.0));
+        assert_eq!(host.submission.last_update().score, Some(0.0));
         assert_eq!(host.submission.last_update().score, Some(0.0));
     }
 
@@ -406,9 +271,6 @@ mod tests {
         host.submission.add_test_case(2, 0.0);
         host.submission.add_test_case(3, 100.0);
         host.submission.add_test_case(4, 0.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::accepted(2));
-        host.eval.queue_result(TestCaseVerdict::accepted(3));
 
         let tcs = vec![
             TestCaseRow {
@@ -466,12 +328,21 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::accepted(2),
+                TestCaseVerdict::accepted(3),
+            ],
+        );
 
-        assert_eq!(result.submission_score, Some(100.0));
-        let batch_inputs = host.eval.batch_inputs();
-        assert_eq!(batch_inputs.len(), 1);
-        let evaluated_ids: Vec<i32> = batch_inputs[0]
+        assert_eq!(host.submission.last_update().score, Some(100.0));
+        let started = host.eval.detached_windowed_requests();
+        assert_eq!(started.len(), 1);
+        let evaluated_ids: Vec<i32> = started[0]
+            .batch
             .test_cases
             .iter()
             .map(|tc| tc.test_case_id)
@@ -484,7 +355,6 @@ mod tests {
     fn judge_scores_labeled_test_case_referenced_by_numeric_id() {
         let host = Host::mock();
         host.submission.add_test_case(7, 100.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(7));
 
         let tcs = vec![TestCaseRow {
             id: 7,
@@ -507,10 +377,9 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(&host, &ctx, vec![TestCaseVerdict::accepted(7)]);
 
-        assert_eq!(result.submission_score, Some(100.0));
-        assert_eq!(result.subtask_scores, Some(vec![100.0]));
+        assert_eq!(host.submission.last_update().score, Some(100.0));
     }
 
     #[test]
@@ -518,8 +387,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 10.0);
         host.submission.add_test_case(2, 90.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::wrong_answer(2));
 
         let tcs = vec![
             TestCaseRow {
@@ -546,10 +413,16 @@ mod tests {
             },
         ];
         let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::wrong_answer(2),
+            ],
+        );
 
-        assert_eq!(result.submission_score, Some(10.0));
-        assert_eq!(result.subtask_scores, Some(vec![10.0]));
+        assert_eq!(host.submission.last_update().score, Some(10.0));
         assert_eq!(host.submission.last_update().score, Some(10.0));
     }
 
@@ -559,9 +432,6 @@ mod tests {
         host.submission.add_test_case(1, 30.0);
         host.submission.add_test_case(2, 30.0);
         host.submission.add_test_case(3, 40.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::accepted(2));
-        host.eval.queue_result(TestCaseVerdict::wrong_answer(3));
 
         let tcs = vec![
             TestCaseRow {
@@ -618,12 +488,19 @@ mod tests {
             ],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::accepted(2),
+                TestCaseVerdict::wrong_answer(3),
+            ],
+        );
 
         // Subtask 1: all pass (1.0, 1.0) -> 60.0
         // Subtask 2: WA (score 0) -> 0.0
-        assert_eq!(result.submission_score, Some(60.0));
-        assert_eq!(result.subtask_scores, Some(vec![60.0, 0.0]));
+        assert_eq!(host.submission.last_update().score, Some(60.0));
     }
 
     #[test]
@@ -632,7 +509,6 @@ mod tests {
         host.submission.add_test_case(1, 100.0);
         host.submission.add_test_case(2, 100.0);
         host.submission.add_test_case(3, 100.0);
-        host.eval.queue_result(TestCaseVerdict::compile_error(1));
 
         let tcs = vec![
             TestCaseRow {
@@ -670,9 +546,9 @@ mod tests {
             },
         ];
         let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        let result = judge(&host, &ctx, vec![TestCaseVerdict::compile_error(1)]);
 
-        assert!(result.output.success);
+        assert!(result.success);
         // Compile-error-only runs never enter Running; they stay in Compiling
         // until the terminal CompilationError update.
         let updates = host.submission.updates();
@@ -699,16 +575,6 @@ mod tests {
     fn test_case_result_text_replaces_nul_bytes() {
         let host = Host::mock();
         host.submission.add_test_case(1, 100.0);
-        host.eval.queue_result(TestCaseVerdict {
-            test_case_id: 1,
-            verdict: Verdict::WrongAnswer,
-            score: 0.0,
-            time_used_ms: Some(10),
-            memory_used_kb: Some(256),
-            message: Some("bad\0message".into()),
-            stdout: Some("out\0put".into()),
-            stderr: Some("err\0or".into()),
-        });
 
         let tcs = vec![TestCaseRow {
             id: 1,
@@ -722,7 +588,20 @@ mod tests {
             is_custom: false,
         }];
         let ctx = default_ctx(tcs);
-        judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![TestCaseVerdict {
+                test_case_id: 1,
+                verdict: Verdict::WrongAnswer,
+                score: 0.0,
+                time_used_ms: Some(10),
+                memory_used_kb: Some(256),
+                message: Some("bad message".into()),
+                stdout: Some("out put".into()),
+                stderr: Some("err or".into()),
+            }],
+        );
 
         let rows = host.submission.results();
         assert_eq!(rows.len(), 1);
@@ -732,57 +611,12 @@ mod tests {
     }
 
     #[test]
-    fn polling_error_fills_system_error() {
-        let host = Host::mock();
-        host.submission.add_test_case(1, 50.0);
-        host.submission.add_test_case(2, 50.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval
-            .queue_result_error(SdkError::Other("poll failed".into()));
-
-        let tcs = vec![
-            TestCaseRow {
-                id: 1,
-                score: 50.0,
-                is_sample: false,
-                position: 0,
-                description: None,
-                label: Some("1".into()),
-                input: TestCaseBodyRef::Missing,
-                expected_output: TestCaseBodyRef::Missing,
-                is_custom: false,
-            },
-            TestCaseRow {
-                id: 2,
-                score: 50.0,
-                is_sample: false,
-                position: 1,
-                description: None,
-                label: Some("2".into()),
-                input: TestCaseBodyRef::Missing,
-                expected_output: TestCaseBodyRef::Missing,
-                is_custom: false,
-            },
-        ];
-        let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
-
-        assert!(result.output.success);
-        let sub = host.submission.last_update();
-        assert_eq!(sub.verdict, Some(Some(Verdict::SystemError)));
-        assert!(host.eval.was_cancelled());
-        // TC results: 1 Accepted + 1 SystemError (timeout fill)
-        assert_eq!(host.submission.results().len(), 2);
-    }
-
-    #[test]
     fn empty_test_cases() {
         let host = Host::mock();
         let ctx = default_ctx(vec![]);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(&host, &ctx, vec![]);
 
-        assert_eq!(result.submission_score, Some(0.0));
-        assert_eq!(result.subtask_scores, Some(vec![]));
+        assert_eq!(host.submission.last_update().score, Some(0.0));
         // No evaluation -> only 1 update (terminal), no Running
         assert_eq!(host.submission.updates().len(), 1);
         let sub = host.submission.last_update();
@@ -795,17 +629,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 50.0);
         host.submission.add_test_case(2, 50.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict {
-            test_case_id: 2,
-            verdict: Verdict::Accepted,
-            score: 0.8,
-            time_used_ms: None,
-            memory_used_kb: None,
-            message: None,
-            stdout: None,
-            stderr: None,
-        });
 
         let tcs = vec![
             TestCaseRow {
@@ -841,9 +664,25 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict {
+                    test_case_id: 2,
+                    verdict: Verdict::Accepted,
+                    score: 0.8,
+                    time_used_ms: None,
+                    memory_used_kb: None,
+                    message: None,
+                    stdout: None,
+                    stderr: None,
+                },
+            ],
+        );
         // GroupMin: TC 2 has score 0.8, not 1.0 -> subtask = 0
-        assert_eq!(result.submission_score, Some(0.0));
+        assert_eq!(host.submission.last_update().score, Some(0.0));
     }
 
     #[test]
@@ -851,26 +690,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 50.0);
         host.submission.add_test_case(2, 50.0);
-        host.eval.queue_result(TestCaseVerdict {
-            test_case_id: 1,
-            verdict: Verdict::Accepted,
-            score: 0.8,
-            time_used_ms: None,
-            memory_used_kb: None,
-            message: None,
-            stdout: None,
-            stderr: None,
-        });
-        host.eval.queue_result(TestCaseVerdict {
-            test_case_id: 2,
-            verdict: Verdict::Accepted,
-            score: 0.5,
-            time_used_ms: None,
-            memory_used_kb: None,
-            message: None,
-            stdout: None,
-            stderr: None,
-        });
 
         let tcs = vec![
             TestCaseRow {
@@ -906,9 +725,34 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict {
+                    test_case_id: 1,
+                    verdict: Verdict::Accepted,
+                    score: 0.8,
+                    time_used_ms: None,
+                    memory_used_kb: None,
+                    message: None,
+                    stdout: None,
+                    stderr: None,
+                },
+                TestCaseVerdict {
+                    test_case_id: 2,
+                    verdict: Verdict::Accepted,
+                    score: 0.5,
+                    time_used_ms: None,
+                    memory_used_kb: None,
+                    message: None,
+                    stdout: None,
+                    stderr: None,
+                },
+            ],
+        );
         // GroupMul: 100 * 0.8 * 0.5 = 40.0
-        assert_eq!(result.submission_score, Some(40.0));
+        assert_eq!(host.submission.last_update().score, Some(40.0));
     }
 
     #[test]
@@ -916,8 +760,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 10.0);
         host.submission.add_test_case(2, 90.0);
-        host.eval.queue_result(TestCaseVerdict::accepted(1));
-        host.eval.queue_result(TestCaseVerdict::wrong_answer(2));
 
         let tcs = vec![
             TestCaseRow {
@@ -953,41 +795,16 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::wrong_answer(2),
+            ],
+        );
 
-        assert_eq!(result.submission_score, Some(10.0));
-        assert_eq!(result.subtask_scores, Some(vec![10.0]));
-    }
-
-    #[test]
-    fn start_batch_failure() {
-        let host = Host::mock();
-        host.submission.add_test_case(1, 100.0);
-        host.eval
-            .queue_start_error(SdkError::HostCall("worker down".into()));
-
-        let tcs = vec![TestCaseRow {
-            id: 1,
-            score: 100.0,
-            is_sample: false,
-            position: 0,
-            description: None,
-            label: Some("1".into()),
-            input: TestCaseBodyRef::Missing,
-            expected_output: TestCaseBodyRef::Missing,
-            is_custom: false,
-        }];
-        let ctx = default_ctx(tcs);
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
-
-        assert!(result.output.success);
-        // Batch never started -> only 1 update (terminal), no Running
-        assert_eq!(host.submission.updates().len(), 1);
-        let sub = host.submission.last_update();
-        assert_eq!(sub.verdict, Some(Some(Verdict::SystemError)));
-        assert_eq!(sub.score, Some(0.0));
-        // SystemError rows inserted for all TCs
-        assert_eq!(host.submission.results().len(), 1);
+        assert_eq!(host.submission.last_update().score, Some(10.0));
     }
 
     #[test]
@@ -995,17 +812,6 @@ mod tests {
         let host = Host::mock();
         host.submission.add_test_case(1, 30.0);
         host.submission.add_test_case(2, 70.0);
-        host.eval.queue_result(TestCaseVerdict {
-            test_case_id: 1,
-            verdict: Verdict::Accepted,
-            score: 0.5,
-            time_used_ms: Some(50),
-            memory_used_kb: Some(1024),
-            message: None,
-            stdout: None,
-            stderr: None,
-        });
-        host.eval.queue_result(TestCaseVerdict::accepted(2));
 
         let tcs = vec![
             TestCaseRow {
@@ -1041,8 +847,24 @@ mod tests {
             }],
         );
 
-        let result = judge_with_context(&host, &sample_input(), &ctx).unwrap();
+        judge(
+            &host,
+            &ctx,
+            vec![
+                TestCaseVerdict {
+                    test_case_id: 1,
+                    verdict: Verdict::Accepted,
+                    score: 0.5,
+                    time_used_ms: Some(50),
+                    memory_used_kb: Some(1024),
+                    message: None,
+                    stdout: None,
+                    stderr: None,
+                },
+                TestCaseVerdict::accepted(2),
+            ],
+        );
         // Sum weights by testcase score: 100 * ((0.5 * 30) + (1.0 * 70)) / 100 = 85.0
-        assert_eq!(result.submission_score, Some(85.0));
+        assert_eq!(host.submission.last_update().score, Some(85.0));
     }
 }

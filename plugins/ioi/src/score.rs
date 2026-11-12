@@ -201,9 +201,7 @@ pub(crate) fn run_judge(
         subtask_defs,
     };
 
-    let result = judge_with_context_detached(host, req, &ctx)?;
-
-    Ok(result.output)
+    judge_with_context_detached(host, req, &ctx)
 }
 
 #[cfg(target_arch = "wasm32")]
