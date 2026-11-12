@@ -27,11 +27,10 @@ return 0
     )
 });
 
-/// Publish a reply if its server's reply stream exists.
+/// Publish a reply if its server's reply stream exists. A missing stream
+/// means its server is gone (or lost the stream, and with it every waiter).
 ///
-/// KEYS: reply stream, server liveness key. ARGV: payload.
-/// Returns 1 (added), 0 (stream missing, server live: retry) or -1 (server
-/// gone).
+/// KEYS: reply stream. ARGV: payload. Returns 1 (added) or 0 (dropped).
 pub(crate) static PUBLISH_REPLY: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r#"
@@ -39,10 +38,7 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('XADD', KEYS[1], '*', 'p', ARGV[1])
   return 1
 end
-if redis.call('EXISTS', KEYS[2]) == 1 then
-  return 0
-end
-return -1
+return 0
 "#,
     )
 });

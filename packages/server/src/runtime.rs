@@ -230,6 +230,8 @@ impl ServerRuntime {
         // to start instead. The claim owns the reply stream, which therefore
         // expires with this server's liveness key; both are released on
         // graceful shutdown.
+        // Created before the claim: losing the reply stream fails every waiter.
+        let operation_waiters: crate::registry::OperationWaiters = Arc::new(DashMap::new());
         let node_heartbeat = match redis_client.as_deref() {
             Some(client) => {
                 let started_at = chrono::Utc::now();
@@ -257,7 +259,19 @@ impl ServerRuntime {
                 )
                 .await?;
                 let claim = match &mq {
-                    Some(mq) => claim.own_stream(mq.topology().reply(&server_id)),
+                    Some(mq) => {
+                        let waiters = operation_waiters.clone();
+                        claim.own_stream(
+                            mq.topology().reply(&server_id),
+                            mq::REPLY_STREAM_TTL,
+                            move || {
+                                crate::consumers::operation_result::fail_all_waiters(
+                                    &waiters,
+                                    "this server's reply stream was lost; the result cannot arrive",
+                                );
+                            },
+                        )
+                    }
                     None => claim,
                 };
                 Some(claim.spawn_heartbeat(payload))
@@ -283,7 +297,6 @@ impl ServerRuntime {
         let checker_stage_registry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry = Arc::new(RwLock::new(HashMap::new()));
         let operation_batches = Arc::new(DashMap::new());
-        let operation_waiters = Arc::new(DashMap::new());
         let evaluate_batches = Arc::new(DashMap::new());
         let evaluate_ops_registry =
             crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();

@@ -12,6 +12,7 @@
 //! The value is the role's JSON heartbeat payload plus the `instance` field,
 //! which readers of the payload ignore.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use redis::aio::MultiplexedConnection;
@@ -200,27 +201,30 @@ pub enum RenewOutcome {
 }
 
 /// Renew iff the key still carries our instance token; take it again if it is
-/// gone. The owned streams (`KEYS[2..]`) get the same TTL, and are created
-/// empty when missing. Returns 1 (renewed), 2 (reacquired) or 0 (held by
-/// someone else).
+/// gone. Each owned stream (`KEYS[2..]`, TTL in `ARGV[3 + i]`) is created
+/// empty when missing and gets its TTL again. Returns `{code, created}`: code
+/// 1 (renewed), 2 (reacquired) or 0 (held by someone else), and the 1-based
+/// indexes of the owned streams that had to be created.
 const RENEW_LUA: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 local code = 2
 if cur then
   local ok, doc = pcall(cjson.decode, cur)
   if not (ok and type(doc) == 'table' and doc.instance == ARGV[1]) then
-    return 0
+    return {0, {}}
   end
   code = 1
 end
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+local created = {}
 for i = 2, #KEYS do
   if redis.call('EXISTS', KEYS[i]) == 0 then
     redis.call('XADD', KEYS[i], 'MAXLEN', 0, '*', '_', '')
+    table.insert(created, i - 1)
   end
-  redis.call('PEXPIRE', KEYS[i], ARGV[3])
+  redis.call('PEXPIRE', KEYS[i], ARGV[i + 2])
 end
-return code
+return {code, created}
 "#;
 
 /// Delete the key and the owned streams iff the key still carries our instance
@@ -235,6 +239,15 @@ end
 return 0
 "#;
 
+/// A stream kept alive by a [`NodeClaim`] (see [`NodeClaim::own_stream`]).
+struct OwnedStream {
+    key: String,
+    ttl: Duration,
+    on_lost: Box<dyn Fn() + Send + Sync>,
+    /// Whether a renewal has seen (or created) it before.
+    existed: AtomicBool,
+}
+
 /// This process's claim on its node ID. See the module docs.
 pub struct NodeClaim {
     conn: Conn,
@@ -243,8 +256,8 @@ pub struct NodeClaim {
     key: String,
     instance: String,
     ttl: Duration,
-    /// Streams that live exactly as long as this claim.
-    owned_streams: Vec<String>,
+    /// Streams this claim keeps alive.
+    owned_streams: Vec<OwnedStream>,
 }
 
 impl NodeClaim {
@@ -331,12 +344,25 @@ impl NodeClaim {
         &self.id
     }
 
-    /// Make stream `key` live exactly as long as this claim: every renewal
-    /// creates it empty if it is missing and gives it the claim's TTL, and the
-    /// release deletes it. A crashed node's stream therefore expires with its
-    /// liveness key. Takes effect from the next renewal.
-    pub fn own_stream(mut self, key: String) -> Self {
-        self.owned_streams.push(key);
+    /// Keep stream `key` alive with this claim: every renewal creates it
+    /// empty if it is missing and gives it `ttl` again, and the release
+    /// deletes it. A crashed node's stream therefore expires `ttl` after its
+    /// last renewal. A stream that disappears while the node runs (a Redis
+    /// that lost data, or a stall longer than `ttl`) lost whatever it held:
+    /// the renewal that recreates it calls `on_lost`. Takes effect from the
+    /// next renewal.
+    pub fn own_stream(
+        mut self,
+        key: String,
+        ttl: Duration,
+        on_lost: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.owned_streams.push(OwnedStream {
+            key,
+            ttl,
+            on_lost: Box::new(on_lost),
+            existed: AtomicBool::new(false),
+        });
         self
     }
 
@@ -346,18 +372,34 @@ impl NodeClaim {
         payload: serde_json::Value,
     ) -> Result<RenewOutcome, redis::RedisError> {
         let value = self.value(payload);
-        let code: i64 = self
+        let (code, created): (i64, Vec<usize>) = self
             .with_conn(|mut conn| async move {
-                redis::Script::new(RENEW_LUA)
+                let script = redis::Script::new(RENEW_LUA);
+                let mut invocation = script.prepare_invoke();
+                invocation
                     .key(&self.key)
-                    .key(&self.owned_streams)
                     .arg(&self.instance)
                     .arg(&value)
-                    .arg(self.ttl.as_millis() as u64)
-                    .invoke_async(&mut conn)
-                    .await
+                    .arg(self.ttl.as_millis() as u64);
+                for stream in &self.owned_streams {
+                    invocation
+                        .key(&stream.key)
+                        .arg(stream.ttl.as_millis() as u64);
+                }
+                invocation.invoke_async(&mut conn).await
             })
             .await?;
+        for (i, stream) in self.owned_streams.iter().enumerate() {
+            let recreated = created.contains(&(i + 1));
+            // The first creation is not a loss; any later one is.
+            if stream.existed.swap(true, Ordering::Relaxed) && recreated {
+                error!(
+                    stream = %stream.key,
+                    "An owned stream disappeared while this node ran; its entries are lost"
+                );
+                (stream.on_lost)();
+            }
+        }
         Ok(match code {
             1 => RenewOutcome::Renewed,
             2 => RenewOutcome::Reacquired,
@@ -372,7 +414,12 @@ impl NodeClaim {
             .with_conn(|mut conn| async move {
                 redis::Script::new(RELEASE_LUA)
                     .key(&self.key)
-                    .key(&self.owned_streams)
+                    .key(
+                        self.owned_streams
+                            .iter()
+                            .map(|s| s.key.as_str())
+                            .collect::<Vec<_>>(),
+                    )
                     .arg(&self.instance)
                     .invoke_async(&mut conn)
                     .await
@@ -544,6 +591,8 @@ impl NodeHeartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
@@ -731,6 +780,8 @@ mod tests {
     async fn an_owned_stream_lives_and_dies_with_the_claim() {
         let (client, _c) = redis().await;
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let lost = Arc::new(AtomicUsize::new(0));
+        let stream_ttl = Duration::from_secs(600);
         let claim = NodeClaim::claim_at_boot(
             client.clone(),
             NodeRole::Server,
@@ -739,9 +790,15 @@ mod tests {
         )
         .await
         .unwrap()
-        .own_stream("replies:s1".into());
+        .own_stream("replies:s1".into(), stream_ttl, {
+            let lost = Arc::clone(&lost);
+            move || {
+                lost.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 
-        // Renewing creates the stream empty, with the claim's TTL.
+        // The first renewal creates the stream empty, with its own TTL, and
+        // that is not a loss.
         claim.renew(serde_json::json!({})).await.unwrap();
         let (len, pttl): (u64, i64) = redis::pipe()
             .cmd("XLEN")
@@ -752,9 +809,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(len, 0);
-        assert!(pttl > 0 && pttl <= TTL.as_millis() as i64);
+        assert!(pttl > TTL.as_millis() as i64 && pttl <= stream_ttl.as_millis() as i64);
+        assert_eq!(lost.load(Ordering::SeqCst), 0);
 
-        // An entry survives the next renewal; the release deletes the stream.
+        // An entry survives the next renewal.
         let _: String = redis::cmd("XADD")
             .arg("replies:s1")
             .arg("*")
@@ -770,6 +828,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(len, 1);
+        assert_eq!(lost.load(Ordering::SeqCst), 0);
+
+        // A stream that disappears is recreated and reported lost.
+        let _: () = redis::cmd("DEL")
+            .arg("replies:s1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        claim.renew(serde_json::json!({})).await.unwrap();
+        assert_eq!(lost.load(Ordering::SeqCst), 1);
+
+        // The release deletes it.
         claim.release().await.unwrap();
         let exists: bool = redis::cmd("EXISTS")
             .arg("replies:s1")

@@ -347,7 +347,6 @@ async fn replies_reach_only_their_server_and_a_gone_server_drops_them() {
     let mq = Mq::connect(&url, BASE).await.unwrap();
     let mut conn = admin(&url).await;
     for server in ["s1", "s2"] {
-        set_live(&mut conn, NodeRole::Server, server).await;
         let _: String = redis::cmd("XADD")
             .arg(mq.topology().reply(server))
             .arg("MAXLEN")
@@ -394,20 +393,11 @@ async fn replies_reach_only_their_server_and_a_gone_server_drops_them() {
     assert_eq!(got, ["r0", "r1", "r2"], "in publish order");
     assert!(s2.next_batch().await.unwrap().is_empty(), "s2 gets nothing");
 
-    // The next read trims what s1 has read.
+    // The next read deletes what s1 has read.
     assert!(s1.next_batch().await.unwrap().is_empty());
     assert_eq!(xlen(&mut conn, &mq.topology().reply("s1")).await, 0);
 
-    // A live server whose stream is momentarily missing: retry. A gone one: drop.
-    let _: () = redis::cmd("DEL")
-        .arg(mq.topology().reply("s2"))
-        .query_async(&mut conn)
-        .await
-        .unwrap();
-    assert_eq!(
-        mq.publish_reply("s2", &reply("late")).await.unwrap(),
-        ReplyOutcome::StreamMissing
-    );
+    // Without its reply stream a server gets nothing, live or not.
     assert_eq!(
         mq.publish_reply("gone", &reply("late")).await.unwrap(),
         ReplyOutcome::ServerGone

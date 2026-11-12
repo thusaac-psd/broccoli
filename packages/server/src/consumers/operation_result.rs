@@ -1,7 +1,7 @@
 use crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
 use crate::registry::OperationWaiters;
 use common::metrics::Metrics;
-use common::worker::TaskReply;
+use common::worker::{TaskReply, TaskResult};
 use mq::ReplyInbox;
 use opentelemetry::KeyValue;
 use tracing::{debug, error, info, warn};
@@ -37,6 +37,37 @@ pub async fn consume_operation_results(
             }
         }
     }
+}
+
+/// Fail every outstanding operation now: their replies cannot arrive any
+/// more (this server's reply stream was lost with whatever it held). The
+/// plugins see failed operations at once instead of waiting out their
+/// timeouts. Returns how many were failed.
+pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
+    let ids: Vec<String> = waiters.iter().map(|w| w.key().clone()).collect();
+    let mut failed = 0;
+    for task_id in ids {
+        let Some((_, waiter)) = waiters.remove(&task_id) else {
+            continue;
+        };
+        let tx = waiter.result_tx.lock().ok().and_then(|mut g| g.take());
+        if let Some(tx) = tx {
+            let _ = tx.send(TaskResult {
+                task_id,
+                success: false,
+                output: serde_json::json!({}),
+                error: Some(reason.to_string()),
+                task_type: None,
+                operation: None,
+                worker_id: None,
+            });
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        error!(failed, reason, "Failed every outstanding operation");
+    }
+    failed
 }
 
 fn handle_reply(
@@ -105,4 +136,31 @@ fn handle_reply(
     metrics
         .operation_result_consume_duration
         .record(started.elapsed().as_secs_f64(), &attrs);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+
+    use super::fail_all_waiters;
+    use crate::registry::{OperationWaiter, OperationWaiters};
+
+    #[tokio::test]
+    async fn every_outstanding_waiter_fails_at_once() {
+        let waiters: OperationWaiters = Arc::new(DashMap::new());
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel();
+        waiters.insert("a".into(), OperationWaiter::new(tx_a));
+        waiters.insert("b".into(), OperationWaiter::new(tx_b));
+
+        assert_eq!(fail_all_waiters(&waiters, "stream lost"), 2);
+        assert!(waiters.is_empty());
+        for rx in [rx_a, rx_b] {
+            let result = rx.await.expect("the waiter is answered");
+            assert!(!result.success);
+            assert_eq!(result.error.as_deref(), Some("stream lost"));
+        }
+    }
 }

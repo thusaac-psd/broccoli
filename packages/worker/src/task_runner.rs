@@ -115,7 +115,6 @@ pub async fn publish_result(
                 );
                 return Ok(());
             }
-            Ok(ReplyOutcome::StreamMissing) => "the reply stream is being recreated".to_string(),
             Err(e) => e.to_string(),
         };
         record_mq_publish(metrics, "task_result", "error", publish_start);

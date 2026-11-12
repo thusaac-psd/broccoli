@@ -427,5 +427,5 @@ When a crashed server will not come back:
    recovery re-dispatches the stranded work), or rejudge the affected
    submissions once the stuck-job detector has failed them.
 
-A dead server's reply stream needs no cleanup: it expires with the server's
-liveness key, 15 seconds after the server stopped.
+A dead server's reply stream needs no cleanup: it expires 10 minutes after the
+server stopped.

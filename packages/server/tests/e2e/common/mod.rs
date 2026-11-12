@@ -246,7 +246,7 @@ impl E2eTestApp {
         )
         .await
         .expect("claim the e2e server id")
-        .own_stream(mq.topology().reply(&server_id))
+        .own_stream(mq.topology().reply(&server_id), mq::REPLY_STREAM_TTL, || {})
         .spawn_heartbeat(|| serde_json::json!({}));
 
         let blob_store = common::storage::config::create_blob_store(

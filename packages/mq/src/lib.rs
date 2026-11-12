@@ -52,14 +52,17 @@ pub enum Route {
     Pinned,
 }
 
+/// How long a server's reply stream outlives its last renewal. Much longer
+/// than the liveness TTL, so a server that stalls (or loses Redis) for a while
+/// keeps its unread replies, while a dead server's stream still expires.
+pub const REPLY_STREAM_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// What happened to a published reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyOutcome {
     Delivered,
-    /// The server is live but its reply stream is momentarily missing (a Redis
-    /// restart lost it); its next heartbeat recreates it, so retry.
-    StreamMissing,
-    /// The server is gone; nobody is waiting for this reply.
+    /// The server's reply stream is gone: the server is gone, or lost the
+    /// stream and failed every waiter. Nobody is waiting for this reply.
     ServerGone,
 }
 
@@ -158,16 +161,15 @@ impl Mq {
             .run(|mut c| async move {
                 scripts::PUBLISH_REPLY
                     .key(self.topology.reply(server_id))
-                    .key(NodeRole::Server.key(server_id))
                     .arg(&payload)
                     .invoke_async(&mut c)
                     .await
             })
             .await?;
-        Ok(match code {
-            1 => ReplyOutcome::Delivered,
-            0 => ReplyOutcome::StreamMissing,
-            _ => ReplyOutcome::ServerGone,
+        Ok(if code == 1 {
+            ReplyOutcome::Delivered
+        } else {
+            ReplyOutcome::ServerGone
         })
     }
 
@@ -190,8 +192,7 @@ impl Mq {
     }
 
     /// The reply stream of server `server_id`. The server's node claim must
-    /// own [`Topology::reply`] for it to exist (see the module docs of
-    /// [`reply`](crate::ReplyInbox)).
+    /// own [`Topology::reply`], with [`REPLY_STREAM_TTL`], for it to exist.
     pub fn reply_inbox(&self, server_id: &str) -> ReplyInbox {
         ReplyInbox::new(self.conn.client().clone(), self.topology.reply(server_id))
     }

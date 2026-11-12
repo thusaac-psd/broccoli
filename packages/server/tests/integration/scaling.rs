@@ -49,7 +49,7 @@ async fn live_server(url: &str, mq: &Mq, id: &str) -> NodeHeartbeat {
     )
     .await
     .expect("claim the server id")
-    .own_stream(mq.topology().reply(id))
+    .own_stream(mq.topology().reply(id), mq::REPLY_STREAM_TTL, || {})
     .spawn_heartbeat(|| serde_json::json!({}))
 }
 

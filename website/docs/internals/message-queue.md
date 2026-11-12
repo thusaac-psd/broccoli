@@ -108,21 +108,24 @@ clock, which can be behind the cursor; when the stream's last generated id is
 behind the cursor, or the stream is missing, the reader starts again from the
 beginning.
 
-The reply stream lives exactly as long as the server's liveness key: the
-server's node claim owns it (`NodeClaim::own_stream`). The same script that
-renews the liveness key creates the stream empty (`XADD ... MAXLEN 0`) when it
-is missing and gives it the liveness key's TTL; the first renewal runs as the
-heartbeat starts, before the server publishes anything. Graceful shutdown
-deletes both. A crashed server's reply stream therefore expires with its
-liveness key, on the Redis clock, and nothing has to sweep it. A server that
-restarts within the TTL reads the replies its previous run left behind; they
-reach no waiter.
+The server's node claim owns the reply stream (`NodeClaim::own_stream`): the
+same script that renews the liveness key creates the stream empty
+(`XADD ... MAXLEN 0`) when it is missing and gives it its own TTL,
+`REPLY_STREAM_TTL` (10 minutes); the first renewal runs as the heartbeat
+starts, before the server publishes anything. Graceful shutdown deletes both.
+A crashed server's reply stream therefore expires 10 minutes after its last
+renewal, on the Redis clock, and nothing has to sweep it. The long TTL means a
+server that stalls, or loses Redis, for longer than the 15 s liveness TTL
+keeps every reply published meanwhile. A server that restarts within the TTL
+reads the replies its previous run left behind; they reach no waiter.
 
-Workers publish replies with a script that tells three cases apart: the stream
-exists (the reply is added), the stream is missing but the server is live (the
-next renewal recreates it, so the worker retries), or both are gone (the
-server died, so the worker drops the reply). A reply never creates a stream,
-so no stream exists without a TTL.
+Workers publish replies with a script that adds the reply only if the stream
+exists, and otherwise drops it: a missing stream means the server is gone, or
+lost the stream. A reply never creates a stream, so no stream exists without a
+TTL. A server whose stream disappears while it runs (a Redis that lost its
+data, or a stall longer than 10 minutes) learns it from the renewal that
+recreates the stream, and fails every outstanding operation at once, so its
+plugins see failed operations instead of waiting out their timeouts.
 
 ## Delivery, redelivery and liveness of in flight work
 
@@ -220,6 +223,10 @@ that means:
 - An acknowledgement lost in that second redelivers a task that already ran.
   Its second result reaches no waiter.
 - A reply lost in that second is recovered the same way as a lost task.
+- A Redis that comes back without its data (or after its stored TTLs passed)
+  has no reply streams: each server's next renewal recreates its stream and
+  fails every operation it was waiting for, and the plugins see them fail at
+  once.
 
 ### Memory under `noeviction`
 

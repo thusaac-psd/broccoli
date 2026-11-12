@@ -627,8 +627,18 @@ mod tests {
             deadline: std::time::Duration::from_millis(500),
         };
         let d = h.deliver(&task("publish-exhausted", None)).await;
-        let _: () = redis::cmd("DEL")
-            .arg(h.mq.topology().reply(SERVER))
+        // Redis is full: every reply publish fails until the window runs out.
+        let _: () = redis::pipe()
+            .cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory-policy")
+            .arg("noeviction")
+            .ignore()
+            .cmd("CONFIG")
+            .arg("SET")
+            .arg("maxmemory")
+            .arg("1")
+            .ignore()
             .query_async(&mut h.admin)
             .await
             .unwrap();
