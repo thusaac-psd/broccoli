@@ -23,6 +23,25 @@ export function isChunkLoadError(error: unknown): boolean {
   );
 }
 
+const STYLESHEET_PRELOAD_MESSAGE = /Unable to preload CSS/i;
+
+/**
+ * Whether `error` is Vite failing to preload a chunk's stylesheet. Vite
+ * marks a stylesheet as loaded before it is fetched and never asks for it
+ * again, so a retry in the page would load the code without its styles: only
+ * a page reload recovers (see the root's `vite:preloadError` handler).
+ */
+export function isStylesheetPreloadError(error: unknown): boolean {
+  return (
+    error instanceof Error && STYLESHEET_PRELOAD_MESSAGE.test(error.message)
+  );
+}
+
+/** Whether a retry in the page can recover from `error`. */
+export function isRetryableChunkLoadError(error: unknown): boolean {
+  return isChunkLoadError(error) && !isStylesheetPreloadError(error);
+}
+
 /**
  * Whether the browser knows it has no network. Only `false` from
  * `navigator.onLine` is trustworthy; `true` just means some interface is up.
@@ -52,7 +71,10 @@ export function whenOnline(): Promise<void> {
 export interface RetryLoadOptions {
   /** Tries in all, the first included. */
   attempts?: number;
-  /** Which failures are worth another try. Chunk-load failures by default. */
+  /**
+   * Which failures are worth another try. By default, chunk-load failures a
+   * retry in the page can recover from.
+   */
   shouldRetry?: (error: unknown) => boolean;
   sleep?: (ms: number) => Promise<void>;
   whenOnline?: () => Promise<void>;
@@ -71,7 +93,7 @@ export async function retryLoad<T>(
   load: (attempt: number) => Promise<T>,
   {
     attempts = DEFAULT_ATTEMPTS,
-    shouldRetry = isChunkLoadError,
+    shouldRetry = isRetryableChunkLoadError,
     sleep: wait = (ms) => sleep(ms),
     whenOnline: online = whenOnline,
   }: RetryLoadOptions = {},

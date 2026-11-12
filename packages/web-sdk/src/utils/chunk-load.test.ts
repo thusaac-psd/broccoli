@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   failedModuleUrl,
   isChunkLoadError,
+  isRetryableChunkLoadError,
   retryLoad,
   retryUrl,
 } from './chunk-load.ts';
@@ -120,4 +121,18 @@ test('the failed module is named by its URL, and a retry gets a fresh one', () =
     retryUrl(retryUrl('https://oj.lan/assets/cpp-x1.js?v=3', 1), 2),
     'https://oj.lan/assets/cpp-x1.js?v=3&retry=2',
   );
+});
+
+test('a stylesheet that failed to preload is left to a page reload', async () => {
+  const css = new Error('Unable to preload CSS for /assets/editor-x1.css');
+  assert.ok(isChunkLoadError(css));
+  assert.ok(!isRetryableChunkLoadError(css));
+  let calls = 0;
+  await assert.rejects(
+    retryLoad(async () => {
+      calls += 1;
+      throw css;
+    }, harness().options),
+  );
+  assert.equal(calls, 1);
 });

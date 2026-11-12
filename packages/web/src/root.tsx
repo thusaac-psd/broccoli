@@ -2,7 +2,10 @@ import '@/App.css';
 
 import { LOCALE_STORAGE_KEY } from '@broccoli/web-sdk/i18n';
 import { THEME_STORAGE_KEY } from '@broccoli/web-sdk/theme';
-import { isChunkLoadError } from '@broccoli/web-sdk/utils';
+import {
+  isChunkLoadError,
+  isStylesheetPreloadError,
+} from '@broccoli/web-sdk/utils';
 import { useEffect, useMemo } from 'react';
 import {
   isRouteErrorResponse,
@@ -54,9 +57,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener('error', onError);
 
+    // A chunk's stylesheet failed to preload. Vite never asks for it again,
+    // so the code would load unstyled: reload for fresh chunks instead. If
+    // that was just tried, or the browser is offline, the import fails into
+    // its caller. Every other preload failure is left to the importer's own
+    // retry.
+    const onPreloadError = (event: Event) => {
+      const { payload } = event as Event & { payload?: unknown };
+      if (isStylesheetPreloadError(payload) && reloadForFreshChunks()) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('vite:preloadError', onPreloadError);
+
     return () => {
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       window.removeEventListener('error', onError);
+      window.removeEventListener('vite:preloadError', onPreloadError);
     };
   }, []);
 
@@ -109,10 +126,11 @@ export default function Root() {
 /**
  * Every error no route handles lands here: a render crash, or code that
  * failed to load (offline for a moment, or a redeploy removed the chunks this
- * page points at). Vite's preload-error event is left alone so each lazy
- * import's own caller recovers first (see `retryLoad` in the SDK); a route
- * chunk that still fails reloads once here for fresh code (once back online,
- * if the browser is offline); anything else gets a translated error page.
+ * page points at). A lazy import's own caller retries first (see `retryLoad`
+ * in the SDK), and React Router reloads the page itself when a route module
+ * fails to load; code that still fails reloads once here for fresh chunks
+ * (once back online, if the browser is offline). Anything else gets a
+ * translated error page.
  */
 export function ErrorBoundary() {
   const error = useRouteError();
