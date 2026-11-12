@@ -87,7 +87,7 @@ mod plugin {
             contest_id: event.contest_id,
         };
         let mut p = Params::new();
-        let sql = gate::claim_sql(&mut p, &key, cooldown);
+        let sql = gate::claim_sql(&mut p, &key, cooldown, event.attempt_timeout_ms);
         if host.db.execute_with_args(&sql, &p.into_args())? > 0 {
             return Ok(serde_json::to_string(&HookResponse::pass())?);
         }
