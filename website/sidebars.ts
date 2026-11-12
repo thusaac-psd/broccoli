@@ -39,7 +39,11 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Internals',
       collapsed: false,
-      items: ['internals/judging', 'internals/judge-epochs'],
+      items: [
+        'internals/judging',
+        'internals/judge-epochs',
+        'internals/plugin-distribution',
+      ],
     },
   ],
 };
