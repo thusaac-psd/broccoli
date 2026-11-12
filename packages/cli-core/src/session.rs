@@ -49,6 +49,9 @@ pub enum SessionError {
     Rejected,
     /// The server could not be reached to refresh the session.
     Unavailable { retry_at: Instant, cause: String },
+    /// The session was refreshed and stays usable in this process, but the new
+    /// pair could not be saved, so other commands still hold the spent one.
+    NotSaved { cause: String },
 }
 
 impl std::fmt::Display for SessionError {
@@ -60,6 +63,11 @@ impl std::fmt::Display for SessionError {
             Self::Unavailable { cause, .. } => {
                 write!(f, "Could not refresh the session: {cause}")
             }
+            Self::NotSaved { cause } => write!(
+                f,
+                "The session was refreshed but could not be saved ({cause}). \
+                 Run `broccoli login` before starting other broccoli commands."
+            ),
         }
     }
 }
@@ -93,7 +101,13 @@ struct Slot {
     token: String,
     refresh_token: Option<String>,
     state: SessionState,
+    /// Access tokens this session held before its current one. A saved pair
+    /// carrying one of them is older than ours (a save failed), never newer.
+    retired: Vec<String>,
 }
+
+/// How many retired tokens a session remembers; one is added per refresh.
+const RETIRED_TOKENS: usize = 16;
 
 struct Inner {
     server: String,
@@ -139,6 +153,7 @@ impl Session {
                     token,
                     refresh_token,
                     state: SessionState::Active,
+                    retired: Vec::new(),
                 }),
                 settled: Condvar::new(),
             }),
@@ -182,7 +197,7 @@ impl Session {
                 }
                 SessionState::Unavailable { .. } => return Ok(slot.token.clone()),
                 SessionState::Rejected => {
-                    return match self.saved_pair_other_than(&slot.token) {
+                    return match self.newer_saved_pair(&slot) {
                         Some(tokens) => {
                             adopt(&mut slot, tokens);
                             Ok(slot.token.clone())
@@ -220,19 +235,23 @@ impl Session {
         }
         slot.state = SessionState::Refreshing;
         let refresh_token = slot.refresh_token.clone();
+        let retired = slot.retired.clone();
         drop(slot);
         let settle = Settle {
             session: self,
             settled: false,
         };
 
-        let outcome = self.rotate(used, refresh_token, exchange);
+        let (outcome, not_saved) = self.rotate(used, &retired, refresh_token, exchange);
 
         let mut slot = self.lock();
         let result = match outcome {
             Exchange::Rotated(tokens) => {
                 adopt(&mut slot, tokens);
-                Ok(())
+                match not_saved {
+                    Some(cause) => Err(SessionError::NotSaved { cause }),
+                    None => Ok(()),
+                }
             }
             Exchange::Refused => {
                 slot.state = SessionState::Rejected;
@@ -254,48 +273,55 @@ impl Session {
     }
 
     /// Exchange the refresh token, or adopt the pair another process saved.
+    /// The second value is why a rotated pair could not be saved, if it was not.
     fn rotate(
         &self,
         used: &str,
+        retired: &[String],
         refresh_token: Option<String>,
         exchange: impl FnOnce(&str) -> Exchange,
-    ) -> Exchange {
+    ) -> (Exchange, Option<String>) {
         let Some(store) = &self.inner.store else {
-            return match refresh_token {
+            let outcome = match refresh_token {
                 Some(refresh_token) => exchange(&refresh_token),
                 None => Exchange::Refused,
             };
+            return (outcome, None);
         };
         let lock = match store.lock() {
             Ok(lock) => lock,
-            Err(e) => return Exchange::unreachable(format!("{e:#}")),
+            Err(e) => return (Exchange::unreachable(format!("{e:#}")), None),
         };
         let saved = lock.read(&self.inner.server);
-        let refresh_token = match saved {
+        if let Some(saved) = &saved
+            && saved.token != used
+            && !retired.contains(&saved.token)
+        {
             // Another process rotated (or logged in again) while this request
             // was in flight: its pair is current and ours is spent.
-            Some(saved) if saved.token != used => return Exchange::Rotated(saved),
-            Some(saved) => saved.refresh_token,
-            None => match refresh_token {
-                Some(refresh_token) => refresh_token,
-                None => return Exchange::Refused,
-            },
+            return (Exchange::Rotated(saved.clone()), None);
+        }
+        let Some(refresh_token) = refresh_token.or(saved.map(|s| s.refresh_token)) else {
+            return (Exchange::Refused, None);
         };
         let outcome = exchange(&refresh_token);
-        if let Exchange::Rotated(tokens) = &outcome {
-            // The new pair stays usable in memory even if saving fails; the
-            // next login repairs the file.
-            let _ = lock.write(&self.inner.server, tokens);
-        }
-        outcome
+        let not_saved = match &outcome {
+            Exchange::Rotated(tokens) => lock
+                .write(&self.inner.server, tokens)
+                .err()
+                .map(|e| format!("{e:#}")),
+            _ => None,
+        };
+        (outcome, not_saved)
     }
 
-    /// A pair saved for this server by a later login, if any.
-    fn saved_pair_other_than(&self, token: &str) -> Option<StoredTokens> {
+    /// A pair saved for this server that is newer than anything this session
+    /// has held (a later login), if any.
+    fn newer_saved_pair(&self, slot: &Slot) -> Option<StoredTokens> {
         let store = self.inner.store.as_ref()?;
         store
             .read(&self.inner.server)
-            .filter(|saved| saved.token != token)
+            .filter(|saved| saved.token != slot.token && !slot.retired.contains(&saved.token))
     }
 
     fn lock(&self) -> MutexGuard<'_, Slot> {
@@ -331,7 +357,11 @@ impl Drop for Settle<'_> {
 }
 
 fn adopt(slot: &mut Slot, tokens: StoredTokens) {
-    slot.token = tokens.token;
+    let previous = std::mem::replace(&mut slot.token, tokens.token);
+    if slot.retired.len() == RETIRED_TOKENS {
+        slot.retired.remove(0);
+    }
+    slot.retired.push(previous);
     slot.refresh_token = Some(tokens.refresh_token);
     slot.state = SessionState::Active;
 }
@@ -528,5 +558,32 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(session.state(), SessionState::Active);
         assert_eq!(session.bearer().unwrap(), "t0");
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_and_the_stale_saved_pair_is_never_adopted() {
+        let (dir, file) = store();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
+        let session = process(&file);
+        // A directory where the temp file goes makes every save fail.
+        std::fs::create_dir(dir.path().join("credentials.json.tmp")).unwrap();
+
+        let err = session
+            .refresh("t0", |_| Exchange::Rotated(pair("t1", "r1")))
+            .unwrap_err();
+        assert!(matches!(err, SessionError::NotSaved { .. }));
+        assert_eq!(session.bearer().unwrap(), "t1");
+        assert_eq!(file.read(SERVER), Some(pair("t0", "r0")));
+
+        // t1 expires: the file still holds the older t0/r0, which must not be
+        // replayed; the session spends its own r1.
+        let _ = session.refresh("t1", |refresh| {
+            assert_eq!(refresh, "r1");
+            Exchange::Rotated(pair("t2", "r2"))
+        });
+        assert_eq!(session.bearer().unwrap(), "t2");
     }
 }
