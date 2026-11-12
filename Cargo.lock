@@ -9209,7 +9209,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "broccoli_queue"
-version = "0.4.6"

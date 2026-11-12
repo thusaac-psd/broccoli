@@ -13,11 +13,6 @@
 !plugins/
 !plugins/**
 !release/lib/plugins.sh
-# Vendored broccoli_queue is a local [patch.crates-io] target; the build needs it
-# in context (whitelist .dockerignore would otherwise drop it and cargo fails to
-# resolve the patch). target/ under it is still excluded by the **/target rules.
-!third_party/
-!third_party/**
 !docker-entrypoint-worker.sh
 
 .env
