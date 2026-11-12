@@ -280,6 +280,15 @@ fn walk(
     let entries = archive.entries().map_err(unreadable)?;
     let mut id: Option<PluginId> = None;
     let mut files = BTreeSet::new();
+    // Every directory the entries name or imply, so that no path is used as
+    // both a file and a directory: unpacking would fail on it.
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let both = |path: &Path| {
+        reject(format!(
+            "Archive has '{}' as both a file and a directory",
+            path.display()
+        ))
+    };
     let mut count = 0usize;
     let mut budget = MAX_UNPACKED_BYTES;
     for entry in entries {
@@ -341,9 +350,23 @@ fn walk(
             }
             continue;
         }
+        // A file implies its parents; a directory, itself and its parents.
+        let implied: Vec<PathBuf> = path
+            .ancestors()
+            .skip(usize::from(is_file))
+            .filter(|a| !a.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .collect();
+        if let Some(clash) = implied.iter().find(|d| files.contains(*d)) {
+            return Err(both(clash));
+        }
+        dirs.extend(implied);
         if !is_file {
             visit(&path, None)?;
             continue;
+        }
+        if dirs.contains(&path) {
+            return Err(both(&path));
         }
         if !files.insert(path.clone()) {
             return Err(reject(format!(
@@ -522,6 +545,46 @@ permissions = ["storage"]
         let manifest = MANIFEST.replace("demo.wasm", "../demo.wasm");
         let bytes = archive(&[Item::File("demo/plugin.toml", manifest.as_bytes())]);
         assert!(error(bytes).contains("outside the plugin directory"));
+    }
+
+    #[test]
+    fn rejects_a_path_that_is_both_a_file_and_a_directory() {
+        for items in [
+            vec![
+                Item::File("demo/plugin.toml", MANIFEST.as_bytes()),
+                Item::File("demo/demo.wasm", b"x"),
+                Item::File("demo/a", b"x"),
+                Item::File("demo/a/b", b"x"),
+            ],
+            vec![
+                Item::File("demo/demo.wasm", b"x"),
+                Item::File("demo/a/b", b"x"),
+                Item::File("demo/a", b"x"),
+                Item::File("demo/plugin.toml", MANIFEST.as_bytes()),
+            ],
+            vec![
+                Item::Dir("demo/plugin.toml/"),
+                Item::File("demo/plugin.toml", MANIFEST.as_bytes()),
+            ],
+            vec![
+                Item::File("demo/plugin.toml", MANIFEST.as_bytes()),
+                Item::Dir("demo/plugin.toml/"),
+            ],
+        ] {
+            let message = error(archive(&items));
+            assert!(message.contains("both a file and a directory"), "{message}");
+        }
+        // A directory listed explicitly and implied by its files is fine.
+        let bytes = archive(&[
+            Item::Dir("demo/"),
+            Item::Dir("demo/web/"),
+            Item::File("demo/web/index.js", b"x"),
+            Item::File("demo/plugin.toml", MANIFEST.as_bytes()),
+            Item::File("demo/demo.wasm", b"x"),
+        ]);
+        let archive = PluginArchive::parse(bytes).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        archive.unpack(&dir.path().join("x")).unwrap();
     }
 
     #[test]
