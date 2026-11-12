@@ -31,8 +31,8 @@ async-trait = { workspace = true }
 common = { workspace = true }
 redis = { workspace = true }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "chrono", "uuid"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
+testcontainers.workspace = true
+testcontainers-modules = { workspace = true, features = ["redis"] }
 
 [dev-dependencies]
 wiremock = { workspace = true }

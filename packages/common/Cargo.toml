@@ -42,5 +42,5 @@ hostname = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
+testcontainers.workspace = true
+testcontainers-modules = { workspace = true, features = ["redis"] }

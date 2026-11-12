@@ -11,9 +11,9 @@ reqwest = { version = "0.12", features = ["cookies", "json", "multipart"] }
 sea-orm = { workspace = true }
 serde_json.workspace = true
 server = { path = "../server" }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "redis"] }
+testcontainers.workspace = true
+testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
 tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-testcontainers = { version = "0.23", features = ["watchdog"] }
+testcontainers = { workspace = true, features = ["watchdog"] }

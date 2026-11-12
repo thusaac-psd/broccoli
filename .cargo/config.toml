@@ -1,0 +1,6 @@
+# The workspace builds with the toolchain pinned in rust-toolchain.toml, so the
+# lockfile resolves against that toolchain rather than the lowest
+# `rust-version` a published crate declares. A declared `rust-version` would
+# otherwise hold security fixes back on older releases.
+[resolver]
+incompatible-rust-versions = "allow"
