@@ -110,7 +110,7 @@ impl WorkerRuntime {
             )],
         );
 
-        spawn_metrics_server(prometheus_registry);
+        spawn_metrics_server(prometheus_registry, config.worker.metrics_addr.clone());
 
         check_clock_skew(&config).await?;
 

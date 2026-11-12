@@ -47,6 +47,8 @@ enable_cgroups = true
 max_concurrency = 1
 dedup_ttl_secs = 600
 fairness_unsafe_allow = false
+# Prometheus /metrics bind address. Give each worker on one host its own port.
+metrics_addr = "0.0.0.0:9091"
 
 [database]
 url = "postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli"
