@@ -7,15 +7,8 @@ use broccoli_server_sdk::prelude::Params;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{JobRow, StationJob, status};
-
-/// `None` emits a literal NULL rather than a bound parameter.
-fn bind_opt<T: Into<Value>>(p: &mut Params, v: Option<T>) -> String {
-    match v {
-        Some(v) => p.bind(v),
-        None => "NULL".to_string(),
-    }
-}
+use crate::lifecycle::{self, Change, JobStatus, bind_opt};
+use crate::models::{JobRow, StationJob};
 
 // Timestamps come back as epoch seconds.
 const JOB_COLS: &str = "id, contest_id, user_id, username, display_name, problem_label, \
@@ -41,12 +34,12 @@ pub struct NewJob {
     pub filename: String,
     pub source: String,
     pub pages_est: i32,
-    pub status: String,
+    pub status: JobStatus,
 }
 
 #[derive(Debug, Clone)]
 pub struct JobFilters {
-    pub status: Option<String>,
+    pub status: Option<JobStatus>,
     pub contest_id: Option<i32>,
     pub station: Option<String>,
     pub printer: Option<String>,
@@ -117,7 +110,7 @@ fn bind_row(p: &mut Params, job: &NewJob) -> String {
         p.bind(job.filename.clone()),
         p.bind(job.source.clone()),
         p.bind(job.pages_est),
-        p.bind(job.status.clone()),
+        p.bind(job.status.as_str()),
     )
 }
 
@@ -206,8 +199,8 @@ pub fn list_my_jobs(
 
 fn build_filter_where(p: &mut Params, f: &JobFilters) -> String {
     let mut clauses: Vec<String> = Vec::new();
-    if let Some(s) = f.status.as_ref().filter(|s| !s.is_empty()) {
-        clauses.push(format!("status = {}", p.bind(s.clone())));
+    if let Some(s) = f.status {
+        clauses.push(format!("status = {}", p.bind(s.as_str())));
     }
     if let Some(cid) = f.contest_id {
         clauses.push(format!("contest_id = {}", p.bind(cid)));
@@ -284,7 +277,7 @@ pub fn list_admin_jobs(host: &Host, f: &JobFilters) -> Result<(Vec<JobRow>, i64)
     Ok((rows, total))
 }
 
-/// Claimable pending jobs for a station, oldest first.
+/// Jobs a station may claim now, oldest first.
 pub fn list_station_jobs(
     host: &Host,
     contest_filter: Option<i32>,
@@ -293,8 +286,8 @@ pub fn list_station_jobs(
 ) -> Result<Vec<StationJob>, SdkError> {
     let mut p = Params::new();
     let mut sql = format!(
-        "SELECT {STATION_JOB_COLS} FROM print_job WHERE status = {}",
-        p.bind(status::PENDING)
+        "SELECT {STATION_JOB_COLS} FROM print_job WHERE {}",
+        lifecycle::claimable(&mut p)
     );
     if let Some(cid) = contest_filter {
         sql.push_str(&format!(" AND contest_id = {}", p.bind(cid)));
@@ -312,117 +305,40 @@ pub fn list_station_jobs(
     host.db.query_with_args(&sql, &p.into_args())
 }
 
-/// Atomic claim. Returns true only if this caller won the race.
-pub fn claim_job(
+/// Perform `change` on job `id`. Returns false when the job is not in a state
+/// the move may leave (or is outside `contest_filter`); concurrent movers
+/// serialize on the row, so exactly one of them wins.
+pub fn apply(
     host: &Host,
     id: i64,
-    station: &str,
-    printer: Option<&str>,
+    change: &Change<'_>,
     contest_filter: Option<i32>,
 ) -> Result<bool, SdkError> {
     let mut p = Params::new();
-    let mut sql = format!(
-        "UPDATE print_job SET status = '{}', claimed_by = {}, claimed_printer = {}, \
-         claimed_at = NOW() WHERE id = {} AND status = '{}'",
-        status::CLAIMED,
-        p.bind(station.to_string()),
-        bind_opt(&mut p, printer.map(|s| s.to_string())),
-        p.bind(id),
-        status::PENDING,
-    );
-    if let Some(cid) = contest_filter {
-        sql.push_str(&format!(" AND contest_id = {}", p.bind(cid)));
-    }
+    let sql = lifecycle::transition_sql(&mut p, id, change, contest_filter);
     Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
 }
 
-pub fn set_status(
+#[derive(Deserialize)]
+struct StatusRow {
+    status: JobStatus,
+}
+
+/// The job's current state, `None` when it does not exist (in `contest_filter`).
+pub fn job_status(
     host: &Host,
     id: i64,
-    new_status: &str,
-    pages: Option<i32>,
-    error: Option<&str>,
     contest_filter: Option<i32>,
-) -> Result<bool, SdkError> {
+) -> Result<Option<JobStatus>, SdkError> {
     let mut p = Params::new();
-    let mut sets = vec![
-        format!("status = {}", p.bind(new_status.to_string())),
-        format!("error = {}", bind_opt(&mut p, error.map(|s| s.to_string()))),
-    ];
-    if let Some(pg) = pages {
-        sets.push(format!("pages = {}", p.bind(pg)));
-    }
-    if new_status == status::DONE || new_status == status::FAILED {
-        sets.push("printed_at = NOW()".to_string());
-    }
-    // A station may only report progress (printing/done/failed) on a job that is
-    // actually in flight - one it CLAIMED or is already PRINTING. Without this
-    // precondition, any holder of a valid station token could set a still-pending
-    // (unclaimed) job to `done` (silent suppression: it is never printed) or
-    // clobber the state of a job another station is mid-print on. Mirrors the
-    // status guards on claim_job / approve_job / cancel_job.
-    let mut sql = format!(
-        "UPDATE print_job SET {} WHERE id = {} AND status IN ({}, {})",
-        sets.join(", "),
-        p.bind(id),
-        p.bind(status::CLAIMED.to_string()),
-        p.bind(status::PRINTING.to_string()),
-    );
+    let mut sql = format!("SELECT status FROM print_job WHERE id = {}", p.bind(id));
     if let Some(cid) = contest_filter {
         sql.push_str(&format!(" AND contest_id = {}", p.bind(cid)));
     }
-    Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
-}
-
-pub fn approve_job(host: &Host, id: i64) -> Result<bool, SdkError> {
-    let mut p = Params::new();
-    let sql = format!(
-        "UPDATE print_job SET status = '{}' WHERE id = {} AND status = '{}'",
-        status::PENDING,
-        p.bind(id),
-        status::PENDING_APPROVAL,
-    );
-    Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
-}
-
-/// Cancel a job unless it already printed.
-pub fn cancel_job(host: &Host, id: i64) -> Result<bool, SdkError> {
-    let mut p = Params::new();
-    let sql = format!(
-        "UPDATE print_job SET status = '{}' WHERE id = {} AND status <> '{}'",
-        status::CANCELED,
-        p.bind(id),
-        status::DONE,
-    );
-    Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
-}
-
-/// Pin (or clear) the target printer and requeue so it reprints there.
-pub fn pin_job(host: &Host, id: i64, printer: Option<&str>) -> Result<bool, SdkError> {
-    let mut p = Params::new();
-    let target = match printer.filter(|s| !s.is_empty()) {
-        Some(pr) => p.bind(pr.to_string()),
-        None => "NULL".to_string(),
-    };
-    let sql = format!(
-        "UPDATE print_job SET target_printer = {target}, status = '{}', \
-         claimed_by = NULL, claimed_printer = NULL, error = NULL WHERE id = {}",
-        status::PENDING,
-        p.bind(id)
-    );
-    Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
-}
-
-/// Requeue a finished job so a station prints it again.
-pub fn reprint_job(host: &Host, id: i64) -> Result<bool, SdkError> {
-    let mut p = Params::new();
-    let sql = format!(
-        "UPDATE print_job SET status = '{}', claimed_by = NULL, claimed_printer = NULL, \
-         claimed_at = NULL, printed_at = NULL, error = NULL, pages = NULL WHERE id = {}",
-        status::PENDING,
-        p.bind(id),
-    );
-    Ok(host.db.execute_with_args(&sql, &p.into_args())? == 1)
+    Ok(host
+        .db
+        .query_one_with_args::<StatusRow>(&sql, &p.into_args())?
+        .map(|r| r.status))
 }
 
 #[cfg(test)]
@@ -442,7 +358,7 @@ mod tests {
             filename: "main.cpp".into(),
             source: "int main(){}".into(),
             pages_est: 1,
-            status: status::PENDING.into(),
+            status: JobStatus::Pending,
         }
     }
 
@@ -491,46 +407,26 @@ mod tests {
     }
 
     #[test]
-    fn claim_returns_true_when_one_row_updated() {
+    fn apply_reports_whether_the_guarded_update_won() {
         let host = Host::mock();
         host.db.queue_execute_result(1);
-        assert!(claim_job(&host, 7, "st-1", Some("main"), None).unwrap());
-        let sql = &host.db.executions()[0].sql;
-        assert!(sql.contains("status = 'claimed'"));
-        assert!(sql.contains("status = 'pending'"));
-    }
-
-    #[test]
-    fn claim_returns_false_when_already_taken() {
-        let host = Host::mock();
         host.db.queue_execute_result(0);
-        assert!(!claim_job(&host, 7, "st-1", None, None).unwrap());
+        let claim = Change::Claim {
+            station: "st-1",
+            printer: Some("main"),
+        };
+        assert!(apply(&host, 7, &claim, None).unwrap());
+        assert!(!apply(&host, 7, &claim, None).unwrap());
+        assert!(host.db.executions()[0].sql.starts_with("UPDATE print_job"));
     }
 
     #[test]
-    fn claim_with_contest_filter_scopes_update() {
+    fn station_listing_offers_exactly_the_claimable_jobs() {
         let host = Host::mock();
-        host.db.queue_execute_result(1);
-        claim_job(&host, 7, "st-1", None, Some(3)).unwrap();
-        assert!(host.db.executions()[0].sql.contains("contest_id ="));
-    }
-
-    #[test]
-    fn done_status_sets_printed_at() {
-        let host = Host::mock();
-        host.db.queue_execute_result(1);
-        set_status(&host, 7, status::DONE, Some(2), None, None).unwrap();
-        let sql = &host.db.executions()[0].sql;
-        assert!(sql.contains("printed_at = NOW()"));
-        assert!(sql.contains("pages ="));
-    }
-
-    #[test]
-    fn printing_status_does_not_set_printed_at() {
-        let host = Host::mock();
-        host.db.queue_execute_result(1);
-        set_status(&host, 7, status::PRINTING, None, None, None).unwrap();
-        assert!(!host.db.executions()[0].sql.contains("printed_at"));
+        list_station_jobs(&host, None, None, 10).unwrap();
+        let mut p = Params::new();
+        let claimable = lifecycle::claimable(&mut p);
+        assert!(host.db.queries()[0].sql.contains(&claimable));
     }
 
     #[test]
@@ -542,7 +438,7 @@ mod tests {
             { "id": 2, "user_id": 11, "username": "b", "language": "py", "filename": "b.py", "status": "done" }
         ]));
         let filters = JobFilters {
-            status: Some("pending".into()),
+            status: Some(JobStatus::Pending),
             contest_id: Some(1),
             station: None,
             printer: None,
@@ -559,25 +455,5 @@ mod tests {
         assert!(queries[0].sql.contains("COUNT(*)"));
         assert!(queries[1].sql.contains("ILIKE"));
         assert!(queries[1].sql.contains("LIMIT"));
-    }
-
-    #[test]
-    fn approve_targets_pending_approval() {
-        let host = Host::mock();
-        host.db.queue_execute_result(1);
-        assert!(approve_job(&host, 5).unwrap());
-        let sql = &host.db.executions()[0].sql;
-        assert!(sql.contains("status = 'pending'"));
-        assert!(sql.contains("status = 'pending_approval'"));
-    }
-
-    #[test]
-    fn reprint_clears_claim_fields() {
-        let host = Host::mock();
-        host.db.queue_execute_result(1);
-        reprint_job(&host, 5).unwrap();
-        let sql = &host.db.executions()[0].sql;
-        assert!(sql.contains("claimed_by = NULL"));
-        assert!(sql.contains("error = NULL"));
     }
 }

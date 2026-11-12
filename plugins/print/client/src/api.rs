@@ -77,15 +77,14 @@ impl ServerClient {
         format!("{}{path}", self.base)
     }
 
+    /// The server names this station after the credential in `auth`.
     pub fn heartbeat(
         &self,
-        station: &str,
         printers: &[String],
         location: Option<&str>,
         queue_seen: i64,
     ) -> Result<()> {
         let body = json!({
-            "station": station,
             "printers": printers,
             "location": location,
             "version": env!("CARGO_PKG_VERSION"),
@@ -114,8 +113,8 @@ impl ServerClient {
     }
 
     /// A 409 means another station won the claim.
-    pub fn claim(&self, id: i64, station: &str, printer: &str) -> Result<ClaimOutcome> {
-        let body = json!({ "station": station, "printer": printer });
+    pub fn claim(&self, id: i64, printer: &str) -> Result<ClaimOutcome> {
+        let body = json!({ "printer": printer });
         match self
             .agent
             .post(&self.url(&format!("/stations/jobs/{id}/claim")))

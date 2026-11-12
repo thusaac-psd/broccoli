@@ -123,7 +123,7 @@ fn process_job(client: &ServerClient, cfg: &Config, printer: &PrinterCfg, job: &
 }
 
 fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
-    if let Err(e) = client.heartbeat(&cfg.station, printer_names, cfg.location.as_deref(), 0) {
+    if let Err(e) = client.heartbeat(printer_names, cfg.location.as_deref(), 0) {
         eprintln!("  ! heartbeat to {} failed: {e}", client.label);
     }
 
@@ -147,7 +147,7 @@ fn tick_server(client: &ServerClient, cfg: &Config, printer_names: &[String]) {
             if handled.contains(&job.id) || !printer_matches(printer, job) {
                 continue;
             }
-            match client.claim(job.id, &cfg.station, &printer.name) {
+            match client.claim(job.id, &printer.name) {
                 Ok(ClaimOutcome::Claimed) => {
                     handled.insert(job.id);
                     claims.push((printer.clone(), job.clone()));

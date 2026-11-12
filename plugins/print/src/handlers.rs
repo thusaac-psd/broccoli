@@ -8,9 +8,8 @@ use serde::de::DeserializeOwned;
 use crate::auth;
 use crate::config;
 use crate::jobs::{self, JobFilters, NewJob};
-use crate::models::{
-    self, ArbitraryJobRequest, ClaimRequest, HeartbeatRequest, StatusRequest, status,
-};
+use crate::lifecycle::{Change, JobStatus};
+use crate::models::{self, ArbitraryJobRequest, ClaimRequest, HeartbeatRequest, StatusRequest};
 use crate::stations;
 
 const MAX_FILENAME_LEN: usize = 200;
@@ -86,11 +85,35 @@ fn sanitize_filename(raw: &str, default: &str) -> String {
     }
 }
 
-fn new_job_status(require_approval: bool) -> &'static str {
-    if require_approval {
-        status::PENDING_APPROVAL
-    } else {
-        status::PENDING
+/// Perform `change` on job `id`, answering 404 when the job does not exist (in
+/// `contest_filter`) and 409 when its state does not allow the move.
+fn move_job(
+    host: &Host,
+    id: i64,
+    change: Change<'_>,
+    contest_filter: Option<i32>,
+) -> Result<PluginHttpResponse, ApiError> {
+    if jobs::apply(host, id, &change, contest_filter)? {
+        return ok(serde_json::json!({ "ok": true }));
+    }
+    match jobs::job_status(host, id, contest_filter)? {
+        None => Err(PluginHttpResponse::error(404, "Job not found").into()),
+        Some(status) => Err(PluginHttpResponse::error(
+            409,
+            format!(
+                "A {} job cannot be {}",
+                status.as_str(),
+                match change {
+                    Change::Approve => "approved",
+                    Change::Cancel => "canceled",
+                    Change::Reprint => "reprinted",
+                    Change::Pin { .. } => "pinned",
+                    Change::Claim { .. } => "claimed",
+                    Change::Report { .. } => "reported on by a station that does not hold it",
+                }
+            ),
+        )
+        .into()),
     }
 }
 
@@ -159,7 +182,7 @@ pub fn handle_print_submission(
         planned.push((f, pages));
     }
 
-    let status = new_job_status(cfg.require_approval);
+    let status = JobStatus::initial(cfg.require_approval);
     let total_pages: i32 = planned.iter().map(|(_, pages)| *pages).sum();
     let new_jobs: Vec<NewJob> = planned
         .iter()
@@ -174,7 +197,7 @@ pub fn handle_print_submission(
             filename: sanitize_filename(&f.filename, "submission.txt"),
             source: f.content.clone(),
             pages_est: *pages,
-            status: status.to_string(),
+            status,
         })
         .collect();
     // Insert all files atomically so a failure leaves nothing partial.
@@ -184,7 +207,7 @@ pub fn handle_print_submission(
         "ok": true,
         "jobs": planned.len(),
         "pages": total_pages,
-        "status": status,
+        "status": status.as_str(),
     }))
 }
 
@@ -246,7 +269,7 @@ pub fn handle_print_arbitrary(
         .to_string();
     let filename = sanitize_filename(&body.filename, "print.txt");
     let username = caller_username(req);
-    let status = new_job_status(cfg.require_approval);
+    let status = JobStatus::initial(cfg.require_approval);
 
     jobs::insert_job(
         host,
@@ -261,11 +284,11 @@ pub fn handle_print_arbitrary(
             filename,
             source: body.source,
             pages_est: pages,
-            status: status.to_string(),
+            status,
         },
     )?;
 
-    created(serde_json::json!({ "ok": true, "jobs": 1, "pages": pages, "status": status }))
+    created(serde_json::json!({ "ok": true, "jobs": 1, "pages": pages, "status": status.as_str() }))
 }
 
 pub fn handle_my_jobs(
@@ -294,8 +317,15 @@ pub fn handle_admin_list_jobs(
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(25)
         .clamp(1, 200);
+    let status = match req.query.get("status").map(String::as_str) {
+        None | Some("") => None,
+        Some(raw) => Some(
+            JobStatus::parse(raw)
+                .ok_or_else(|| PluginHttpResponse::error(400, "Invalid status filter"))?,
+        ),
+    };
     let filters = JobFilters {
-        status: req.query.get("status").cloned(),
+        status,
         contest_id: query_i32(req, "contest_id"),
         station: req.query.get("station").cloned(),
         printer: req.query.get("printer").cloned(),
@@ -335,36 +365,21 @@ pub fn handle_admin_approve(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let id = path_i64(req, "id")?;
-    if jobs::approve_job(host, id)? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(409, "Job is not awaiting approval").into())
-    }
+    move_job(host, path_i64(req, "id")?, Change::Approve, None)
 }
 
 pub fn handle_admin_reprint(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let id = path_i64(req, "id")?;
-    if jobs::reprint_job(host, id)? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(404, "Job not found").into())
-    }
+    move_job(host, path_i64(req, "id")?, Change::Reprint, None)
 }
 
 pub fn handle_admin_cancel(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let id = path_i64(req, "id")?;
-    if jobs::cancel_job(host, id)? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(409, "Job cannot be canceled").into())
-    }
+    move_job(host, path_i64(req, "id")?, Change::Cancel, None)
 }
 
 pub fn handle_admin_pin(
@@ -374,11 +389,7 @@ pub fn handle_admin_pin(
     let id = path_i64(req, "id")?;
     let body: serde_json::Value = parse_body(req)?;
     let printer = body.get("printer").and_then(|v| v.as_str());
-    if jobs::pin_job(host, id, printer)? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(404, "Job not found").into())
-    }
+    move_job(host, id, Change::Pin { printer }, None)
 }
 
 pub fn handle_admin_get_job(
@@ -404,9 +415,9 @@ pub fn handle_station_heartbeat(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    auth::authenticate_station(host, req)?;
+    let station = auth::authenticate_station(host, req)?;
     let body: HeartbeatRequest = parse_body(req)?;
-    stations::heartbeat(host, &body)?;
+    stations::heartbeat(host, &station.name, &body)?;
     ok(serde_json::json!({ "ok": true }))
 }
 
@@ -429,44 +440,30 @@ pub fn handle_station_claim(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let auth = auth::authenticate_station(host, req)?;
+    let station = auth::authenticate_station(host, req)?;
     let id = path_i64(req, "id")?;
     let body: ClaimRequest = parse_body(req)?;
-    if jobs::claim_job(
-        host,
-        id,
-        &body.station,
-        body.printer.as_deref(),
-        auth.contest_filter,
-    )? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(409, "Job already claimed or not available").into())
-    }
+    let change = Change::Claim {
+        station: &station.name,
+        printer: body.printer.as_deref(),
+    };
+    move_job(host, id, change, station.contest_filter)
 }
 
 pub fn handle_station_status(
     host: &Host,
     req: &PluginHttpRequest,
 ) -> Result<PluginHttpResponse, ApiError> {
-    let auth = auth::authenticate_station(host, req)?;
+    let station = auth::authenticate_station(host, req)?;
     let id = path_i64(req, "id")?;
     let body: StatusRequest = parse_body(req)?;
-    if !status::STATION_SETTABLE.contains(&body.status.as_str()) {
-        return Err(PluginHttpResponse::error(400, "Invalid status").into());
-    }
-    if jobs::set_status(
-        host,
-        id,
-        &body.status,
-        body.pages,
-        body.error.as_deref(),
-        auth.contest_filter,
-    )? {
-        ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err(PluginHttpResponse::error(404, "Job not found").into())
-    }
+    let change = Change::Report {
+        station: &station.name,
+        report: body.status,
+        pages: body.pages,
+        error: body.error.as_deref(),
+    };
+    move_job(host, id, change, station.contest_filter)
 }
 
 #[cfg(test)]
@@ -563,7 +560,7 @@ mod tests {
             "plugin",
             "",
             config::NAMESPACE,
-            json!({ "station_tokens": ["G"] }),
+            json!({ "stations": [{ "name": "hall", "token": "G" }] }),
         );
         let mut req = request();
         req.headers
@@ -581,15 +578,69 @@ mod tests {
             "plugin",
             "",
             config::NAMESPACE,
-            json!({ "station_tokens": ["G"] }),
+            json!({ "stations": [{ "name": "hall", "token": "G" }] }),
         );
         host.db.queue_execute_result(0); // claim updates nothing
+        host.db.queue_query_result(json!([{ "status": "claimed" }]));
         let mut req = request();
         req.headers
             .insert("authorization".into(), "PrintStation G".into());
         req.params.insert("id".into(), "5".into());
-        req.body = Some(json!({ "station": "s1", "printer": "main" }));
+        req.body = Some(json!({ "printer": "main" }));
         let err = handle_station_claim(&host, &req).unwrap_err();
         assert_eq!(err.into_response().status, 409);
+    }
+
+    fn station_request(id: i64, body: serde_json::Value) -> (Host, PluginHttpRequest) {
+        let host = Host::mock();
+        host.config.seed(
+            "plugin",
+            "",
+            config::NAMESPACE,
+            json!({ "stations": [{ "name": "hall", "token": "G" }] }),
+        );
+        let mut req = request();
+        req.headers
+            .insert("authorization".into(), "PrintStation G".into());
+        req.params.insert("id".into(), id.to_string());
+        req.body = Some(body);
+        (host, req)
+    }
+
+    #[test]
+    fn a_claim_records_the_authenticated_station_not_the_body() {
+        let (host, req) = station_request(5, json!({ "station": "impostor", "printer": "main" }));
+        host.db.queue_execute_result(1);
+        handle_station_claim(&host, &req).unwrap();
+        let sql = &host.db.executions()[0].sql;
+        assert!(sql.contains("claimed_by = $"), "{sql}");
+        assert!(!sql.contains("impostor"));
+    }
+
+    #[test]
+    fn a_disallowed_move_is_a_conflict_and_a_missing_job_is_not_found() {
+        let mut req = request();
+        req.params.insert("id".into(), "9".into());
+
+        let host = Host::mock();
+        host.db.queue_execute_result(0);
+        host.db
+            .queue_query_result(json!([{ "status": "pending_approval" }]));
+        let err = handle_admin_reprint(&host, &req).unwrap_err();
+        assert_eq!(err.into_response().status, 409);
+
+        let host = Host::mock();
+        host.db.queue_execute_result(0);
+        let err = handle_admin_reprint(&host, &req).unwrap_err();
+        assert_eq!(err.into_response().status, 404);
+    }
+
+    #[test]
+    fn admin_list_rejects_an_unknown_status_filter() {
+        let host = Host::mock();
+        let mut req = request();
+        req.query.insert("status".into(), "bogus".into());
+        let err = handle_admin_list_jobs(&host, &req).unwrap_err();
+        assert_eq!(err.into_response().status, 400);
     }
 }

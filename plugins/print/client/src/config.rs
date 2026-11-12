@@ -38,6 +38,8 @@ pub struct PrinterCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Label printed on this station's output. The server knows the station by
+    /// the name configured next to its token instead.
     pub station: String,
     #[serde(default)]
     pub location: Option<String>,

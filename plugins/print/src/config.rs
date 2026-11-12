@@ -13,6 +13,14 @@ fn default_max_pages() -> i32 {
     10
 }
 
+/// One print station's credential. The station is known by `name` to
+/// everything it does with `token`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StationCredential {
+    pub name: String,
+    pub token: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrintConfig {
     #[serde(default = "default_true")]
@@ -24,7 +32,7 @@ pub struct PrintConfig {
     #[serde(default)]
     pub banner: String,
     #[serde(default)]
-    pub station_tokens: Vec<String>,
+    pub stations: Vec<StationCredential>,
 }
 
 impl Default for PrintConfig {
@@ -34,7 +42,7 @@ impl Default for PrintConfig {
             require_approval: false,
             max_pages: default_max_pages(),
             banner: String::new(),
-            station_tokens: Vec::new(),
+            stations: Vec::new(),
         }
     }
 }
@@ -65,7 +73,7 @@ mod tests {
         assert!(cfg.enabled);
         assert!(!cfg.require_approval);
         assert_eq!(cfg.max_pages, 10);
-        assert!(cfg.station_tokens.is_empty());
+        assert!(cfg.stations.is_empty());
     }
 
     #[test]
@@ -83,12 +91,17 @@ mod tests {
             "contest",
             "5",
             NAMESPACE,
-            json!({ "require_approval": true, "max_pages": 3, "station_tokens": ["t1"] }),
+            json!({
+                "require_approval": true,
+                "max_pages": 3,
+                "stations": [{ "name": "room-a", "token": "t1" }],
+            }),
         );
         let cfg = load_contest_config(&host, 5);
         assert!(cfg.require_approval);
         assert_eq!(cfg.max_pages, 3);
-        assert_eq!(cfg.station_tokens, vec!["t1".to_string()]);
+        assert_eq!(cfg.stations[0].name, "room-a");
+        assert_eq!(cfg.stations[0].token, "t1");
     }
 
     #[test]
