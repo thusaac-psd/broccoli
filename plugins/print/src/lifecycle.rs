@@ -1,6 +1,7 @@
 //! The print job state machine. [`JobStatus`] names every state, [`Change`]
 //! names every move together with the data it writes, and [`Change::edge`] is
-//! the one table of which states each move may leave and where it lands.
+//! the one table of which states each move may leave, under which condition,
+//! and where it lands.
 //! [`transition_sql`] turns a move into the single guarded `UPDATE` that
 //! performs it, so no write path can change `status` without going through the
 //! table.
@@ -9,9 +10,43 @@ use broccoli_server_sdk::prelude::Params;
 use serde::{Deserialize, Serialize};
 
 /// A claim that has not reached `done` or `failed` within this many seconds
-/// belongs to a station that died. Any station may then claim the job again,
-/// and the original station can no longer report on it.
+/// belongs to a station that died, and any station may claim the job again.
+/// Until another station does, the original station may still report on it.
 pub const CLAIM_LEASE_SECS: i64 = 600;
+
+/// One allowed source of a move: the state it leaves and the condition the job
+/// must meet in that state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edge {
+    pub from: JobStatus,
+    pub when: When,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum When {
+    Always,
+    /// The job's claim is older than [`CLAIM_LEASE_SECS`].
+    LeaseExpired,
+}
+
+/// `Edge` literals, so the table's arrays are promoted to `'static`.
+macro_rules! always {
+    ($from:ident) => {
+        Edge {
+            from: $from,
+            when: When::Always,
+        }
+    };
+}
+
+macro_rules! lease_expired {
+    ($from:ident) => {
+        Edge {
+            from: $from,
+            when: When::LeaseExpired,
+        }
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,21 +125,34 @@ pub enum Change<'a> {
 use JobStatus::*;
 
 impl Change<'_> {
-    /// The states this move may leave, and the state it lands in.
-    pub fn edge(&self) -> (&'static [JobStatus], JobStatus) {
+    /// The sources this move may leave, and the state it lands in.
+    pub fn edge(&self) -> (&'static [Edge], JobStatus) {
         match self {
-            Change::Approve => (&[PendingApproval], Pending),
+            Change::Approve => (&[always!(PendingApproval)], Pending),
             Change::Cancel => (
-                &[PendingApproval, Pending, Claimed, Printing, Failed],
+                &[
+                    always!(PendingApproval),
+                    always!(Pending),
+                    always!(Claimed),
+                    always!(Printing),
+                    always!(Failed),
+                ],
                 Canceled,
             ),
-            Change::Reprint => (&[Done, Failed], Pending),
-            Change::Pin { .. } => (&[Pending, Done, Failed], Pending),
-            Change::Claim { .. } => (&[Pending], Claimed),
+            Change::Reprint => (&[always!(Done), always!(Failed)], Pending),
+            Change::Pin { .. } => (&[always!(Pending), always!(Done), always!(Failed)], Pending),
+            Change::Claim { .. } => (
+                &[
+                    always!(Pending),
+                    lease_expired!(Claimed),
+                    lease_expired!(Printing),
+                ],
+                Claimed,
+            ),
             Change::Report { report, .. } => match report {
-                StationReport::Printing => (&[Claimed], Printing),
-                StationReport::Done => (&[Claimed, Printing], Done),
-                StationReport::Failed => (&[Claimed, Printing], Failed),
+                StationReport::Printing => (&[always!(Claimed)], Printing),
+                StationReport::Done => (&[always!(Claimed), always!(Printing)], Done),
+                StationReport::Failed => (&[always!(Claimed), always!(Printing)], Failed),
             },
         }
     }
@@ -154,38 +202,33 @@ impl Change<'_> {
         sets
     }
 
-    /// Which rows in the source states this move may touch. A claim may also
-    /// take over a job whose lease expired; a report must come from the
-    /// station that holds an unexpired claim.
+    /// Which rows this move may touch: one in a source state meeting that
+    /// source's condition. A report must also come from the station holding
+    /// the claim, which a takeover by another station ends.
     fn guard(&self, p: &mut Params) -> String {
-        let (from, _) = self.edge();
-        let in_from = format!(
-            "status IN ({})",
-            from.iter()
-                .map(|s| p.bind(s.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let (sources, _) = self.edge();
+        let sources = sources
+            .iter()
+            .map(|edge| {
+                let status = format!("status = {}", p.bind(edge.from.as_str()));
+                match edge.when {
+                    When::Always => status,
+                    When::LeaseExpired => format!(
+                        "({status} AND claimed_at <= NOW() - ({}::int * INTERVAL '1 second'))",
+                        p.bind(CLAIM_LEASE_SECS)
+                    ),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
         match *self {
-            Change::Claim { .. } => format!("({in_from} OR {})", lease_expired(p)),
             Change::Report { station, .. } => format!(
-                "{in_from} AND claimed_by = {} AND NOT {}",
-                p.bind(station.to_string()),
-                lease_expired(p)
+                "({sources}) AND claimed_by = {}",
+                p.bind(station.to_string())
             ),
-            _ => in_from,
+            _ => format!("({sources})"),
         }
     }
-}
-
-/// A held job whose claim is older than the lease.
-fn lease_expired(p: &mut Params) -> String {
-    format!(
-        "(status IN ({}, {}) AND claimed_at <= NOW() - ({} * INTERVAL '1 second'))",
-        p.bind(Claimed.as_str()),
-        p.bind(Printing.as_str()),
-        p.bind(CLAIM_LEASE_SECS)
-    )
 }
 
 /// `None` emits a literal NULL rather than a bound parameter.
@@ -243,8 +286,9 @@ mod tests {
         Canceled,
     ];
 
+    /// Whether `change` may leave `from` at all, under any condition.
     fn allowed(change: Change<'_>, from: JobStatus) -> bool {
-        change.edge().0.contains(&from)
+        change.edge().0.iter().any(|edge| edge.from == from)
     }
 
     #[test]
@@ -284,6 +328,18 @@ mod tests {
     }
 
     #[test]
+    fn only_a_claim_takes_over_a_held_job_and_only_once_its_lease_expired() {
+        for status in [Claimed, Printing] {
+            let claim = Change::Claim {
+                station: "s",
+                printer: None,
+            };
+            let edge = claim.edge().0.iter().find(|e| e.from == status);
+            assert_eq!(edge.map(|e| e.when), Some(When::LeaseExpired));
+        }
+    }
+
+    #[test]
     fn done_jobs_cannot_be_canceled_and_canceled_jobs_stay_canceled() {
         assert!(!allowed(Change::Cancel, Done));
         for change in [
@@ -300,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_report_requires_the_reporting_station_to_hold_the_claim() {
+    fn a_report_requires_the_reporting_station_to_hold_the_claim_and_nothing_else() {
         let mut p = Params::new();
         let change = Change::Report {
             station: "room-a",
@@ -310,7 +366,10 @@ mod tests {
         };
         let sql = transition_sql(&mut p, 7, &change, None);
         assert!(sql.contains("claimed_by = $"), "{sql}");
-        assert!(sql.contains("AND NOT (status IN"), "{sql}");
+        assert!(
+            !sql.contains("claimed_at <="),
+            "a report from the holding station is accepted however late: {sql}"
+        );
         assert!(sql.contains("printed_at = NOW()"), "{sql}");
         let args = p.into_args();
         assert!(args.contains(&serde_json::json!("room-a")));
@@ -342,7 +401,7 @@ mod tests {
         assert!(sql.contains("printed_at = NULL"), "{sql}");
         assert!(sql.contains("pages = NULL"), "{sql}");
         assert!(sql.contains("error = NULL"), "{sql}");
-        assert!(sql.contains(" OR (status IN"), "{sql}");
+        assert!(sql.contains(" OR (status = $"), "{sql}");
         assert!(sql.contains("claimed_at <= NOW() -"), "{sql}");
         assert!(sql.contains("AND contest_id = $"), "{sql}");
     }

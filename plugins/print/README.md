@@ -139,5 +139,8 @@ emoji) print as a missing-glyph box rather than vanishing.
 A move from any other state answers 409. Concurrent stations are serialized by
 an atomic SQL claim, so a job is never printed twice. A station that crashes
 while holding a job loses it after the 10-minute claim lease: another station
-claims it and the crashed station can no longer report on it. Requeueing and
-claiming clear the previous run's claim, page count and error.
+may then claim it, after which the first station's reports are refused. Until
+that happens, the holding station may still report however late. The client
+reports `printing` before it prints and does not print a job whose `printing`
+report is refused. Requeueing and claiming clear the previous run's claim, page
+count and error.
