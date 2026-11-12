@@ -27,15 +27,6 @@ export type CodeRun = components['schemas']['CodeRunResponse'];
 export type CodeRunJudgeResult = components['schemas']['CodeRunJudgeResult'];
 export type CodeRunResult = components['schemas']['CodeRunResultResponse'];
 
-export const SUBMISSION_STATUSES: SubmissionStatus[] = [
-  'Pending',
-  'Compiling',
-  'Running',
-  'Judged',
-  'CompilationError',
-  'SystemError',
-];
-
 export type SubmissionStatusFilterValue = 'all' | SubmissionStatus;
 
 /**
@@ -48,8 +39,3 @@ export interface SubmissionError {
   message: string;
   details?: Record<string, unknown>;
 }
-
-export const SUBMISSION_STATUS_FILTER_OPTIONS: SubmissionStatusFilterValue[] = [
-  'all',
-  ...SUBMISSION_STATUSES,
-];
