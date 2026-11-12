@@ -678,6 +678,8 @@ export const en: Record<string, string> = {
   'admin.additionalFiles.downloadError': 'Failed to download file.',
   'admin.additionalFiles.selectLanguageFirst':
     'Please select a language first.',
+  'admin.additionalFiles.selectLanguageFirstFor':
+    '{name}: select a language first.',
   'admin.additionalFiles.dropzone': 'Drop files here or click to browse',
   'admin.additionalFiles.language': 'Language',
   'admin.additionalFiles.path': 'Virtual path (optional)',

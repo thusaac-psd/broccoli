@@ -409,7 +409,7 @@ function PoolCard({
             )}
             {tc.is_sample && (
               <span className="text-[8px] font-bold uppercase tracking-tight px-[5px] py-px rounded-[3px] bg-indigo-500/10 text-indigo-500">
-                S
+                {t('ioi.subtask.sampleAbbr')}
               </span>
             )}
             <span className={cn(monoClass, 'text-[10px] opacity-40 ml-auto')}>

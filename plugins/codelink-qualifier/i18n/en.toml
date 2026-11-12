@@ -16,6 +16,7 @@
 'codelink-qualifier.table.rank' = 'Rank'
 'codelink-qualifier.table.accepted' = 'Solved'
 'codelink-qualifier.cell.accepted' = 'Accepted solution'
+'codelink-qualifier.cell.acceptedShort' = 'AC'
 'codelink-qualifier.phase.before' = 'Not started'
 'codelink-qualifier.phase.during' = 'In progress'
 'codelink-qualifier.phase.after' = 'Finished'

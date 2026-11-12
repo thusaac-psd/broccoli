@@ -615,6 +615,7 @@
 'admin.additionalFiles.deleted' = '文件删除成功。'
 'admin.additionalFiles.downloadError' = '下载文件失败。'
 'admin.additionalFiles.selectLanguageFirst' = '请先选择语言。'
+'admin.additionalFiles.selectLanguageFirstFor' = '{name}：请先选择语言。'
 'admin.additionalFiles.dropzone' = '将文件拖放到此处，或点击浏览'
 'admin.additionalFiles.language' = '语言'
 'admin.additionalFiles.path' = '虚拟路径（可选）'

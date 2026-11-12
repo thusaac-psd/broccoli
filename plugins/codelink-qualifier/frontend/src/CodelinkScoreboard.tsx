@@ -52,7 +52,7 @@ function Cell({
         >
           <div className="whitespace-nowrap text-xs font-medium">
             {acceptedView
-              ? 'AC'
+              ? t('codelink-qualifier.cell.acceptedShort')
               : cell.status === 'credited'
                 ? t('codelink-qualifier.cell.slot', { slot: cell.slot })
                 : t(`codelink-qualifier.cell.${cell.status}`)}

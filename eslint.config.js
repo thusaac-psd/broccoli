@@ -78,7 +78,7 @@ export default defineConfig([
     },
   },
 
-  // User-facing text comes from translation keys, never from JSX literals:
+  // User-facing text comes from translation keys, never from literals: JSX
   // text children, string expressions rendered in JSX, and the attributes a
   // user reads or hears. Class names, identifiers and symbols are exempt.
   {
@@ -99,27 +99,24 @@ export default defineConfig([
             include: [
               'placeholder',
               'title',
-              'aria-label',
               'alt',
               'label',
               'description',
-              'emptyMessage',
-              'searchPlaceholder',
               'tooltip',
               'hint',
+              'aria-(label|description|placeholder|roledescription|valuetext)',
+              '[a-z][A-Za-z]*(Label|Title|Placeholder|Message|Description|Hint)',
             ],
           },
           words: {
             exclude: [
               // Numbers, punctuation and symbols.
               '[0-9!-/:-@[-`{-~\\s·—–→←×✓…▾▸]+',
-              // Constants and codes.
-              '[A-Z_-]+',
               // Colors.
               '#[0-9a-fA-F]{3,8}',
               'var\\(--[a-z-]+\\)',
-              // Class names.
-              '[a-z0-9:./\\[\\]()!%#_-]*-[a-z0-9:./\\[\\]()!%#_ -]*',
+              // A single class name or kebab-case identifier.
+              '[a-z0-9:./\\[\\]()!%#_-]*-[a-z0-9:./\\[\\]()!%#_-]*',
               // snake_case identifiers.
               '[a-z0-9]+(_[a-z0-9]+)+',
             ],
@@ -138,6 +135,44 @@ export default defineConfig([
               'split',
             ],
           },
+        },
+      ],
+    },
+  },
+  // Outside JSX: messages shown through toasts and error state, and the
+  // label/title/message fields handed to UI components, in .ts files too.
+  // Class names and dotted translation keys in those fields are exempt.
+  {
+    files: [
+      'packages/web/src/**/*.{ts,tsx}',
+      'packages/web-sdk/src/**/*.{ts,tsx}',
+      'plugins/*/frontend/src/**/*.{ts,tsx}',
+      'plugins/*/web/src/**/*.{ts,tsx}',
+    ],
+    ignores: ['**/*.test.ts', '**/*.test-util.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "CallExpression[callee.object.name='toast'] > :matches(Literal[value=/[A-Za-z]/], TemplateLiteral)",
+          message: 'Toast text comes from a translation key: use t().',
+        },
+        {
+          // The JSX rule lets DOM elements' aria attributes through.
+          selector:
+            'JSXAttribute[name.name=/^aria-(label|description|placeholder|roledescription|valuetext)$/] > Literal[value=/[A-Za-z]/]',
+          message: 'Accessible text comes from a translation key: use t().',
+        },
+        {
+          selector:
+            'CallExpression[callee.name=/^set(Error|Message|Notice)$/] > :matches(Literal[value=/[A-Za-z]/], TemplateLiteral)',
+          message: 'Shown error text comes from a translation key: use t().',
+        },
+        {
+          selector:
+            'Property[key.name=/^(label|title|description|placeholder|message|confirmLabel|failureMessage|emptyMessage)$/] > Literal[value=/[A-Za-z]{2}/]:not([value=/[a-z0-9]-[a-z]/]):not([value=/^[\\w-]+(\\.[\\w-]+)+$/])',
+          message: 'UI text comes from a translation key: use t().',
         },
       ],
     },

@@ -16,6 +16,7 @@
 'codelink-qualifier.table.rank' = '名次'
 'codelink-qualifier.table.accepted' = '通过题数'
 'codelink-qualifier.cell.accepted' = '已通过'
+'codelink-qualifier.cell.acceptedShort' = 'AC'
 'codelink-qualifier.phase.before' = '尚未开始'
 'codelink-qualifier.phase.during' = '进行中'
 'codelink-qualifier.phase.after' = '已结束'

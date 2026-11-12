@@ -25,16 +25,17 @@ import { useParams } from 'react-router';
 import { usePrintApi } from './hooks/usePrintApi';
 import { estimatePages } from './lib/format';
 
-const LANGUAGES: { value: string; label: string }[] = [
-  { value: 'cpp', label: 'C++' },
-  { value: 'c', label: 'C' },
-  { value: 'python3', label: 'Python' },
-  { value: 'java', label: 'Java' },
-  { value: 'kotlin', label: 'Kotlin' },
-  { value: 'rust', label: 'Rust' },
-  { value: 'go', label: 'Go' },
-  { value: 'javascript', label: 'JavaScript' },
-  { value: 'text', label: 'Plain text' },
+/** Languages a print job can be highlighted as, by their proper names. */
+const LANGUAGES: { value: string; name?: string }[] = [
+  { value: 'cpp', name: 'C++' },
+  { value: 'c', name: 'C' },
+  { value: 'python3', name: 'Python' },
+  { value: 'java', name: 'Java' },
+  { value: 'kotlin', name: 'Kotlin' },
+  { value: 'rust', name: 'Rust' },
+  { value: 'go', name: 'Go' },
+  { value: 'javascript', name: 'JavaScript' },
+  { value: 'text' },
 ];
 
 type Phase = 'idle' | 'sending' | 'done' | 'error';
@@ -163,7 +164,7 @@ export function PrintToolbarButton() {
                 <SelectContent>
                   {LANGUAGES.map((l) => (
                     <SelectItem key={l.value} value={l.value}>
-                      {l.label}
+                      {l.name ?? t('print.dialog.plainText')}
                     </SelectItem>
                   ))}
                 </SelectContent>

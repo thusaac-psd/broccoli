@@ -5,6 +5,7 @@ import {
   type Verdict,
 } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { AlertTriangle, Loader2, Pin } from 'lucide-react';
 
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
@@ -152,7 +153,7 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
                   : '—'}
               </span>
               <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
-                {row.memoryUsed != null ? `${row.memoryUsed}KB` : '—'}
+                {row.memoryUsed != null ? formatKibibytes(row.memoryUsed) : '—'}
               </span>
               <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
                 {submissionId != null ? `#${submissionId}` : ''}

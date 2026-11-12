@@ -18,6 +18,7 @@
 'print.dialog.submit' = '打印'
 'print.dialog.empty' = '没有要打印的内容'
 'print.dialog.tooManyPages' = '过长，无法打印（预计 {pages} 页，限制 {max} 页）。'
+'print.dialog.plainText' = '纯文本'
 
 # 提交打印确认
 'print.submission.title' = '打印这份提交？'

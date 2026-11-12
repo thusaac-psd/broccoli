@@ -30,7 +30,7 @@ import {
   DropdownMenuTrigger,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { formatDateTime } from '@broccoli/web-sdk/utils';
+import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   FileCode,
@@ -415,7 +415,7 @@ function useProblemColumns({
       size: 120,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {(row.original.memory_limit / 1024).toFixed(0)}MB
+          {formatKibibytes(row.original.memory_limit)}
         </span>
       ),
     },

@@ -95,7 +95,9 @@ export function AdditionalFilesSection({
     async (item: StagedFile): Promise<boolean> => {
       if (!item.language) {
         toast.error(
-          `${item.file.name}: ${t('admin.additionalFiles.selectLanguageFirst')}`,
+          t('admin.additionalFiles.selectLanguageFirstFor', {
+            name: item.file.name,
+          }),
         );
         return false;
       }
