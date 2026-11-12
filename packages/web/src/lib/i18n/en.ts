@@ -1051,6 +1051,12 @@ export const en: Record<string, string> = {
     'Could not load this. Check your connection and try again.',
   'common.retry': 'Retry',
   'confirm.confirm': 'Confirm',
+  'config.validation.number': 'Must be a valid number',
+  'config.validation.integer': 'Must be a whole number',
+  'config.validation.min': 'Must be at least {min}',
+  'config.validation.max': 'Must be at most {max}',
+  'config.validation.minLength': 'Must be at least {min} characters',
+  'config.validation.maxLength': 'Must be at most {max} characters',
   'users.revoke': 'Revoke',
   'confirm.failed': 'The action failed. Please try again.',
 
