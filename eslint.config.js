@@ -18,6 +18,9 @@ export default defineConfig([
     '**/coverage/*',
     'packages/web-sdk/src/api/schema.ts',
     'packages/web/.react-router/**',
+    // The docs site is not a member of the root pnpm workspace; its
+    // dependencies install from website/pnpm-lock.yaml.
+    'website/**',
   ]),
 
   // TypeScript files
