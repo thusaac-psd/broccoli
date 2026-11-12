@@ -197,6 +197,19 @@ struct AppData {
 }
 
 impl AppData {
+    /// Drop everything that belonged to the previous user's session.
+    fn forget_user(&mut self) {
+        self.my_submissions.clear();
+        self.subs_inited = false;
+        self.submission_detail = None;
+        if matches!(self.overlay, Some(Overlay::Submission { .. })) {
+            self.overlay = None;
+        }
+        for p in &mut self.problems {
+            p.solved = false;
+        }
+    }
+
     fn current_len(&self) -> usize {
         match self.selected_tab {
             Tab::MySubmissions => self.my_submissions.len(),
@@ -259,6 +272,8 @@ enum PollUpdate {
     Clarifications(ClarificationListResponse),
     /// How the most recent poll cycle ended.
     Cycle(PollOutcome),
+    /// A new login replaced a rejected session with a different user's.
+    UserChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,7 +408,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
 
     let (tx, rx) = mpsc::channel::<PollUpdate>();
     let cid = contest_id.clone();
-    let uid = self_uid.to_string();
+    let mut uid = self_uid;
 
     let running = Arc::new(AtomicBool::new(true));
     let poller_running = running.clone();
@@ -403,9 +418,26 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
     let poll_client = Arc::clone(&client);
 
     let poller = thread::spawn(move || {
+        let mut last = PollOutcome::Ok;
         'outer: while poller_running.load(Ordering::Relaxed) {
-            let subs =
-                poll_client.list_contest_submissions(&cid, None, Some(&uid), None, Some(100));
+            // A rejected session resumes only through a new login, which may
+            // be another user's: re-read who we are before scoping the polls.
+            if last == PollOutcome::SessionRejected
+                && let Ok(me) = poll_client.me()
+                && me.id != uid
+            {
+                uid = me.id;
+                if tx.send(PollUpdate::UserChanged).is_err() {
+                    break 'outer;
+                }
+            }
+            let subs = poll_client.list_contest_submissions(
+                &cid,
+                None,
+                Some(&uid.to_string()),
+                None,
+                Some(100),
+            );
             let mut outcome = PollOutcome::of(&subs);
             if let Ok(d) = subs
                 && tx.send(PollUpdate::Submissions(d)).is_err()
@@ -422,6 +454,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
             if tx.send(PollUpdate::Cycle(outcome)).is_err() {
                 break 'outer;
             }
+            last = outcome;
             // ~2s between polls, but wake early on refresh request.
             for _ in 0..20 {
                 if !poller_running.load(Ordering::Relaxed)
@@ -495,6 +528,7 @@ fn run_event_loop(
                     consider(1, notify_new_clar(app), &mut pending_flash);
                 }
                 PollUpdate::Cycle(outcome) => app.link = app.link.after(outcome),
+                PollUpdate::UserChanged => app.forget_user(),
             }
             app.clamp_selections();
         }
@@ -2160,5 +2194,21 @@ mod tests {
         assert_eq!(Ok.worst(Failed), Failed);
         assert_eq!(Failed.worst(SessionRejected), SessionRejected);
         assert_eq!(Ok.worst(Ok), Ok);
+    }
+
+    #[test]
+    fn a_different_user_logging_in_clears_the_previous_users_state() {
+        let mut app = sample_app();
+        update_submissions(
+            &mut app,
+            &submissions(&[(1, 1, "A Plus B", Verdict::Accepted)]),
+        );
+        app.subs_inited = true;
+        assert!(app.problems.iter().any(|p| p.solved));
+
+        app.forget_user();
+        assert!(app.my_submissions.is_empty());
+        assert!(!app.subs_inited);
+        assert!(app.problems.iter().all(|p| !p.solved));
     }
 }

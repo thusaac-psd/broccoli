@@ -120,11 +120,10 @@ impl Client {
                 }),
                 Err(e) => Exchange::unreachable(format!("unreadable refresh response: {e}")),
             },
-            // Too many requests, a timeout or a server failure says nothing
-            // about the refresh token; any other client error refuses it.
-            408 | 429 => unavailable(resp),
-            status if status >= 500 => unavailable(resp),
-            _ => Exchange::Refused,
+            status => {
+                let retry_after = retry_after(&resp);
+                refused_or_unreachable(status, ApiError::from_response(resp), retry_after)
+            }
         }
     }
 
@@ -510,19 +509,33 @@ pub fn persist_session(server: &str, access_token: &str) -> anyhow::Result<()> {
         .context("Failed to save credentials")
 }
 
-/// An exchange the server could not complete, honouring its `Retry-After`
-/// (in seconds; the HTTP-date form is not used by the server).
-fn unavailable(resp: Response) -> Exchange {
-    let retry_after = resp
-        .headers()
+/// Classify a failed refresh. Only the server saying the token is invalid
+/// (401, or a token error code) ends the session; any other answer (a rate
+/// limit, a proxy's 403/404, a server failure) says nothing about the refresh
+/// token, so the session waits and retries.
+fn refused_or_unreachable(
+    status: u16,
+    error: ApiError,
+    retry_after: Option<std::time::Duration>,
+) -> Exchange {
+    if status == 401 || error.rejects_token() {
+        Exchange::Refused
+    } else {
+        Exchange::Unreachable {
+            cause: error.to_string(),
+            retry_after,
+        }
+    }
+}
+
+/// The server's `Retry-After`, in seconds (the server never sends the
+/// HTTP-date form).
+fn retry_after(resp: &Response) -> Option<std::time::Duration> {
+    resp.headers()
         .get(http::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(std::time::Duration::from_secs);
-    Exchange::Unreachable {
-        cause: ApiError::from_response(resp).to_string(),
-        retry_after,
-    }
+        .map(std::time::Duration::from_secs)
 }
 
 /// A request the server answered with a non-2xx status. `code` is the
@@ -536,6 +549,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// The server's codes for a missing or invalid token.
+    pub const TOKEN_CODES: [&'static str; 2] = ["TOKEN_MISSING", "TOKEN_INVALID"];
+
+    /// Whether the server refused the credentials themselves.
+    pub fn rejects_token(&self) -> bool {
+        Self::TOKEN_CODES.contains(&self.code.as_str())
+    }
+
     /// The `code` of a body that is not an [`ErrorBody`] (a proxy page, an
     /// empty body).
     pub const UNSTRUCTURED: &'static str = "UNSTRUCTURED";
@@ -561,7 +582,7 @@ impl ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.code.as_str() {
-            "TOKEN_MISSING" | "TOKEN_INVALID" => write!(
+            _ if self.rejects_token() => write!(
                 f,
                 "{} Run `broccoli login` to re-authenticate.",
                 self.message
@@ -585,4 +606,35 @@ pub struct PollResponse {
     pub error: Option<String>,
     #[serde(default)]
     pub token: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error(status: u16, code: &str) -> ApiError {
+        ApiError {
+            status,
+            code: code.into(),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn only_token_rejections_end_the_session() {
+        assert!(matches!(
+            refused_or_unreachable(401, error(401, "TOKEN_INVALID"), None),
+            Exchange::Refused
+        ));
+        assert!(matches!(
+            refused_or_unreachable(400, error(400, "TOKEN_INVALID"), None),
+            Exchange::Refused
+        ));
+        for status in [403, 404, 429, 502] {
+            assert!(matches!(
+                refused_or_unreachable(status, error(status, ApiError::UNSTRUCTURED), None),
+                Exchange::Unreachable { .. }
+            ));
+        }
+    }
 }
