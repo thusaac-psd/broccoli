@@ -107,6 +107,40 @@ fn burst_fault_args_parse_fanout_metrics_guards() {
 }
 
 #[test]
+fn kill_server_recovery_logs_in_with_a_username_and_password() {
+    use stress_test::cli::{Command, FaultScenario};
+    let cli = Cli::try_parse_from([
+        "broccoli-stress-test",
+        "fault",
+        "kill-server-recovery",
+        "--db-url",
+        "postgres://localhost/broccoli",
+        "--server-url",
+        "http://localhost:3000",
+        "--admin-username",
+        "admin",
+        "--admin-password",
+        "secret",
+        "--kill-command",
+        "true",
+        "--redis-url",
+        "redis://localhost",
+    ])
+    .unwrap();
+
+    let Some(Command::Fault(args)) = cli.command else {
+        panic!("expected fault command");
+    };
+    let FaultScenario::KillServerRecovery(args) = args.scenario else {
+        panic!("expected kill-server-recovery scenario");
+    };
+    assert!(matches!(
+        args.admin.auth(),
+        Ok(stress_test::client::AuthCreds::UsernamePassword { .. })
+    ));
+}
+
+#[test]
 fn rejects_token_and_username_password_both_missing() {
     let cli =
         Cli::try_parse_from(["broccoli-stress-test", "--url", "http://localhost:3000"]).unwrap();
@@ -126,8 +160,8 @@ fn accepts_username_password_pair() {
     ])
     .unwrap();
     assert!(cli.validate().is_ok());
-    assert_eq!(cli.admin_username.as_deref(), Some("admin"));
-    assert_eq!(cli.admin_password.as_deref(), Some("secret"));
+    assert_eq!(cli.admin.admin_username.as_deref(), Some("admin"));
+    assert_eq!(cli.admin.admin_password.as_deref(), Some("secret"));
 }
 
 #[test]

@@ -57,8 +57,7 @@ pub struct Burst {
     pub contest_type: Option<String>,
     pub problem_type: Option<String>,
 
-    // Connection params (burst constructs its own Client rather than using the
-    // legacy ScenarioContext, per the existing TODO in fault/runner.rs).
+    // Connection params for the client the scenario builds.
     pub server_url: String,
     pub creds: AuthCreds,
     pub out: PathBuf,

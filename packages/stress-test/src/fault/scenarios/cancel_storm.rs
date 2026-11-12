@@ -360,8 +360,6 @@ mod tests {
         let ctx = ScenarioContext {
             redis_url: format!("redis://127.0.0.1:{port}"),
             db_url: None,
-            server_url: None,
-            admin_token: None,
             kill_command: None,
         };
         let scenario = CancelStorm {

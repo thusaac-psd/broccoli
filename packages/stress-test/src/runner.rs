@@ -393,14 +393,9 @@ pub async fn run(cli: Cli) -> u8 {
 }
 
 fn build_creds(cli: &Cli) -> AuthCreds {
-    if let Some(t) = cli.admin_token.clone() {
-        AuthCreds::Token(t)
-    } else {
-        AuthCreds::UsernamePassword {
-            username: cli.admin_username.clone().unwrap_or_default(),
-            password: cli.admin_password.clone().unwrap_or_default(),
-        }
-    }
+    cli.admin
+        .auth()
+        .expect("Cli::validate checked the admin credentials")
 }
 
 fn passthrough_summary_from_outcome(
