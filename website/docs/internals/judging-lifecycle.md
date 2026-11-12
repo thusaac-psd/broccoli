@@ -103,6 +103,7 @@ submission whose verdict is a `SystemError`.
 
 ## Locks
 
-Statements lock a submission row before its judgements. Scans lock the unit
-and its submission with `FOR UPDATE OF ... SKIP LOCKED`, so a scan never waits
-and never deadlocks with a rejudge or a plugin write.
+Rows are locked in one order: a submission, then its judgements, then dead
+letters. A statement that touches many rows (a scan, the lease refresh) takes
+them in id order with `SKIP LOCKED`, so it never waits on a busy row and never
+deadlocks with a rejudge or a plugin write.

@@ -40,10 +40,12 @@ impl Unit {
     }
 
     /// Row locks of a scan. A judgement scan locks its submission too, so
-    /// the statements that follow never wait for either row.
+    /// the statements that follow never wait for either row; the submission
+    /// comes first, so a row skipped because its submission is busy leaves
+    /// no lock behind.
     fn scan_lock(self) -> &'static str {
         match self {
-            Unit::Judgement => "FOR UPDATE OF u, s SKIP LOCKED",
+            Unit::Judgement => "FOR UPDATE OF s, u SKIP LOCKED",
             Unit::CodeRun => "FOR UPDATE OF u SKIP LOCKED",
         }
     }
@@ -309,7 +311,9 @@ pub struct UnitCounts {
 }
 
 /// Bumps the lease heartbeat of every in-flight unit `server_id` owns, with
-/// the database clock, which every lease-age comparison also uses.
+/// the database clock, which every lease-age comparison also uses. Rows are
+/// taken in id order and a busy one is skipped: it is mid-transition, and the
+/// lease TTL spans many refresh intervals.
 pub(crate) async fn refresh_leases(
     db: &DatabaseConnection,
     server_id: &str,
@@ -321,7 +325,9 @@ pub(crate) async fn refresh_leases(
                 DbBackend::Postgres,
                 format!(
                     "UPDATE {table} SET lease_heartbeat_at = NOW() \
-                     WHERE owner_server_id = $1 AND status IN {in_flight}",
+                     WHERE id IN (SELECT id FROM {table} \
+                                  WHERE owner_server_id = $1 AND status IN {in_flight} \
+                                  ORDER BY id FOR NO KEY UPDATE SKIP LOCKED)",
                     table = unit.table(),
                     in_flight = StatusPhase::InFlight.sql_list(),
                 ),

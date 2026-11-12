@@ -67,8 +67,10 @@
 //!
 //! # Locks
 //!
-//! Statements lock a submission row before its judgements. Scans lock both
-//! with `FOR UPDATE OF ... SKIP LOCKED`, so they never wait on either.
+//! Rows are locked in one order: a submission, then its judgements, then
+//! dead letters. A statement that touches many rows takes them in id order
+//! and skips busy ones (`SKIP LOCKED`), so no two transitions can wait on
+//! each other in a cycle.
 
 mod budget;
 mod open;
