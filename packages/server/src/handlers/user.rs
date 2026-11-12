@@ -31,6 +31,7 @@ use crate::services::privileges::{
     AdminSetChange, CeilingTarget, SystemAdminLock, require_within_ceiling,
 };
 use crate::state::AppState;
+use crate::utils::contest::{ContestPhase, contest_phase};
 use crate::utils::hash;
 use crate::utils::soft_delete::SoftDeletable;
 
@@ -198,7 +199,7 @@ pub async fn update_user(
     tag = "Users",
     operation_id = "deleteUser",
     summary = "Soft-delete a user by ID",
-    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.",
+    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or ended contest that is still active (not yet deactivated), or is the last active user holding `system:admin`. Registrations in contests that have not started or are not yet activated are automatically cancelled before deletion.",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 204, description = "User deleted"),
@@ -250,25 +251,30 @@ pub async fn delete_user(
             .all(&txn)
             .await?;
 
+        let mut unstarted_ids = Vec::new();
         for c in &contests {
-            if c.start_time <= now && c.deactivate_time.is_none_or(|dt| dt > now) {
-                return Err(AppError::Conflict(format!(
-                    "Cannot delete user: currently participating in active contest \"{}\"",
-                    c.title
-                )));
+            match contest_phase(c, now) {
+                // A running or ended-but-still-active contest may still be
+                // judging and publishing standings.
+                ContestPhase::Running | ContestPhase::Ended => {
+                    return Err(AppError::Conflict(format!(
+                        "Cannot delete user: currently participating in active contest \"{}\"",
+                        c.title
+                    )));
+                }
+                // No standings exist yet, so the registration goes with the
+                // account.
+                ContestPhase::Unactivated | ContestPhase::Upcoming => unstarted_ids.push(c.id),
+                // Standings are built from `contest_user`: keep the row so
+                // the participant's results survive.
+                ContestPhase::Deactivated => {}
             }
         }
 
-        let future_ids: Vec<i32> = contests
-            .iter()
-            .filter(|c| c.start_time > now)
-            .map(|c| c.id)
-            .collect();
-
-        if !future_ids.is_empty() {
+        if !unstarted_ids.is_empty() {
             contest_user::Entity::delete_many()
                 .filter(contest_user::Column::UserId.eq(id))
-                .filter(contest_user::Column::ContestId.is_in(future_ids))
+                .filter(contest_user::Column::ContestId.is_in(unstarted_ids))
                 .exec(&txn)
                 .await?;
         }

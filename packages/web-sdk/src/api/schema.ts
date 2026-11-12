@@ -2043,7 +2043,7 @@ export interface paths {
      * Soft-delete a user by ID
      * @description Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.
      *
-     *     Deletion is blocked if the user is registered in a running or recently-ended contest, or is the last active user holding `system:admin`. Registrations in future (not-yet-started) contests are automatically cancelled before deletion.
+     *     Deletion is blocked if the user is registered in a running or ended contest that is still active (not yet deactivated), or is the last active user holding `system:admin`. Registrations in contests that have not started or are not yet activated are automatically cancelled before deletion.
      */
     delete: operations['deleteUser'];
     options?: never;

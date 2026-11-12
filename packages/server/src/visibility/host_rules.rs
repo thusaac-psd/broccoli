@@ -10,12 +10,9 @@
 //!
 //! Rules ported (numbering matches the task brief):
 //!   1. `perm::CONTEST_MANAGE` short-circuits to `Allow`.
-//!   2. Contest activation window: `activate_time.is_none_or(|at| at > now)
-//!      || deactivate_time.is_some_and(|dt| dt <= now)` -> `Deny`. This
-//!      exact predicate is ported from BOTH `check_contest_access` AND
-//!      `require_contest_started` (byte-identical in the source, applied to
-//!      the same contest/`now`) - see [`window_is_closed`],
-//!      [`check_contest_access_decision`], and
+//!   2. A contest outside its activation window (its
+//!      [`ContestPhase`](crate::utils::contest::ContestPhase) is not active) -> `Deny` - see
+//!      [`check_contest_access_decision`] and
 //!      [`require_contest_started_window_decision`].
 //!   3. `contest.is_public` short-circuits the participant check.
 //!   4. Otherwise `contest_user` membership is required.
@@ -35,10 +32,11 @@
 //!      problem in zero contests -> `Deny` (checked BEFORE the
 //!      `contest:manage` bypass - see [`decide_standalone_problem_access`]);
 //!      `perm::CONTEST_MANAGE` -> `Allow`; otherwise `Allow` if the problem
-//!      is attached to a contest that is both public and "open and started"
-//!      (activation window open AND `start_time <= now`), or, failing that,
+//!      is attached to a contest that is both public and started
+//!      ([`ContestPhase::has_started`](crate::utils::contest::ContestPhase::has_started): active and running or ended), or,
+//!      failing that,
 //!      `Allow` if the subject is a participant of any contest (public or
-//!      not) attached to the problem that is "open and started".
+//!      not) attached to the problem that has started.
 //!      Samples and attachments are parts of their problem: a
 //!      `Resource::Sample` or `Resource::Attachment` gets exactly the
 //!      decision its problem would get under the same `contest_id` scope
@@ -144,6 +142,7 @@ use crate::entity::{
     clarification, clarification_reply, contest, contest_problem, contest_user, problem, submission,
 };
 use crate::error::AppError;
+use crate::utils::contest::contest_phase;
 use crate::utils::soft_delete::SoftDeletable;
 
 use super::{Action, Decision, FieldMask, Resource, Subject};
@@ -489,15 +488,6 @@ fn decide_one(
     }
 }
 
-/// Rule 2, ported byte-identically from BOTH `check_contest_access`
-/// (`utils/contest.rs:30-34`) and `require_contest_started`
-/// (`utils/contest.rs:77-81`) - the two source functions contain the exact
-/// same predicate applied to the same contest/`now`.
-fn window_is_closed(contest: &contest::Model, now: chrono::DateTime<chrono::Utc>) -> bool {
-    contest.activate_time.is_none_or(|at| at > now)
-        || contest.deactivate_time.is_some_and(|dt| dt <= now)
-}
-
 /// Ported from `check_contest_access` (`utils/contest.rs:21-46`): rules 1-4.
 /// Rule 7 (soft-deleted contest) is enforced by the caller only ever
 /// looking `contest_id` up in `contests`, which is populated via
@@ -511,7 +501,7 @@ fn check_contest_access_decision(
     if subject.has_permission(perm::CONTEST_MANAGE) {
         return Decision::Allow;
     }
-    if window_is_closed(contest, now) {
+    if !contest_phase(contest, now).is_active() {
         return Decision::Deny;
     }
     if contest.is_public {
@@ -536,10 +526,10 @@ fn require_contest_started_window_decision(
     if subject.has_permission(perm::CONTEST_MANAGE) {
         return Decision::Allow;
     }
-    if window_is_closed(contest, now) {
-        Decision::Deny
-    } else {
+    if contest_phase(contest, now).is_active() {
         Decision::Allow
+    } else {
+        Decision::Deny
     }
 }
 
@@ -672,21 +662,18 @@ fn decide_standalone_problem_access(
     if subject.has_permission(perm::CONTEST_MANAGE) {
         return Decision::Allow;
     }
-    // "Open and started": `window_is_closed`'s negation (activation window
-    // open) AND `start_time <= now` - the extra condition
-    // `can_access_problem_via_contest` applies on top of the plain window
-    // check (`utils/contest.rs:165-171`'s comment explains why: a
-    // not-yet-started or already-deactivated contest must not leak a hidden
-    // problem's statement/samples/attachments here, even if it is public).
-    let open_and_started: Vec<&contest::Model> = candidate_contest_ids
+    // A not-yet-started or deactivated contest must not leak a hidden
+    // problem's statement, samples or attachments here, even if it is
+    // public.
+    let started: Vec<&contest::Model> = candidate_contest_ids
         .iter()
         .filter_map(|cid| contests.get(cid))
-        .filter(|c| !window_is_closed(c, now) && c.start_time <= now)
+        .filter(|c| contest_phase(c, now).has_started())
         .collect();
-    if open_and_started.iter().any(|c| c.is_public) {
+    if started.iter().any(|c| c.is_public) {
         return Decision::Allow;
     }
-    if open_and_started.iter().any(|c| member_of.contains(&c.id)) {
+    if started.iter().any(|c| member_of.contains(&c.id)) {
         return Decision::Allow;
     }
     Decision::Deny

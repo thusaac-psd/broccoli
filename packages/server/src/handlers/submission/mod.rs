@@ -38,7 +38,8 @@ use crate::models::shared::{PageWindow, escape_like};
 use crate::models::submission::*;
 use crate::state::AppState;
 use crate::utils::contest::{
-    find_contest, require_contest_participant, require_contest_running, required_contest_type,
+    compile_output_public, find_contest, require_contest_participant, require_contest_running,
+    required_contest_type,
 };
 use crate::utils::judging::{files_to_json, validate_code_payload, validate_submission_contract};
 use crate::utils::problem::find_problem;
@@ -563,15 +564,9 @@ async fn build_visible_judgement(
     };
 
     let is_owner = visibility.viewer_id == sub.user_id;
-    let contest_ended = contest_model
-        .as_ref()
-        .is_none_or(|c| Utc::now() > c.end_time);
     let show_compile_output = visibility.has_view_all
         || is_owner
-        || contest_ended
-        || contest_model
-            .as_ref()
-            .is_some_and(|c| c.show_compile_output);
+        || compile_output_public(contest_model.as_ref(), Utc::now());
     let show_test_details = visibility.has_view_all || problem_model.show_test_details;
 
     let mut response = build_judgement_response(

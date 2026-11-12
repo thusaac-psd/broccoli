@@ -19,6 +19,7 @@ use crate::error::AppError;
 use crate::extractors::auth::AuthUser;
 use crate::models::shared::{PageWindow, Pagination};
 use crate::models::submission::*;
+use crate::utils::contest::compile_output_public;
 use crate::utils::judging::files_from_json;
 use crate::utils::test_case_body::{
     RESPONSE_BODY_PREVIEW_BYTES, read_test_case_body_preview_with_limit,
@@ -397,18 +398,10 @@ pub(super) async fn build_submission_response_with_cases(
         .as_ref()
         .is_some_and(|ctx| ctx.viewer_id == sub.user_id);
     let has_view_all = visibility.as_ref().is_some_and(|ctx| ctx.has_view_all);
-    let contest_ended = contest_model
-        .as_ref()
-        .is_none_or(|c| Utc::now() > c.end_time);
-
     let show_source_code = has_view_all || is_owner;
 
-    let show_compile_output = has_view_all
-        || is_owner
-        || contest_ended
-        || contest_model
-            .as_ref()
-            .is_some_and(|c| c.show_compile_output);
+    let show_compile_output =
+        has_view_all || is_owner || compile_output_public(contest_model.as_ref(), Utc::now());
 
     let is_running = sub.status == SubmissionStatus::Running;
     let show_results = sub.status.is_terminal() || is_running;
