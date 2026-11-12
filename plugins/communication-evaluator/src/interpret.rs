@@ -82,7 +82,7 @@ pub fn interpret_result(
             // SystemError-retry reaper instead of pinning a permanent wrong
             // CompileError on valid code under burst.
             let sandbox = &compile_c.sandbox_result;
-            if sandbox.status_kind() == SandboxStatus::InternalError {
+            if sandbox.sandbox_status == SandboxStatus::InternalError {
                 return TestCaseVerdict {
                     test_case_id,
                     verdict: Verdict::SystemError,
@@ -414,6 +414,11 @@ mod tests {
             } else {
                 "RE".to_string()
             },
+            sandbox_status: if exit_code == 0 {
+                SandboxStatus::Ok
+            } else {
+                SandboxStatus::NonZeroExit
+            },
             ..Default::default()
         }
     }
@@ -441,6 +446,7 @@ mod tests {
             wall_time_used: 1.0,
             memory_used: Some(4096),
             status: "OK".to_string(),
+            sandbox_status: SandboxStatus::Ok,
             stdout: score.to_string(),
             stderr: message.to_string(),
             ..Default::default()
@@ -503,6 +509,7 @@ mod tests {
         let mut tle_sandbox = ok_sandbox(0, 2.0, 4096);
         tle_sandbox.killed = true;
         tle_sandbox.status = "TO".to_string();
+        tle_sandbox.sandbox_status = SandboxStatus::TimedOut;
         tle_sandbox.exit_code = None;
 
         let result = OperationResult {
@@ -525,6 +532,7 @@ mod tests {
         mle_sandbox.killed = true;
         mle_sandbox.exit_code = None;
         mle_sandbox.status = "SG".to_string();
+        mle_sandbox.sandbox_status = SandboxStatus::Signaled;
 
         let result = OperationResult {
             success: false,
@@ -559,6 +567,7 @@ mod tests {
             exit_code: None,
             signal: Some(signal),
             status: "SG".to_string(),
+            sandbox_status: SandboxStatus::Signaled,
             time_used: 0.1,
             memory_used: Some(2048),
             ..Default::default()
@@ -716,6 +725,7 @@ mod tests {
         let mut aborted = ok_sandbox(1, 1.0, 8192);
         aborted.exit_code = None;
         aborted.status = "TO".to_string();
+        aborted.sandbox_status = SandboxStatus::TimedOut;
         aborted.stderr = "partial diagnostics before the kill".to_string();
 
         let result = OperationResult {
@@ -738,6 +748,7 @@ mod tests {
         // match server-sdk: InternalError is checked before exit_code.
         let mut internal = ok_sandbox(1, 1.0, 8192);
         internal.status = "XX".to_string();
+        internal.sandbox_status = SandboxStatus::InternalError;
         internal.stderr = "error: looks like a real diagnostic".to_string();
 
         let result = OperationResult {
@@ -773,6 +784,7 @@ mod tests {
         let mut mgr = mgr_result("0.5", "internal error");
         mgr.exit_code = Some(1);
         mgr.status = "RE".to_string();
+        mgr.sandbox_status = SandboxStatus::NonZeroExit;
 
         let result = OperationResult {
             success: false,

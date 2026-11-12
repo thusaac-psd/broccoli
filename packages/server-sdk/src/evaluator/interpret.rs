@@ -13,7 +13,7 @@ pub const DEFAULT_CHECK_STEP_ID: &str = "check";
 /// step in the same op, so its small result (exit code + message + sandbox
 /// status) is read from `task_results` and turned into a verdict via the
 /// checker plugin's `interpret`. Outcome precedence (TLE/MLE/RE/compile) is
-/// identical to the legacy path - a failed run wins and the checker is ignored.
+/// that of the solution steps - a failed run wins and the checker is ignored.
 ///
 /// The checker message is sourced from the check step's stderr - both
 /// broccoli-compare and testlib write their verdict message there, while the
@@ -91,7 +91,7 @@ pub fn interpret_fused_result(
     // redirect file lost after a clean exit under load) is an infrastructure
     // fault, not a contestant verdict: surface it as a retryable SystemError
     // rather than feeding the missing comparator output to the checker.
-    if sandbox.status_kind() == SandboxStatus::InternalError {
+    if sandbox.sandbox_status == SandboxStatus::InternalError {
         return Ok(TestCaseVerdict {
             test_case_id,
             verdict: Verdict::SystemError,
@@ -189,7 +189,7 @@ pub(crate) fn precheck_verdict(
         // isolate tags that as InternalError. Check it BEFORE the exit-code
         // branch so an infrastructure fault becomes a retryable SystemError, not
         // a terminal CompileError that never self-heals. Mirrors the exec arm.
-        if compile_result.sandbox_result.status_kind() == SandboxStatus::InternalError {
+        if compile_result.sandbox_result.sandbox_status == SandboxStatus::InternalError {
             return Some(TestCaseVerdict {
                 test_case_id,
                 verdict: Verdict::SystemError,
@@ -323,9 +323,7 @@ pub(crate) fn precheck_verdict(
         }
 
         // Classify the sandbox termination once, via the normalized status.
-        // `status_kind()` derives from the raw string when the typed field is
-        // absent, so results predating `sandbox_status` still classify.
-        match sandbox.status_kind() {
+        match sandbox.sandbox_status {
             SandboxStatus::TimedOut => {
                 let time_ms = extract_time_used(result);
                 return Some(TestCaseVerdict {
@@ -534,6 +532,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(0),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 ..Default::default()
             },
         )
@@ -545,6 +544,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(0),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 ..Default::default()
             },
         )
@@ -565,6 +565,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 stderr: "error: expected ';'".into(),
                 ..Default::default()
             },
@@ -611,6 +612,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
                 stderr: String::new(),
                 stdout: String::new(),
                 ..Default::default()
@@ -630,6 +632,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
                 stderr: String::new(),
                 stdout: "error: syntax".into(),
                 ..Default::default()
@@ -653,6 +656,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
                 stderr: "[0.028s][warning][os,thread] Failed to start thread \"Unknown thread\" \
                          - pthread_create failed (EAGAIN) for attributes: stacksize: 1024k, \
                          guardsize: 0k, detached.\nError occurred during initialization of VM\n\
@@ -675,6 +679,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "RE".into(),
+                sandbox_status: SandboxStatus::NonZeroExit,
                 stderr: "gcc: fatal error: cannot execute 'cc1': posix_spawn: \
                          Resource temporarily unavailable\ncompilation terminated."
                     .into(),
@@ -710,6 +715,7 @@ mod tests {
             ExecutionResult {
                 exit_code: None,
                 status: "TO".into(),
+                sandbox_status: SandboxStatus::TimedOut,
                 ..Default::default()
             },
         );
@@ -724,6 +730,7 @@ mod tests {
             ExecutionResult {
                 exit_code: None,
                 status: "SG".into(),
+                sandbox_status: SandboxStatus::Signaled,
                 cg_oom_killed: true,
                 memory_used: Some(999),
                 ..Default::default()
@@ -740,6 +747,7 @@ mod tests {
             ExecutionResult {
                 exit_code: None,
                 status: "SG".into(),
+                sandbox_status: SandboxStatus::Signaled,
                 message: "Caught fatal signal 11".into(),
                 ..Default::default()
             },
@@ -796,22 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn precheck_exec_internal_error_via_raw_status_fallback() {
-        // Results without the typed field (older workers) still classify via the
-        // raw `XX` status string.
-        let exec = task(
-            true,
-            ExecutionResult {
-                exit_code: Some(0),
-                status: "XX".into(),
-                ..Default::default()
-            },
-        );
-        let v = precheck_verdict(1, &op(vec![("exec", exec)])).unwrap();
-        assert_eq!(v.verdict, Verdict::SystemError);
-    }
-
-    #[test]
     fn precheck_present_but_empty_output_is_not_infra() {
         // A file that is PRESENT but empty is legitimate empty program output, not
         // an infrastructure fault: precheck must pass it through to the checker
@@ -821,6 +813,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(0),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 stdout: String::new(),
                 ..Default::default()
             },
@@ -891,6 +884,7 @@ mod tests {
             ExecutionResult {
                 exit_code: None,
                 status: "TO".into(),
+                sandbox_status: SandboxStatus::TimedOut,
                 ..Default::default()
             },
         );
@@ -935,6 +929,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(1),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 stdout: "solution-output-preview".into(),
                 stderr: "token 2 mismatch".into(),
                 ..Default::default()
@@ -966,6 +961,7 @@ mod tests {
             ExecutionResult {
                 exit_code: Some(0),
                 status: "OK".into(),
+                sandbox_status: SandboxStatus::Ok,
                 stdout: "hello world\n".into(),
                 ..Default::default()
             },
@@ -988,6 +984,7 @@ mod tests {
             ExecutionResult {
                 exit_code: None,
                 status: "TO".into(),
+                sandbox_status: SandboxStatus::TimedOut,
                 ..Default::default()
             },
         );
