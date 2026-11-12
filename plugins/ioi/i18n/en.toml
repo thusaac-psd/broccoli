@@ -178,6 +178,7 @@
 'ioi.tokenPanel.available' = '{available} / {total} available'
 'ioi.tokenPanel.useToken' = 'Use Token on This Submission'
 'ioi.tokenPanel.usingToken' = 'Using token...'
+'ioi.tokenPanel.useFailed' = 'Failed to use the token.'
 'ioi.tokenPanel.alreadyUsed' = 'Token used on this submission'
 'ioi.tokenPanel.tokenedSubmissions' = 'Tokened submissions'
 'ioi.tokenPanel.confirmUse' = 'Use a token on submission #{id}? You will have {remaining} token(s) remaining.'

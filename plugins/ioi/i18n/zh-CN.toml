@@ -178,6 +178,7 @@
 'ioi.tokenPanel.available' = '可用：{available} / {total}'
 'ioi.tokenPanel.useToken' = '在此提交上使用令牌'
 'ioi.tokenPanel.usingToken' = '正在使用令牌...'
+'ioi.tokenPanel.useFailed' = '使用令牌失败。'
 'ioi.tokenPanel.alreadyUsed' = '此提交已使用令牌'
 'ioi.tokenPanel.tokenedSubmissions' = '已使用令牌的提交'
 'ioi.tokenPanel.confirmUse' = '确定要在提交 #{id} 上使用令牌吗？您还将剩余 {remaining} 个令牌。'

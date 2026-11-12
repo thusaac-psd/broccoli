@@ -112,14 +112,16 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     setError(null);
     try {
       await api.useToken(cId, submission.id);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : t('ioi.tokenPanel.useFailed'));
+    } finally {
+      setIsUsing(false);
+      // Refetch on failure too: the token may have been spent (an unknown
+      // outcome) or the count may have changed under us.
       queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
       queryClient.invalidateQueries({
         queryKey: ['ioi-subtask-scores', cId, submission.id],
       });
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to use token');
-    } finally {
-      setIsUsing(false);
     }
   };
 
