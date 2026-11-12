@@ -750,6 +750,7 @@ export const en: Record<string, string> = {
   'admin.testCases.sample': 'Sample',
   'admin.testCases.deleteError':
     'Failed to delete test case. It may have judge results.',
+  'admin.testCases.field.position': '#',
   'admin.testCases.field.input': 'Input',
   'admin.testCases.field.expectedOutput': 'Expected Output',
   'admin.testCases.field.score': 'Score',

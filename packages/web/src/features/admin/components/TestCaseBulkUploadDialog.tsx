@@ -25,18 +25,18 @@ import { Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+
 interface TestCaseBulkUploadDialogProps {
   problemId: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  testCasesQueryKey: (string | number)[];
 }
 
 export function TestCaseBulkUploadDialog({
   problemId,
   open,
   onOpenChange,
-  testCasesQueryKey,
 }: TestCaseBulkUploadDialogProps) {
   const apiClient = useApiClient();
   const { t } = useTranslation();
@@ -133,11 +133,7 @@ export function TestCaseBulkUploadDialog({
       }
 
       toast.success(t('admin.testCases.bulkUpload.uploadSuccess'));
-      queryClient.invalidateQueries({ queryKey: testCasesQueryKey });
-      queryClient.invalidateQueries({ queryKey: ['problem', problemId] });
-      queryClient.invalidateQueries({
-        queryKey: ['problem-sample-contents', problemId],
-      });
+      invalidateProblemTestCases(queryClient, problemId);
       onOpenChange(false);
       setSelectedFile(null);
       setInputFormat('*.in');
