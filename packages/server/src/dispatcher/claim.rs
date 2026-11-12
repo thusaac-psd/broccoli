@@ -1,9 +1,9 @@
-//! Per-server background fiber that pulls submissions out of `Queued`
-//! and into `Pending`. Pairs with the durable accept path: the api's POST handler
-//! persists `status='Queued'` and returns 201; this fiber claims rows
-//! through `SELECT ... FOR UPDATE SKIP LOCKED`, transitions them to
-//! `Pending`, sets `owner_server_id`, bumps `retry_count`, and finally
-//! dispatches via the existing `dispatch_to_plugin` path.
+//! Per-server background fiber that moves queued work into flight. The api
+//! persists new work as `Queued` and returns; every recovery requeues it
+//! (see [`crate::services::judging`]). This fiber is the only dispatcher:
+//! it claims queued judgements and code runs (`Queued` → `Pending`, owned by
+//! this server, lease stamped with the database clock) and spawns their
+//! dispatch, within the server's in-flight cap and dispatcher admission.
 //!
 //! The fiber lives for the lifetime of the api process. When
 //! `server.claim_fiber_enabled` is `false`, it never starts - meaning
@@ -18,20 +18,14 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, ExprTrait,
-    QueryFilter, QueryResult, Statement, TransactionTrait,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
-use crate::entity::{code_run, problem, submission, submission_judgement};
+use crate::dispatcher::permits::DispatcherReservation;
+use crate::entity::problem;
+use crate::services::judging::{self, ClaimedCodeRun, ClaimedJudgement};
 use crate::state::AppState;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueuedRow {
-    id: i32,
-}
 
 fn transition_duration_seconds(created_at: DateTime<Utc>, transitioned_at: DateTime<Utc>) -> f64 {
     std::cmp::max(
@@ -117,24 +111,15 @@ pub async fn run(
     }
 }
 
-/// One claim cycle: scan submissions, then code-runs. Errors are
-/// returned to the caller so the fiber loop can log; partial progress
-/// (e.g., submissions claimed but code-runs failed) is fine - the next
-/// tick will pick up whatever's still in `Queued`.
+/// One claim cycle: judgements within the in-flight cap, then code runs.
+/// Errors are returned to the caller so the fiber loop can log; whatever is
+/// still `Queued` is claimed next tick.
 ///
-/// **Crash-recovery contract:** the post-commit `tokio::spawn` below is
-/// intentionally detached. If this server crashes after `txn.commit()`
-/// (which has already flipped the row to `Pending`, set `owner_server_id`
-/// to *us*, and bumped `retry_count`) but before the spawned task
-/// actually publishes the dispatch, the row is now stranded in `Pending`
-/// owned by a dead server. It is recovered when this `server_id` boots
-/// again (boot releases its own in-flight rows for re-dispatch; see
-/// `steal::release_owned_leases`), or, with lease/steal on, by a peer's
-/// steal scanner once `lease_heartbeat_at` is older than `lease_ttl_secs`.
-/// So recovery is not "instant" - this is the cost of decoupling claim
-/// from dispatch. Don't introduce a bounded join-set or `await`
-/// here without re-thinking that contract: an inline `await` would make
-/// the claim fiber the bottleneck for dispatch throughput.
+/// **Crash-recovery contract:** dispatch runs detached after the claim
+/// committed. If this server crashes in between, the claimed rows stay in
+/// flight owned by a dead server. They are requeued when this `server_id`
+/// boots again ([`judging::release_leases`]), or, with lease/steal on, by a
+/// peer's steal scanner once their lease lapses, or by the stuck detector.
 ///
 /// `pub` so integration tests can drive one cycle directly, like
 /// `plugin_timer::tick_once`.
@@ -147,73 +132,76 @@ pub async fn claim_once(
     let in_flight = if max_in_flight == 0 {
         0
     } else {
-        count_in_flight(state, server_id).await?
+        judging::count_in_flight(&state.db, server_id).await?
     };
-    let budget = claim_budget(batch_size, max_in_flight, in_flight);
     // The contest types this replica can judge right now; see
     // `dispatcher::prefer_local_handler`.
     let contest_types = super::local_contest_types(state).await;
-    let submission_models = if budget > 0 {
-        claim_queued_submissions(state, server_id, budget, &contest_types).await?
-    } else {
-        Vec::new()
-    };
-    // Deferred rejudges are judging work too: they share what is left.
-    let rejudge_budget = budget.saturating_sub(submission_models.len() as u32);
-    for model in submission_models {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            crate::services::submission_dispatch::dispatch_submission_to_plugin(state_clone, model)
-                .await;
-        });
+
+    let slots = reserve_slots(state, claim_budget(batch_size, max_in_flight, in_flight));
+    if !slots.is_empty() {
+        let claimed =
+            judging::claim_judgements(&state.db, server_id, slots.len() as u32, &contest_types)
+                .await?;
+        record_judgement_claim_transitions(state, &claimed, Utc::now()).await;
+        if !claimed.is_empty() {
+            info!(
+                server_id,
+                claimed = claimed.len(),
+                "Claimed queued judgements"
+            );
+        }
+        for (claimed, slot) in claimed.into_iter().zip(slots) {
+            let state = state.clone();
+            slot.spawn("dispatch_judgement", async move {
+                crate::services::submission_dispatch::dispatch_judgement(state, claimed).await;
+            });
+        }
     }
 
-    let code_run_models =
-        claim_queued_code_runs(state, server_id, batch_size, &contest_types).await?;
-    for model in code_run_models {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            crate::services::code_run_dispatch::dispatch_code_run_to_plugin(state_clone, model)
-                .await;
-        });
-    }
-
-    // Deferred-rejudge path. Non-current
-    // judgements created by `apply_immediately=false` start at
-    // `status=Queued` so the post-commit silent-loss window is closed
-    // symmetrically with the submission path. The parent submission's
-    // own status is unchanged for these rows, so the submission scan
-    // above doesn't reach them - the judgement scan does.
-    let judgement_pairs = if rejudge_budget > 0 {
-        claim_queued_judgements(state, server_id, rejudge_budget, &contest_types).await?
-    } else {
-        Vec::new()
-    };
-    for (sub_model, judgement_model) in judgement_pairs {
-        let state_clone = state.clone();
-        let judgement_id = judgement_model.id;
-        let is_current = judgement_model.is_current;
-        tokio::spawn(async move {
-            crate::services::submission_dispatch::dispatch_submission_to_plugin_with_judgement(
-                state_clone,
-                sub_model,
-                Some(judgement_id),
-                // `fire_after_judging` mirrors `is_current`: the
-                // deferred path was originally spawned with
-                // `false`, and that's still correct here - the
-                // judgement isn't the displayed verdict, so hooks
-                // shouldn't fire for it. A judgement reached this
-                // path with `is_current=true` only if a future
-                // refactor routes immediate-apply through this
-                // scan, in which case the caller will have flipped
-                // `is_current` and hooks should fire.
-                is_current,
-            )
-            .await;
-        });
+    let slots = reserve_slots(state, batch_size);
+    if !slots.is_empty() {
+        let claimed =
+            judging::claim_code_runs(&state.db, server_id, slots.len() as u32, &contest_types)
+                .await?;
+        record_code_run_claim_transitions(state, &claimed, Utc::now()).await;
+        if !claimed.is_empty() {
+            info!(
+                server_id,
+                claimed = claimed.len(),
+                "Claimed queued code runs"
+            );
+        }
+        for (code_run, slot) in claimed.into_iter().zip(slots) {
+            let state = state.clone();
+            slot.spawn("dispatch_code_run", async move {
+                crate::services::code_run_dispatch::dispatch_code_run_to_plugin(state, code_run)
+                    .await;
+            });
+        }
     }
 
     Ok(())
+}
+
+/// Up to `n` dispatcher admission slots; fewer when the dispatcher queue is
+/// full, so a claim never takes work it cannot start.
+fn reserve_slots(state: &AppState, n: u32) -> Vec<DispatcherReservation> {
+    let mut slots = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        match state.dispatcher_permits.reserve() {
+            Ok(slot) => slots.push(slot),
+            Err(e) => {
+                warn!(
+                    reserved = slots.len(),
+                    retry_after_secs = e.retry_after_secs,
+                    "Claim limited because the dispatcher queue is full"
+                );
+                break;
+            }
+        }
+    }
+    slots
 }
 
 /// How often the claim loop re-reads live worker capacity.
@@ -257,262 +245,6 @@ fn claim_budget(batch_size: u32, max_in_flight: u32, in_flight: u64) -> u32 {
     std::cmp::min(batch_size, u32::try_from(room).unwrap_or(u32::MAX))
 }
 
-/// Submissions this server has claimed and not finished judging.
-pub async fn count_in_flight(state: &AppState, server_id: &str) -> anyhow::Result<u64> {
-    let row = state
-        .db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!(
-                "SELECT COUNT(*)::bigint AS n FROM submission \
-                 WHERE owner_server_id = $1 AND status IN {}",
-                common::StatusPhase::InFlight.sql_list()
-            ),
-            [server_id.into()],
-        ))
-        .await?;
-    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
-    Ok(u64::try_from(n).unwrap_or(0))
-}
-
-async fn claim_queued_submissions(
-    state: &AppState,
-    server_id: &str,
-    batch_size: u32,
-    contest_types: &[String],
-) -> anyhow::Result<Vec<submission::Model>> {
-    let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission", batch_size, contest_types).await?;
-
-    if rows.is_empty() {
-        txn.commit().await?;
-        return Ok(Vec::new());
-    }
-
-    let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
-
-    // FOR UPDATE SKIP LOCKED already serialized us against peer claim
-    // fibers - the only way to land here with `status != 'Queued'` would
-    // be a same-process bug. We still scope the UPDATE with a status
-    // filter so a hypothetical bug becomes a no-op rather than a state
-    // corruption.
-    submission::Entity::update_many()
-        .col_expr(
-            submission::Column::Status,
-            sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .col_expr(
-            submission::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(
-            submission::Column::LeaseHeartbeatAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            submission::Column::LeasedAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            submission::Column::RetryCount,
-            sea_orm::sea_query::Expr::col(submission::Column::RetryCount).add(1),
-        )
-        .filter(submission::Column::Id.is_in(ids.clone()))
-        .filter(submission::Column::Status.eq(SubmissionStatus::Queued))
-        .exec(&txn)
-        .await?;
-
-    let models = submission::Entity::find()
-        .filter(submission::Column::Id.is_in(ids))
-        .all(&txn)
-        .await?;
-
-    let transitioned_at = Utc::now();
-    txn.commit().await?;
-    record_submission_claim_transitions(state, &models, transitioned_at).await;
-
-    if !models.is_empty() {
-        info!(
-            server_id,
-            claimed = models.len(),
-            "Claim fiber promoted submissions Queued -> Pending"
-        );
-    }
-
-    Ok(models)
-}
-
-async fn claim_queued_code_runs(
-    state: &AppState,
-    server_id: &str,
-    batch_size: u32,
-    contest_types: &[String],
-) -> anyhow::Result<Vec<code_run::Model>> {
-    let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "code_run", batch_size, contest_types).await?;
-
-    if rows.is_empty() {
-        txn.commit().await?;
-        return Ok(Vec::new());
-    }
-
-    let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
-
-    code_run::Entity::update_many()
-        .col_expr(
-            code_run::Column::Status,
-            sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .col_expr(
-            code_run::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(
-            code_run::Column::LeaseHeartbeatAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            code_run::Column::LeasedAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            code_run::Column::RetryCount,
-            sea_orm::sea_query::Expr::col(code_run::Column::RetryCount).add(1),
-        )
-        .filter(code_run::Column::Id.is_in(ids.clone()))
-        .filter(code_run::Column::Status.eq(SubmissionStatus::Queued))
-        .exec(&txn)
-        .await?;
-
-    let models = code_run::Entity::find()
-        .filter(code_run::Column::Id.is_in(ids))
-        .all(&txn)
-        .await?;
-
-    let transitioned_at = Utc::now();
-    txn.commit().await?;
-    record_code_run_claim_transitions(state, &models, transitioned_at).await;
-
-    if !models.is_empty() {
-        info!(
-            server_id,
-            claimed = models.len(),
-            "Claim fiber promoted code-runs Queued -> Pending"
-        );
-    }
-
-    Ok(models)
-}
-
-/// Claims deferred-rejudge judgement rows (`status='Queued'` on the
-/// `submission_judgement` table) and returns them paired with their
-/// parent submission model - the dispatch path needs both.
-///
-/// Mirrors `claim_queued_submissions` shape: SELECT FOR UPDATE SKIP
-/// LOCKED, in-txn UPDATE to Pending, refetch, commit. The parent
-/// submission's denormalized columns are left untouched - by design,
-/// a deferred rejudge's outcome doesn't override the current verdict
-/// until an admin explicitly applies it.
-async fn claim_queued_judgements(
-    state: &AppState,
-    server_id: &str,
-    batch_size: u32,
-    contest_types: &[String],
-) -> anyhow::Result<Vec<(submission::Model, submission_judgement::Model)>> {
-    let txn = state.db.begin().await?;
-    let rows = select_queued_rows(&txn, "submission_judgement", batch_size, contest_types).await?;
-
-    if rows.is_empty() {
-        txn.commit().await?;
-        return Ok(Vec::new());
-    }
-
-    let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
-
-    submission_judgement::Entity::update_many()
-        .col_expr(
-            submission_judgement::Column::Status,
-            sea_orm::sea_query::Expr::value(SubmissionStatus::Pending.to_string()),
-        )
-        .col_expr(
-            submission_judgement::Column::OwnerServerId,
-            sea_orm::sea_query::Expr::value(Some(server_id.to_string())),
-        )
-        .col_expr(
-            submission_judgement::Column::LeaseHeartbeatAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            submission_judgement::Column::LeasedAt,
-            sea_orm::sea_query::Expr::cust("NOW()"),
-        )
-        .col_expr(
-            submission_judgement::Column::RetryCount,
-            sea_orm::sea_query::Expr::col(submission_judgement::Column::RetryCount).add(1),
-        )
-        .filter(submission_judgement::Column::Id.is_in(ids.clone()))
-        .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Queued))
-        .exec(&txn)
-        .await?;
-
-    let judgements = submission_judgement::Entity::find()
-        .filter(submission_judgement::Column::Id.is_in(ids))
-        .all(&txn)
-        .await?;
-
-    // Re-fetch each parent submission in the same txn so dispatch
-    // sees a consistent snapshot. Submissions for deferred rejudge
-    // are not locked here - we don't mutate them and a concurrent
-    // current-judgement claim acts on a different row.
-    let sub_ids: Vec<i32> = judgements.iter().map(|j| j.submission_id).collect();
-    let submissions = submission::Entity::find()
-        .filter(submission::Column::Id.is_in(sub_ids))
-        .all(&txn)
-        .await?;
-
-    let sub_by_id: HashMap<i32, submission::Model> =
-        submissions.into_iter().map(|s| (s.id, s)).collect();
-
-    let mut pairs = Vec::with_capacity(judgements.len());
-    for j in judgements {
-        if let Some(mut s) = sub_by_id.get(&j.submission_id).cloned() {
-            // Dispatch runs the plugin at `sub.judge_epoch`, and every host
-            // persistence write is gated on that epoch. A deferred rejudge
-            // judgement lives at a NEW epoch while its parent submission row
-            // stays at the old one, so without this override the plugin runs
-            // at the stale epoch and every finalize/result write matches 0
-            // rows (the rejudge silently produces nothing). Mirrors the
-            // deferred-steal path (steal.rs). In-memory copy only; the
-            // submission row is never mutated.
-            s.judge_epoch = j.judge_epoch;
-            pairs.push((s, j));
-        } else {
-            // Parent submission vanished between SELECT and JOIN -
-            // exceedingly unlikely (deletes are guarded) but log and
-            // skip rather than panic.
-            tracing::warn!(
-                judgement_id = j.id,
-                submission_id = j.submission_id,
-                "Claim fiber: parent submission missing for queued judgement; skipping"
-            );
-        }
-    }
-
-    let transitioned_at = Utc::now();
-    txn.commit().await?;
-
-    if !pairs.is_empty() {
-        record_judgement_claim_transitions(state, &pairs, transitioned_at).await;
-        info!(
-            server_id,
-            claimed = pairs.len(),
-            "Claim fiber promoted deferred judgements Queued -> Pending"
-        );
-    }
-
-    Ok(pairs)
-}
-
 async fn problem_types_by_problem_id(
     state: &AppState,
     problem_ids: impl IntoIterator<Item = i32>,
@@ -540,32 +272,9 @@ async fn problem_types_by_problem_id(
     }
 }
 
-async fn record_submission_claim_transitions(
-    state: &AppState,
-    models: &[submission::Model],
-    transitioned_at: DateTime<Utc>,
-) {
-    let problem_types =
-        problem_types_by_problem_id(state, models.iter().map(|model| model.problem_id)).await;
-
-    for model in models {
-        let problem_type = problem_types
-            .get(&model.problem_id)
-            .map(String::as_str)
-            .unwrap_or("unknown");
-        record_submission_state_transition(
-            &state.metrics,
-            &SubmissionStatus::Queued,
-            &SubmissionStatus::Pending,
-            problem_type,
-            transition_duration_seconds(model.created_at, transitioned_at),
-        );
-    }
-}
-
 async fn record_code_run_claim_transitions(
     state: &AppState,
-    models: &[code_run::Model],
+    models: &[ClaimedCodeRun],
     transitioned_at: DateTime<Utc>,
 ) {
     let problem_types =
@@ -588,15 +297,18 @@ async fn record_code_run_claim_transitions(
 
 async fn record_judgement_claim_transitions(
     state: &AppState,
-    pairs: &[(submission::Model, submission_judgement::Model)],
+    claimed: &[ClaimedJudgement],
     transitioned_at: DateTime<Utc>,
 ) {
+    if claimed.is_empty() {
+        return;
+    }
     let problem_types =
-        problem_types_by_problem_id(state, pairs.iter().map(|(sub, _)| sub.problem_id)).await;
+        problem_types_by_problem_id(state, claimed.iter().map(|c| c.submission.problem_id)).await;
 
-    for (sub, judgement) in pairs {
+    for c in claimed {
         let problem_type = problem_types
-            .get(&sub.problem_id)
+            .get(&c.submission.problem_id)
             .map(String::as_str)
             .unwrap_or("unknown");
         record_submission_state_transition(
@@ -604,80 +316,14 @@ async fn record_judgement_claim_transitions(
             &SubmissionStatus::Queued,
             &SubmissionStatus::Pending,
             problem_type,
-            transition_duration_seconds(judgement.created_at, transitioned_at),
+            transition_duration_seconds(c.judgement.created_at, transitioned_at),
         );
     }
-}
-
-/// Selects a bounded batch of `Queued` rows from the named table with
-/// row-level locks acquired via `FOR UPDATE SKIP LOCKED`. Peer claim
-/// fibers and the dispatcher/steal scanner can run concurrently without
-/// claiming the same row twice.
-async fn select_queued_rows(
-    txn: &DatabaseTransaction,
-    table: &str,
-    batch_size: u32,
-    contest_types: &[String],
-) -> Result<Vec<QueuedRow>, sea_orm::DbErr> {
-    // Spawn-time validation (see `dispatcher::Dispatcher::spawn`) asserts
-    // `batch_size > 0`, so we should never see a 0 here. Keep a defensive
-    // `max(_, 1)` so a future regression in that validation doesn't turn
-    // into a silent "select 0 rows forever" no-op.
-    debug_assert!(batch_size > 0, "batch_size must be positive at this point");
-    let limit = std::cmp::max(batch_size, 1);
-    let rows = txn
-        .query_all_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            queued_rows_sql(table),
-            [i64::from(limit).into(), contest_types.to_vec().into()],
-        ))
-        .await?;
-
-    rows.into_iter().map(row_to_queued).collect()
-}
-
-/// The claim SELECT for `table`: `$1` batch limit, `$2` the contest types
-/// this replica handles (see [`super::prefer_local_handler`]).
-fn queued_rows_sql(table: &str) -> String {
-    format!(
-        r#"SELECT id
-           FROM {table}
-           WHERE status IN {queued}
-             AND {handled}
-           ORDER BY created_at
-           LIMIT $1
-           FOR UPDATE SKIP LOCKED"#,
-        queued = common::StatusPhase::Queued.sql_list(),
-        handled = super::prefer_local_handler_for(table, "$2"),
-    )
-}
-
-fn row_to_queued(row: QueryResult) -> Result<QueuedRow, sea_orm::DbErr> {
-    let id = row
-        .try_get::<i32>("", "id")
-        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-    Ok(QueuedRow { id })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn select_queued_rows_sql_includes_for_update_skip_locked() {
-        // The claim SELECT must lock with `FOR UPDATE SKIP LOCKED` and stay
-        // bounded. A regression here would be silent (the fiber would still
-        // appear to work but lose concurrency safety vs. peer fibers and the
-        // dispatcher/steal scanner), so guard the SQL actually emitted.
-        for table in ["submission", "code_run", "submission_judgement"] {
-            let sql = queued_rows_sql(table);
-            assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "{sql}");
-            assert!(sql.contains("LIMIT $1"), "{sql}");
-            assert!(sql.contains("status IN ('Queued')"), "{sql}");
-            assert!(sql.contains("ORDER BY created_at"), "{sql}");
-            assert!(sql.contains("ANY($2)"), "{sql}");
-        }
-    }
 
     #[test]
     fn claim_budget_fills_up_to_the_in_flight_cap_and_no_further() {
@@ -703,16 +349,6 @@ mod tests {
         assert_eq!(effective_cap(256, 800), 6_400);
         // Disabled stays disabled.
         assert_eq!(effective_cap(0, 800), 0);
-    }
-
-    #[test]
-    fn queued_row_id_only() {
-        // Defensive: the projection is `id` only - adding more fields
-        // to the SELECT requires updating `row_to_queued` and this
-        // struct. If a future commit changes either, the other must
-        // follow.
-        let row = QueuedRow { id: 42 };
-        assert_eq!(row.id, 42);
     }
 
     #[test]

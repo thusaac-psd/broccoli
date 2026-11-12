@@ -10,10 +10,10 @@ Done already (for reference on the pattern):
 - `services/windowed_session.rs` — shared windowed-session engine extracted from
   `operation_batch.rs` / `evaluate_batch` (commit e618f98); a later
   drain-on-refill-failure fix then landed once instead of twice.
-- `entity/judgement_reset.rs` — single source for the judged-output column clear
-  list used by `dispatcher/steal.rs`, `dlq/stuck/recovery.rs`, and
-  `services/submission_dispatch.rs` (whose pre-extraction judgement reset was
-  missing `CompileOutput`).
+- `services/judging/` — the one owner of every judgement and code-run
+  transition; the judged-output column clear list (`cleared_output_sets`), the
+  submission cache mirror (`MIRROR_SETS`) and the status sets
+  (`common::StatusPhase`) each exist once.
 - `Verdict::severity` — canonical table now lives only in
   `broccoli_types::types::Verdict`; `common::Verdict` delegates and carries a
   drift-pin test.

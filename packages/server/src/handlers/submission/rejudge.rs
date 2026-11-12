@@ -5,8 +5,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
-use common::SubmissionStatus;
-use sea_orm::sea_query::LockType;
 use sea_orm::*;
 use serde::Deserialize;
 use tracing::{info, instrument};
@@ -28,15 +26,16 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // *mutation* is authorised by `submission:rejudge` alone; what comes back
 // reflects the actor's own Read visibility, not a blanket admin view. Pinned
 // by `tests/integration/rejudge_visibility.rs`.
-use crate::entity::{submission, submission_judgement, test_case_result};
+use crate::entity::submission;
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::FreshAuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::validate_contest_type;
 use crate::models::submission::*;
-use crate::services::judgement_lifecycle::{
-    ApplyJudgement, OpenJudgement, apply_judgement, open_judgement,
+use crate::services::judging::{
+    self, ApplyJudgement, DiscardJudgement, OpenJudgement, apply_judgement, discard_judgement,
+    open_judgement,
 };
 use crate::services::submission_dispatch::fire_after_judging_hooks;
 use crate::state::AppState;
@@ -141,36 +140,25 @@ pub async fn discard_submission_judgement(
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    let _sub = submission::Entity::find_by_id(id)
-        .lock(LockType::Update)
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Submission not found".into()))?;
-
-    let judgement = submission_judgement::Entity::find_by_id(judgement_id)
-        .filter(submission_judgement::Column::SubmissionId.eq(id))
-        .one(&txn)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Judgement not found".into()))?;
-
-    if judgement.is_current {
-        return Err(AppError::Conflict(
-            "Cannot discard the current judgement".into(),
-        ));
+    match discard_judgement(&txn, id, judgement_id).await? {
+        DiscardJudgement::Discarded => {}
+        DiscardJudgement::SubmissionNotFound => {
+            return Err(AppError::NotFound("Submission not found".into()));
+        }
+        DiscardJudgement::JudgementNotFound => {
+            return Err(AppError::NotFound("Judgement not found".into()));
+        }
+        DiscardJudgement::IsCurrent => {
+            return Err(AppError::Conflict(
+                "Cannot discard the current judgement".into(),
+            ));
+        }
+        DiscardJudgement::NotFinalized => {
+            return Err(AppError::Conflict(
+                "Cannot discard a judgement that is still running".into(),
+            ));
+        }
     }
-    if !judgement.is_finalized {
-        return Err(AppError::Conflict(
-            "Cannot discard a judgement that is still running".into(),
-        ));
-    }
-
-    test_case_result::Entity::delete_many()
-        .filter(test_case_result::Column::JudgementId.eq(Some(judgement_id)))
-        .exec(&txn)
-        .await?;
-    submission_judgement::Entity::delete_by_id(judgement_id)
-        .exec(&txn)
-        .await?;
     txn.commit().await?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -221,11 +209,8 @@ pub async fn rejudge_submission(
         serde_json::from_slice::<RejudgeRequest>(&body)
             .map_err(|e| AppError::Validation(format!("Invalid rejudge request body: {e}")))?
     };
-    // Backpressure on POST: covers both branches of this
-    // handler - `apply_immediately=true` inserts a `Queued` row into
-    // `submission`, `apply_immediately=false` inserts one into
-    // `submission_judgement`. Both are counted in
-    // `count_queued_rows()` so the cap applies uniformly.
+    // Backpressure on POST: both branches queue a judgement, which
+    // `count_queued_rows()` counts, so the cap applies uniformly.
     enforce_queue_depth_admission(&state).await?;
 
     let requested_target = payload
@@ -525,12 +510,6 @@ pub async fn admin_fan_out_submission(
         let new_submission = submission::ActiveModel {
             files: Set(files_json.clone()),
             language: Set(language.clone()),
-            // Admin fan-out submissions enter the same
-            // durable-accept lifecycle. The claim fiber
-            // promotes each row from `Queued` to `Pending` and
-            // dispatches via the worker-pinned route already encoded
-            // in `target_worker_id`.
-            status: Set(SubmissionStatus::Queued),
             user_id: Set(auth_user.user_id),
             problem_id: Set(payload.problem_id),
             contest_id: Set(payload.contest_id),
@@ -539,7 +518,9 @@ pub async fn admin_fan_out_submission(
             created_at: Set(now),
             ..Default::default()
         };
-        let model = new_submission.insert(&txn).await?;
+        // Queued with its first judgement, pinned to the worker through
+        // `target_worker_id`; the claim fiber dispatches it.
+        let (model, _judgement) = judging::create_submission(&txn, new_submission).await?;
         models.push(model);
     }
 

@@ -277,7 +277,6 @@ impl E2eTestApp {
                 sweep_interval_secs: 300,
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
-                max_stuck_retries: 5,
                 sweeper_dry_run: true,
                 operation_reaper_enabled: false,
                 operation_reaper_interval_secs: 30,

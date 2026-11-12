@@ -34,6 +34,7 @@ async fn seed_accepted_ioi_submission(
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()
@@ -191,6 +192,7 @@ async fn ioi_feedback_filter_redacts_judgement_history() {
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()
@@ -484,6 +486,7 @@ async fn ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict() {
         time_used: Set(Some(10)),
         memory_used: Set(Some(256)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()
@@ -670,6 +673,7 @@ async fn ioi_scoreboard_visibility_config_can_show_all_viewers_during_contest() 
             time_used: Set(Some(10)),
             memory_used: Set(Some(256)),
             judge_epoch: Set(1),
+            max_judge_epoch: Set(1),
             created_at: Set(created_at),
             judged_at: Set(Some(created_at)),
             ..Default::default()
@@ -886,6 +890,7 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
             time_used: Set(Some(10)),
             memory_used: Set(Some(256)),
             judge_epoch: Set(1),
+            max_judge_epoch: Set(1),
             created_at: Set(created_at),
             judged_at: Set(Some(created_at)),
             ..Default::default()

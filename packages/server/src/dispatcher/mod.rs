@@ -43,8 +43,8 @@ pub(crate) async fn local_contest_types(state: &AppState) -> Vec<String> {
 /// burns its retry budget. Each replica publishes the types it handles in its
 /// `plugin_replica` row (see [`crate::plugin_fleet`]); liveness is that row's
 /// heartbeat against the database clock, so no server clock is involved.
-/// Shared by every select that hands out judging work: the claim fiber, the
-/// steal scans, and the SystemError retry.
+/// Shared by every scan that hands out or recovers judging work (see
+/// [`crate::services::judging`]).
 pub(crate) fn prefer_local_handler(contest_type: &str, local_types: &str) -> String {
     format!(
         "({contest_type} = ANY({local_types}) OR NOT EXISTS (\
@@ -53,22 +53,6 @@ pub(crate) fn prefer_local_handler(contest_type: &str, local_types: &str) -> Str
               AND r.contest_types @> jsonb_build_array({contest_type})))",
         live = crate::plugin_fleet::LIVE_WINDOW_SECS,
     )
-}
-
-/// [`prefer_local_handler`] for a row of `table`: `submission` and
-/// `code_run` rows carry their contest type; a judgement takes its parent
-/// submission's.
-pub(crate) fn prefer_local_handler_for(table: &str, local_types: &str) -> String {
-    if table == "submission_judgement" {
-        format!(
-            "EXISTS (SELECT 1 FROM submission s \
-                      WHERE s.id = submission_judgement.submission_id \
-                        AND {})",
-            prefer_local_handler("s.contest_type", local_types)
-        )
-    } else {
-        prefer_local_handler(&format!("{table}.contest_type"), local_types)
-    }
 }
 
 pub struct DispatcherDeps {
@@ -163,23 +147,11 @@ impl Dispatcher {
             );
         }
 
-        // SystemError-retry reaper: bounded re-judge of plugin-finalized
-        // SystemError verdicts (a system condition, never the contestant's
-        // code), path-agnostic across batch + interactive judging.
-        //
-        // Deliberately NOT behind the lease/steal toggle, which it used to share.
-        // That toggle defaults off and is `false` in the shipped release env
-        // files, so the reaper never ran in the configuration people deploy:
-        // every SystemError stood as the contestant's verdict, contradicting
-        // this fiber's own invariant that none is ever abandoned. Measured on
-        // a real 4-worker stack: 62 SystemError verdicts under a concurrent
-        // burst, zero re-judged.
-        //
-        // It does not need the lease/steal fibers. It writes lease columns on
-        // requeue only so a running steal leaves a re-judging row alone; with
-        // steal off those columns are inert. Its re-dispatch is a direct
-        // `dispatch_submission_to_plugin_with_judgement` call, and every write
-        // is epoch-gated, so concurrent replicas cannot double-requeue.
+        // SystemError-retry reaper: bounded re-judge of SystemError verdicts
+        // (a system condition, never the contestant's code). It runs whatever
+        // the lease/steal toggle says: it requeues, the claim fiber
+        // dispatches, and its scan locks rows with SKIP LOCKED, so concurrent
+        // replicas cannot double-requeue.
         handles.push(tokio::spawn(system_error_retry::run(
             deps.state.clone(),
             deps.server_id.clone(),
@@ -198,9 +170,7 @@ impl Dispatcher {
             handles.push(tokio::spawn(steal::run(
                 deps.state.clone(),
                 deps.server_id.clone(),
-                steal::Reclaim::Stale {
-                    lease_ttl_secs: deps.config.lease_ttl_secs,
-                },
+                deps.config.lease_ttl_secs,
                 deps.config.steal_scan_interval_secs,
                 deps.config.steal_batch_size,
                 deps.config.max_dispatch_retries,
@@ -220,22 +190,10 @@ impl Dispatcher {
             }
         } else {
             // Without lease refresh a live peer's heartbeat goes stale too, so
-            // stealing by lease age is off. Work a server explicitly released
-            // (graceful shutdown, or a restart's boot recovery) is owned by
-            // no one, though, and is still re-dispatched promptly.
-            handles.push(tokio::spawn(steal::run(
-                deps.state.clone(),
-                deps.server_id.clone(),
-                steal::Reclaim::Released,
-                deps.config.steal_scan_interval_secs,
-                deps.config.steal_batch_size,
-                deps.config.max_dispatch_retries,
-                cancel_rx.clone(),
-            )));
-            info!(
-                "Lease refresh and steal scanning disabled by config; only released work \
-                 is reclaimed"
-            );
+            // stealing by lease age is off. Work a server gives up is requeued
+            // by that server itself (see `judging::release_leases`), and the
+            // stuck-job detector catches the rest.
+            info!("Lease refresh and steal scanning disabled by config");
         }
 
         if deps.config.operation_reaper_enabled {

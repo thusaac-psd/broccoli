@@ -33,6 +33,7 @@ async fn seed_accepted_icpc_submission(
         verdict: Set(Some(Verdict::Accepted)),
         score: Set(Some(1.0)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()
@@ -115,6 +116,7 @@ async fn seed_current_icpc_submission(
         verdict: Set(Some(verdict.clone())),
         score: Set(Some(if accepted { 1.0 } else { 0.0 })),
         judge_epoch: Set(version),
+        max_judge_epoch: Set(version),
         created_at: Set(created_at),
         judged_at: Set(Some(Utc::now())),
         ..Default::default()
@@ -721,6 +723,7 @@ async fn icpc_scoreboard_freeze_redacts_peer_submission_but_not_owner_or_organiz
         time_used: Set(Some(123)),
         memory_used: Set(Some(4096)),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(submitted_at),
         judged_at: Set(Some(submitted_at)),
         ..Default::default()

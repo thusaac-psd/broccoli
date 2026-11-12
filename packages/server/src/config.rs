@@ -211,26 +211,18 @@ pub struct ServerConfig {
     pub steal_batch_size: u32,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
-    /// Maximum dispatch ATTEMPTS (first dispatch included) the claim and
-    /// lease-steal paths make before finalizing a row as SystemError; compared
-    /// against the row's `retry_count`, which counts attempts.
+    /// Dispatch retries a judgement or code run gets after its owner was
+    /// lost or it got stuck (the lease steal and the stuck-job detector share
+    /// this budget). Once they are spent the unit is finalized as
+    /// SystemError and dead-lettered.
     #[serde(default = "default_max_dispatch_retries")]
     pub max_dispatch_retries: u32,
-    /// Retry budget for the global stuck detector. Rows with
-    /// `retry_count <= max_stuck_retries` (`retry_count` counts dispatch
-    /// attempts) are left for claim/lease-steal recovery; rows above the
-    /// budget are finalized as SystemError.
-    #[serde(default = "default_max_stuck_retries")]
-    pub max_stuck_retries: u32,
-    /// Retry budget for the SystemError-retry reaper. A `SystemError` verdict is
-    /// a SYSTEM condition (contention, lost result, wedge), never the
-    /// contestant's code, so it must not stand as the verdict. This budget is
-    /// deliberately much larger than `max_dispatch_retries`/`max_stuck_retries`:
-    /// the stuck-handler and dispatch-exhaustion paths SPEND those budgets before
-    /// terminalizing to `status == SystemError`, so the reaper needs headroom to
-    /// keep re-judging ("slow is fine; never abandon a system fault"). It stays
-    /// finite only as a runaway backstop and is rarely approached once the
-    /// underlying contention clears. Admission control bounds the blast radius.
+    /// System-error retries a submission gets since its last rejudge. A
+    /// `SystemError` verdict is a SYSTEM condition (contention, lost result,
+    /// wedge, spent dispatch retries), never the contestant's code, so the
+    /// SystemError-retry reaper judges it again; each retry starts with a
+    /// fresh dispatch-retry budget. Finite as a backstop against a problem
+    /// that fails deterministically.
     #[serde(default = "default_max_system_error_retries")]
     pub max_system_error_retries: u32,
     /// When true, log ghost reply queues and debounce them without deleting
@@ -408,7 +400,6 @@ impl Default for ServerConfig {
             steal_batch_size: default_steal_batch_size(),
             sweep_interval_secs: default_sweep_interval_secs(),
             max_dispatch_retries: default_max_dispatch_retries(),
-            max_stuck_retries: default_max_stuck_retries(),
             max_system_error_retries: default_max_system_error_retries(),
             sweeper_dry_run: default_sweeper_dry_run(),
             operation_reaper_enabled: default_operation_reaper_enabled(),
@@ -485,15 +476,10 @@ fn default_max_dispatch_retries() -> u32 {
     5
 }
 
-fn default_max_stuck_retries() -> u32 {
-    5
-}
-
 fn default_max_system_error_retries() -> u32 {
-    // Still well above max_dispatch_retries/max_stuck_retries (both 5) so genuine
-    // transient faults get real recovery headroom, but bounded so a DETERMINISTIC
+    // Real recovery headroom for transient faults, bounded so a deterministic
     // SystemError (e.g. a checker that always dies on one case) terminalizes in
-    // minutes instead of re-judging ~50x and churning the box for a contest.
+    // minutes instead of churning the box for a contest.
     10
 }
 
@@ -963,12 +949,6 @@ mod tests {
         let resolved = cfg.effective_max_blocking_threads();
         assert_eq!(resolved, auto_max_blocking_threads());
         assert!((512..=8192).contains(&resolved));
-    }
-
-    #[test]
-    fn server_config_defaults_max_stuck_retries_to_five() {
-        let cfg = server_config_fixture(None);
-        assert_eq!(cfg.max_stuck_retries, 5);
     }
 
     #[test]

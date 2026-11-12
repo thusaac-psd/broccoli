@@ -30,7 +30,7 @@ use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::dlq::*;
 use crate::models::shared::PageWindow;
-use crate::services::judgement_lifecycle::{OpenJudgement, open_judgement};
+use crate::services::judging::{OpenJudgement, open_judgement};
 use crate::state::AppState;
 
 #[utoipa::path(
@@ -225,7 +225,9 @@ async fn retry_stuck_submission(
         ));
     };
 
-    if sub.status != SubmissionStatus::SystemError && sub.status != SubmissionStatus::Pending {
+    // Only a submission whose verdict is a SystemError is retried; one that
+    // is queued, in flight or judged is already being handled.
+    if sub.status != SubmissionStatus::SystemError {
         return Ok(StuckRetryOutcome::Skipped(
             StuckRetrySkip::NotRetryableStatus {
                 submission_id,
@@ -235,15 +237,7 @@ async fn retry_stuck_submission(
     }
 
     // A DLQ retry is an immediate rejudge, opened exactly as the admin
-    // rejudge path opens one: `open_judgement` allocates a fresh epoch,
-    // demotes the stale judgement left by the SystemError terminalization,
-    // inserts a fresh current judgement and resets the submission to
-    // `Queued` with its judged output cleared. Without the fresh judgement
-    // the claim fiber's `ensure_active_judgement_id` would find no
-    // non-finalized current row, collide with
-    // `idx_submission_judgement_one_current` on its own insert and dispatch
-    // with judgement id 0. The claim fiber promotes `Queued` to `Pending`
-    // and re-dispatches.
+    // rejudge path opens one; the claim fiber dispatches it.
     open_judgement(
         &txn,
         sub.id,
@@ -293,7 +287,7 @@ fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
             submission_id,
             status,
         } => AppError::Validation(format!(
-            "Submission {} is in '{}' state and cannot be retried. Only SystemError or Pending submissions can be retried.",
+            "Submission {} is in '{}' state and cannot be retried. Only SystemError submissions can be retried.",
             submission_id, status
         )),
     }
@@ -390,7 +384,7 @@ pub async fn delete_dlq_message(
     tag = "Dead Letter Queue",
     operation_id = "bulkRetryDlq",
     summary = "Bulk-retry DLQ messages",
-    description = "Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError or Pending state are retryable; other message types are skipped. Requires `dlq:manage` permission.",
+    description = "Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state are retryable; other message types are skipped. Requires `dlq:manage` permission.",
     request_body = BulkRetryDlqRequest,
     responses(
         (status = 200, description = "Bulk retry result", body = BulkRetryDlqResponse),

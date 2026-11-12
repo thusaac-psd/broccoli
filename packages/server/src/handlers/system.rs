@@ -369,9 +369,16 @@ async fn read_pending_submission_ages(state: &AppState) -> Result<Vec<PendingAge
     // under a judging backlog.
     type PendingTs = (Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>);
 
+    // A submission's dispatch lease lives on its current judgement.
     let submission_ts: Vec<PendingTs> = submission::Entity::find()
         .select_only()
-        .column(submission::Column::LeaseHeartbeatAt)
+        .column_as(
+            sea_orm::sea_query::Expr::cust(
+                "(SELECT j.lease_heartbeat_at FROM submission_judgement j \
+                         WHERE j.submission_id = submission.id AND j.is_current)",
+            ),
+            "lease_heartbeat_at",
+        )
         .column(submission::Column::CreatedAt)
         .filter(submission::Column::Status.eq(SubmissionStatus::Pending))
         .into_tuple()

@@ -14,15 +14,14 @@
 //! The raw `sql` capability is now restricted to the read-only `broccoli_plugin`
 //! role; this module carries the judge's structured core-write path.
 
-use broccoli_server_sdk::types::{
-    SubmissionStatus, SubmissionUpdate, TestCaseResultRow, push_judge_sets,
-    sanitize_result_text_field,
-};
+use broccoli_server_sdk::types::{SubmissionUpdate, TestCaseResultRow, sanitize_result_text_field};
 use std::sync::Arc;
 
 use extism::host_fn;
 use sea_orm::DatabaseConnection;
 use serde_json::{Value as JsonValue, json};
+
+use crate::services::judging;
 
 /// Server-side mirror of the guest SDK's `db::Params`: assigns positional
 /// `$1..$N` placeholders (1-based) and collects the bound JSON values, so the
@@ -70,9 +69,9 @@ impl broccoli_server_sdk::types::SqlBindSink for Params {
     }
 }
 
-/// Deserialized view of the `HostDbResponse` envelope returned by
-/// `sql::execute_on_pool`, so `submission_update`'s multi-statement flow can read
-/// rows-affected and propagate a DB error verbatim to the guest.
+/// Deserialized view of the `HostDbResponse` envelope `sql::execute_on_pool`
+/// returns, for tests that read a statement's row count.
+#[cfg(test)]
 #[derive(serde::Deserialize)]
 struct ExecEnvelope {
     #[serde(default)]
@@ -85,107 +84,11 @@ fn ok_affected(n: u64) -> Result<String, extism::Error> {
     Ok(json!({ "data": n }).to_string())
 }
 
-/// The write fence every plugin write to a judgement's results goes through:
-/// the row is the judgement the caller names, of the submission it names, at
-/// the epoch the caller was dispatched with, and still in flight. Epochs are
-/// unique per submission (`services::judgement_lifecycle`) and a superseded
-/// judgement is finalized when it is replaced, so exactly the attempt that
-/// owns an epoch can write and finish, whether it is the current judgement or
-/// a deferred rejudge running beside it, and nothing can write to a
-/// superseded or finalized one. `j` names the `submission_judgement` row.
-const JUDGEMENT_WRITE_FENCE: &str = "j.id = {judgement} AND j.submission_id = {submission} \
-     AND j.judge_epoch = {epoch} AND j.is_finalized = FALSE";
-
-fn judgement_write_fence(judgement: &str, submission: &str, epoch: &str) -> String {
-    JUDGEMENT_WRITE_FENCE
-        .replace("{judgement}", judgement)
-        .replace("{submission}", submission)
-        .replace("{epoch}", epoch)
-}
-
-/// `submission_update`'s first statement: mirrors the judged columns onto the
-/// caller's own judgement, behind `JUDGEMENT_WRITE_FENCE`. A terminal
-/// Judged/CompilationError status also finalizes it. `None` when the update
-/// sets no judgement column.
-fn judgement_update(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
+/// The statement behind `submission_update`, with its bound arguments.
+/// `None` when the update sets nothing.
+fn submission_update_statement(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
     let mut p = Params::new();
-    let mut sets = Vec::new();
-    push_judge_sets(
-        &mut p,
-        &mut sets,
-        &update.status,
-        &update.verdict,
-        &update.score,
-        &update.time_used,
-        &update.memory_used,
-        &update.compile_output,
-        &update.error_code,
-        &update.error_message,
-    );
-    // `judged_at` lives on the submission only; the judgement's terminal
-    // stamp is `finalized_at`.
-    sets.retain(|set| set != "judged_at = NOW()");
-    if sets.is_empty() {
-        return None;
-    }
-    if matches!(
-        update.status,
-        Some(SubmissionStatus::Judged) | Some(SubmissionStatus::CompilationError)
-    ) {
-        sets.push("is_finalized = TRUE".to_string());
-        sets.push("finalized_at = NOW()".to_string());
-    }
-    let fence = judgement_write_fence(
-        &p.bind(update.judgement_id),
-        &p.bind(update.submission_id),
-        &p.bind(update.judge_epoch),
-    );
-    let sql = format!(
-        "UPDATE submission_judgement AS j SET {} WHERE {fence}",
-        sets.join(", ")
-    );
-    Some((sql, p.into_args()))
-}
-
-/// `submission_update`'s second statement: the submission's denormalized
-/// cache row. Only the CURRENT judgement drives it (`j.is_current` and the
-/// submission's own `judge_epoch`), so a deferred rejudge finalizing its own
-/// judgement leaves the visible verdict alone until an admin applies it.
-/// `None` when the update sets no column at all.
-fn submission_cache_update(update: &SubmissionUpdate) -> Option<(String, Vec<JsonValue>)> {
-    let mut p = Params::new();
-    let mut sets = Vec::new();
-    push_judge_sets(
-        &mut p,
-        &mut sets,
-        &update.status,
-        &update.verdict,
-        &update.score,
-        &update.time_used,
-        &update.memory_used,
-        &update.compile_output,
-        &update.error_code,
-        &update.error_message,
-    );
-    if sets.is_empty() {
-        return None;
-    }
-    let sql = format!(
-        "UPDATE submission SET {} WHERE id = {} AND judge_epoch = {} \
-         AND status NOT IN {terminal} \
-         AND EXISTS ( \
-             SELECT 1 FROM submission_judgement j \
-             WHERE j.id = {} \
-               AND j.submission_id = submission.id \
-               AND j.judge_epoch = submission.judge_epoch \
-               AND j.is_current = TRUE \
-         )",
-        sets.join(", "),
-        p.bind(update.submission_id),
-        p.bind(update.judge_epoch),
-        p.bind(update.judgement_id),
-        terminal = common::StatusPhase::Terminal.sql_list(),
-    );
+    let sql = judging::judgement_write(&mut p, update)?;
     Some((sql, p.into_args()))
 }
 
@@ -196,37 +99,13 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
     let update: SubmissionUpdate = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_update input: {e}")))?;
 
-    let Some((sql, args)) = submission_cache_update(&update) else {
+    let Some((sql, args)) = submission_update_statement(&update) else {
         return ok_affected(1);
     };
-
-    let mut judgement_rows: u64 = 1;
-    if let Some((jsql, jargs)) = judgement_update(&update) {
-        let jargs = serde_json::to_string(&jargs)?;
-        let resp_json = super::sql::execute_on_pool(db, plugin_id, jsql, jargs)?;
-        let env: ExecEnvelope = serde_json::from_str(&resp_json)
-            .map_err(|e| extism::Error::msg(format!("Malformed submission_judgement envelope: {e}")))?;
-        if env.error.is_some() {
-            // Surface the DB error to the guest exactly as raw_execute did.
-            return Ok(resp_json);
-        }
-        judgement_rows = env.data.as_ref().and_then(|v| v.as_u64()).unwrap_or(0);
-    }
-
-    if judgement_rows == 0 {
-        return ok_affected(0);
-    }
-
+    // The statement's row count is the number of judgements written, so the
+    // envelope is returned as is: 0 tells the guest its epoch is stale.
     let args = serde_json::to_string(&args)?;
-    let resp_json = super::sql::execute_on_pool(db, plugin_id, sql, args)?;
-    let env: ExecEnvelope = serde_json::from_str(&resp_json)
-        .map_err(|e| extism::Error::msg(format!("Malformed submission envelope: {e}")))?;
-    if env.error.is_some() {
-        return Ok(resp_json);
-    }
-    // The submission cache-row update's own rows-affected is intentionally
-    // ignored, mirroring the SDK; the reported count is the judgement rows.
-    ok_affected(judgement_rows)
+    super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
 host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
@@ -280,7 +159,7 @@ host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnectio
          ) \
          JOIN submission_judgement j ON {}",
         rows.join(", "),
-        judgement_write_fence("v.judgement_id", "v.submission_id", "v.judge_epoch"),
+        judging::write_fence("j", "v.judgement_id", "v.submission_id", "v.judge_epoch"),
     );
     let args = serde_json::to_string(&p.into_args())?;
     super::sql::execute_on_pool(db, plugin_id, sql, args)
@@ -302,7 +181,7 @@ fn delete_results_statement(
         p.bind(submission_id),
         p.bind(judgement_id),
         p.bind(judge_epoch),
-        judgement_write_fence("t.judgement_id", "t.submission_id", "t.judge_epoch"),
+        judging::write_fence("j", "t.judgement_id", "t.submission_id", "t.judge_epoch"),
     );
     (sql, p.into_args())
 }
@@ -342,8 +221,8 @@ host_fn!(pub submission_query_test_cases(user_data: Arc<(String, DatabaseConnect
 mod tests {
     use super::*;
     use crate::entity::{submission, submission_judgement, test_case_result};
-    use crate::services::judgement_lifecycle::{OpenJudgement, open_judgement};
-    use broccoli_server_sdk::types::Verdict;
+    use crate::services::judging::{OpenJudgement, open_judgement};
+    use broccoli_server_sdk::types::{SubmissionStatus, Verdict};
     use chrono::Utc;
     use sea_orm::{
         ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
@@ -364,15 +243,8 @@ mod tests {
     async fn submission_update(db: &DatabaseConnection, update: SubmissionUpdate) -> u64 {
         let db = db.clone();
         tokio::task::spawn_blocking(move || {
-            let (sql, args) = submission_cache_update(&update).expect("cache sets");
-            let rows = match judgement_update(&update) {
-                Some((jsql, jargs)) => execute(&db, jsql, jargs),
-                None => 1,
-            };
-            if rows > 0 {
-                execute(&db, sql, args);
-            }
-            rows
+            let (sql, args) = submission_update_statement(&update).expect("sets");
+            execute(&db, sql, args)
         })
         .await
         .expect("join")
