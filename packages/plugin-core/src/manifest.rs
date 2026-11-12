@@ -27,6 +27,13 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
+    /// Parse a `plugin.toml`. Config schema includes are left unresolved
+    /// (see [`Self::resolve_schema_includes`]).
+    pub fn parse(toml_content: &str) -> Result<Self, PluginError> {
+        toml::from_str(toml_content)
+            .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))
+    }
+
     pub fn has_server(&self) -> bool {
         self.server.is_some()
     }
