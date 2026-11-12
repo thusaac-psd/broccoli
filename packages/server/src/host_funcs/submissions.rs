@@ -110,54 +110,155 @@ host_fn!(pub submission_update(user_data: Arc<(String, DatabaseConnection)>; inp
     super::sql::execute_on_pool(db, plugin_id, sql, args)
 });
 
-/// `submission_insert_results`' statement: the rows land only while their
-/// judgement is unfinalized at their epoch. `None` for an empty batch.
-fn submission_results_statement(results: &[TestCaseResultRow]) -> Option<(String, Vec<JsonValue>)> {
+/// Postgres accepts at most this many bound parameters in one statement.
+const BIND_PARAMETER_LIMIT: usize = 65_535;
+
+/// The judged columns every result row carries, after the columns that name
+/// its unit.
+const JUDGED_RESULT_COLUMNS: [&str; 8] = [
+    "verdict",
+    "score",
+    "time_used",
+    "memory_used",
+    "checker_output",
+    "stdout",
+    "stderr",
+    "created_at",
+];
+
+/// The judged part of one result row.
+struct JudgedResult<'a> {
+    verdict: String,
+    score: f64,
+    time_used: Option<i32>,
+    memory_used: Option<i32>,
+    message: Option<&'a str>,
+    stdout: Option<&'a str>,
+    stderr: Option<&'a str>,
+}
+
+/// The fenced `INSERT ... SELECT` both result host functions run: each row
+/// is `key_columns` (bound by `bind_key`) then [`JUDGED_RESULT_COLUMNS`], and
+/// lands only through `join`, which names the unit row the fence locks.
+/// `Ok(None)` for an empty batch; `Err` when the batch would exceed the bind
+/// parameter limit, so the plugin can send it in smaller batches.
+fn results_statement<R>(
+    results: &[R],
+    table: &str,
+    key_columns: &[&str],
+    bind_key: impl Fn(&mut Params, &R) -> Vec<String>,
+    judged: impl Fn(&R) -> JudgedResult<'_>,
+    join: &str,
+) -> Result<Option<(String, Vec<JsonValue>)>, String> {
     if results.is_empty() {
-        return None;
+        return Ok(None);
+    }
+    // `created_at` is `NOW()`, not bound.
+    let per_row = key_columns.len() + JUDGED_RESULT_COLUMNS.len() - 1;
+    let max_rows = BIND_PARAMETER_LIMIT / per_row;
+    if results.len() > max_rows {
+        return Err(format!(
+            "{} result rows in one call exceed the limit of {max_rows}; send them in smaller batches",
+            results.len()
+        ));
     }
     let mut p = Params::new();
     let mut rows = Vec::with_capacity(results.len());
-
     for r in results {
-        let score_val = if r.score.is_finite() { r.score } else { 0.0 };
-        let message = r.message.as_deref().map(sanitize_result_text_field);
-        let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
-        let stderr = r.stderr.as_deref().map(sanitize_result_text_field);
-        rows.push(format!(
-            "({}, {}::int, {}, {}, {}, {}, {}, {}, {}, {}::text, {}::text, {}::text, NOW())",
-            p.bind(r.submission_id),
-            p.bind(r.judgement_id),
-            p.bind(r.judge_epoch),
-            p.bind_optional_int(r.test_case_id),
-            p.bind_optional_int(r.run_index),
-            p.bind(r.verdict.to_db_str()),
-            p.bind(score_val),
-            p.bind_optional_int(r.time_used),
-            p.bind_optional_int(r.memory_used),
-            p.bind(json!(message.as_deref())),
-            p.bind(json!(stdout.as_deref())),
-            p.bind(json!(stderr.as_deref())),
-        ));
+        let mut values = bind_key(&mut p, r);
+        let j = judged(r);
+        let score = if j.score.is_finite() { j.score } else { 0.0 };
+        values.extend([
+            p.bind(j.verdict),
+            p.bind(score),
+            p.bind_optional_int(j.time_used),
+            p.bind_optional_int(j.memory_used),
+            format!(
+                "{}::text",
+                p.bind(json!(j.message.map(sanitize_result_text_field)))
+            ),
+            format!(
+                "{}::text",
+                p.bind(json!(j.stdout.map(sanitize_result_text_field)))
+            ),
+            format!(
+                "{}::text",
+                p.bind(json!(j.stderr.map(sanitize_result_text_field)))
+            ),
+            "NOW()".to_string(),
+        ]);
+        rows.push(format!("({})", values.join(", ")));
     }
-
+    let all_columns = || key_columns.iter().copied().chain(JUDGED_RESULT_COLUMNS);
+    let columns = all_columns().collect::<Vec<_>>().join(", ");
+    let selected = all_columns()
+        .map(|c| format!("v.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
-        "INSERT INTO test_case_result \
-         (submission_id, judgement_id, judge_epoch, test_case_id, run_index, verdict, score, \
-          time_used, memory_used, checker_output, stdout, stderr, created_at) \
-         SELECT v.submission_id, v.judgement_id, v.judge_epoch, v.test_case_id, v.run_index, \
-                v.verdict, v.score, v.time_used, v.memory_used, v.checker_output, \
-                v.stdout, v.stderr, v.created_at \
-         FROM (VALUES {}) AS v( \
-             submission_id, judgement_id, judge_epoch, test_case_id, run_index, verdict, score, \
-             time_used, memory_used, checker_output, stdout, stderr, created_at \
-         ) \
-         JOIN submission_judgement j ON {} \
-         FOR SHARE OF j",
-        rows.join(", "),
-        judging::write_fence("j", "v.judgement_id", "v.submission_id", "v.judge_epoch"),
+        "INSERT INTO {table} ({columns}) SELECT {selected} \
+         FROM (VALUES {rows}) AS v({columns}) JOIN {join}",
+        rows = rows.join(", "),
     );
-    Some((sql, p.into_args()))
+    Ok(Some((sql, p.into_args())))
+}
+
+/// Runs a result insert built by [`results_statement`], or reports its error
+/// to the guest in the standard envelope.
+fn execute_results(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    statement: Result<Option<(String, Vec<JsonValue>)>, String>,
+) -> Result<String, extism::Error> {
+    match statement {
+        Ok(None) => ok_affected(0),
+        Ok(Some((sql, args))) => {
+            let args = serde_json::to_string(&args)?;
+            super::sql::execute_on_pool(db, plugin_id, sql, args)
+        }
+        Err(e) => super::sql::HostDbResponse::err(e).to_json_string(),
+    }
+}
+
+/// `submission_insert_results`' statement: the rows land only while their
+/// judgement is unfinalized at their epoch, behind a `FOR SHARE` lock (see
+/// [`judging::write_fence`]).
+fn submission_results_statement(
+    results: &[TestCaseResultRow],
+) -> Result<Option<(String, Vec<JsonValue>)>, String> {
+    results_statement(
+        results,
+        "test_case_result",
+        &[
+            "submission_id",
+            "judgement_id",
+            "judge_epoch",
+            "test_case_id",
+            "run_index",
+        ],
+        |p, r| {
+            vec![
+                p.bind(r.submission_id),
+                format!("{}::int", p.bind(r.judgement_id)),
+                p.bind(r.judge_epoch),
+                p.bind_optional_int(r.test_case_id),
+                p.bind_optional_int(r.run_index),
+            ]
+        },
+        |r| JudgedResult {
+            verdict: r.verdict.to_db_str().to_string(),
+            score: r.score,
+            time_used: r.time_used,
+            memory_used: r.memory_used,
+            message: r.message.as_deref(),
+            stdout: r.stdout.as_deref(),
+            stderr: r.stderr.as_deref(),
+        },
+        &format!(
+            "submission_judgement j ON {} FOR SHARE OF j",
+            judging::write_fence("j", "v.judgement_id", "v.submission_id", "v.judge_epoch")
+        ),
+    )
 }
 
 host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
@@ -166,11 +267,7 @@ host_fn!(pub submission_insert_results(user_data: Arc<(String, DatabaseConnectio
 
     let results: Vec<TestCaseResultRow> = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid submission_insert_results input: {e}")))?;
-    let Some((sql, args)) = submission_results_statement(&results) else {
-        return ok_affected(0);
-    };
-    let args = serde_json::to_string(&args)?;
-    super::sql::execute_on_pool(db, plugin_id, sql, args)
+    execute_results(db, plugin_id, submission_results_statement(&results))
 });
 
 /// `submission_delete_results`' statement. Same fence as the writes: a
@@ -247,48 +344,35 @@ host_fn!(pub code_run_update(user_data: Arc<(String, DatabaseConnection)>; input
 });
 
 /// `code_run_insert_results`' statement: the rows land only while their run
-/// is still in flight at their epoch. `None` for an empty batch.
-fn code_run_results_statement(results: &[CodeRunResultRow]) -> Option<(String, Vec<JsonValue>)> {
-    if results.is_empty() {
-        return None;
-    }
-    let mut p = Params::new();
-    let mut rows = Vec::with_capacity(results.len());
-    for r in results {
-        let score_val = if r.score.is_finite() { r.score } else { 0.0 };
-        let message = r.message.as_deref().map(sanitize_result_text_field);
-        let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
-        let stderr = r.stderr.as_deref().map(sanitize_result_text_field);
-        rows.push(format!(
-            "({}, {}, {}, {}, {}, {}, {}, {}::text, {}::text, {}::text, NOW())",
-            p.bind(r.code_run_id),
-            p.bind(r.judge_epoch),
-            p.bind(r.run_index),
-            p.bind(r.verdict.to_db_str()),
-            p.bind(score_val),
-            p.bind_optional_int(r.time_used),
-            p.bind_optional_int(r.memory_used),
-            p.bind(json!(message.as_deref())),
-            p.bind(json!(stdout.as_deref())),
-            p.bind(json!(stderr.as_deref())),
-        ));
-    }
-    let sql = format!(
-        "INSERT INTO code_run_result \
-         (code_run_id, judge_epoch, run_index, verdict, score, \
-          time_used, memory_used, checker_output, stdout, stderr, created_at) \
-         SELECT v.code_run_id, v.judge_epoch, v.run_index, v.verdict, v.score, \
-                v.time_used, v.memory_used, v.checker_output, v.stdout, v.stderr, v.created_at \
-         FROM (VALUES {}) AS v( \
-             code_run_id, judge_epoch, run_index, verdict, score, \
-             time_used, memory_used, checker_output, stdout, stderr, created_at \
-         ) \
-         JOIN code_run cr ON {} \
-         FOR SHARE OF cr",
-        rows.join(", "),
-        judging::code_run_write_fence("cr", "v.code_run_id", "v.judge_epoch"),
-    );
-    Some((sql, p.into_args()))
+/// is in flight at their epoch, behind a `FOR SHARE` lock.
+fn code_run_results_statement(
+    results: &[CodeRunResultRow],
+) -> Result<Option<(String, Vec<JsonValue>)>, String> {
+    results_statement(
+        results,
+        "code_run_result",
+        &["code_run_id", "judge_epoch", "run_index"],
+        |p, r| {
+            vec![
+                p.bind(r.code_run_id),
+                p.bind(r.judge_epoch),
+                p.bind(r.run_index),
+            ]
+        },
+        |r| JudgedResult {
+            verdict: r.verdict.to_db_str().to_string(),
+            score: r.score,
+            time_used: r.time_used,
+            memory_used: r.memory_used,
+            message: r.message.as_deref(),
+            stdout: r.stdout.as_deref(),
+            stderr: r.stderr.as_deref(),
+        },
+        &format!(
+            "code_run cr ON {} FOR SHARE OF cr",
+            judging::code_run_write_fence("cr", "v.code_run_id", "v.judge_epoch")
+        ),
+    )
 }
 
 host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {
@@ -297,11 +381,7 @@ host_fn!(pub code_run_insert_results(user_data: Arc<(String, DatabaseConnection)
 
     let results: Vec<CodeRunResultRow> = serde_json::from_str(&input)
         .map_err(|e| extism::Error::msg(format!("Invalid code_run_insert_results input: {e}")))?;
-    let Some((sql, args)) = code_run_results_statement(&results) else {
-        return ok_affected(0);
-    };
-    let args = serde_json::to_string(&args)?;
-    super::sql::execute_on_pool(db, plugin_id, sql, args)
+    execute_results(db, plugin_id, code_run_results_statement(&results))
 });
 
 #[cfg(test)]
@@ -599,7 +679,9 @@ mod tests {
                         stdout: None,
                         stderr: None,
                     };
-                    let (rsql, rargs) = code_run_results_statement(&[result]).expect("rows");
+                    let (rsql, rargs) = code_run_results_statement(&[result])
+                        .expect("fits")
+                        .expect("rows");
                     let inserted = execute(&db, rsql, rargs);
                     let update = CodeRunUpdate {
                         code_run_id: id,
@@ -748,7 +830,9 @@ mod tests {
                 stderr: None,
             };
             tokio::task::spawn_blocking(move || {
-                let (sql, args) = submission_results_statement(&[row]).expect("rows");
+                let (sql, args) = submission_results_statement(&[row])
+                    .expect("fits")
+                    .expect("rows");
                 execute(&db, sql, args)
             })
         };
@@ -766,5 +850,27 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_result_batch_past_the_bind_limit_is_refused_whole() {
+        let row = CodeRunResultRow {
+            code_run_id: 1,
+            judge_epoch: 1,
+            run_index: 0,
+            verdict: Verdict::Accepted,
+            score: 1.0,
+            time_used: None,
+            memory_used: None,
+            message: None,
+            stdout: None,
+            stderr: None,
+        };
+        // A code-run row binds 10 parameters.
+        let fits = vec![row.clone(); BIND_PARAMETER_LIMIT / 10];
+        assert!(code_run_results_statement(&fits).expect("fits").is_some());
+        let too_many = vec![row; BIND_PARAMETER_LIMIT / 10 + 1];
+        let err = code_run_results_statement(&too_many).expect_err("over the limit");
+        assert!(err.contains("smaller batches"), "{err}");
     }
 }
