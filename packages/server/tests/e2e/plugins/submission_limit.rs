@@ -550,18 +550,19 @@ async fn limited_problem(app: &E2eTestApp, tag: &str, max: u32) -> (String, i32,
     (contestant, uid, problem_id, contest_id)
 }
 
-/// Store one reservation for `attempt_id`, taken `age_secs` ago.
+/// Store one reservation for `attempt_id` that expires `expires_in_secs` from
+/// now (negative: already expired).
 async fn seed_reservation(
     app: &E2eTestApp,
     (uid, problem_id, contest_id): (i32, i32, i32),
     attempt_id: &str,
-    age_secs: i64,
+    expires_in_secs: i64,
 ) {
     app.db
         .execute_unprepared(&format!(
             "INSERT INTO submission_limit_claim (user_id, problem_id, contest_id, reservations) \
              VALUES ({uid}, {problem_id}, {contest_id}, \
-               jsonb_build_object('{attempt_id}', EXTRACT(EPOCH FROM NOW()) - {age_secs}))"
+               jsonb_build_object('{attempt_id}', EXTRACT(EPOCH FROM NOW()) + {expires_in_secs}))"
         ))
         .await
         .expect("seed reservation");
@@ -577,25 +578,25 @@ async fn submit(app: &E2eTestApp, token: &str, problem_id: i32, contest_id: i32)
 }
 
 /// A submission that reserved a slot but was then rejected by a later hook (or
-/// failed to insert) leaves a reservation no submission carries. Once it ages
-/// past the grace window it frees its slot.
+/// failed to insert) leaves a reservation no submission carries. Once the
+/// attempt timeout has passed it frees its slot.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reservation_without_a_submission_frees_its_slot_after_the_grace() {
+async fn a_reservation_without_a_submission_frees_its_slot_once_it_expires() {
     let app = E2eTestApp::spawn().await;
     let (token, uid, problem_id, contest_id) = limited_problem(&app, "expired", 1).await;
     let attempt = "00000000-0000-4000-8000-000000000001";
-    seed_reservation(&app, (uid, problem_id, contest_id), attempt, 120).await;
+    seed_reservation(&app, (uid, problem_id, contest_id), attempt, -1).await;
     assert_eq!(submit(&app, &token, problem_id, contest_id).await, 201);
 }
 
-/// A reservation inside the grace window holds its slot while its submission
-/// has not committed.
+/// An unexpired reservation holds its slot while its submission has not
+/// committed, however long the create takes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_live_reservation_holds_its_slot() {
     let app = E2eTestApp::spawn().await;
     let (token, uid, problem_id, contest_id) = limited_problem(&app, "live", 1).await;
     let attempt = "00000000-0000-4000-8000-000000000002";
-    seed_reservation(&app, (uid, problem_id, contest_id), attempt, 0).await;
+    seed_reservation(&app, (uid, problem_id, contest_id), attempt, 60).await;
     assert_eq!(submit(&app, &token, problem_id, contest_id).await, 429);
 }
 

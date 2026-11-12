@@ -29,15 +29,21 @@ mod plugin {
         Ok("ok".into())
     }
 
-    /// Take a slot for `attempt_id`. Ok(false) when the cap is reached.
+    /// Take a slot for the attempt. Ok(false) when the cap is reached.
     fn try_claim(
         host: &Host,
         key: &LimitKey,
-        attempt_id: &str,
+        event: &BeforeSubmissionEvent,
         max: u32,
     ) -> Result<bool, SdkError> {
         let mut p = Params::new();
-        let sql = reservation::claim_sql(&mut p, key, attempt_id, max);
+        let sql = reservation::claim_sql(
+            &mut p,
+            key,
+            &event.attempt_id,
+            event.attempt_timeout_ms,
+            max,
+        );
         Ok(host.db.execute_with_args(&sql, &p.into_args())? > 0)
     }
 
@@ -85,7 +91,7 @@ mod plugin {
             problem_id: event.problem_id,
             contest_id: event.contest_id,
         };
-        if try_claim(&host, &key, &event.attempt_id, max)? {
+        if try_claim(&host, &key, &event, max)? {
             return Ok(serde_json::to_string(&HookResponse::pass())?);
         }
 
