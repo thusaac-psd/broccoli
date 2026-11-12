@@ -7,9 +7,9 @@ import React, {
 } from 'react';
 
 import { useApiClient } from '@/api/use-api-client';
-import { useSession } from '@/api/use-session';
 import { AuthContext } from '@/auth/auth-context';
 import { nextRefreshInMs, sessionEffects } from '@/auth/session';
+import { useSession } from '@/auth/session-context';
 import type { LoginRequest } from '@/auth/types';
 
 interface AuthProviderProps {

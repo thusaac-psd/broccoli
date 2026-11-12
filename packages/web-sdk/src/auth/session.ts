@@ -147,6 +147,12 @@ export interface Session {
   signOut: (revoke: () => Promise<unknown>) => Promise<void>;
 }
 
+/**
+ * What code outside the auth providers may see of the session: its state and
+ * its changes, never a way to change it.
+ */
+export type SessionView = Pick<Session, 'getState' | 'subscribe'>;
+
 export interface SessionDeps {
   /** The one shared refresh (see `refresh-session.ts`). */
   refresh: () => Promise<RefreshOutcome>;

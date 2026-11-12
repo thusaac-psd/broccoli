@@ -6,6 +6,7 @@ import { refreshSession, withSettledCookie } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
 import { fetchWithServerClock } from '@/api/server-clock';
 import { accessToken, createSession } from '@/auth/session';
+import { SessionContext } from '@/auth/session-context';
 
 interface ApiClientProviderProps {
   children: ReactNode;
@@ -181,10 +182,11 @@ export function ApiClientProvider({
     [resolvedBaseUrl, session],
   );
 
-  const value = useMemo(
-    () => ({ apiClient, apiFetch, session }),
-    [apiClient, apiFetch, session],
-  );
+  const value = useMemo(() => ({ apiClient, apiFetch }), [apiClient, apiFetch]);
 
-  return <ApiClientContext value={value}>{children}</ApiClientContext>;
+  return (
+    <SessionContext value={session}>
+      <ApiClientContext value={value}>{children}</ApiClientContext>
+    </SessionContext>
+  );
 }
