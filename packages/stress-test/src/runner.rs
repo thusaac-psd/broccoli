@@ -251,7 +251,7 @@ pub async fn run(cli: Cli) -> u8 {
     };
     let mut overall_exit = exit_code::PASS;
 
-    if overall_exit == exit_code::PASS && !cli.skip_load && !cli.correctness_only {
+    if overall_exit == exit_code::PASS && !cli.skip_load {
         match cli.profile {
             LoadProfile::Judge => {
                 let load_config = crate::load::LoadConfig {

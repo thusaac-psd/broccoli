@@ -251,16 +251,7 @@ pub struct Cli {
     pub contest_concurrency: u32,
 
     #[arg(long, default_value_t = false)]
-    pub skip_correctness: bool,
-
-    #[arg(long, default_value_t = false)]
     pub skip_load: bool,
-
-    /// Removed: `--correctness-only` is no longer supported and is rejected at
-    /// startup (the stress test always runs load, bootstrapping A+B fixtures when
-    /// no --contest-id is given).
-    #[arg(long, default_value_t = false)]
-    pub correctness_only: bool,
 
     #[arg(long, default_value_t = false)]
     pub keep_fixtures: bool,
@@ -306,13 +297,6 @@ impl Cli {
         if !has_token && !has_user_pass {
             return Err(
                 "must provide --admin-token, or both --admin-username and --admin-password"
-                    .to_string(),
-            );
-        }
-
-        if self.correctness_only {
-            return Err(
-                "--correctness-only is no longer supported; the stress test now runs load against real contest data, or bootstraps A+B fixtures when no --contest-id is provided"
                     .to_string(),
             );
         }

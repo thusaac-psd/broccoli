@@ -157,51 +157,6 @@ fn rejects_password_without_username() {
 }
 
 #[test]
-fn accepts_skip_correctness_as_legacy_noop() {
-    let cli = Cli::try_parse_from([
-        "broccoli-stress-test",
-        "--url",
-        "http://localhost:3000",
-        "--admin-token",
-        "abc",
-        "--skip-correctness",
-        "--skip-load",
-    ])
-    .unwrap();
-    assert!(cli.validate().is_ok());
-}
-
-#[test]
-fn rejects_removed_correctness_only_alias() {
-    let cli = Cli::try_parse_from([
-        "broccoli-stress-test",
-        "--url",
-        "http://localhost:3000",
-        "--admin-token",
-        "abc",
-        "--correctness-only",
-    ])
-    .unwrap();
-    assert!(cli.correctness_only);
-    assert!(cli.validate().is_err());
-}
-
-#[test]
-fn rejects_skip_correctness_and_correctness_only() {
-    let cli = Cli::try_parse_from([
-        "broccoli-stress-test",
-        "--url",
-        "http://localhost:3000",
-        "--admin-token",
-        "abc",
-        "--skip-correctness",
-        "--correctness-only",
-    ])
-    .unwrap();
-    assert!(cli.validate().is_err());
-}
-
-#[test]
 fn rejects_zero_total() {
     let cli = Cli::try_parse_from([
         "broccoli-stress-test",
