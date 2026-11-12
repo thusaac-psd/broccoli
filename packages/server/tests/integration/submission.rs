@@ -905,13 +905,14 @@ mod judgement_history {
         .await
         .expect("insert test case");
 
-        for (judgement_id, verdict, score) in [
-            (old.id, Verdict::WrongAnswer, 40.0),
-            (current.id, Verdict::Accepted, 100.0),
+        for (judgement, verdict, score) in [
+            (&old, Verdict::WrongAnswer, 40.0),
+            (&current, Verdict::Accepted, 100.0),
         ] {
             test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
-                judgement_id: Set(Some(judgement_id)),
+                judgement_id: Set(Some(judgement.id)),
+                judge_epoch: Set(judgement.judge_epoch),
                 test_case_id: Set(Some(test_case.id)),
                 run_index: Set(None),
                 verdict: Set(verdict),
@@ -995,6 +996,8 @@ mod judgement_history {
         test_case_result::ActiveModel {
             submission_id: Set(submission_id),
             judgement_id: Set(Some(current_judgement_id)),
+            // The current judgement's epoch (see `seed_history`).
+            judge_epoch: Set(11),
             test_case_id: Set(Some(added_case.id)),
             run_index: Set(None),
             verdict: Set(Verdict::Accepted),
@@ -1074,6 +1077,8 @@ mod judgement_history {
             let result = test_case_result::ActiveModel {
                 submission_id: Set(submission_id),
                 judgement_id: Set(Some(current_id)),
+                // The current judgement's epoch (see `seed_history`).
+                judge_epoch: Set(11),
                 test_case_id: Set(Some(tc.id)),
                 verdict: Set(Verdict::Accepted),
                 score: Set(1.0),

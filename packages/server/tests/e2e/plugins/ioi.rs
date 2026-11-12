@@ -223,6 +223,7 @@ async fn ioi_feedback_filter_redacts_judgement_history() {
     test_case_result::ActiveModel {
         submission_id: Set(submission.id),
         judgement_id: Set(Some(judgement.id)),
+        judge_epoch: Set(judgement.judge_epoch),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),
@@ -352,6 +353,7 @@ async fn ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judg
     test_case_result::ActiveModel {
         submission_id: Set(sub_id),
         judgement_id: Set(Some(judgement_model.id)),
+        judge_epoch: Set(judgement_model.judge_epoch),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),
@@ -517,6 +519,7 @@ async fn ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict() {
     test_case_result::ActiveModel {
         submission_id: Set(submission.id),
         judgement_id: Set(Some(judgement.id)),
+        judge_epoch: Set(judgement.judge_epoch),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),
