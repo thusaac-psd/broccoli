@@ -117,19 +117,19 @@ mod tests {
     }
 
     #[test]
-    fn pass_serializes_to_legacy_wire_format() {
+    fn pass_serializes_to_its_wire_format() {
         let json = serde_json::to_string(&HookResponse::pass()).unwrap();
         assert_eq!(json, r#"{"action":"pass"}"#);
     }
 
     #[test]
-    fn stop_serializes_to_legacy_wire_format() {
+    fn stop_serializes_to_its_wire_format() {
         let json = serde_json::to_string(&HookResponse::stop()).unwrap();
         assert_eq!(json, r#"{"action":"stop"}"#);
     }
 
     #[test]
-    fn reject_serializes_to_legacy_wire_format_and_round_trips() {
+    fn reject_serializes_to_its_wire_format_and_round_trips() {
         let resp = HookResponse::reject(
             "COOLDOWN_ACTIVE",
             "Please wait 3 more seconds",

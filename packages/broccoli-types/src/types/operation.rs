@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn step_mounts_defaults_to_empty_for_legacy_payloads() {
+    fn step_mounts_defaults_to_empty_when_omitted() {
         let step: Step = serde_json::from_value(serde_json::json!({
             "id": "plain",
             "env_ref": "sandbox",

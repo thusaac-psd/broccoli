@@ -379,7 +379,7 @@ fn inflight_capped_is_null_safe_on_both_sides() {
         Some(now - chrono::Duration::seconds(30)),
         Some(cap)
     ));
-    // Legacy / pre-dispatch row with no anchor -> never capped.
+    // A row not yet dispatched has no anchor -> never capped.
     assert!(!inflight_capped(None, Some(cap)));
     // Cap disabled -> never capped, however old the anchor.
     assert!(!inflight_capped(

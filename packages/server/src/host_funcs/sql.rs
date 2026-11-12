@@ -166,7 +166,7 @@ pub fn set_plugin_db_fallback_url(url: String, session: common::db::PgSession) {
 /// non-privileged login" whole. Its `url` may differ from
 /// [`PLUGIN_DB_FALLBACK_URL`] (e.g. a DBA-managed `database.plugin_url`). When
 /// unset, the restricted fallback keeps app-role auth plus the after-connect
-/// `SET ROLE broccoli_plugin` downshift (backward compatible).
+/// `SET ROLE broccoli_plugin` downshift.
 static PLUGIN_DB_RESTRICTED_FALLBACK: OnceLock<RestrictedFallback> = OnceLock::new();
 
 struct RestrictedFallback {
