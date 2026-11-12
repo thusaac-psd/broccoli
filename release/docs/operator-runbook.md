@@ -287,15 +287,28 @@ spike with four active operations per submission. Override via
 
 **Why `--maxmemory-policy noeviction` is mandatory**
 
-Every key Broccoli writes to Redis is correctness-bearing: MQ payloads are
-queued submissions, heartbeats drive worker-dedup steal logic, dedup keys carry
-claim invariants, and the planned observability streams (see
-`docs/plans/2026-05-07-observability-expansion-design.md`) hold live SSE state
-admins watch. `allkeys-lru` would silently lose all of these. With `noeviction`,
-a full Redis returns `OOM command not allowed`; workers retry, the API returns
-`503 OVERLOADED`, and operators get an alert — fail-loud beats fail-silent.
-Worker dedup keys expire via `BROCCOLI__WORKER__DEDUP_TTL_SECS` (default 600)
-instead of the DLQ stuck-job timeout.
+Every key Broccoli writes to Redis is correctness-bearing: message queue stream
+entries are queued or in-flight operations and dead letters, and node liveness
+keys decide which servers and workers are alive. `allkeys-lru` would silently
+lose them. With `noeviction`, a full Redis returns `OOM command not allowed`:
+publishes fail, the operation batch fails loudly, and workers retry the replies
+they could not deliver. Acknowledged tasks are deleted at once and each server
+trims its reply stream as it reads it, so memory tracks the live backlog.
+
+Redis 7 or newer is required. Keep `--appendonly yes` with
+`--appendfsync everysec`: a Redis crash then loses at most the last second of
+writes, and the stuck-job detector recovers the work lost in it. A worker that
+crashes loses nothing: the tasks it held are redelivered to another worker 30 to
+35 seconds after it stopped refreshing them.
+
+Useful checks on the infra node (`operation_tasks` is
+`mq.operation_queue_name`):
+
+```bash
+redis-cli -a "$REDIS_PASSWORD" XLEN operation_tasks              # unread plus in flight
+redis-cli -a "$REDIS_PASSWORD" XPENDING operation_tasks workers  # in flight, per worker
+redis-cli -a "$REDIS_PASSWORD" XLEN operation_tasks:dlq          # dead letters not yet recorded
+```
 
 ## Plugin Pool Sizing
 
@@ -408,12 +421,11 @@ Every server re-dispatches its own unfinished work automatically, whatever
 When a crashed server will not come back:
 
 1. Confirm the failed server is dead (not merely network-partitioned). Two
-   replicas with the same ID racing on the same queue is worse than ghost
-   queues.
+   replicas with the same ID refuse to run side by side, but a partitioned one
+   still holds its work.
 2. Either start a replacement with the same `BROCCOLI__SERVER__ID` (its boot
    recovery re-dispatches the stranded work), or rejudge the affected
    submissions once the stuck-job detector has failed them.
-3. If `redis-cli SCAN MATCH operation_results.*` shows queues with no live
-   consumer (i.e. their `<server_id>` does not match any healthy replica),
-   `redis-cli DEL <queue_name> <queue_name>_processing <queue_name>_failed <queue_name>_fairness_set`
-   to reclaim the memory.
+
+A dead server's reply stream needs no cleanup: it expires with the server's
+liveness key, 15 seconds after the server stopped.

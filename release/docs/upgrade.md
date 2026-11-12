@@ -95,12 +95,6 @@ derives one for its host instead of `hostname -s` (servers) or `worker-1`
 anything outside Broccoli depends on the old values. An explicit but invalid ID
 now fails boot instead of being replaced.
 
-Finish upgrading every server node within an hour of the first one. With
-`DISPATCHER_LEASE_STEAL_ENABLED=true`, the reply-queue sweeper treats a server
-without a heartbeat as dead, and servers from earlier releases never write one.
-After the sweeper's one-hour grace it would delete a still-running old server's
-result queue.
-
 ## Contests without a contest type
 
 Every contest now needs a contest type. Contests created by earlier releases
