@@ -1,4 +1,4 @@
-import { retryLoad } from '@broccoli/web-sdk/utils';
+import { retryImport } from '@broccoli/web-sdk/utils';
 import type * as monacoNs from 'monaco-editor';
 import { type RefObject, useEffect, useRef } from 'react';
 
@@ -33,7 +33,7 @@ export function useEditorKeybindings(
     let cancelled = false;
 
     if (mode === 'vim') {
-      retryLoad(() => import('monaco-vim')).then(
+      retryImport(() => import('monaco-vim')).then(
         ({ initVimMode }) => {
           if (cancelled) return;
           adapterRef.current = initVimMode(

@@ -4,6 +4,11 @@
 // with backoff, waiting for the connection while the browser knows it is
 // offline, and only after that does the failure reach the caller (for a route,
 // the root error boundary, which reloads the page once for fresh chunks).
+//
+// A browser remembers a failed `import()` of a URL for the life of the page
+// and fails every later import of it without asking the network again, so a
+// retry has to import a different URL: `retryImport` re-imports the failed
+// module with a cache-busting query.
 
 const CHUNK_LOAD_MESSAGE =
   /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|is not a valid JavaScript MIME type|Unable to preload CSS|Loading (CSS )?chunk .+ failed/i;
@@ -79,4 +84,44 @@ export async function retryLoad<T>(
       await online();
     }
   }
+}
+
+/**
+ * The URL of the module a chunk-load error names (Chromium and Firefox put it
+ * at the end of the message), or null.
+ */
+export function failedModuleUrl(error: unknown): string | null {
+  if (!isChunkLoadError(error)) return null;
+  const match = /(https?:\/\/\S+?)\.?$/.exec((error as Error).message);
+  return match ? match[1] : null;
+}
+
+/** `url` with a query that makes the browser fetch it as a new module. */
+export function retryUrl(url: string, attempt: number): string {
+  const next = new URL(url);
+  next.searchParams.set('retry', String(attempt));
+  return next.toString();
+}
+
+/**
+ * `retryLoad` for a lazy `import()`: each retry imports the module the last
+ * failure named under a fresh URL, since the browser would fail the original
+ * URL again without fetching it. Where the error names no URL, `load` itself
+ * runs again.
+ */
+export function retryImport<T>(
+  load: () => Promise<T>,
+  options?: RetryLoadOptions,
+): Promise<T> {
+  let failedUrl: string | null = null;
+  return retryLoad(async (attempt) => {
+    try {
+      return failedUrl
+        ? ((await import(/* @vite-ignore */ retryUrl(failedUrl, attempt))) as T)
+        : await load();
+    } catch (error) {
+      failedUrl = failedModuleUrl(error) ?? failedUrl;
+      throw error;
+    }
+  }, options);
 }

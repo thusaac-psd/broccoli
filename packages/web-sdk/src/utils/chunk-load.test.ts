@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { isChunkLoadError, retryLoad } from './chunk-load.ts';
+import {
+  failedModuleUrl,
+  isChunkLoadError,
+  retryLoad,
+  retryUrl,
+} from './chunk-load.ts';
 
 test('chunk-load failures are recognised across browsers', () => {
   for (const message of [
@@ -93,4 +98,26 @@ test('a bug in the loaded code is not retried by default', async () => {
     }, h.options),
   );
   assert.equal(calls, 1);
+});
+
+test('the failed module is named by its URL, and a retry gets a fresh one', () => {
+  const chromium = new TypeError(
+    'Failed to fetch dynamically imported module: https://oj.lan/assets/cpp-x1.js?v=3',
+  );
+  const firefox = new TypeError(
+    'error loading dynamically imported module: https://oj.lan/assets/cpp-x1.js',
+  );
+  assert.equal(
+    failedModuleUrl(chromium),
+    'https://oj.lan/assets/cpp-x1.js?v=3',
+  );
+  assert.equal(failedModuleUrl(firefox), 'https://oj.lan/assets/cpp-x1.js');
+  assert.equal(
+    failedModuleUrl(new TypeError('Importing a module script failed.')),
+    null,
+  );
+  assert.equal(
+    retryUrl(retryUrl('https://oj.lan/assets/cpp-x1.js?v=3', 1), 2),
+    'https://oj.lan/assets/cpp-x1.js?v=3&retry=2',
+  );
 });

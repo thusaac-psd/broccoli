@@ -20,7 +20,7 @@ import type {
   PluginModule,
   SlotConfig,
 } from '@/plugin/types';
-import { retryLoad } from '@/utils/chunk-load';
+import { retryImport, retryLoad } from '@/utils/chunk-load';
 
 // While the server cannot be asked for its plugin list (a gateway 502 while
 // it restarts), ask again with backoff, so the page does not stay without
@@ -160,7 +160,7 @@ export function PluginRegistryProvider({
     const local = Promise.all(
       (lazyPlugins ?? []).map(async (loader) => {
         try {
-          const module = await retryLoad(() => loader());
+          const module = await retryImport(loader);
           await registry.load(module.manifest, 'local', async () => module);
         } catch (error) {
           console.error('Failed to load lazy plugin:', error);

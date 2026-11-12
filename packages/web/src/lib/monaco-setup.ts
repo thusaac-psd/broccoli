@@ -8,7 +8,7 @@
  * `<Editor>`; the shared-deps shim for `@monaco-editor/react` imports it too, so
  * plugins get the same offline instance.
  */
-import { retryLoad } from '@broccoli/web-sdk/utils';
+import { retryImport } from '@broccoli/web-sdk/utils';
 import { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -47,7 +47,7 @@ loader.config({ monaco });
 // the first time the language is used, and remembers a failed load for good:
 // one dropped request would leave that language unhighlighted until a page
 // reload. So every lazily loaded language gets a loader that retries (see
-// `retryLoad`) and, should every retry fail, forgets the failure so the next
+// `retryImport`) and, should every retry fail, forgets the failure so the next
 // use of the language tries again.
 interface LazyLanguage {
   language: monaco.languages.IMonarchLanguage;
@@ -59,7 +59,7 @@ function retryingLanguageLoader(
 ): () => Promise<LazyLanguage> {
   let loaded: Promise<LazyLanguage> | null = null;
   return () => {
-    loaded ??= retryLoad(load).catch((error: unknown) => {
+    loaded ??= retryImport(load).catch((error: unknown) => {
       loaded = null;
       throw error;
     });
