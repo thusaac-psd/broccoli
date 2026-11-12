@@ -75,25 +75,28 @@ impl OperationHandler {
             operation.tasks.len()
         );
 
-        let environments = self.create_environments(operation).await?;
-
-        // Run everything else under a panic guard so the sandbox + channels
-        // cleanup below ALWAYS runs. A panicking step future - or an error at
-        // any stage - would otherwise unwind straight past the cleanup and
-        // orphan the isolate boxes and the shared channels dir.
+        // Run every stage under a panic guard so the sandbox + channels
+        // cleanup below ALWAYS runs, and runs once. Each stage records what it
+        // created in `environments` / `channels_dir` as it goes, so a stage
+        // that fails or panics midway leaves nothing behind, and its own
+        // error is the one returned.
+        let mut environments = HashMap::new();
         let mut channels_dir = None;
-        let outcome =
-            AssertUnwindSafe(self.run_operation(operation, &environments, &mut channels_dir))
-                .catch_unwind()
-                .await;
+        let outcome = AssertUnwindSafe(async {
+            self.create_environments(operation, &mut environments)
+                .await?;
+            self.run_operation(operation, &environments, &mut channels_dir)
+                .await
+        })
+        .catch_unwind()
+        .await;
 
-        // Always clean up, whatever the run did (completed, errored, panicked).
         if let Some(dir) = &channels_dir
             && let Err(e) = tokio::fs::remove_dir_all(dir).await
         {
             error!(error = %e, "Failed to clean up shared channels directory");
         }
-        self.cleanup_environments(&environments).await.ok();
+        self.cleanup_environments(&environments).await;
 
         let (task_results, global_success) = match outcome {
             Ok(result) => result?,
@@ -116,43 +119,30 @@ impl OperationHandler {
         })
     }
 
-    /// Create one sandbox per environment and load its files. On failure the
-    /// sandboxes already created are removed.
+    /// Create one sandbox per environment and load its files, recording each
+    /// sandbox in `environments` as soon as it exists so the caller removes
+    /// it whatever happens next.
     async fn create_environments(
         &self,
         operation: &OperationTask,
-    ) -> Result<HashMap<String, EnvironmentList>> {
-        let mut environments = HashMap::new();
+        environments: &mut HashMap<String, EnvironmentList>,
+    ) -> Result<()> {
         for env_config in operation.environments.iter() {
             let box_id = allocate_box_id();
             debug!(env_id = %env_config.id, box_id = %box_id, "Initializing environment");
-
-            let working_dir = match self.create_sandbox(box_id.as_str()).await {
-                Ok(dir) => dir,
-                Err(e) => {
-                    self.cleanup_environments(&environments).await.ok();
-                    return Err(e.context("Failed to create sandbox"));
-                }
-            };
-
-            if let Err(e) = self
-                .load_environment_files(&working_dir, &env_config.files_in)
+            let working_dir = self
+                .create_sandbox(box_id.as_str())
                 .await
-            {
-                if let Err(cleanup_err) = self.sandbox_manager.remove_sandbox(box_id.as_str()).await
-                {
-                    error!(box_id = %box_id, error = %cleanup_err, "Failed to clean up sandbox after file loading failure");
-                }
-                self.cleanup_environments(&environments).await?;
-                return Err(e.context("Failed to load environment files"));
-            }
-
+                .context("Failed to create sandbox")?;
             environments.insert(
                 env_config.id.clone(),
-                EnvironmentList::new(env_config.id.clone(), box_id, working_dir),
+                EnvironmentList::new(env_config.id.clone(), box_id, working_dir.clone()),
             );
+            self.load_environment_files(&working_dir, &env_config.files_in)
+                .await
+                .context("Failed to load environment files")?;
         }
-        Ok(environments)
+        Ok(())
     }
 
     /// Everything after the environments exist: channels, keep-alives and the
