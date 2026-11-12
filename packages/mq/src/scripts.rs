@@ -30,12 +30,13 @@ return 0
 /// Publish a reply if its server's reply stream exists. A missing stream
 /// means its server is gone (or lost the stream, and with it every waiter).
 ///
-/// KEYS: reply stream. ARGV: payload. Returns 1 (added) or 0 (dropped).
+/// KEYS: reply stream. ARGV: payload, length cap. Returns 1 (added) or 0
+/// (dropped).
 pub(crate) static PUBLISH_REPLY: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r#"
 if redis.call('EXISTS', KEYS[1]) == 1 then
-  redis.call('XADD', KEYS[1], '*', 'p', ARGV[1])
+  redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*', 'p', ARGV[1])
   return 1
 end
 return 0
@@ -135,7 +136,7 @@ return #entries
 /// earlier deliveries `ARGV[6]`) to the end of the entry's own stream.
 ///
 /// KEYS: stream, dead-letter stream. ARGV: group, consumer, id, mode,
-/// payload, prior deliveries. Returns 1 when settled, 0 when the entry is not
+/// payload, prior deliveries, dead-letter length cap. Returns 1 when settled, 0 when the entry is not
 /// this consumer's (any more).
 pub(crate) static SETTLE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
@@ -145,7 +146,7 @@ if not ok or #p == 0 then
   return 0
 end
 if ARGV[4] == 'dead_letter' then
-  redis.call('XADD', KEYS[2], '*', 'p', ARGV[5])
+  redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[7], '*', 'p', ARGV[5])
 elseif ARGV[4] == 'requeue' then
   redis.call('XADD', KEYS[1], '*', 'p', ARGV[5], 'n', ARGV[6])
 end

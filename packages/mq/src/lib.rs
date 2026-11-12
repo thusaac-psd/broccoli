@@ -57,6 +57,16 @@ pub enum Route {
 /// keeps its unread replies, while a dead server's stream still expires.
 pub const REPLY_STREAM_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Approximate cap on a reply stream's length. A server reads its replies as
+/// they arrive, so only a stuck or dead server's stream gets near it; the cap
+/// keeps that stream from filling Redis (and stopping every write under
+/// `noeviction`) while it waits to expire.
+pub const REPLY_STREAM_MAXLEN: u64 = 100_000;
+
+/// Approximate cap on the dead-letter stream's length, so a long database
+/// outage cannot fill Redis. Past it the oldest unrecorded dead letters go.
+pub const DEAD_LETTER_MAXLEN: u64 = 100_000;
+
 /// What happened to a published reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyOutcome {
@@ -162,6 +172,7 @@ impl Mq {
                 scripts::PUBLISH_REPLY
                     .key(self.topology.reply(server_id))
                     .arg(&payload)
+                    .arg(REPLY_STREAM_MAXLEN)
                     .invoke_async(&mut c)
                     .await
             })
@@ -181,6 +192,9 @@ impl Mq {
             .run(|mut c| async move {
                 redis::cmd("XADD")
                     .arg(&key)
+                    .arg("MAXLEN")
+                    .arg("~")
+                    .arg(DEAD_LETTER_MAXLEN)
                     .arg("*")
                     .arg("p")
                     .arg(&payload)

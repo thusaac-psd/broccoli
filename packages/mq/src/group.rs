@@ -301,6 +301,7 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
                     .arg(mode)
                     .arg(payload)
                     .arg(prior)
+                    .arg(crate::DEAD_LETTER_MAXLEN)
                     .invoke_async(&mut c)
                     .await
             })

@@ -304,6 +304,12 @@ crashes loses nothing: the tasks it held are redelivered to another worker 30 to
 Useful checks on the infra node (`operation_tasks` is
 `mq.operation_queue_name`):
 
+Reply streams and the dead-letter stream are capped at about 100 000 entries
+each, so a stuck server or a long database outage cannot fill Redis. The shared
+operation stream is not capped (trimming it would drop queued work): watch
+`broccoli_mq_queue_depth{queue_role="operation"}`; the server logs an error when
+it crosses 50 000.
+
 ```bash
 redis-cli -a "$REDIS_PASSWORD" XLEN operation_tasks              # unread plus in flight
 redis-cli -a "$REDIS_PASSWORD" XPENDING operation_tasks workers  # in flight, per worker

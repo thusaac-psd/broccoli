@@ -234,9 +234,14 @@ that means:
 work or in flight work, and eviction would drop either silently. When Redis is
 full, `XADD` fails with `OOM`, the publish returns an error, and the server
 fails the operation batch instead of losing its tasks. Acknowledged entries are
-deleted at once, each read deletes the replies before it and reply streams expire with their
-server, and the DLQ stream drains into Postgres, so memory tracks the live
-backlog.
+deleted at once, each read deletes the replies before it, reply streams expire
+with their server, and the DLQ stream drains into Postgres, so memory tracks
+the live backlog. Two streams can still grow while something is stuck: a
+stuck server's reply stream, and the DLQ stream during a database outage.
+Both are capped with `XADD ... MAXLEN ~ 100000` (`REPLY_STREAM_MAXLEN`,
+`DEAD_LETTER_MAXLEN`), which drops their oldest entries rather than stop every
+write. The shared stream is never trimmed, since that would drop queued work;
+the server logs an error when its backlog crosses 50 000.
 
 ## Clock rule
 

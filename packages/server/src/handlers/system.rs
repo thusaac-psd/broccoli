@@ -162,8 +162,33 @@ pub fn spawn_queue_depth_sampler(state: AppState, interval: Duration) {
     });
 }
 
+/// Shared operation backlog at which the depth sampler raises an error: work
+/// is arriving faster than the workers take it, and under `noeviction` a full
+/// Redis refuses every write. Watch `broccoli_mq_queue_depth{queue_role="operation"}`.
+const SHARED_BACKLOG_ALARM: u64 = 50_000;
+
 async fn record_queue_depths(state: &AppState, previous: &mut HashMap<QueueDepthKey, u64>) {
     let queues = read_queues(state).await;
+    for queue in &queues {
+        if queue_role(state, &queue.name) != mq::StreamRole::Shared.as_str() {
+            continue;
+        }
+        let before = previous
+            .get(&QueueDepthKey {
+                role: mq::StreamRole::Shared.as_str().into(),
+                name: queue.name.clone(),
+            })
+            .copied()
+            .unwrap_or(0);
+        if queue.depth >= SHARED_BACKLOG_ALARM && before < SHARED_BACKLOG_ALARM {
+            tracing::error!(
+                stream = %queue.name,
+                depth = queue.depth,
+                threshold = SHARED_BACKLOG_ALARM,
+                "The shared operation backlog crossed its alarm threshold; add workers or find what stopped them"
+            );
+        }
+    }
     let samples = queues
         .iter()
         .map(|queue| {
