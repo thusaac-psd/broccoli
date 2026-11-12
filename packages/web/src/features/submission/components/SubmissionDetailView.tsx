@@ -95,7 +95,7 @@ export function SubmissionDetailView({
               <span className="ml-auto font-mono text-lg font-bold tabular-nums text-foreground">
                 {scoreDisplay.value}
                 <span className="text-sm font-normal text-muted-foreground ml-1">
-                  pts
+                  {t('result.pointsUnit')}
                 </span>
               </span>
             ) : (
@@ -143,7 +143,7 @@ export function SubmissionDetailView({
             {result?.time_used != null && (
               <MetaItem label={t('result.timeHeader')}>
                 <span className="font-mono tabular-nums text-foreground">
-                  {result.time_used}ms
+                  {t('result.timeValue', { value: result.time_used })}
                 </span>
               </MetaItem>
             )}

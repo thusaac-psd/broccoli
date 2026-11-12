@@ -1,4 +1,5 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, FileDropZone, Label } from '@broccoli/web-sdk/ui';
 import { File, Loader2, Upload, X } from 'lucide-react';
 import { useCallback, useState } from 'react';
@@ -22,6 +23,7 @@ export function BlobRefField({
   onChange: (v: BlobRefValue | undefined) => void;
   isExplicit: boolean;
 }>) {
+  const { t } = useTranslation();
   const apiClient = useApiClient();
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +48,9 @@ export function BlobRefField({
         );
 
         if (apiError) {
-          throw new Error(getErrorMessage(apiError, 'Upload failed'));
+          throw new Error(
+            getErrorMessage(apiError, t('config.blob.uploadFailed')),
+          );
         }
 
         onChange({
@@ -54,7 +58,9 @@ export function BlobRefField({
           hash: data.content_hash,
         });
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Upload failed');
+        setError(
+          err instanceof Error ? err.message : t('config.blob.uploadFailed'),
+        );
       } finally {
         setUploading(false);
         setUploadingName('');
@@ -79,7 +85,7 @@ export function BlobRefField({
           </Label>
           {!isExplicit && (
             <span className="inline-flex items-center rounded-full border border-dashed px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Default
+              {t('config.blob.default')}
             </span>
           )}
         </div>
@@ -107,7 +113,7 @@ export function BlobRefField({
           <FileDropZone
             onFilesSelected={handleFilesSelected}
             className="border-0 p-0 rounded-none inline-flex"
-            aria-label={`Replace ${value.filename}`}
+            aria-label={t('config.blob.replaceLabel', { name: value.filename })}
           >
             <Button
               type="button"
@@ -117,7 +123,7 @@ export function BlobRefField({
               tabIndex={-1}
             >
               <Upload className="h-3 w-3 mr-1.5" />
-              Replace
+              {t('config.blob.replace')}
             </Button>
           </FileDropZone>
           <Button
@@ -137,10 +143,10 @@ export function BlobRefField({
         <FileDropZone
           onFilesSelected={handleFilesSelected}
           className="py-4"
-          aria-label={`Upload ${label}`}
+          aria-label={t('config.blob.uploadLabel', { name: label })}
         >
           <Upload className="h-4 w-4" />
-          <span className="text-xs">Drop file here or click to browse</span>
+          <span className="text-xs">{t('config.blob.prompt')}</span>
         </FileDropZone>
       )}
 
@@ -150,7 +156,7 @@ export function BlobRefField({
           <FileDropZone
             onFilesSelected={handleFilesSelected}
             className="border-0 p-0 rounded-none inline-flex"
-            aria-label="Retry upload"
+            aria-label={t('config.blob.retryLabel')}
           >
             <Button
               type="button"
@@ -159,7 +165,7 @@ export function BlobRefField({
               className="h-auto py-0.5 px-1.5 text-xs pointer-events-none"
               tabIndex={-1}
             >
-              Retry
+              {t('common.retry')}
             </Button>
           </FileDropZone>
         </div>

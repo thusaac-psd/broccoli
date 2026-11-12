@@ -182,7 +182,7 @@ export default function OverviewPage() {
                     </div>
                     <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
                       <Clock className="h-3 w-3" />
-                      {problem.time_limit}ms
+                      {t('result.timeValue', { value: problem.time_limit })}
                     </div>
                   </div>
                 ))}

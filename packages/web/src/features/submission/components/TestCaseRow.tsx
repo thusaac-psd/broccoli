@@ -78,6 +78,15 @@ const VERDICT_CONFIG: Record<
   },
 };
 
+/** The outputs a test case's details show, in order. */
+const DETAIL_FIELDS = [
+  'checker_output',
+  'input',
+  'expected_output',
+  'stdout',
+  'stderr',
+] as const;
+
 export function TestCaseRow({
   testCase,
   index,
@@ -140,15 +149,7 @@ export function TestCaseRow({
       )}
       {hasDetails && detailsOpen && (
         <div className="px-3 pb-3 space-y-2">
-          {(
-            [
-              'checker_output',
-              'input',
-              'expected_output',
-              'stdout',
-              'stderr',
-            ] as const
-          ).map((field) => (
+          {DETAIL_FIELDS.map((field) => (
             <TestCaseOutput
               key={field}
               submissionId={submissionId}

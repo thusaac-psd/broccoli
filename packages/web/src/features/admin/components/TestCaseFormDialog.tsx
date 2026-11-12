@@ -201,14 +201,14 @@ function TestCaseForm({
           label={t('admin.testCases.field.input')}
           value={values.input}
           onChange={set('input')}
-          placeholder={'4\n2 7 11 15\n9'}
+          placeholder={t('admin.testCases.inputPlaceholder')}
         />
         <TestDataField
           id="tc-expected-output"
           label={t('admin.testCases.field.expectedOutput')}
           value={values.expectedOutput}
           onChange={set('expectedOutput')}
-          placeholder="0 1"
+          placeholder={t('admin.testCases.outputPlaceholder')}
         />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -220,7 +220,7 @@ function TestCaseForm({
               onChange={(e) => set('label')(e.target.value)}
               maxLength={64}
               required={!isEdit}
-              placeholder="sample_01"
+              placeholder={t('admin.testCases.labelPlaceholder')}
               className="font-mono"
             />
           </div>

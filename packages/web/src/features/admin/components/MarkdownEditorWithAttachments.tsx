@@ -27,6 +27,9 @@ interface Props extends Omit<MarkdownEditorProps, 'onEditorMount'> {
   attachments: Attachment[];
 }
 
+const INSERT_IMAGE_SHORTCUT = 'Ctrl+Shift+I';
+const INSERT_FILE_SHORTCUT = 'Ctrl+Shift+K';
+
 export function MarkdownEditorWithAttachments({
   problemId,
   attachments,
@@ -499,7 +502,10 @@ export function MarkdownEditorWithAttachments({
           size="sm"
           className="h-7 px-2 text-xs"
           onClick={() => imageInputRef.current?.click()}
-          title={`${t('admin.attachments.insertImage')} (Ctrl+Shift+I)`}
+          title={t('common.withShortcut', {
+            action: t('admin.attachments.insertImage'),
+            shortcut: INSERT_IMAGE_SHORTCUT,
+          })}
         >
           <ImagePlus className="h-3.5 w-3.5 mr-1" />
           {t('admin.attachments.insertImage')}
@@ -510,7 +516,10 @@ export function MarkdownEditorWithAttachments({
           size="sm"
           className="h-7 px-2 text-xs"
           onClick={() => fileInputRef.current?.click()}
-          title={`${t('admin.attachments.insertFile')} (Ctrl+Shift+K)`}
+          title={t('common.withShortcut', {
+            action: t('admin.attachments.insertFile'),
+            shortcut: INSERT_FILE_SHORTCUT,
+          })}
         >
           <Paperclip className="h-3.5 w-3.5 mr-1" />
           {t('admin.attachments.insertFile')}

@@ -2,6 +2,7 @@ import { format } from 'date-fns';
 import { CalendarIcon, X } from 'lucide-react';
 import * as React from 'react';
 
+import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Calendar } from '@/ui/calendar';
 import { Input } from '@/ui/input';
@@ -23,6 +24,7 @@ function DateTimePicker({
   disabled = false,
   className,
 }: DateTimePickerProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
 
   const hours = value ? String(value.getHours()).padStart(2, '0') : '00';
@@ -87,7 +89,9 @@ function DateTimePicker({
         />
         <div className="border-t px-3 py-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Time:</span>
+            <span className="text-xs text-muted-foreground">
+              {t('dateTime.time')}
+            </span>
             <Input
               type="number"
               min={0}
@@ -95,7 +99,7 @@ function DateTimePicker({
               value={hours}
               onChange={(e) => handleTimeChange('hours', e.target.value)}
               className="w-12 h-7 text-center text-xs px-1"
-              aria-label="Hours"
+              aria-label={t('dateTime.hours')}
             />
             <span className="text-xs font-medium">:</span>
             <Input
@@ -105,7 +109,7 @@ function DateTimePicker({
               value={minutes}
               onChange={(e) => handleTimeChange('minutes', e.target.value)}
               className="w-12 h-7 text-center text-xs px-1"
-              aria-label="Minutes"
+              aria-label={t('dateTime.minutes')}
             />
           </div>
 
@@ -120,7 +124,7 @@ function DateTimePicker({
               className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
             >
               <X className="h-3 w-3 mr-1" />
-              Clear
+              {t('dateTime.clear')}
             </Button>
           )}
         </div>

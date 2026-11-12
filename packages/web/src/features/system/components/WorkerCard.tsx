@@ -86,7 +86,7 @@ export function WorkerCard({ worker }: Props) {
               {worker.sandbox_backend}
             </span>
             <span aria-hidden>·</span>
-            <span>v{worker.version}</span>
+            <span>{t('common.version', { version: worker.version })}</span>
             <span aria-hidden>·</span>
             <span>
               {t('system.worker.uptime', {
@@ -171,7 +171,7 @@ export function WorkerCard({ worker }: Props) {
           )}
           {worker.pid != null && (
             <div className="text-[10px] text-muted-foreground/60 font-mono">
-              pid {worker.pid}
+              {t('system.worker.pid', { pid: worker.pid })}
             </div>
           )}
         </div>

@@ -404,7 +404,7 @@ function useProblemColumns({
       size: 120,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {row.original.time_limit}ms
+          {t('result.timeValue', { value: row.original.time_limit })}
         </span>
       ),
     },

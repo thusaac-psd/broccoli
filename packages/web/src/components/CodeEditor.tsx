@@ -13,6 +13,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@broccoli/web-sdk/ui';
+import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import type { Monaco } from '@monaco-editor/react';
 import Editor from '@monaco-editor/react';
 import { useQuery } from '@tanstack/react-query';
@@ -781,7 +782,7 @@ function CodeEditorContent({
                     : 'border-transparent text-muted-foreground hover:text-foreground'
                 }`}
               >
-                Case {i + 1}
+                {t('editor.caseLabel', { index: i + 1 })}
                 {customTestCases.length > 1 && (
                   <span
                     role="button"
@@ -819,7 +820,7 @@ function CodeEditorContent({
             <div className="grid grid-cols-2 gap-2">
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground">
-                  stdin
+                  {t('editor.stdin')}
                 </label>
                 <textarea
                   value={activeTc.input}
@@ -892,12 +893,12 @@ function CodeEditorContent({
                 )}
                 {activeRunTc.time_used != null && (
                   <span className="text-muted-foreground">
-                    {activeRunTc.time_used} ms
+                    {t('result.timeValue', { value: activeRunTc.time_used })}
                   </span>
                 )}
                 {activeRunTc.memory_used != null && (
                   <span className="text-muted-foreground">
-                    {(activeRunTc.memory_used / 1024).toFixed(1)} MB
+                    {formatKibibytes(activeRunTc.memory_used)}
                   </span>
                 )}
               </div>
@@ -914,7 +915,7 @@ function CodeEditorContent({
               {activeRunTc.stdout != null && (
                 <div className="px-3 py-2">
                   <div className="text-xs font-medium text-muted-foreground mb-1">
-                    stdout
+                    {t('editor.stdout')}
                   </div>
                   <pre className="font-mono text-sm whitespace-pre-wrap text-foreground max-h-[10rem] overflow-y-auto">
                     {activeRunTc.stdout || t('editor.emptyOutput')}
@@ -924,7 +925,7 @@ function CodeEditorContent({
               {activeRunTc.stderr && (
                 <div className="px-3 py-2 border-t">
                   <div className="text-xs font-medium text-muted-foreground mb-1">
-                    stderr
+                    {t('editor.stderr')}
                   </div>
                   <pre className="font-mono text-xs whitespace-pre-wrap text-foreground/70 max-h-[6rem] overflow-y-auto">
                     {activeRunTc.stderr}

@@ -191,7 +191,7 @@ function EnrolledTab({
                   <td className="px-3 py-2 font-medium">
                     {p.is_deleted ? (
                       <span className="text-muted-foreground italic">
-                        [Deleted User]
+                        {t('users.deletedUser')}
                       </span>
                     ) : (
                       p.username

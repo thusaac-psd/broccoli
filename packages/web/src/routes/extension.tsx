@@ -1,3 +1,4 @@
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
 import { Skeleton } from '@broccoli/web-sdk/ui';
 import { matchPath, useLocation } from 'react-router';
@@ -10,6 +11,7 @@ import { ErrorCatcher } from '@/components/ErrorCatcher';
  * It matches the current URL against registered plugin routes.
  */
 export default function ExtensionPage() {
+  const { t } = useTranslation();
   const { routes, components, isLoading } = usePluginRegistry();
   const location = useLocation();
 
@@ -41,15 +43,15 @@ export default function ExtensionPage() {
   if (!Component) {
     return (
       <div className="p-8 text-center text-destructive">
-        <h1 className="text-xl font-bold">Component Error</h1>
+        <h1 className="text-xl font-bold">{t('extension.componentError')}</h1>
         <p>
-          Some plugin registered this route, but component{' '}
-          <code>{matchedRoute.component}</code> is missing.
+          {t('extension.componentMissing', {
+            component: matchedRoute.component,
+          })}
         </p>
       </div>
     );
   }
 
-  // TODO: pass route metadata
   return <Component />;
 }

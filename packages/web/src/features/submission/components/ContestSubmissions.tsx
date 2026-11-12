@@ -552,8 +552,11 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       {pagination && pagination.total_pages > 1 && (
         <div className="flex items-center justify-between text-sm text-muted-foreground">
           <span className="tabular-nums">
-            {(page - 1) * PER_PAGE + 1}–
-            {Math.min(page * PER_PAGE, pagination.total)} of {pagination.total}
+            {t('list.range', {
+              start: (page - 1) * PER_PAGE + 1,
+              end: Math.min(page * PER_PAGE, pagination.total),
+              total: pagination.total,
+            })}
           </span>
           <div className="flex items-center gap-1">
             <Button

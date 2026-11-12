@@ -236,7 +236,7 @@ export function ProblemForm({
           onChange={(e) => handleTitleChange(e.target.value)}
           required
           maxLength={256}
-          placeholder="Two Sum"
+          placeholder={t('admin.problem.titlePlaceholder')}
         />
       </div>
 
@@ -249,7 +249,7 @@ export function ProblemForm({
               value={data.content}
               onChange={handleContentChange}
               minHeight={250}
-              placeholder="Problem statement (Markdown supported)"
+              placeholder={t('admin.problem.contentPlaceholder')}
               problemId={problemId}
               attachments={attachments}
             />
@@ -263,7 +263,7 @@ export function ProblemForm({
             value={data.content}
             onChange={handleContentChange}
             minHeight={250}
-            placeholder="Problem statement (Markdown supported)"
+            placeholder={t('admin.problem.contentPlaceholder')}
           />
         )}
       </div>

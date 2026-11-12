@@ -81,6 +81,7 @@ export const en: Record<string, string> = {
   'error.action.reload': 'Reload page',
   'error.action.retry': 'Try again',
   'error.action.back': 'Go back',
+  'error.action.goBack': 'Go back',
 
   // Overview
   'overview.title': 'Overview',
@@ -123,6 +124,8 @@ export const en: Record<string, string> = {
   'submissions.bulkRejudge.queued': 'Queued {count} submissions for rejudge.',
   'submissions.bulkRejudge.error': 'Failed to bulk rejudge submissions.',
   'submissions.bulkRejudge.applyImmediately': 'Apply immediately',
+  'submissions.inContest': '· contest #{id}',
+  'submissions.pinnedTo': 'Pinned to {worker}',
 
   // Homepage
   'homepage.title': 'Broccoli Online Judge',
@@ -191,6 +194,10 @@ export const en: Record<string, string> = {
   'editor.emptyOutput': '(empty)',
   'editor.compilationError': 'Compilation Error',
   'editor.compilerOutput': 'Compiler Output',
+  'editor.caseLabel': 'Case {index}',
+  'editor.stdin': 'stdin',
+  'editor.stdout': 'stdout',
+  'editor.stderr': 'stderr',
 
   // Submission result
   'result.title': 'Result',
@@ -347,6 +354,8 @@ export const en: Record<string, string> = {
   'contest.qa.directMessages': 'Direct Messages',
   'contest.qa.messages': 'Messages',
   'contest.qa.empty': 'No questions yet.',
+  'contest.countdown.start': 'Start',
+  'contest.countdown.end': 'End',
 
   // Ranking
   'ranking.title': 'Ranking',
@@ -789,6 +798,9 @@ export const en: Record<string, string> = {
     'Output format must contain exactly one *',
   'admin.testCases.bulkUpload.outputFormatRequired':
     'Output format is required.',
+  'admin.testCases.labelPlaceholder': 'sample_01',
+  'admin.testCases.outputPlaceholder': '0 1',
+  'admin.testCases.inputPlaceholder': '4\n2 7 11 15\n9',
 
   // Toast notifications
   'toast.contest.created': 'Contest created successfully.',
@@ -939,6 +951,8 @@ export const en: Record<string, string> = {
 
   // Resource config
   'admin.configure': 'Configure',
+  'admin.problem.titlePlaceholder': 'Two Sum',
+  'admin.problem.contentPlaceholder': 'Problem statement (Markdown supported)',
   'config.title': 'Configuration: {name}',
   'config.description': 'Plugin configuration for this resource.',
   'config.noSchemas': 'No plugin configuration available for this resource.',
@@ -1042,10 +1056,13 @@ export const en: Record<string, string> = {
 
   // Common
   'common.cancel': 'Cancel',
+  'common.withShortcut': '{action} ({shortcut})',
   'common.loading': 'Loading...',
   'common.loadFailed':
     'Could not load this. Check your connection and try again.',
   'common.retry': 'Retry',
+  'common.version': 'v{version}',
+  'common.close': 'Close',
   'confirm.confirm': 'Confirm',
   'config.validation.number': 'Must be a valid number',
   'config.validation.integer': 'Must be a whole number',
@@ -1053,7 +1070,16 @@ export const en: Record<string, string> = {
   'config.validation.max': 'Must be at most {max}',
   'config.validation.minLength': 'Must be at least {min} characters',
   'config.validation.maxLength': 'Must be at most {max} characters',
+  'config.blob.default': 'Default',
+  'config.blob.replaceLabel': 'Replace {name}',
+  'config.blob.replace': 'Replace',
+  'config.blob.uploadLabel': 'Upload {name}',
+  'config.blob.prompt': 'Drop file here or click to browse',
+  'config.blob.retryLabel': 'Retry upload',
+  'config.blob.uploadFailed': 'Upload failed',
+  'config.inheritance.disabled': '(disabled)',
   'users.revoke': 'Revoke',
+  'users.deletedUser': '[Deleted User]',
   'confirm.failed': 'The action failed. Please try again.',
 
   // System / admin monitoring
@@ -1097,9 +1123,15 @@ export const en: Record<string, string> = {
   'system.worker.ip': 'IP',
   'system.worker.system': 'System',
   'system.worker.cpus': '{count} CPUs',
+  'system.worker.pid': 'pid {pid}',
 
   // Dead Letter Queue
   'sidebar.dlq': 'Dead Letter Queue',
+  'sidebar.mobileTitle': 'Sidebar',
+  'sidebar.mobileDescription': 'Displays the mobile sidebar.',
+  'sidebar.toggle': 'Toggle Sidebar',
+  'sidebar.expand': 'Expand Sidebar',
+  'sidebar.collapse': 'Collapse Sidebar',
   'dlq.title': 'Dead Letter Queue',
   'dlq.subtitle':
     'Messages that exhausted their retry budget. Inspect, retry, or resolve them here.',
@@ -1161,4 +1193,41 @@ export const en: Record<string, string> = {
   'dlq.detail.deleteError': 'Delete failed.',
   'dlq.detail.deleteConfirm':
     'Mark this message as resolved without retrying? This cannot be undone.',
+  'markdown.write': 'Write',
+  'markdown.preview': 'Preview',
+  'markdown.nothingToPreview': 'Nothing to preview',
+  'errorReporter.title': 'Something went wrong',
+  'errorReporter.description':
+    'The page hit an unexpected error. Your submissions and contest data are safe on the server; reloading usually fixes it.',
+  'errorReporter.reload': 'Reload page',
+  'errorReporter.back': 'Go back',
+  'deviceAuth.promptAuthenticated': 'authenticated',
+  'deviceAuth.codeDigit': 'Code digit {index}',
+  'cliAuth.authorized': 'Authorized',
+  'cliAuth.signedInAs': 'Signed in as {username}',
+  'cliAuth.pasteToken':
+    'Paste this token in your terminal to complete login. You can close this tab afterwards.',
+  'cliAuth.title': 'Authorize Broccoli CLI',
+  'cliAuth.redirectBlocked':
+    'The provided redirect target was not a local address and has been blocked for your security. After authorizing, copy the token shown and paste it into your terminal manually.',
+  'cliAuth.requestFor':
+    'The broccoli CLI on your terminal wants to access your account {username}.',
+  'cliAuth.request':
+    'The broccoli CLI on your terminal wants to access your account.',
+  'cliAuth.scope':
+    'This will let the CLI submit solutions, check scores, and manage your contest participation on your behalf.',
+  'cliAuth.authorize': 'Authorize',
+  'cliAuth.switchUser': 'Sign in as a different user',
+  'extension.componentError': 'Component Error',
+  'extension.componentMissing':
+    'A plugin registered this route, but its component {component} is missing.',
+  'table.resultOne': '1 result',
+  'table.results': '{count} results',
+  'table.loading': 'loading...',
+  'dateTime.time': 'Time:',
+  'dateTime.hours': 'Hours',
+  'dateTime.minutes': 'Minutes',
+  'dateTime.clear': 'Clear',
+  'fileDrop.label': 'Upload files',
+  'fileDrop.prompt': 'Drop files here or click to browse',
 };

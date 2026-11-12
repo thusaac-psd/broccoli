@@ -1,5 +1,6 @@
 import '@/lib/monaco-setup';
 
+import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useTheme } from '@broccoli/web-sdk/theme';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@broccoli/web-sdk/ui';
 import type { Monaco } from '@monaco-editor/react';
@@ -31,6 +32,7 @@ export function MarkdownEditor({
   placeholder,
   onEditorMount,
 }: MarkdownEditorProps) {
+  const { t } = useTranslation();
   const { theme } = useTheme();
   const [tab, setTab] = useState<string>('write');
   const [editorInstance, setEditorInstance] =
@@ -57,10 +59,10 @@ export function MarkdownEditor({
       <div className="flex items-center justify-between">
         <TabsList className="h-8">
           <TabsTrigger value="write" className="text-xs px-3 py-1">
-            Write
+            {t('markdown.write')}
           </TabsTrigger>
           <TabsTrigger value="preview" className="text-xs px-3 py-1">
-            Preview
+            {t('markdown.preview')}
           </TabsTrigger>
         </TabsList>
         <KeybindingModeDropdown
@@ -113,7 +115,7 @@ export function MarkdownEditor({
             <Markdown>{value}</Markdown>
           ) : (
             <p className="text-sm text-muted-foreground italic">
-              Nothing to preview
+              {t('markdown.nothingToPreview')}
             </p>
           )}
         </div>

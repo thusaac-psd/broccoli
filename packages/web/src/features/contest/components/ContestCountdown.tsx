@@ -177,11 +177,15 @@ export function ContestCountdown() {
       {/* Schedule */}
       <div className="text-xs text-muted-foreground/70 font-medium tabular-nums space-y-1">
         <div>
-          <span className="text-muted-foreground/40 mr-1.5">Start</span>
+          <span className="text-muted-foreground/40 mr-1.5">
+            {t('contest.countdown.start')}
+          </span>
           {fmtDate(contest.start_time)}
         </div>
         <div>
-          <span className="text-muted-foreground/40 mr-1.5">End</span>
+          <span className="text-muted-foreground/40 mr-1.5">
+            {t('contest.countdown.end')}
+          </span>
           {fmtDate(contest.end_time)}
         </div>
       </div>

@@ -147,7 +147,9 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
               </div>
 
               <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
-                {row.timeUsed != null ? `${row.timeUsed}ms` : '—'}
+                {row.timeUsed != null
+                  ? t('result.timeValue', { value: row.timeUsed })
+                  : '—'}
               </span>
               <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
                 {row.memoryUsed != null ? `${row.memoryUsed}KB` : '—'}
