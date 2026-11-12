@@ -220,9 +220,8 @@ async fn pending_timer_count(app: &TestApp, key: &str) -> u64 {
 /// refuse to move past a poisonous row. This test is what makes that
 /// documented promise checkable.
 ///
-/// `lease_secs: 0` makes each explicit tick immediately eligible to reclaim
-/// the row, so the retry budget can be exhausted without waiting out a real
-/// 30-second lease.
+/// Between ticks the test expires the claim's lease directly in the database,
+/// so the retry budget can be spent without waiting out a real lease.
 #[tokio::test]
 async fn a_trapping_handler_is_retried_then_dropped() {
     let app = TestApp::spawn_with_plugins().await;
@@ -230,7 +229,6 @@ async fn a_trapping_handler_is_retried_then_dropped() {
     schedule_timer(&app, "poison", 0, "{}").await;
 
     let config = server::dispatcher::plugin_timer::TimerConfig {
-        lease_secs: 0,
         max_attempts: 3,
         ..Default::default()
     };
@@ -243,8 +241,17 @@ async fn a_trapping_handler_is_retried_then_dropped() {
             stats.claimed, 1,
             "tick {tick} should still claim the poisonous row"
         );
+        expire_claims(&app).await;
     }
 
+    let stats = server::dispatcher::plugin_timer::tick_once(&app.state, &config)
+        .await
+        .unwrap();
+    assert_eq!(
+        (stats.claimed, stats.dropped),
+        (0, 1),
+        "the spent row is dropped by the next claim, not retried"
+    );
     assert_eq!(
         pending_timer_count(&app, "poison").await,
         0,
@@ -265,4 +272,14 @@ async fn a_trapping_handler_is_retried_then_dropped() {
         deliveries.iter().any(|d| d["key"] == "healthy"),
         "a poisonous timer must not starve later ones: {deliveries:?}"
     );
+}
+
+/// Move every claim's lease into the past, as if it had expired.
+async fn expire_claims(app: &TestApp) {
+    sea_orm::ConnectionTrait::execute_unprepared(
+        &app.db,
+        "UPDATE plugin_timer SET claimed_at = claimed_at - INTERVAL '1 hour' WHERE claimed_at IS NOT NULL",
+    )
+    .await
+    .expect("expire plugin timer claims");
 }
