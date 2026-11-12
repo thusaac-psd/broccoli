@@ -55,16 +55,22 @@ export type SendSettled = <T>(
   request: (idempotencyKey: string) => Promise<T>,
 ) => Promise<IdempotentResult<T>>;
 
-/** The reply body: undefined when empty, parsed when JSON, else its text. */
+/**
+ * The reply body: undefined when empty, else parsed as JSON. A body that is
+ * not JSON is returned as its text, unless it claims to be JSON (then it is
+ * an `INVALID_RESPONSE`). The plugin proxy may send no content type at all.
+ */
 async function readBody(response: Response): Promise<unknown> {
   const text = await response.text();
   if (!text) return undefined;
-  const type = response.headers.get('content-type') ?? '';
-  if (!type.includes('json')) return text;
   try {
     return JSON.parse(text);
   } catch {
-    throw new PluginApiError('', response.status, 'INVALID_RESPONSE');
+    const type = response.headers.get('content-type') ?? '';
+    if (type.includes('json')) {
+      throw new PluginApiError('', response.status, 'INVALID_RESPONSE');
+    }
+    return text;
   }
 }
 

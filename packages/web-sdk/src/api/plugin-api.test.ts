@@ -61,6 +61,21 @@ test('an empty reply settles without data', async () => {
   assert.deepEqual(await api.post('/act'), { settled: true, data: undefined });
 });
 
+test('a JSON reply without a content type is parsed', async () => {
+  const { api } = client([new Response('{"ok":true}', { status: 200 })]);
+  assert.deepEqual(await api.get('/info'), { ok: true });
+});
+
+test('a reply claiming JSON that is not is an invalid response', async () => {
+  const { api } = client([
+    new Response('oops', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  ]);
+  await assert.rejects(api.get('/info'), { code: 'INVALID_RESPONSE' });
+});
+
 test('a non-JSON reply is read as text', async () => {
   const { api } = client([new Response('pong', { status: 200 })]);
   assert.equal(await api.get('/ping'), 'pong');
