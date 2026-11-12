@@ -115,6 +115,7 @@
 'ioi.subtask.allTestCases' = 'ALL TEST CASES'
 'ioi.subtask.addAllUnassigned' = '+ All Unassigned'
 'ioi.subtask.clear' = 'Clear'
+'ioi.subtask.remove' = 'Remove'
 'ioi.subtask.clearConfirm' = 'Remove all {count} test cases from "{name}"?'
 'ioi.subtask.searchPlaceholder' = 'Search labels (regex ok), or #1-10,15 for positions'
 'ioi.subtask.noMatchPosition' = 'No test cases at those positions'

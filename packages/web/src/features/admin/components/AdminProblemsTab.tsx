@@ -28,6 +28,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -541,6 +542,7 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
   const table = useTableSearchParams({
     defaultSortBy: 'created_at',
     defaultSortOrder: 'desc',
@@ -616,19 +618,24 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
     setConfigDialogOpen(true);
   }
 
-  async function handleDeleteProblem(problem: ProblemSummary) {
-    if (!window.confirm(t('admin.deleteConfirm'))) return;
-    const { error } = await apiClient.DELETE('/problems/{id}', {
-      params: { path: { id: problem.id } },
+  function handleDeleteProblem(problem: ProblemSummary) {
+    confirm({
+      title: t('admin.deleteConfirm'),
+      description: problem.title,
+      confirmLabel: t('admin.delete'),
+      destructive: true,
+      failureMessage: t('toast.problem.deleteError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE('/problems/{id}', {
+          params: { path: { id: problem.id } },
+        });
+        if (error) throw error;
+        toast.success(t('toast.problem.deleted'));
+        // Prefix invalidation: refreshes the global list and every
+        // contest-scoped list, since the problem may appear in any of them.
+        queryClient.invalidateQueries({ queryKey: ['admin-problems'] });
+      },
     });
-    if (error) {
-      toast.error(getErrorMessage(error, t('toast.problem.deleteError')));
-    } else {
-      toast.success(t('toast.problem.deleted'));
-      // Prefix invalidation: refreshes the global list and every
-      // contest-scoped list, since the problem may appear in any of them.
-      queryClient.invalidateQueries({ queryKey: ['admin-problems'] });
-    }
   }
 
   // In contest mode rows only carry the contest relationship; the management
@@ -654,24 +661,27 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
   }
 
   // Detach the problem from this contest; never deletes the problem itself.
-  async function handleDetachProblem(row: ContestProblem) {
+  function handleDetachProblem(row: ContestProblem) {
     if (!contestId) return;
-    if (!window.confirm(t('admin.removeFromContestConfirm'))) return;
-    const { error } = await apiClient.DELETE(
-      '/contests/{id}/problems/{problem_id}',
-      {
-        params: { path: { id: contestId, problem_id: row.problem_id } },
+    confirm({
+      title: t('admin.removeFromContestConfirm'),
+      description: row.problem_title,
+      confirmLabel: t('admin.removeFromContest'),
+      destructive: true,
+      failureMessage: t('toast.problem.removeError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE(
+          '/contests/{id}/problems/{problem_id}',
+          { params: { path: { id: contestId, problem_id: row.problem_id } } },
+        );
+        if (error) throw error;
+        toast.success(t('toast.problem.removed'));
+        queryClient.invalidateQueries({ queryKey: problemsQueryKey });
+        queryClient.invalidateQueries({
+          queryKey: ['contest-problems', contestId],
+        });
       },
-    );
-    if (error) {
-      toast.error(getErrorMessage(error, t('toast.problem.removeError')));
-    } else {
-      toast.success(t('toast.problem.removed'));
-      queryClient.invalidateQueries({ queryKey: problemsQueryKey });
-      queryClient.invalidateQueries({
-        queryKey: ['contest-problems', contestId],
-      });
-    }
+    });
   }
 
   function handleConfigureContestProblem(row: ContestProblem) {
@@ -798,6 +808,7 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
           onOpenChange={setConfigDialogOpen}
         />
       )}
+      {confirmDialog}
     </>
   );
 }

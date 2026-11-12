@@ -34,6 +34,7 @@ import {
   Input,
   Label,
   Separator,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatDateTime, formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -50,7 +51,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
 
@@ -484,6 +485,7 @@ export function ContestProblemsDialog({
   const contestProblemsKey = ['contest-problems', contest.id];
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const { data: contestProblems = [], isLoading: loadingContestProblems } =
     useQuery({
@@ -580,20 +582,27 @@ export function ContestProblemsDialog({
     }
   }
 
-  async function handleRemove(problemId: number) {
-    if (!window.confirm(t('admin.deleteConfirm'))) return;
-    const { error: apiError } = await apiClient.DELETE(
-      '/contests/{id}/problems/{problem_id}',
-      {
-        params: { path: { id: contest.id, problem_id: problemId } },
+  function handleRemove(problem: ContestProblem) {
+    confirm({
+      title: t('admin.removeFromContestConfirm'),
+      description: problem.problem_title,
+      confirmLabel: t('admin.removeFromContest'),
+      destructive: true,
+      failureMessage: t('toast.problem.removeError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE(
+          '/contests/{id}/problems/{problem_id}',
+          {
+            params: {
+              path: { id: contest.id, problem_id: problem.problem_id },
+            },
+          },
+        );
+        if (error) throw error;
+        toast.success(t('toast.problem.removed'));
+        queryClient.invalidateQueries({ queryKey: contestProblemsKey });
       },
-    );
-    if (apiError) {
-      toast.error(getErrorMessage(apiError, t('toast.problem.removeError')));
-    } else {
-      toast.success(t('toast.problem.removed'));
-      queryClient.invalidateQueries({ queryKey: contestProblemsKey });
-    }
+    });
   }
 
   const isLoading = loadingContestProblems || loadingAllProblems;
@@ -653,7 +662,7 @@ export function ContestProblemsDialog({
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7 text-destructive hover:text-destructive"
-                          onClick={() => handleRemove(p.problem_id)}
+                          onClick={() => handleRemove(p)}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -778,6 +787,7 @@ export function ContestProblemsDialog({
             onOpenChange={setConfigCPOpen}
           />
         )}
+        {confirmDialog}
       </DialogContent>
     </Dialog>
   );
@@ -918,12 +928,50 @@ function useContestColumns({
   ];
 }
 
+// -- Contest deletion --
+
+/**
+ * Ask to delete a contest and delete it once confirmed. Returns the function
+ * that asks and the confirm dialog to render.
+ */
+export function useDeleteContestConfirm(): [
+  (contest: { id: number; title: string }, onDeleted?: () => void) => void,
+  ReactNode,
+] {
+  const { t } = useTranslation();
+  const apiClient = useApiClient();
+  const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
+
+  const confirmDelete = (
+    contest: { id: number; title: string },
+    onDeleted?: () => void,
+  ) =>
+    confirm({
+      title: t('admin.deleteConfirm'),
+      description: contest.title,
+      confirmLabel: t('admin.delete'),
+      destructive: true,
+      failureMessage: t('toast.contest.deleteError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE('/contests/{id}', {
+          params: { path: { id: contest.id } },
+        });
+        if (error) throw error;
+        toast.success(t('toast.contest.deleted'));
+        queryClient.invalidateQueries({ queryKey: ['admin-contests'] });
+        onDeleted?.();
+      },
+    });
+
+  return [confirmDelete, confirmDialog];
+}
+
 // -- Contests Tab --
 
 export function AdminContestsTab() {
   const { t } = useTranslation();
-  const apiClient = useApiClient();
-  const queryClient = useQueryClient();
+  const [confirmDelete, deleteDialog] = useDeleteContestConfirm();
   const table = useTableSearchParams({
     defaultSortBy: 'created_at',
     defaultSortOrder: 'desc',
@@ -972,22 +1020,9 @@ export function AdminContestsTab() {
     setConfigDialogOpen(true);
   }
 
-  async function handleDeleteContest(contest: ContestSummary) {
-    if (!window.confirm(t('admin.deleteConfirm'))) return;
-    const { error } = await apiClient.DELETE('/contests/{id}', {
-      params: { path: { id: contest.id } },
-    });
-    if (error) {
-      toast.error(getErrorMessage(error, t('toast.contest.deleteError')));
-    } else {
-      toast.success(t('toast.contest.deleted'));
-      queryClient.invalidateQueries({ queryKey: ['admin-contests'] });
-    }
-  }
-
   const columns = useContestColumns({
     onEdit: handleEditContest,
-    onDelete: handleDeleteContest,
+    onDelete: (contest) => confirmDelete(contest),
     onManageProblems: handleManageProblems,
     onBulkParticipants: handleBulkParticipants,
     onConfigure: handleConfigure,
@@ -1043,6 +1078,7 @@ export function AdminContestsTab() {
           onOpenChange={setConfigDialogOpen}
         />
       )}
+      {deleteDialog}
     </>
   );
 }

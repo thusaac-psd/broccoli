@@ -115,6 +115,7 @@
 'ioi.subtask.allTestCases' = '所有测试点'
 'ioi.subtask.addAllUnassigned' = '+ 所有未分配的测试点'
 'ioi.subtask.clear' = '清空'
+'ioi.subtask.remove' = '移除'
 'ioi.subtask.clearConfirm' = '确定要从 "{name}" 中移除所有 {count} 个测试点吗？'
 'ioi.subtask.searchPlaceholder' = '搜索标签（支持正则），或输入 #1-10,15 搜索位置'
 'ioi.subtask.noMatchPosition' = '在这些位置未找到测试点'

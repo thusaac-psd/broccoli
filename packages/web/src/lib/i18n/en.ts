@@ -575,6 +575,7 @@ export const en: Record<string, string> = {
   'admin.participants.registeredAt': 'Registered',
   'admin.participants.add': 'Add',
   'admin.participants.removeConfirm': 'Remove {username} from this contest?',
+  'admin.participants.remove': 'Remove',
   'admin.bulkParticipantsJsonLabel': 'JSON File or JSON Content',
   'admin.bulkParticipantsJsonPlaceholder':
     '["alice", { "username": "team001", "display_name": "Team One", "password": "custom_pass123" }]',
@@ -1052,6 +1053,7 @@ export const en: Record<string, string> = {
     'Could not load this. Check your connection and try again.',
   'common.retry': 'Retry',
   'confirm.confirm': 'Confirm',
+  'users.revoke': 'Revoke',
   'confirm.failed': 'The action failed. Please try again.',
 
   // System / admin monitoring

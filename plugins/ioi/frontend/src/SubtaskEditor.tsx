@@ -18,6 +18,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import type React from 'react';
@@ -998,6 +999,7 @@ export function SubtaskEditor({
 
   // State
   const [openPools, setOpenPools] = useState<Record<number, boolean>>({});
+  const [confirm, confirmDialog] = useConfirmDialog();
   const [warningsExpanded, setWarningsExpanded] = useState(true);
   const [lastClicked, setLastClicked] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] =
@@ -1051,21 +1053,27 @@ export function SubtaskEditor({
         count > 0
           ? t('ioi.subtask.removeConfirm', { name, count })
           : t('ioi.subtask.removeConfirmEmpty', { name });
-      if (!window.confirm(msg)) return;
-      onChange(subtasks.filter((_, i) => i !== index));
-      setSubtaskKeys((prev) => prev.filter((_, i) => i !== index));
-      // Shift index-keyed state maps so entries above the removed index move down by 1
-      setOpenPools((prev) => {
-        const shifted: Record<number, boolean> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const ki = Number(k);
-          if (ki < index) shifted[ki] = v;
-          else if (ki > index) shifted[ki - 1] = v;
-        }
-        return shifted;
+      confirm({
+        title: msg,
+        confirmLabel: t('ioi.subtask.remove'),
+        destructive: true,
+        onConfirm: () => {
+          onChange(subtasks.filter((_, i) => i !== index));
+          setSubtaskKeys((prev) => prev.filter((_, i) => i !== index));
+          // Shift index-keyed state maps so entries above the removed index move down by 1
+          setOpenPools((prev) => {
+            const shifted: Record<number, boolean> = {};
+            for (const [k, v] of Object.entries(prev)) {
+              const ki = Number(k);
+              if (ki < index) shifted[ki] = v;
+              else if (ki > index) shifted[ki - 1] = v;
+            }
+            return shifted;
+          });
+        },
       });
     },
-    [subtasks, onChange, t],
+    [subtasks, onChange, confirm, t],
   );
 
   const addSubtask = useCallback(() => {
@@ -1845,16 +1853,16 @@ export function SubtaskEditor({
                           onClick={() => {
                             if (subtask.test_cases.length === 0) return;
                             const n = subtask.test_cases.length;
-                            if (
-                              window.confirm(
-                                t('ioi.subtask.clearConfirm', {
-                                  count: n,
-                                  name: subtask.name,
-                                }),
-                              )
-                            ) {
-                              updateSubtask(idx, { test_cases: [] });
-                            }
+                            confirm({
+                              title: t('ioi.subtask.clearConfirm', {
+                                count: n,
+                                name: subtask.name,
+                              }),
+                              confirmLabel: t('ioi.subtask.clear'),
+                              destructive: true,
+                              onConfirm: () =>
+                                updateSubtask(idx, { test_cases: [] }),
+                            });
                           }}
                           className="text-[9px] font-semibold opacity-50 uppercase tracking-tight h-auto py-0.5 px-2"
                         >
@@ -1911,6 +1919,7 @@ export function SubtaskEditor({
       >
         {t('ioi.subtask.addSubtask')}
       </Button>
+      {confirmDialog}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Label, Switch } from '@broccoli/web-sdk/ui';
+import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useEffect, useState } from 'react';
@@ -169,8 +169,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
   const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [now, setNow] = useState(Date.now());
-  const [revealing, setRevealing] = useState(false);
-  const [revealError, setRevealError] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const {
     data: standings,
@@ -192,21 +191,21 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
     },
   });
 
-  const handleReveal = async () => {
+  // Reveal is final and cannot be undone from the UI, so it is confirmed
+  // first. A failure stays in the dialog: the organizer never believes it
+  // succeeded.
+  const handleReveal = () => {
     if (!contestId) return;
-    // Reveal is final and cannot be undone from the UI - confirm first.
-    if (!window.confirm(t('icpc.scoreboard.revealConfirm'))) return;
-    setRevealing(true);
-    setRevealError(null);
-    try {
-      await api.reveal(contestId);
-      await refetch();
-    } catch (e) {
-      // Surface the failure - do NOT let the organizer believe it succeeded.
-      setRevealError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRevealing(false);
-    }
+    confirm({
+      title: t('icpc.scoreboard.revealConfirm'),
+      confirmLabel: t('icpc.scoreboard.reveal'),
+      destructive: true,
+      failureMessage: t('icpc.scoreboard.revealFailed'),
+      onConfirm: async () => {
+        await api.reveal(contestId);
+        await refetch();
+      },
+    });
   };
 
   const hasData = dataUpdatedAt > 0;
@@ -241,24 +240,17 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
 
   return (
     <div>
+      {confirmDialog}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <PhaseBar phase={phase} frozen={frozen} />
         <div className="flex items-center gap-3">
-          {revealError && (
-            <span className="text-[11px] text-red-600" title={revealError}>
-              {t('icpc.scoreboard.revealFailed')}
-            </span>
-          )}
           {can_reveal && (
             <button
               type="button"
               onClick={handleReveal}
-              disabled={revealing}
               className="rounded-md bg-amber-500 px-3 py-1 text-[12px] font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
             >
-              {revealing
-                ? t('icpc.scoreboard.revealing')
-                : t('icpc.scoreboard.reveal')}
+              {t('icpc.scoreboard.reveal')}
             </button>
           )}
           {dataUpdatedAt > 0 && (

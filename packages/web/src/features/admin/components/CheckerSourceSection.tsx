@@ -1,6 +1,6 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button, FileDropZone } from '@broccoli/web-sdk/ui';
+import { Button, FileDropZone, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileCode, Loader2, Plus, Trash2, Upload } from 'lucide-react';
@@ -37,6 +37,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const [staged, setStaged] = useState<StagedFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -145,20 +146,25 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
     [files, apiClient, problemId, queryClient, queryKey, t],
   );
 
-  const handleClearAll = useCallback(async () => {
-    if (!window.confirm(t('admin.deleteConfirm'))) return;
-    try {
-      const { error } = await apiClient.DELETE(
-        '/problems/{id}/checker-source',
-        { params: { path: { id: problemId } } },
-      );
-      if (error) throw error;
-      toast.success(t('admin.checkerSource.cleared'));
-      queryClient.invalidateQueries({ queryKey });
-    } catch (err) {
-      toast.error(getErrorMessage(err, t('admin.checkerSource.deleteError')));
-    }
-  }, [apiClient, problemId, queryClient, queryKey, t]);
+  const handleClearAll = useCallback(
+    () =>
+      confirm({
+        title: t('admin.deleteConfirm'),
+        confirmLabel: t('admin.delete'),
+        destructive: true,
+        failureMessage: t('admin.checkerSource.deleteError'),
+        onConfirm: async () => {
+          const { error } = await apiClient.DELETE(
+            '/problems/{id}/checker-source',
+            { params: { path: { id: problemId } } },
+          );
+          if (error) throw error;
+          toast.success(t('admin.checkerSource.cleared'));
+          queryClient.invalidateQueries({ queryKey });
+        },
+      }),
+    [apiClient, confirm, problemId, queryClient, queryKey, t],
+  );
 
   return (
     <div className="space-y-4">
@@ -297,6 +303,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
           </div>
         </div>
       ) : null}
+      {confirmDialog}
     </div>
   );
 }

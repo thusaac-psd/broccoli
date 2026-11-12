@@ -1,6 +1,11 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button, FileDropZone, Input } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  FileDropZone,
+  Input,
+  useConfirmDialog,
+} from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -57,6 +62,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
   const { upload: uploadFile } = useAttachmentUpload(problemId);
 
   const [staged, setStaged] = useState<StagedFile[]>([]);
@@ -171,20 +177,24 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
   );
 
   const handleDelete = useCallback(
-    async (file: Attachment) => {
-      if (!window.confirm(t('admin.deleteConfirm'))) return;
-      const { error } = await apiClient.DELETE(
-        '/problems/{id}/attachments/{ref_id}',
-        { params: { path: { id: problemId, ref_id: file.id } } },
-      );
-      if (error) {
-        toast.error(getErrorMessage(error, t('admin.attachments.deleteError')));
-      } else {
-        toast.success(t('admin.attachments.deleted'));
-        queryClient.invalidateQueries({ queryKey });
-      }
-    },
-    [apiClient, problemId, queryClient, queryKey, t],
+    (file: Attachment) =>
+      confirm({
+        title: t('admin.deleteConfirm'),
+        description: file.filename,
+        confirmLabel: t('admin.delete'),
+        destructive: true,
+        failureMessage: t('admin.attachments.deleteError'),
+        onConfirm: async () => {
+          const { error } = await apiClient.DELETE(
+            '/problems/{id}/attachments/{ref_id}',
+            { params: { path: { id: problemId, ref_id: file.id } } },
+          );
+          if (error) throw error;
+          toast.success(t('admin.attachments.deleted'));
+          queryClient.invalidateQueries({ queryKey });
+        },
+      }),
+    [apiClient, confirm, problemId, queryClient, queryKey, t],
   );
 
   const handleDownload = useCallback(
@@ -403,6 +413,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
           ))}
         </div>
       ) : null}
+      {confirmDialog}
     </div>
   );
 }

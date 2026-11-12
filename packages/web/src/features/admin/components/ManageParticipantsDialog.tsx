@@ -22,6 +22,7 @@ import {
   TabsList,
   TabsTrigger,
   Textarea,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatDateTime } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -92,7 +93,7 @@ function EnrolledTab({
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
-  const [removingId, setRemovingId] = useState<number | null>(null);
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const filtered = useMemo(() => {
     if (!search) return participants;
@@ -105,25 +106,24 @@ function EnrolledTab({
     );
   }, [participants, search]);
 
-  async function handleRemove(userId: number, username: string) {
-    if (!window.confirm(t('admin.participants.removeConfirm', { username })))
-      return;
-    setRemovingId(userId);
-    const { error } = await apiClient.DELETE(
-      '/contests/{id}/participants/{user_id}',
-      {
-        params: { path: { id: contest.id, user_id: userId } },
+  function handleRemove(userId: number, username: string) {
+    confirm({
+      title: t('admin.participants.removeConfirm', { username }),
+      confirmLabel: t('admin.participants.remove'),
+      destructive: true,
+      failureMessage: t('toast.participant.removeError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE(
+          '/contests/{id}/participants/{user_id}',
+          { params: { path: { id: contest.id, user_id: userId } } },
+        );
+        if (error) throw error;
+        toast.success(t('toast.participant.removed'));
+        queryClient.invalidateQueries({
+          queryKey: ['contest-participants', contest.id],
+        });
       },
-    );
-    setRemovingId(null);
-    if (error) {
-      toast.error(getErrorMessage(error, t('toast.participant.removeError')));
-    } else {
-      toast.success(t('toast.participant.removed'));
-      queryClient.invalidateQueries({
-        queryKey: ['contest-participants', contest.id],
-      });
-    }
+    });
   }
 
   return (
@@ -208,7 +208,6 @@ function EnrolledTab({
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-destructive hover:text-destructive"
-                      disabled={removingId === p.user_id}
                       onClick={() => handleRemove(p.user_id, p.username)}
                     >
                       <UserMinus className="h-3.5 w-3.5" />
@@ -220,6 +219,7 @@ function EnrolledTab({
           </table>
         )}
       </div>
+      {confirmDialog}
     </div>
   );
 }
