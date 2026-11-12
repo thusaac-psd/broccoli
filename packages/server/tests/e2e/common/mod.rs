@@ -288,8 +288,6 @@ impl E2eTestApp {
                 max_blocking_threads: None,
                 batch_evaluator_fanout_concurrency: 64,
                 operation_batch_publish_concurrency: 32,
-                healthz_listen: None,
-                healthz_worker_threads: 2,
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,

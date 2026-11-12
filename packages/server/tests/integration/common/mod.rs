@@ -586,8 +586,6 @@ impl TestApp {
                 max_blocking_threads: None,
                 batch_evaluator_fanout_concurrency: 64,
                 operation_batch_publish_concurrency: 32,
-                healthz_listen: None,
-                healthz_worker_threads: 2,
                 // Enable the claim fiber by default so integration
                 // tests that rely on the `Queued`-on-POST flow see the
                 // row transition all the way to dispatch.

@@ -296,27 +296,6 @@ pub struct ServerConfig {
     /// dominate latency.
     #[serde(default = "default_operation_batch_publish_concurrency")]
     pub operation_batch_publish_concurrency: u32,
-    /// Address (e.g. `"0.0.0.0:9091"`) for an **optional** dedicated TCP
-    /// listener that serves only `/livez`, `/healthz` (both liveness-only
-    /// there) and `/metrics` on its own tokio runtime + OS thread.
-    /// When `None`, these endpoints are served only on the main router and
-    /// therefore share the main runtime's scheduler.
-    ///
-    /// Setting this is **opt-in**: it lets liveness probes and metrics
-    /// scrapes survive even when the api runtime is saturated by submission
-    /// bursts or scheduler thrash - but operators must repoint their
-    /// probe/scrape targets at this port to actually realize that
-    /// isolation. The endpoints stay mounted on the main router unchanged
-    /// for backward compatibility.
-    #[serde(default)]
-    pub healthz_listen: Option<String>,
-    /// Number of tokio worker threads for the dedicated healthz/metrics
-    /// runtime. Two is plenty: the only handlers running here are
-    /// a Prometheus encode (CPU-bound, microseconds) and a 2s DB/MQ ping.
-    /// Increase only if you also use the healthz listener for high-volume
-    /// scraping fan-in.
-    #[serde(default = "default_healthz_worker_threads")]
-    pub healthz_worker_threads: u32,
     /// Master switch for the claim fiber. When `true` (default), the
     /// per-server claim fiber polls the `submission` and `code_run` tables
     /// for `status='Queued'` rows, transitions them to `Pending`, and
@@ -413,8 +392,6 @@ impl Default for ServerConfig {
             max_blocking_threads: None,
             batch_evaluator_fanout_concurrency: default_batch_evaluator_fanout_concurrency(),
             operation_batch_publish_concurrency: default_operation_batch_publish_concurrency(),
-            healthz_listen: None,
-            healthz_worker_threads: default_healthz_worker_threads(),
             claim_fiber_enabled: default_claim_fiber_enabled(),
             claim_poll_interval_ms: default_claim_poll_interval_ms(),
             claim_batch_size: default_claim_batch_size(),
@@ -519,10 +496,6 @@ fn default_batch_evaluator_fanout_concurrency() -> u32 {
 
 fn default_operation_batch_publish_concurrency() -> u32 {
     32
-}
-
-fn default_healthz_worker_threads() -> u32 {
-    2
 }
 
 fn default_claim_fiber_enabled() -> bool {

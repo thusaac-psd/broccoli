@@ -16,7 +16,6 @@ use crate::build_router;
 use crate::config::{AppConfig, per_replica_result_queue_name, resolve_server_id};
 use crate::consumers::{consume_operation_dlq, consume_operation_results};
 use crate::dlq::run_stuck_job_detector;
-use crate::healthz_runtime::spawn_healthz_runtime;
 use crate::host_funcs::context::HostFunctionSystemDeps;
 use crate::manager::ServerManager;
 use crate::registry;
@@ -36,12 +35,6 @@ pub struct ServerRuntime {
     /// For shutdown: refusing and draining plugin calls, stopping the plugin
     /// lifecycle before its replica row is retired.
     state: AppState,
-    /// Handle to the dedicated `/healthz` + `/metrics` OS thread spawned in
-    /// [`crate::healthz_runtime`]. `None` when `server.healthz_listen`
-    /// is unset. The thread runs for the process lifetime and is reaped by
-    /// the OS on exit, so we hold the handle for ownership but never `join()`
-    /// it - hence the underscore prefix to silence dead-code warnings.
-    _healthz_handle: Option<std::thread::JoinHandle<()>>,
     /// Keeps this replica's ID claim / heartbeat alive; released in [`Self::serve`].
     node_heartbeat: Option<NodeHeartbeat>,
     _telemetry_guard: common::observability::TelemetryGuard,
@@ -483,7 +476,6 @@ impl ServerRuntime {
             config: app_config.server.clone(),
         });
 
-        let healthz_state = state.clone();
         let shutdown_state = state.clone();
         let app = build_router(state).layer(cors_layer(&app_config.server.cors)?);
 
@@ -498,22 +490,6 @@ impl ServerRuntime {
             .await
             .with_context(|| format!("Failed to bind to {}", addr))?;
 
-        // Optional dedicated runtime + listener for /healthz + /metrics.
-        // When configured, probe traffic survives main-runtime saturation.
-        let healthz_handle = if let Some(ref addr_str) = app_config.server.healthz_listen {
-            let healthz_addr: SocketAddr = addr_str
-                .parse()
-                .with_context(|| format!("Invalid server.healthz_listen address: {}", addr_str))?;
-            let worker_threads = app_config.server.healthz_worker_threads.max(1) as usize;
-            Some(spawn_healthz_runtime(
-                healthz_addr,
-                worker_threads,
-                healthz_state,
-            )?)
-        } else {
-            None
-        };
-
         Ok(Self {
             listener,
             app,
@@ -522,7 +498,6 @@ impl ServerRuntime {
             db,
             server_id,
             state: shutdown_state,
-            _healthz_handle: healthz_handle,
             node_heartbeat,
             _telemetry_guard: telemetry_guard,
         })
