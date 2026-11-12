@@ -18,12 +18,13 @@ use ratatui::widgets::*;
 
 use broccoli_cli_core::api::clarification::{ClarificationListResponse, ClarificationResponse};
 use broccoli_cli_core::api::submission::SubmissionListResponse;
-use broccoli_cli_core::client::Client;
+use broccoli_cli_core::client::{Client, ClientError, ClientResult};
 use broccoli_cli_core::config;
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::model::{
     ClarificationKind, StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay,
 };
+use broccoli_cli_core::session::SessionError;
 use broccoli_cli_core::tui::theme::THEME;
 use chrono::{DateTime, Utc};
 
@@ -174,8 +175,8 @@ struct AppData {
     overlay: Option<Overlay>,
     /// Open submission overlay's detail body, refreshed live by the poller.
     submission_detail: Option<broccoli_cli_core::api::submission::SubmissionResponse>,
-    /// Consecutive failed poll cycles; drives a "reconnecting" header warning.
-    poll_failures: u32,
+    /// How the poller has been doing; drives the header warning.
+    link: Link,
     /// Inner (width, height) of the overlay modal from the last render, for scroll clamping.
     overlay_viewport: Cell<(u16, u16)>,
     /// Reply count the user has seen per clarification id (absent means never opened).
@@ -256,8 +257,66 @@ impl AppData {
 enum PollUpdate {
     Submissions(SubmissionListResponse),
     Clarifications(ClarificationListResponse),
-    /// Whether the most recent poll cycle reached the server.
-    Health(bool),
+    /// How the most recent poll cycle ended.
+    Cycle(PollOutcome),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollOutcome {
+    Ok,
+    Failed,
+    /// The session ended; polling resumes once `broccoli login` saves a new one.
+    SessionRejected,
+}
+
+impl PollOutcome {
+    /// The worse of two outcomes in one cycle.
+    fn worst(self, other: Self) -> Self {
+        use PollOutcome::*;
+        match (self, other) {
+            (SessionRejected, _) | (_, SessionRejected) => SessionRejected,
+            (Failed, _) | (_, Failed) => Failed,
+            (Ok, Ok) => Ok,
+        }
+    }
+
+    fn of<T>(result: &ClientResult<T>) -> Self {
+        match result {
+            Ok(_) => Self::Ok,
+            Err(ClientError::Session(SessionError::Rejected)) => Self::SessionRejected,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
+/// The poller's connection to the server, as the header reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Connected,
+    Failing { cycles: u32 },
+    SessionRejected,
+}
+
+impl Link {
+    fn after(self, outcome: PollOutcome) -> Self {
+        match (outcome, self) {
+            (PollOutcome::Ok, _) => Self::Connected,
+            (PollOutcome::SessionRejected, _) => Self::SessionRejected,
+            (PollOutcome::Failed, Self::Failing { cycles }) => Self::Failing {
+                cycles: cycles.saturating_add(1),
+            },
+            (PollOutcome::Failed, _) => Self::Failing { cycles: 1 },
+        }
+    }
+
+    /// Header warning, if any. A single failed cycle is not worth one.
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Connected | Self::Failing { cycles: 0..=1 } => None,
+            Self::Failing { .. } => Some("  ⚠ reconnecting… "),
+            Self::SessionRejected => Some("  ⚠ session expired: run `broccoli login` "),
+        }
+    }
 }
 
 pub fn run(args: WatchArgs) -> anyhow::Result<()> {
@@ -316,7 +375,7 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         sel_clar: 0,
         overlay: None,
         submission_detail: None,
-        poll_failures: 0,
+        link: Link::Connected,
         overlay_viewport: Cell::new((0, 0)),
         clar_acked: HashMap::new(),
         clar_prev: HashMap::new(),
@@ -327,9 +386,9 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
         flash_at: None,
     };
 
-    // One shared Client across the poller and UI threads. The Client is Sync and
-    // serializes token refresh internally (via its TokenStore), so no outer lock
-    // is needed and concurrent calls never double-rotate the refresh token.
+    // One shared Client across the poller and UI threads. Its Session
+    // serializes token refresh, so concurrent calls never double-rotate the
+    // refresh token.
     let client = Arc::new(client);
 
     let (tx, rx) = mpsc::channel::<PollUpdate>();
@@ -345,27 +404,22 @@ pub fn run(args: WatchArgs) -> anyhow::Result<()> {
 
     let poller = thread::spawn(move || {
         'outer: while poller_running.load(Ordering::Relaxed) {
-            let mut ok = true;
-            match poll_client
-                .list_contest_submissions(&cid, None, Some(&uid), None, Some(100))
-                .ok()
+            let subs =
+                poll_client.list_contest_submissions(&cid, None, Some(&uid), None, Some(100));
+            let mut outcome = PollOutcome::of(&subs);
+            if let Ok(d) = subs
+                && tx.send(PollUpdate::Submissions(d)).is_err()
             {
-                Some(d) => {
-                    if tx.send(PollUpdate::Submissions(d)).is_err() {
-                        break 'outer;
-                    }
-                }
-                None => ok = false,
+                break 'outer;
             }
-            match poll_client.list_clarifications(&cid).ok() {
-                Some(d) => {
-                    if tx.send(PollUpdate::Clarifications(d)).is_err() {
-                        break 'outer;
-                    }
-                }
-                None => ok = false,
+            let clars = poll_client.list_clarifications(&cid);
+            outcome = outcome.worst(PollOutcome::of(&clars));
+            if let Ok(d) = clars
+                && tx.send(PollUpdate::Clarifications(d)).is_err()
+            {
+                break 'outer;
             }
-            if tx.send(PollUpdate::Health(ok)).is_err() {
+            if tx.send(PollUpdate::Cycle(outcome)).is_err() {
                 break 'outer;
             }
             // ~2s between polls, but wake early on refresh request.
@@ -408,10 +462,10 @@ fn run_event_loop(
         let mut got_poll = false;
         let mut pending_flash: Option<(u8, String)> = None;
         let consider = |prio: u8, msg: Option<String>, flash: &mut Option<(u8, String)>| {
-            if let Some(msg) = msg {
-                if flash.as_ref().is_none_or(|(p, _)| prio >= *p) {
-                    *flash = Some((prio, msg));
-                }
+            if let Some(msg) = msg
+                && flash.as_ref().is_none_or(|(p, _)| prio >= *p)
+            {
+                *flash = Some((prio, msg));
             }
         };
         while let Ok(update) = rx.try_recv() {
@@ -440,13 +494,7 @@ fn run_event_loop(
                     update_clarifications(app, &d);
                     consider(1, notify_new_clar(app), &mut pending_flash);
                 }
-                PollUpdate::Health(ok) => {
-                    app.poll_failures = if ok {
-                        0
-                    } else {
-                        app.poll_failures.saturating_add(1)
-                    };
-                }
+                PollUpdate::Cycle(outcome) => app.link = app.link.after(outcome),
             }
             app.clamp_selections();
         }
@@ -461,18 +509,16 @@ fn run_event_loop(
         }
 
         // Stop re-fetching an open submission overlay once it reaches a terminal verdict.
-        if subs_changed {
-            if let Some(Overlay::Submission { id, .. }) = app.overlay.as_ref() {
-                let still_judging = app
-                    .submission_detail
-                    .as_ref()
-                    .map(|s| s.status.is_in_progress())
-                    .unwrap_or(true);
-                if still_judging {
-                    let id = id.clone();
-                    if let Ok(sub) = client.get_submission(&id) {
-                        app.submission_detail = Some(sub);
-                    }
+        if subs_changed && let Some(Overlay::Submission { id, .. }) = app.overlay.as_ref() {
+            let still_judging = app
+                .submission_detail
+                .as_ref()
+                .map(|s| s.status.is_in_progress())
+                .unwrap_or(true);
+            if still_judging {
+                let id = id.clone();
+                if let Ok(sub) = client.get_submission(&id) {
+                    app.submission_detail = Some(sub);
                 }
             }
         }
@@ -854,15 +900,15 @@ fn build_clarification_lines(row: &ClarificationRow) -> Vec<Line<'static>> {
     ]));
     lines.push(field("From", row.author.clone()));
     lines.push(field("Asked", format_timestamp(&row.created_at)));
-    if row.resolved {
-        if let Some(at) = row.resolved_at.as_ref() {
-            let by = row
-                .resolved_by
-                .as_deref()
-                .map(|b| format!(" by {}", b))
-                .unwrap_or_default();
-            lines.push(field("Resolved", format!("{}{}", format_timestamp(at), by)));
-        }
+    if row.resolved
+        && let Some(at) = row.resolved_at.as_ref()
+    {
+        let by = row
+            .resolved_by
+            .as_deref()
+            .map(|b| format!(" by {}", b))
+            .unwrap_or_default();
+        lines.push(field("Resolved", format!("{}{}", format_timestamp(at), by)));
     }
 
     lines.push(plain(""));
@@ -1200,9 +1246,9 @@ fn render(f: &mut Frame, app: &AppData) {
             .fg(clock_color)
             .add_modifier(Modifier::BOLD),
     )];
-    if app.poll_failures >= 2 {
+    if let Some(warning) = app.link.warning() {
         header_spans.push(Span::styled(
-            "  ⚠ reconnecting… ",
+            warning,
             Style::default()
                 .fg(THEME.warning)
                 .add_modifier(Modifier::BOLD),
@@ -1702,7 +1748,7 @@ mod tests {
             sel_clar: 0,
             overlay: None,
             submission_detail: None,
-            poll_failures: 0,
+            link: Link::Connected,
             overlay_viewport: Cell::new((0, 0)),
             clar_acked: HashMap::new(),
             clar_prev: HashMap::new(),
@@ -2089,5 +2135,30 @@ mod tests {
         let app = sample_app();
         let content = render_to(&app, 40, 20);
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_session_is_reported_instead_of_reconnecting() {
+        let mut app = sample_app();
+        app.link = app.link.after(PollOutcome::Failed);
+        assert_eq!(app.link.warning(), None, "one failed cycle stays quiet");
+        app.link = app.link.after(PollOutcome::Failed);
+        assert!(render_to(&app, 120, 30).contains("reconnecting"));
+
+        app.link = app.link.after(PollOutcome::SessionRejected);
+        let screen = render_to(&app, 120, 30);
+        assert!(screen.contains("session expired"));
+        assert!(!screen.contains("reconnecting"));
+
+        app.link = app.link.after(PollOutcome::Ok);
+        assert_eq!(app.link, Link::Connected);
+    }
+
+    #[test]
+    fn a_cycle_reports_its_worst_request() {
+        use PollOutcome::*;
+        assert_eq!(Ok.worst(Failed), Failed);
+        assert_eq!(Failed.worst(SessionRejected), SessionRejected);
+        assert_eq!(Ok.worst(Ok), Ok);
     }
 }

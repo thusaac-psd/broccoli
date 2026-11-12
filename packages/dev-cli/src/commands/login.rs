@@ -8,7 +8,6 @@ use console::style;
 
 use broccoli_cli_core::api::auth::DeviceCodeResponse;
 use broccoli_cli_core::client::{Client, PollResponse, persist_session};
-use broccoli_cli_core::config::Credentials;
 use broccoli_cli_core::tls;
 
 #[derive(Args)]
@@ -29,11 +28,7 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
         style(&args.server).cyan()
     );
 
-    let client = Client::new(Credentials {
-        server: args.server.to_string(),
-        token: String::new(),
-        refresh_token: None,
-    });
+    let client = Client::anonymous(&args.server);
 
     let device_code_resp: DeviceCodeResponse = client
         .request_device_code()

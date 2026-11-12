@@ -446,12 +446,12 @@ fn default_runtime(lang: &str) -> String {
 fn print_remote_result(run: &CodeRunResponse) -> anyhow::Result<()> {
     let judge = run.result.as_ref();
 
-    if let Some(compile) = judge.and_then(|r| r.compile_output.as_deref()) {
-        if !compile.trim().is_empty() {
-            println!("  {} Compilation output:", style("!").yellow());
-            for line in compile.lines() {
-                println!("    {}", style(line).dim());
-            }
+    if let Some(compile) = judge.and_then(|r| r.compile_output.as_deref())
+        && !compile.trim().is_empty()
+    {
+        println!("  {} Compilation output:", style("!").yellow());
+        for line in compile.lines() {
+            println!("    {}", style(line).dim());
         }
     }
 

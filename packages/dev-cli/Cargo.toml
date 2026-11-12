@@ -8,7 +8,7 @@ readme = "README.md"
 keywords = ["broccoli", "cli", "plugin", "wasm", "online-judge"]
 categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [[bin]]
 name = "broccoli-dev"

@@ -268,12 +268,12 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
                         println!("    {}", style(line).red());
                     }
                 }
-                if let Some(ref co) = result.compile_output {
-                    if !co.is_empty() {
-                        println!("\n  Compilation output:");
-                        for line in co.lines() {
-                            println!("    {}", style(line).dim());
-                        }
+                if let Some(ref co) = result.compile_output
+                    && !co.is_empty()
+                {
+                    println!("\n  Compilation output:");
+                    for line in co.lines() {
+                        println!("    {}", style(line).dim());
                     }
                 }
             }
