@@ -27,7 +27,7 @@ impl OperationHandler {
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         file_cacher: Box<dyn FileCacher>,
         task_cache: Box<dyn TaskCacheStore>,
-        toolchain_fingerprint: String,
+        toolchain_fingerprint: crate::toolchain_fingerprint::ToolchainFingerprint,
         metrics: common::metrics::Metrics,
     ) -> Self {
         Self::with_cache_leader(
@@ -50,7 +50,7 @@ impl OperationHandler {
         cache_leader: Arc<dyn CacheLeaderElector>,
         follower_poll_interval: Duration,
         follower_max_wait: Duration,
-        toolchain_fingerprint: String,
+        toolchain_fingerprint: crate::toolchain_fingerprint::ToolchainFingerprint,
         metrics: common::metrics::Metrics,
     ) -> Self {
         Self {
@@ -1789,7 +1789,7 @@ mod step_execution_tests {
             // only AFTER a successful run, on the collect path.
             Box::new(UnavailableFileCacher::new("test-induced upload fault")),
             Box::new(NoopTaskCacheStore),
-            "test-fingerprint".to_string(),
+            crate::toolchain_fingerprint::ToolchainFingerprint::Known("test-fingerprint".into()),
             metrics,
         );
 

@@ -28,6 +28,7 @@ use worker::models::operation::sandbox::{
 };
 use worker::models::operation::task_cache::NoopTaskCacheStore;
 use worker::models::worker::Worker;
+use worker::toolchain_fingerprint::ToolchainFingerprint;
 
 /// A sandbox backend the shared cases run against.
 pub trait Backend {
@@ -280,7 +281,7 @@ fn handler<B: Backend>(tools_dir: Option<PathBuf>) -> OperationHandler {
         B::manager(),
         Box::new(UnavailableFileCacher::new("no blobs needed")),
         Box::new(NoopTaskCacheStore),
-        String::new(),
+        ToolchainFingerprint::Known(String::new()),
         metrics,
     )
     .with_tools_dir(tools_dir)
@@ -338,7 +339,7 @@ pub async fn blob_input_fails_when_blob_storage_is_unavailable<B: Backend>() {
         B::manager(),
         Box::new(UnavailableFileCacher::new("test storage unavailable")),
         Box::new(NoopTaskCacheStore),
-        String::new(),
+        ToolchainFingerprint::Known(String::new()),
         metrics,
     );
 

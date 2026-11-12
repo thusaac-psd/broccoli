@@ -14,6 +14,8 @@ mod execution;
 mod metrics;
 mod paths;
 
+use crate::toolchain_fingerprint::ToolchainFingerprint;
+
 pub struct OperationHandler {
     sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
     file_cacher: Box<dyn FileCacher>,
@@ -21,7 +23,7 @@ pub struct OperationHandler {
     cache_leader: Arc<dyn CacheLeaderElector>,
     follower_poll_interval: Duration,
     follower_max_wait: Duration,
-    toolchain_fingerprint: String,
+    toolchain_fingerprint: ToolchainFingerprint,
     metrics: common::metrics::Metrics,
     /// Directory holding worker-local platform tools (e.g. `broccoli-compare`).
     /// `MountSource::PlatformTool { name }` resolves to `<tools_dir>/<name>`.

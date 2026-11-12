@@ -262,6 +262,10 @@ impl OperationHandler {
         argv: &[String],
         key_inputs: &[String],
     ) -> Result<String> {
+        let fingerprint = self
+            .toolchain_fingerprint
+            .cache_key_part()
+            .context("Toolchain fingerprint is unreliable; compile cache disabled")?;
         let mut input_files = Vec::new();
         for filename in key_inputs {
             let path = safe_join(working_dir, filename)?;
@@ -270,10 +274,45 @@ impl OperationHandler {
                 .with_context(|| format!("Failed to read cache key input: {}", path.display()))?;
             input_files.push((filename.clone(), content));
         }
-        Ok(compute_cache_key(
-            &self.toolchain_fingerprint,
-            argv,
-            &input_files,
-        ))
+        Ok(compute_cache_key(fingerprint, argv, &input_files))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::operation::file_cacher::NoopFileCacher;
+    use crate::models::operation::sandbox::mock::MockSandboxManager;
+    use crate::models::operation::task_cache::NoopTaskCacheStore;
+    use crate::toolchain_fingerprint::ToolchainFingerprint;
+
+    fn handler(fingerprint: ToolchainFingerprint) -> OperationHandler {
+        let (metrics, _provider) =
+            common::observability::init_metrics_local("broccoli-worker-test");
+        OperationHandler::new(
+            Box::new(MockSandboxManager::new(std::env::temp_dir())),
+            Box::new(NoopFileCacher),
+            Box::new(NoopTaskCacheStore),
+            fingerprint,
+            metrics,
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unreliable_toolchain_fingerprint_builds_no_cache_key() {
+        let argv = vec!["g++".to_string()];
+        let dir = std::env::temp_dir();
+        assert!(
+            handler(ToolchainFingerprint::Unreliable)
+                .build_cache_key(&dir, &argv, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            handler(ToolchainFingerprint::Known("fp".into()))
+                .build_cache_key(&dir, &argv, &[])
+                .await
+                .is_ok()
+        );
     }
 }
