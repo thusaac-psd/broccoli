@@ -17,6 +17,7 @@ pub mod fixtures;
 pub mod load;
 pub mod mixed;
 pub mod passthrough;
+pub mod perf;
 pub mod report;
 pub mod runner;
 pub mod scenarios;

@@ -17,6 +17,8 @@ pub enum LoadProfile {
 pub enum Command {
     /// Fault-injection scenarios (cancel-storm, kill-server-recovery, ...).
     Fault(FaultArgs),
+    /// Judging throughput and per-stage latency (see docs/internals/performance.md).
+    Perf(crate::perf::PerfArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
