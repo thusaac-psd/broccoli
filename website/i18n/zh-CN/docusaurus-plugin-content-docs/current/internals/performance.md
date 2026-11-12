@@ -38,7 +38,9 @@ target/release/broccoli-stress-test perf \
 
 `--concurrency` 个客户端各自保持一个在途提交：提交后每隔 `--poll-interval-ms`
 轮询一次 `GET /api/v1/submissions/{id}`，直到进入终态。因此负载是闭环的。吞吐量
-随并发度上升，直到某个阶段饱和，此后上升的是延迟。扫描并发度即可找到饱和点。
+随并发度上升，直到某个阶段饱和，此后上升的是延迟。扫描并发度即可找到饱和点。闭环负载还会把吞吐量限制在每个客户端每个轮询间隔一个提交
+（`client_throughput.poll_cap_subs_per_s`）；接近这一上限时，请改看服务端的
+`db_throughput`，或提高并发度。
 传入多个 `--server-url` 时，提交按轮询方式分摊到各服务器。
 
 `--database-url`、`--redis-url` 与 `--metrics-url` 都是可选的，每个都会给报告增加

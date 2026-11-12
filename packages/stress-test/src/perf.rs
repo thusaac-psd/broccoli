@@ -830,9 +830,12 @@ async fn build_report(
         "completed": results.iter().filter(|r| r.terminal).count(),
         "statuses": statuses,
         "wall_s": wall,
+        // A closed loop cannot complete faster than one submission per client
+        // per poll interval; near this cap, read `stages_ms.db_throughput`.
         "client_throughput": {
             "subs_per_s": n / wall,
             "test_cases_per_s": tcs / wall,
+            "poll_cap_subs_per_s": args.concurrency as f64 * 1000.0 / args.poll_interval_ms.max(1) as f64,
         },
         "submit_latency_ms": pct(&submit),
         "e2e_latency_ms": pct(&e2e),
@@ -881,6 +884,13 @@ fn print_report(r: &Value, top: usize) {
         f(&r["client_throughput"], "test_cases_per_s"),
         r["statuses"]
     );
+    let cap = f(&r["client_throughput"], "poll_cap_subs_per_s");
+    if f(&r["client_throughput"], "subs_per_s") > 0.8 * cap {
+        println!(
+            "warning: within 20% of the polling cap ({cap:.1} subs/s = concurrency / poll \
+             interval); use stages_ms.db_throughput or raise --concurrency"
+        );
+    }
     for k in ["submit_latency_ms", "e2e_latency_ms"] {
         let v = &r[k];
         println!(

@@ -43,7 +43,9 @@ target/release/broccoli-stress-test perf \
 `GET /api/v1/submissions/{id}` every `--poll-interval-ms` until it is terminal.
 That makes the load closed loop. Throughput rises with concurrency until a
 stage saturates, then latency rises instead. Sweep concurrency to find the
-saturation point. Several `--server-url` values spread the submissions
+saturation point. A closed loop also caps throughput at one submission per
+client per poll interval (`client_throughput.poll_cap_subs_per_s`); near that
+cap, read the server-side `db_throughput` instead, or raise concurrency. Several `--server-url` values spread the submissions
 round-robin.
 
 `--database-url`, `--redis-url` and `--metrics-url` are optional. Each adds a
