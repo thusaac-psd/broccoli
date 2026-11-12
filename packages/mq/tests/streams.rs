@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use common::liveness::{NodeRole, TTL};
 use common::worker::{Task, TaskReply, TaskResult};
 use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
-use mq::{Delivery, MAX_DELIVERIES, Mq, ReplyOutcome, Route};
+use mq::{CLAIM_IDLE, Delivery, MAX_DELIVERIES, Mq, ReplyOutcome, Route, Settled};
 use testcontainers::core::ContainerPort;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, ImageExt};
@@ -125,7 +125,7 @@ async fn published_tasks_are_delivered_once_and_gone_after_ack() {
     );
     assert!(got.iter().all(|d| d.deliveries == 1));
     for d in &got {
-        consumer.ack(&d.entry).await.unwrap();
+        assert_eq!(consumer.ack(&d.entry).await.unwrap(), Settled::Done);
     }
 
     let other = mq.task_consumer("w2");
@@ -165,10 +165,71 @@ async fn a_dead_consumers_tasks_are_redelivered_and_a_live_ones_are_not() {
         dead.refresh(&[held[0].entry.clone()]).await.unwrap().len(),
         1
     );
-    eager.ack(&taken[0].entry).await.unwrap();
+    assert_eq!(eager.ack(&taken[0].entry).await.unwrap(), Settled::Done);
     assert!(eager.reclaim(10).await.unwrap().is_empty());
     let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
     assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
+}
+
+/// Make `entry` look idle for `idle` without waiting, keeping its owner.
+async fn age(
+    conn: &mut redis::aio::MultiplexedConnection,
+    owner: &str,
+    entry: &mq::EntryRef,
+    idle: Duration,
+) {
+    let _: Vec<String> = redis::cmd("XCLAIM")
+        .arg(&*entry.stream)
+        .arg(mq::WORKERS_GROUP)
+        .arg(owner)
+        .arg(0)
+        .arg(&entry.id)
+        .arg("IDLE")
+        .arg(idle.as_millis() as u64)
+        .arg("JUSTID")
+        .query_async(conn)
+        .await
+        .unwrap();
+}
+
+/// A consumer that stalled past the threshold settles nothing: the consumer
+/// that took the entry over owns it.
+#[tokio::test]
+async fn a_stale_owner_cannot_settle_an_entry_taken_over() {
+    let (_c, url) = redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    let mut conn = admin(&url).await;
+    let stale = mq.task_consumer("stale");
+    stale.ensure_groups().await.unwrap();
+    mq.publish_task(&task("contested"), None).await.unwrap();
+    let mine = stale.reader().read(1).await.unwrap().remove(0);
+    age(&mut conn, "stale", &mine.entry, CLAIM_IDLE * 2).await;
+    let fresh = mq.task_consumer("fresh");
+    let theirs = fresh.reclaim(1).await.unwrap().remove(0);
+
+    assert_eq!(stale.ack(&mine.entry).await.unwrap(), Settled::HandedOver);
+    assert_eq!(
+        stale
+            .dead_letter(&mine.entry, &envelope("contested"))
+            .await
+            .unwrap(),
+        Settled::HandedOver
+    );
+    assert_eq!(stale.requeue(&mine).await.unwrap(), Settled::HandedOver);
+    let shared = mq.topology().shared();
+    let depths = mq
+        .depths(&[shared.clone(), mq.topology().dead_letter()])
+        .await
+        .unwrap();
+    assert_eq!(
+        (depths[0].unread, depths[0].pending),
+        (0, 1),
+        "no copy added"
+    );
+    assert_eq!(depths[1].unread, 0, "nothing dead-lettered");
+
+    assert_eq!(fresh.ack(&theirs.entry).await.unwrap(), Settled::Done);
+    assert_eq!(xlen(&mut conn, &shared).await, 0);
 }
 
 #[tokio::test]
@@ -204,29 +265,32 @@ async fn poison_and_undecodable_entries_end_in_the_dead_letter_stream() {
     let mut conn = admin(&url).await;
     let shared = mq.topology().shared();
 
-    let crashing = |name: &str| {
-        mq.task_consumer(name)
-            .with_claim_idle(Duration::from_millis(1))
-    };
-    let first = crashing("c0");
+    let first = mq.task_consumer("c0");
     first.ensure_groups().await.unwrap();
     mq.publish_task(&task("poison"), None).await.unwrap();
     let mut last = first.reader().read(1).await.unwrap().remove(0);
+    let mut owner = first.clone();
     // Each consumer takes it and dies holding it.
     for n in 1..=MAX_DELIVERIES {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        last = crashing(&format!("c{n}"))
-            .reclaim(1)
-            .await
-            .unwrap()
-            .remove(0);
+        age(
+            &mut conn,
+            &format!("c{}", n - 1),
+            &last.entry,
+            CLAIM_IDLE * 2,
+        )
+        .await;
+        owner = mq.task_consumer(&format!("c{n}"));
+        last = owner.reclaim(1).await.unwrap().remove(0);
     }
     assert_eq!(last.deliveries, MAX_DELIVERIES + 1);
     assert!(last.is_poison());
-    first
-        .dead_letter(&last.entry, &envelope("poison"))
-        .await
-        .unwrap();
+    assert_eq!(
+        owner
+            .dead_letter(&last.entry, &envelope("poison"))
+            .await
+            .unwrap(),
+        Settled::Done
+    );
 
     let _: String = redis::cmd("XADD")
         .arg(&shared)
@@ -239,10 +303,13 @@ async fn poison_and_undecodable_entries_end_in_the_dead_letter_stream() {
     let bad = first.reader().read(1).await.unwrap().remove(0);
     assert!(bad.payload.is_err());
     assert_eq!(bad.raw_payload(), "{not json");
-    first
-        .dead_letter(&bad.entry, &envelope("bad"))
-        .await
-        .unwrap();
+    assert_eq!(
+        first
+            .dead_letter(&bad.entry, &envelope("bad"))
+            .await
+            .unwrap(),
+        Settled::Done
+    );
 
     assert_eq!(
         xlen(&mut conn, &shared).await,
@@ -407,7 +474,7 @@ async fn requeued_entries_go_back_to_their_stream() {
     w1.ensure_groups().await.unwrap();
     mq.publish_task(&task("unstarted"), None).await.unwrap();
     let d = w1.reader().read(1).await.unwrap().remove(0);
-    w1.requeue(&d).await.unwrap();
+    assert_eq!(w1.requeue(&d).await.unwrap(), Settled::Done);
 
     let w2 = mq.task_consumer("w2");
     w2.ensure_groups().await.unwrap();
@@ -460,7 +527,7 @@ async fn a_redis_restart_mid_flight_loses_nothing() {
     // The two in-flight entries are still ours; the rest are still unread.
     let mut seen = BTreeSet::new();
     for d in &in_flight {
-        w1.ack(&d.entry).await.unwrap();
+        assert_eq!(w1.ack(&d.entry).await.unwrap(), Settled::Done);
         seen.insert(d.payload.as_ref().unwrap().id.clone());
     }
     loop {
@@ -473,7 +540,7 @@ async fn a_redis_restart_mid_flight_loses_nothing() {
                 seen.insert(d.payload.as_ref().unwrap().id.clone()),
                 "no duplicates"
             );
-            w1.ack(&d.entry).await.unwrap();
+            assert_eq!(w1.ack(&d.entry).await.unwrap(), Settled::Done);
         }
     }
     let expected: BTreeSet<String> = (0..5).map(|i| format!("t{i}")).collect();

@@ -132,6 +132,34 @@ return #entries
     )
 });
 
+/// Settle an entry, but only if this consumer still owns it: a consumer
+/// that stalled past the claim threshold may find another one running it.
+/// `ack` acknowledges and deletes it; `dead_letter` first adds `ARGV[5]` to
+/// the dead-letter stream; `requeue` first adds a copy (payload `ARGV[5]`,
+/// earlier deliveries `ARGV[6]`) to the end of the entry's own stream.
+///
+/// KEYS: stream, dead-letter stream. ARGV: group, consumer, id, mode,
+/// payload, prior deliveries. Returns 1 when settled, 0 when the entry is not
+/// this consumer's (any more).
+pub(crate) static SETTLE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local ok, p = pcall(redis.call, 'XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1, ARGV[2])
+if not ok or #p == 0 then
+  return 0
+end
+if ARGV[4] == 'dead_letter' then
+  redis.call('XADD', KEYS[2], '*', 'p', ARGV[5])
+elseif ARGV[4] == 'requeue' then
+  redis.call('XADD', KEYS[1], '*', 'p', ARGV[5], 'n', ARGV[6])
+end
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[3])
+redis.call('XDEL', KEYS[1], ARGV[3])
+return 1
+"#,
+    )
+});
+
 /// Length and PEL size of each stream, from the first of the ARGV groups the
 /// stream has; 0 pending for a stream without any.
 ///

@@ -25,7 +25,7 @@ pub use conn::{COMMAND_TIMEOUT, CONNECT_TIMEOUT};
 pub use error::MqError;
 pub use group::{
     BLOCK, CLAIM_IDLE, DecodeError, Delivery, EntryRef, GroupConsumer, GroupReader, MAX_DELIVERIES,
-    REFRESH_INTERVAL,
+    REFRESH_INTERVAL, Settled,
 };
 pub use keys::{SERVERS_GROUP, StreamRole, Topology, WORKERS_GROUP};
 pub use reply::{REPLY_BATCH, ReplyInbox};

@@ -99,7 +99,11 @@ async fn handle(
 }
 
 async fn ack(consumer: &GroupConsumer<DlqEnvelope>, delivery: &Delivery<DlqEnvelope>) {
-    if let Err(e) = consumer.ack(&delivery.entry).await {
-        warn!(error = %e, "Acknowledging a dead letter failed; it will be written again");
+    match consumer.ack(&delivery.entry).await {
+        Ok(mq::Settled::Done) => {}
+        Ok(mq::Settled::HandedOver) => {
+            warn!("Another server took this dead letter over while it was written")
+        }
+        Err(e) => warn!(error = %e, "Acknowledging a dead letter failed; it will be written again"),
     }
 }

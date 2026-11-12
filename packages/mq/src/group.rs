@@ -37,6 +37,16 @@ pub struct EntryRef {
     pub id: String,
 }
 
+/// The outcome of acknowledging, dead-lettering or requeueing an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Settled {
+    Done,
+    /// Another consumer took the entry over (this one stalled past the claim
+    /// threshold) and settles it; nothing was changed.
+    HandedOver,
+}
+
 /// A payload that did not decode as the stream's type.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("undecodable entry payload: {reason}")]
@@ -246,96 +256,60 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
         Ok(lost)
     }
 
-    /// Acknowledge and delete an entry.
-    pub async fn ack(&self, entry: &EntryRef) -> Result<(), MqError> {
-        self.inner
-            .conn
-            .run(|mut c| async move {
-                redis::pipe()
-                    .atomic()
-                    .cmd("XACK")
-                    .arg(&*entry.stream)
-                    .arg(self.inner.group)
-                    .arg(&entry.id)
-                    .ignore()
-                    .cmd("XDEL")
-                    .arg(&*entry.stream)
-                    .arg(&entry.id)
-                    .ignore()
-                    .query_async::<()>(&mut c)
-                    .await
-            })
-            .await?;
-        Ok(())
+    /// Acknowledge and delete an entry this consumer owns.
+    pub async fn ack(&self, entry: &EntryRef) -> Result<Settled, MqError> {
+        self.settle(entry, "ack", "", 0).await
     }
 
-    /// Move an entry to the dead-letter stream as `envelope`, in one step.
+    /// Move an entry this consumer owns to the dead-letter stream as
+    /// `envelope`, in one step.
     pub async fn dead_letter(
         &self,
         entry: &EntryRef,
         envelope: &common::DlqEnvelope,
-    ) -> Result<(), MqError> {
+    ) -> Result<Settled, MqError> {
         let envelope = serde_json::to_string(envelope)?;
-        self.inner
-            .conn
-            .run(|mut c| async move {
-                redis::pipe()
-                    .atomic()
-                    .cmd("XADD")
-                    .arg(&self.inner.dead_letter)
-                    .arg("*")
-                    .arg("p")
-                    .arg(&envelope)
-                    .ignore()
-                    .cmd("XACK")
-                    .arg(&*entry.stream)
-                    .arg(self.inner.group)
-                    .arg(&entry.id)
-                    .ignore()
-                    .cmd("XDEL")
-                    .arg(&*entry.stream)
-                    .arg(&entry.id)
-                    .ignore()
-                    .query_async::<()>(&mut c)
-                    .await
-            })
-            .await?;
-        Ok(())
+        self.settle(entry, "dead_letter", &envelope, 0).await
     }
 
-    /// Give back an entry this consumer read but never started: a copy goes to
-    /// the end of its stream with its delivery count, and the original is
+    /// Give back an entry this consumer owns but never started: a copy goes
+    /// to the end of its stream with its delivery count, and the original is
     /// acknowledged, in one step.
-    pub async fn requeue(&self, delivery: &Delivery<T>) -> Result<(), MqError> {
-        let entry = &delivery.entry;
+    pub async fn requeue(&self, delivery: &Delivery<T>) -> Result<Settled, MqError> {
         let prior = delivery.deliveries.saturating_sub(1);
-        self.inner
+        self.settle(&delivery.entry, "requeue", &delivery.raw, prior)
+            .await
+    }
+
+    async fn settle(
+        &self,
+        entry: &EntryRef,
+        mode: &str,
+        payload: &str,
+        prior: u32,
+    ) -> Result<Settled, MqError> {
+        let settled: i64 = self
+            .inner
             .conn
             .run(|mut c| async move {
-                redis::pipe()
-                    .atomic()
-                    .cmd("XADD")
-                    .arg(&*entry.stream)
-                    .arg("*")
-                    .arg("p")
-                    .arg(&delivery.raw)
-                    .arg("n")
-                    .arg(prior)
-                    .ignore()
-                    .cmd("XACK")
-                    .arg(&*entry.stream)
+                scripts::SETTLE
+                    .key(&*entry.stream)
+                    .key(&self.inner.dead_letter)
                     .arg(self.inner.group)
+                    .arg(&self.inner.consumer)
                     .arg(&entry.id)
-                    .ignore()
-                    .cmd("XDEL")
-                    .arg(&*entry.stream)
-                    .arg(&entry.id)
-                    .ignore()
-                    .query_async::<()>(&mut c)
+                    .arg(mode)
+                    .arg(payload)
+                    .arg(prior)
+                    .invoke_async(&mut c)
                     .await
             })
             .await?;
-        Ok(())
+        Ok(if settled == 1 {
+            Settled::Done
+        } else {
+            Settled::HandedOver
+        })
     }
 
     /// Run a command that needs the group; `None` when the group was missing

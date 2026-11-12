@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use common::retry::{RetryTracker, spawn_cleanup_task};
 use common::worker::Task;
-use mq::{Delivery, EntryRef, GroupConsumer, Mq};
+use mq::{Delivery, EntryRef, GroupConsumer, Mq, Settled};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -373,11 +373,18 @@ async fn run_consume_loop<F, Fut>(
                 Settlement::DeadLetter(envelope) => tasks.dead_letter(&entry, &envelope).await,
                 Settlement::Abandon => {
                     warn!(entry = %entry.id, "Task abandoned; it is redelivered once idle");
-                    Ok(())
+                    Ok(Settled::Done)
                 }
             };
-            if let Err(e) = settled {
-                error!(entry = %entry.id, error = %e, "Settling a task failed; it will be redelivered");
+            match settled {
+                Ok(Settled::Done) => {}
+                Ok(Settled::HandedOver) => warn!(
+                    entry = %entry.id,
+                    "Another worker took this task over while it ran; leaving it to that worker"
+                ),
+                Err(e) => {
+                    error!(entry = %entry.id, error = %e, "Settling a task failed; it will be redelivered")
+                }
             }
             held.remove(&entry);
         });
@@ -385,8 +392,11 @@ async fn run_consume_loop<F, Fut>(
 
     info!("Shutdown signaled; no longer consuming. Draining in-flight tasks");
     for delivery in buffer.drain(..) {
-        if let Err(e) = tasks.requeue(&delivery).await {
-            warn!(entry = %delivery.entry.id, error = %e, "Giving a task back failed; it is redelivered once idle");
+        match tasks.requeue(&delivery).await {
+            Ok(Settled::Done | Settled::HandedOver) => {}
+            Err(e) => {
+                warn!(entry = %delivery.entry.id, error = %e, "Giving a task back failed; it is redelivered once idle")
+            }
         }
         held.remove(&delivery.entry);
     }
