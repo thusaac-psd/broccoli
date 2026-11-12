@@ -253,7 +253,6 @@ fn empty_operation() -> OperationTask {
         environments: Vec::new(),
         tasks: Vec::new(),
         channels: Vec::new(),
-        priority: None,
         target_worker_id: None,
         evaluate_batch_id: None,
         test_case_id: None,

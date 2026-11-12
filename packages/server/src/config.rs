@@ -266,8 +266,8 @@ pub struct ServerConfig {
     /// roughly `total_publish_ms / N` plus MQ-broker throughput limits.
     ///
     /// Default 32. Trade-off: higher values reduce dispatch latency but
-    /// multiply concurrent load on the Redis MQ broker (each publish is one
-    /// RPUSH plus optional priority sorting). Tune down on a constrained MQ
+    /// multiply concurrent load on Redis (each publish is one `XADD`, or one
+    /// routing script for a pinned task). Tune down on a constrained MQ
     /// host; tune up when broker is over-provisioned and submission bursts
     /// dominate latency.
     #[serde(default = "default_operation_batch_publish_concurrency")]

@@ -413,7 +413,6 @@ async fn end_to_end_concurrent_compile_runs_once() {
             mounts: vec![],
         }],
         channels: vec![],
-        priority: None,
         target_worker_id: None,
         evaluate_batch_id: None,
         test_case_id: None,

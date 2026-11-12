@@ -450,7 +450,6 @@ mod platform_tool_validation_tests {
             environments: vec![],
             tasks: steps,
             channels: vec![],
-            priority: None,
             target_worker_id: None,
             evaluate_batch_id: None,
             test_case_id: None,

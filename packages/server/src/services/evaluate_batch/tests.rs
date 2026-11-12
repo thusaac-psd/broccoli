@@ -350,7 +350,6 @@ fn callback_path_tags_operation_tasks_with_evaluate_context() {
         environments: vec![],
         tasks: vec![],
         channels: vec![],
-        priority: None,
         target_worker_id: None,
         evaluate_batch_id: None,
         test_case_id: None,
