@@ -19,6 +19,9 @@ system.
 
 ### Rust workspace members
 
+- `packages/api-types` (`broccoli-api-types`: the REST request and response
+  types the server serializes and the Rust clients read)
+- `packages/cli-core` (shared CLI client, credentials and session)
 - `packages/common`
 - `packages/mq`
 - `packages/plugin-core`
@@ -26,7 +29,9 @@ system.
 - `packages/test-support` (dev-dependency harness shared by the server's
   `tests/integration` and `tests/e2e` trees)
 - `packages/worker`
-- `packages/cli`
+- `packages/contestant-cli` (`broccoli`) and `packages/dev-cli` (`broccoli-dev`)
+- `packages/stress-test` and `packages/broccoli-compare` (opt-in, not default
+  members)
 
 Also present but not part of the main Rust workspace members list:
 
@@ -110,8 +115,9 @@ The checked-in Docker Postgres credentials are:
 - `packages/plugin-core` contains shared plugin abstractions: `config`, `error`,
   `hook`, `host`, `http`, `i18n`, `manager`, `manifest`, `registry`, and
   `traits`.
-- `packages/cli` builds the `broccoli` binary and includes plugin build and
-  related utility flows.
+- `packages/contestant-cli` builds the `broccoli` binary and `packages/dev-cli`
+  the `broccoli-dev` plugin build tool; both talk to the server through
+  `packages/cli-core`.
 - `packages/server-sdk` exists as a separate Rust crate and should not be
   forgotten when changing public server-facing APIs.
 
@@ -159,7 +165,9 @@ The checked-in Docker Postgres credentials are:
 ### SDK / API surface changes
 
 - If you change server request/response shapes, check whether
-  `packages/server-sdk` and `packages/web-sdk` need to move with them.
+  `packages/server-sdk` and `packages/web-sdk` need to move with them. A type a
+  Rust client reads belongs in `packages/api-types`, never in a client-side
+  copy.
 - Be careful with exported package entrypoints in `packages/web-sdk`, since its
   `package.json` exposes multiple subpaths, and plugin bundles resolve them
   through `SDK_SHARED_DEPS` in `packages/web/plugins/shared-deps.ts`.
@@ -185,8 +193,8 @@ custom verdicts oppositely on host vs guest. Rules:
   duplicates of shared utilities as blocking findings.
 - Cross-boundary mirrors (guest SDK vs host) must live in `broccoli-types` when
   possible; if a verbatim mirror is unavoidable, both sides must carry a
-  drift-pin test the way `common::submission_status` now pins its severity table
-  to `broccoli_types::types::Verdict`.
+  drift-pin test the way `broccoli_api_types::status` pins its severity table to
+  `broccoli_types::types::Verdict`.
 
 ## Testing Guidance
 
