@@ -670,3 +670,58 @@ async fn a_recurring_exhaustion_reopens_the_one_dead_letter_of_its_submission() 
     assert_eq!(row.retry_count, 2, "both occurrences are counted");
     assert_eq!(row.retry_history.as_array().map(Vec::len), Some(2));
 }
+
+/// A rejudge holds its submission's row lock from the epoch allocation to
+/// commit, so a concurrent rejudge waits for it and a claim skips the
+/// submission: versions stay unique and exactly one judgement is current.
+#[tokio::test]
+async fn a_rejudge_serializes_with_another_rejudge_and_a_claim() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let sid = s.id;
+    let rejudge_in = move |txn: sea_orm::DatabaseTransaction| async move {
+        open_judgement(
+            &txn,
+            sid,
+            OpenJudgement::Rejudge {
+                triggered_by_user_id: 1,
+                target_worker_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        txn
+    };
+
+    let first = rejudge_in(db.begin().await.unwrap()).await;
+    // While the first rejudge is open, a claim passes over the submission.
+    assert!(
+        claim_judgements(&db, "srv", 10, NO_TYPES)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A second rejudge blocks on the row lock until the first commits.
+    let second_txn = db.begin().await.unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        started_tx.send(()).unwrap();
+        rejudge_in(second_txn).await.commit().await.unwrap();
+    });
+    started_rx.await.unwrap();
+    first.commit().await.unwrap();
+    second.await.unwrap();
+
+    let all = submission_judgement::Entity::find()
+        .filter(submission_judgement::Column::SubmissionId.eq(sid))
+        .all(&db)
+        .await
+        .unwrap();
+    let mut versions: Vec<i32> = all.iter().map(|j| j.version).collect();
+    versions.sort_unstable();
+    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(all.iter().filter(|j| j.is_current).count(), 1);
+    let current = claim_one(&db, "srv").await;
+    assert_eq!(current.judgement.version, 3);
+}
