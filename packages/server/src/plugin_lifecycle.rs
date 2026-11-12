@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Set, Statement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Set, Statement,
+};
 
 use crate::entity::plugin as plugin_entity;
 use crate::error::AppError;
@@ -959,12 +961,21 @@ pub async fn install(state: &AppState, plugin_id: &str) -> Result<(), AppError> 
 /// and pick up new plugin directories, fleet-wide.
 pub async fn reload_all(state: &AppState) -> Result<ReloadAllResponse, AppError> {
     with_applied(state, async |applied| {
+        // The fleet's desired state, not this replica's cache of it, so a
+        // peer's recent enable or disable counts.
+        let enabled_in_db: std::collections::HashSet<String> = plugin_entity::Entity::find()
+            .filter(plugin_entity::Column::IsEnabled.eq(true))
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
         let enabled_ids: Vec<String> = state
             .plugins
             .list_plugins()?
             .into_iter()
             .map(|p| p.id)
-            .filter(|id| state.plugin_lifecycle.is_desired_enabled(id))
+            .filter(|id| enabled_in_db.contains(id))
             .collect();
 
         let mut reloaded = Vec::new();
