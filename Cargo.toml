@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "packages/api-types",
   "packages/cli-core",
   "packages/common",
   "packages/mq",
@@ -16,6 +17,7 @@ members = [
 # packages/broccoli-compare (comparator binary), both opt-in via
 # `cargo build -p <name>` so day-to-day builds stay fast.
 default-members = [
+  "packages/api-types",
   "packages/cli-core",
   "packages/common",
   "packages/mq",
@@ -122,6 +124,7 @@ rust-s3 = { version = "0.37", default-features = false, features = [
 tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "7", default-features = false, features = ["deflate"] }
 broccoli-server-sdk = { path = "packages/server-sdk" }
+broccoli-api-types = { path = "packages/api-types" }
 broccoli-types = { path = "packages/broccoli-types" }
 crossbeam = "0.8"
 dashmap = "6.1"

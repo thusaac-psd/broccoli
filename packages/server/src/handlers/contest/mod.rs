@@ -222,7 +222,7 @@ pub async fn list_contests(
     let data = select
         .offset(Some(window.offset()))
         .limit(Some(window.limit()))
-        .into_partial_model::<ContestListItem>()
+        .into_partial_model::<ContestListRow>()
         .all(&state.db)
         .await?;
 
@@ -241,7 +241,7 @@ pub async fn list_contests(
             if decision.is_denied() {
                 None
             } else {
-                Some(item)
+                Some(ContestListItem::from(item))
             }
         })
         .collect();

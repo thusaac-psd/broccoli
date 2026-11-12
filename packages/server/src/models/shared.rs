@@ -1,20 +1,9 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 
 use crate::error::AppError;
-
-#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct Pagination {
-    #[schema(example = 1)]
-    pub page: u64,
-    #[schema(example = 20)]
-    pub per_page: u64,
-    #[schema(example = 47)]
-    pub total: u64,
-    #[schema(example = 3)]
-    pub total_pages: u64,
-}
+pub use broccoli_api_types::shared::Pagination;
 
 /// A validated page request: the only place an SQL `OFFSET` is derived from
 /// caller-supplied `page`/`per_page`.

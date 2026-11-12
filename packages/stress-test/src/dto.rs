@@ -270,7 +270,7 @@ pub struct TestCaseResultResponse {
 // Verdict used to be a hand-rolled byte-for-byte copy of the canonical enum
 // in `common` (including the custom wire-string serde). Re-export the real
 // one instead so it can never drift behind the server contract.
-pub use common::submission_status::Verdict;
+pub use common::Verdict;
 
 /// Submission lifecycle status as returned by the server.
 ///

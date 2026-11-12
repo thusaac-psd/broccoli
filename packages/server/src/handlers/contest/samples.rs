@@ -1,7 +1,6 @@
 use axum::Json;
 use axum::extract::State;
 use sea_orm::*;
-use serde::Serialize;
 use tracing::instrument;
 
 // visibility-bypass-audited: this handler routes through `VisibilityKernel`
@@ -17,18 +16,8 @@ use crate::handlers::problem::require_problem_part_reachable;
 use crate::state::AppState;
 use crate::utils::test_case_body::read_test_case_body_preview;
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
+pub use broccoli_api_types::problem::{ProblemSamplesResponse, SampleCase};
 
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ProblemSamplesResponse {
-    pub samples: Vec<SampleCase>,
-}
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct SampleCase {
-    pub input: String,
-    pub output: String,
-    /// Optional markdown note explaining this sample (author-written).
-    pub description: Option<String>,
-}
 #[instrument(skip(state, auth_user), fields(contest_id, problem_id))]
 #[utoipa::path(
     get,

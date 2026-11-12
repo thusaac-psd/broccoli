@@ -5,12 +5,13 @@ edition = "2024"
 
 [features]
 default = []
-sea-orm = ["dep:sea-orm"]
+sea-orm = ["dep:sea-orm", "broccoli-api-types/sea-orm"]
 object-storage = ["dep:rust-s3", "dep:tokio-util", "dep:futures"]
 
 [dependencies]
 libc = "0.2"
 anyhow.workspace = true
+broccoli-api-types.workspace = true
 broccoli-types.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "broccoli-api-types"
+version = "0.1.0"
+edition = "2024"
+description = "Request and response types of the Broccoli REST API, shared by the server and its Rust clients"
+license = "MIT"
+repository = "https://github.com/THUSAAC-PSD/broccoli"
+
+[features]
+default = []
+# `DeriveValueType` for the status enums and `FromQueryResult` for row-shaped
+# responses; enabled by the server through `common/sea-orm`.
+sea-orm = ["dep:sea-orm"]
+
+[dependencies]
+broccoli-types.workspace = true
+chrono.workspace = true
+sea-orm = { workspace = true, optional = true, default-features = false, features = ["macros", "with-chrono"] }
+serde.workspace = true
+serde_json.workspace = true
+utoipa.workspace = true

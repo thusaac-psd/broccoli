@@ -790,6 +790,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "broccoli-api-types"
+version = "0.1.0"
+dependencies = [
+ "broccoli-types",
+ "chrono",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "utoipa",
+]
+
+[[package]]
 name = "broccoli-cli-core"
 version = "0.1.0"
 dependencies = [
@@ -1198,6 +1210,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "broccoli-api-types",
  "broccoli-types",
  "chrono",
  "config",
@@ -6198,6 +6211,7 @@ dependencies = [
  "axum-extra",
  "axum_typed_multipart",
  "base64 0.22.1",
+ "broccoli-api-types",
  "broccoli-server-sdk",
  "chrono",
  "common",
