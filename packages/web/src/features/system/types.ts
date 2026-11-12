@@ -3,7 +3,6 @@ export interface WorkerInfo {
   started_at: string;
   last_seen: string;
   seconds_since_last_seen: number;
-  stale: boolean;
   in_flight: number;
   max_concurrency: number | null;
   sandbox_backend: string;

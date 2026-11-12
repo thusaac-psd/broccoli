@@ -236,13 +236,12 @@ fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
     u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
 }
 
-/// Sum of `max_concurrency` over live (non-stale) workers, from heartbeats.
-/// 0 when heartbeats are unavailable, which leaves the configured floor.
+/// Sum of `max_concurrency` over live workers. 0 when Redis is unavailable,
+/// which leaves the configured floor.
 async fn live_worker_slots(state: &AppState) -> u64 {
     crate::handlers::system::read_workers(state)
         .await
         .iter()
-        .filter(|w| !w.stale)
         .map(|w| u64::from(w.max_concurrency.unwrap_or(1)))
         .sum()
 }

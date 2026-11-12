@@ -34,7 +34,7 @@ export default function AdminSystemPage() {
   }
 
   const totalInFlight = data?.workers.reduce((s, w) => s + w.in_flight, 0) ?? 0;
-  const onlineWorkers = data?.workers.filter((w) => !w.stale).length ?? 0;
+  const onlineWorkers = data?.workers.length ?? 0;
 
   return (
     <PageLayout

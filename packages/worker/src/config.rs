@@ -290,7 +290,7 @@ impl WorkerAppConfig {
 
         let mut config: Self = s.try_deserialize()?;
         config.worker.id = common::node_identity::resolve_node_id(
-            common::node_identity::NodeRole::Worker,
+            common::liveness::NodeRole::Worker,
             &config.worker.id,
             false,
         )

@@ -752,7 +752,7 @@ pub fn resolve_server_id(
     expects_multi_replica: bool,
 ) -> Result<String, common::node_identity::NodeIdError> {
     common::node_identity::resolve_node_id(
-        common::node_identity::NodeRole::Server,
+        common::liveness::NodeRole::Server,
         configured,
         expects_multi_replica,
     )

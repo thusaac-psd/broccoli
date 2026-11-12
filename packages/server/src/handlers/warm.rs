@@ -82,11 +82,7 @@ pub async fn prewarm_contest(
     let total_blobs = hashes.len() as u32;
     let job = publish_warm_job(client, id, hashes).await?;
 
-    let live_workers = read_workers(&state)
-        .await
-        .iter()
-        .filter(|w| !w.stale)
-        .count() as u32;
+    let live_workers = read_workers(&state).await.len() as u32;
 
     info!(
         job_id = %job.job_id,
@@ -193,7 +189,7 @@ pub async fn prewarm_status(
     // Live workers: report their progress (or "pending" if not yet started).
     for w in &live {
         let entry = by_worker.remove(&w.id);
-        let ws = worker_status(&w.id, w.stale, total_blobs, entry);
+        let ws = worker_status(&w.id, false, total_blobs, entry);
         fraction_sum += ws.fraction;
         if ws.state == "complete" {
             workers_complete += 1;

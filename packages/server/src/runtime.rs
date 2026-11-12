@@ -23,7 +23,8 @@ use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
-use common::node_identity::{NodeClaim, NodeHeartbeat, NodeRole};
+use common::liveness::NodeRole;
+use common::node_identity::{NodeClaim, NodeHeartbeat};
 
 pub struct ServerRuntime {
     listener: tokio::net::TcpListener,

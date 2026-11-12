@@ -22,10 +22,7 @@ export function TargetWorkerSelector({ selected, onChange, disabled }: Props) {
   const { data, isLoading } = useSystemOverview();
   const [open, setOpen] = useState(false);
 
-  const liveWorkers = useMemo(
-    () => (data?.workers ?? []).filter((w) => !w.stale),
-    [data],
-  );
+  const liveWorkers = useMemo(() => data?.workers ?? [], [data]);
 
   const available = useMemo(
     () => liveWorkers.filter((w) => !selected.includes(w.id)),

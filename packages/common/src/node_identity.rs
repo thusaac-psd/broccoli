@@ -1,16 +1,16 @@
 //! Node identity for servers and workers: a unique default ID per host, and a
 //! Redis claim that makes two live processes with the same ID impossible.
 //!
-//! Every node writes a TTL'd liveness key, `broccoli:{role}:heartbeat:{id}`
-//! (see [`NodeRole::heartbeat_key`]). That key doubles as the node's *claim* on
+//! Every node writes its liveness key (see [`crate::liveness`]). That key
+//! doubles as the node's *claim* on
 //! its ID: it is created with `SET NX` at boot ([`NodeClaim::claim_at_boot`]),
 //! renewed only by the process that created it (the value carries a per-process
 //! `instance` token), and deleted on graceful shutdown. A second process booting
 //! with an ID that a live node holds therefore refuses to start instead of
 //! silently sharing its queues, dedup claims and leases.
 //!
-//! The value is the role's JSON heartbeat payload plus the `instance` field, so
-//! existing readers of the payload (which ignore unknown fields) are unaffected.
+//! The value is the role's JSON heartbeat payload plus the `instance` field,
+//! which readers of the payload ignore.
 
 use std::time::Duration;
 
@@ -20,17 +20,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-/// Prefix of a worker's heartbeat (and ID claim) key.
-pub const WORKER_HEARTBEAT_KEY_PREFIX: &str = "broccoli:worker:heartbeat:";
-/// Prefix of a server's heartbeat (and ID claim) key. The reply-queue sweeper
-/// treats a server without one as dead.
-pub const SERVER_HEARTBEAT_KEY_PREFIX: &str = "broccoli:server:heartbeat:";
-
-/// How long a heartbeat key lives without renewal. Readers treat its presence
-/// as liveness, so this is also how long a crashed node still looks alive.
-pub const HEARTBEAT_TTL: Duration = Duration::from_secs(15);
-/// How often a live node renews its heartbeat key.
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+use crate::liveness::{NodeRole, RENEW_INTERVAL, TTL};
 
 /// Consecutive [`RenewOutcome::Lost`] renewals (about 15 s) after which the
 /// node stops: a live twin holds its ID. This also closes the fail-open boot
@@ -43,32 +33,6 @@ const LOST_CLAIM_EXIT_CODE: i32 = 75;
 
 /// The JSON field holding the per-process token that owns a claim.
 const INSTANCE_FIELD: &str = "instance";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeRole {
-    Server,
-    Worker,
-}
-
-impl NodeRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Server => "server",
-            Self::Worker => "worker",
-        }
-    }
-
-    pub fn heartbeat_key_prefix(self) -> &'static str {
-        match self {
-            Self::Server => SERVER_HEARTBEAT_KEY_PREFIX,
-            Self::Worker => WORKER_HEARTBEAT_KEY_PREFIX,
-        }
-    }
-
-    pub fn heartbeat_key(self, id: &str) -> String {
-        format!("{}{id}", self.heartbeat_key_prefix())
-    }
-}
 
 /// Returns true if `id` is safe as a node ID: it is embedded in Redis queue
 /// names, so alphanumeric plus `-_.`, 1 to 128 chars, and no suffix that the
@@ -292,7 +256,7 @@ impl NodeClaim {
         id: &str,
         payload: serde_json::Value,
     ) -> Result<Self, NodeClaimError> {
-        Self::claim_with_timing(client, role, id, payload, HEARTBEAT_TTL, HEARTBEAT_INTERVAL).await
+        Self::claim_with_timing(client, role, id, payload, TTL, RENEW_INTERVAL).await
     }
 
     async fn claim_with_timing(
@@ -307,7 +271,7 @@ impl NodeClaim {
             client,
             role,
             id: id.to_string(),
-            key: role.heartbeat_key(id),
+            key: role.key(id),
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
             conn: Mutex::new(None),
@@ -398,13 +362,13 @@ impl NodeClaim {
         Ok(())
     }
 
-    /// Renew the claim every [`HEARTBEAT_INTERVAL`] with a fresh `payload()`
+    /// Renew the claim every [`RENEW_INTERVAL`] with a fresh `payload()`
     /// until [`NodeHeartbeat::shutdown`], which then releases it.
     pub fn spawn_heartbeat<F>(self, payload: F) -> NodeHeartbeat
     where
         F: Fn() -> serde_json::Value + Send + 'static,
     {
-        self.spawn_heartbeat_every(HEARTBEAT_INTERVAL, payload)
+        self.spawn_heartbeat_every(RENEW_INTERVAL, payload)
     }
 
     fn spawn_heartbeat_every<F>(self, interval: Duration, payload: F) -> NodeHeartbeat
@@ -641,18 +605,6 @@ mod tests {
             Err(NodeIdError::ExplicitIdRequired(NodeRole::Server))
         );
         assert!(resolve_node_id(NodeRole::Server, "bad id", true).is_err());
-    }
-
-    #[test]
-    fn heartbeat_keys_follow_one_scheme() {
-        assert_eq!(
-            NodeRole::Server.heartbeat_key("s1"),
-            "broccoli:server:heartbeat:s1"
-        );
-        assert_eq!(
-            NodeRole::Worker.heartbeat_key("w1"),
-            "broccoli:worker:heartbeat:w1"
-        );
     }
 
     async fn redis() -> (redis::Client, testcontainers::ContainerAsync<Redis>) {

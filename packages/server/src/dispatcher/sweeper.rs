@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 const BROKER_SUFFIXES: [&str; 4] = ["_processing", "_failed", "_fairness_set", ""];
 const DEAD_SINCE_PREFIX: &str = "broccoli:server:dead_since:";
 // Written by every live server; see `common::node_identity`.
-const SERVER_HEARTBEAT_PREFIX: &str = common::node_identity::SERVER_HEARTBEAT_KEY_PREFIX;
+const SERVER_HEARTBEAT_PREFIX: &str = common::liveness::NodeRole::Server.key_prefix();
 const GHOST_QUEUE_GRACE_SECS: i64 = 3600;
 
 pub async fn run(
@@ -377,7 +377,8 @@ mod tests {
     /// releasing it on graceful shutdown lets the sweeper start the debounce.
     #[tokio::test]
     async fn server_id_claims_are_the_liveness_signal_the_sweeper_reads() {
-        use common::node_identity::{NodeClaim, NodeRole};
+        use common::liveness::NodeRole;
+        use common::node_identity::NodeClaim;
         use redis::AsyncCommands;
         use testcontainers::runners::AsyncRunner;
         use testcontainers_modules::redis::Redis;

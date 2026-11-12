@@ -813,7 +813,7 @@ async fn target_worker_is_live(redis: Option<&redis::Client>, worker_id: &str) -
     let Ok(mut conn) = client.get_multiplexed_async_connection().await else {
         return true;
     };
-    let key = format!("{}{worker_id}", common::worker::WORKER_HEARTBEAT_KEY_PREFIX);
+    let key = common::liveness::NodeRole::Worker.key(worker_id);
     let exists: Result<i64, redis::RedisError> =
         redis::cmd("EXISTS").arg(&key).query_async(&mut conn).await;
     match exists {
@@ -1089,10 +1089,7 @@ mod tests {
             .expect("connect");
 
         // Mirror the worker heartbeat writer: a key with a TTL under the prefix.
-        let key = format!(
-            "{}worker-alive",
-            common::worker::WORKER_HEARTBEAT_KEY_PREFIX
-        );
+        let key = common::liveness::NodeRole::Worker.key("worker-alive");
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg("{}")

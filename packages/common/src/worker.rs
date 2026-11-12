@@ -41,36 +41,9 @@ pub fn worker_private_queue_name(shared_queue: &str, worker_id: &str) -> String 
     format!("{shared_queue}:worker:{worker_id}")
 }
 
-/// Redis key prefix for a worker's liveness heartbeat: the full key is
-/// `{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}` (15s TTL, written by the worker;
-/// it is also the worker's ID claim, see [`crate::node_identity`]).
-///
-/// This is the coupling between the worker (which WRITES its heartbeat) and the
-/// server (which READS it for the system dashboard, the dead-worker operation
-/// reaper, and pinned-task liveness routing) plus the worker-side dedup claim
-/// (which checks a prior owner's heartbeat). Every one of those sites must use
-/// the identical prefix, so it lives here as the single source of truth rather
-/// than as a hand-copied literal in each crate.
-pub use crate::node_identity::WORKER_HEARTBEAT_KEY_PREFIX;
-
-/// TTL (seconds) the worker sets on its heartbeat key, refreshing it every few
-/// seconds. Readers derive a heartbeat's age from the key's remaining TTL, so
-/// liveness is measured on the Redis clock alone and never compares a
-/// worker's clock with a server's.
-pub const WORKER_HEARTBEAT_TTL_SECS: u64 = 15;
-
-fn default_fairness_mode() -> String {
-    "unknown".into()
-}
-
-/// The worker liveness heartbeat wire payload, serialized by the worker into
-/// `{WORKER_HEARTBEAT_KEY_PREFIX}{id}` and deserialized by the server (system
-/// dashboard, dead-worker operation reaper). It lives here as the single source
-/// of truth so the producer and consumer cannot drift: previously each crate
-/// hand-mirrored this struct and they had already diverged (`fairness_mode` was
-/// `String` on one side and `Option<String>` on the other). All the trailing
-/// fields are `#[serde(default)]` so heartbeats written by older workers still
-/// deserialize.
+/// The payload a worker writes into its liveness key (see
+/// [`crate::liveness`]) and the server reads for the system dashboard and
+/// capacity planning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatPayload {
     pub id: String,
@@ -78,21 +51,14 @@ pub struct HeartbeatPayload {
     pub last_seen: chrono::DateTime<Utc>,
     pub in_flight: u32,
     pub max_concurrency: Option<u32>,
-    #[serde(default = "default_fairness_mode")]
     pub fairness_mode: String,
     pub sandbox_backend: String,
     pub version: String,
-    #[serde(default)]
     pub hostname: Option<String>,
-    #[serde(default)]
     pub ip_addresses: Vec<String>,
-    #[serde(default)]
     pub os: Option<String>,
-    #[serde(default)]
     pub arch: Option<String>,
-    #[serde(default)]
     pub cpu_count: Option<u32>,
-    #[serde(default)]
     pub pid: Option<u32>,
 }
 

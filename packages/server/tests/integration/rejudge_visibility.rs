@@ -25,7 +25,8 @@
 
 use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
-use common::worker::{HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX};
+use common::liveness::{NodeRole, TTL};
+use common::worker::HeartbeatPayload;
 use common::{SubmissionStatus, Verdict};
 use redis::AsyncCommands;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -430,11 +431,11 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
         cpu_count: None,
         pid: None,
     };
-    let key = format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}");
+    let key = NodeRole::Worker.key(worker_id);
     let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");
     // Mirror the worker's writer: the key's TTL is what makes it live.
     let _: () = conn
-        .set_ex(&key, &value, common::worker::WORKER_HEARTBEAT_TTL_SECS)
+        .set_ex(&key, &value, TTL.as_secs())
         .await
         .expect("write heartbeat key");
 }

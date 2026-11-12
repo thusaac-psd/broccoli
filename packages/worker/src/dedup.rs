@@ -4,7 +4,7 @@ use tracing::warn;
 
 use crate::models::operation::models::OperationTask;
 
-const HEARTBEAT_PREFIX: &str = common::worker::WORKER_HEARTBEAT_KEY_PREFIX;
+const HEARTBEAT_PREFIX: &str = common::liveness::NodeRole::Worker.key_prefix();
 const OPERATION_DEDUP_SLACK_SECS: u64 = 300;
 
 /// Lua script for atomic, liveness-aware claim.

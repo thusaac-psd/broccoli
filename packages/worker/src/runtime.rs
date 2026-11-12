@@ -10,7 +10,8 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use common::cancel::RedisCancelChecker;
-use common::node_identity::{NodeClaim, NodeRole};
+use common::liveness::NodeRole;
+use common::node_identity::NodeClaim;
 
 use crate::config::WorkerAppConfig;
 use crate::consumer::{WorkerConsumer, WorkerConsumerDeps};

@@ -16,6 +16,7 @@ pub mod deadline;
 pub mod dlq;
 pub mod event;
 pub mod hook;
+pub mod liveness;
 pub mod metrics;
 pub mod node_identity;
 pub mod observability;

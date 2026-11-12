@@ -52,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
 /// while the worker's own Redis connection works. A key written from another
 /// host means two workers share this worker id.
 async fn check_own_heartbeat(redis_url: &str, worker_id: &str) -> anyhow::Result<()> {
-    use common::worker::{HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX};
+    use common::liveness::NodeRole;
+    use common::worker::HeartbeatPayload;
 
     let client = redis::Client::open(redis_url).context("Failed to initialize Redis client")?;
     let mut conn = client
@@ -60,7 +61,7 @@ async fn check_own_heartbeat(redis_url: &str, worker_id: &str) -> anyhow::Result
         .await
         .context("Failed to connect to Redis")?;
     let raw: Option<String> = redis::cmd("GET")
-        .arg(format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}"))
+        .arg(NodeRole::Worker.key(worker_id))
         .query_async(&mut conn)
         .await
         .context("Redis heartbeat read failed")?;
@@ -157,10 +158,7 @@ mod tests {
         let client = redis::Client::open(url).unwrap();
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
         let _: () = redis::cmd("SET")
-            .arg(format!(
-                "{}{worker_id}",
-                common::worker::WORKER_HEARTBEAT_KEY_PREFIX
-            ))
+            .arg(common::liveness::NodeRole::Worker.key(worker_id))
             .arg(payload.to_string())
             .arg("EX")
             .arg(15)
