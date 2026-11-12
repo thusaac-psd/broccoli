@@ -42,6 +42,8 @@ cat > "$CONF" <<TOML
 [database]
 url = "${BROCCOLI_TEST_DATABASE_URL}"
 TOML
+CONN_ENV="$T/connection.env"
+printf "BROCCOLI__DATABASE__URL='%s'\n" "$BROCCOLI_TEST_DATABASE_URL" > "$CONN_ENV"
 
 #
 # -q (quiet) is required in addition to -At: without it, psql still prints a
@@ -139,7 +141,7 @@ assert_eq "post-delete user"         0 "$("${PSQL[@]}" -c "SELECT count(*) FROM 
 
 # --- 5. restore from the bundle directory (no --truncate: target is
 #     problem-empty, so the non-empty guard doesn't even apply here) ---
-bash "$import_sh" --config "$CONF" --bundle "$T/bundle" >"$T/import1.log" 2>&1 \
+bash "$import_sh" --env-file "$CONN_ENV" --bundle "$T/bundle" >"$T/import1.log" 2>&1 \
   || { cat "$T/import1.log" >&2; echo "FAIL: import-problems.sh (restore)" >&2; exit 1; }
 
 assert_eq "restored contest"      1 "$("${PSQL[@]}" -c "SELECT count(*) FROM contest WHERE id=$SEED_CID")"
@@ -150,7 +152,7 @@ assert_eq "restored user"         1 "$("${PSQL[@]}" -c "SELECT count(*) FROM \"u
 assert_eq "restored user password blank" "" "$("${PSQL[@]}" -c "SELECT password FROM \"user\" WHERE id=$SEED_UID")"
 
 # --- 6. re-import the SAME bundle: idempotent, counts unchanged, no error ---
-bash "$import_sh" --config "$CONF" --bundle "$T/bundle" >"$T/import2.log" 2>&1 \
+bash "$import_sh" --env-file "$CONN_ENV" --bundle "$T/bundle" >"$T/import2.log" 2>&1 \
   || { cat "$T/import2.log" >&2; echo "FAIL: import-problems.sh (re-import)" >&2; exit 1; }
 
 assert_eq "re-import contest"      1 "$("${PSQL[@]}" -c "SELECT count(*) FROM contest WHERE id=$SEED_CID")"
@@ -163,7 +165,7 @@ assert_eq "re-import user"         1 "$("${PSQL[@]}" -c "SELECT count(*) FROM \"
 #     deleted_at IS NULL DO NOTHING must skip the row entirely. ---
 "${PSQL[@]}" -c "UPDATE \"user\" SET password='$HASH_B' WHERE id=$SEED_UID" >/dev/null
 
-bash "$import_sh" --config "$CONF" --bundle "$T/bundle" >"$T/import3.log" 2>&1 \
+bash "$import_sh" --env-file "$CONN_ENV" --bundle "$T/bundle" >"$T/import3.log" 2>&1 \
   || { cat "$T/import3.log" >&2; echo "FAIL: import-problems.sh (no-clobber re-import)" >&2; exit 1; }
 
 assert_eq "active user password never clobbered" "$HASH_B" "$("${PSQL[@]}" -c "SELECT password FROM \"user\" WHERE id=$SEED_UID")"
