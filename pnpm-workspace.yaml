@@ -23,10 +23,16 @@ catalog:
 # Transitive versions pinned past a security advisory until the direct
 # dependency that pulls them in accepts a patched release.
 overrides:
-  # monaco-editor 0.57 pins dompurify 3.4.15.
+  # monaco-editor 0.55.1 pins dompurify 3.2.7; dompurify's 3.x API is stable.
   dompurify: ^3.4.17
-  # rehype-katex 7 requires katex ^0.16.
-  katex: ^0.18.2
+
+auditConfig:
+  ignoreGhsas:
+    # KaTeX before 0.18.2: existing prototype pollution can bypass `trust`
+    # restrictions. rehype-katex 7 (the only release line) requires katex
+    # ^0.16, and the web app renders math with the default `trust: false`, so
+    # there is no trust restriction to bypass.
+    - GHSA-238p-pmpm-9mq7
 
 onlyBuiltDependencies:
   - esbuild
