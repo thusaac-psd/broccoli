@@ -18,8 +18,13 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
+    /// Declared `indexed` so schema sync treats the migration's partial
+    /// unique index on this column, `idx_submission_judgement_one_current`,
+    /// as declared and keeps it.
+    #[sea_orm(indexed, unique_key = "submission_version")]
     pub submission_id: i32,
     /// 1-based per-submission ordinal. Holes are not allowed.
+    #[sea_orm(unique_key = "submission_version")]
     pub version: i32,
     /// Exactly one current judgement per submission, enforced by the
     /// partial unique index `idx_submission_judgement_one_current`.

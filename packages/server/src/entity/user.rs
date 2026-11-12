@@ -10,6 +10,10 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
+    /// Unique among active accounts, enforced by the migration's partial
+    /// unique index `idx_user_username_active`. Declared `indexed` so schema
+    /// sync treats that index as declared and keeps it.
+    #[sea_orm(indexed)]
     pub username: String,
     pub display_name: String,
     pub password: String,

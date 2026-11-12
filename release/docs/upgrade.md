@@ -115,38 +115,6 @@ docker compose --env-file .env.infra -f docker-compose.infra.yaml exec db \
   -c "SELECT id, title FROM contest WHERE contest_type IS NULL AND deleted_at IS NULL"
 ```
 
-## Duplicate rows blocking a unique index
-
-Servers now refuse to start when a boot-time unique index cannot be built
-because duplicate rows already exist. Earlier releases only logged a warning, so
-a database can carry duplicates from then: most often a second bootstrap `admin`
-from two servers' simultaneous first boot, or repeated attachment or
-additional-file paths. The error names the index and prints a `SELECT` that
-lists the duplicate keys; run it on the infra node:
-
-```bash
-set -a; . ./.env.infra; set +a
-docker compose --env-file .env.infra -f docker-compose.infra.yaml exec db \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '<query from the error>'
-```
-
-Then keep one row per key. For duplicate usernames, soft-delete the extra
-accounts (the index only covers accounts that are not deleted):
-
-```sql
-UPDATE "user" SET deleted_at = now()
-WHERE username = 'admin' AND deleted_at IS NULL
-  AND id <> (SELECT min(id) FROM "user" WHERE username = 'admin' AND deleted_at IS NULL);
-```
-
-For attachment or additional-file paths, delete the older copies in the problem
-editor or with `DELETE ... WHERE id = ...`. Restart the server afterwards.
-
-If you cannot clean up before the contest, set
-`BROCCOLI__DATABASE__ALLOW_MISSING_UNIQUE_INDEXES=true` on the servers to start
-anyway; the error is still logged and the invariant stays unenforced. This
-switch exists for one release only.
-
 ## Compose project names
 
 Env files written by this release set `COMPOSE_PROJECT_NAME=broccoli-<role>`, so

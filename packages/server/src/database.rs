@@ -367,7 +367,7 @@ async fn connect_restricted_pool_with_fallback(
 ///    before the plugin can use it, via sqlx's per-connection `after_connect`
 ///    hook. `broccoli_plugin` is a NOLOGIN role (created + granted by the
 ///    migrations in [`BootSession::migrate`]) that the app role is a MEMBER of. By
-///    product decision (migrations m0003/m0004) it has full read + write DML
+///    product decision it has full read + write DML
 ///    (SELECT/INSERT/UPDATE/DELETE) on every table, so raw plugin SQL can freely
 ///    read and mutate contest DATA. What it still CANNOT do, and what this role
 ///    boundary exists to enforce, is: schema DDL on core tables (DROP/ALTER are
@@ -557,17 +557,9 @@ impl BootSession {
     /// Schema sync and versioned migrations.
     pub async fn migrate(&self) -> Result<(), DbErr> {
         let db = &self.db;
-        crate::migration::prepare_user_display_name(db).await?;
-
-        // Create/update the core tables from the entity definitions.
+        // Create the core tables from the entity definitions, then apply the
+        // schema they cannot express (see `crate::migration`).
         db.get_schema_registry("server::entity::*").sync(db).await?;
-
-        // Apply the versioned, tracked supplementary DDL (column evolutions, the
-        // one-time data backfill, and the `broccoli_plugin` least-privilege role +
-        // read-narrowing grants/view) that the entity `sync()` above does not
-        // cover. Recorded in `seaql_migrations` so each runs once and its failures
-        // surface instead of being swallowed; idempotent, so an existing
-        // deployment records them as no-ops on first run. See `crate::migration`.
         Migrator::up(db, None).await
     }
 
@@ -639,7 +631,6 @@ mod tests {
     async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
         let boot = BootSession::acquire(url).await?;
         boot.migrate().await?;
-        crate::seed::ensure_indexes(boot.conn(), false).await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         let bootstrap = crate::config::BootstrapConfig {
             admin_username: "admin".into(),
@@ -750,51 +741,51 @@ mod tests {
         assert!(row.try_get::<bool>("", "idx").unwrap());
     }
 
-    /// A unique index that cannot be built (duplicates already present) fails
-    /// boot instead of leaving the invariant silently unenforced.
+    /// A reboot leaves every index exactly as the first boot built it: schema
+    /// sync neither drops the migration's partial unique indexes nor rebuilds
+    /// anything, so the invariants they enforce never lapse.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn uncreatable_unique_index_fails_boot() {
+    async fn reboot_keeps_every_index() {
         let (_c, url) = fresh_postgres().await;
-        let boot = BootSession::acquire(&url).await.expect("acquire");
-        boot.migrate().await.expect("migrate");
-        for _ in 0..2 {
-            boot.conn()
-                .execute_unprepared(
-                    "INSERT INTO \"user\" (username, display_name, password, created_at, credentials_changed_at) \
-                     VALUES ('dup', 'dup', 'x', now(), now())",
-                )
+        async fn indexes(url: &str) -> Vec<(String, i64, String)> {
+            let db = connect_main_pool(url, 1, &test_session())
                 .await
-                .expect("insert duplicate user");
+                .expect("pool");
+            let rows = db
+                .query_all_raw(sea_orm::Statement::from_string(
+                    sea_orm::DatabaseBackend::Postgres,
+                    "SELECT indexname::text AS name, \
+                     (quote_ident(schemaname) || '.' || quote_ident(indexname))::regclass::oid::bigint AS oid, \
+                     indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname",
+                ))
+                .await
+                .expect("list indexes");
+            db.close().await.expect("close");
+            rows.into_iter()
+                .map(|r| {
+                    (
+                        r.try_get::<String>("", "name").unwrap(),
+                        r.try_get::<i64>("", "oid").unwrap(),
+                        r.try_get::<String>("", "indexdef").unwrap(),
+                    )
+                })
+                .collect()
         }
-        let err = crate::seed::ensure_indexes(boot.conn(), false)
-            .await
-            .expect_err("duplicate usernames must fail boot");
-        let msg = err.to_string();
-        assert!(msg.contains("idx_user_username_active"), "{msg}");
-        assert!(msg.contains("ALLOW_MISSING_UNIQUE_INDEXES"), "{msg}");
-
-        // The reported query is runnable and lists exactly the offending key.
-        let find = msg
-            .split("Find the duplicate rows with: ")
-            .nth(1)
-            .and_then(|rest| rest.split(';').next())
-            .expect("find query in the error");
-        let rows = boot
-            .conn()
-            .query_all_raw(sea_orm::Statement::from_string(
-                sea_orm::DatabaseBackend::Postgres,
-                find.to_string(),
-            ))
-            .await
-            .expect("find query runs");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].try_get::<String>("", "username").unwrap(), "dup");
-        assert_eq!(rows[0].try_get::<i64>("", "rows").unwrap(), 2);
-
-        // The one-release opt-out lets boot continue with the index missing.
-        crate::seed::ensure_indexes(boot.conn(), true)
-            .await
-            .expect("opt-out starts anyway");
+        boot_like_the_server(&url).await.expect("first boot");
+        let first = indexes(&url).await;
+        for partial in [
+            "idx_user_username_active",
+            "idx_submission_judgement_one_current",
+        ] {
+            assert!(
+                first
+                    .iter()
+                    .any(|(name, _, def)| name == partial && def.contains(" WHERE ")),
+                "{partial} missing after the first boot: {first:?}"
+            );
+        }
+        boot_like_the_server(&url).await.expect("second boot");
+        assert_eq!(indexes(&url).await, first);
     }
 
     /// Every pooled connection carries the shared session settings: a slow
@@ -861,8 +852,8 @@ mod tests {
         }
     }
 
-    /// The plugin role may now READ and WRITE (DML) any core table by product
-    /// decision (m0003 reads, m0004 writes), but core schema DDL (`DROP`/`ALTER`)
+    /// The plugin role may READ and WRITE (DML) any core table by product
+    /// decision, but core schema DDL (`DROP`/`ALTER`)
     /// stays owner-only, so a plugin cannot corrupt/drop the schema. It retains
     /// full DDL on its OWN tables. Drives the REAL migration + REAL pools against
     /// a live Postgres.
@@ -884,7 +875,7 @@ mod tests {
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
         // Full app migration: syncs the core schema AND applies the plugin role's
-        // read (m0003) + write (m0004) grants.
+        // read and write grants.
         let app = init_db_with_max_connections(&url, 5, &test_session())
             .await
             .expect("app migration + schema sync");
@@ -1173,16 +1164,15 @@ mod tests {
             .expect("the degraded app-role pool must be usable");
     }
 
-    /// The plugin read DENY-LIST was removed by product decision (m0003): plugins
-    /// may `SELECT` every table, including formerly-restricted ones. This drives
-    /// the REAL migration + REAL restricted pool against a live Postgres and
-    /// asserts the previously-denied tables are now readable. (Credential columns
-    /// they expose are argon2-hashed at rest; contest admins are trusted.) This
-    /// test covers reads only; `broccoli_plugin_can_read_write_core_but_not_ddl_it_and_owns_its_tables`
-    /// covers that the plugin role may now WRITE (DML) core tables while core DDL
+    /// By product decision plugins may `SELECT` every table, including the
+    /// sensitive ones (credential columns are argon2-hashed at rest; contest
+    /// admins are trusted). Drives the REAL migration + REAL restricted pool
+    /// against a live Postgres. This test covers reads only;
+    /// `broccoli_plugin_can_read_write_core_but_not_ddl_it_and_owns_its_tables`
+    /// covers that the plugin role may WRITE (DML) core tables while core DDL
     /// stays owner-only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn broccoli_plugin_can_read_all_tables_after_denylist_removed() {
+    async fn broccoli_plugin_can_read_every_table() {
         use testcontainers::ImageExt;
         use testcontainers::runners::AsyncRunner;
         use testcontainers_modules::postgres::Postgres;
@@ -1205,7 +1195,7 @@ mod tests {
             .await
             .expect("restricted plugin pool");
 
-        // Every formerly deny-listed table is now SELECT-able by the plugin role.
+        // Sensitive tables are SELECT-able by the plugin role.
         for table in [
             r#""user""#,
             "refresh_tokens",
@@ -1221,9 +1211,7 @@ mod tests {
             restricted
                 .execute_unprepared(&format!("SELECT * FROM {table} LIMIT 1"))
                 .await
-                .unwrap_or_else(|e| {
-                    panic!("SELECT from {table} must be allowed after deny-list removal, got: {e}")
-                });
+                .unwrap_or_else(|e| panic!("SELECT from {table} must be allowed, got: {e}"));
         }
 
         // Contest-data tables and the curated view stay readable too.

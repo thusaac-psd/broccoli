@@ -87,16 +87,9 @@ impl ServerRuntime {
         let db_session = crate::database::app_session(&app_config.database);
         // Boot-time schema work runs on one session holding a cluster-wide
         // advisory lock, so replicas booting together serialize instead of
-        // racing each other's DDL and check-then-insert seeding. Indexes come
-        // before seeding: the unique username index must exist before the
-        // bootstrap admin is inserted, or a duplicate admin makes it uncreatable.
+        // racing each other's DDL and check-then-insert seeding.
         let boot = crate::database::BootSession::acquire(&app_config.database.url).await?;
         boot.migrate().await?;
-        crate::seed::ensure_indexes(
-            boot.conn(),
-            app_config.database.allow_missing_unique_indexes,
-        )
-        .await?;
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
         crate::seed::backfill_submission_judgements(boot.conn()).await?;
