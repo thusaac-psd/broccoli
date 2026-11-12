@@ -69,6 +69,7 @@ import {
 } from '@/features/problem/api/attachments';
 import { fetchProblems } from '@/features/problem/api/fetch-problems';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
+import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 // -- Problem Form Dialog --
@@ -208,7 +209,7 @@ function ProblemDialogForm({
     const result = isEdit
       ? await apiClient.PATCH('/problems/{id}', {
           params: { path: { id: problemId } },
-          body,
+          body: changedFields(problemRequestBody(initial), body),
         })
       : await sendIdempotent(body, (key) =>
           apiClient.POST('/problems', {

@@ -65,6 +65,7 @@ import { ContestSlotProvider } from '@/features/contest/components/ContestSlotPr
 import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
+import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 // -- Data fetcher --
@@ -197,6 +198,23 @@ function contestFormValues(
   };
 }
 
+/** The create and update request body for validated `values`. */
+function contestRequestBody(values: ContestFormValues) {
+  return {
+    title: values.title,
+    description: values.description,
+    activate_time: values.activateTime?.toISOString() ?? null,
+    start_time: values.startTime!.toISOString(),
+    end_time: values.endTime!.toISOString(),
+    deactivate_time: values.deactivateTime?.toISOString() ?? null,
+    is_public: values.isPublic,
+    submissions_visible: values.submissionsVisible,
+    show_compile_output: values.showCompileOutput,
+    show_participants_list: values.showParticipantsList,
+    contest_type: values.contestType,
+  };
+}
+
 /** The i18n key of the first problem with `values`, or null when valid. */
 function contestFormProblem(values: ContestFormValues): string | null {
   const { title, startTime, endTime, activateTime, deactivateTime } = values;
@@ -284,24 +302,12 @@ function ContestForm({
       setValues((prev) => ({ ...prev, [field]: value }));
 
   async function save() {
-    const body = {
-      title: values.title,
-      description: values.description,
-      activate_time: values.activateTime?.toISOString() ?? null,
-      start_time: values.startTime!.toISOString(),
-      end_time: values.endTime!.toISOString(),
-      deactivate_time: values.deactivateTime?.toISOString() ?? null,
-      is_public: values.isPublic,
-      submissions_visible: values.submissionsVisible,
-      show_compile_output: values.showCompileOutput,
-      show_participants_list: values.showParticipantsList,
-      contest_type: values.contestType,
-    };
+    const body = contestRequestBody(values);
 
     const result = isEdit
       ? await apiClient.PATCH('/contests/{id}', {
           params: { path: { id: contestId } },
-          body,
+          body: changedFields(contestRequestBody(initial), body),
         })
       : await sendIdempotent(body, (key) =>
           apiClient.POST('/contests', {

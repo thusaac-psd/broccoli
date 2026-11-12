@@ -26,6 +26,7 @@ import {
   attachmentsQueryKey,
   fetchAttachments,
 } from '@/features/problem/api/attachments';
+import { changedFields } from '@/lib/changed-fields';
 
 async function fetchProblem(apiClient: ApiClient, id: number) {
   const { data, error } = await apiClient.GET('/problems/{id}', {
@@ -79,7 +80,10 @@ function ProblemEditFields({
   async function save() {
     const { error } = await apiClient.PATCH('/problems/{id}', {
       params: { path: { id: problemIdNum } },
-      body: problemRequestBody(formData),
+      body: changedFields(
+        problemRequestBody(initial),
+        problemRequestBody(formData),
+      ),
     });
     if (error) {
       toast.error(getErrorMessage(error, t('admin.editError')));

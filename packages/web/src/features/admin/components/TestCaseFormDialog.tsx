@@ -27,6 +27,7 @@ import { toast } from 'sonner';
 import { RecordLoader } from '@/components/RecordLoader';
 import { SwitchField } from '@/features/admin/components/SwitchField';
 import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 interface TestCaseFormDialogProps {
@@ -63,6 +64,20 @@ function testCaseFormValues(testCase: TestCase): TestCaseFormValues {
     isSample: testCase.is_sample,
     description: testCase.description ?? '',
   };
+}
+
+function testCaseFields(values: TestCaseFormValues) {
+  return {
+    input: values.input,
+    expected_output: values.expectedOutput,
+    score: values.score,
+    is_sample: values.isSample,
+    description: values.description || null,
+  };
+}
+
+function testCaseUpdateBody(values: TestCaseFormValues) {
+  return { ...testCaseFields(values), label: values.label.trim() || null };
 }
 
 export function TestCaseFormDialog({
@@ -147,19 +162,18 @@ function TestCaseForm({
       setValues((prev) => ({ ...prev, [field]: value }));
 
   async function save() {
-    const fields = {
-      input: values.input,
-      expected_output: values.expectedOutput,
-      score: values.score,
-      is_sample: values.isSample,
-      description: values.description || null,
+    const createBody = {
+      ...testCaseFields(values),
+      label: values.label.trim(),
     };
-    const createBody = { ...fields, label: values.label.trim() };
 
     const result = isEdit
       ? await apiClient.PATCH('/problems/{id}/test-cases/{tc_id}', {
           params: { path: { id: problemId, tc_id: testCaseId } },
-          body: { ...fields, label: values.label.trim() || null },
+          body: changedFields(
+            testCaseUpdateBody(initial),
+            testCaseUpdateBody(values),
+          ),
         })
       : await sendIdempotent({ problemId, body: createBody }, (key) =>
           apiClient.POST('/problems/{id}/test-cases', {
