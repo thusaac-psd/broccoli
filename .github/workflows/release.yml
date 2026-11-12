@@ -510,7 +510,7 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
       - name: Trivy vulnerability scan linux/amd64
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
@@ -521,7 +521,7 @@ jobs:
           format: table
 
       - name: Trivy vulnerability scan linux/arm64
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/arm64
         with:

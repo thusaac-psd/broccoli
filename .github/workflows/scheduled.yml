@@ -1,52 +1,81 @@
-name: Scheduled Security Audit
+name: Security Audit
 
 on:
   schedule:
     - cron: "0 0 * * 1" # Every Monday 00:00 UTC (08:00 UTC+8)
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+  # A pull request that changes what gets installed is audited before it lands,
+  # not on the following Monday.
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "website/pnpm-lock.yaml"
+      - ".cargo/audit.toml"
+      - "scripts/audit-rust.sh"
+      - ".github/workflows/scheduled.yml"
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
 
 jobs:
-  audit:
-    name: Security Audit
+  rust:
+    name: Rust advisories
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable # cargo-audit parses Cargo.lock, never compiles; no nightly needed
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
 
-      - name: Rust audit
-        run: cargo audit # Fails on any RUSTSEC advisory; Rust CVEs are actionable
+      # Every committed Cargo.lock: the workspace, each plugin, the server test
+      # fixtures and the examples. Ignores live in .cargo/audit.toml, each with
+      # its reason.
+      - name: cargo audit
+        run: ./scripts/audit-rust.sh
+
+  js:
+    name: JS advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: pnpm
+          node-version-file: package.json
 
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
+      # `pnpm audit` reads the lockfile, so nothing needs installing. `--prod`
+      # skips devDependencies: they never ship.
+      - name: pnpm audit (workspace)
+        run: pnpm audit --prod
 
-      - name: JS audit (advisory only)
-        run: pnpm audit --prod # --prod skips devDeps since they're not deployed, so not exploitable
-        continue-on-error: true # JS audit is high-noise; visible but not a blocker
+      # The docs site keeps its own lockfile; its ignores are documented in
+      # website/README.md.
+      - name: pnpm audit (website)
+        working-directory: website
+        run: pnpm audit --prod --ignore-workspace
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Trivy secret scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           scanners: secret
-          exit-code: "0" # TODO: flip to 1 after baseline is clean
+          exit-code: "1"
           format: table
