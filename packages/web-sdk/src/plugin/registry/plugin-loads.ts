@@ -47,11 +47,20 @@ export interface PluginRegistryDeps {
   ) => Promise<PluginModule>;
   /** Drop what `importRemote` added to the page (its stylesheets). */
   removeRemote: (pluginId: string) => void;
-  /** Run `load` until it succeeds or gives up (see `retryLoad`). */
-  retry: <T>(load: (attempt: number) => Promise<T>) => Promise<T>;
+  /**
+   * Run `load` until it succeeds, gives up, or fails in a way `shouldRetry`
+   * rejects (see `retryLoad`).
+   */
+  retry: <T>(
+    load: (attempt: number) => Promise<T>,
+    shouldRetry: (error: unknown) => boolean,
+  ) => Promise<T>;
   /** Refetch translations once the set of plugins has changed. */
   refreshI18n: () => Promise<void>;
 }
+
+/** Thrown by a load whose plugin was unloaded or reloaded meanwhile. */
+const ABANDONED = new Error('The plugin load was abandoned.');
 
 const toError = (error: unknown) =>
   error instanceof Error ? error : new Error(String(error));
@@ -103,32 +112,37 @@ export function createPluginRegistry(deps: PluginRegistryDeps) {
       let imported: PluginModule | null = null;
       let importFailed = false;
       try {
-        const module = await deps.retry(async () => {
-          if (!imported) {
+        const module = await deps.retry(
+          async () => {
+            // Unloaded while waiting to retry: no stylesheet, no onInit.
+            if (!isCurrent()) throw ABANDONED;
+            if (!imported) {
+              try {
+                imported = await importModule(importFailed);
+              } catch (error) {
+                importFailed = true;
+                throw error;
+              }
+            }
+            const candidate = imported;
             try {
-              imported = await importModule(importFailed);
+              await candidate.onInit?.();
             } catch (error) {
-              importFailed = true;
+              await destroy(manifest, candidate);
               throw error;
             }
-          }
-          const candidate = imported;
-          try {
-            await candidate.onInit?.();
-          } catch (error) {
-            await destroy(manifest, candidate);
-            throw error;
-          }
-          return candidate;
-        });
+            return candidate;
+          },
+          (error) => error !== ABANDONED,
+        );
         if (isCurrent()) {
           put(manifest.id, { manifest, source, status: 'loaded', module });
         } else {
           await destroy(manifest, module);
         }
       } catch (error) {
-        console.error(`Error loading plugin '${manifest.id}':`, error);
         if (isCurrent()) {
+          console.error(`Error loading plugin '${manifest.id}':`, error);
           if (source === 'remote') deps.removeRemote(manifest.id);
           put(manifest.id, {
             manifest,

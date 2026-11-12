@@ -126,13 +126,10 @@ export function PluginRegistryProvider({
           : ({ manifest } as PluginModule);
       },
       removeRemote: removePluginCss,
-      // `onInit` may fail on a transient error too, so every failure is
-      // worth another try.
-      retry: (load) =>
-        retryLoad(load, {
-          attempts: PLUGIN_LOAD_ATTEMPTS,
-          shouldRetry: () => true,
-        }),
+      // `onInit` may fail on a transient error too, so every failure the
+      // registry does not rule out is worth another try.
+      retry: (load, shouldRetry) =>
+        retryLoad(load, { attempts: PLUGIN_LOAD_ATTEMPTS, shouldRetry }),
       refreshI18n: async () => {
         await queryClient.refetchQueries({
           queryKey: ['i18n'],

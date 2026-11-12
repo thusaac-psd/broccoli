@@ -55,12 +55,12 @@ function registry(overrides: Partial<PluginRegistryDeps> = {}) {
     },
     removeRemote: (id) => removed.push(id),
     // Up to three tries, no waiting.
-    retry: async (load) => {
+    retry: async (load, shouldRetry) => {
       for (let attempt = 0; ; attempt += 1) {
         try {
           return await load(attempt);
         } catch (error) {
-          if (attempt === 2) throw error;
+          if (attempt === 2 || !shouldRetry(error)) throw error;
         }
       }
     },
@@ -217,4 +217,30 @@ test('a failed onInit is retried on the module already imported', async () => {
   await r.sync();
   assert.equal(inits, 2);
   assert.deepEqual(imports, [{ id: 'a', fresh: false }]);
+});
+
+test('a plugin unloaded while its load waits to retry is not imported again', async () => {
+  const pause = deferred<void>();
+  let imports = 0;
+  const { r } = registry({
+    importRemote: async () => {
+      imports += 1;
+      throw new TypeError('Failed to fetch dynamically imported module');
+    },
+    retry: async (load) => {
+      try {
+        return await load(0);
+      } catch {
+        await pause.promise;
+        return await load(1);
+      }
+    },
+  });
+  const syncing = r.sync();
+  while (imports === 0) await new Promise((resolve) => setImmediate(resolve));
+  await r.unload('a');
+  pause.resolve();
+  await syncing;
+  assert.equal(imports, 1);
+  assert.equal(r.getLoads().size, 0);
 });
