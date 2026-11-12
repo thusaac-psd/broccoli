@@ -105,6 +105,7 @@
 'codelink-bracket.setup.autofill' = 'Fill from problem order'
 'codelink-bracket.setup.bench' = 'Other enrolled players ({count})'
 'codelink-bracket.setup.breakMinutes' = 'Break before stage (minutes)'
+'codelink-bracket.setup.loadFailed' = 'Could not load the bracket setup.'
 'codelink-bracket.setup.confirmDescription' = 'Seeding is fixed when the contest starts. Each stage is fixed when it opens.'
 'codelink-bracket.setup.confirmTitle' = 'Create the bracket?'
 'codelink-bracket.setup.create' = 'Create bracket'

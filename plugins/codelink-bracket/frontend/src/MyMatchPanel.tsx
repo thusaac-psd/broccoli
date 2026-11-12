@@ -1,3 +1,5 @@
+import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -219,17 +221,23 @@ function CurrentTask({
               setError(null);
               setSubmitting(true);
               try {
-                await api.submitOrder(contestId, match.id, order);
+                const result = await api.submitOrder(
+                  contestId,
+                  match.id,
+                  order,
+                );
+                // It may or may not be in: the refetch below shows which.
+                if (!result.settled) {
+                  setError(t(unsettledMessageKey(result.outcome)));
+                }
+              } catch (err) {
+                setError(
+                  getErrorMessage(err, t('codelink-bracket.error.submitOrder')),
+                );
+              } finally {
                 await queryClient.invalidateQueries({
                   queryKey: ['codelink-bracket-bracket', contestId],
                 });
-              } catch (err) {
-                setError(
-                  err instanceof Error
-                    ? err.message
-                    : t('codelink-bracket.error.submitOrder'),
-                );
-              } finally {
                 setSubmitting(false);
               }
             }}

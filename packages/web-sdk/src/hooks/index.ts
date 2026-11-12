@@ -5,8 +5,11 @@ export {
   IDEMPOTENCY_RESPONSE_TOO_LARGE,
   type IdempotencyOutcome,
   idempotencyOutcome,
+  type IdempotentResult,
   isAlreadyDone,
   isOutcomeUnknown,
+  settleIdempotent,
+  unsettledMessageKey,
 } from '@/hooks/idempotency';
 export * from '@/hooks/use-async-submit';
 export * from '@/hooks/use-idempotent-request';

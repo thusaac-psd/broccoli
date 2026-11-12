@@ -98,6 +98,7 @@
 'ioi.subtask.importCancel' = 'Cancel'
 'ioi.subtask.loading' = 'Loading test cases...'
 'ioi.subtask.retry' = 'Retry'
+'ioi.subtask.loadFailed' = 'Failed to load test cases.'
 'ioi.subtask.noSubtasks' = 'No subtasks defined'
 'ioi.subtask.noSubtasksHint' = 'All scored test cases are one Sum group weighted by testcase point values'
 'ioi.subtask.addSubtask' = '+ Add Subtask'

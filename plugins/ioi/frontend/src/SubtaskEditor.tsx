@@ -1,3 +1,4 @@
+import { getErrorMessage } from '@broccoli/web-sdk/api';
 /**
  * Visual subtask definition editor for IOI-style contest problems.
  */
@@ -1431,9 +1432,9 @@ export function SubtaskEditor({
         </div>
       )}
 
-      {problemId && tcError && (
+      {problemId && tcError != null && (
         <div className="px-4 py-3 rounded-lg bg-red-500/[0.06] border border-red-500/20 flex items-center justify-between text-xs text-red-600">
-          <span>{tcError}</span>
+          <span>{getErrorMessage(tcError, t('ioi.subtask.loadFailed'))}</span>
           <Button
             variant="outline"
             size="sm"

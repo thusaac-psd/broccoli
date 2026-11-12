@@ -2,7 +2,13 @@
 // `<api base>/p/<plugin id>`. The host knows nothing about the plugin: the
 // plugin names itself and its own paths.
 
-/** A failed plugin API request: its HTTP status and the error body's code. */
+import type { IdempotentResult } from '@/hooks/idempotency';
+
+/**
+ * A failed plugin API request: its HTTP status, the error body's `code`, and
+ * as `message` the body's message for the user, or an empty string when the
+ * body has none. Callers show `getErrorMessage(error, <translated fallback>)`.
+ */
 export class PluginApiError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -22,60 +28,94 @@ export class PluginApiError extends Error {
   }
 }
 
+/** What a plugin request may send: JSON-serializable data, or a raw body. */
+export type PluginRequestBody = FormData | Blob | object | undefined;
+
 export interface PluginApi {
-  /** GET `path` (with its query string, if any) and parse the JSON reply. */
+  /** GET `path` (with its query string, if any) and read the reply. */
   get<T>(path: string): Promise<T>;
   /**
-   * POST `body` (sent as JSON when given) to `path` with an idempotency key
-   * bound to the request: retrying the identical request after a lost reply
-   * reuses the key, so the server replays the result instead of acting twice.
+   * POST `body` to `path` with an idempotency key bound to the request, so a
+   * retry after a lost reply is replayed instead of acting twice. Resolves to
+   * where the operation stands: settled (with the reply, or no data when an
+   * earlier send already succeeded), or not settled, which the caller must
+   * handle by refetching and telling the user to check before sending again.
+   * Rejects with a `PluginApiError` when the request failed.
    */
-  post<T>(path: string, body?: unknown): Promise<T>;
+  post<T>(path: string, body?: PluginRequestBody): Promise<IdempotentResult<T>>;
   /** The raw authenticated response, for streams and other non-JSON replies. */
   fetch(path: string, init?: RequestInit): Promise<Response>;
 }
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
-/** Sends `request` with the idempotency key for `operation`. */
-export type SendIdempotent = <T>(
+/** Sends `request` idempotently and settles it (`settleIdempotent`). */
+export type SendSettled = <T>(
   operation: unknown,
   request: (idempotencyKey: string) => Promise<T>,
-) => Promise<T>;
+) => Promise<IdempotentResult<T>>;
 
-async function readJson(response: Response): Promise<unknown> {
+/** The reply body: undefined when empty, parsed when JSON, else its text. */
+async function readBody(response: Response): Promise<unknown> {
   const text = await response.text();
-  return text ? JSON.parse(text) : undefined;
+  if (!text) return undefined;
+  const type = response.headers.get('content-type') ?? '';
+  if (!type.includes('json')) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new PluginApiError('', response.status, 'INVALID_RESPONSE');
+  }
 }
 
 async function toError(response: Response): Promise<PluginApiError> {
-  const body = (await readJson(response).catch(() => undefined)) as
+  const body = (await readBody(response).catch(() => undefined)) as
     | { code?: unknown; message?: unknown; error?: unknown; details?: unknown }
+    | string
     | undefined;
+  const fields = typeof body === 'object' ? body : undefined;
   const message =
-    [body?.message, body?.error].find(
+    [fields?.message, fields?.error].find(
       (value): value is string => typeof value === 'string' && value !== '',
-    ) ?? `Request failed: ${response.status}`;
+    ) ?? '';
   return new PluginApiError(
     message,
     response.status,
-    typeof body?.code === 'string' ? body.code : undefined,
-    body?.details,
+    typeof fields?.code === 'string' ? fields.code : undefined,
+    fields?.details,
   );
+}
+
+function encode(body: PluginRequestBody): {
+  body?: BodyInit;
+  headers: Record<string, string>;
+} {
+  if (body === undefined) return { headers: {} };
+  if (
+    (typeof FormData !== 'undefined' && body instanceof FormData) ||
+    (typeof Blob !== 'undefined' && body instanceof Blob)
+  ) {
+    // The browser sets the multipart boundary or the blob's type itself.
+    return { body: body as BodyInit, headers: {} };
+  }
+  return {
+    body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json' },
+  };
 }
 
 export function createPluginApi({
   fetch,
   baseUrl,
   pluginId,
-  sendIdempotent,
+  sendSettled,
 }: {
   /** An authenticated fetch for absolute URLs. */
   fetch: Fetch;
   /** The absolute API base URL, e.g. `https://oj.example/api/v1`. */
   baseUrl: string;
   pluginId: string;
-  sendIdempotent: SendIdempotent;
+  sendSettled: SendSettled;
 }): PluginApi {
   const root = `${baseUrl.replace(/\/+$/, '')}/p/${encodeURIComponent(pluginId)}`;
 
@@ -85,24 +125,21 @@ export function createPluginApi({
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await send(path, init);
     if (!response.ok) throw await toError(response);
-    return (await readJson(response)) as T;
+    return (await readBody(response)) as T;
   }
 
   return {
     fetch: send,
     get: (path) => request(path),
-    post: (path, body) =>
-      sendIdempotent({ pluginId, path, body }, (key) =>
+    post: (path, body) => {
+      const encoded = encode(body);
+      return sendSettled({ pluginId, path, body }, (key) =>
         request(path, {
           method: 'POST',
-          headers: {
-            'Idempotency-Key': key,
-            ...(body === undefined
-              ? {}
-              : { 'Content-Type': 'application/json' }),
-          },
-          body: body === undefined ? undefined : JSON.stringify(body),
+          headers: { 'Idempotency-Key': key, ...encoded.headers },
+          body: encoded.body,
         }),
-      ),
+      );
+    },
   };
 }

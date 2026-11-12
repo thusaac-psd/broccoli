@@ -1,4 +1,5 @@
-import { PluginApiError } from '@broccoli/web-sdk/api';
+import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { Submission } from '@broccoli/web-sdk/submission';
 import {
@@ -48,13 +49,11 @@ export function PrintSubmissionButton({ submission }: Props) {
     setMessage(null);
     try {
       let resultStatus: string | undefined;
-      if (submission.contest_id != null) {
-        const r = await api.printSubmission(
-          submission.contest_id,
-          submission.id,
-        );
-        resultStatus = r.status;
-      } else {
+      const results =
+        submission.contest_id != null
+          ? [await api.printSubmission(submission.contest_id, submission.id)]
+          : [];
+      if (submission.contest_id == null) {
         // Without a contest, print each file as standalone text.
         for (const f of files) {
           const r = await api.printArbitrary({
@@ -62,8 +61,19 @@ export function PrintSubmissionButton({ submission }: Props) {
             language: submission.language,
             source: f.content,
           });
-          resultStatus = r.status;
+          results.push(r);
+          if (!r.settled) break;
         }
+      }
+      for (const r of results) {
+        if (!r.settled) {
+          // A job may already be queued: say so instead of inviting a
+          // second print.
+          setPhase('error');
+          setMessage(t(unsettledMessageKey(r.outcome)));
+          return;
+        }
+        resultStatus = r.data?.status ?? resultStatus;
       }
       setPhase('done');
       setMessage(
@@ -77,9 +87,7 @@ export function PrintSubmissionButton({ submission }: Props) {
       }, 2000);
     } catch (e) {
       setPhase('error');
-      setMessage(
-        e instanceof PluginApiError ? e.message : t('print.action.failed'),
-      );
+      setMessage(getErrorMessage(e, t('print.action.failed')));
     }
   };
 

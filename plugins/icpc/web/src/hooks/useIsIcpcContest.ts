@@ -1,4 +1,3 @@
-import { PluginApiError } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
 
 import { useIcpcApi } from './useIcpcApi';
@@ -10,7 +9,7 @@ import { useIcpcApi } from './useIcpcApi';
 export function useIsIcpcContest(contestId?: number) {
   const api = useIcpcApi();
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ['icpc-contest-info', contestId],
     enabled: !!contestId,
     queryFn: () => api.getContestInfo(contestId!),
@@ -18,13 +17,9 @@ export function useIsIcpcContest(contestId?: number) {
     staleTime: 5 * 60 * 1000,
   });
 
-  const is404 = error instanceof PluginApiError && error.status === 404;
-  const isServerError = !!error && !is404;
-
   return {
     isIcpc: !!data,
     contestInfo: data ?? null,
     isLoading,
-    error: isServerError ? (error as Error).message : null,
   };
 }

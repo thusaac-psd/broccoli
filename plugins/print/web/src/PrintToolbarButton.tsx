@@ -1,4 +1,5 @@
-import { PluginApiError } from '@broccoli/web-sdk/api';
+import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -83,9 +84,16 @@ export function PrintToolbarButton() {
         language,
         source,
       });
+      if (!r.settled) {
+        // The job may already be queued: say so instead of inviting a
+        // second print.
+        setPhase('error');
+        setMessage(t(unsettledMessageKey(r.outcome)));
+        return;
+      }
       setPhase('done');
       setMessage(
-        r.status === 'pending_approval'
+        r.data?.status === 'pending_approval'
           ? t('print.action.needsApproval')
           : t('print.action.submitted'),
       );
@@ -96,9 +104,7 @@ export function PrintToolbarButton() {
       }, 2200);
     } catch (e) {
       setPhase('error');
-      setMessage(
-        e instanceof PluginApiError ? e.message : t('print.action.failed'),
-      );
+      setMessage(getErrorMessage(e, t('print.action.failed')));
     }
   };
 

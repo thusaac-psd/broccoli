@@ -2,6 +2,7 @@ import { use, useMemo } from 'react';
 
 import { ApiClientContext } from '@/api/api-client-context';
 import { createPluginApi, type PluginApi } from '@/api/plugin-api';
+import { settleIdempotent } from '@/hooks/idempotency';
 import { useIdempotentRequest } from '@/hooks/use-idempotent-request';
 
 /**
@@ -18,7 +19,13 @@ export function usePluginApi(pluginId: string): PluginApi {
   const { apiFetch, baseUrl } = context;
   return useMemo(
     () =>
-      createPluginApi({ fetch: apiFetch, baseUrl, pluginId, sendIdempotent }),
+      createPluginApi({
+        fetch: apiFetch,
+        baseUrl,
+        pluginId,
+        sendSettled: (operation, request) =>
+          settleIdempotent(sendIdempotent(operation, request)),
+      }),
     [apiFetch, baseUrl, pluginId, sendIdempotent],
   );
 }

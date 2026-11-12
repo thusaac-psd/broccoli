@@ -1,3 +1,4 @@
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -202,8 +203,12 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
       destructive: true,
       failureMessage: t('icpc.scoreboard.revealFailed'),
       onConfirm: async () => {
-        await api.reveal(contestId);
+        const result = await api.reveal(contestId);
         await refetch();
+        // It may or may not be revealed: the refetched board shows which.
+        if (!result.settled) {
+          throw new Error(t(unsettledMessageKey(result.outcome)));
+        }
       },
     });
   };

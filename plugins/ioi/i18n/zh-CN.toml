@@ -98,6 +98,7 @@
 'ioi.subtask.importCancel' = '取消'
 'ioi.subtask.loading' = '正在加载测试点...'
 'ioi.subtask.retry' = '重试'
+'ioi.subtask.loadFailed' = '加载测试点失败。'
 'ioi.subtask.noSubtasks' = '未定义子任务'
 'ioi.subtask.noSubtasksHint' = '所有有分值的测试点将作为一个按测试点分值加权的求和组计分'
 'ioi.subtask.addSubtask' = '+ 添加子任务'

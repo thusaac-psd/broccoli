@@ -105,6 +105,7 @@
 'codelink-bracket.setup.autofill' = '按题目顺序填充'
 'codelink-bracket.setup.bench' = '其他已报名选手（{count}）'
 'codelink-bracket.setup.breakMinutes' = '阶段开始前休息（分钟）'
+'codelink-bracket.setup.loadFailed' = '无法加载赛程设置。'
 'codelink-bracket.setup.confirmDescription' = '比赛开始后种子固定，各阶段开启后该阶段配置固定。'
 'codelink-bracket.setup.confirmTitle' = '生成对阵表？'
 'codelink-bracket.setup.create' = '生成对阵表'

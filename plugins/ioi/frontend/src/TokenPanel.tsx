@@ -1,3 +1,5 @@
+import { getErrorMessage, PluginApiError } from '@broccoli/web-sdk/api';
+import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -47,9 +49,8 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
         return await api.getTokenStatus(cId!);
       } catch (error) {
         if (
-          error instanceof Error &&
-          'status' in error &&
-          (error.status === 401 || error.status === 403 || error.status === 404)
+          error instanceof PluginApiError &&
+          [401, 403, 404].includes(error.status)
         ) {
           return null;
         }
@@ -111,9 +112,12 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     setIsUsing(true);
     setError(null);
     try {
-      await api.useToken(cId, submission.id);
+      const result = await api.useToken(cId, submission.id);
+      // The token may or may not be spent: say so, and the refetch below
+      // shows which, instead of inviting a second use.
+      if (!result.settled) setError(t(unsettledMessageKey(result.outcome)));
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : t('ioi.tokenPanel.useFailed'));
+      setError(getErrorMessage(e, t('ioi.tokenPanel.useFailed')));
     } finally {
       setIsUsing(false);
       // Refetch on failure too: the token may have been spent (an unknown
