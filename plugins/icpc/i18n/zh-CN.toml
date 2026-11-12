@@ -1,5 +1,5 @@
 # IcpcScoreboard
-'icpc.scoreboard.loading' = '正在加载榜单...'
+'icpc.scoreboard.loading' = '正在加载榜单…'
 'icpc.scoreboard.loadError' = '榜单加载失败'
 'icpc.scoreboard.phase.before' = '未开始'
 'icpc.scoreboard.phase.during' = '进行中'
