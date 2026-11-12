@@ -751,3 +751,42 @@ async fn lease_refresh_skips_a_judgement_a_rejudge_holds() {
     assert_eq!(counts.judgements, 1, "the held judgement is skipped");
     txn.commit().await.unwrap();
 }
+
+#[tokio::test]
+async fn discarding_a_dead_lettered_judgement_resolves_its_dead_letter() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, j1) = new_submission(&db).await;
+    claim_one(&db, "srv").await;
+    finish(&db, &j1, Verdict::Accepted).await;
+    mirror_status(&db, s.id).await;
+    let deferred = rejudge(&db, s.id, false).await;
+    claim_one(&db, "dead").await;
+    exec(
+        &db,
+        &format!(
+            "UPDATE submission_judgement SET lease_heartbeat_at = NOW() - INTERVAL '2 minutes' \
+             WHERE id = {}",
+            deferred.id
+        ),
+    )
+    .await;
+    assert_eq!(steal(&db).await.exhausted, 1);
+
+    let txn = db.begin().await.unwrap();
+    assert!(matches!(
+        discard_judgement(&txn, s.id, deferred.id, 7).await.unwrap(),
+        DiscardJudgement::Discarded
+    ));
+    txn.commit().await.unwrap();
+    let row = dead_letter_message::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.message_type,
+        DlqMessageType::StuckSubmissionJudgement.as_str()
+    );
+    assert!(row.resolved);
+    assert_eq!(row.resolved_by, Some(7));
+}

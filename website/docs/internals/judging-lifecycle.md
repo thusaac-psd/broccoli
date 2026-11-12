@@ -95,11 +95,15 @@ A unit that spends its dispatch retries is dead-lettered under its subject:
 its submission for a current judgement, otherwise the judgement or code run
 itself (`DlqSubject`). A subject has at most one `dead_letter_message` row.
 Dead-lettering it again reopens the row and appends the occurrence to its
-retry history, so `retry_count` counts occurrences. When the subject finishes
-with a verdict that stands (anything terminal but a system error), the same
-statement resolves the row and leaves `resolved_by` NULL. An operator's
-resolution or DLQ retry names the operator. A DLQ retry rejudges only a
-submission whose verdict is a `SystemError`.
+retry history.
+
+A submission's row resolves itself: when its current judgement finishes with a
+verdict that stands (anything terminal but a system error), the same statement
+resolves the row and leaves `resolved_by` NULL. A DLQ retry rejudges a
+submission whose verdict is a `SystemError` and records the retry in the
+history, leaving the row open until the rejudge recovers. Nothing re-judges a
+stuck deferred judgement or code run, so an operator resolves those; discarding
+the judgement resolves its row. An operator resolution names the operator.
 
 ## Locks
 

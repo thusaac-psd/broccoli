@@ -9,6 +9,7 @@ use sea_orm::{
 };
 
 use super::unit::mirror_current;
+use crate::dlq::{DlqService, DlqSubject};
 use crate::entity::{submission, submission_judgement, test_case_result};
 
 /// Chainable on `submission::Entity::update_many()`: allocates one fresh
@@ -278,12 +279,13 @@ pub(crate) enum DiscardJudgement {
     NotFinalized,
 }
 
-/// Deletes a finalized, non-current judgement and its results, in the
-/// caller's transaction.
+/// Deletes a finalized, non-current judgement and its results, and resolves
+/// its dead letter on behalf of `operator_id`, in the caller's transaction.
 pub(crate) async fn discard_judgement(
     txn: &DatabaseTransaction,
     submission_id: i32,
     judgement_id: i32,
+    operator_id: i32,
 ) -> Result<DiscardJudgement, DbErr> {
     let locked = submission::Entity::find_by_id(submission_id)
         .select_only()
@@ -314,6 +316,9 @@ pub(crate) async fn discard_judgement(
         .await?;
     submission_judgement::Entity::delete_by_id(judgement_id)
         .exec(txn)
+        .await?;
+    DlqService::new(txn)
+        .resolve_subject(DlqSubject::Judgement(judgement_id), operator_id)
         .await?;
     Ok(DiscardJudgement::Discarded)
 }

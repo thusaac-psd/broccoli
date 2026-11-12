@@ -1912,7 +1912,7 @@ export interface paths {
     put?: never;
     /**
      * Discard a non-current submission judgement
-     * @description Deletes a non-current judgement and its test-case result rows. Requires `submission:rejudge` permission.
+     * @description Deletes a non-current judgement and its test-case result rows, and resolves its dead letter message, if any. Requires `submission:rejudge` permission.
      */
     post: operations['discardSubmissionJudgement'];
     delete?: never;
@@ -3017,8 +3017,8 @@ export interface components {
       message_type: string;
       payload: unknown;
       /**
-       * @description Resolved by an operator, or automatically once the stuck submission,
-       *     judgement or code run finished with a verdict other than a system error.
+       * @description Resolved by an operator, or, for a stuck submission, automatically once
+       *     it finished with a verdict other than a system error.
        * @example false
        */
       resolved: boolean;
@@ -3068,8 +3068,8 @@ export interface components {
       /** @example stuck_submission */
       message_type: string;
       /**
-       * @description Resolved by an operator, or automatically once the stuck submission,
-       *     judgement or code run finished with a verdict other than a system error.
+       * @description Resolved by an operator, or, for a stuck submission, automatically once
+       *     it finished with a verdict other than a system error.
        * @example false
        */
       resolved: boolean;

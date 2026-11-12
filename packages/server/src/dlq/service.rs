@@ -30,11 +30,12 @@ pub struct DlqStats {
 
 /// What a stuck-work dead letter is about. Each subject has at most one
 /// row, keyed by [`DlqSubject::message_id`]: dead-lettering the same subject
-/// again reopens that row and appends the occurrence to its retry history,
-/// and the judging lifecycle resolves it automatically when the subject
-/// reaches a terminal state other than a system error (see
-/// `services::judging`), leaving `resolved_by` NULL. An operator resolution
-/// always names the operator.
+/// again reopens that row and appends the occurrence to its retry history.
+/// A submission's row is resolved automatically when its current judgement
+/// ends with a verdict other than a system error (see `services::judging`),
+/// leaving `resolved_by` NULL; nothing re-judges a stuck deferred judgement
+/// or code run, so an operator resolves those. An operator resolution always
+/// names the operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DlqSubject {
     /// A submission whose current judgement spent its dispatch retries.
@@ -257,6 +258,33 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
                    WHERE d.id = $1"#,
                 [id.into(), operator_id.to_string().into()],
             ))
+            .await?;
+        Ok(())
+    }
+
+    /// Resolves `subject`'s message, if it has an open one, on behalf of
+    /// operator `resolved_by`.
+    pub async fn resolve_subject(
+        &self,
+        subject: DlqSubject,
+        resolved_by: i32,
+    ) -> Result<(), DbErr> {
+        dead_letter_message::Entity::update_many()
+            .col_expr(
+                dead_letter_message::Column::Resolved,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .col_expr(
+                dead_letter_message::Column::ResolvedAt,
+                sea_orm::sea_query::Expr::cust("NOW()"),
+            )
+            .col_expr(
+                dead_letter_message::Column::ResolvedBy,
+                sea_orm::sea_query::Expr::value(Some(resolved_by)),
+            )
+            .filter(dead_letter_message::Column::MessageId.eq(subject.message_id()))
+            .filter(dead_letter_message::Column::Resolved.eq(false))
+            .exec(self.conn)
             .await?;
         Ok(())
     }

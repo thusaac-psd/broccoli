@@ -98,8 +98,8 @@ impl Unit {
 
     /// CTEs (each with a leading comma) that keep derived rows in step with
     /// the rows of CTE `moved`: a current judgement's submission cache, and
-    /// the dead letters of a unit (and of a current judgement's submission)
-    /// that just recovered.
+    /// the dead letter of a submission whose current judgement just
+    /// recovered. A code run derives nothing.
     fn cascade(self) -> String {
         match self {
             Unit::Judgement => format!(
@@ -107,21 +107,12 @@ impl Unit {
                  WHERE s.id = j.submission_id AND j.is_current RETURNING s.id, s.status), \
                  recovered AS (UPDATE dead_letter_message d \
                      SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
-                     FROM moved j WHERE NOT d.resolved AND {recovered} \
-                       AND (d.message_id = {own} \
-                            OR (j.is_current AND d.message_id = {submission})))",
+                     FROM moved j WHERE NOT d.resolved AND j.is_current AND {recovered} \
+                       AND d.message_id = {submission})",
                 recovered = recovered("j"),
-                own = DlqSubject::Judgement(0).sql_message_id("j.id"),
                 submission = DlqSubject::Submission(0).sql_message_id("j.submission_id"),
             ),
-            Unit::CodeRun => format!(
-                ", recovered AS (UPDATE dead_letter_message d \
-                     SET resolved = TRUE, resolved_at = NOW(), resolved_by = NULL \
-                     FROM moved r WHERE NOT d.resolved AND {recovered} \
-                       AND d.message_id = {own})",
-                recovered = recovered("r"),
-                own = DlqSubject::CodeRun(0).sql_message_id("r.id"),
-            ),
+            Unit::CodeRun => String::new(),
         }
     }
 }

@@ -117,7 +117,7 @@ pub async fn apply_submission_judgement(
     tag = "Submissions",
     operation_id = "discardSubmissionJudgement",
     summary = "Discard a non-current submission judgement",
-    description = "Deletes a non-current judgement and its test-case result rows. Requires `submission:rejudge` permission.",
+    description = "Deletes a non-current judgement and its test-case result rows, and resolves its dead letter message, if any. Requires `submission:rejudge` permission.",
     params(
         ("id" = i32, Path, description = "Submission ID"),
         ("judgement_id" = i32, Path, description = "Judgement ID")
@@ -140,7 +140,7 @@ pub async fn discard_submission_judgement(
     auth_user.require_permission(perm::SUBMISSION_REJUDGE)?;
 
     let txn = state.db.begin().await?;
-    match discard_judgement(&txn, id, judgement_id).await? {
+    match discard_judgement(&txn, id, judgement_id, auth_user.user_id).await? {
         DiscardJudgement::Discarded => {}
         DiscardJudgement::SubmissionNotFound => {
             return Err(AppError::NotFound("Submission not found".into()));

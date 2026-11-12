@@ -44,8 +44,8 @@ pub struct DlqMessageResponse {
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
-    /// Resolved by an operator, or automatically once the stuck submission,
-    /// judgement or code run finished with a verdict other than a system error.
+    /// Resolved by an operator, or, for a stuck submission, automatically once
+    /// it finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
@@ -96,8 +96,8 @@ pub struct DlqMessageDetailResponse {
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
-    /// Resolved by an operator, or automatically once the stuck submission,
-    /// judgement or code run finished with a verdict other than a system error.
+    /// Resolved by an operator, or, for a stuck submission, automatically once
+    /// it finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
