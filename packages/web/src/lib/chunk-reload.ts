@@ -32,6 +32,9 @@ function lastReloadAt(): number | null {
 export function canReloadForFreshChunks(): boolean {
   if (isKnownOffline()) return false;
   const last = lastReloadAt();
+  // The stamp outlives the page, so it takes the wall clock, not
+  // `performance.now()`; `Math.abs` keeps a clock jump from blocking reloads.
+  // eslint-disable-next-line no-restricted-properties
   return last !== null && Math.abs(Date.now() - last) >= RELOAD_GUARD_MS;
 }
 
@@ -42,6 +45,7 @@ export function canReloadForFreshChunks(): boolean {
 export function reloadForFreshChunks(): boolean {
   if (!canReloadForFreshChunks()) return false;
   try {
+    // eslint-disable-next-line no-restricted-properties -- see above
     sessionStorage.setItem(RELOAD_STAMP_KEY, String(Date.now()));
   } catch {
     return false;

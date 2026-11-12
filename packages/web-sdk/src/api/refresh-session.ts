@@ -101,6 +101,7 @@ export interface LeaseClocks {
 }
 
 const defaultLeaseClocks: LeaseClocks = {
+  // eslint-disable-next-line no-restricted-properties -- the clock tabs share
   wallNow: () => Date.now(),
   monotonicNow: () => performance.now(),
 };

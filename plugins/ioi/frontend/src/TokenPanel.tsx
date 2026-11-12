@@ -1,3 +1,4 @@
+import { useServerNow, useServerTimeReached } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -31,7 +32,6 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   const { t } = useTranslation();
   const [isUsing, setIsUsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now());
   const [confirmingSubmissionId, setConfirmingSubmissionId] = useState<
     number | null
   >(null);
@@ -69,30 +69,25 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     return Number.isNaN(parsed) ? null : parsed;
   }, [tokenStatus]);
 
+  // The regeneration time is the server's, so the countdown runs on the
+  // server clock; it ticks only while there is something to count down.
+  const now = useServerNow(countdownTargetMs === null ? undefined : 1000);
+  const countdownExpired = useServerTimeReached(countdownTargetMs);
   const remainingSeconds =
     countdownTargetMs === null
       ? null
       : Math.max(0, Math.ceil((countdownTargetMs - now) / 1000));
-  const countdownExpired =
-    countdownTargetMs !== null && now >= countdownTargetMs;
   const countdownLabel =
     remainingSeconds !== null && remainingSeconds > 0
       ? formatCountdown(remainingSeconds)
       : null;
 
-  useEffect(() => {
-    if (countdownTargetMs === null) return;
-    setNow(Date.now());
-    const id = globalThis.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-    return () => globalThis.clearInterval(id);
-  }, [countdownTargetMs]);
-
+  // Once per regeneration time: a status still showing a past time is left to
+  // the regular refetch rather than asked for again every second.
   useEffect(() => {
     if (!cId || !countdownExpired) return;
     void queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
-  }, [cId, countdownExpired, now, queryClient]);
+  }, [cId, countdownExpired, queryClient]);
 
   if (guardLoading || !isIoi || !showTokens) return null;
   if (!tokenStatus) return null;
