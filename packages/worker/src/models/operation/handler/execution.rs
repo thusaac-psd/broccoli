@@ -1,4 +1,4 @@
-use super::super::cache_leader::{CacheLeaderElector, LeaderRole, NoopCacheLeaderElector};
+use super::super::cache_leader::LeaderRole;
 use super::super::file_cacher::FileCacher;
 use super::super::models::*;
 use super::super::sandbox::{
@@ -30,37 +30,24 @@ impl OperationHandler {
         toolchain_fingerprint: crate::toolchain_fingerprint::ToolchainFingerprint,
         metrics: common::metrics::Metrics,
     ) -> Self {
-        Self::with_cache_leader(
+        Self::with_compile_cache(
             sandbox_manager,
             Arc::from(file_cacher),
-            Arc::from(task_cache),
-            Arc::new(NoopCacheLeaderElector),
-            Duration::from_millis(250),
-            Duration::from_secs(30),
-            toolchain_fingerprint,
+            super::CompileCache::local(Arc::from(task_cache), toolchain_fingerprint),
             metrics,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_cache_leader(
+    pub fn with_compile_cache(
         sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
         file_cacher: Arc<dyn FileCacher>,
-        task_cache: Arc<dyn TaskCacheStore>,
-        cache_leader: Arc<dyn CacheLeaderElector>,
-        follower_poll_interval: Duration,
-        follower_max_wait: Duration,
-        toolchain_fingerprint: crate::toolchain_fingerprint::ToolchainFingerprint,
+        cache: super::CompileCache,
         metrics: common::metrics::Metrics,
     ) -> Self {
         Self {
             sandbox_manager,
             file_cacher,
-            task_cache,
-            cache_leader,
-            follower_poll_interval,
-            follower_max_wait,
-            toolchain_fingerprint,
+            cache,
             metrics,
             tools_dir: None,
         }
@@ -572,7 +559,7 @@ impl OperationHandler {
                 .unwrap_or_default();
 
             if !cache_key.is_empty() {
-                match self.cache_leader.acquire(&cache_key).await {
+                match self.cache.leader.acquire(&cache_key).await {
                     Ok(LeaderRole::Leader(lease)) => {
                         _lease = Some(lease);
                         debug!(step_id = %step.id, cache_key = %cache_key, "cache-leader: leading");

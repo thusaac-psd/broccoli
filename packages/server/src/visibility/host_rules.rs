@@ -12,8 +12,8 @@
 //!   1. `perm::CONTEST_MANAGE` short-circuits to `Allow`.
 //!   2. A contest outside its activation window (its
 //!      [`ContestPhase`](crate::utils::contest::ContestPhase) is not active) -> `Deny` - see
-//!      [`check_contest_access_decision`] and
-//!      [`require_contest_started_window_decision`].
+//!      [`BatchFacts::check_contest_access_decision`] and
+//!      [`BatchFacts::require_contest_started_window_decision`].
 //!   3. `contest.is_public` short-circuits the participant check.
 //!   4. Otherwise `contest_user` membership is required.
 //!   5. A problem not in `contest_problem` for that contest -> `Deny`.
@@ -30,7 +30,7 @@
 //!   9. "Hidden draft reachable via a contest", ported from
 //!      `can_access_problem_via_contest` (`utils/contest.rs:142-217`): a
 //!      problem in zero contests -> `Deny` (checked BEFORE the
-//!      `contest:manage` bypass - see [`decide_standalone_problem_access`]);
+//!      `contest:manage` bypass - see [`BatchFacts::decide_standalone_problem_access`]);
 //!      `perm::CONTEST_MANAGE` -> `Allow`; otherwise `Allow` if the problem
 //!      is attached to a contest that is both public and started
 //!      ([`ContestPhase::has_started`](crate::utils::contest::ContestPhase::has_started): active and running or ended), or,
@@ -41,14 +41,14 @@
 //!      `Resource::Sample` or `Resource::Attachment` gets exactly the
 //!      decision its problem would get under the same `contest_id` scope
 //!      (rules 1-5 with a contest, rules 8-9 without), and `attachment_id`
-//!      never enters the host decision - see [`decide_problem_or_sample`].
+//!      never enters the host decision - see [`BatchFacts::decide_problem_or_sample`].
 //!      Rule 9 widens READ only: under `Action::Submit` a standalone
 //!      decision stops after rule 8, so a hidden problem is denied there
 //!      even when one of its contests would admit reading it - see
 //!      [`standalone_reachable_via_contest`]. This is a deliberate departure
 //!      from the verbatim port.
 //!  10. `Resource::Clarification`, ported from `list_clarifications`
-//!      (`handlers/clarification.rs:58-208`) - see [`decide_clarification`]
+//!      (`handlers/clarification.rs:58-208`) - see [`BatchFacts::decide_clarification`]
 //!      for the full mapping. A missing clarification, or one where the
 //!      subject is neither `contest:manage`, the author, the recipient, nor
 //!      looking at a public row, -> `Deny`. A participant (admin/author/
@@ -417,266 +417,333 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .collect()
     };
 
-    Ok(resources
-        .iter()
-        .map(|r| {
-            decide_one(
-                subject,
-                action,
-                now,
-                r,
-                &contests,
-                &member_of,
-                &problem_in_contest,
-                &submissions,
-                &problems,
-                &problem_contest_ids,
-                &clarifications,
-                &latest_reply_public,
-            )
-        })
-        .collect())
+    let facts = BatchFacts {
+        subject,
+        now,
+        contests,
+        member_of,
+        problem_in_contest,
+        submissions,
+        problems,
+        problem_contest_ids,
+        clarifications,
+        latest_reply_public,
+    };
+    Ok(resources.iter().map(|r| facts.decide(action, r)).collect())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decide_one(
-    subject: &Subject,
-    action: Action,
+/// Everything the host rules read to decide one batch, fetched up front by
+/// [`host_decide`] so each per-resource decision is pure.
+struct BatchFacts<'a> {
+    subject: &'a Subject,
     now: chrono::DateTime<chrono::Utc>,
-    resource: &Resource,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    problem_in_contest: &HashSet<(i32, i32)>,
-    submissions: &HashMap<i32, submission::Model>,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-    clarifications: &HashMap<i32, clarification::Model>,
-    latest_reply_public: &HashMap<i32, bool>,
-) -> Decision {
-    match resource {
-        Resource::Contest(id) => decide_contest(subject, now, *id, contests, member_of),
-        Resource::Problem {
-            contest_id,
-            problem_id,
-        }
-        | Resource::Sample {
-            contest_id,
-            problem_id,
-        }
-        | Resource::Attachment {
-            contest_id,
-            problem_id,
-            ..
-        } => decide_problem_or_sample(
-            subject,
-            action,
-            now,
-            *contest_id,
-            *problem_id,
-            contests,
-            member_of,
-            problem_in_contest,
-            problems,
-            problem_contest_ids,
-        ),
-        Resource::Submission(id) => {
-            decide_submission(subject, now, *id, contests, member_of, submissions)
-        }
-        Resource::Clarification(id) => {
-            decide_clarification(subject, *id, clarifications, latest_reply_public)
-        }
-    }
+    /// Active (not soft-deleted) contests the batch references.
+    contests: HashMap<i32, contest::Model>,
+    /// The contests among `contests` the subject is registered in.
+    member_of: HashSet<i32>,
+    /// `(contest_id, problem_id)` links among the batch's scoped problems.
+    problem_in_contest: HashSet<(i32, i32)>,
+    submissions: HashMap<i32, submission::Model>,
+    /// Active problems the batch references outside a contest.
+    problems: HashMap<i32, problem::Model>,
+    /// The contests each of `problems` belongs to.
+    problem_contest_ids: HashMap<i32, Vec<i32>>,
+    clarifications: HashMap<i32, clarification::Model>,
+    /// Whether each clarification's latest reply is public.
+    latest_reply_public: HashMap<i32, bool>,
 }
 
-/// Ported from `check_contest_access` (`utils/contest.rs:21-46`): rules 1-4.
-/// Rule 7 (soft-deleted contest) is enforced by the caller only ever
-/// looking `contest_id` up in `contests`, which is populated via
-/// `find_active`.
-fn check_contest_access_decision(
-    subject: &Subject,
-    contest: &contest::Model,
-    now: chrono::DateTime<chrono::Utc>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
+impl BatchFacts<'_> {
+    fn decide(&self, action: Action, resource: &Resource) -> Decision {
+        match resource {
+            Resource::Contest(id) => self.decide_contest(*id),
+            Resource::Problem {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Sample {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Attachment {
+                contest_id,
+                problem_id,
+                ..
+            } => self.decide_problem_or_sample(action, *contest_id, *problem_id),
+            Resource::Submission(id) => self.decide_submission(*id),
+            Resource::Clarification(id) => self.decide_clarification(*id),
+        }
     }
-    if !contest_phase(contest, now).is_active() {
-        return Decision::Deny;
+
+    /// Ported from `check_contest_access` (`utils/contest.rs:21-46`): rules 1-4.
+    /// Rule 7 (soft-deleted contest) is enforced by the caller only ever
+    /// looking `contest_id` up in `contests`, which is populated via
+    /// `find_active`.
+    fn check_contest_access_decision(&self, contest: &contest::Model) -> Decision {
+        if self.subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        if !contest_phase(contest, self.now).is_active() {
+            return Decision::Deny;
+        }
+        if contest.is_public {
+            return Decision::Allow;
+        }
+        if self.member_of.contains(&contest.id) {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
     }
-    if contest.is_public {
-        return Decision::Allow;
+
+    /// Ported from `require_contest_started` (`utils/contest.rs:69-86`): the
+    /// `contest:manage` short-circuit and window-gate portion only. The
+    /// `now < contest.start_time` business-rule check in the source is
+    /// intentionally NOT reproduced here - see the module docs.
+    fn require_contest_started_window_decision(&self, contest: &contest::Model) -> Decision {
+        if self.subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        if contest_phase(contest, self.now).is_active() {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
     }
-    if member_of.contains(&contest.id) {
-        Decision::Allow
-    } else {
+
+    /// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access`
+    /// only - no `require_contest_started`).
+    fn decide_contest(&self, id: i32) -> Decision {
+        match self.contests.get(&id) {
+            // Rule 7: missing (soft-deleted, since `contests` was fetched with
+            // `find_active`) or nonexistent contest -> Deny, mirroring
+            // `find_contest`'s `NotFound`.
+            None => Decision::Deny,
+            Some(c) => self.check_contest_access_decision(c),
+        }
+    }
+
+    /// Mirrors `list_contest_problems` / `get_contest_problem_samples`, which
+    /// both call `check_contest_access` THEN `require_contest_started` on the
+    /// same contest before checking `find_contest_problem` /
+    /// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
+    /// sequence. Used for every problem part (`Problem`, `Sample`,
+    /// `Attachment`): a sample or attachment is reachable exactly when its
+    /// problem is, under the same scope.
+    fn decide_problem_or_sample(
+        &self,
+        action: Action,
+        contest_id: Option<i32>,
+        problem_id: i32,
+    ) -> Decision {
+        let Some(cid) = contest_id else {
+            // Standalone problem/sample access - rules 8-9.
+            return self.decide_standalone_problem_access(action, problem_id);
+        };
+        let Some(c) = self.contests.get(&cid) else {
+            return Decision::Deny; // rule 7
+        };
+        if self.check_contest_access_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        if self.require_contest_started_window_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        if self.problem_in_contest.contains(&(cid, problem_id)) {
+            Decision::Allow
+        } else {
+            Decision::Deny // rule 5
+        }
+    }
+
+    /// Rules 8-9. Ported from `require_problem_read_access`
+    /// (`utils/contest.rs:219-241`) and `can_access_problem_via_contest`
+    /// (`utils/contest.rs:142-217`). Used for every standalone
+    /// (`contest_id: None`) problem part: `Resource::Problem`,
+    /// `Resource::Sample` and `Resource::Attachment`. Samples and attachments
+    /// are parts of their problem, so this takes only a `problem_id`, never an
+    /// `attachment_id`.
+    ///
+    /// Preserves a source asymmetry verbatim: inside
+    /// `can_access_problem_via_contest`, the `contest_ids.is_empty()` check
+    /// happens BEFORE the `contest:manage` bypass (`utils/contest.rs:155-161`),
+    /// so a `contest:manage` holder without `problem:create`/`problem:edit` is
+    /// still denied a hidden problem attached to zero contests.
+    ///
+    /// The source runs two separate window-filtered DB queries in sequence -
+    /// `has_public` (is_public AND open-and-started), then, only if that came
+    /// back empty, `started_contest_ids` (open-and-started, any visibility) for
+    /// the participant check. Both queries share the identical "open and
+    /// started" predicate (`utils/contest.rs:172-178`'s `within_window` plus
+    /// each call site's own `StartTime.lte(now)`), so this fuses them into one
+    /// in-memory filter pass over `contests` - `has_public`'s candidate set is a
+    /// strict subset of `started_contest_ids`'s, so filtering once and checking
+    /// `is_public` first, then membership, is bit-identical to the source's two
+    /// queries for every input.
+    ///
+    /// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
+    /// can use it. For `Action::Submit` the decision ends after rule 8.
+    fn decide_standalone_problem_access(&self, action: Action, problem_id: i32) -> Decision {
+        let subject = self.subject;
+        // `require_problem_read_access`: missing/soft-deleted problem -> Deny
+        // (`problems` was fetched with `find_active`, mirroring
+        // `find_active_by_id`).
+        let Some(problem) = self.problems.get(&problem_id) else {
+            return Decision::Deny;
+        };
+        if subject.has_permission(perm::PROBLEM_CREATE)
+            || subject.has_permission(perm::PROBLEM_EDIT)
+        {
+            return Decision::Allow;
+        }
+        if problem.is_public {
+            return Decision::Allow;
+        }
+        if !standalone_reachable_via_contest(action) {
+            return Decision::Deny;
+        }
+        // `can_access_problem_via_contest`, inlined below.
+        let no_contests: Vec<i32> = Vec::new();
+        let candidate_contest_ids = self
+            .problem_contest_ids
+            .get(&problem_id)
+            .unwrap_or(&no_contests);
+        if candidate_contest_ids.is_empty() {
+            return Decision::Deny;
+        }
+        if subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        // A not-yet-started or deactivated contest must not leak a hidden
+        // problem's statement, samples or attachments here, even if it is
+        // public.
+        let started: Vec<&contest::Model> = candidate_contest_ids
+            .iter()
+            .filter_map(|cid| self.contests.get(cid))
+            .filter(|c| contest_phase(c, self.now).has_started())
+            .collect();
+        if started.iter().any(|c| c.is_public) {
+            return Decision::Allow;
+        }
+        if started.iter().any(|c| self.member_of.contains(&c.id)) {
+            return Decision::Allow;
+        }
         Decision::Deny
     }
-}
 
-/// Ported from `require_contest_started` (`utils/contest.rs:69-86`): the
-/// `contest:manage` short-circuit and window-gate portion only. The
-/// `now < contest.start_time` business-rule check in the source is
-/// intentionally NOT reproduced here - see the module docs.
-fn require_contest_started_window_decision(
-    subject: &Subject,
-    contest: &contest::Model,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Decision {
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
+    /// Ported from `require_submission_visible`
+    /// (`handlers/submission/filter.rs:18-51`). Rule 6, plus rule 7 via the
+    /// non-owner branch's contest lookup.
+    fn decide_submission(&self, id: i32) -> Decision {
+        let subject = self.subject;
+        let Some(sub) = self.submissions.get(&id) else {
+            // No such submission (the source's raw `find_by_id` 404s the same
+            // way before `require_submission_visible` ever runs).
+            return Decision::Deny;
+        };
+        if subject.has_permission(perm::SUBMISSION_VIEW_ALL) {
+            return Decision::Allow;
+        }
+        if subject.user_id == Some(sub.user_id) {
+            // Owner bypass: the source skips the contest lookup ENTIRELY here,
+            // so this stays Allow even if the parent contest has since been
+            // soft-deleted. Preserved verbatim - see the task report.
+            return Decision::Allow;
+        }
+        let Some(cid) = sub.contest_id else {
+            return Decision::Deny;
+        };
+        let Some(c) = self.contests.get(&cid) else {
+            return Decision::Deny; // rule 7
+        };
+        if self.check_contest_access_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        let is_participant = self.member_of.contains(&cid);
+        if !is_participant || !c.submissions_visible {
+            Decision::Deny
+        } else {
+            Decision::Allow
+        }
     }
-    if contest_phase(contest, now).is_active() {
-        Decision::Allow
-    } else {
-        Decision::Deny
-    }
-}
 
-/// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access`
-/// only - no `require_contest_started`).
-fn decide_contest(
-    subject: &Subject,
-    now: chrono::DateTime<chrono::Utc>,
-    id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    match contests.get(&id) {
-        // Rule 7: missing (soft-deleted, since `contests` was fetched with
-        // `find_active`) or nonexistent contest -> Deny, mirroring
-        // `find_contest`'s `NotFound`.
-        None => Decision::Deny,
-        Some(c) => check_contest_access_decision(subject, c, now, member_of),
-    }
-}
+    /// Rule 10. Ported from `list_clarifications` (`handlers/
+    /// clarification.rs:58-208`): the row-visibility predicate that appears
+    /// TWICE, verbatim, in the source - once as the SQL prefilter
+    /// (`clarification.rs:76-83`, applied only when `!is_admin`) and once again
+    /// as the in-memory `is_participant`/`show_question` computation
+    /// (`clarification.rs:141-144`) - both express the exact same "author,
+    /// recipient, admin, or public" condition, ported here as ONE predicate,
+    /// not two.
+    ///
+    /// A missing clarification -> `Deny`, mirroring `reply_clarification`'s /
+    /// `resolve_clarification`'s own `find_by_id(...).ok_or(NotFound)` shape for
+    /// this table (there is no dedicated "get one clarification" handler this
+    /// task was asked to port, but every other handler that loads one 404s the
+    /// same way on a miss).
+    ///
+    /// A participant (`contest:manage`, the author, or the recipient) sees
+    /// everything, full stop - `Allow`, matching `show_question = true` AND
+    /// `show_reply = true` for every such row in the source, regardless of
+    /// `is_public` or the latest reply's own visibility.
+    ///
+    /// A non-participant with `is_public == false` never reaches the source's
+    /// per-row logic at all - the SQL prefilter excludes the row outright - so
+    /// this is `Deny` too, NOT some partial view.
+    ///
+    /// A non-participant with `is_public == true` sees the question
+    /// (`show_question` is `is_participant || r.is_public`, and `is_public` is
+    /// `true` here, so it is always `true` too) but the legacy `reply_content`/
+    /// `reply_author_id`/`reply_author_name`/`replied_at` fields
+    /// (`clarification.rs:191-195`) are additionally gated on `show_reply =
+    /// is_participant || latest_reply_public` - since `is_participant` is
+    /// `false` on this branch, that reduces to `latest_reply_public` alone. A
+    /// `false` there is expressed as `Decision::Redact` over exactly those four
+    /// paths; a `true` is `Allow` (nothing left to hide).
+    ///
+    /// The `replies: Vec<ClarificationReplyResponse>` array's own per-element
+    /// filter (`clarification.rs:157-171`) is deliberately NOT folded in here -
+    /// see the module docs' "Deliberately not ported" section.
+    fn decide_clarification(&self, id: i32) -> Decision {
+        let subject = self.subject;
+        let Some(c) = self.clarifications.get(&id) else {
+            return Decision::Deny;
+        };
 
-/// Mirrors `list_contest_problems` / `get_contest_problem_samples`, which
-/// both call `check_contest_access` THEN `require_contest_started` on the
-/// same contest before checking `find_contest_problem` /
-/// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
-/// sequence. Used for every problem part (`Problem`, `Sample`,
-/// `Attachment`): a sample or attachment is reachable exactly when its
-/// problem is, under the same scope.
-#[allow(clippy::too_many_arguments)]
-fn decide_problem_or_sample(
-    subject: &Subject,
-    action: Action,
-    now: chrono::DateTime<chrono::Utc>,
-    contest_id: Option<i32>,
-    problem_id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    problem_in_contest: &HashSet<(i32, i32)>,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-) -> Decision {
-    let Some(cid) = contest_id else {
-        // Standalone problem/sample access - rules 8-9.
-        return decide_standalone_problem_access(
-            subject,
-            action,
-            now,
-            problem_id,
-            problems,
-            problem_contest_ids,
-            contests,
-            member_of,
-        );
-    };
-    let Some(c) = contests.get(&cid) else {
-        return Decision::Deny; // rule 7
-    };
-    if check_contest_access_decision(subject, c, now, member_of).is_denied() {
-        return Decision::Deny;
-    }
-    if require_contest_started_window_decision(subject, c, now).is_denied() {
-        return Decision::Deny;
-    }
-    if problem_in_contest.contains(&(cid, problem_id)) {
-        Decision::Allow
-    } else {
-        Decision::Deny // rule 5
-    }
-}
+        // `clarification.rs:141-144`'s `is_participant`. `subject.user_id.
+        // is_some() &&` guards the recipient comparison so an unauthenticated
+        // `Subject` (never possible for the source's `AuthUser`-gated handler,
+        // but possible for this shared kernel) can't spuriously match a `None
+        // == None` on a DM-less row; it changes nothing for any authenticated
+        // subject, which is the only kind the source ever sees.
+        let is_participant = subject.has_permission(perm::CONTEST_MANAGE)
+            || subject.user_id == Some(c.author_id)
+            || (subject.user_id.is_some() && c.recipient_id == subject.user_id);
 
-/// Rules 8-9. Ported from `require_problem_read_access`
-/// (`utils/contest.rs:219-241`) and `can_access_problem_via_contest`
-/// (`utils/contest.rs:142-217`). Used for every standalone
-/// (`contest_id: None`) problem part: `Resource::Problem`,
-/// `Resource::Sample` and `Resource::Attachment`. Samples and attachments
-/// are parts of their problem, so this takes only a `problem_id`, never an
-/// `attachment_id`.
-///
-/// Preserves a source asymmetry verbatim: inside
-/// `can_access_problem_via_contest`, the `contest_ids.is_empty()` check
-/// happens BEFORE the `contest:manage` bypass (`utils/contest.rs:155-161`),
-/// so a `contest:manage` holder without `problem:create`/`problem:edit` is
-/// still denied a hidden problem attached to zero contests.
-///
-/// The source runs two separate window-filtered DB queries in sequence -
-/// `has_public` (is_public AND open-and-started), then, only if that came
-/// back empty, `started_contest_ids` (open-and-started, any visibility) for
-/// the participant check. Both queries share the identical "open and
-/// started" predicate (`utils/contest.rs:172-178`'s `within_window` plus
-/// each call site's own `StartTime.lte(now)`), so this fuses them into one
-/// in-memory filter pass over `contests` - `has_public`'s candidate set is a
-/// strict subset of `started_contest_ids`'s, so filtering once and checking
-/// `is_public` first, then membership, is bit-identical to the source's two
-/// queries for every input.
-///
-/// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
-/// can use it. For `Action::Submit` the decision ends after rule 8.
-#[allow(clippy::too_many_arguments)]
-fn decide_standalone_problem_access(
-    subject: &Subject,
-    action: Action,
-    now: chrono::DateTime<chrono::Utc>,
-    problem_id: i32,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    // `require_problem_read_access`: missing/soft-deleted problem -> Deny
-    // (`problems` was fetched with `find_active`, mirroring
-    // `find_active_by_id`).
-    let Some(problem) = problems.get(&problem_id) else {
-        return Decision::Deny;
-    };
-    if subject.has_permission(perm::PROBLEM_CREATE) || subject.has_permission(perm::PROBLEM_EDIT) {
-        return Decision::Allow;
+        // `clarification.rs:76-83` (SQL prefilter) / `:144` (`show_question`):
+        // reachable at all only if a participant or the row is public.
+        if !is_participant && !c.is_public {
+            return Decision::Deny;
+        }
+        if is_participant {
+            return Decision::Allow;
+        }
+
+        // Non-participant, public row: `clarification.rs:154-155`'s
+        // `show_reply`, reduced to its `latest_reply_public` disjunct since
+        // `is_participant` is `false` here.
+        let latest_public = self.latest_reply_public.get(&id).copied().unwrap_or(false);
+        if latest_public {
+            Decision::Allow
+        } else {
+            Decision::Redact(FieldMask::new([
+                "reply_content".to_string(),
+                "reply_author_id".to_string(),
+                "reply_author_name".to_string(),
+                "replied_at".to_string(),
+            ]))
+        }
     }
-    if problem.is_public {
-        return Decision::Allow;
-    }
-    if !standalone_reachable_via_contest(action) {
-        return Decision::Deny;
-    }
-    // `can_access_problem_via_contest`, inlined below.
-    let no_contests: Vec<i32> = Vec::new();
-    let candidate_contest_ids = problem_contest_ids.get(&problem_id).unwrap_or(&no_contests);
-    if candidate_contest_ids.is_empty() {
-        return Decision::Deny;
-    }
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
-    }
-    // A not-yet-started or deactivated contest must not leak a hidden
-    // problem's statement, samples or attachments here, even if it is
-    // public.
-    let started: Vec<&contest::Model> = candidate_contest_ids
-        .iter()
-        .filter_map(|cid| contests.get(cid))
-        .filter(|c| contest_phase(c, now).has_started())
-        .collect();
-    if started.iter().any(|c| c.is_public) {
-        return Decision::Allow;
-    }
-    if started.iter().any(|c| member_of.contains(&c.id)) {
-        return Decision::Allow;
-    }
-    Decision::Deny
 }
 
 /// Whether rule 9 ("hidden problem reachable via a contest") may admit a
@@ -706,130 +773,6 @@ fn standalone_reachable_via_contest(action: Action) -> bool {
     match action {
         Action::Submit => false,
         Action::Read | Action::Clarify | Action::Download => true,
-    }
-}
-
-/// Ported from `require_submission_visible`
-/// (`handlers/submission/filter.rs:18-51`). Rule 6, plus rule 7 via the
-/// non-owner branch's contest lookup.
-fn decide_submission(
-    subject: &Subject,
-    now: chrono::DateTime<chrono::Utc>,
-    id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    submissions: &HashMap<i32, submission::Model>,
-) -> Decision {
-    let Some(sub) = submissions.get(&id) else {
-        // No such submission (the source's raw `find_by_id` 404s the same
-        // way before `require_submission_visible` ever runs).
-        return Decision::Deny;
-    };
-    if subject.has_permission(perm::SUBMISSION_VIEW_ALL) {
-        return Decision::Allow;
-    }
-    if subject.user_id == Some(sub.user_id) {
-        // Owner bypass: the source skips the contest lookup ENTIRELY here,
-        // so this stays Allow even if the parent contest has since been
-        // soft-deleted. Preserved verbatim - see the task report.
-        return Decision::Allow;
-    }
-    let Some(cid) = sub.contest_id else {
-        return Decision::Deny;
-    };
-    let Some(c) = contests.get(&cid) else {
-        return Decision::Deny; // rule 7
-    };
-    if check_contest_access_decision(subject, c, now, member_of).is_denied() {
-        return Decision::Deny;
-    }
-    let is_participant = member_of.contains(&cid);
-    if !is_participant || !c.submissions_visible {
-        Decision::Deny
-    } else {
-        Decision::Allow
-    }
-}
-
-/// Rule 10. Ported from `list_clarifications` (`handlers/
-/// clarification.rs:58-208`): the row-visibility predicate that appears
-/// TWICE, verbatim, in the source - once as the SQL prefilter
-/// (`clarification.rs:76-83`, applied only when `!is_admin`) and once again
-/// as the in-memory `is_participant`/`show_question` computation
-/// (`clarification.rs:141-144`) - both express the exact same "author,
-/// recipient, admin, or public" condition, ported here as ONE predicate,
-/// not two.
-///
-/// A missing clarification -> `Deny`, mirroring `reply_clarification`'s /
-/// `resolve_clarification`'s own `find_by_id(...).ok_or(NotFound)` shape for
-/// this table (there is no dedicated "get one clarification" handler this
-/// task was asked to port, but every other handler that loads one 404s the
-/// same way on a miss).
-///
-/// A participant (`contest:manage`, the author, or the recipient) sees
-/// everything, full stop - `Allow`, matching `show_question = true` AND
-/// `show_reply = true` for every such row in the source, regardless of
-/// `is_public` or the latest reply's own visibility.
-///
-/// A non-participant with `is_public == false` never reaches the source's
-/// per-row logic at all - the SQL prefilter excludes the row outright - so
-/// this is `Deny` too, NOT some partial view.
-///
-/// A non-participant with `is_public == true` sees the question
-/// (`show_question` is `is_participant || r.is_public`, and `is_public` is
-/// `true` here, so it is always `true` too) but the legacy `reply_content`/
-/// `reply_author_id`/`reply_author_name`/`replied_at` fields
-/// (`clarification.rs:191-195`) are additionally gated on `show_reply =
-/// is_participant || latest_reply_public` - since `is_participant` is
-/// `false` on this branch, that reduces to `latest_reply_public` alone. A
-/// `false` there is expressed as `Decision::Redact` over exactly those four
-/// paths; a `true` is `Allow` (nothing left to hide).
-///
-/// The `replies: Vec<ClarificationReplyResponse>` array's own per-element
-/// filter (`clarification.rs:157-171`) is deliberately NOT folded in here -
-/// see the module docs' "Deliberately not ported" section.
-fn decide_clarification(
-    subject: &Subject,
-    id: i32,
-    clarifications: &HashMap<i32, clarification::Model>,
-    latest_reply_public: &HashMap<i32, bool>,
-) -> Decision {
-    let Some(c) = clarifications.get(&id) else {
-        return Decision::Deny;
-    };
-
-    // `clarification.rs:141-144`'s `is_participant`. `subject.user_id.
-    // is_some() &&` guards the recipient comparison so an unauthenticated
-    // `Subject` (never possible for the source's `AuthUser`-gated handler,
-    // but possible for this shared kernel) can't spuriously match a `None
-    // == None` on a DM-less row; it changes nothing for any authenticated
-    // subject, which is the only kind the source ever sees.
-    let is_participant = subject.has_permission(perm::CONTEST_MANAGE)
-        || subject.user_id == Some(c.author_id)
-        || (subject.user_id.is_some() && c.recipient_id == subject.user_id);
-
-    // `clarification.rs:76-83` (SQL prefilter) / `:144` (`show_question`):
-    // reachable at all only if a participant or the row is public.
-    if !is_participant && !c.is_public {
-        return Decision::Deny;
-    }
-    if is_participant {
-        return Decision::Allow;
-    }
-
-    // Non-participant, public row: `clarification.rs:154-155`'s
-    // `show_reply`, reduced to its `latest_reply_public` disjunct since
-    // `is_participant` is `false` here.
-    let latest_public = latest_reply_public.get(&id).copied().unwrap_or(false);
-    if latest_public {
-        Decision::Allow
-    } else {
-        Decision::Redact(FieldMask::new([
-            "reply_content".to_string(),
-            "reply_author_id".to_string(),
-            "reply_author_name".to_string(),
-            "replied_at".to_string(),
-        ]))
     }
 }
 

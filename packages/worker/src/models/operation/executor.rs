@@ -14,7 +14,7 @@ use super::sandbox::isolate::IsolateSandboxManager;
 use super::sandbox::mock::MockSandboxManager;
 use super::task_cache::{DatabaseTaskCacheStore, NoopTaskCacheStore, TaskCacheStore};
 use crate::config::WorkerAppConfig;
-use crate::models::operation::handler::OperationHandler;
+use crate::models::operation::handler::{CompileCache, OperationHandler};
 use crate::toolchain_fingerprint;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -92,14 +92,16 @@ impl OperationTaskExecutor {
         }
 
         Ok(Self {
-            operation_executor: OperationHandler::with_cache_leader(
+            operation_executor: OperationHandler::with_compile_cache(
                 sandbox_manager,
                 file_cacher,
-                Arc::from(task_cache),
-                cache_leader,
-                follower_poll,
-                follower_max_wait,
-                fingerprint,
+                CompileCache {
+                    store: Arc::from(task_cache),
+                    leader: cache_leader,
+                    follower_poll_interval: follower_poll,
+                    follower_max_wait,
+                    toolchain_fingerprint: fingerprint,
+                },
                 metrics,
             )
             .with_tools_dir(tools_dir.clone()),

@@ -126,7 +126,7 @@ impl OperationHandler {
             .await?;
 
         let cache_start = std::time::Instant::now();
-        let cached_outputs = match self.task_cache.get(&cache_key).await {
+        let cached_outputs = match self.cache.store.get(&cache_key).await {
             Ok(Some(outputs)) => {
                 self.record_task_cache_metric(cache_start, "get", "hit");
                 outputs
@@ -158,11 +158,11 @@ impl OperationHandler {
         cache_key: &str,
     ) -> Option<TaskExecutionResult> {
         let env = environments.get(&step.env_ref)?;
-        let deadline = tokio::time::Instant::now() + self.follower_max_wait;
+        let deadline = tokio::time::Instant::now() + self.cache.follower_max_wait;
         loop {
-            tokio::time::sleep(self.follower_poll_interval).await;
+            tokio::time::sleep(self.cache.follower_poll_interval).await;
             let cache_start = std::time::Instant::now();
-            match self.task_cache.get(cache_key).await {
+            match self.cache.store.get(cache_key).await {
                 Ok(Some(outputs)) => {
                     self.record_task_cache_metric(cache_start, "get", "follower_hit");
                     return self
@@ -237,7 +237,7 @@ impl OperationHandler {
         }
 
         let cache_start = std::time::Instant::now();
-        match self.task_cache.put(&cache_key, output_hashes).await {
+        match self.cache.store.put(&cache_key, output_hashes).await {
             Ok(TaskCachePutOutcome::Inserted) => {
                 self.record_task_cache_metric(cache_start, "put", "success");
                 info!(step_id = %step.id, cache_key = %cache_key, "Stored step outputs in task cache");
@@ -263,6 +263,7 @@ impl OperationHandler {
         key_inputs: &[String],
     ) -> Result<String> {
         let fingerprint = self
+            .cache
             .toolchain_fingerprint
             .cache_key_part()
             .context("Toolchain fingerprint is unreliable; compile cache disabled")?;
