@@ -1,8 +1,13 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import {
+  type ApiClient,
+  getErrorMessage,
+  useApiClient,
+} from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
 import {
   idempotencyOutcome,
   isAlreadyDone,
+  useAsyncDialog,
   useIdempotentRequest,
 } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -37,20 +42,26 @@ import {
   Settings,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
 
 import { ResourceConfigDialog } from '@/components/config';
+import { RecordLoader } from '@/components/RecordLoader';
 import { AdditionalFilesDialog } from '@/features/admin/components/AdditionalFilesDialog';
 import { AttachmentsDialog } from '@/features/admin/components/AttachmentsDialog';
 import { CheckerSourceDialog } from '@/features/admin/components/CheckerSourceDialog';
-import {
-  ProblemForm,
-  type ProblemFormData,
-} from '@/features/admin/components/ProblemForm';
+import { ProblemForm } from '@/features/admin/components/ProblemForm';
 import { TestCasesDialog } from '@/features/admin/components/TestCasesDialog';
+import {
+  NEW_PROBLEM,
+  type ProblemFormData,
+  problemFormProblem,
+  problemFormValues,
+  problemRequestBody,
+} from '@/features/admin/problem-form-values';
 import { fetchContestProblems } from '@/features/contest/api/fetch-contest-problems';
+import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import {
   attachmentsQueryKey,
   fetchAttachments,
@@ -59,24 +70,15 @@ import { fetchProblems } from '@/features/problem/api/fetch-problems';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
-// -- Helpers --
-
-// A-Z, then AA-AZ, BA-BZ, ..., ZZ (max 702)
-function nextProblemLabel(usedLabels: Set<string>): string {
-  for (let i = 0; i < 26; i++) {
-    const label = String.fromCharCode(65 + i);
-    if (!usedLabels.has(label)) return label;
-  }
-  for (let i = 0; i < 26; i++) {
-    for (let j = 0; j < 26; j++) {
-      const label = String.fromCharCode(65 + i) + String.fromCharCode(65 + j);
-      if (!usedLabels.has(label)) return label;
-    }
-  }
-  return '';
-}
-
 // -- Problem Form Dialog --
+
+async function fetchProblem(apiClient: ApiClient, id: number) {
+  const { data, error } = await apiClient.GET('/problems/{id}', {
+    params: { path: { id } },
+  });
+  if (error) throw error;
+  return data;
+}
 
 export function ProblemFormDialog({
   problem,
@@ -94,96 +96,81 @@ export function ProblemFormDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const isEdit = !!problem;
+  const apiClient = useApiClient();
+  const dialog = useAsyncDialog({ open, onOpenChange });
 
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [timeLimit, setTimeLimit] = useState(1000);
-  const [memoryLimit, setMemoryLimit] = useState(262144);
-  const [problemType, setProblemType] = useState('');
-  const [checkerFormat, setCheckerFormat] = useState('exact');
-  const [defaultContestType, setDefaultContestType] = useState('');
-  const [showTestDetails, setShowTestDetails] = useState(false);
-  const [isPublic, setIsPublic] = useState(false);
-  const [submissionFormat, setSubmissionFormat] = useState<
-    Record<string, string[]>
-  >({});
-  const [loading, setLoading] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
+  return (
+    <Dialog open={dialog.open} onOpenChange={dialog.onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            {problem ? t('admin.editProblem') : t('admin.createProblem')}
+          </DialogTitle>
+          <DialogDescription>
+            {problem
+              ? problem.title
+              : contestId
+                ? t('admin.createProblemInContestDesc')
+                : t('admin.createProblemDesc')}
+          </DialogDescription>
+        </DialogHeader>
+
+        {problem ? (
+          <RecordLoader
+            key={problem.id}
+            queryKey={['problem-edit', problem.id]}
+            queryFn={() => fetchProblem(apiClient, problem.id)}
+          >
+            {(record) => (
+              <ProblemDialogForm
+                problemId={problem.id}
+                contestId={contestId}
+                initial={problemFormValues(record)}
+                dialog={dialog}
+              />
+            )}
+          </RecordLoader>
+        ) : (
+          <ProblemDialogForm
+            contestId={contestId}
+            initial={NEW_PROBLEM}
+            dialog={dialog}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ProblemDialogForm({
+  problemId,
+  contestId,
+  initial,
+  dialog,
+}: {
+  /** The problem being edited; creates a new one when absent. */
+  problemId?: number;
+  contestId?: number;
+  initial: ProblemFormData;
+  dialog: ReturnType<typeof useAsyncDialog>;
+}) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
+  const [formData, setFormData] = useState(initial);
+  const isEdit = problemId !== undefined;
 
   const { data: attachments = [] } = useQuery({
-    queryKey: attachmentsQueryKey(problem?.id ?? 0),
-    queryFn: () => fetchAttachments(apiClient, problem!.id),
-    enabled: isEdit && open,
+    queryKey: attachmentsQueryKey(problemId ?? 0),
+    queryFn: () => fetchAttachments(apiClient, problemId!),
+    enabled: isEdit,
   });
-
-  const formData: ProblemFormData = {
-    title,
-    content,
-    timeLimit,
-    memoryLimit,
-    problemType,
-    checkerFormat,
-    defaultContestType,
-    showTestDetails,
-    isPublic,
-    submissionFormat,
-  };
-
-  const handleFormChange = (data: ProblemFormData) => {
-    setTitle(data.title);
-    setContent(data.content);
-    setTimeLimit(data.timeLimit);
-    setMemoryLimit(data.memoryLimit);
-    setProblemType(data.problemType);
-    setCheckerFormat(data.checkerFormat);
-    setDefaultContestType(data.defaultContestType);
-    setShowTestDetails(data.showTestDetails);
-    setIsPublic(data.isPublic);
-    setSubmissionFormat(data.submissionFormat);
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    if (problem) {
-      setLoadingData(true);
-      apiClient
-        .GET('/problems/{id}', { params: { path: { id: problem.id } } })
-        .then(({ data, error }) => {
-          setLoadingData(false);
-          if (error || !data) return;
-          setTitle(data.title);
-          setContent(data.content);
-          setTimeLimit(data.time_limit);
-          setMemoryLimit(data.memory_limit);
-          setProblemType(data.problem_type);
-          setCheckerFormat(data.checker_format);
-          setDefaultContestType(data.default_contest_type);
-          setShowTestDetails(data.show_test_details);
-          setIsPublic(data.is_public);
-          setSubmissionFormat(data.submission_format ?? {});
-        });
-    } else {
-      setTitle('');
-      setContent('');
-      setTimeLimit(1000);
-      setMemoryLimit(262144);
-      setProblemType('');
-      setCheckerFormat('exact');
-      setDefaultContestType('');
-      setShowTestDetails(false);
-      setIsPublic(false);
-      setSubmissionFormat({});
-    }
-  }, [apiClient, open, problem]);
 
   // `unsettled`: an earlier attempt to attach it is still running or was cut
   // off, so it may or may not be in the contest yet.
   async function attachToContest(
-    problemId: number,
+    newProblemId: number,
   ): Promise<'attached' | 'failed' | 'unsettled'> {
     if (!contestId) return 'failed';
     const { data: existing, error: listError } = await apiClient.GET(
@@ -195,7 +182,7 @@ export function ProblemFormDialog({
       new Set(existing.map((p: ContestProblem) => p.label)),
     );
     if (!label) return 'failed';
-    const body = { problem_id: problemId, label };
+    const body = { problem_id: newProblemId, label };
     const { error } = await sendIdempotent({ contestId, body }, (key) =>
       apiClient.POST('/contests/{id}/problems', {
         headers: { 'Idempotency-Key': key },
@@ -215,49 +202,11 @@ export function ProblemFormDialog({
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-
-    if (!title.trim()) {
-      toast.error(t('validation.titleRequired'));
-      return;
-    }
-    if (!content.trim()) {
-      toast.error(t('validation.contentRequired'));
-      return;
-    }
-    if (!problemType) {
-      toast.error(t('validation.problemTypeRequired'));
-      return;
-    }
-    if (!checkerFormat) {
-      toast.error(t('validation.checkerFormatRequired'));
-      return;
-    }
-    if (!defaultContestType) {
-      toast.error(t('validation.contestTypeRequired'));
-      return;
-    }
-
-    setLoading(true);
-
-    const body = {
-      title,
-      content,
-      time_limit: timeLimit,
-      memory_limit: memoryLimit,
-      problem_type: problemType,
-      checker_format: checkerFormat,
-      default_contest_type: defaultContestType,
-      show_test_details: showTestDetails,
-      is_public: isPublic,
-      submission_format:
-        Object.keys(submissionFormat).length > 0 ? submissionFormat : null,
-    };
-
+  async function save() {
+    const body = problemRequestBody(formData);
     const result = isEdit
       ? await apiClient.PATCH('/problems/{id}', {
-          params: { path: { id: problem!.id } },
+          params: { path: { id: problemId } },
           body,
         })
       : await sendIdempotent(body, (key) =>
@@ -269,6 +218,9 @@ export function ProblemFormDialog({
 
     const refetchProblems = () => {
       queryClient.invalidateQueries({ queryKey: ['admin-problems'] });
+      if (isEdit) {
+        queryClient.invalidateQueries({ queryKey: ['problem', problemId] });
+      }
       if (contestId) {
         queryClient.invalidateQueries({
           queryKey: ['contest-problems', contestId],
@@ -276,21 +228,19 @@ export function ProblemFormDialog({
       }
     };
 
+    // Unsettled: the form stays open, so if the problem is not in the list
+    // it can be sent again as it is.
     if (toastUnsettled(result.error, t, { refetch: refetchProblems })) {
-      // The form stays open: if the problem is not in the list, it can be
-      // sent again as it is.
-      setLoading(false);
-      return;
+      throw result.error;
     }
     if (result.error && !isAlreadyDone(result.error)) {
-      setLoading(false);
       toast.error(
         getErrorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),
       );
-      return;
+      throw result.error;
     }
 
     let attached: Awaited<ReturnType<typeof attachToContest>> = 'attached';
@@ -299,7 +249,6 @@ export function ProblemFormDialog({
       // lost with the response, so it cannot be attached from here.
       attached = result.data ? await attachToContest(result.data.id) : 'failed';
     }
-    setLoading(false);
 
     if (attached === 'failed') {
       toast.warning(t('toast.problem.createdNotAttached'));
@@ -311,50 +260,38 @@ export function ProblemFormDialog({
       );
     }
     refetchProblems();
-    onOpenChange(false);
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const problem = problemFormProblem(formData);
+    if (problem) {
+      toast.error(t(problem));
+      return;
+    }
+    void dialog.submit(save);
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>
-            {isEdit ? t('admin.editProblem') : t('admin.createProblem')}
-          </DialogTitle>
-          <DialogDescription>
-            {isEdit
-              ? ''
-              : contestId
-                ? t('admin.createProblemInContestDesc')
-                : t('admin.createProblemDesc')}
-          </DialogDescription>
-        </DialogHeader>
-
-        {loadingData ? (
-          <div className="py-8 text-center text-muted-foreground">
-            Loading...
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <ProblemForm
-              data={formData}
-              onChange={handleFormChange}
-              problemId={isEdit ? problem!.id : undefined}
-              attachments={isEdit ? attachments : undefined}
-            />
-            <DialogFooter>
-              <Button type="submit" disabled={loading}>
-                {loading
-                  ? t('admin.saving')
-                  : isEdit
-                    ? t('admin.save')
-                    : t('admin.createProblem')}
-              </Button>
-            </DialogFooter>
-          </form>
-        )}
-      </DialogContent>
-    </Dialog>
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <fieldset disabled={dialog.submitting} className="space-y-4">
+        <ProblemForm
+          data={formData}
+          onChange={setFormData}
+          problemId={problemId}
+          attachments={isEdit ? attachments : undefined}
+        />
+      </fieldset>
+      <DialogFooter>
+        <Button type="submit" disabled={dialog.submitting}>
+          {dialog.submitting
+            ? t('admin.saving')
+            : isEdit
+              ? t('admin.save')
+              : t('admin.createProblem')}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }
 

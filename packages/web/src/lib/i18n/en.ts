@@ -651,6 +651,12 @@ export const en: Record<string, string> = {
   'admin.submissionFormat.addFile': 'Add File',
   'admin.submissionFormat.empty': 'No language configured yet.',
   'admin.loading': 'Loading...',
+  'admin.problemPreview.title': '#{id} — {title}',
+  'admin.problemPreview.limits': '{time}ms · {memory}',
+  'admin.problemFallbackLabel': 'Problem {id}',
+  'admin.contest.titlePlaceholder': 'Weekly Contest #42',
+  'admin.contest.descriptionPlaceholder':
+    'Contest description (Markdown supported)',
 
   // Additional Files (admin)
   'admin.additionalFiles.title': 'Additional Files',
@@ -735,6 +741,12 @@ export const en: Record<string, string> = {
   'admin.testCases.create': 'Create Test Case',
   'admin.testCases.createDesc': 'Add a new test case to this problem.',
   'admin.testCases.edit': 'Edit Test Case',
+  'admin.testCases.uploadFile': 'Upload File',
+  'admin.testCases.fileReadError': 'Failed to read the file.',
+  'admin.testCases.uploadedHidden':
+    'File uploaded; its content is hidden. Length: {length} characters. Click to clear.',
+  'admin.testCases.descriptionPlaceholder':
+    'Explains this sample (Markdown supported)',
   'admin.testCases.sample': 'Sample',
   'admin.testCases.deleteError':
     'Failed to delete test case. It may have judge results.',
@@ -1034,6 +1046,10 @@ export const en: Record<string, string> = {
 
   // Common
   'common.cancel': 'Cancel',
+  'common.loading': 'Loading...',
+  'common.loadFailed':
+    'Could not load this. Check your connection and try again.',
+  'common.retry': 'Retry',
   'confirm.confirm': 'Confirm',
   'confirm.failed': 'The action failed. Please try again.',
 

@@ -23,24 +23,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { MarkdownEditor } from '@/components/MarkdownEditor';
 import { MarkdownEditorWithAttachments } from '@/features/admin/components/MarkdownEditorWithAttachments';
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import type { ProblemFormData } from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
 import {
   fetchSupportedLanguages,
   type SupportedLanguage,
 } from '@/features/problem/api/fetch-supported-languages';
-
-export interface ProblemFormData {
-  title: string;
-  content: string;
-  timeLimit: number;
-  memoryLimit: number;
-  problemType: string;
-  checkerFormat: string;
-  defaultContestType: string;
-  showTestDetails: boolean;
-  isPublic: boolean;
-  submissionFormat: Record<string, string[]>;
-}
 
 interface ProblemFormProps {
   data: ProblemFormData;

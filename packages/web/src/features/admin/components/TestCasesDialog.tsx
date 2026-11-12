@@ -196,7 +196,6 @@ export function TestCasesDialog({
           testCaseId={editingTestCaseId}
           open={formDialogOpen}
           onOpenChange={setFormDialogOpen}
-          testCasesQueryKey={testCasesKey}
         />
       </DialogContent>
     </Dialog>
