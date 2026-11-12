@@ -99,6 +99,68 @@ jobs:
       - name: Documentation (plugins)
         run: ./scripts/doc-plugins.sh
 
+  # The suites that judge real programs: the worker's isolate suite and the
+  # server e2e tests marked `#[ignore]` for needing isolate. isolate is built
+  # and installed the way the worker image builds it, and its own systemd unit
+  # (isolate-cg-keeper) delegates the cgroup v2 subtree it sandboxes in. The
+  # runner image ships the C++, Python and Java toolchains the tests compile
+  # with.
+  sandbox:
+    name: Sandbox (isolate)
+    runs-on: ubuntu-latest
+    env:
+      ISOLATE_VERSION: v2.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install isolate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
+          git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
+          sudo make -C "$RUNNER_TEMP/isolate" install
+          sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemctl start isolate.service
+          isolate --version
+          isolate-check-environment || true
+
+      - name: Build plugin WASM artefacts
+        run: ./scripts/build-plugins.sh
+
+      # Judging mounts broccoli-compare into the box as a platform tool.
+      - name: Build platform tools
+        run: |
+          cargo build -p broccoli-compare --locked --release
+          mkdir -p "$RUNNER_TEMP/tools"
+          cp target/release/broccoli-compare "$RUNNER_TEMP/tools/"
+          echo "BROCCOLI_WORKER_TOOLS_DIR=$RUNNER_TEMP/tools" >> "$GITHUB_ENV"
+
+      # One test at a time: isolate box ids are a host-wide resource.
+      - name: Worker isolate suite
+        timeout-minutes: 20
+        run: cargo test -p worker --locked --test worker_isolate_sandbox -- --ignored --test-threads=1
+
+      - name: Server e2e on isolate
+        timeout-minutes: 40
+        env:
+          E2E_SANDBOX_BACKEND: isolate
+        run: cargo test -p server --locked --test e2e -- --ignored --test-threads=1
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

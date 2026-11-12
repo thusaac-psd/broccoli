@@ -47,6 +47,13 @@ test-plugins:
     cargo test --manifest-path plugins/standard-languages/Cargo.toml
     cargo test --manifest-path plugins/submission-limit/Cargo.toml
 
+# Run the suites that judge real programs in isolate, as the `sandbox` CI job
+# does. Needs isolate installed with its cgroup v2 setup.
+test-sandbox:
+    cargo build -p broccoli-compare
+    cargo test -p worker --test worker_isolate_sandbox -- --ignored --test-threads=1
+    E2E_SANDBOX_BACKEND=isolate BROCCOLI_WORKER_TOOLS_DIR={{justfile_directory()}}/target/debug cargo test -p server --test e2e -- --ignored --test-threads=1
+
 # Run server tests that require opt-in bundled-stress-test feature
 test-server-bundled-downloads:
     cargo test -p server --features bundled-stress-test routes::downloads
@@ -240,4 +247,4 @@ stress-test-all: stress-test-linux-x86_64 stress-test-linux-aarch64
 
 # Run portability harness (requires prebuilt musl binaries; Linux only)
 stress-test-portability:
-    STRESS_TEST_PORTABILITY=1 cargo test -p stress-test --test portability
+    STRESS_TEST_PORTABILITY=1 cargo test -p stress-test --test portability -- --ignored

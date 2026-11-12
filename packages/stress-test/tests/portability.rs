@@ -76,7 +76,7 @@ fn alpine_help_smoke(binary: &Path, platform: &str) {
 }
 
 #[test]
-#[ignore = "requires prebuilt musl binary and Docker; opt in with --ignored"]
+#[ignore = "needs prebuilt musl binaries and Docker: just stress-test-all && just stress-test-portability"]
 fn musl_x86_64_binary_is_static() {
     let binary = musl_binary(
         "x86_64-unknown-linux-musl",
@@ -94,7 +94,7 @@ fn musl_x86_64_binary_is_static() {
 }
 
 #[test]
-#[ignore = "requires prebuilt musl binary and Docker; opt in with --ignored"]
+#[ignore = "needs prebuilt musl binaries and Docker: just stress-test-all && just stress-test-portability"]
 fn musl_aarch64_binary_is_static() {
     let binary = musl_binary(
         "aarch64-unknown-linux-musl",
@@ -112,7 +112,7 @@ fn musl_aarch64_binary_is_static() {
 }
 
 #[test]
-#[ignore = "requires prebuilt musl CLI (release-cli); opt in with --ignored"]
+#[ignore = "needs the musl contestant CLI built with --profile release-cli: just stress-test-portability"]
 fn musl_x86_64_contestant_cli_is_static() {
     // The bundled `broccoli` CLI must be static so it runs on any distro / glibc 2.31.
     let binary = musl_binary("x86_64-unknown-linux-musl", "release-cli", "broccoli");
