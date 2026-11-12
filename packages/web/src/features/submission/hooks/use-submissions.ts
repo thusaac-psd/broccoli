@@ -233,17 +233,30 @@ export function useSubmissions({
         setActiveEntryId(placeholderEntries[0]?.id ?? null);
 
         try {
-          const res = await apiClient.POST('/admin/submissions/fan-out', {
-            body: {
-              problem_id: problemId,
-              contest_id: contestId ?? null,
-              contest_type: contestType ?? null,
-              files,
-              language,
-              target_worker_ids: targetWorkerIds,
-            },
-          });
-          if (res.error) throw res.error;
+          const body = {
+            problem_id: problemId,
+            contest_id: contestId ?? null,
+            contest_type: contestType ?? null,
+            files,
+            language,
+            target_worker_ids: targetWorkerIds,
+          };
+          const res = await sendIdempotent(body, (key) =>
+            apiClient.POST('/admin/submissions/fan-out', {
+              body,
+              headers: { 'Idempotency-Key': key },
+            }),
+          );
+          if (res.error && !isAlreadyDone(res.error)) throw res.error;
+          if (!res.data) {
+            // An earlier send of this fan-out was accepted but its response
+            // is gone: the submissions are in the list, with nothing to poll.
+            setEntries((prev) => prev.filter((e) => e.groupKey !== groupKey));
+            setActiveEntryId(null);
+            invalidateSubmissionLists();
+            toast.success(t('toast.submission.alreadySubmitted'));
+            return;
+          }
 
           const created = res.data.submissions;
           // Pair each created submission back to its placeholder by request
@@ -282,14 +295,9 @@ export function useSubmissions({
                 };
               }
 
-              return {
-                ...e,
-                // Safe: `pairing.withheld` is false, so every field this
-                // relies on (status, result, ...) is actually present - see
-                // `isWithheldFanOutSubmission`.
-                submission: pairing.submission as unknown as Submission,
-                status: 'polling' as const,
-              };
+              // The mutation response may be redacted, so the entry gets its
+              // submission from the first poll of `GET /submissions/{id}`.
+              return { ...e, status: 'polling' as const };
             }),
           );
 
@@ -309,7 +317,18 @@ export function useSubmissions({
             }
           });
         } catch (err) {
-          console.error('Fan-out submission failed:', err);
+          if (
+            toastUnsettled(err, t, {
+              refetch: invalidateSubmissionLists,
+              outcomeUnknownKey: 'toast.submission.outcomeUnknown',
+            })
+          ) {
+            // An earlier send of this fan-out may have gone through (the
+            // refetched list shows it if so) or is still running.
+            setEntries((prev) => prev.filter((e) => e.groupKey !== groupKey));
+            setActiveEntryId(null);
+            return;
+          }
           const submissionError = parseSubmissionError(err);
           setEntries((prev) =>
             prev.map((e) =>
