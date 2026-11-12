@@ -1,9 +1,11 @@
 // A lazily loaded module can fail to load: the connection dropped for a
 // moment, or the site was redeployed and the chunk a cached page points at is
-// gone. Every importer recovers through this module: a failed load is retried
-// with backoff, waiting for the connection while the browser knows it is
-// offline, and only after that does the failure reach the caller (for a route,
-// the root error boundary, which reloads the page once for fresh chunks).
+// gone. Lazy imports in app and SDK code recover through this module: a
+// failed load is retried with backoff, waiting for the connection while the
+// browser knows it is offline, and only after that does the failure reach the
+// caller. Route modules are not imported through here: React Router reloads
+// the page itself when one fails to load. Whatever still fails during render
+// reaches the root error boundary, which reloads once for fresh chunks.
 //
 // A browser remembers a failed `import()` of a URL for the life of the page
 // and fails every later import of it without asking the network again, so a
