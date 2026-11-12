@@ -5,6 +5,7 @@
 'codelink-qualifier.loadError' = '无法加载榜单。'
 'codelink-qualifier.stale' = '刷新失败，当前显示的榜单可能已过期。'
 'codelink-qualifier.refresh' = '刷新'
+'codelink-qualifier.points' = '{points} 分'
 'codelink-qualifier.autoRefresh' = '自动刷新（{seconds} 秒）'
 'codelink-qualifier.manualRefreshOnly' = '仅手动刷新'
 'codelink-qualifier.ranking.label' = '排行榜视图'

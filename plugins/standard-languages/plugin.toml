@@ -15,6 +15,7 @@ CompileInfoBanner = "CompileInfoBanner"
 
 [translations]
 en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
 
 [[web.slots]]
 name = "config.form.standard-languages.compilation"

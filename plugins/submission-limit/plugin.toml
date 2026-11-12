@@ -35,6 +35,7 @@ handler = "get_limit_status_standalone"
 
 [translations]
 en = "i18n/en.toml"
+zh-CN = "i18n/zh-CN.toml"
 
 [web]
 root = "frontend/dist"

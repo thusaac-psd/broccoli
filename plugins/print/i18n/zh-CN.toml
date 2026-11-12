@@ -22,6 +22,7 @@
 # 提交打印确认
 'print.submission.title' = '打印这份提交？'
 'print.submission.files' = '{count} 个文件，约 {pages} 页'
+'print.submission.estimatedPages' = '约 {count} 页'
 
 # 打印队列页面（工作人员）
 'print.queue.title' = '打印队列'
@@ -56,6 +57,7 @@
 'print.queue.action.confirmPinBatch' = '确定要将这 {count} 个任务指定到所选打印机吗？'
 'print.queue.codeTitle' = '{filename} — {who}'
 'print.queue.nav' = '打印队列'
+'print.queue.staffOnly' = '403 — 仅限工作人员访问'
 'print.nav.groupLabel' = '打印'
 
 # My Prints panel (contestant sidebar)
@@ -82,3 +84,4 @@
 'print.stations.col.queue' = '已处理'
 'print.stations.col.version' = '版本'
 'print.stations.col.lastSeen' = '最后活跃'
+'print.stations.version' = 'v{version}'
