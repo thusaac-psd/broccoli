@@ -251,6 +251,24 @@ pub async fn run(cli: Cli) -> u8 {
     };
     let mut overall_exit = exit_code::PASS;
 
+    // Fixtures this run created carry an expected verdict per scenario, so
+    // every scenario is judged once and checked before any load is applied.
+    // An existing contest's problems have no expectations to check.
+    if state.owns_fixtures {
+        let outcome = crate::correctness::run(
+            &client,
+            &state,
+            SCENARIOS,
+            Duration::from_secs(cli.per_job_timeout),
+            &tx,
+        )
+        .await;
+        if !outcome.is_ok() {
+            overall_exit = exit_code::CORRECTNESS_FAIL;
+        }
+        summary.correctness = Some(outcome);
+    }
+
     if overall_exit == exit_code::PASS && !cli.skip_load {
         match cli.profile {
             LoadProfile::Judge => {

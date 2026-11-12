@@ -274,6 +274,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 20)]
     pub contest_concurrency: u32,
 
+    /// Skip the load phase. A run that bootstraps its own fixtures still
+    /// judges every scenario once in the correctness phase.
     #[arg(long, default_value_t = false)]
     pub skip_load: bool,
 
