@@ -3117,10 +3117,17 @@ export interface components {
     /** @description A single evaluator registration entry. */
     EvaluatorEntry: {
       /**
-       * @description Plugin function invoked to evaluate test cases for this problem type.
+       * @description Plugin function invoked to evaluate a test case, or, for a staged
+       *     evaluator, to prepare its operations.
        * @example evaluate_communication
        */
       function_name: string;
+      /**
+       * @description For a staged evaluator, the plugin function that turns finished
+       *     operations into verdicts.
+       * @example on_operation_results
+       */
+      interpret_function_name?: string | null;
       /**
        * @description Plugin that registered this evaluator.
        * @example communication-evaluator

@@ -78,7 +78,7 @@ pub async fn start_evaluate_batch(
         problem_type = %problem_type,
         test_case_count = test_case_count,
         evaluator_plugin = %evaluator.plugin_id,
-        evaluator_fn = %evaluator.function_name,
+        evaluator_fn = %evaluator.functions.entry(),
         "Starting evaluate batch"
     );
 
@@ -90,7 +90,10 @@ pub async fn start_evaluate_batch(
                 KeyValue::new("plugin.id", caller_plugin_id.clone()),
                 KeyValue::new("problem.type", problem_type.clone()),
                 KeyValue::new("evaluator.plugin.id", evaluator.plugin_id.clone()),
-                KeyValue::new("evaluator.function", evaluator.function_name.clone()),
+                KeyValue::new(
+                    "evaluator.function",
+                    evaluator.functions.entry().to_string(),
+                ),
             ],
         );
     }
@@ -103,17 +106,21 @@ pub async fn start_evaluate_batch(
         metrics: deps.metrics.clone(),
     };
 
-    if is_batch_evaluator_callback_path(&evaluator) {
-        spawn_batch_evaluator_callback_dispatch(
-            stage,
-            deps.fanout_slots.clone(),
-            deps.operation_deps.clone(),
-            batch_id.clone(),
-            resolved_inputs,
-            batch_tx,
-        );
-        return Ok(batch_id);
-    }
+    let function = match evaluator.functions {
+        EvaluatorFunctions::Direct { function } => function,
+        EvaluatorFunctions::Staged { prepare, interpret } => {
+            spawn_staged_dispatch(
+                stage,
+                StagedFunctions { prepare, interpret },
+                deps.fanout_slots.clone(),
+                deps.operation_deps.clone(),
+                batch_id.clone(),
+                resolved_inputs,
+                batch_tx,
+            );
+            return Ok(batch_id);
+        }
+    };
 
     spawn_fanout(
         deps.fanout_slots.clone(),
@@ -121,7 +128,7 @@ pub async fn start_evaluate_batch(
         batch_tx,
         move |tc_input, batch_tx| {
             let stage = stage.clone();
-            let function = evaluator.function_name.clone();
+            let function = function.clone();
             let span = tracing::info_span!(
                 "evaluate_test_case",
                 test_case_id = tc_input.test_case_id,
@@ -208,13 +215,19 @@ fn spawn_fanout<F, Fut>(
     });
 }
 
-fn is_batch_evaluator_callback_path(evaluator: &PluginHandler) -> bool {
-    evaluator.plugin_id == BATCH_EVALUATOR_PLUGIN_ID
-        && evaluator.function_name == BATCH_EVALUATOR_LEGACY_FN
+/// The functions of a staged evaluator (see `EvaluatorFunctions::Staged`).
+#[derive(Clone)]
+struct StagedFunctions {
+    prepare: String,
+    interpret: String,
 }
 
-fn spawn_batch_evaluator_callback_dispatch(
+/// Run a batch on a staged evaluator: each case is prepared, its operations
+/// run without holding a plugin instance, and finished cases are interpreted
+/// in groups of up to [`INTERPRET_COALESCE`].
+fn spawn_staged_dispatch(
     stage: EvaluatorStage,
+    functions: StagedFunctions,
     fanout: crate::dispatcher::fanout::FanoutSemaphore,
     operation_deps: crate::host_funcs::context::OperationHostDeps,
     batch_id: String,
@@ -222,13 +235,15 @@ fn spawn_batch_evaluator_callback_dispatch(
     batch_tx: BatchSender<TestCaseVerdict>,
 ) {
     let (ready_tx, ready_rx) =
-        mpsc::channel::<EvaluateOperationResultInput>(BATCH_EVALUATOR_CALLBACK_COALESCE * 2);
+        mpsc::channel::<EvaluateOperationResultInput>(INTERPRET_COALESCE * 2);
 
-    tokio::spawn(run_batch_evaluator_callback_aggregator(
+    tokio::spawn(run_interpret_aggregator(
         stage.clone(),
+        functions.interpret,
         ready_rx,
         batch_tx.clone(),
     ));
+    let prepare = functions.prepare;
 
     spawn_fanout(
         fanout,
@@ -239,26 +254,23 @@ fn spawn_batch_evaluator_callback_dispatch(
             let operation_deps = operation_deps.clone();
             let ready_tx = ready_tx.clone();
             let batch_id = batch_id.clone();
+            let prepare = prepare.clone();
             let tc_id = tc_input.test_case_id;
             let span = tracing::info_span!(
-                "batch_evaluator_callback_test_case",
+                "staged_evaluate_test_case",
                 test_case_id = tc_id,
                 evaluator_plugin = %stage.plugin_id
             );
             async move {
-                let result = run_batch_evaluator_case_continuation(
-                    &stage,
-                    operation_deps,
-                    batch_id,
-                    tc_input,
-                )
-                .await;
+                let result =
+                    prepare_and_run_case(&stage, &prepare, operation_deps, batch_id, tc_input)
+                        .await;
                 match result {
                     Ok(ready_case) => {
                         if ready_tx.send(ready_case).await.is_err() {
                             batch_tx.deliver(system_error_verdict(
                                 tc_id,
-                                "Batch-evaluator callback aggregator stopped",
+                                "Evaluator interpret aggregator stopped",
                             ));
                         }
                     }
@@ -270,25 +282,27 @@ fn spawn_batch_evaluator_callback_dispatch(
     );
 }
 
-async fn run_batch_evaluator_case_continuation(
+/// Prepare one case and run its operations to completion.
+async fn prepare_and_run_case(
     stage: &EvaluatorStage,
+    prepare: &str,
     operation_deps: crate::host_funcs::context::OperationHostDeps,
     evaluate_batch_id: String,
     tc_input: BuildEvalOpsInput,
 ) -> anyhow::Result<EvaluateOperationResultInput> {
-    let prepare_permit = stage.acquire(BATCH_EVALUATOR_PREPARE_FN).await?;
+    let prepare_permit = stage.acquire(prepare).await?;
     let input_bytes = serde_json::to_vec(&tc_input)
-        .with_context(|| "Failed to serialize batch-evaluator prepare input")?;
+        .with_context(|| "Failed to serialize evaluator prepare input")?;
     let prepared_bytes = stage
-        .call(BATCH_EVALUATOR_PREPARE_FN, input_bytes)
+        .call(prepare, input_bytes)
         .await
-        .with_context(|| "Batch-evaluator prepare callback failed")?;
+        .with_context(|| "Evaluator prepare call failed")?;
     drop(prepare_permit);
 
     let mut prepared = serde_json::from_slice::<PreparedEvaluateCase>(&prepared_bytes)
-        .with_context(|| "Failed to deserialize batch-evaluator prepared case")?;
+        .with_context(|| "Failed to deserialize evaluator prepared case")?;
     if prepared.operations.is_empty() {
-        return Err(anyhow!("Batch-evaluator prepared no operations"));
+        return Err(anyhow!("Evaluator prepared no operations"));
     }
     tag_operation_tasks_for_evaluate_batch(
         &mut prepared.operations,
@@ -320,7 +334,7 @@ async fn run_batch_evaluator_case_continuation(
     })
 }
 
-/// Large infrastructure ceiling for the batch-evaluator operation-result wait.
+/// Large infrastructure ceiling for a staged evaluator's operation-result wait.
 /// The per-op `timeout` is the small solution-derived budget; under load
 /// (queueing + cold blob IO) that elapses while the worker is still alive and
 /// processing. Bounding the wait by it converts SYSTEM slowness into a
@@ -329,11 +343,11 @@ async fn run_batch_evaluator_case_continuation(
 /// worker is reclaimed by the dispatcher stuck-detector. Zero in tests so the
 /// explicit `timeout` still governs.
 #[cfg(not(test))]
-fn batch_evaluator_result_infra_floor() -> Duration {
+fn staged_result_infra_floor() -> Duration {
     Duration::from_secs(30 * 60)
 }
 #[cfg(test)]
-fn batch_evaluator_result_infra_floor() -> Duration {
+fn staged_result_infra_floor() -> Duration {
     Duration::from_secs(0)
 }
 
@@ -345,7 +359,7 @@ async fn wait_for_operation_results(
     timeout: Duration,
 ) -> anyhow::Result<Vec<OperationResult>> {
     let batches = &operation_deps.operation_batches;
-    let ceiling = timeout.max(batch_evaluator_result_infra_floor());
+    let ceiling = timeout.max(staged_result_infra_floor());
     // Collect the operation results by awaiting each as a future - no blocking
     // thread is held for the batch's lifetime, and a cancelled/superseded batch
     // (dropped sender) ends the wait immediately instead of leaking a thread to
@@ -384,32 +398,34 @@ async fn wait_for_operation_results(
     operation_results_from_task_results(task_results)
 }
 
-async fn run_batch_evaluator_callback_aggregator(
+async fn run_interpret_aggregator(
     stage: EvaluatorStage,
+    interpret: String,
     mut ready_rx: mpsc::Receiver<EvaluateOperationResultInput>,
     batch_tx: BatchSender<TestCaseVerdict>,
 ) {
-    let mut pending = Vec::with_capacity(BATCH_EVALUATOR_CALLBACK_COALESCE);
+    let mut pending = Vec::with_capacity(INTERPRET_COALESCE);
     while let Some(ready_case) = ready_rx.recv().await {
         if let Some(items) = push_ready_case_for_callback(&mut pending, ready_case) {
-            flush_batch_evaluator_callback(&stage, &batch_tx, items).await;
+            flush_interpret(&stage, &interpret, &batch_tx, items).await;
         }
     }
 
     if !pending.is_empty() {
-        flush_batch_evaluator_callback(&stage, &batch_tx, pending).await;
+        flush_interpret(&stage, &interpret, &batch_tx, pending).await;
     }
 }
 
-/// Deliver one verdict per item: the callback's, or a SystemError when the
-/// callback failed or omitted the case.
-async fn flush_batch_evaluator_callback(
+/// Deliver one verdict per item: the evaluator's, or a SystemError when the
+/// interpret call failed or omitted the case.
+async fn flush_interpret(
     stage: &EvaluatorStage,
+    interpret: &str,
     batch_tx: &BatchSender<TestCaseVerdict>,
     items: Vec<EvaluateOperationResultInput>,
 ) {
     let case_ids: Vec<i32> = items.iter().map(|item| item.case.test_case_id).collect();
-    let mut verdicts_by_case = match call_batch_evaluator_callback(stage, items).await {
+    let mut verdicts_by_case = match call_interpret(stage, interpret, items).await {
         Ok(verdicts) => verdicts
             .into_iter()
             .map(|verdict| (verdict.test_case_id, verdict))
@@ -424,7 +440,7 @@ async fn flush_batch_evaluator_callback(
 
     for tc_id in case_ids {
         let verdict = verdicts_by_case.remove(&tc_id).unwrap_or_else(|| {
-            system_error_verdict(tc_id, "Batch-evaluator callback omitted testcase verdict")
+            system_error_verdict(tc_id, "Evaluator interpret call omitted testcase verdict")
         });
         batch_tx.deliver(verdict);
     }
@@ -432,26 +448,27 @@ async fn flush_batch_evaluator_callback(
     for extra in verdicts_by_case.into_values() {
         tracing::warn!(
             test_case_id = extra.test_case_id,
-            "Batch-evaluator callback returned an unexpected testcase verdict"
+            "Evaluator interpret call returned an unexpected testcase verdict"
         );
     }
 }
 
-async fn call_batch_evaluator_callback(
+async fn call_interpret(
     stage: &EvaluatorStage,
+    interpret: &str,
     items: Vec<EvaluateOperationResultInput>,
 ) -> anyhow::Result<Vec<TestCaseVerdict>> {
-    let _permit = stage.acquire(BATCH_EVALUATOR_CALLBACK_FN).await?;
+    let _permit = stage.acquire(interpret).await?;
     let input = EvaluateOperationResultsInput { results: items };
     let input_bytes = serde_json::to_vec(&input)
-        .with_context(|| "Failed to serialize batch-evaluator callback input")?;
+        .with_context(|| "Failed to serialize evaluator interpret input")?;
     let output_bytes = stage
-        .call(BATCH_EVALUATOR_CALLBACK_FN, input_bytes)
+        .call(interpret, input_bytes)
         .await
-        .with_context(|| "Batch-evaluator result callback failed")?;
+        .with_context(|| "Evaluator interpret call failed")?;
 
     serde_json::from_slice::<Vec<TestCaseVerdict>>(&output_bytes)
-        .with_context(|| "Failed to deserialize batch-evaluator callback verdicts")
+        .with_context(|| "Failed to deserialize evaluator interpret verdicts")
 }
 
 async fn resolve_inputs(

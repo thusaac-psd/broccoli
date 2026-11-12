@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::entity::{additional_file, plugin_config, problem, test_case};
 use crate::host_funcs::context::EvaluateHostDeps;
-use crate::registry::{EvaluateBatches, PluginHandler};
+use crate::registry::{EvaluateBatches, EvaluatorFunctions};
 use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::submission_dispatch::fire_after_judging_hooks_for_detached_completion;
@@ -32,11 +32,8 @@ use crate::services::windowed_session::{
 
 const INLINE_TEST_INPUT_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
 const EVALUATE_RESULT_WAIT_TICK: Duration = Duration::from_millis(50);
-const BATCH_EVALUATOR_PLUGIN_ID: &str = "batch-evaluator";
-const BATCH_EVALUATOR_LEGACY_FN: &str = "evaluate_batch";
-const BATCH_EVALUATOR_PREPARE_FN: &str = "prepare_evaluate_case";
-const BATCH_EVALUATOR_CALLBACK_FN: &str = "on_operation_results";
-const BATCH_EVALUATOR_CALLBACK_COALESCE: usize = 4;
+/// How many finished cases a staged evaluator interprets in one call.
+const INTERPRET_COALESCE: usize = 4;
 /// How many times a timed-out detached evaluate op is re-dispatched (on a fresh
 /// op batch, which any worker may pick up) before the timeout is surfaced to the
 /// plugin as a terminal event. The queued-case extend in [`EvaluateCases`]
@@ -116,7 +113,7 @@ fn detached_evaluate_completion(
 
 fn push_ready_case_for_callback<T>(pending: &mut Vec<T>, item: T) -> Option<Vec<T>> {
     pending.push(item);
-    if pending.len() >= BATCH_EVALUATOR_CALLBACK_COALESCE {
+    if pending.len() >= INTERPRET_COALESCE {
         Some(std::mem::take(pending))
     } else {
         None

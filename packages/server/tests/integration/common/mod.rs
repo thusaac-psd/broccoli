@@ -682,9 +682,11 @@ impl TestApp {
         if !load_plugins {
             evaluator_registry.write().await.insert(
                 "standard".into(),
-                server::registry::PluginHandler {
+                server::registry::EvaluatorHandler {
                     plugin_id: "__test__".into(),
-                    function_name: "noop".into(),
+                    functions: server::registry::EvaluatorFunctions::Direct {
+                        function: "noop".into(),
+                    },
                 },
             );
             {

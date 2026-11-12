@@ -505,9 +505,11 @@ impl E2eTestApp {
         } else {
             state.registries.evaluator_registry.write().await.insert(
                 "batch".into(),
-                server::registry::PluginHandler {
+                server::registry::EvaluatorHandler {
                     plugin_id: "__test__".into(),
-                    function_name: "noop".into(),
+                    functions: server::registry::EvaluatorFunctions::Direct {
+                        function: "noop".into(),
+                    },
                 },
             );
             {

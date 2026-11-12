@@ -48,9 +48,14 @@ pub struct EvaluatorEntry {
     /// Plugin that registered this evaluator.
     #[schema(example = "communication-evaluator")]
     pub plugin_id: String,
-    /// Plugin function invoked to evaluate test cases for this problem type.
+    /// Plugin function invoked to evaluate a test case, or, for a staged
+    /// evaluator, to prepare its operations.
     #[schema(example = "evaluate_communication")]
     pub function_name: String,
+    /// For a staged evaluator, the plugin function that turns finished
+    /// operations into verdicts.
+    #[schema(example = "on_operation_results")]
+    pub interpret_function_name: Option<String>,
 }
 
 /// A single contest type registration entry.

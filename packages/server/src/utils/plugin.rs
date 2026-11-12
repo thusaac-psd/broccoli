@@ -186,7 +186,7 @@ fn collect_files(root: &std::path::Path, rel: &std::path::Path, out: &mut Vec<st
 #[derive(Default)]
 pub(crate) struct Registrations {
     contest_types: Vec<(String, crate::registry::ContestTypeHandlers)>,
-    evaluators: Vec<(String, crate::registry::PluginHandler)>,
+    evaluators: Vec<(String, crate::registry::EvaluatorHandler)>,
     checker_stages: Vec<(String, crate::registry::CheckerStageHandlers)>,
     language_resolvers: Vec<(String, crate::registry::LanguageResolverEntry)>,
 }

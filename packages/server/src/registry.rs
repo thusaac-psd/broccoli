@@ -8,10 +8,34 @@ use tokio::sync::{RwLock, oneshot};
 use crate::services::batch_table::BatchTable;
 use crate::services::evaluate_batch::EvaluateCases;
 
+/// The plugin that evaluates test cases of one problem type, and how.
 #[derive(Clone, Debug)]
-pub struct PluginHandler {
+pub struct EvaluatorHandler {
     pub plugin_id: String,
-    pub function_name: String,
+    pub functions: EvaluatorFunctions,
+}
+
+/// The functions an evaluator declared when it registered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvaluatorFunctions {
+    /// One call evaluates a test case end to end; the plugin starts and
+    /// awaits its own operations.
+    Direct { function: String },
+    /// The host drives each test case: `prepare` returns its operations, the
+    /// host runs them without holding a plugin instance, and `interpret`
+    /// turns batches of finished cases into verdicts.
+    Staged { prepare: String, interpret: String },
+}
+
+impl EvaluatorFunctions {
+    /// The function called first for each case: the direct function, or
+    /// `prepare`. Used to label logs and metrics.
+    pub fn entry(&self) -> &str {
+        match self {
+            Self::Direct { function } => function,
+            Self::Staged { prepare, .. } => prepare,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -24,7 +48,7 @@ pub struct ContestTypeHandlers {
 
 pub type ContestTypeRegistry = Arc<RwLock<HashMap<String, ContestTypeHandlers>>>;
 
-pub type EvaluatorRegistry = Arc<RwLock<HashMap<String, PluginHandler>>>;
+pub type EvaluatorRegistry = Arc<RwLock<HashMap<String, EvaluatorHandler>>>;
 
 /// The resolve + interpret functions a checker plugin registers for a format
 /// under checker fusion. `resolve_fn` returns a `CheckerStage` to splice into the

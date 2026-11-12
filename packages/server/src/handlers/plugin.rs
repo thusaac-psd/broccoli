@@ -7,6 +7,7 @@ use crate::models::plugin::{
     ActivePluginResponse, ContestTypeEntry, EvaluatorEntry, HookEntryInfo, LanguageRegistryItem,
     RegistriesResponse,
 };
+use crate::registry::EvaluatorFunctions;
 use crate::state::AppState;
 
 #[utoipa::path(
@@ -27,10 +28,19 @@ pub async fn list_registries(
     let mut evaluators: Vec<EvaluatorEntry> = {
         let reg = state.registries.evaluator_registry.read().await;
         reg.iter()
-            .map(|(problem_type, h)| EvaluatorEntry {
-                problem_type: problem_type.clone(),
-                plugin_id: h.plugin_id.clone(),
-                function_name: h.function_name.clone(),
+            .map(|(problem_type, h)| {
+                let (function_name, interpret_function_name) = match &h.functions {
+                    EvaluatorFunctions::Direct { function } => (function.clone(), None),
+                    EvaluatorFunctions::Staged { prepare, interpret } => {
+                        (prepare.clone(), Some(interpret.clone()))
+                    }
+                };
+                EvaluatorEntry {
+                    problem_type: problem_type.clone(),
+                    plugin_id: h.plugin_id.clone(),
+                    function_name,
+                    interpret_function_name,
+                }
             })
             .collect()
     };
