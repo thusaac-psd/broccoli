@@ -86,20 +86,11 @@ pub async fn list_clarifications(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
 
     // Fail fast, before reading any clarification rows below, on a contest
-    // the kernel already knows is unreachable. Folds in what `find_contest`
-    // + `check_contest_access` used to check here (existence, the
-    // activation window, `is_public`, `contest_user` membership) - see
-    // `visibility::host_rules::decide_contest`. Both of that pair's `Err`
-    // branches already returned exactly this same `AppError::NotFound`
-    // message, so this is not a behavioural change.
-    //
-    // NOTE: this is a pure reachability gate - `is_denied()` treats a
-    // hypothetical `Redact` on this `Resource::Contest` decision the same
-    // as `Allow`, and the contest itself is never rendered from this
-    // decision (only used to decide whether to proceed), so `Redact`
-    // degenerates to `Allow` here. No plugin currently returns `Redact` for
-    // `Resource::Contest`, so this is a documented no-op today, not a live
-    // bug - see Task 20 Item 6.
+    // the kernel knows is unreachable (missing, outside its activation
+    // window, or private to a non-member - see
+    // `visibility::host_rules::decide_contest`). This is a pure
+    // reachability gate: the contest itself is never rendered from this
+    // decision, so a `Redact` counts as `Allow` here.
     if kernel
         .decide(Action::Read, Resource::Contest(contest_id))
         .await?
@@ -117,12 +108,12 @@ pub async fn list_clarifications(
         select = select.filter(clarification::Column::ClarificationType.eq(type_filter.as_str()));
     }
 
-    // The author/is_public/recipient prefilter that used to live here is now
-    // the kernel's job (`visibility::host_rules::decide_clarification`,
-    // rule 10): every row for this contest (matching the optional type
-    // filter) is fetched, and a row this viewer may not see comes back
-    // `Deny` from `fetch_visible_batch` below and is dropped from `data`,
-    // never rendered as a placeholder.
+    // Which rows this viewer may see is the kernel's job
+    // (`visibility::host_rules::decide_clarification`, rule 10): every row
+    // for this contest (matching the optional type filter) is fetched, and a
+    // row this viewer may not see comes back `Deny` from
+    // `fetch_visible_batch` below and is dropped from `data`, never rendered
+    // as a placeholder.
     let rows = select
         .order_by_desc(clarification::Column::CreatedAt)
         .all(&state.db)
@@ -272,20 +263,10 @@ pub async fn create_clarification(
     // the kernel already knows is unreachable. There is no clarification row
     // yet to decide about at POST time, only "can this subject reach this
     // contest at all" - so this reuses `Resource::Contest`/rules 1-4
-    // verbatim via `Action::Clarify` (`host_decide` does not branch on
-    // `Action` for `Resource::Contest`, so this is byte-identical to the
-    // `Action::Read` gate above it in `list_clarifications`). Both of the
-    // `find_contest` + `check_contest_access` pair's `Err` branches already
-    // returned exactly this same `AppError::NotFound` message, so this is
-    // not a behavioural change. See `visibility::host_rules`'s module docs
-    // for why this needs no new host-rule code.
-    //
-    // NOTE: as in `list_clarifications` above, this is a pure reachability
-    // gate - `is_denied()` treats a hypothetical `Redact` here the same as
-    // `Allow`, and this decision's `Resource::Contest` is never rendered
-    // from here, so `Redact` degenerates to `Allow`. No plugin currently
-    // returns `Redact` for `Resource::Contest`, so this is a documented
-    // no-op today, not a live bug - see Task 20 Item 6.
+    // via `Action::Clarify` (`host_decide` does not branch on `Action` for
+    // `Resource::Contest`, so this matches the `Action::Read` gate in
+    // `list_clarifications`). As there, this is a pure reachability gate, so
+    // a `Redact` counts as `Allow`.
     if kernel
         .decide(Action::Clarify, Resource::Contest(contest_id))
         .await?

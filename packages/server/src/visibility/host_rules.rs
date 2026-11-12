@@ -1,14 +1,7 @@
 //! Host-side (non-plugin) reachability rules for the contest / problem /
 //! submission surface.
 //!
-//! Ported **verbatim** from the pre-kernel access-control helpers so that a
-//! later task can drop `host_decide` in behind those call sites without
-//! changing what they allow. Nothing here is simplified, reordered, or
-//! "cleaned up" relative to the source, including logic that looks
-//! redundant or asymmetric - see the task report for a rule-by-rule
-//! file:line mapping.
-//!
-//! Rules ported (numbering matches the task brief):
+//! Rules:
 //!   1. `perm::CONTEST_MANAGE` short-circuits to `Allow`.
 //!   2. Contest activation window: `activate_time.is_none_or(|at| at > now)
 //!      || deactivate_time.is_some_and(|dt| dt <= now)` -> `Deny`. This
@@ -47,22 +40,17 @@
 //!      Rule 9 widens READ only: under `Action::Submit` a standalone
 //!      decision stops after rule 8, so a hidden problem is denied there
 //!      even when one of its contests would admit reading it - see
-//!      [`standalone_reachable_via_contest`]. This is a deliberate departure
-//!      from the verbatim port.
-//!  10. `Resource::Clarification`, ported from `list_clarifications`
-//!      (`handlers/clarification.rs:58-208`) - see [`decide_clarification`]
-//!      for the full mapping. A missing clarification, or one where the
+//!      [`standalone_reachable_via_contest`].
+//!  10. `Resource::Clarification` - see [`decide_clarification`]. A
+//!      missing clarification, or one where the
 //!      subject is neither `contest:manage`, the author, the recipient, nor
 //!      looking at a public row, -> `Deny`. A participant (admin/author/
 //!      recipient), or anyone looking at a public row, -> `Allow`.
-//!      `create_clarification`'s reachability gate (`handlers/
-//!      clarification.rs:238`) is a DIFFERENT rule, not this one: there is
-//!      no clarification row yet to decide about, so it reuses
-//!      `Resource::Contest`/rules 1-4 verbatim (via `Action::Clarify`) - see
-//!      the task report for why that degenerates to no new host-rule code.
+//!      `create_clarification`'s reachability gate is a different rule:
+//!      there is no clarification row yet to decide about, so it reuses
+//!      `Resource::Contest`/rules 1-4 (via `Action::Clarify`).
 //!
-//! Deliberately **not** ported here (out of scope for this task - not in
-//! the source list the task brief named):
+//! Deliberately **not** decided here:
 //!   - `require_contest_started`'s `now < contest.start_time` check. That
 //!     raises a distinct `400 VALIDATION_ERROR` business rule, not a
 //!     reachability outcome, so it has no representation in `Decision`
@@ -123,8 +111,7 @@
 //! public contests) - rule 6's participation check is unconditional
 //! (independent of `is_public`), so narrowing the fetch to
 //! `check_contest_access`'s needs would silently break peer-submission
-//! visibility on public contests. See the task report for the exact query
-//! count this achieves per scenario.
+//! visibility on public contests.
 
 use std::collections::{HashMap, HashSet};
 
@@ -147,9 +134,7 @@ use super::{Action, Decision, Resource, Subject};
 /// contest-less submission) once that submission has been resolved by Query
 /// 0 below. This surfaces a mapping `host_decide` already builds for its own
 /// rule 6 check, rather than resolving it a second time - see
-/// `VisibilityKernel::decide_batch`'s CRITICAL fix note
-/// (`packages/server/src/visibility/mod.rs`, Task 7) for why the caller
-/// needs it: a `Resource::Submission`'s contest is otherwise unknowable
+/// `VisibilityKernel::decide_batch` for why the caller needs it: a `Resource::Submission`'s contest is otherwise unknowable
 /// outside this function, and losing it produces a confidently wrong (not
 /// merely ambiguous) `QueryResource.contest_id` for plugins. Left untouched
 /// (and callers pass an empty map) on the `admin_override` early return
@@ -157,7 +142,7 @@ use super::{Action, Decision, Resource, Subject};
 /// never reach a plugin anyway.
 ///
 /// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification` (Task 12): `clarification_id -> clarification.contest_id`,
+/// Clarification`: `clarification_id -> clarification.contest_id`,
 /// populated once Query C below resolves it. Unlike a submission's, a
 /// clarification's `contest_id` column is never null - every clarification
 /// belongs to exactly one contest - so this map's value is a plain `i32`,
@@ -169,8 +154,7 @@ use super::{Action, Decision, Resource, Subject};
 /// [`standalone_reachable_via_contest`]). Every other rule is the same for
 /// every action.
 ///
-/// Called from `VisibilityKernel::decide_batch`
-/// (`packages/server/src/visibility/mod.rs`, Task 7), which sends it every
+/// Called from `VisibilityKernel::decide_batch`, which sends it every
 /// deduped, not-yet-memoized resource in a batch before any plugin is
 /// consulted.
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
@@ -702,7 +686,7 @@ fn decide_submission(
     if subject.user_id == Some(sub.user_id) {
         // Owner bypass: the source skips the contest lookup ENTIRELY here,
         // so this stays Allow even if the parent contest has since been
-        // soft-deleted. Preserved verbatim - see the task report.
+        // soft-deleted.
         return Decision::Allow;
     }
     let Some(cid) = sub.contest_id else {

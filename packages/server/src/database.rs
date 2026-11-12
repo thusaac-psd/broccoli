@@ -490,14 +490,13 @@ pub const BOOT_LOCK_KEY: i64 = 0x6272_6f63_636f_6c69;
 /// One dedicated database session holding [`BOOT_LOCK_KEY`] for the duration
 /// of boot-time schema work.
 ///
-/// Without it, servers booting together on a fresh database race each other's
-/// check-then-insert seeding and DDL: losers fail and restart, and a duplicate
-/// bootstrap admin inserted before the unique username index exists makes that
-/// index impossible to create, so the invariant is lost for good.
+/// Servers booting together on a fresh database therefore run schema sync,
+/// migrations and check-then-insert seeding one at a time, instead of racing
+/// each other's DDL and inserting duplicate seed rows.
 ///
 /// The session is a single never-recycled connection (so the session-level
 /// lock and the work run on the same backend) with no `statement_timeout`
-/// (DDL and backfills on a large database legitimately run long). If this
+/// (DDL on a large database legitimately runs long). If this
 /// process dies while holding the lock, Postgres releases it when the session
 /// ends; the server-side keepalive in [`common::db`] bounds that to about a
 /// minute even when the host vanishes without closing the socket.
