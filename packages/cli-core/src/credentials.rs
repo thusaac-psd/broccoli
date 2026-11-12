@@ -241,8 +241,15 @@ impl CredentialsLock {
 /// never briefly world-readable.
 fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
+    // A leftover file from an interrupted write keeps its old mode, and the
+    // mode below applies only to a newly created file, so start from none.
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("Failed to remove a stale credentials file"),
+    }
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -339,5 +346,23 @@ mod tests {
         assert!(!locking_unsupported(&Error::from(
             ErrorKind::PermissionDenied
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_world_readable_temp_file_never_becomes_the_credentials_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = CredentialsFile::at(dir.path().join("credentials.json"));
+        let tmp = dir.path().join("credentials.json.tmp");
+        std::fs::write(&tmp, "stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        file.lock()
+            .unwrap()
+            .write("https://a", &pair("a", "r"))
+            .unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }
