@@ -196,6 +196,7 @@ impl ServerRuntime {
                     );
                     Some(queue)
                 }
+                Err(e @ mq::MqError::RedisTooOld { .. }) => return Err(e.into()),
                 Err(e) => {
                     warn!("MQ connection failed, submissions won't be queued: {}", e);
                     None

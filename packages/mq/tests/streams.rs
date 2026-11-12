@@ -103,6 +103,21 @@ async fn xlen(conn: &mut redis::aio::MultiplexedConnection, key: &str) -> u64 {
 }
 
 #[tokio::test]
+async fn a_redis_older_than_7_is_refused() {
+    let container = Redis::default()
+        .with_tag("6.2-alpine")
+        .start()
+        .await
+        .expect("start redis");
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    let err = Mq::connect(&format!("redis://127.0.0.1:{port}"), BASE)
+        .await
+        .err()
+        .expect("Redis 6 must be refused");
+    assert!(matches!(err, mq::MqError::RedisTooOld { ref found } if found.starts_with("6.")));
+}
+
+#[tokio::test]
 async fn published_tasks_are_delivered_once_and_gone_after_ack() {
     let (_c, url) = redis().await;
     let mq = Mq::connect(&url, BASE).await.unwrap();

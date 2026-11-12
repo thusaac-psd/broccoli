@@ -32,6 +32,16 @@ pub use reply::{REPLY_BATCH, ReplyInbox};
 
 use crate::conn::Conn;
 
+/// Oldest Redis major version the queue runs on.
+pub const MIN_REDIS_MAJOR: u32 = 7;
+
+/// `redis_version` from an `INFO server` reply.
+fn redis_version(info: &str) -> Option<&str> {
+    info.lines()
+        .find_map(|line| line.strip_prefix("redis_version:"))
+        .map(str::trim)
+}
+
 /// Entries one drain step moves out of a dead worker's private stream.
 const DRAIN_BATCH: usize = 64;
 
@@ -73,17 +83,24 @@ pub struct Mq {
 }
 
 impl Mq {
-    /// Connect to `url` and check that Redis answers. `base` is
-    /// `mq.operation_queue_name`, the prefix of every key.
+    /// Connect to `url` and check that Redis answers and is at least
+    /// [`MIN_REDIS_MAJOR`]. `base` is `mq.operation_queue_name`, the prefix of
+    /// every key.
     pub async fn connect(url: &str, base: &str) -> Result<Self, MqError> {
         let client = redis::Client::open(url)?;
         let mq = Self {
             conn: Arc::new(Conn::new(client, COMMAND_TIMEOUT)),
             topology: Topology::new(base),
         };
-        mq.conn
-            .run(|mut c| async move { redis::cmd("PING").query_async::<()>(&mut c).await })
+        let info: String = mq
+            .conn
+            .run(|mut c| async move { redis::cmd("INFO").arg("server").query_async(&mut c).await })
             .await?;
+        let found = redis_version(&info).unwrap_or("unknown").to_string();
+        let major = found.split('.').next().and_then(|m| m.parse::<u32>().ok());
+        if major.is_none_or(|m| m < MIN_REDIS_MAJOR) {
+            return Err(MqError::RedisTooOld { found });
+        }
         Ok(mq)
     }
 
@@ -275,5 +292,17 @@ impl Mq {
                 pending,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redis_version;
+
+    #[test]
+    fn redis_version_is_read_from_info_server() {
+        let info = "# Server\r\nredis_version:7.4.12\r\nredis_mode:standalone\r\n";
+        assert_eq!(redis_version(info), Some("7.4.12"));
+        assert_eq!(redis_version("# Server\r\n"), None);
     }
 }
