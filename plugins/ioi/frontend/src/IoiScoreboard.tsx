@@ -171,6 +171,7 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
     null,
   );
   const previousPhaseRef = useRef<string | null>(null);
+  // eslint-disable-next-line no-restricted-properties -- see `secondsAgo`
   const [now, setNow] = useState(Date.now());
 
   const {
@@ -209,6 +210,8 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
 
   useEffect(() => {
     if (!dataUpdatedAt) return;
+    // `dataUpdatedAt` is stamped by this machine's clock, so its age is too.
+    // eslint-disable-next-line no-restricted-properties
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [dataUpdatedAt]);

@@ -2,6 +2,7 @@ import { format } from 'date-fns';
 import { CalendarIcon, X } from 'lucide-react';
 import * as React from 'react';
 
+import { serverNow } from '@/api/server-clock';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Calendar } from '@/ui/calendar';
@@ -48,7 +49,7 @@ function DateTimePicker({
     const num = parseInt(raw, 10);
     if (isNaN(num)) return;
 
-    const base = value ? new Date(value) : new Date();
+    const base = value ? new Date(value) : new Date(serverNow());
     if (!value) {
       base.setSeconds(0, 0);
     }

@@ -17,6 +17,4 @@ export * from '@/api/use-api-base-path';
 export * from '@/api/use-api-client';
 export * from '@/api/use-api-fetch';
 export * from '@/api/use-plugin-api';
-export * from '@/api/use-refresh-session';
-export * from '@/api/use-set-api-access-token';
 export type { IdempotentResult } from '@/hooks/idempotency';

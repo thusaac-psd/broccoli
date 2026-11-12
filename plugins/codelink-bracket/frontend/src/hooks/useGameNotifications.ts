@@ -50,7 +50,7 @@ export function useGameNotifications(
 
     const run = async () => {
       while (!signal.aborted) {
-        const started = Date.now();
+        const started = performance.now();
         try {
           const response = await api.fetch(
             `${ROUTES}/contests/${contestId}/bracket`,
@@ -90,7 +90,7 @@ export function useGameNotifications(
           });
           // The server regularly closes healthy streams for reauthorization.
           // Reconnect directly: a background setTimeout can be throttled for a minute.
-          if (Date.now() - started >= 1_000) {
+          if (performance.now() - started >= 1_000) {
             retryMs = 1_000;
             continue;
           }

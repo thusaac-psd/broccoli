@@ -1,4 +1,9 @@
-import { getErrorMessage, PluginApiError } from '@broccoli/web-sdk/api';
+import {
+  getErrorMessage,
+  PluginApiError,
+  useServerNow,
+  useServerTimeReached,
+} from '@broccoli/web-sdk/api';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
@@ -19,6 +24,10 @@ interface TokenPanelProps {
   contestId?: number;
 }
 
+/** Fetches of the token status after a regeneration time passes, at most. */
+const REGEN_CHECKS = 5;
+const REGEN_RECHECK_MS = 2_000;
+
 function formatCountdown(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -33,7 +42,6 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
   const { t } = useTranslation();
   const [isUsing, setIsUsing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now());
   const [confirmingSubmissionId, setConfirmingSubmissionId] = useState<
     number | null
   >(null);
@@ -70,30 +78,43 @@ export function TokenPanel({ submission, contestId }: TokenPanelProps) {
     return Number.isNaN(parsed) ? null : parsed;
   }, [tokenStatus]);
 
+  // The regeneration time is the server's, so the countdown runs on the
+  // server clock; it ticks only while there is something to count down.
+  const now = useServerNow(countdownTargetMs === null ? undefined : 1000);
+  const countdownExpired = useServerTimeReached(countdownTargetMs);
   const remainingSeconds =
     countdownTargetMs === null
       ? null
       : Math.max(0, Math.ceil((countdownTargetMs - now) / 1000));
-  const countdownExpired =
-    countdownTargetMs !== null && now >= countdownTargetMs;
   const countdownLabel =
     remainingSeconds !== null && remainingSeconds > 0
       ? formatCountdown(remainingSeconds)
       : null;
 
+  // Once the regeneration time passes, fetch the status that follows it. The
+  // server clock is estimated to within about a second, so the first fetch
+  // can come too early and still show the passed time: ask again a few times,
+  // a little apart, rather than wait for the regular refetch.
+  const [regenChecks, setRegenChecks] = useState<{
+    target: number | null;
+    count: number;
+  }>({ target: null, count: 0 });
   useEffect(() => {
-    if (countdownTargetMs === null) return;
-    setNow(Date.now());
-    const id = globalThis.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
-    return () => globalThis.clearInterval(id);
-  }, [countdownTargetMs]);
-
-  useEffect(() => {
-    if (!cId || !countdownExpired) return;
-    void queryClient.invalidateQueries({ queryKey: ['ioi-token-status', cId] });
-  }, [cId, countdownExpired, now, queryClient]);
+    if (!cId || !countdownExpired || countdownTargetMs === null) return;
+    const count =
+      regenChecks.target === countdownTargetMs ? regenChecks.count : 0;
+    if (count >= REGEN_CHECKS) return;
+    const timer = setTimeout(
+      () => {
+        setRegenChecks({ target: countdownTargetMs, count: count + 1 });
+        void queryClient.invalidateQueries({
+          queryKey: ['ioi-token-status', cId],
+        });
+      },
+      count === 0 ? 0 : REGEN_RECHECK_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [cId, countdownExpired, countdownTargetMs, regenChecks, queryClient]);
 
   if (guardLoading || !isIoi || !showTokens) return null;
   if (!tokenStatus) return null;

@@ -4,52 +4,82 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 
 import { useApiClient } from '@/api/use-api-client';
+import {
+  createPluginRegistry,
+  registryView,
+} from '@/plugin/registry/plugin-loads';
 import { PluginRegistryContext } from '@/plugin/registry/plugin-registry-context';
 import type {
   ActivePluginManifest,
-  ComponentBundle,
   PluginModule,
-  RouteConfig,
   SlotConfig,
 } from '@/plugin/types';
+import { backoffDelay, type BackoffPolicy } from '@/utils/backoff';
+import { retryLoad } from '@/utils/chunk-load';
 
-type RemoteLoadResult = 'ok' | 'partial' | 'unreachable';
+// While the server cannot be asked for its plugin list, or a plugin it lists
+// would not load (a gateway 502 while the server restarts), sync again with
+// backoff, so the page does not stay without its plugin views until a manual
+// reload.
+const SYNC_RETRY: BackoffPolicy = { baseMs: 1_000, maxMs: 60_000 };
 
-const REMOTE_RETRY_BASE_MS = 1_000;
-const REMOTE_RETRY_MAX_MS = 30_000;
+/** Tries per plugin load, the first included. */
+const PLUGIN_LOAD_ATTEMPTS = 4;
 
 interface PluginRegistryProviderProps {
   children: ReactNode;
   backendUrl: string;
 }
 
+/** A unique query string, so a fresh load bypasses the HTTP and module caches. */
+function cacheBuster(): string {
+  return Math.random().toString(36).slice(2);
+}
+
+/**
+ * Point the plugin's stylesheet links at `resolve(file)`, adding those that
+ * are missing. Links are matched by plugin and file, not by href, which
+ * carries a cache buster after a reload.
+ */
+function injectPluginCss(
+  manifest: ActivePluginManifest,
+  resolve: (file: string) => string,
+) {
+  for (const file of manifest.css ?? []) {
+    const href = resolve(file);
+    const existing = Array.from(
+      document.querySelectorAll<HTMLLinkElement>(
+        `link[data-plugin-id="${CSS.escape(manifest.id)}"]`,
+      ),
+    ).find((link) => link.dataset.cssFile === file);
+    if (existing) {
+      existing.href = href;
+      continue;
+    }
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.dataset.pluginId = manifest.id;
+    link.dataset.cssFile = file;
+    document.head.appendChild(link);
+  }
+}
+
+function removePluginCss(pluginId: string) {
+  document
+    .querySelectorAll(`link[data-plugin-id="${CSS.escape(pluginId)}"]`)
+    .forEach((link) => link.remove());
+}
+
 export function PluginRegistryProvider({
   children,
   backendUrl,
 }: PluginRegistryProviderProps) {
-  const [plugins, setPlugins] = useState<Map<string, ActivePluginManifest>>(
-    () => new Map(),
-  );
-
-  const activeManifests = useRef<Map<string, ActivePluginManifest>>(new Map());
-  const activeModules = useRef<Map<string, PluginModule>>(new Map());
-
-  const [components, setComponents] = useState<ComponentBundle>({});
-  const [routes, setRoutes] = useState<RouteConfig[]>([]);
-
-  const componentOwnersRef = useRef<Map<string, string>>(new Map());
-
-  // TODO: loadingLock
-  const [remoteLoaded, setRemoteLoaded] = useState(false);
-  const isLoading = !remoteLoaded;
-
-  const [errors, setErrors] = useState<Map<string, Error>>(() => new Map());
-
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
 
@@ -62,378 +92,139 @@ export function PluginRegistryProvider({
     }
   }, [backendUrl]);
 
-  const resolvePluginEntryUrl = useCallback(
-    (entry: string, bustCache = false) => {
-      const url = new URL(entry, resolvedBackendUrl);
-      if (bustCache) {
-        url.searchParams.set('_ts', `${Date.now()}`);
-      }
-      return url.toString();
-    },
-    [resolvedBackendUrl],
-  );
-
-  const refreshI18n = useCallback(async () => {
-    await Promise.all([
-      queryClient.refetchQueries({
-        queryKey: ['i18n', 'locales'],
-        type: 'active',
-      }),
-      queryClient.refetchQueries({
-        queryKey: ['i18n', 'translations'],
-        type: 'active',
-      }),
-    ]);
-  }, [queryClient]);
-
-  const unloadPlugin = useCallback(async (pluginId: string) => {
-    const manifest = activeManifests.current.get(pluginId);
-    const module = activeModules.current.get(pluginId);
-
-    if (!manifest || !module) {
-      return;
-    }
-
-    try {
-      // Call onDestroy if provided
-      await module.onDestroy?.();
-
-      // Remove plugin CSS
-      document
-        .querySelectorAll(`link[data-plugin-id="${pluginId}"]`)
-        .forEach((el) => el.remove());
-
-      // Remove plugin components
-      if (manifest.components) {
-        setComponents((prev) => {
-          const next = { ...prev };
-          Object.keys(manifest.components || {}).forEach((key) => {
-            delete next[key];
-            componentOwnersRef.current.delete(key);
-          });
-          return next;
-        });
-      }
-
-      // Remove plugin routes
-      if (manifest.routes) {
-        setRoutes((prev) =>
-          prev.filter((route) => !manifest.routes?.includes(route)),
-        );
-      }
-
-      activeManifests.current.delete(pluginId);
-      activeModules.current.delete(pluginId);
-      setPlugins(new Map(activeManifests.current));
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      console.error(
-        `Error unloading plugin '${manifest.name}' with id '${manifest.id}':`,
-        err,
-      );
-      setErrors((prev) => new Map(prev).set(pluginId, err));
-    }
-  }, []);
-
-  const loadPlugin = useCallback(
-    async (manifest: ActivePluginManifest, module: PluginModule) => {
-      if (activeManifests.current.has(manifest.id)) {
-        console.warn(
-          `Plugin '${manifest.name}' with id '${manifest.id}' is already loaded. Skipping.`,
-        );
-        return;
-      }
-
-      try {
-        // Call onInit if provided
-        await module.onInit?.();
-
-        activeManifests.current.set(manifest.id, manifest);
-        activeModules.current.set(manifest.id, module);
-
-        if (manifest.components) {
-          const resolvedComponents: ComponentBundle = {};
-          for (const [key, name] of Object.entries(manifest.components)) {
-            if (module[name]) {
-              resolvedComponents[key] = module[name] as React.ElementType;
-            } else {
-              console.warn(
-                `Component '${name}' specified in plugin '${manifest.name}' not found in module. Skipping component '${key}'.`,
-              );
-            }
-          }
-
-          // Check for component namespace collisions before merging
-          for (const key of Object.keys(resolvedComponents)) {
-            const existingOwner = componentOwnersRef.current.get(key);
-            if (existingOwner && existingOwner !== manifest.name) {
-              console.warn(
-                `Component key '${key}' from plugin '${manifest.name}' ` +
-                  `overwrites existing component from plugin '${existingOwner}'.`,
-              );
-            }
-            componentOwnersRef.current.set(key, manifest.name);
-          }
-
-          setComponents((prev) => ({
-            ...prev,
-            ...resolvedComponents,
-          }));
-        }
-
-        if (manifest.routes) {
-          setRoutes((prev) => [...prev, ...(manifest.routes ?? [])]);
-        }
-
-        setPlugins(new Map(activeManifests.current));
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        console.error(
-          `Error loading plugin '${manifest.name}' with id '${manifest.id}':`,
-          err,
-        );
-        setErrors((prev) => new Map(prev).set(manifest.id, err));
-        await unloadPlugin(manifest.id);
-      }
-    },
-    [unloadPlugin],
-  );
-
-  /**
-   * Fetch the active plugin list and load every plugin not loaded yet.
-   * `'unreachable'` if the list could not be fetched (e.g. a gateway 502
-   * while the server restarts), `'partial'` if some plugin failed to load.
-   */
-  const loadRemotePlugins = useCallback(
-    async (bustCache = false): Promise<RemoteLoadResult> => {
-      const pluginList = await (async () => {
+  const [registry] = useState(() =>
+    createPluginRegistry({
+      fetchActive: async () => {
         try {
           const { data, error } = await apiClient.GET('/plugins/active');
           if (!error && Array.isArray(data)) return data;
-          console.warn(`Failed to fetch active plugins:`, error ?? data);
+          console.warn('Failed to fetch active plugins:', error ?? data);
         } catch (error) {
-          console.warn(`Failed to fetch active plugins:`, error);
+          console.warn('Failed to fetch active plugins:', error);
         }
         return null;
-      })();
-      if (!pluginList) return 'unreachable';
+      },
+      importRemote: async (manifest, fresh) => {
+        const buster = fresh ? cacheBuster() : null;
+        const resolve = (file: string) => {
+          const url = new URL(file, resolvedBackendUrl);
+          if (buster) url.searchParams.set('_ts', buster);
+          return url.toString();
+        };
+        injectPluginCss(manifest, resolve);
+        // A translation-only plugin has no entry point.
+        return manifest.entry
+          ? ((await import(
+              /* @vite-ignore */ resolve(manifest.entry)
+            )) as PluginModule)
+          : ({ manifest } as PluginModule);
+      },
+      removeRemote: removePluginCss,
+      // `onInit` may fail on a transient error too, so every failure the
+      // registry does not rule out is worth another try.
+      retry: (load, shouldRetry) =>
+        retryLoad(load, { attempts: PLUGIN_LOAD_ATTEMPTS, shouldRetry }),
+      refreshI18n: async () => {
+        await queryClient.refetchQueries({
+          queryKey: ['i18n'],
+          type: 'active',
+        });
+      },
+    }),
+  );
 
-      const pending = pluginList.filter(
-        (pluginInfo) => !activeManifests.current.has(pluginInfo.id),
-      );
-      const results = await Promise.allSettled(
-        pending.map(async (pluginInfo) => {
-          // Load CSS files declared by the plugin
-          if (pluginInfo.css && pluginInfo.css.length > 0) {
-            for (const cssUrl of pluginInfo.css) {
-              const href = resolvePluginEntryUrl(cssUrl, bustCache);
-              // Avoid duplicate <link> tags - match by plugin ID, not href
-              // (href includes cache-buster query params that change on reload)
-              const existing = document.querySelector(
-                `link[data-plugin-id="${pluginInfo.id}"][data-css-file="${cssUrl}"]`,
-              );
-              if (!existing) {
-                const link = document.createElement('link');
-                link.rel = 'stylesheet';
-                link.href = href;
-                link.dataset.pluginId = pluginInfo.id;
-                link.dataset.cssFile = cssUrl;
-                document.head.appendChild(link);
-              } else {
-                // Update href to pick up new cache buster on reload
-                existing.setAttribute('href', href);
-              }
-            }
-          }
+  const loads = useSyncExternalStore(
+    registry.subscribe,
+    registry.getLoads,
+    registry.getLoads,
+  );
+  const view = useMemo(() => registryView(loads), [loads]);
 
-          const pluginModule: PluginModule = pluginInfo.entry
-            ? await import(
-                /* @vite-ignore */ resolvePluginEntryUrl(
-                  pluginInfo.entry,
-                  bustCache,
-                )
-              )
-            : {}; // For translation-only plugins without an entry point
-          await loadPlugin(pluginInfo, pluginModule);
-        }),
-      );
+  // Until the server's list has been fetched once, pages show a loading
+  // state rather than an empty one.
+  const [listed, setListed] = useState(false);
 
-      const failed = results.filter(
-        (r): r is PromiseRejectedResult => r.status === 'rejected',
-      );
-      await refreshI18n();
-      if (failed.length > 0) {
-        console.warn(
-          `${failed.length}/${pending.length} plugins failed to load.`,
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const syncUntilLoaded = async (attempt: number) => {
+      const result = await registry.sync();
+      if (cancelled) return;
+      if (result !== 'unreachable') setListed(true);
+      if (result !== 'ok') {
+        timer = setTimeout(
+          () => void syncUntilLoaded(attempt + 1),
+          backoffDelay(attempt, SYNC_RETRY),
         );
-        for (const r of failed) {
-          console.error('Plugin load error:', r.reason);
-        }
-        return 'partial';
       }
-      return 'ok';
-    },
-    [apiClient, loadPlugin, refreshI18n, resolvePluginEntryUrl],
+    };
+    void syncUntilLoaded(0);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // The plugin set is fixed for the provider's lifetime.
+  }, [registry]);
+
+  const loadPlugin = useCallback(
+    (manifest: ActivePluginManifest, module: PluginModule) =>
+      registry.load(manifest, 'local', async () => module),
+    [registry],
   );
 
   const loadAllPlugins = useCallback(async () => {
-    await loadRemotePlugins(false);
-  }, [loadRemotePlugins]);
+    await registry.sync();
+  }, [registry]);
 
-  const reloadPlugin = useCallback(
-    async (pluginId: string) => {
-      await unloadPlugin(pluginId);
-
-      setErrors((prev) => {
-        const next = new Map(prev);
-        next.delete(pluginId);
-        return next;
-      });
-
-      const { data: pluginList, error } =
-        await apiClient.GET('/plugins/active');
-      if (error) {
-        console.warn(`Failed to fetch active plugins for reload:`, error);
-        return;
-      }
-
-      const pluginInfo = pluginList.find((p) => p.id === pluginId);
-      if (!pluginInfo) {
-        console.warn(
-          `Plugin '${pluginId}' not found in active plugins after reload`,
-        );
-        return;
-      }
-
-      // Dynamic import with new URL (cache buster ensures fresh module)
-      try {
-        // Load CSS files declared by the plugin
-        if (pluginInfo.css && pluginInfo.css.length > 0) {
-          for (const cssUrl of pluginInfo.css) {
-            const href = resolvePluginEntryUrl(cssUrl, true);
-            const existing = document.querySelector(
-              `link[data-plugin-id="${pluginInfo.id}"][data-css-file="${cssUrl}"]`,
-            );
-            if (!existing) {
-              const link = document.createElement('link');
-              link.rel = 'stylesheet';
-              link.href = href;
-              link.dataset.pluginId = pluginInfo.id;
-              link.dataset.cssFile = cssUrl;
-              document.head.appendChild(link);
-            } else {
-              existing.setAttribute('href', href);
-            }
-          }
-        }
-
-        const pluginModule: PluginModule = pluginInfo.entry
-          ? await import(
-              /* @vite-ignore */ resolvePluginEntryUrl(pluginInfo.entry, true)
-            )
-          : {};
-        await loadPlugin(pluginInfo, pluginModule);
-        await refreshI18n();
-      } catch (err) {
-        console.error(`Failed to reload plugin '${pluginId}':`, err);
-        setErrors((prev) =>
-          new Map(prev).set(
-            pluginId,
-            err instanceof Error ? err : new Error(String(err)),
-          ),
-        );
-      }
-    },
-    [apiClient, loadPlugin, refreshI18n, resolvePluginEntryUrl, unloadPlugin],
-  );
-
-  const reloadAllPlugins = useCallback(async () => {
-    const remotePluginIds: string[] = [];
-    activeManifests.current.forEach((manifest, id) => {
-      if (manifest.entry) {
-        remotePluginIds.push(id);
-      }
-    });
-
-    for (const id of remotePluginIds) {
-      await unloadPlugin(id);
-    }
-
-    setErrors((prev) => {
-      const next = new Map(prev);
-      for (const id of remotePluginIds) {
-        next.delete(id);
-      }
-      return next;
-    });
-
-    await loadRemotePlugins(true);
-  }, [loadRemotePlugins, unloadPlugin]);
+  const { plugins, components, routes, errors, loading } = view;
 
   const getSlots = useCallback(
     (slotName: string): SlotConfig[] => {
       const slots: SlotConfig[] = [];
       plugins.forEach((plugin, pluginName) => {
-        if (plugin.slots) {
-          const matchingSlots = plugin.slots
-            .filter((slot) => slot.name === slotName)
-            .map((slot) => ({ ...slot, _pluginName: pluginName }));
-          slots.push(...matchingSlots);
+        for (const slot of plugin.slots ?? []) {
+          if (slot.name === slotName) {
+            slots.push({ ...slot, _pluginName: pluginName });
+          }
         }
       });
-
-      // Sort by priority (higher priority first)
+      // Higher priority first.
       return slots.sort((a, b) => (b.priority || 0) - (a.priority || 0));
     },
     [plugins],
   );
 
-  // Load active plugins from backend on mount, retrying with backoff until
-  // every plugin has loaded. Without the retry, one failed request (a
-  // gateway 502 while the server restarts) left the page without its plugin
-  // views until a manual reload. Stays `isLoading` until the list itself has
-  // been fetched, so pages show a loading state rather than an empty one.
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const attempt = async (n: number) => {
-      // Retries bust the module cache so a failed import is fetched again.
-      const result = await loadRemotePlugins(n > 0);
-      if (cancelled) return;
-      if (result !== 'unreachable') setRemoteLoaded(true);
-      await refreshI18n();
-      if (result !== 'ok' && !cancelled) {
-        timer = setTimeout(
-          () => void attempt(n + 1),
-          Math.min(REMOTE_RETRY_MAX_MS, REMOTE_RETRY_BASE_MS * 2 ** n),
-        );
-      }
-    };
-    void attempt(0);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const value = useMemo(
+    () => ({
+      plugins,
+      components,
+      routes,
+      isLoading: !listed || loading,
+      loadPlugin,
+      loadAllPlugins,
+      unloadPlugin: registry.unload,
+      reloadPlugin: registry.reload,
+      reloadAllPlugins: registry.reloadAll,
+      getSlots,
+      errors,
+    }),
+    [
+      plugins,
+      components,
+      routes,
+      listed,
+      loading,
+      loadPlugin,
+      loadAllPlugins,
+      registry,
+      getSlots,
+      errors,
+    ],
+  );
 
   return (
-    <PluginRegistryContext
-      value={{
-        plugins,
-        components,
-        routes,
-        isLoading,
-        loadPlugin,
-        loadAllPlugins,
-        unloadPlugin,
-        reloadPlugin,
-        reloadAllPlugins,
-        getSlots,
-        errors,
-      }}
-    >
-      {children}
-    </PluginRegistryContext>
+    <PluginRegistryContext value={value}>{children}</PluginRegistryContext>
   );
 }

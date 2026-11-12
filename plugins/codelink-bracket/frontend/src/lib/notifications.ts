@@ -85,6 +85,8 @@ export function claimDesktopNotification(key: string): Promise<boolean> {
       db.onversionchange = () => db.close();
       try {
         const tx = db.transaction('delivered', 'readwrite');
+        // When it was delivered, by this machine's clock; never compared.
+        // eslint-disable-next-line no-restricted-properties
         const add = tx.objectStore('delivered').add(Date.now(), key);
         let duplicate = false;
         add.onerror = () => {

@@ -1,3 +1,4 @@
+import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
@@ -13,7 +14,6 @@ import {
 } from 'react';
 
 import { useBracket } from './hooks/useBracket';
-import { useNow } from './hooks/useNow';
 import { roundNameKey } from './lib/rounds';
 import { sideOf } from './lib/stage';
 import { contestEndWarning, currentRoundProgress } from './lib/summary';
@@ -157,7 +157,7 @@ function SummaryBar({
   onTogglePresent: () => void;
 }) {
   const { t } = useTranslation();
-  const now = useNow(15_000);
+  const now = useServerNow(15_000);
   const current = currentRoundProgress(matches, stageCount, thirdPlace);
   const endWarning = contestEndWarning(
     matches,

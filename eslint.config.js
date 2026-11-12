@@ -54,6 +54,28 @@ export default defineConfig([
     },
   },
 
+  // Client clocks. A contestant PC's clock can be hours off the server's, so
+  // anything compared with a server timestamp reads the server clock.
+  {
+    files: [
+      'packages/web/src/**/*.{ts,tsx}',
+      'packages/web-sdk/src/**/*.{ts,tsx}',
+      'plugins/*/{frontend,web}/src/**/*.{ts,tsx}',
+    ],
+    ignores: ['**/*.test.ts', 'packages/web-sdk/src/api/server-clock.ts'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'Date',
+          property: 'now',
+          message:
+            "Date.now() reads this machine's clock, which can be far off the server's. Compare server timestamps with serverNow(), useServerNow() or useServerTimeReached() from @broccoli/web-sdk/api, and measure elapsed time with performance.now().",
+        },
+      ],
+    },
+  },
+
   // Frontend-specific React config
   {
     files: ['packages/web/**/*.{ts,tsx}', 'packages/web-sdk/**/*.tsx'],
