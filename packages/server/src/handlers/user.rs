@@ -31,7 +31,7 @@ use crate::services::privileges::{
     AdminSetChange, CeilingTarget, SystemAdminLock, require_within_ceiling,
 };
 use crate::state::AppState;
-use crate::utils::contest::{ContestPhase, contest_phase};
+use crate::utils::contest::{ContestPhase, contest_phase, start_has_passed};
 use crate::utils::hash;
 use crate::utils::soft_delete::SoftDeletable;
 
@@ -199,7 +199,7 @@ pub async fn update_user(
     tag = "Users",
     operation_id = "deleteUser",
     summary = "Soft-delete a user by ID",
-    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or ended contest that is still active (not yet deactivated), or is the last active user holding `system:admin`. Registrations in contests that have not started or are not yet activated are automatically cancelled before deletion.",
+    description = "Marks the user as deleted. The record is retained for historical data but the user can no longer log in and will not appear in listings. Requires `user:manage` permission; without `system:admin`, the target user may not hold any permission the caller lacks.\n\nDeletion is blocked if the user is registered in a running or ended contest that is still active (not yet deactivated), or in a started contest that is not activated, or is the last active user holding `system:admin`. Registrations in contests that have not started or are not yet activated are automatically cancelled before deletion.",
     params(("id" = i32, Path, description = "User ID")),
     responses(
         (status = 204, description = "User deleted"),
@@ -259,6 +259,14 @@ pub async fn delete_user(
                 ContestPhase::Running | ContestPhase::Ended => {
                     return Err(AppError::Conflict(format!(
                         "Cannot delete user: currently participating in active contest \"{}\"",
+                        c.title
+                    )));
+                }
+                // A contest hidden after it ran may still publish standings
+                // built from `contest_user`, so a started one blocks too.
+                ContestPhase::Unactivated if start_has_passed(c, now) => {
+                    return Err(AppError::Conflict(format!(
+                        "Cannot delete user: participated in started contest \"{}\"",
                         c.title
                     )));
                 }

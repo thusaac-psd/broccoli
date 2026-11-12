@@ -47,13 +47,20 @@ pub fn contest_phase(contest: &contest::Model, now: DateTime<Utc>) -> ContestPha
         ContestPhase::Unactivated
     } else if contest.deactivate_time.is_some_and(|dt| dt <= now) {
         ContestPhase::Deactivated
-    } else if now < contest.start_time {
+    } else if !start_has_passed(contest, now) {
         ContestPhase::Upcoming
     } else if now < contest.end_time {
         ContestPhase::Running
     } else {
         ContestPhase::Ended
     }
+}
+
+/// Whether `contest`'s `start_time` has passed at `now`, whatever its
+/// activation state: the boundary between [`ContestPhase::Upcoming`] and
+/// [`ContestPhase::Running`]. From then on standings may exist.
+pub fn start_has_passed(contest: &contest::Model, now: DateTime<Utc>) -> bool {
+    now >= contest.start_time
 }
 
 /// Whether a submission's compile output is shown to viewers who neither own
