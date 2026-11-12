@@ -1,25 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use hdrhistogram::Histogram;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokio::sync::{Mutex, Semaphore, mpsc};
 use tokio::task::JoinSet;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
+use tokio::time::{Instant, MissedTickBehavior, interval};
 use tracing::warn;
 
 use crate::bootstrap::BootstrapState;
 use crate::client::Client;
-use crate::dto::{
-    CreateSubmissionRequest, SubmissionFileDto, SubmissionResponse, SubmissionStatus, Verdict,
-};
-use crate::error::{StressError, StressResult};
+use crate::dto::{CreateSubmissionRequest, SubmissionFileDto, SubmissionStatus, Verdict};
 use crate::events::{ActualTerminal, Event, ExpectedTerminal, Phase};
 use crate::scenarios::Scenario;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 const HISTOGRAM_LOW: u64 = 1;
 const HISTOGRAM_HIGH: u64 = 600_000;
@@ -173,29 +167,6 @@ fn terminal_status_passes(actual_status: SubmissionStatus) -> bool {
     actual_status != SubmissionStatus::SystemError
 }
 
-async fn poll_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach a terminal status within {:?} (last status = {:?})",
-                submission_id,
-                timeout,
-                resp.status,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
-    }
-}
-
 pub async fn run(
     client: &Client,
     state: &BootstrapState,
@@ -338,7 +309,7 @@ pub async fn run(
                 }
             };
 
-            let polled = poll_until_terminal(&client, submitted.id, per_job_timeout).await;
+            let polled = client.wait_for_submission(submitted.id, per_job_timeout).await;
             match polled {
                 Ok(final_resp) => {
                     let actual_status = final_resp.status;

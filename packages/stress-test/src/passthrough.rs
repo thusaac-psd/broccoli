@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::client::Client;
@@ -15,8 +14,6 @@ use crate::dto::{
 };
 use crate::error::{StressError, StressResult};
 use crate::events::{Event, Phase};
-
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
@@ -309,7 +306,7 @@ async fn run_one(
         }
     };
 
-    match poll_until_terminal(client, submitted.id, timeout).await {
+    match client.wait_for_submission(submitted.id, timeout).await {
         Ok(final_resp) => {
             let label = label_for(final_resp.status.clone(), terminal_verdict(&final_resp));
             SubResult {
@@ -355,29 +352,6 @@ fn verdict_str(v: &Verdict) -> String {
         Verdict::Skipped => "Skipped".into(),
         Verdict::Cancelled => "Cancelled".into(),
         Verdict::Other(s) => format!("Other({s})"),
-    }
-}
-
-async fn poll_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach terminal status within {:?} (last status = {:?})",
-                submission_id,
-                timeout,
-                resp.status,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
     }
 }
 

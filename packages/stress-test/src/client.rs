@@ -1,11 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use reqwest::{StatusCode, multipart};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::dto::SubmissionStatus;
 use crate::dto::{
     AddContestProblemRequest, BulkAddParticipantsRequest, BulkAddParticipantsResponse,
     ContestProblemResponse, ContestResponse, CreateContestRequest, CreateProblemRequest,
@@ -14,6 +16,9 @@ use crate::dto::{
     TestCaseResponse,
 };
 use crate::error::{StressError, StressResult};
+
+/// How often the `wait_for_*` helpers re-fetch a pending submission or code run.
+pub const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone)]
 pub enum AuthCreds {
@@ -361,6 +366,67 @@ impl Client {
             None,
         )
         .await
+    }
+
+    /// Poll a submission until it reaches a terminal status.
+    pub async fn wait_for_submission(
+        &self,
+        id: i32,
+        timeout: Duration,
+    ) -> StressResult<SubmissionResponse> {
+        self.wait_until_terminal(
+            "submission",
+            id,
+            timeout,
+            || self.get_submission(id),
+            |s| &s.status,
+        )
+        .await
+    }
+
+    /// Poll a code run until it reaches a terminal status.
+    pub async fn wait_for_code_run(
+        &self,
+        id: i32,
+        timeout: Duration,
+    ) -> StressResult<crate::dto::CodeRunResponse> {
+        self.wait_until_terminal(
+            "code run",
+            id,
+            timeout,
+            || self.get_code_run(id),
+            |r| &r.status,
+        )
+        .await
+    }
+
+    /// Fetch every [`TERMINAL_POLL_INTERVAL`] until `status` of the fetched
+    /// value is terminal, failing once `timeout` has passed.
+    async fn wait_until_terminal<T, F>(
+        &self,
+        what: &str,
+        id: i32,
+        timeout: Duration,
+        fetch: impl Fn() -> F,
+        status: impl Fn(&T) -> &SubmissionStatus,
+    ) -> StressResult<T>
+    where
+        F: std::future::Future<Output = StressResult<T>>,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let value = fetch().await?;
+            let last = status(&value);
+            if last.is_terminal() {
+                return Ok(value);
+            }
+            if Instant::now() >= deadline {
+                return Err(StressError::Other(anyhow::anyhow!(
+                    "{what} {id} did not reach a terminal status within {timeout:?} (last status = {last:?})"
+                )));
+            }
+            tokio::time::sleep(TERMINAL_POLL_INTERVAL).await;
+        }
     }
 
     pub async fn get_json_path<R: DeserializeOwned>(&self, path: &str) -> StressResult<R> {

@@ -1,20 +1,13 @@
 use std::time::{Duration, Instant};
 
-use anyhow::anyhow;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::bootstrap::BootstrapState;
 use crate::client::Client;
-use crate::dto::{
-    CreateSubmissionRequest, SubmissionFileDto, SubmissionResponse, SubmissionStatus, Verdict,
-};
-use crate::error::{StressError, StressResult};
+use crate::dto::{CreateSubmissionRequest, SubmissionFileDto, SubmissionStatus, Verdict};
 use crate::events::{Event, Phase};
 use crate::scenarios::Scenario;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrectnessOutcome {
@@ -125,7 +118,10 @@ async fn run_scenario(
         }
     };
 
-    match poll_until_terminal(client, submitted.id, per_job_timeout).await {
+    match client
+        .wait_for_submission(submitted.id, per_job_timeout)
+        .await
+    {
         Ok(final_resp) => {
             let actual_status = final_resp.status;
             let actual_verdict = final_resp
@@ -211,30 +207,6 @@ fn scenario_passes(
         return actual_verdict == scenario.expected_verdict.as_ref();
     }
     true
-}
-
-async fn poll_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach a terminal status within {:?} (last status = {:?})",
-                submission_id,
-                timeout,
-                resp.status,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
-    }
 }
 
 #[cfg(test)]
