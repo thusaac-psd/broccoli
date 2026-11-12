@@ -1,6 +1,7 @@
+import { PluginApiError } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
 
-import { ApiError, useIoiApi } from './useIoiApi';
+import { useIoiApi } from './useIoiApi';
 
 /**
  * Checks if the current contest is IOI-type by fetching
@@ -17,7 +18,7 @@ export function useIsIoiContest(contestId?: number) {
     staleTime: 5 * 60 * 1000,
   });
 
-  const is404 = error instanceof ApiError && error.status === 404;
+  const is404 = error instanceof PluginApiError && error.status === 404;
   const isServerError = !!error && !is404;
 
   return {

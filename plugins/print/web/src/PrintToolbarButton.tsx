@@ -1,3 +1,4 @@
+import { PluginApiError } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -20,7 +21,7 @@ import { AlertCircle, Check, Loader2, Printer, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useParams } from 'react-router';
 
-import { ApiError, usePrintApi } from './hooks/usePrintApi';
+import { usePrintApi } from './hooks/usePrintApi';
 import { estimatePages } from './lib/format';
 
 const LANGUAGES: { value: string; label: string }[] = [
@@ -95,7 +96,9 @@ export function PrintToolbarButton() {
       }, 2200);
     } catch (e) {
       setPhase('error');
-      setMessage(e instanceof ApiError ? e.message : t('print.action.failed'));
+      setMessage(
+        e instanceof PluginApiError ? e.message : t('print.action.failed'),
+      );
     }
   };
 

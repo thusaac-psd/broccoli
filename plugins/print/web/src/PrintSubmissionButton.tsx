@@ -1,3 +1,4 @@
+import { PluginApiError } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import type { Submission } from '@broccoli/web-sdk/submission';
 import {
@@ -12,7 +13,7 @@ import {
 import { AlertCircle, Check, FileText, Loader2, Printer } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
-import { ApiError, usePrintApi } from './hooks/usePrintApi';
+import { usePrintApi } from './hooks/usePrintApi';
 import { estimatePages } from './lib/format';
 
 interface Props {
@@ -76,7 +77,9 @@ export function PrintSubmissionButton({ submission }: Props) {
       }, 2000);
     } catch (e) {
       setPhase('error');
-      setMessage(e instanceof ApiError ? e.message : t('print.action.failed'));
+      setMessage(
+        e instanceof PluginApiError ? e.message : t('print.action.failed'),
+      );
     }
   };
 

@@ -1,4 +1,4 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
@@ -11,7 +11,7 @@ import {
   writeStorage,
 } from '../lib/notifications';
 import type { BracketResponse } from '../types';
-import { PLUGIN_BASE } from './useBracketApi';
+import { PLUGIN_ID, ROUTES } from './useBracketApi';
 
 export function useGameNotifications(
   contestId: number | undefined,
@@ -21,7 +21,7 @@ export function useGameNotifications(
     signal: AbortSignal,
   ) => void | Promise<void>,
 ): boolean {
-  const apiFetch = useApiFetch();
+  const api = usePluginApi(PLUGIN_ID);
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const viewerKey = viewerCacheKey(user);
@@ -52,8 +52,8 @@ export function useGameNotifications(
       while (!signal.aborted) {
         const started = Date.now();
         try {
-          const response = await apiFetch(
-            `${PLUGIN_BASE}/contests/${contestId}/bracket`,
+          const response = await api.fetch(
+            `${ROUTES}/contests/${contestId}/bracket`,
             { signal, headers: { Accept: 'text/event-stream' } },
           );
           if ([401, 403, 404].includes(response.status)) return;
@@ -116,7 +116,7 @@ export function useGameNotifications(
     };
     void run();
     return () => controller.abort();
-  }, [apiFetch, contestId, queryClient, viewerId, viewerKey]);
+  }, [api, contestId, queryClient, viewerId, viewerKey]);
 
   return connected;
 }
