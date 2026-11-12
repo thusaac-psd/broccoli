@@ -228,6 +228,21 @@ export function refreshSession(
   return request;
 }
 
+/**
+ * Run `run` once no refresh for `refreshUrl` is rotating the cookie, in this
+ * page or another tab, so a request that presents the cookie (a logout)
+ * presents the one the browser ends up with.
+ */
+export async function withSettledCookie<T>(
+  refreshUrl: string,
+  run: () => Promise<T>,
+  deps: Partial<Pick<RefreshDeps, 'withLock'>> = {},
+): Promise<T> {
+  // The storage lease does not make a tab wait for its own refresh.
+  await states.get(refreshUrl)?.inFlight;
+  return (deps.withLock ?? defaultDeps.withLock)(run);
+}
+
 async function attemptRefresh(
   refreshUrl: string,
   deps: RefreshDeps,

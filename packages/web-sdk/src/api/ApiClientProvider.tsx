@@ -1,11 +1,11 @@
 import createClient from 'openapi-fetch';
-import { type ReactNode, useCallback, useMemo, useRef } from 'react';
+import { type ReactNode, useMemo } from 'react';
 
 import { ApiClientContext } from '@/api/api-client-context';
-import { refreshSession as refreshSharedSession } from '@/api/refresh-session';
+import { refreshSession, withSettledCookie } from '@/api/refresh-session';
 import type { paths } from '@/api/schema';
 import { fetchWithServerClock } from '@/api/server-clock';
-import { AUTH_SESSION_EXPIRED_EVENT } from '@/auth/types';
+import { accessToken, createSession } from '@/auth/session';
 
 interface ApiClientProviderProps {
   children: ReactNode;
@@ -39,19 +39,6 @@ export function ApiClientProvider({
   children,
   baseUrl,
 }: ApiClientProviderProps) {
-  const accessTokenRef = useRef<string | null>(null);
-
-  const setAccessToken = useCallback((token: string | null) => {
-    accessTokenRef.current = token;
-  }, []);
-
-  const clearAuth = useCallback(() => {
-    accessTokenRef.current = null;
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent(AUTH_SESSION_EXPIRED_EVENT));
-    }
-  }, []);
-
   // Resolve a path-relative `baseUrl` (e.g. "/api/v1" when proxied through a
   // dev server) against the current origin. The URL constructor rejects
   // relative bases, so without this the first plugin fetch throws
@@ -82,25 +69,17 @@ export function ApiClientProvider({
     [resolvedBaseUrl],
   );
 
-  const refreshSession = useCallback(
-    () => refreshSharedSession(refreshUrl, { fetch: fetchWithServerClock }),
+  // The one owner of the sign-in session: the AuthProvider drives its
+  // lifecycle, and every request reads the access token from it.
+  const session = useMemo(
+    () =>
+      createSession({
+        refresh: () =>
+          refreshSession(refreshUrl, { fetch: fetchWithServerClock }),
+        withSettledCookie: (run) => withSettledCookie(refreshUrl, run),
+      }),
     [refreshUrl],
   );
-
-  // Returns the new access token after a successful refresh (also storing it
-  // for subsequent requests), or null when there is none. Only a definitive
-  // rejection ends the session; when the server is merely unreachable the
-  // caller gets the original 401 and the session survives for a later retry.
-  const recoverSession = useCallback(async (): Promise<string | null> => {
-    const outcome = await refreshSession();
-    if (outcome.status === 'rejected') {
-      clearAuth();
-      return null;
-    }
-    if (outcome.status === 'unavailable') return null;
-    accessTokenRef.current = outcome.session.token;
-    return outcome.session.token;
-  }, [refreshSession, clearAuth]);
 
   const apiClient = useMemo(() => {
     const client = createClient<paths>({
@@ -116,9 +95,9 @@ export function ApiClientProvider({
 
     client.use({
       onRequest({ id, request }) {
-        const currentToken = accessTokenRef.current;
-        if (currentToken) {
-          request.headers.set('Authorization', `Bearer ${currentToken}`);
+        const token = accessToken(session.getState());
+        if (token) {
+          request.headers.set('Authorization', `Bearer ${token}`);
         }
         replayableRequests.set(id, request.clone());
         return request;
@@ -140,7 +119,7 @@ export function ApiClientProvider({
         // decides when a session has ended.
         if (isRefreshUrl(request.url)) return response;
 
-        const token = await recoverSession();
+        const token = await session.refresh();
         if (!token) {
           return response;
         }
@@ -158,15 +137,15 @@ export function ApiClientProvider({
     });
 
     return client;
-  }, [resolvedBaseUrl, recoverSession]);
+  }, [resolvedBaseUrl, session]);
 
   const apiFetch = useMemo(
     () => async (input: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       const hasCallerAuth = headers.has('Authorization');
-      const currentToken = accessTokenRef.current;
-      if (currentToken && !hasCallerAuth) {
-        headers.set('Authorization', `Bearer ${currentToken}`);
+      const sentToken = accessToken(session.getState());
+      if (sentToken && !hasCallerAuth) {
+        headers.set('Authorization', `Bearer ${sentToken}`);
       }
 
       const url = new URL(input, resolvedBaseUrl);
@@ -181,7 +160,7 @@ export function ApiClientProvider({
 
       if (isRefreshUrl(url.toString())) return response;
 
-      const token = await recoverSession();
+      const token = await session.refresh();
       if (!token) {
         return response;
       }
@@ -199,14 +178,13 @@ export function ApiClientProvider({
         headers: retryHeaders,
       });
     },
-    [resolvedBaseUrl, recoverSession],
+    [resolvedBaseUrl, session],
   );
 
-  return (
-    <ApiClientContext
-      value={{ apiClient, apiFetch, setAccessToken, refreshSession }}
-    >
-      {children}
-    </ApiClientContext>
+  const value = useMemo(
+    () => ({ apiClient, apiFetch, session }),
+    [apiClient, apiFetch, session],
   );
+
+  return <ApiClientContext value={value}>{children}</ApiClientContext>;
 }
