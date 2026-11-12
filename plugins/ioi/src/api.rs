@@ -72,10 +72,11 @@ pub(crate) fn handle_use_token(
         user_id: i32,
         problem_id: i32,
         contest_id: Option<i32>,
+        status: SubmissionStatus,
     }
     let mut p = Params::new();
     let sql = format!(
-        "SELECT user_id, problem_id, contest_id FROM submission WHERE id = {}",
+        "SELECT user_id, problem_id, contest_id, status FROM submission WHERE id = {}",
         p.bind(submission_id)
     );
     let sub_info = host
@@ -92,6 +93,14 @@ pub(crate) fn handle_use_token(
         return Ok(PluginHttpResponse::error(
             400,
             "Submission does not belong to this contest",
+        ));
+    }
+    // A token reveals a judged result; spent on anything else it would buy
+    // nothing.
+    if sub_info.status != SubmissionStatus::Judged {
+        return Ok(PluginHttpResponse::error(
+            409,
+            "Tokens can only be used on a judged submission",
         ));
     }
     let problem_id = sub_info.problem_id;
@@ -141,7 +150,6 @@ pub(crate) fn handle_use_token(
         if state.tokened_submission_ids.contains(&submission_id) {
             return Err(SdkError::Other("ALREADY_TOKENED".into()));
         }
-        state.used += 1;
         state.tokened_submission_ids.push(submission_id);
         Ok(())
     });
@@ -412,7 +420,7 @@ pub(crate) fn handle_token_status(
     // Derive total from avail + used to guarantee available <= total
     let total = match contest_config.tokens.mode {
         crate::config::TokenMode::None => 0,
-        _ => avail + token_state.used,
+        _ => avail + token_state.used(),
     };
     let next_regen_at = match next_regen_elapsed_min(&contest_config.tokens, elapsed_min) {
         Some(next_elapsed_min) => {
@@ -437,7 +445,7 @@ pub(crate) fn handle_token_status(
         body: Some(serde_json::json!({
             "mode": contest_config.tokens.mode,
             "available": if contest_config.tokens.mode == crate::config::TokenMode::None { 0 } else { avail },
-            "used": token_state.used,
+            "used": token_state.used(),
             "total": total,
             "next_regen_at": next_regen_at,
             "tokened_submission_ids": token_state.tokened_submission_ids,

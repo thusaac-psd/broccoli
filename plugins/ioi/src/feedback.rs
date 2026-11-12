@@ -770,7 +770,7 @@ mod visibility_tests {
         host.storage
             .set(&[(
                 "tokens:10:2",
-                &serde_json::json!({ "used": 1, "tokened_submission_ids": [7] }).to_string(),
+                &serde_json::json!({ "tokened_submission_ids": [7] }).to_string(),
             )])
             .unwrap();
 
@@ -794,7 +794,7 @@ mod visibility_tests {
         host.storage
             .set(&[(
                 "tokens:10:2",
-                &serde_json::json!({ "used": 1, "tokened_submission_ids": [999] }).to_string(),
+                &serde_json::json!({ "tokened_submission_ids": [999] }).to_string(),
             )])
             .unwrap();
 
