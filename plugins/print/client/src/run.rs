@@ -252,14 +252,12 @@ mod tests {
     fn job(target: Option<&str>) -> Job {
         Job {
             id: 1,
-            contest_id: None,
             username: "u".into(),
             display_name: None,
             problem_label: None,
             language: "text".into(),
             filename: "a.txt".into(),
             source: "x".into(),
-            location: None,
             target_printer: target.map(String::from),
             created_at: None,
         }
