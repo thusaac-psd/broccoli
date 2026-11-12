@@ -1,15 +1,17 @@
 import type { ApiClient } from '@broccoli/web-sdk/api';
-import type { ServerTableParams } from '@broccoli/web-sdk/hooks';
 import type {
   SubmissionStatus,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
 
-import type { SubmissionListPage } from '@/features/submission/api/fetch-submissions';
+import type {
+  SubmissionListPage,
+  SubmissionPageParams,
+} from '@/features/submission/api/fetch-submissions';
 
 export async function fetchContestSubmissions(
   apiClient: ApiClient,
-  params: ServerTableParams & {
+  params: SubmissionPageParams & {
     contestId: number;
     problemId?: number | null;
     language?: string | null;
@@ -21,7 +23,7 @@ export async function fetchContestSubmissions(
     params: {
       path: { id: params.contestId },
       query: {
-        page: params.page,
+        ...(params.cursor ? { cursor: params.cursor } : {}),
         per_page: params.per_page,
         sort_by: params.sort_by,
         sort_order: params.sort_order,
@@ -49,29 +51,39 @@ export async function fetchAllContestSubmissions(
   },
 ): Promise<SubmissionSummary[]> {
   const all: SubmissionSummary[] = [];
-  let page = 1;
-  let hasMore = true;
+  let cursor: string | null = null;
 
-  while (hasMore) {
-    const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
-      params: {
-        path: { id: params.contestId },
-        query: {
-          page,
-          per_page: undefined,
-          sort_by: 'created_at',
-          sort_order: 'desc',
-          user_id: params.userId,
-        },
-      },
-    });
-
-    if (error) throw error;
-
-    all.push(...data.data);
-    hasMore = data.pagination.has_more;
-    page += 1;
+  for (;;) {
+    const page = await fetchContestSubmissionPage(
+      apiClient,
+      params.contestId,
+      params.userId,
+      cursor,
+    );
+    all.push(...page.data);
+    cursor = page.pagination.next_cursor ?? null;
+    if (!cursor) return all;
   }
+}
 
-  return all;
+async function fetchContestSubmissionPage(
+  apiClient: ApiClient,
+  contestId: number,
+  userId: number | undefined,
+  cursor: string | null,
+): Promise<SubmissionListPage> {
+  const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
+    params: {
+      path: { id: contestId },
+      query: {
+        ...(cursor ? { cursor } : {}),
+        sort_by: 'created_at',
+        sort_order: 'desc',
+        user_id: userId,
+      },
+    },
+  });
+
+  if (error) throw error;
+  return data;
 }

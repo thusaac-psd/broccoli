@@ -49,6 +49,7 @@ use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 mod dispatch;
 mod filter;
+mod list_page;
 mod rejudge;
 mod response;
 
@@ -59,10 +60,10 @@ pub use rejudge::*;
 // rejudge endpoints (see `crate::handlers::dlq`).
 
 use dispatch::{dispatch_before_submission_hooks, find_submission, fire_after_submission_hooks};
-use filter::{apply_filter_to_judgement_response, apply_filter_to_list, apply_filter_to_response};
+use filter::{apply_filter_to_judgement_response, apply_filter_to_response};
 use response::{
-    VisibilityContext, build_judgement_response, build_submission_list_items,
-    build_submission_response, build_submission_response_with_cases,
+    VisibilityContext, build_judgement_response, build_submission_response,
+    build_submission_response_with_cases,
 };
 
 #[utoipa::path(
@@ -238,11 +239,11 @@ pub async fn create_submission(
     tag = "Submissions",
     operation_id = "listSubmissions",
     summary = "List submissions",
-    description = "Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.",
+    description = "Returns one cursor page of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.",
     params(SubmissionListQuery),
     responses(
         (status = 200, description = "List of submissions", body = SubmissionListResponse),
-        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Invalid query or cursor (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
     ),
     security(("jwt" = [])),
@@ -261,7 +262,7 @@ pub async fn list_submissions(
 
     let can_view_all = auth_user.has_permission(perm::SUBMISSION_VIEW_ALL);
 
-    let window = PageWindow::new(query.page, query.per_page)?;
+    let per_page = PageWindow::page_size(query.per_page);
 
     let mut base_select = submission::Entity::find();
 
@@ -335,39 +336,25 @@ pub async fn list_submissions(
     // is exact, and reported, only when none can.
     let total = list_total(&state, &kernel, &base_select).await?;
 
-    let select = base_select.find_also_related(user::Entity);
-
-    let sort_order = if query.sort_order.as_deref() == Some("asc") {
-        Order::Asc
-    } else {
-        Order::Desc
-    };
-
-    let select = match query.sort_by.as_deref().unwrap_or("created_at") {
-        "created_at" => select.order_by(submission::Column::CreatedAt, sort_order),
-        "status" => select.order_by(
-            crate::services::submission_feedback::public_status(can_view_all),
-            sort_order,
-        ),
-        _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
-    };
-
-    let mut submissions = select
-        .offset(Some(window.offset()))
-        .limit(Some(window.limit_with_lookahead()))
-        .all(&state.db)
-        .await?;
-    let pagination = window.finish_page(&mut submissions, total);
-
-    let data = build_submission_list_items(&state.db, submissions).await?;
     // This list is GLOBAL - it can span several contests plus contest-less
-    // submissions in one page. One `decide_batch` (via `fetch_visible_batch`)
-    // over every listed submission's own `Resource::Submission(id)` resolves
-    // each row's own contest scope internally (`host_decide`'s
-    // `submission_contest_ids` out-param), so no extra plumbing is needed
-    // here to keep rows from different contests from bleeding into each
-    // other's decision.
-    let data = apply_filter_to_list(&kernel, data).await?;
+    // submissions in one page. Each row is decided as its own
+    // `Resource::Submission(id)`, whose contest scope the kernel resolves
+    // internally, so rows from different contests never share a decision.
+    let order = list_page::ListOrder::from_query(
+        query.sort_by.as_deref(),
+        query.sort_order.as_deref(),
+        can_view_all,
+    );
+    let (data, pagination) = list_page::visible_page(
+        &state,
+        &kernel,
+        base_select,
+        order,
+        query.cursor.as_deref(),
+        per_page,
+        total,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "data": data,
         "pagination": pagination,
@@ -855,14 +842,14 @@ pub async fn create_contest_submission(
     tag = "Submissions",
     operation_id = "listContestSubmissions",
     summary = "List contest submissions",
-    description = "Returns submissions for a contest. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.",
+    description = "Returns one cursor page of a contest's submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         SubmissionListQuery
     ),
     responses(
         (status = 200, description = "List of submissions", body = SubmissionListResponse),
-        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 400, description = "Invalid query or cursor (VALIDATION_ERROR)", body = ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
     ),
@@ -952,7 +939,7 @@ pub async fn list_contest_submissions(
             .is_some()
     };
 
-    let window = PageWindow::new(query.page, query.per_page)?;
+    let per_page = PageWindow::page_size(query.per_page);
 
     let mut base_select =
         submission::Entity::find().filter(submission::Column::ContestId.eq(Some(contest_id)));
@@ -981,44 +968,27 @@ pub async fn list_contest_submissions(
 
     let total = list_total(&state, &kernel, &base_select).await?;
 
-    let select = base_select.find_also_related(user::Entity);
-
-    let sort_order = if query.sort_order.as_deref() == Some("asc") {
-        Order::Asc
-    } else {
-        Order::Desc
-    };
-
-    let select = match query.sort_by.as_deref().unwrap_or("created_at") {
-        "created_at" => select.order_by(submission::Column::CreatedAt, sort_order),
-        "status" => select.order_by(
-            crate::services::submission_feedback::public_status(can_view_all),
-            sort_order,
-        ),
-        _ => select.order_by(submission::Column::CreatedAt, Order::Desc),
-    };
-
-    let mut submissions = select
-        .offset(Some(window.offset()))
-        .limit(Some(window.limit_with_lookahead()))
-        .all(&state.db)
-        .await?;
-    let pagination = window.finish_page(&mut submissions, total);
-
-    let data = build_submission_list_items(&state.db, submissions).await?;
-    // Reuses the same kernel instance the top-level `Resource::Contest` gate
-    // above used. `submission:view_all` (not `contest:manage`) is still what
-    // bypasses that gate. This per-row decision is an ADDITIONAL, independent
-    // narrowing on top: it also requires contest participation for any row
-    // not already covered by `submission:view_all` or self-ownership,
-    // matching `get_submission`'s row-level behaviour exactly (see
-    // `visibility::host_rules::decide_submission`). Previously the
-    // plugin-based filter had no way to omit a row at all, so every viewer
-    // who passed the top-level gate saw every row the SQL query returned; a
-    // genuinely non-participant viewer of a public, `submissions_visible`
-    // contest could see peers' submissions in the list that `get_submission`
-    // would already 404 on individually - this closes that inconsistency.
-    let data = apply_filter_to_list(&kernel, data).await?;
+    // The page reuses the kernel of the `Resource::Contest` gate above. Each
+    // row is decided as its own `Resource::Submission`, which also requires
+    // contest participation for any row not covered by `submission:view_all`
+    // or self-ownership, exactly as `get_submission` does (see
+    // `visibility::host_rules::decide_submission`), so the list never shows a
+    // row `get_submission` would 404 on.
+    let order = list_page::ListOrder::from_query(
+        query.sort_by.as_deref(),
+        query.sort_order.as_deref(),
+        can_view_all,
+    );
+    let (data, pagination) = list_page::visible_page(
+        &state,
+        &kernel,
+        base_select,
+        order,
+        query.cursor.as_deref(),
+        per_page,
+        total,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "data": data,
         "pagination": pagination,

@@ -3,30 +3,38 @@ import { Button } from '@broccoli/web-sdk/ui';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 /**
- * Previous/next controls for a submission list. The server withholds the
- * total when a visibility plugin may hide matching submissions; the pager
- * then shows the page number alone and follows `has_more`.
+ * Previous/next controls for a cursor-paged submission list. The server
+ * withholds the total when a visibility plugin may hide matching
+ * submissions; the pager then shows the page number alone and follows
+ * `has_more`. `page` is `null` when the page number is unknown (a deep link
+ * to a later page).
  */
 export function SubmissionListPager({
   pagination,
-  onPageChange,
+  page,
+  hasPrevious,
+  onNext,
+  onPrevious,
 }: {
   pagination: SubmissionListPagination | undefined;
-  onPageChange: (page: number) => void;
+  page: number | null;
+  hasPrevious: boolean;
+  onNext: (cursor: string) => void;
+  onPrevious: () => void;
 }) {
   if (!pagination) return null;
   const {
-    page,
     per_page: perPage,
     total,
     total_pages: totalPages,
+    next_cursor: nextCursor,
   } = pagination;
-  if (page <= 1 && !pagination.has_more) return null;
+  if (!hasPrevious && !nextCursor) return null;
 
   return (
     <div className="flex items-center justify-between text-sm text-muted-foreground">
       <span className="tabular-nums">
-        {total != null
+        {total != null && page != null
           ? `${(page - 1) * perPage + 1}–${Math.min(page * perPage, total)} of ${total}`
           : null}
       </span>
@@ -35,20 +43,22 @@ export function SubmissionListPager({
           variant="outline"
           size="icon"
           className="h-8 w-8"
-          disabled={page <= 1}
-          onClick={() => onPageChange(page - 1)}
+          disabled={!hasPrevious}
+          onClick={onPrevious}
         >
           <ChevronLeft className="h-4 w-4" />
         </Button>
         <span className="px-3 text-sm tabular-nums">
-          {totalPages != null ? `${page} / ${totalPages}` : page}
+          {page != null && totalPages != null
+            ? `${page} / ${totalPages}`
+            : (page ?? '…')}
         </span>
         <Button
           variant="outline"
           size="icon"
           className="h-8 w-8"
-          disabled={!pagination.has_more}
-          onClick={() => onPageChange(page + 1)}
+          disabled={!nextCursor}
+          onClick={() => nextCursor && onNext(nextCursor)}
         >
           <ChevronRight className="h-4 w-4" />
         </Button>

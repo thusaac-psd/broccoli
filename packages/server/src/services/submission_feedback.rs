@@ -32,13 +32,18 @@ fn withheld_sql(alias: &str) -> String {
 /// The submission status a viewer sees, as a SQL expression over
 /// `submission`, for status filters and sorting.
 pub fn public_status(can_view_all: bool) -> sea_orm::sea_query::Expr {
+    sea_orm::sea_query::Expr::cust(public_status_sql(can_view_all, "submission"))
+}
+
+/// [`public_status`] as SQL over the `submission` row aliased `row`.
+pub fn public_status_sql(can_view_all: bool, row: &str) -> String {
     if can_view_all {
-        return sea_orm::sea_query::Expr::cust("submission.status");
+        return format!("{row}.status");
     }
-    sea_orm::sea_query::Expr::cust(format!(
-        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = submission.id AND {}) THEN '{WITHHELD_STATUS}' ELSE submission.status END",
+    format!(
+        "CASE WHEN EXISTS (SELECT 1 FROM submission_feedback f WHERE f.submission_id = {row}.id AND {}) THEN '{WITHHELD_STATUS}' ELSE {row}.status END",
         withheld_sql("f")
-    ))
+    )
 }
 
 fn parse_outcome(value: &str) -> Result<FeedbackOutcome, DbErr> {

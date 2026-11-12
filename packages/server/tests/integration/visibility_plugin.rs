@@ -1036,3 +1036,100 @@ async fn download_attachment_redact_on_attachment_resource_still_returns_full_co
          the streamed bytes must be the real, unmasked content"
     );
 }
+
+// == Submission lists a plugin narrows ===================================
+// A narrowed list pages only through the rows the caller is shown, so
+// walking it reveals nothing about the rows a plugin hides: every page is
+// full until the last, `has_more` describes shown rows only, and a cursor
+// naming a hidden row is refused like a malformed one.
+
+/// A new user's token, five of their standalone submissions newest first,
+/// and the ones the plugin denies: the 2nd, 3rd and 4th, a run longer than a
+/// one-row page.
+async fn narrowed_own_submissions(app: &TestApp, username: &str) -> (String, Vec<i32>, Vec<i32>) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    let token = app.create_authenticated_user(username, "pass1234").await;
+    let owner = user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("query owner")
+        .expect("owner should exist");
+    let problem_id = insert_public_problem(app, "Narrowed List Problem").await;
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        ids.push(insert_queued_submission(app, problem_id, owner.id).await);
+    }
+    ids.reverse();
+    let hidden = ids[1..4].to_vec();
+    let keys: Vec<String> = hidden.iter().map(|id| format!("submission:{id}")).collect();
+    seed_kv(app, "deny_resource_keys", &keys.join(",")).await;
+    (token, ids, hidden)
+}
+
+#[tokio::test]
+async fn a_narrowed_list_pages_only_through_shown_rows() {
+    let app = TestApp::spawn_with_plugins().await;
+    let (token, ids, hidden) = narrowed_own_submissions(&app, "narrowed_pager").await;
+    let shown: Vec<i32> = ids
+        .iter()
+        .copied()
+        .filter(|id| !hidden.contains(id))
+        .collect();
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let url = match &cursor {
+            Some(c) => format!("{}?per_page=1&cursor={c}", routes::SUBMISSIONS),
+            None => format!("{}?per_page=1", routes::SUBMISSIONS),
+        };
+        let res = app.get_with_token(&url, &token).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let pagination = &res.body["pagination"];
+        assert!(
+            pagination["total"].is_null(),
+            "a narrowed count is withheld"
+        );
+        let page = res.body["data"].as_array().unwrap();
+        assert_eq!(page.len(), 1, "every page is full until the last");
+        seen.push(page[0]["id"].as_i64().unwrap() as i32);
+        match pagination["next_cursor"].as_str() {
+            Some(next) => {
+                assert_eq!(pagination["has_more"], true);
+                cursor = Some(next.to_string());
+            }
+            None => {
+                assert_eq!(pagination["has_more"], false);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        seen, shown,
+        "the walk visits exactly the shown rows, in order"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_naming_a_hidden_submission_is_refused() {
+    use base64::Engine;
+
+    let app = TestApp::spawn_with_plugins().await;
+    let (token, _ids, hidden) = narrowed_own_submissions(&app, "narrowed_cursor").await;
+    let forge = |id: i32| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "by": "created_at", "order": "desc", "id": id }).to_string(),
+        )
+    };
+
+    // A hidden row and a row that does not exist answer the same way.
+    for id in [hidden[0], i32::MAX] {
+        let url = format!("{}?cursor={}", routes::SUBMISSIONS, forge(id));
+        let res = app.get_with_token(&url, &token).await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR");
+    }
+}

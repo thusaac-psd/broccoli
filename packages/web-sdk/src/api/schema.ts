@@ -1071,7 +1071,7 @@ export interface paths {
     };
     /**
      * List contest submissions
-     * @description Returns submissions for a contest. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.
+     * @description Returns one cursor page of a contest's submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.
      */
     get: operations['listContestSubmissions'];
     put?: never;
@@ -1793,7 +1793,7 @@ export interface paths {
     };
     /**
      * List submissions
-     * @description Returns a paginated list of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them; `pagination.has_more` is always set.
+     * @description Returns one cursor page of submissions. Users see their own submissions; users with `submission:view_all` permission see all submissions. A page holds only submissions the caller is shown; pass `pagination.next_cursor` as `cursor` for the next one. `pagination.total` and `pagination.total_pages` are null when a visibility plugin may hide matching submissions from the caller, since a count would disclose them.
      */
     get: operations['listSubmissions'];
     put?: never;
@@ -3255,22 +3255,23 @@ export interface components {
       template: string;
     };
     /**
-     * @description Pagination of a list that a visibility plugin may narrow below what its
-     *     SQL matches. A count of matching rows would then disclose rows the caller
-     *     is not shown, so `total` and `total_pages` are present only when the count
-     *     is exact for this caller; `has_more` is always present.
+     * @description Cursor pagination of a list that a visibility plugin may narrow below what
+     *     its SQL matches. Every page holds only rows the caller is shown, and
+     *     `has_more`/`next_cursor` describe only such rows. A count of matching rows
+     *     would disclose rows the caller is not shown, so `total` and `total_pages`
+     *     are present only when the count is exact for this caller.
      */
     ListPagination: {
       /**
-       * @description Whether a page after this one has matching rows.
+       * @description Whether the caller is shown a row after this page.
        * @example true
        */
       has_more: boolean;
       /**
-       * Format: int64
-       * @example 1
+       * @description Pass as `cursor` to fetch the next page; set exactly when `has_more`.
+       * @example eyJieSI6ImNyZWF0ZWRfYXQiLCJvcmRlciI6ImRlc2MiLCJpZCI6NDJ9
        */
-      page: number;
+      next_cursor?: string | null;
       /**
        * Format: int64
        * @example 20
@@ -8050,8 +8051,11 @@ export interface operations {
   listContestSubmissions: {
     parameters: {
       query?: {
-        /** @example 1 */
-        page?: number;
+        /**
+         * @description `pagination.next_cursor` of the previous page; omit for the first page.
+         *     A cursor is valid only with the `sort_by`/`sort_order` it was issued for.
+         */
+        cursor?: string;
         /** @example 20 */
         per_page?: number;
         /** @example 1 */
@@ -8089,7 +8093,7 @@ export interface operations {
           'application/json': components['schemas']['SubmissionListResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Invalid query or cursor (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;
@@ -11071,8 +11075,11 @@ export interface operations {
   listSubmissions: {
     parameters: {
       query?: {
-        /** @example 1 */
-        page?: number;
+        /**
+         * @description `pagination.next_cursor` of the previous page; omit for the first page.
+         *     A cursor is valid only with the `sort_by`/`sort_order` it was issued for.
+         */
+        cursor?: string;
         /** @example 20 */
         per_page?: number;
         /** @example 1 */
@@ -11107,7 +11114,7 @@ export interface operations {
           'application/json': components['schemas']['SubmissionListResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR) */
+      /** @description Invalid query or cursor (VALIDATION_ERROR) */
       400: {
         headers: {
           [name: string]: unknown;

@@ -14,18 +14,13 @@ import { useSearchParams } from 'react-router';
 
 import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
 import { fetchSubmissions } from '@/features/submission/api/fetch-submissions';
+import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
 
 import { SubmissionListPager } from './SubmissionListPager';
 import { SubmissionsTable } from './SubmissionsTable';
 
 const PER_PAGE = 25;
 const SEARCH_DEBOUNCE_MS = 300;
-
-function parsePositiveInt(value: string | null) {
-  if (!value) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
 
 function parseStatus(value: string | null): SubmissionStatusFilterValue {
   return SUBMISSION_STATUS_FILTER_OPTIONS.includes(
@@ -40,7 +35,7 @@ export function AllSubmissions() {
   const apiClient = useApiClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const page = parsePositiveInt(searchParams.get('page')) ?? 1;
+  const pages = useCursorPages();
   const appliedQ = (searchParams.get('q') ?? '').trim();
   const appliedLanguage = searchParams.get('language') ?? null;
   const appliedStatus = parseStatus(searchParams.get('status'));
@@ -60,7 +55,6 @@ export function AllSubmissions() {
   const updateSearchParams = useCallback(
     (
       updates: {
-        page?: number;
         q?: string | null;
         language?: string | null;
         status?: SubmissionStatusFilterValue;
@@ -68,14 +62,13 @@ export function AllSubmissions() {
       options?: { replace?: boolean },
     ) => {
       const next = new URLSearchParams(searchParams);
-      const nextPage = updates.page ?? page;
       const nextQ = updates.q === undefined ? appliedQ : updates.q;
       const nextLanguage =
         updates.language === undefined ? appliedLanguage : updates.language;
       const nextStatus = updates.status ?? appliedStatus;
 
-      if (nextPage <= 1) next.delete('page');
-      else next.set('page', String(nextPage));
+      // Any filter change starts the list over.
+      next.delete('cursor');
 
       if (nextQ && nextQ.trim()) next.set('q', nextQ.trim());
       else next.delete('q');
@@ -88,14 +81,7 @@ export function AllSubmissions() {
 
       setSearchParams(next, { replace: options?.replace ?? false });
     },
-    [
-      appliedLanguage,
-      appliedQ,
-      appliedStatus,
-      page,
-      searchParams,
-      setSearchParams,
-    ],
+    [appliedLanguage, appliedQ, appliedStatus, searchParams, setSearchParams],
   );
 
   // Debounce the text input -> URL.
@@ -103,7 +89,7 @@ export function AllSubmissions() {
     const trimmed = searchInput.trim();
     if (trimmed === appliedQ) return;
     const handle = setTimeout(() => {
-      updateSearchParams({ page: 1, q: trimmed || null }, { replace: true });
+      updateSearchParams({ q: trimmed || null }, { replace: true });
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(handle);
   }, [appliedQ, searchInput, updateSearchParams]);
@@ -120,14 +106,14 @@ export function AllSubmissions() {
       appliedQ,
       String(appliedLanguage ?? 'all'),
       appliedStatus,
-      page,
+      pages.cursor,
     ],
     queryFn: () =>
       fetchSubmissions(apiClient, {
         q: appliedQ || null,
         language: appliedLanguage,
         status: toSubmissionStatus(appliedStatus),
-        page,
+        cursor: pages.cursor,
         per_page: PER_PAGE,
         sort_by: 'created_at',
         sort_order: 'desc',
@@ -176,7 +162,6 @@ export function AllSubmissions() {
           options={languageOptions}
           onChange={(next) =>
             updateSearchParams({
-              page: 1,
               language: next === 'all' ? null : next,
             })
           }
@@ -188,7 +173,6 @@ export function AllSubmissions() {
           options={statusOptions}
           onChange={(next) =>
             updateSearchParams({
-              page: 1,
               status: next as SubmissionStatusFilterValue,
             })
           }
@@ -216,7 +200,10 @@ export function AllSubmissions() {
 
       <SubmissionListPager
         pagination={pagination}
-        onPageChange={(next) => updateSearchParams({ page: next })}
+        page={pages.page}
+        hasPrevious={pages.hasPrevious}
+        onNext={pages.next}
+        onPrevious={pages.previous}
       />
     </div>
   );

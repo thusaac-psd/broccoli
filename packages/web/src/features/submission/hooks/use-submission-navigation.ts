@@ -105,7 +105,7 @@ export function useSubmissionReturn(
       // Checking the list endpoint also covers submission:view_all, which can
       // grant list access independently of access to the contest dashboard.
       const { error } = await apiClient.GET('/contests/{id}/submissions', {
-        params: { path: { id: contestId! }, query: { page: 1, per_page: 1 } },
+        params: { path: { id: contestId! }, query: { per_page: 1 } },
       });
       if (error) throw error;
       return true;
