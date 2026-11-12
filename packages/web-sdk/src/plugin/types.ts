@@ -37,10 +37,3 @@ export interface PluginModule {
   /** Dynamic component exports keyed by name */
   [key: string]: unknown;
 }
-
-/**
- * A lazy plugin loader: a function that returns a promise resolving to a
- * PluginModule. Used for code-splitting plugins so they are only fetched
- * when the application mounts rather than being included in the main bundle.
- */
-export type LazyPluginLoader = () => Promise<PluginModule>;

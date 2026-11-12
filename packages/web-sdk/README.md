@@ -56,9 +56,9 @@ component only when the current user and contest satisfy them.
 
 ## Set up the provider
 
-Wrap the app once. `backendUrl` is where the registry fetches active plugins.
-`lazyPlugins` is for plugins bundled with the app and code-split with dynamic
-`import()`; remote plugins delivered by the server need no entry here.
+Wrap the app once. `backendUrl` is where the registry fetches active plugins;
+the server delivers every plugin's bundle, so there is nothing to register in
+frontend code.
 
 ```tsx
 import { PluginRegistryProvider } from '@broccoli/web-sdk/plugin';

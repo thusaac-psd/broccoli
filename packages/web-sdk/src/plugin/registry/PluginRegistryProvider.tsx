@@ -13,7 +13,6 @@ import { PluginRegistryContext } from '@/plugin/registry/plugin-registry-context
 import type {
   ActivePluginManifest,
   ComponentBundle,
-  LazyPluginLoader,
   PluginModule,
   RouteConfig,
   SlotConfig,
@@ -27,17 +26,11 @@ const REMOTE_RETRY_MAX_MS = 30_000;
 interface PluginRegistryProviderProps {
   children: ReactNode;
   backendUrl: string;
-  /**
-   * Lazy plugin loaders. Each loader is a function returning a dynamic
-   * `import()` so Vite can code-split them into separate chunks.
-   */
-  lazyPlugins?: LazyPluginLoader[];
 }
 
 export function PluginRegistryProvider({
   children,
   backendUrl,
-  lazyPlugins,
 }: PluginRegistryProviderProps) {
   const [plugins, setPlugins] = useState<Map<string, ActivePluginManifest>>(
     () => new Map(),
@@ -52,9 +45,8 @@ export function PluginRegistryProvider({
   const componentOwnersRef = useRef<Map<string, string>>(new Map());
 
   // TODO: loadingLock
-  const [localLoaded, setLocalLoaded] = useState(false);
   const [remoteLoaded, setRemoteLoaded] = useState(false);
-  const isLoading = !localLoaded || !remoteLoaded;
+  const isLoading = !remoteLoaded;
 
   const [errors, setErrors] = useState<Map<string, Error>>(() => new Map());
 
@@ -395,26 +387,6 @@ export function PluginRegistryProvider({
     },
     [plugins],
   );
-
-  // Load local plugin modules on mount (eager + lazy)
-  useEffect(() => {
-    const loadInitialPlugins = async () => {
-      // Load lazy plugins (code-split via dynamic import)
-      const lazyLoads = (lazyPlugins ?? []).map(async (loader) => {
-        try {
-          const module = await loader();
-          await loadPlugin(module.manifest, module);
-        } catch (error) {
-          console.error('Failed to load lazy plugin:', error);
-        }
-      });
-
-      await Promise.all(lazyLoads);
-      setLocalLoaded(true);
-    };
-    loadInitialPlugins();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Load active plugins from backend on mount, retrying with backoff until
   // every plugin has loaded. Without the retry, one failed request (a
