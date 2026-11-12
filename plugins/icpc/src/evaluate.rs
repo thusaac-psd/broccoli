@@ -36,7 +36,18 @@ pub struct EvalResult {
 #[derive(Serialize, Deserialize)]
 struct IcpcJudge;
 
+/// How many cases ICPC judges at once. The verdict is the first failure in
+/// test order, so the driver holds out-of-order results (`IN_ORDER`) and a
+/// wider window only changes speed: judging takes about cases / window round
+/// trips instead of one per case. The cost is work after an early failure: up
+/// to `EVAL_WINDOW - 1` cases already running when it is found are judged and
+/// then discarded as skipped. Four matches the IOI window, which keeps a busy
+/// judge fleet shared fairly between submissions.
+const EVAL_WINDOW: usize = 4;
+
 impl ContestJudge for IcpcJudge {
+    const IN_ORDER: bool = true;
+
     fn score(&self, result: &TestCaseVerdict) -> CaseOutcome {
         // Binary scoring: 1.0 for AC, 0.0 otherwise. The driver's default
         // `db_score` persists exactly this.
@@ -108,7 +119,14 @@ pub fn evaluate_short_circuit_detached(
     test_cases: &[TestCaseRow],
     _submission_id: i32,
 ) -> Result<OnSubmissionOutput, SdkError> {
-    DetachedEval::start(host, req, test_cases, IcpcJudge, "on_icpc_eval_result", 1)?;
+    DetachedEval::start(
+        host,
+        req,
+        test_cases,
+        IcpcJudge,
+        "on_icpc_eval_result",
+        EVAL_WINDOW,
+    )?;
     Ok(OnSubmissionOutput::ok())
 }
 
@@ -395,13 +413,132 @@ mod tests {
         );
     }
 
+    fn verdict(test_case_id: i32, verdict: Verdict) -> TestCaseVerdict {
+        TestCaseVerdict {
+            verdict,
+            score: 0.0,
+            ..TestCaseVerdict::accepted(test_case_id)
+        }
+    }
+
+    /// Feed `results` in the given order and return the last callback output.
+    fn drive_all(
+        host: &Host,
+        mut state: serde_json::Value,
+        results: Vec<TestCaseVerdict>,
+    ) -> DetachedEvaluateCallbackOutput {
+        let mut last = None;
+        for result in results {
+            let out = drive(host, state, result);
+            state = out.state.clone();
+            last = Some(out);
+        }
+        last.expect("at least one result")
+    }
+
     #[test]
-    fn judges_one_case_at_a_time() {
+    fn judges_a_window_of_cases_at_a_time() {
         let host = Host::mock();
-        let tcs = vec![test_case(1), test_case(2), test_case(3)];
+        let tcs: Vec<TestCaseRow> = (1..=6).map(test_case).collect();
         let req = test_submission(tcs.clone());
         start_state(&host, &req, &tcs);
-        assert_eq!(host.eval.detached_windowed_requests()[0].concurrency, 1);
+        assert_eq!(
+            host.eval.detached_windowed_requests()[0].concurrency,
+            EVAL_WINDOW
+        );
+    }
+
+    #[test]
+    fn a_failure_inside_the_window_stops_at_that_case() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=6).map(test_case).collect();
+        let req = test_submission(tcs.clone());
+        let s0 = start_state(&host, &req, &tcs);
+        let out = drive_all(
+            &host,
+            s0,
+            vec![
+                TestCaseVerdict::accepted(1),
+                verdict(2, Verdict::TimeLimitExceeded),
+            ],
+        );
+        assert_eq!(out.action, DetachedEvaluateCallbackAction::Finish);
+        assert_eq!(row_verdict(&host, 2), Verdict::TimeLimitExceeded);
+        for id in 3..=6 {
+            assert_eq!(row_verdict(&host, id), Verdict::Skipped);
+        }
+        let update = host.submission.last_update();
+        assert_eq!(update.verdict, Some(Some(Verdict::TimeLimitExceeded)));
+    }
+
+    #[test]
+    fn a_failure_after_the_window_is_reached_in_order() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=6).map(test_case).collect();
+        let req = test_submission(tcs.clone());
+        let s0 = start_state(&host, &req, &tcs);
+        let mut results: Vec<_> = (1..=5).map(TestCaseVerdict::accepted).collect();
+        results.push(TestCaseVerdict::wrong_answer(6));
+        let out = drive_all(&host, s0, results);
+        assert_eq!(out.action, DetachedEvaluateCallbackAction::Finish);
+        assert!((1..=5).all(|id| row_verdict(&host, id) == Verdict::Accepted));
+        let update = host.submission.last_update();
+        assert_eq!(update.verdict, Some(Some(Verdict::WrongAnswer)));
+        assert_eq!(update.score, Some(0.0));
+    }
+
+    #[test]
+    fn out_of_order_results_are_decided_in_test_order() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=4).map(test_case).collect();
+        let req = test_submission(tcs.clone());
+        let s0 = start_state(&host, &req, &tcs);
+
+        // Case 3 fails first and case 2 next, while case 1 is still running:
+        // both are held, unrecorded.
+        let held = drive_all(
+            &host,
+            s0,
+            vec![
+                TestCaseVerdict::wrong_answer(3),
+                verdict(2, Verdict::TimeLimitExceeded),
+            ],
+        );
+        assert_eq!(held.action, DetachedEvaluateCallbackAction::Continue);
+        assert!(host.submission.results().is_empty());
+
+        // Case 1 passes: 2 is next in order and decides the verdict, so 3's
+        // wrong answer is discarded with the rest.
+        let out = drive(&host, held.state, TestCaseVerdict::accepted(1));
+        assert_eq!(out.action, DetachedEvaluateCallbackAction::Finish);
+        assert_eq!(row_verdict(&host, 1), Verdict::Accepted);
+        assert_eq!(row_verdict(&host, 2), Verdict::TimeLimitExceeded);
+        assert_eq!(row_verdict(&host, 3), Verdict::Skipped);
+        assert_eq!(row_verdict(&host, 4), Verdict::Skipped);
+        let update = host.submission.last_update();
+        assert_eq!(update.verdict, Some(Some(Verdict::TimeLimitExceeded)));
+    }
+
+    #[test]
+    fn out_of_order_accepted_results_all_count() {
+        let host = Host::mock();
+        let tcs: Vec<TestCaseRow> = (1..=3).map(test_case).collect();
+        let req = test_submission(tcs.clone());
+        let s0 = start_state(&host, &req, &tcs);
+        let out = drive_all(
+            &host,
+            s0,
+            vec![
+                TestCaseVerdict::accepted(3),
+                TestCaseVerdict::accepted(1),
+                TestCaseVerdict::accepted(2),
+            ],
+        );
+        assert_eq!(out.action, DetachedEvaluateCallbackAction::Finish);
+        assert_eq!(host.submission.results().len(), 3);
+        let update = host.submission.last_update();
+        assert_eq!(update.verdict, Some(Some(Verdict::Accepted)));
+        assert_eq!(update.score, Some(1.0));
     }
 
     #[test]
