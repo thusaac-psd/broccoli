@@ -86,7 +86,8 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         .unwrap()
         .remove(0);
     assert_eq!(record.metadata, admission.metadata);
-    assert!(record.withheld && record.slot_held);
+    assert_eq!(record.outcome, FeedbackOutcome::Pending);
+    assert!(record.holds_slot());
     assert!(
         submission_feedback::query(&app.db, "other-owner", &SubmissionFeedbackQuery::default())
             .await
@@ -132,7 +133,7 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         submission_feedback::query(&app.db, owner, &SubmissionFeedbackQuery::default())
             .await
             .unwrap()[0]
-            .withheld
+            .is_withheld()
     );
     let releases = futures::future::join_all(
         (0..8).map(|_| submission_feedback::update(&app.db, owner, admitted.id, &public)),
@@ -329,7 +330,7 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         .await
         .unwrap()
         .remove(0);
-    assert!(upgraded.withheld && !upgraded.slot_held);
+    assert!(upgraded.is_withheld() && !upgraded.holds_slot());
     assert_eq!(upgraded.metadata["scope_key"], "opaque-scope");
     assert_eq!(upgraded.metadata["delay_seconds"], 11);
     assert_eq!(upgraded.metadata["effective_at_us"], 1234);

@@ -1880,8 +1880,7 @@ mod tests {
             verdict: Some(Verdict::Accepted),
             key: storage::match_key(7, 0),
             metadata: serde_json::json!({"scope_key":crate::feedback::game_scope(7,0,index),"delay_seconds":0,"effective_at_us":30_000_000}),
-            withheld: true,
-            slot_held: true,
+            outcome: FeedbackOutcome::Pending,
             slot_key: Some(crate::feedback::player_slot(7, 10)),
             result: None,
         }
