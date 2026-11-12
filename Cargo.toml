@@ -82,8 +82,8 @@ mq = { path = "packages/mq" }
 plugin-core = { path = "packages/plugin-core" }
 rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
-sea-orm = "2.0.0-rc.29"
-sea-orm-migration = { version = "2.0.0-rc.29", default-features = false, features = [
+sea-orm = "2.0.4"
+sea-orm-migration = { version = "2.0.4", default-features = false, features = [
   "runtime-tokio-rustls",
   "sqlx-postgres",
 ] }

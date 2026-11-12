@@ -10,6 +10,10 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
+    /// `indexed` keeps the partial unique index `idx_user_username_active`:
+    /// the per-boot schema `sync()` drops every unique index whose column set
+    /// no entity declares an index on.
+    #[sea_orm(indexed)]
     pub username: String,
     pub display_name: String,
     pub password: String,
