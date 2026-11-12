@@ -221,6 +221,10 @@ impl Session {
         slot.state = SessionState::Refreshing;
         let refresh_token = slot.refresh_token.clone();
         drop(slot);
+        let settle = Settle {
+            session: self,
+            settled: false,
+        };
 
         let outcome = self.rotate(used, refresh_token, exchange);
 
@@ -243,7 +247,9 @@ impl Session {
             }
         };
         drop(slot);
-        self.inner.settled.notify_all();
+        let mut settle = settle;
+        settle.settled = true;
+        drop(settle);
         result
     }
 
@@ -301,6 +307,26 @@ impl Session {
             .settled
             .wait(slot)
             .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Wakes the threads waiting on a refresh however it ends. If the exchange
+/// panics, the session returns to `Active` instead of staying `Refreshing`
+/// with every other caller blocked on it.
+struct Settle<'a> {
+    session: &'a Session,
+    settled: bool,
+}
+
+impl Drop for Settle<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            let mut slot = self.session.lock();
+            if slot.state == SessionState::Refreshing {
+                slot.state = SessionState::Active;
+            }
+        }
+        self.session.inner.settled.notify_all();
     }
 }
 
@@ -490,5 +516,17 @@ mod tests {
     fn an_explicit_token_is_never_refreshed() {
         let session = Session::explicit(SERVER.into(), "t0".into());
         assert_eq!(session.refresh("t0", never), Err(SessionError::Rejected));
+    }
+
+    #[test]
+    fn a_panicking_exchange_does_not_strand_the_session_in_refreshing() {
+        let session = Session::explicit(SERVER.into(), "t0".into());
+        session.lock().refresh_token = Some("r0".into());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            session.refresh("t0", |_| panic!("exchange failed"))
+        }));
+        assert!(result.is_err());
+        assert_eq!(session.state(), SessionState::Active);
+        assert_eq!(session.bearer().unwrap(), "t0");
     }
 }
