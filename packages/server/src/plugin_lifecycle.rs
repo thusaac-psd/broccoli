@@ -933,6 +933,7 @@ async fn load_then_publish(
     source: &PluginSource,
 ) -> Result<(), ChangeError> {
     let plugin_id = id.as_str();
+    let before = Registered::now(state, plugin_id);
     let loaded = async {
         let root = plugin_distribution::locate(state, id, source)
             .await
@@ -949,6 +950,9 @@ async fn load_then_publish(
         Err(failure) => {
             if let Some(a) = applied.get_mut(plugin_id) {
                 a.retry = Some(Retry::after(a.retry, Instant::now()));
+            }
+            if !failure.kept_previous {
+                before.restore(state, plugin_id).await;
             }
             return Err(ChangeError::Load(failure.error));
         }
@@ -971,6 +975,7 @@ async fn load_then_publish(
                     if let Err(e) = deactivate(state, plugin_id).await {
                         tracing::warn!(plugin_id, error = %e, "Failed to unload an unpublished plugin");
                     }
+                    before.restore(state, plugin_id).await;
                 }
             }
             return Err(e);
@@ -990,6 +995,44 @@ async fn load_then_publish(
     );
     state.plugin_lifecycle.set_desired(plugin_id, true);
     Ok(())
+}
+
+/// What this replica had registered for a plugin that was not loaded, so a
+/// change that publishes nothing can leave the registry as it found it
+/// (a loaded plugin is put back by [`plugin_utils::roll_back`] instead).
+enum Registered {
+    /// Loaded, or registered from the directory a failed load used.
+    Kept,
+    /// Registered, unloaded, from this directory.
+    Unloaded(std::path::PathBuf),
+    /// Not registered at all.
+    Absent,
+}
+
+impl Registered {
+    fn now(state: &AppState, plugin_id: &str) -> Self {
+        let Ok(registry) = state.plugins.get_registry().read() else {
+            return Registered::Kept;
+        };
+        match registry.get(plugin_id) {
+            None => Registered::Absent,
+            Some(entry) if entry.status == PluginStatus::Loaded => Registered::Kept,
+            Some(entry) => Registered::Unloaded(entry.root_dir.clone()),
+        }
+    }
+
+    async fn restore(self, state: &AppState, plugin_id: &str) {
+        match self {
+            Registered::Kept => {}
+            Registered::Unloaded(root) => plugin_utils::register_unloaded(state, plugin_id, &root),
+            Registered::Absent => {
+                purge_plugin_registrations(&state.registries, plugin_id).await;
+                if let Ok(mut registry) = state.plugins.get_registry().write() {
+                    registry.remove(plugin_id);
+                }
+            }
+        }
+    }
 }
 
 /// Why [`publish`] refused `change`.

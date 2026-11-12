@@ -343,6 +343,37 @@ async fn a_plugin_that_fails_to_load_here_is_not_published() {
     assert!(cache_entries(&a).is_empty(), "{:?}", cache_entries(&a));
 }
 
+/// A new plugin that cannot load here leaves no trace: no row, nothing in
+/// the registry, nothing in the cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_plugin_that_fails_to_load_leaves_nothing_behind() {
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml")).unwrap();
+    let broken = tar_gz(&[
+        (&format!("{UPLOAD_ONLY}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{UPLOAD_ONLY}/server_plugin.wasm"), b"not wasm"),
+    ]);
+
+    let res = a
+        .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD, broken, &token)
+        .await;
+    assert_eq!(res.status, 422, "{}", res.text);
+    assert!(row(&a, UPLOAD_ONLY).await.is_none());
+    assert_eq!(status(&a, UPLOAD_ONLY), None);
+    assert!(cache_entries(&a).is_empty(), "{:?}", cache_entries(&a));
+    let res = a.get_with_token(routes::ADMIN_PLUGINS, &token).await;
+    assert!(
+        !res.body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == UPLOAD_ONLY),
+        "{}",
+        res.text
+    );
+}
+
 /// B cannot use what A published (the blob store hands it bytes that do not
 /// match the published hash). B must keep serving the version it had, say
 /// so, and converge once the archive is intact and someone reloads.
