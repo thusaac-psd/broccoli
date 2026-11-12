@@ -204,7 +204,13 @@ export function ApiClientProvider({
 
   return (
     <ApiClientContext
-      value={{ apiClient, apiFetch, setAccessToken, refreshSession }}
+      value={{
+        apiClient,
+        baseUrl: resolvedBaseUrl,
+        apiFetch,
+        setAccessToken,
+        refreshSession,
+      }}
     >
       {children}
     </ApiClientContext>
