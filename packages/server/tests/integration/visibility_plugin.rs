@@ -1,16 +1,11 @@
-//! Widening-regression coverage for Task 11: replacing the submission
-//! `filter_submission_fn` mechanism with kernel decisions.
+//! Widening-regression coverage for plugin visibility decisions.
 //!
-//! Before this task, `filter_submission_via_plugin`
-//! (`packages/server/src/handlers/submission/filter.rs`) adopted a
-//! plugin-authored submission JSON wholesale after only a shape check -
-//! `Ok(out) => Ok(out.submission)`. A plugin registered against the
-//! submission's contest type could therefore alter a verdict, a score, or a
-//! displayed user id: a field mask can blank a value, but the old mechanism
-//! could also WRITE one.
+//! A visibility plugin answers with kernel decisions, never with a response
+//! body: a field mask can blank a value, but a plugin can never alter a
+//! verdict, a score, or a displayed user id.
 //!
 //! These tests drive the fixture plugin under `tests/fixtures/server-plugin`
-//! (which now registers `[[server.queries]] topic = "visibility"`, function
+//! (which registers `[[server.queries]] topic = "visibility"`, function
 //! `decide_visibility`) through real HTTP handlers and assert the host's own
 //! decision always wins:
 //!
@@ -24,7 +19,7 @@
 //!   masked fields must come back `null` - never the plugin's own content,
 //!   and never the real value either.
 //!
-//! Task 14 extends the same fixture with a `visibility_mode` KV switch (see
+//! The same fixture has a `visibility_mode` KV switch (see
 //! `tests/fixtures/server-plugin/src/lib.rs`) and adds two further groups of
 //! tests below, both driving real HTTP handlers:
 //!
@@ -46,7 +41,7 @@ use crate::common::{TestApp, routes};
 /// `tests/fixtures/server-plugin/src/lib.rs`) via the plugin's existing
 /// `kv_write` route. Generalizes [`seed_redact_submission_id`] to the mode
 /// switch and the `deny_resource_keys`/`redact_resource_keys`/
-/// `redact_resource_fields` mechanism added for Task 14.
+/// `redact_resource_fields` mechanism.
 async fn seed_kv(app: &TestApp, key: &str, value: &str) {
     let route = routes::plugin_proxy("server-plugin", &format!("kv/{key}"));
     let res = app
@@ -284,7 +279,7 @@ async fn plugin_cannot_author_a_verdict() {
     assert_eq!(res.body["status"], "Judged");
 }
 
-// == Task 14: failure injection ==========================================
+// == Failure injection ===============================================
 //
 // The fixture plugin's `decide_visibility` (`tests/fixtures/server-plugin/src/lib.rs`)
 // is switched into each of these failure modes via the `visibility_mode` KV
@@ -471,7 +466,7 @@ async fn over_limit_mask_fields_denies() {
     assert_denies_single_submission_read("over_limit_fields").await;
 }
 
-// == Task 14: a WORKING decide_visibility, through real handlers ==========
+// == A WORKING decide_visibility, through real handlers ================
 //
 // Up to this point the kernel's two headline capabilities - omitting a
 // denied resource from a list, and masking a redacted one - were proven only
@@ -924,7 +919,7 @@ async fn contest_level_gates_all_route_through_the_kernel() {
 }
 
 // ---------------------------------------------------------------------
-// Task 20 Item 6 (I5): `Decision::is_denied()` treats `Redact` as NOT
+// `Decision::is_denied()` treats `Redact` as NOT
 // denied by design (see decision.rs's `is_denied_true_only_for_deny`).
 // `get_test_case` and `download_attachment` both gate reachability with a
 // bare `.is_denied()` check on `Resource::Problem` (and, for the

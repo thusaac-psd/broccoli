@@ -175,7 +175,7 @@ pub(super) async fn apply_filter_to_judgement_response(
     // directly as JSON, reading them with `Value` indexing rather than
     // through a struct. If you're tempted to "simplify" this back into a
     // typed round trip, don't - that reintroduces this exact crash.
-    // Task 17 / Step 2z: the `obj.insert(...)` calls below assume the eight
+    // The `obj.insert(...)` calls below assume the eight
     // leaves named here are the WHOLE of `JudgeResultResponse` - i.e. that
     // splicing them one by one out of `masked_result` is equivalent to
     // splicing the whole `result` object. That is true today, but it is a

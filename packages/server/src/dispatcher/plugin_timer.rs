@@ -199,12 +199,9 @@ struct ClaimRow {
 /// - `FOR UPDATE SKIP LOCKED` makes a claimer skip a row another claimer
 ///   currently holds, rather than blocking on its lock.
 ///
-/// Either alone is sufficient for correctness — verified by mutation, not by
-/// argument: removing just one keeps
-/// `two_concurrent_claimers_take_a_timer_exactly_once` green, and removing
-/// both makes it fail with a genuine duplicate claim. `SKIP LOCKED`'s
-/// distinct contribution is liveness (no claimer waits on another's lock),
-/// which the suite does not measure.
+/// Either alone keeps each timer claimed once, which
+/// `two_concurrent_claimers_take_a_timer_exactly_once` checks. `SKIP LOCKED`
+/// also keeps claiming live: no claimer waits on another's row lock.
 ///
 /// Only timers of `plugin_ids` (the plugins `Loaded` on this replica) are
 /// claimed. Any replica may claim any due row, and replicas do not always

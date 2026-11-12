@@ -192,7 +192,7 @@ pub async fn list_contest_problems(
     // decision the same as `Allow`, and this decision's contest is never
     // rendered from here, so `Redact` degenerates to `Allow`. No plugin
     // currently returns `Redact` for `Resource::Contest`, so this is a
-    // documented no-op today, not a live bug - see Task 20 Item 6.
+    // documented no-op today, not a live bug.
     if contest_visible.is_none() {
         return Err(AppError::NotFound("Contest not found".into()));
     }

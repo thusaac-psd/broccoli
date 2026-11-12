@@ -20,12 +20,11 @@
 //! Multiple plugins may register `[[server.queries]] topic = "visibility"`.
 //! Each is queried independently with an identical [`VisibilityQueryInput`],
 //! and the per-plugin decision vectors are combined element-wise with
-//! [`Decision::meet`] - associative and commutative (Task 2), so the
+//! [`Decision::meet`] - associative and commutative, so the
 //! registry's `HashMap`-backed (i.e. unordered) iteration order cannot
 //! affect the result.
 //!
-//! Called from `VisibilityKernel::decide_batch`
-//! (`packages/server/src/visibility/mod.rs`, Task 7), alongside
+//! Called from `VisibilityKernel::decide_batch`, alongside
 //! `host_rules::host_decide` - only for the resources the host did not
 //! already `Deny`.
 
@@ -419,8 +418,7 @@ fn meet_positionally(acc: Vec<Decision>, next: Vec<Decision>) -> Vec<Decision> {
 /// (positional with `resources`, same length - see the `debug_assert_eq!`
 /// below) is the authority: each entry becomes that resource's own
 /// `QueryResource.contest_id` on the wire, resolved by the caller
-/// (`VisibilityKernel::decide_batch`,
-/// `packages/server/src/visibility/mod.rs`, Task 7) from the resource
+/// (`VisibilityKernel::decide_batch`) from the resource
 /// itself (`Contest`/`Problem`/`Sample`) or from `host_decide`'s submission
 /// -> contest_id map (`Submission`). Do not re-derive a batch-wide
 /// `contest_id` from `resource_contest_ids` here or anywhere downstream -
@@ -547,8 +545,8 @@ fn enforce_mask_cap_post_union(decisions: Vec<Decision>) -> Vec<Decision> {
         .collect()
 }
 
-// Re-exported for `super::tests` (`packages/server/src/visibility/mod.rs`,
-// Task 7) - see the doc comment on `PanicPluginManager` below.
+// Re-exported for `super::tests` (`visibility/mod.rs`) - see the doc
+// comment on `PanicPluginManager` below.
 #[cfg(test)]
 pub(crate) use tests::PanicPluginManager;
 
@@ -782,8 +780,8 @@ mod tests {
     // ---------------------------------------------------------------------
 
     // `pub(crate)` (rather than the private default every other test-only
-    // type in this file uses): Task 7's `VisibilityKernel::decide_batch`
-    // tests (`packages/server/src/visibility/mod.rs`) need a plugin-manager
+    // type in this file uses): the `VisibilityKernel::decide_batch` tests
+    // (`visibility/mod.rs`) need a plugin-manager
     // double that panics on any call, to prove `admin_override` and a fully
     // host-denied batch never reach for the plugin host - exactly the
     // property this type already exists to prove here. Re-exported above

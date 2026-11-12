@@ -26,8 +26,8 @@ use crate::state::AppState;
 /// any individual resource. See [`resource_contest_id`] for the
 /// authoritative, per-resource value that actually lands in each
 /// `QueryResource.contest_id` on the wire; conflating the two (using this
-/// function's result as a stand-in for per-resource scope) was a real bug -
-/// see the task report's CRITICAL fix note.
+/// function's result as a stand-in for per-resource scope) would hand a
+/// plugin a wrong contest for every resource outside that scope.
 ///
 /// `Resource` does not uniformly carry a contest id (`Submission` and
 /// `Clarification` do not - resolving those needs a DB round trip, which
@@ -70,15 +70,12 @@ fn contest_scope(resources: &[Resource]) -> Option<i32> {
 /// every `Resource::Submission` passed in is guaranteed to be a key in it.
 ///
 /// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification` (`clarification_id -> clarification.contest_id`), added
-/// in Task 12 alongside `host_rules::decide_clarification`. Unlike a
+/// Clarification` (`clarification_id -> clarification.contest_id`). Unlike a
 /// submission, a clarification's `contest_id` column is never null - it
-/// belongs to exactly one contest, always - so returning `None` for a
-/// `Resource::Clarification` that WAS resolved by `host_decide` would be
-/// the exact Task 7 `Submission` bug this function's own history warns
-/// about: a real, single-valued `contest_id` exists and is knowable, so
-/// reporting `None` would be silently dishonest to a plugin, not merely
-/// imprecise. It differs from a standalone problem part's principled
+/// belongs to exactly one contest, always - so a `Resource::Clarification`
+/// that `host_decide` resolved always reports that contest: a real,
+/// single-valued `contest_id` exists and is knowable, so `None` would be
+/// wrong, not merely imprecise. It differs from a standalone problem part's principled
 /// `None` below in exactly this way - a clarification has ONE contest, a
 /// problem read outside any contest can sit in zero, one, or many. A miss in this map
 /// (the id absent as a key) can only mean this resource was never a host
@@ -185,7 +182,7 @@ impl<'a> VisibilityKernel<'a> {
     /// 2. Drop any entry the memo already has an answer for.
     /// 3. `host_decide` the remaining misses in one batch (`admin_override`
     ///    short-circuits *inside* `host_decide` to all-`Allow`, with zero
-    ///    queries - that part is Task 4's, not this function's). This also
+    ///    queries). This also
     ///    resolves `submission_contest_ids`, `host_decide`'s out-param
     ///    mapping every `Resource::Submission` miss to its own
     ///    `contest_id` - needed by step 4 so each resource can be stamped

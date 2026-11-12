@@ -1,11 +1,8 @@
-//! Task 14, part D (SDD 2026-09-15-visibility-kernel).
-//!
 //! `visibility_matrix.rs::contest_clarification_list` (FROZEN) only asserts
 //! HTTP status codes and, at most, `data.is_array()` - it never inspects how
-//! many rows come back or which ones. A prior task found a commit where
-//! `list_clarifications` returned `data: []` for every viewer, including
-//! admins, and that whole suite stayed green throughout. This file is the
-//! dedicated contents pin that scenario was missing: same private-contest /
+//! many rows come back or which ones, so a `list_clarifications` that
+//! returned `data: []` for every viewer, including admins, would leave that
+//! suite green. This file is the contents pin: same private-contest /
 //! admin+participant+participant shape as `contest_clarification_list`, but
 //! asserting exact row COUNT and IDENTITY per viewer, plus the one masking
 //! (`Redact`) path `decide_clarification` has that the status-only suite

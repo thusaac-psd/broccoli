@@ -1,5 +1,4 @@
-//! End-to-end integration for Task 12 of the 下午场 (afternoon-session)
-//! bracket plugin rollout.
+//! End-to-end integration for the codelink-bracket plugin.
 //!
 //! Every other codelink-bracket test (112 of them, in
 //! `plugins/codelink-bracket/src/**`) calls `decide_problem`,

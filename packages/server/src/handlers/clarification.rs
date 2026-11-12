@@ -99,7 +99,7 @@ pub async fn list_clarifications(
     // decision (only used to decide whether to proceed), so `Redact`
     // degenerates to `Allow` here. No plugin currently returns `Redact` for
     // `Resource::Contest`, so this is a documented no-op today, not a live
-    // bug - see Task 20 Item 6.
+    // bug.
     if kernel
         .decide(Action::Read, Resource::Contest(contest_id))
         .await?
@@ -303,7 +303,7 @@ pub async fn create_clarification(
     // `Allow`, and this decision's `Resource::Contest` is never rendered
     // from here, so `Redact` degenerates to `Allow`. No plugin currently
     // returns `Redact` for `Resource::Contest`, so this is a documented
-    // no-op today, not a live bug - see Task 20 Item 6.
+    // no-op today, not a live bug.
     if kernel
         .decide(Action::Clarify, Resource::Contest(contest_id))
         .await?

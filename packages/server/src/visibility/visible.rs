@@ -57,15 +57,12 @@ impl<T: serde::Serialize> Visible<T> {
     /// `Redact` decision can never be skipped at the serialization step.
     ///
     /// Also applies [`cap_submission_detail_texts`] here, unconditionally,
-    /// after masking - moved from the two per-contest-type plugins that used
-    /// to call it (ICPC, then IOI) once `decide_visibility` stopped handing
-    /// plugins the response body to cap in the first place (Task 15/16). The
-    /// byte cap on oversized free-text fields (`compile_output`, checker
+    /// after masking; plugins never see a response body to cap. The byte
+    /// cap on oversized free-text fields (`compile_output`, checker
     /// output, test-case blobs) is a payload-size invariant, not an access
     /// decision, so it belongs here structurally: every DTO that reaches a
     /// response body passes through this one function, including contest
-    /// types with NO registered visibility plugin at all, which could never
-    /// have called it under the old per-plugin convention. It is a plain
+    /// types with NO registered visibility plugin at all. It is a plain
     /// no-op (returns immediately) for any `Value` that isn't shaped like a
     /// submission detail response (no top-level `result` object), so calling
     /// it unconditionally for every `Visible<T>` is safe regardless of `T`.
@@ -107,16 +104,13 @@ mod tests {
         result: FakeJudgeResult,
     }
 
-    /// Task 17 / Step 2a: `cap_submission_detail_texts` moved into
-    /// `into_masked_json` because, after Task 16, nothing else calls it at
-    /// all (both plugins that used to were migrated off the old
-    /// `filter_submission_fn` mechanism, which was the only place a plugin
-    /// could see - and cap - a response body). `Decision::Allow` with no
+    /// `into_masked_json` is the only caller of `cap_submission_detail_texts`.
+    /// `Decision::Allow` with no
     /// `FieldMask` in play is exactly what a contest type with NO registered
     /// visibility plugin gets: `host_decide`'s reachability answer alone,
     /// `meet`-ed with zero queriers (`query_plugins`'s zero-queriers case
     /// returns Allow, the identity element). This test proves the cap holds
-    /// even here, i.e. it no longer depends on any plugin cooperating.
+    /// even here, i.e. it does not depend on any plugin cooperating.
     #[test]
     fn into_masked_json_caps_oversized_detail_text_with_no_mask_and_no_plugin() {
         let big =

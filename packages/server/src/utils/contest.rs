@@ -107,9 +107,9 @@ pub fn required_contest_type(contest: &contest::Model) -> Result<String, AppErro
 /// The `contest_problem` link `(contest_id, problem_id)`, only while BOTH
 /// parents are active (not soft-deleted). Every contest-problem lookup goes
 /// through this, so a deleted contest's problems stop resolving everywhere at
-/// once instead of per caller: before, contest-problem config could still be
-/// written (re-creating rows `delete_contest` had purged) after the delete.
-/// Both gates are `EXISTS` filters in the same statement.
+/// once, and contest-problem config cannot be written back for a contest that
+/// `delete_contest` purged. Both gates are `EXISTS` filters in the same
+/// statement.
 fn find_active_contest_problem(
     contest_id: i32,
     problem_id: i32,

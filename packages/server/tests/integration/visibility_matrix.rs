@@ -1,13 +1,11 @@
-//! Visibility/reachability pin (SDD 2026-09-15-visibility-kernel, Task 1).
+//! Visibility/reachability pin.
 //!
-//! This module is a safety net, not a spec. It records WHAT THE SERVER
-//! CURRENTLY DOES for a representative slice of the
-//! resource x viewer x window x soft-delete cross-product described in
-//! `.superpowers/sdd/2026-09-15-visibility-kernel/task-1-brief.md`, so that
-//! later tasks which relocate this logic (`utils/contest.rs`,
-//! `handlers/submission/filter.rs`, `utils/soft_delete.rs`) can prove they
-//! preserved it byte-for-byte. Every test name says which rule it pins;
-//! a failure here means a later task changed behaviour, not that this
+//! This module is a safety net, not a spec. It records what the server does
+//! for a representative slice of the resource x viewer x window x soft-delete
+//! cross-product, so a change to the reachability rules (`visibility/`,
+//! `utils/contest.rs`, `handlers/submission/filter.rs`,
+//! `utils/soft_delete.rs`) shows up as a failure here. Every test name says
+//! which rule it pins; a failure means behaviour changed, not that the
 //! assertion needs "fixing" (unless the assertion itself is provably wrong).
 //!
 //! Full coverage selection (not the full 256-cell cross product):
