@@ -668,4 +668,34 @@ mod tests {
             Some(y.xiaoju[1].deadline_ms)
         );
     }
+
+    #[test]
+    fn a_closing_retry_that_keeps_failing_stops_after_its_retry_budget() {
+        let host = Host::mock();
+        let mut m = match_in_progress();
+        m.phase = Phase::Decided {
+            winner: 10,
+            decided_at_ms: 1_000,
+        };
+        seed(&host, 7, &setup_two_rounds(), 0, &m);
+        let closing = key(MatchTimer::Closing(Closure::Decision));
+        let mut at = 2_000;
+        host.timer.schedule(at, &closing, "").unwrap();
+        for retry in 0..crate::timers::MAX_RETRIES {
+            queue_now(&host, at);
+            host.submission
+                .queue_feedback_query_error(SdkError::Other("publication unavailable".into()));
+            let payload = format!(r#"{{"retry":{retry}}}"#);
+            assert!(handle_timer(&host, &closing, &payload, at).is_err());
+            at += 1_000;
+            assert_eq!(host.timer.scheduled_at(&closing), Some(at), "retry {retry}");
+        }
+        host.timer.cancel(&closing).unwrap();
+        queue_now(&host, at);
+        host.submission
+            .queue_feedback_query_error(SdkError::Other("publication unavailable".into()));
+        let payload = format!(r#"{{"retry":{}}}"#, crate::timers::MAX_RETRIES);
+        assert!(handle_timer(&host, &closing, &payload, at).is_err());
+        assert!(!host.timer.is_scheduled(&closing));
+    }
 }

@@ -202,10 +202,12 @@ pub fn transition(
 /// closing work, and cancelling the wakeup of a phase that was left.
 ///
 /// While a match is open, the left phase's wakeup is cancelled last, so it
-/// retries the post-commit work until that has succeeded. A closing match
-/// has its [`MatchTimer::Closing`] wakeup armed before the write for that,
-/// so the left wakeup is released first and `Closing` once the closing work
-/// is done.
+/// retries the post-commit work until that has succeeded. A match entering a
+/// closed phase has its [`MatchTimer::Closing`] wakeup armed before the write
+/// for that, so the left wakeup is released first and `Closing` once the
+/// closing work is done. Every later tick of the closed match repeats the
+/// closing work without re-arming `Closing`, so a permanently failing
+/// closing retry stops after `timers::MAX_RETRIES` deliveries.
 fn finish(
     current: &MatchState,
     next: MatchState,
@@ -218,10 +220,14 @@ fn finish(
         .map(Effect::Cancel);
     let publish = (!next.xiaoju.is_empty()).then_some(Effect::PublishFeedback);
     let effects = if let Some(closure) = Closure::of(&next.phase) {
-        wakeups.push(Wakeup {
-            timer: MatchTimer::Closing(closure),
-            at_ms: inputs.clock.now.saturating_add(CLOSING_RETRY_MS),
-        });
+        // Armed only on entry: a later tick of the closed match must not
+        // reset the retry count a failing `Closing` delivery carries.
+        if Closure::of(&current.phase) != Some(closure) {
+            wakeups.push(Wakeup {
+                timer: MatchTimer::Closing(closure),
+                at_ms: inputs.clock.now.saturating_add(CLOSING_RETRY_MS),
+            });
+        }
         let advance = next
             .winner()
             .map(|winner| Effect::AdvanceBracket { winner });
@@ -899,9 +905,11 @@ mod tests {
                 Effect::Cancel(MatchTimer::Closing(Closure::Decision)),
             ]
         );
-        // Re-evaluating the closed match repeats only its closing work.
+        // Re-evaluating the closed match repeats only its closing work and
+        // leaves the retry count of a pending `Closing` delivery alone.
         let again = tick_at(&t.next, &setup, now + 5_000, &[]);
         assert_eq!(again.next, t.next);
+        assert!(again.wakeups.is_empty());
         assert_eq!(
             again.effects,
             [
