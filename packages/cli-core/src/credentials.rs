@@ -95,20 +95,50 @@ impl CredentialsFile {
     }
 
     /// Block until no other process holds the lock, then take it.
+    ///
+    /// Some home directories (NFS without a lock manager) cannot lock at all.
+    /// Refusing to log in or refresh there would make the CLI unusable, so the
+    /// lock degrades to unlocked access with a one-time warning. The cost is
+    /// the race the lock prevents: two processes refreshing at the same moment
+    /// can each spend the refresh token, and the slower one's session ends
+    /// (the server allows a short replay grace, so this needs near-simultaneous
+    /// refreshes).
     pub fn lock(&self) -> anyhow::Result<CredentialsLock> {
+        let lock = self.open_lock()?;
+        let held = match lock.lock() {
+            Ok(()) => Some(lock),
+            Err(e) if locking_unsupported(&e) => {
+                warn_unlocked(&e);
+                None
+            }
+            Err(e) => return Err(e).context("Failed to lock credentials"),
+        };
+        Ok(CredentialsLock {
+            file: self.clone(),
+            _lock: held,
+        })
+    }
+
+    /// Check, without waiting, whether this file system supports the lock,
+    /// so the one-time warning appears before any long-running command starts.
+    pub fn check_locking(&self) {
+        if let Ok(lock) = self.open_lock()
+            && let Err(std::fs::TryLockError::Error(e)) = lock.try_lock()
+            && locking_unsupported(&e)
+        {
+            warn_unlocked(&e);
+        }
+    }
+
+    fn open_lock(&self) -> anyhow::Result<File> {
         let dir = self.path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).context("Failed to create config directory")?;
-        let lock = OpenOptions::new()
+        OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(self.lock_path())
-            .context("Failed to open credentials lock")?;
-        lock.lock().context("Failed to lock credentials")?;
-        Ok(CredentialsLock {
-            file: self.clone(),
-            _lock: lock,
-        })
+            .context("Failed to open credentials lock")
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -157,10 +187,29 @@ impl CredentialsFile {
     }
 }
 
-/// Exclusive access to a credentials file; released on drop.
+/// Exclusive access to a credentials file (where the file system supports
+/// locking); released on drop.
 pub struct CredentialsLock {
     file: CredentialsFile,
-    _lock: File,
+    _lock: Option<File>,
+}
+
+fn locking_unsupported(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ENOLCK) {
+        return true;
+    }
+    e.kind() == std::io::ErrorKind::Unsupported
+}
+
+fn warn_unlocked(e: &std::io::Error) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "Warning: this file system cannot lock the credentials file ({e}); \
+             running several broccoli commands at once may end the session."
+        );
+    });
 }
 
 impl CredentialsLock {
@@ -279,5 +328,16 @@ mod tests {
             .unwrap();
         let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn only_missing_lock_support_degrades_to_unlocked_access() {
+        use std::io::{Error, ErrorKind};
+        #[cfg(unix)]
+        assert!(locking_unsupported(&Error::from_raw_os_error(libc::ENOLCK)));
+        assert!(locking_unsupported(&Error::from(ErrorKind::Unsupported)));
+        assert!(!locking_unsupported(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
     }
 }

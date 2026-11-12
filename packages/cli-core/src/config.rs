@@ -66,7 +66,10 @@ fn resolve_credentials_from_sources(
     };
     match (token, saved) {
         (Some(token), Some((server, _))) => Ok(Session::explicit(server, token)),
-        (None, Some((server, tokens))) => Ok(Session::stored(server, tokens, store.clone())),
+        (None, Some((server, tokens))) => {
+            store.check_locking();
+            Ok(Session::stored(server, tokens, store.clone()))
+        }
         _ => bail!(
             "No credentials found.\n\
              Run `broccoli login` to authenticate, or pass --server and --token."
