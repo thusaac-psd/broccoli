@@ -18,13 +18,6 @@ pub struct Model {
     #[sea_orm(default_value = false)]
     pub is_public: bool,
 
-    #[sea_orm(column_type = "Text", nullable)]
-    pub reply_content: Option<String>,
-    pub reply_author_id: Option<i32>,
-    #[sea_orm(default_value = false)]
-    pub reply_is_public: bool,
-    pub replied_at: Option<DateTimeUtc>,
-
     #[sea_orm(default_value = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTimeUtc>,
