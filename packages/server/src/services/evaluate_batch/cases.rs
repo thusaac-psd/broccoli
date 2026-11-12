@@ -220,7 +220,11 @@ mod tests {
 
     fn batch(ids: &[i32]) -> EvaluateBatches {
         let batches = EvaluateBatches::default();
-        batches.open("eval-1", ids.len(), EvaluateCases::new(ids.iter().copied()));
+        batches.open(
+            "eval-1",
+            ids.iter().map(|id| id.to_string()),
+            EvaluateCases::new(ids.iter().copied()),
+        );
         batches
     }
 

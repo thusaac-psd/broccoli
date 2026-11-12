@@ -16,6 +16,7 @@
 //! of an operation batch, or the per-test-case progress of an evaluate batch.
 //! It lives and dies with the batch.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -29,14 +30,25 @@ use opentelemetry::KeyValue;
 pub trait BatchResult: Send + 'static {
     /// The `batch.kind` metric attribute.
     const KIND: &'static str;
+
+    /// Which of the batch's expected results this is.
+    fn key(&self) -> String;
 }
 
 impl BatchResult for TaskResult {
     const KIND: &'static str = "operation";
+
+    fn key(&self) -> String {
+        self.task_id.clone()
+    }
 }
 
 impl BatchResult for TestCaseVerdict {
     const KIND: &'static str = "evaluate";
+
+    fn key(&self) -> String {
+        self.test_case_id.to_string()
+    }
 }
 
 /// Why a batch leaves the table.
@@ -88,11 +100,14 @@ impl<T: BatchResult, S> Default for BatchTable<T, S> {
 }
 
 /// The producing side of one batch: every result goes through
-/// [`BatchSender::deliver`], which sends before it decrements the pending
-/// count. A waiter that sees the batch as no longer pending therefore finds
-/// the last result already buffered.
+/// [`BatchSender::deliver`], which accepts each expected key once and sends
+/// before it decrements the pending count. A waiter that sees the batch as no
+/// longer pending therefore finds the last result already buffered.
 pub struct BatchSender<T> {
     tx: flume::Sender<T>,
+    /// The keys still owed a result. Guards the send and the decrement
+    /// together, so the pending count only ever counts outstanding keys.
+    outstanding: Arc<std::sync::Mutex<HashSet<String>>>,
     pending: Arc<AtomicUsize>,
     metrics: Option<common::metrics::Metrics>,
 }
@@ -101,6 +116,7 @@ impl<T> Clone for BatchSender<T> {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
+            outstanding: self.outstanding.clone(),
             pending: self.pending.clone(),
             metrics: self.metrics.clone(),
         }
@@ -108,25 +124,25 @@ impl<T> Clone for BatchSender<T> {
 }
 
 impl<T: BatchResult> BatchSender<T> {
-    /// Deliver one of the batch's expected results. The channel holds exactly
-    /// the expected number of results, so this never blocks; a result beyond
-    /// that count is a producer bug and is dropped with an error log.
+    /// Deliver the result for one of the batch's expected keys. A second
+    /// result for a key, or one for a key the batch never expected, is a
+    /// producer bug and is dropped with an error log. The channel holds one
+    /// slot per key, so this never blocks.
     pub fn deliver(&self, result: T) {
-        match self.tx.try_send(result) {
-            Ok(()) | Err(flume::TrySendError::Disconnected(_)) => {}
-            Err(flume::TrySendError::Full(_)) => {
+        let key = result.key();
+        {
+            let mut outstanding = self.outstanding.lock().unwrap_or_else(|e| e.into_inner());
+            if !outstanding.remove(&key) {
                 tracing::error!(
                     batch_kind = T::KIND,
-                    "Batch produced more results than it expected; dropping the extra result"
+                    key = %key,
+                    "Batch result for a key that is not outstanding; dropping it"
                 );
                 return;
             }
+            let _ = self.tx.try_send(result);
+            self.pending.fetch_sub(1, Ordering::SeqCst);
         }
-        // `try_update` instead of `fetch_sub` so an over-delivery can never
-        // wrap the count.
-        let _ = self
-            .pending
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         if let Some(metrics) = self.metrics.as_ref() {
             metrics
                 .batch_pending_items
@@ -149,10 +165,17 @@ impl<T: BatchResult, S> BatchTable<T, S> {
         [KeyValue::new("batch.kind", T::KIND)]
     }
 
-    /// Open a batch that will produce exactly `expected` results, and return
-    /// its producing side.
-    pub fn open(&self, batch_id: &str, expected: usize, state: S) -> BatchSender<T> {
-        // Capacity `expected` never blocks a producer; `max(1)` because a
+    /// Open a batch that will produce one result for each of `keys`, and
+    /// return its producing side.
+    pub fn open(
+        &self,
+        batch_id: &str,
+        keys: impl IntoIterator<Item = String>,
+        state: S,
+    ) -> BatchSender<T> {
+        let outstanding: HashSet<String> = keys.into_iter().collect();
+        let expected = outstanding.len();
+        // One slot per key never blocks a producer; `max(1)` because a
         // zero-capacity flume channel is a rendezvous channel.
         let (tx, result_rx) = flume::bounded(expected.max(1));
         let pending = Arc::new(AtomicUsize::new(expected));
@@ -174,6 +197,7 @@ impl<T: BatchResult, S> BatchTable<T, S> {
         }
         BatchSender {
             tx,
+            outstanding: Arc::new(std::sync::Mutex::new(outstanding)),
             pending,
             metrics: self.inner.metrics.clone(),
         }
@@ -334,6 +358,10 @@ mod tests {
 
     type Table = BatchTable<TaskResult, Vec<&'static str>>;
 
+    fn keys(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
     fn result(id: &str) -> TaskResult {
         TaskResult {
             task_id: id.into(),
@@ -350,7 +378,7 @@ mod tests {
     #[test]
     fn batch_drains_only_after_every_result_is_taken() {
         let table = Table::default();
-        let tx = table.open("b", 2, vec![]);
+        let tx = table.open("b", keys(&["1", "2"]), vec![]);
         let (rx, _) = table.receiver("b").unwrap();
 
         tx.deliver(result("1"));
@@ -364,21 +392,27 @@ mod tests {
     }
 
     #[test]
-    fn delivery_beyond_the_expected_count_is_dropped_without_blocking() {
+    fn only_the_first_result_for_an_outstanding_key_is_delivered() {
         let table = Table::default();
-        let tx = table.open("b", 1, vec![]);
+        let tx = table.open("b", keys(&["1", "2"]), vec![]);
+        let (rx, pending) = table.receiver("b").unwrap();
+        tx.deliver(result("1"));
+        rx.try_recv().unwrap();
+        // A repeat for a taken key and an unexpected key must not count
+        // toward the batch, or the waiter would stop before "2" arrives.
         tx.deliver(result("1"));
         tx.deliver(result("extra"));
-        let (rx, pending) = table.receiver("b").unwrap();
-        assert_eq!(pending.load(Ordering::SeqCst), 0);
-        assert_eq!(rx.try_recv().unwrap().task_id, "1");
+        assert_eq!(pending.load(Ordering::SeqCst), 1);
         assert!(rx.try_recv().is_err());
+        tx.deliver(result("2"));
+        assert_eq!(pending.load(Ordering::SeqCst), 0);
+        assert_eq!(rx.try_recv().unwrap().task_id, "2");
     }
 
     #[test]
     fn removed_batch_is_never_recreated_by_a_state_update() {
         let table = Table::default();
-        table.open("b", 1, vec!["k"]);
+        table.open("b", keys(&["1"]), vec!["k"]);
         assert_eq!(table.remove("b", Removal::Failed), Some(vec!["k"]));
         assert_eq!(table.update("b", |keys| keys.push("late")), None);
         assert!(!table.contains("b"));
@@ -388,7 +422,7 @@ mod tests {
     #[test]
     fn reaper_expires_then_removes_on_the_next_pass() {
         let table = Table::default();
-        table.open("old", 1, vec!["k"]);
+        table.open("old", keys(&["1"]), vec!["k"]);
         let max_age = Duration::from_secs(60);
         let start = Instant::now();
 

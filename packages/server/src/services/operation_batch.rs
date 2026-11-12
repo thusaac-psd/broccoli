@@ -143,7 +143,7 @@ pub async fn start_operation_batch(
         .collect::<Vec<_>>();
     let batch_tx =
         deps.operation_batches
-            .open(&batch_id, operations.len(), correlation_ids.clone());
+            .open(&batch_id, correlation_ids.clone(), correlation_ids.clone());
 
     tracing::info!(
         plugin_id = %plugin_id,
@@ -852,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn async_wait_delivers_a_result() {
         let batches = OperationBatches::default();
-        let tx = batches.open("b1", 1, Vec::new());
+        let tx = batches.open("b1", ["op-1".to_string()], Vec::new());
         tx.deliver(dummy_task_result("op-1"));
 
         let got = next_operation_result_async("p", &batches, "b1", Duration::from_secs(5))
@@ -871,7 +871,7 @@ mod tests {
         // out" SystemError. `Duration::ZERO` (ceiling 0 via the test infra
         // floor) forces the give-up branch on the first poll.
         let batches = OperationBatches::default();
-        let tx = batches.open("b1", 1, Vec::new());
+        let tx = batches.open("b1", ["op-1".to_string()], Vec::new());
         tx.deliver(dummy_task_result("op-1"));
 
         let got = next_operation_result_async("p", &batches, "b1", Duration::ZERO)
@@ -888,7 +888,7 @@ mod tests {
     fn sync_wait_drains_buffered_result_when_giving_up() {
         // Sync sibling of the give-up drain (the Extism host-fn boundary).
         let batches = OperationBatches::default();
-        let tx = batches.open("b1", 1, Vec::new());
+        let tx = batches.open("b1", ["op-1".to_string()], Vec::new());
         tx.deliver(dummy_task_result("op-1"));
 
         let got = next_operation_result("p", &batches, "b1", Duration::ZERO).unwrap();
@@ -905,7 +905,7 @@ mod tests {
         // linger to the infra ceiling. The batch stays pending, so only the
         // disconnect can end it.
         let batches = OperationBatches::default();
-        drop(batches.open("b2", 1, Vec::new()));
+        drop(batches.open("b2", ["op-1".to_string()], Vec::new()));
 
         let outcome =
             next_operation_result_async("p", &batches, "b2", Duration::from_secs(30)).await;
@@ -1111,11 +1111,11 @@ mod tests {
         let evaluate_batches = crate::registry::EvaluateBatches::default();
         evaluate_batches.open(
             "eval-1",
-            1,
+            ["10".to_string()],
             crate::services::evaluate_batch::EvaluateCases::new([10]),
         );
         let correlation_ids = vec!["op-1".to_string(), "op-2".to_string()];
-        operation_batches.open("batch-1", 2, correlation_ids.clone());
+        operation_batches.open("batch-1", correlation_ids.clone(), correlation_ids.clone());
         for id in &correlation_ids {
             evaluate_batches.record_ops("eval-1", 10, "batch-1", vec![id.clone()]);
             operation_waiters.insert(
@@ -1145,7 +1145,11 @@ mod tests {
     fn cancel_operation_batch_removes_waiters() {
         let batches = OperationBatches::default();
         let waiters: OperationWaiters = Arc::default();
-        batches.open("batch-1", 1, vec!["task-1".to_string()]);
+        batches.open(
+            "batch-1",
+            ["task-1".to_string()],
+            vec!["task-1".to_string()],
+        );
         waiters.insert("task-1".to_string(), waiter(None));
 
         cancel_operation_batch("plugin", &batches, &waiters, "batch-1");

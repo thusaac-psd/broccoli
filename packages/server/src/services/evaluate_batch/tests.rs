@@ -16,7 +16,7 @@ fn open_batch(
 ) -> BatchSender<TestCaseVerdict> {
     batches.open(
         batch_id,
-        case_ids.len(),
+        case_ids.iter().map(|id| id.to_string()),
         EvaluateCases::new(case_ids.iter().copied()),
     )
 }

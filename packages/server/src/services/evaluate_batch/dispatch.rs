@@ -68,7 +68,7 @@ pub async fn start_evaluate_batch(
 
     let batch_tx = deps.evaluate_batches.open(
         &batch_id,
-        test_case_count,
+        resolved_inputs.iter().map(|tc| tc.test_case_id.to_string()),
         EvaluateCases::new(resolved_inputs.iter().map(|tc| tc.test_case_id)),
     );
 

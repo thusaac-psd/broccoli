@@ -233,9 +233,9 @@ mod tests {
         }
     }
 
-    fn batch(expected: usize) -> (Table, BatchSender<TaskResult>) {
+    fn batch(keys: &[u32]) -> (Table, BatchSender<TaskResult>) {
         let batches = Table::default();
-        let tx = batches.open("b", expected, ());
+        let tx = batches.open("b", keys.iter().map(u32::to_string), ());
         (batches, tx)
     }
 
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn last_delivered_result_removes_the_drained_batch() {
-        let (batches, tx) = batch(2);
+        let (batches, tx) = batch(&[1, 2]);
         tx.deliver(result(1));
         tx.deliver(result(2));
 
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn disconnected_channel_is_the_policy_error() {
-        let (batches, tx) = batch(1);
+        let (batches, tx) = batch(&[1]);
         drop(tx);
         let err = open(&batches, Duration::from_secs(1))
             .blocking()
@@ -290,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_batch_waits_past_empty_ticks_until_the_result_lands() {
-        let (batches, tx) = batch(1);
+        let (batches, tx) = batch(&[7]);
         let wait = tokio::spawn({
             let batches = batches.clone();
             async move { id(open(&batches, Duration::from_secs(5)).wait().await.unwrap()) }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn give_up_drains_a_result_buffered_before_the_pending_decrement() {
-        let (batches, tx) = batch(1);
+        let (batches, tx) = batch(&[3]);
         tx.deliver(result(3));
         let wait = open(&batches, Duration::ZERO);
         assert_eq!(id(wait.give_up()).as_deref(), Some("3"));
@@ -313,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn settled_batch_gives_up_after_one_empty_tick() {
-        let (batches, _tx) = batch(0);
+        let (batches, _tx) = batch(&[]);
         let got = open(&batches, Duration::from_secs(5)).wait().await.unwrap();
         assert!(got.is_none());
     }
