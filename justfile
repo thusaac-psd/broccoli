@@ -72,9 +72,10 @@ worker:
 install:
     pnpm install
 
-# Generate API client from OpenAPI spec
-gen-api url="http://127.0.0.1:3000/api-docs/openapi.json":
-    node packages/web-sdk/scripts/generate-api.mjs {{url}}
+# Generate the web SDK's API types from the server's OpenAPI document
+gen-api:
+    BROCCOLI__AUTH__JWT_SECRET="${BROCCOLI__AUTH__JWT_SECRET:-openapi}" cargo run -p server -- --openapi > target/openapi.json
+    node packages/web-sdk/scripts/generate-api.mjs target/openapi.json
 
 # Build all JS packages (sdk before web)
 build-js:
