@@ -557,6 +557,7 @@ impl BootSession {
     /// Schema sync and versioned migrations.
     pub async fn migrate(&self) -> Result<(), DbErr> {
         let db = &self.db;
+        crate::migration::refuse_unknown_migrations(db).await?;
         // Create the core tables from the entity definitions, then apply the
         // schema they cannot express (see `crate::migration`).
         db.get_schema_registry("server::entity::*").sync(db).await?;
@@ -739,6 +740,41 @@ mod tests {
             .expect("row");
         assert_eq!(row.try_get::<i64>("", "admins").unwrap(), 1);
         assert!(row.try_get::<bool>("", "idx").unwrap());
+    }
+
+    /// A database that records a migration this build does not define is
+    /// refused before schema sync touches it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_refuses_a_database_from_another_build_untouched() {
+        let (_c, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.conn()
+            .execute_unprepared(
+                "CREATE TABLE seaql_migrations (version varchar PRIMARY KEY, applied_at bigint NOT NULL); \
+                 INSERT INTO seaql_migrations VALUES ('m0099_from_another_build', 0)",
+            )
+            .await
+            .expect("record a foreign migration");
+        let err = boot
+            .migrate()
+            .await
+            .expect_err("a foreign migration must refuse boot");
+        let msg = err.to_string();
+        assert!(msg.contains("m0099_from_another_build"), "{msg}");
+        assert!(msg.contains("empty database"), "{msg}");
+        let tables = boot
+            .conn()
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "SELECT COUNT(*)::bigint AS n FROM pg_tables WHERE schemaname = 'public'",
+            ))
+            .await
+            .expect("count tables")
+            .expect("row")
+            .try_get::<i64>("", "n")
+            .unwrap();
+        assert_eq!(tables, 1, "only seaql_migrations exists; sync never ran");
+        boot.release().await.expect("release");
     }
 
     /// A reboot leaves every index exactly as the first boot built it: schema
