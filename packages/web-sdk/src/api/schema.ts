@@ -1091,7 +1091,7 @@ export interface paths {
     };
     /**
      * List dead letter messages
-     * @description Returns a paginated list of dead letter messages. Requires `dlq:manage` permission.
+     * @description Returns a paginated list of dead letter messages, most recently failed first. Requires `dlq:manage` permission.
      */
     get: operations['listDlqMessages'];
     put?: never;
@@ -3011,6 +3011,13 @@ export interface components {
        * @example 1
        */
       id: number;
+      /**
+       * Format: date-time
+       * @description When the message was last dead-lettered; a recurrence reopens the
+       *     message and moves this forward. Lists sort by it, newest first.
+       * @example 2025-09-02T10:00:00Z
+       */
+      last_failed_at: string;
       /** @example job-abc123 */
       message_id: string;
       /** @example stuck_submission */
@@ -3031,8 +3038,8 @@ export interface components {
       resolved_by?: number | null;
       /**
        * Format: int32
-       * @description Times this message was dead-lettered: a stuck job that is dead-lettered
-       *     again reopens its message and counts here.
+       * @description Attempts recorded in `retry_history`: failed deliveries of an operation
+       *     task, or each dead-lettering and operator retry of stuck work.
        * @example 3
        */
       retry_count: number;
@@ -3063,6 +3070,13 @@ export interface components {
        * @example 1
        */
       id: number;
+      /**
+       * Format: date-time
+       * @description When the message was last dead-lettered; a recurrence reopens the
+       *     message and moves this forward. Lists sort by it, newest first.
+       * @example 2025-09-02T10:00:00Z
+       */
+      last_failed_at: string;
       /** @example job-abc123 */
       message_id: string;
       /** @example stuck_submission */
@@ -3082,8 +3096,8 @@ export interface components {
       resolved_by?: number | null;
       /**
        * Format: int32
-       * @description Times this message was dead-lettered: a stuck job that is dead-lettered
-       *     again reopens its message and counts here.
+       * @description Attempts recorded in `retry_history`: failed deliveries of an operation
+       *     task, or each dead-lettering and operator retry of stuck work.
        * @example 3
        */
       retry_count: number;

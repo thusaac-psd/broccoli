@@ -120,8 +120,8 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
     }
 
     /// Dead-letters `subject`: inserts its row, or reopens the existing one
-    /// with the new error and payload and appends this occurrence to its
-    /// retry history. `retry_count` is the number of occurrences.
+    /// with the new error and payload, appends this occurrence to its retry
+    /// history and restamps `last_failed_at`.
     pub async fn dead_letter(
         &self,
         subject: DlqSubject,
@@ -149,6 +149,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
                            'error', EXCLUDED.error_message,
                            'timestamp', NOW())),
                        retry_count = jsonb_array_length(d.retry_history) + 1,
+                       last_failed_at = NOW(),
                        resolved = FALSE,
                        resolved_at = NULL,
                        resolved_by = NULL"#,
@@ -218,7 +219,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         let total = query.clone().count(self.conn).await?;
 
         let messages = query
-            .order_by_desc(dead_letter_message::Column::CreatedAt)
+            .order_by_desc(dead_letter_message::Column::LastFailedAt)
             .offset(window.offset())
             .limit(window.limit())
             .all(self.conn)

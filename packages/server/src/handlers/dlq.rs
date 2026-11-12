@@ -39,7 +39,7 @@ use crate::state::AppState;
     tag = "Dead Letter Queue",
     operation_id = "listDlqMessages",
     summary = "List dead letter messages",
-    description = "Returns a paginated list of dead letter messages. Requires `dlq:manage` permission.",
+    description = "Returns a paginated list of dead letter messages, most recently failed first. Requires `dlq:manage` permission.",
     params(ListDlqParams),
     responses(
         (status = 200, description = "List of DLQ messages", body = DlqListResponse),

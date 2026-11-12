@@ -657,6 +657,11 @@ async fn a_recurring_exhaustion_reopens_the_one_dead_letter_of_its_submission() 
         .resolve(first.id, 1)
         .await
         .unwrap();
+    exec(
+        &db,
+        "UPDATE dead_letter_message SET last_failed_at = NOW() - INTERVAL '1 day'",
+    )
+    .await;
 
     abandon(&db, 0).await;
     assert_eq!(steal(&db).await.exhausted, 1);
@@ -669,6 +674,10 @@ async fn a_recurring_exhaustion_reopens_the_one_dead_letter_of_its_submission() 
     assert_eq!(row.resolved_by, None);
     assert_eq!(row.retry_count, 2, "both occurrences are counted");
     assert_eq!(row.retry_history.as_array().map(Vec::len), Some(2));
+    assert!(
+        row.last_failed_at > Utc::now() - chrono::Duration::hours(1),
+        "the recurrence restamps when it last failed"
+    );
 }
 
 /// A rejudge holds its submission's row lock from the epoch allocation to
