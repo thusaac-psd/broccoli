@@ -28,11 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
-          targets: wasm32-wasip1
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -80,19 +80,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -176,19 +175,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -273,19 +271,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (mac universal)
-        if: matrix.platform == 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
-
-      - name: Install Rust toolchain (single target)
-        if: matrix.platform != 'macos-universal'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: ${{ matrix.target }}
+      # The toolchain rust-toolchain.toml pins, plus this platform's targets.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          if [ "$TARGET" = universal2-apple-darwin ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "$TARGET"
+          fi
 
       - name: Install musl tools
         if: contains(matrix.target, 'musl')
@@ -390,12 +387,9 @@ jobs:
             echo "created=$(date -u +%FT%TZ)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain for plugin assets
+      - name: Install the pinned Rust toolchain for plugin assets
         if: matrix.name == 'server'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: wasm32-wasip1
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         if: matrix.name == 'server'
@@ -543,10 +537,11 @@ jobs:
           name: stress-test-linux-x86_64
           path: stress-artifacts
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: wasm32-wasip1
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         with:

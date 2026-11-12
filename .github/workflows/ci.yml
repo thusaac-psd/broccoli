@@ -24,11 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
-          targets: wasm32-wasip1
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -151,9 +151,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
         with:
