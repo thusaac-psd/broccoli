@@ -14,7 +14,6 @@
 // see that function's doc comment).
 
 export type MatchPhase =
-  | 'pending'
   | 'ordering'
   | 'preparing'
   | 'intermission'

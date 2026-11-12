@@ -213,7 +213,7 @@ function MatchDetail({
           </Section>
         )}
 
-        {(match.state === 'ordering' || match.state === 'pending') && (
+        {match.state === 'ordering' && (
           <Section title={t('codelink-bracket.section.rankings')}>
             <div className="grid grid-cols-2 gap-3">
               <RankingStatus name={nameA} done={match.order_b !== null} />

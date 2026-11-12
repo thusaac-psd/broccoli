@@ -279,6 +279,13 @@ Staff can act from the match panel. Every action asks for confirmation first.
 | **Force expiry** | A game is live or waiting on judging | Checks the current game again right away, for example after a rejudge. It never ends a game before its time is up. |
 | **Award to** | A game is live, waiting on judging, or the match needs a staff decision | Gives the match to that player, who moves into the next round. This cannot be undone. |
 
+Both **Force expiry** and **Award to** use the match's `force-decide` route.
+Called without a winner, the route checks the match again at the current time
+in any phase. A match whose start time has passed starts, and a match the
+contest end has overtaken goes to staff. Awarding a match that is already
+decided returns 409. When the bracket is not set up or the match does not
+exist, the route returns 404.
+
 ### Game reminders
 
 Game results appear as persistent web notifications until dismissed. Select
