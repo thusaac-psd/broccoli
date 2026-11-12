@@ -36,7 +36,7 @@
 
 use broccoli_server_sdk::prelude::*;
 
-use crate::model::MatchPhase;
+use crate::model::PhaseName;
 
 // The rest of this file's imports are used only by `decide_visibility_decisions`
 // and its exclusive helpers below, which are themselves gated
@@ -75,7 +75,7 @@ pub struct VisibilityCtx {
     pub order_a: Option<Vec<i32>>,
     /// The order player B must solve their own group in, as ranked by A.
     pub order_b: Option<Vec<i32>>,
-    pub state: MatchPhase,
+    pub state: PhaseName,
     /// Index of the most recently OPENED 小局, if any has opened yet.
     /// `None` before the first 小局 opens (e.g. during `Ordering`).
     pub current_xiaoju_index: Option<u8>,
@@ -111,8 +111,8 @@ pub fn decide_problem(
     } else {
         // Not in either player's group: only the active 附加赛 problem can
         // still be Allow, and then to both players.
-        let is_active_tiebreak_problem = (ctx.state == MatchPhase::Tiebreak
-            || (ctx.state == MatchPhase::AwaitingJudge
+        let is_active_tiebreak_problem = (ctx.state == PhaseName::Tiebreak
+            || (ctx.state == PhaseName::AwaitingJudge
                 && ctx
                     .current_xiaoju_index
                     .is_some_and(|index| usize::from(index) >= ctx.group_a.len())))
@@ -124,17 +124,14 @@ pub fn decide_problem(
     };
 
     // Opponent statements are available only while choosing their order.
-    if viewer == opponent && ctx.state == MatchPhase::Ordering {
+    if viewer == opponent && ctx.state == PhaseName::Ordering {
         return WireDecision::Allow {};
     }
 
     // During play, reveal only this player's current game. Previous games,
     // the opponent's group and the next game stay hidden during buffers too.
     if viewer == owner
-        && matches!(
-            ctx.state,
-            MatchPhase::InProgress | MatchPhase::AwaitingJudge
-        )
+        && matches!(ctx.state, PhaseName::InProgress | PhaseName::AwaitingJudge)
         && let Some(current_index) = ctx.current_xiaoju_index
         && let Some(order) = owners_order
         && let Some(pos) = order.iter().position(|&p| p == problem_id)
@@ -167,9 +164,9 @@ fn ctx_from_match(m: &MatchState, round_def: &RoundDef) -> VisibilityCtx {
         group_b: m.group_b.clone(),
         order_a: m.order_a.clone(),
         order_b: m.order_b.clone(),
-        state: m.state,
+        state: m.phase_name(),
         current_xiaoju_index: m.xiaoju.last().map(|x| x.index),
-        tiebreak_problem: round_def.tiebreak.get(m.tiebreak_index).copied(),
+        tiebreak_problem: round_def.tiebreak.get(m.tiebreak_attempt()).copied(),
     }
 }
 
@@ -479,6 +476,7 @@ pub fn decide_visibility(input: String) -> extism_pdk::FnResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Phase;
 
     fn ctx_in_ordering(a: i32, b: i32) -> VisibilityCtx {
         VisibilityCtx {
@@ -488,7 +486,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: None,
             order_b: None,
-            state: MatchPhase::Ordering,
+            state: PhaseName::Ordering,
             current_xiaoju_index: None,
             tiebreak_problem: None,
         }
@@ -502,7 +500,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(order_a),
             order_b: Some(vec![203, 201, 202]),
-            state: MatchPhase::InProgress,
+            state: PhaseName::InProgress,
             current_xiaoju_index: Some(index),
             tiebreak_problem: None,
         }
@@ -516,7 +514,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(vec![101, 102, 103]),
             order_b: Some(vec![201, 202, 203]),
-            state: MatchPhase::Tiebreak,
+            state: PhaseName::Tiebreak,
             current_xiaoju_index: Some(2),
             tiebreak_problem: Some(tiebreak_problem),
         }
@@ -701,7 +699,7 @@ mod tests {
                     group_a: vec![101, 102, 103],
                     group_b: vec![201, 202, 203],
                     order_a: Some(vec![101, 102, 103]),
-                    state: MatchPhase::Ordering,
+                    phase: Phase::Ordering,
                     ..Default::default()
                 })
                 .unwrap()
@@ -781,7 +779,7 @@ mod tests {
             group_b: config.group_b.clone(),
             order_a: Some(config.group_a.clone()),
             order_b: Some(config.group_b.clone()),
-            state: MatchPhase::InProgress,
+            phase: Phase::Playing,
             xiaoju: vec![crate::model::XiaojuState {
                 index: 0,
                 ..Default::default()
@@ -792,7 +790,7 @@ mod tests {
             pos: 1,
             player_a: 30,
             player_b: 40,
-            state: MatchPhase::Intermission,
+            phase: Phase::Intermission { next_game_at_ms: 0 },
             ..final_match.clone()
         };
         let setups = HashMap::from([(7, setup)]);
@@ -810,9 +808,12 @@ mod tests {
             decide_problem_for_contest(7, problem, 30, &setups, &matches),
             WireDecision::Deny {}
         );
-        final_match.state = MatchPhase::Decided;
+        final_match.phase = Phase::Decided {
+            winner: 10,
+            decided_at_ms: 0,
+        };
         let bronze = MatchState {
-            state: MatchPhase::InProgress,
+            phase: Phase::Playing,
             ..bronze
         };
         matches.insert(7, vec![(2, final_match), (3, bronze)]);
@@ -997,7 +998,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(vec![103, 101, 102]),
             order_b: Some(vec![203, 201, 202]),
-            state: MatchPhase::InProgress,
+            phase: Phase::Playing,
             xiaoju: vec![crate::model::XiaojuState {
                 index: 0,
                 decided: false,
@@ -1066,7 +1067,7 @@ mod tests {
             group_a: vec![101, 102, 103],
             group_b: vec![201, 202, 203],
             order_a: Some(vec![101, 102, 103]),
-            state: MatchPhase::Ordering,
+            phase: Phase::Ordering,
             ..Default::default()
         };
 
@@ -1136,8 +1137,10 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(vec![101, 102, 103]),
             order_b: Some(vec![201, 202, 203]),
-            state: MatchPhase::Decided,
-            winner: Some(10),
+            phase: Phase::Decided {
+                winner: 10,
+                decided_at_ms: 0,
+            },
             xiaoju: vec![crate::model::XiaojuState {
                 index: 2,
                 decided: true,
@@ -1180,7 +1183,7 @@ mod tests {
             group_a: vec![101, 102, 103],
             group_b: vec![201, 202, 203],
             order_a: Some(vec![101, 102, 103]),
-            state: MatchPhase::Ordering, // owner 10 denied their own group
+            phase: Phase::Ordering, // owner 10 denied their own group
             ..Default::default()
         };
         let visible_in_contest_8 = MatchState {
@@ -1192,8 +1195,10 @@ mod tests {
             group_b: vec![401, 402, 403],
             order_a: Some(vec![101, 102, 103]),
             order_b: Some(vec![401, 402, 403]),
-            state: MatchPhase::Decided, // owner 10 allowed: match is over
-            winner: Some(10),
+            phase: Phase::Decided {
+                winner: 10,
+                decided_at_ms: 0,
+            }, // owner 10 allowed: match is over
             xiaoju: vec![crate::model::XiaojuState {
                 index: 2,
                 decided: true,
@@ -1240,7 +1245,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(vec![101, 102, 103]),
             order_b: Some(vec![201, 202, 203]),
-            state: MatchPhase::Ordering,
+            phase: Phase::Ordering,
             ..Default::default()
         };
         let host = Host::mock();

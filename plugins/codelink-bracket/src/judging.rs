@@ -11,11 +11,11 @@ use broccoli_server_sdk::types::*;
 use extism_pdk::{FnResult, plugin_fn};
 use serde::{Deserialize, Serialize};
 
-use crate::judge::advance;
+use crate::executor;
 use crate::storage;
 
 /// Resolve `(contest, user, problem)` -- as produced by a judged submission
-/// -- to the match it belongs to, then [`advance`] it. A no-op if the
+/// -- to the match it belongs to, then tick it. A no-op if the
 /// problem does not resolve to a round, or the user has no match in that
 /// round (mirrors `gate.rs::resolve_rejection`'s same resolution, which is
 /// deliberately not shared: that one REJECTS on failure to resolve, this
@@ -37,7 +37,7 @@ pub(crate) fn resolve_and_advance(
     let Some(m) = storage::find_players_match(&matches, round, user_id) else {
         return Ok(());
     };
-    advance(
+    executor::tick(
         host,
         contest_id,
         storage::match_id_for(setup.player_count(), m.round, m.pos),
@@ -261,4 +261,54 @@ pub fn on_codelink_bracket_eval_result(input: String) -> FnResult<String> {
         }
     };
     Ok(serde_json::to_string(&output)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{MatchState, Phase, XiaojuState};
+    use crate::test_support::{queue_now, seed, setup_two_rounds};
+
+    fn match_in_progress() -> MatchState {
+        MatchState {
+            round: 1,
+            player_a: 10,
+            player_b: 20,
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            order_a: Some(vec![103, 101, 102]),
+            order_b: Some(vec![203, 201, 202]),
+            phase: Phase::Playing,
+            xiaoju: vec![XiaojuState {
+                deadline_ms: 1_000_000,
+                base_deadline_ms: 1_000_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_judged_submission_outside_the_bracket_advances_nothing() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        resolve_and_advance(&host, 7, 10, 999).unwrap();
+        assert!(host.db.queries().is_empty());
+    }
+
+    #[test]
+    fn a_judged_submission_ticks_the_players_match() {
+        let host = Host::mock();
+        seed(&host, 7, &setup_two_rounds(), 0, &match_in_progress());
+        queue_now(&host, 500_000);
+        host.db.queue_query_result(serde_json::json!([{
+            "id": 1, "user_id": 10, "problem_id": 103, "submitted_at_us": 100_000,
+            "verdict": "Accepted", "status": "Judged",
+        }]));
+        resolve_and_advance(&host, 7, 10, 103).unwrap();
+        assert_eq!(
+            storage::load_match(&host, 7, 0).unwrap().unwrap().score_a,
+            1
+        );
+    }
 }

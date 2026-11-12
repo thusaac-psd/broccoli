@@ -8,10 +8,11 @@
 pub mod bracket;
 pub mod clock;
 pub mod decide;
+pub mod executor;
 pub mod feedback;
 pub mod gate;
-pub mod judge;
 pub mod judging;
+pub mod machine;
 pub mod model;
 pub mod ordering;
 pub mod routes;
@@ -20,6 +21,7 @@ pub mod stages;
 pub mod storage;
 #[cfg(test)]
 mod test_support;
+pub mod timers;
 pub mod visibility;
 
 #[cfg(target_arch = "wasm32")]

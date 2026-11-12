@@ -275,7 +275,7 @@ Staff can act from the match panel. Every action asks for confirmation first.
 
 | Control | When it appears | What it does |
 | --- | --- | --- |
-| **Start now** | A legacy unscheduled match is waiting for rankings | Starts that match within an open stage. Scheduled stages have no individual start override. |
+| **Start now** | A match in an unscheduled stage is waiting for rankings | Starts that match within an open stage. Scheduled stages have no individual start override. |
 | **Force expiry** | A game is live or waiting on judging | Checks the current game again right away, for example after a rejudge. It never ends a game before its time is up. |
 | **Award to** | A game is live, waiting on judging, or the match needs a staff decision | Gives the match to that player, who moves into the next round. This cannot be undone. |
 

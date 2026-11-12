@@ -91,9 +91,7 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
     // A problem belongs to exactly one group of one round. Tracked globally
     // (not per-round) because the visibility kernel's opponent-ranking
     // branch would otherwise grant a player `Allow` on a problem that is
-    // still their own hidden problem in a DIFFERENT match -- see the module
-    // doc comment on this file's caller in `docs/superpowers/plans/
-    // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
+    // still their own hidden problem in a DIFFERENT match.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
     for (round_idx, round) in setup
         .rounds
@@ -326,7 +324,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             || (setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()))
                 .contains(&round)
         {
-            crate::judge::try_open_stage(host, contest_id, round as u8)?;
+            crate::stages::try_open_stage(host, contest_id, round as u8)?;
         }
     }
 
@@ -888,7 +886,7 @@ mod tests {
         // (see `handle_setup`'s doc comment), but a MATCH document only
         // exists once `create_match_if_both_slots_filled` has run for it --
         // without this, round 1 would have 16 filled slots and zero actual
-        // matches for `judge::advance`/`ordering::handle_order` to act on.
+        // matches for the state machine and `ordering::handle_order` to act on.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);

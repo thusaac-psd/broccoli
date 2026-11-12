@@ -64,7 +64,7 @@ struct ClockRow {
 /// Nobody can submit once the contest has ended, so no game may open or
 /// run past `contest_end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Clock {
+pub struct Clock {
     pub now: i64,
     /// `None` only if the contest row could not be read.
     pub contest_end: Option<i64>,
@@ -79,13 +79,13 @@ impl Clock {
         }
     }
 
-    pub(crate) fn contest_ended(&self) -> bool {
+    pub fn contest_ended(&self) -> bool {
         self.contest_end.is_some_and(|end| self.now >= end)
     }
 
     /// When a game with this deadline must be looked at again: its own
     /// deadline, or the contest end if that comes first.
-    pub(crate) fn cutoff(&self, deadline_ms: i64) -> i64 {
+    pub fn cutoff(&self, deadline_ms: i64) -> i64 {
         self.contest_end
             .map_or(deadline_ms, |end| deadline_ms.min(end))
     }
@@ -118,6 +118,4 @@ mod tests {
         queue_now(&host, 1_234_567);
         assert_eq!(now_ms(&host).unwrap(), 1_234_567);
     }
-
-    // -- open_xiaoju --
 }

@@ -2318,7 +2318,7 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
         max_attempts: 1,
         ..Default::default()
     };
-    let key = format!("xiaoju:{}:0:1:effective:{}", fx.contest_id, accepted.id());
+    let key = format!("match:{}:0:effective:1:{}", fx.contest_id, accepted.id());
     for attempt in 0..2 {
         sleep_until_ms(effective_at_ms + attempt * 1_000 + 150).await;
         tick_once(&fx.app.state, &config).await.unwrap();

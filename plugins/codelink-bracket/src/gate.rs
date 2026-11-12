@@ -2,16 +2,13 @@
 //! reject a submission unless it targets the submitter's OWN current 小局
 //! problem (or the active 附加赛 problem) in a live match.
 //!
-//! Quoted from `docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`:
+//! A submission through a bracket contest is admitted only when all hold:
 //!
-//! > `[[server.hooks]] topic = "before_submission"` rejects unless **all**
-//! > hold:
-//! >
-//! > - the target contest is this format's contest,
-//! > - V is a player in a match whose state is `InProgress` or `Tiebreak`,
-//! > - the problem is V's current 小局 problem (or the active 附加赛
-//! >   problem),
-//! > - the 小局 is open -- started, and not yet decided.
+//! - the submitter plays in a match of the problem's round whose game is
+//!   open (`Phase::Playing`),
+//! - the problem is the submitter's current 小局 problem (or the active
+//!   附加赛 problem), as [`MatchState::current_problem`] defines it,
+//! - the 小局 is open -- started, not yet decided, and inside its window.
 //!
 //! Visibility (`visibility.rs`) already hides a problem the viewer should
 //! not see, but that is advisory only: a player can still POST an arbitrary
@@ -30,43 +27,9 @@
 //!
 //! All of those restrictions are owned here, rather than inferred by the host.
 
-use crate::model::MatchPhase;
-
-use crate::model::{MatchState, RoundDef};
+use crate::model::{MatchState, Phase, RoundDef};
 use crate::storage;
 use broccoli_server_sdk::prelude::*;
-
-/// Everything [`check`] needs about ONE match to decide whether `viewer` may
-/// submit to `problem_id` right now. Deliberately narrower than
-/// [`crate::model::MatchState`], mirroring [`crate::visibility::VisibilityCtx`]:
-/// built from a real match by the host wiring below; tests construct it
-/// directly.
-#[derive(Debug, Clone)]
-pub struct GateCtx {
-    pub player_a: i32,
-    pub player_b: i32,
-    /// The order player A must solve their own group in, as ranked by B.
-    /// `None` before B has ranked it (still `Ordering`).
-    pub order_a: Option<Vec<i32>>,
-    /// The order player B must solve their own group in, as ranked by A.
-    pub order_b: Option<Vec<i32>>,
-    pub state: MatchPhase,
-    /// Index of the currently open 小局 (regular or 附加赛 -- both live in
-    /// the same `xiaoju` log, see [`crate::model::MatchState::xiaoju`]).
-    /// `None` before any 小局 has opened.
-    pub current_xiaoju_index: Option<u8>,
-    /// Whether the currently open 小局 has already been decided. Distinct
-    /// from `current_xiaoju_index` being `None`: an index can be `Some` for
-    /// a 小局 that has since been decided but whose successor has not opened
-    /// yet (a brief window between `decide_xiaoju` deciding it and the next
-    /// one being scheduled).
-    pub current_xiaoju_decided: bool,
-    /// The active 附加赛 problem, if `state == Tiebreak`. During 附加赛 both
-    /// players face the SAME problem ("双方将面对相同的题目"), unlike the
-    /// regular 小局 phase where each player has their own current problem
-    /// from their own imposed order.
-    pub tiebreak_problem: Option<i32>,
-}
 
 /// A rejected submission's reason, carrying a machine-readable `code` so the
 /// frontend can distinguish "wrong problem" from "小局 closed" from
@@ -109,9 +72,9 @@ impl Rejection {
     }
 
     /// Produced by the host wiring below: the viewer DOES have a match for
-    /// this round, but it is not currently `InProgress` or `Tiebreak` --
-    /// covers both "not started yet" (`Pending`/`Ordering`) and "no longer
-    /// accepting submissions" (`Decided`/`NeedsAdjudication`). The spec's
+    /// this round, but no game of it is open -- covers both "not started
+    /// yet" (`Ordering`/`Preparing`), a break or a judging wait, and "no
+    /// longer accepting submissions" (`Decided`/`NeedsAdjudication`). The spec's
     /// wording ("has not started") only names the former, but the latter is
     /// just as much "not open for submission right now" and the plan does
     /// not allocate it a fifth code.
@@ -123,77 +86,22 @@ impl Rejection {
     }
 }
 
-/// Decide whether `viewer` may submit to `problem_id` right now. See the
-/// module doc comment for the rule this implements (the last two of its four
-/// bullets -- "V is a player in a match whose state is InProgress or
-/// Tiebreak" is enforced by the host wiring below, before a [`GateCtx`] is
-/// even built: a `GateCtx` always describes a live match).
-pub fn check(ctx: &GateCtx, viewer: i32, problem_id: i32) -> Result<(), Rejection> {
-    // What SHOULD `viewer` be submitting to right now? During 附加赛 both
-    // players face the same shared problem; during the regular 小局 phase
-    // each player's current problem is their OWN position in their OWN
-    // imposed order (`order_a`/`order_b`) at the current 小局 index. Any
-    // other phase (Pending, Ordering, Decided, NeedsAdjudication) has no
-    // current problem at all -- the host wiring below is responsible for
-    // never building a `GateCtx` in those phases, but `check` still treats
-    // "no expected problem" as a hard rejection rather than trusting that.
-    let expected = match ctx.state {
-        MatchPhase::Tiebreak => ctx.tiebreak_problem,
-        MatchPhase::InProgress => {
-            let order = if viewer == ctx.player_a {
-                ctx.order_a.as_ref()
-            } else if viewer == ctx.player_b {
-                ctx.order_b.as_ref()
-            } else {
-                None
-            };
-            match (order, ctx.current_xiaoju_index) {
-                (Some(order), Some(index)) => order.get(index as usize).copied(),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-
-    if expected != Some(problem_id) {
+/// Whether `viewer` may submit `problem_id` to the open game of `m`.
+pub fn check(
+    m: &MatchState,
+    round_def: &RoundDef,
+    viewer: i32,
+    problem_id: i32,
+) -> Result<(), Rejection> {
+    if m.current_problem(round_def, viewer) != Some(problem_id) {
         return Err(Rejection::not_your_problem());
     }
-
-    if ctx.current_xiaoju_decided {
+    if m.xiaoju.last().is_some_and(|game| game.decided) {
         return Err(Rejection::xiaoju_closed());
     }
-
     Ok(())
 }
 
-/// Build a [`GateCtx`] from a real match and the `RoundDef` that owns it.
-/// Mirrors `visibility.rs`'s `ctx_from_match`.
-fn gate_ctx_from_match(m: &MatchState, round_def: &RoundDef) -> GateCtx {
-    let current = m.xiaoju.last();
-    GateCtx {
-        player_a: m.player_a,
-        player_b: m.player_b,
-        order_a: m.order_a.clone(),
-        order_b: m.order_b.clone(),
-        state: m.state,
-        current_xiaoju_index: current.map(|x| x.index),
-        current_xiaoju_decided: current.map(|x| x.decided).unwrap_or(false),
-        tiebreak_problem: round_def.tiebreak.get(m.tiebreak_index).copied(),
-    }
-}
-
-/// Core decision logic for the `before_submission` hook. Exercised directly
-/// by tests via `Host::mock()`; the thin `check_submission` wrapper below
-/// adapts it to the WASM ABI.
-///
-/// Resolves `event.problem_id` to a round the same way `visibility.rs`
-/// resolves a problem-visibility query: scan `Setup.rounds` for the round
-/// whose group or 附加赛 list contains it, then find `event.user_id`'s one
-/// match in that round. A missing setup, an unresolvable round, or no match
-/// for this viewer all reject as `NOT_IN_MATCH` -- there is no "fail open"
-/// case for a submission gate, unlike visibility's "no opinion" `Allow`
-/// default: a gate that cannot positively confirm the four conditions must
-/// not let the submission through.
 fn resolve_rejection(
     host: &Host,
     event: &BeforeSubmissionEvent,
@@ -227,12 +135,11 @@ fn resolve_rejection(
         .snapshot(&state_key)?
         .ok_or_else(|| SdkError::Other("match disappeared during submission".into()))?;
     let m: MatchState = serde_json::from_str(&snapshot.value)?;
-    if m.state != MatchPhase::InProgress && m.state != MatchPhase::Tiebreak {
+    if m.phase != Phase::Playing {
         return Ok(Err(Rejection::match_not_started()));
     }
 
-    let ctx = gate_ctx_from_match(&m, &round_def);
-    if let Err(rejection) = check(&ctx, event.user_id, event.problem_id) {
+    if let Err(rejection) = check(&m, &round_def, event.user_id, event.problem_id) {
         return Ok(Err(rejection));
     }
     let feedback = crate::feedback::player_feedback(
@@ -341,29 +248,30 @@ pub fn check_submission(input: String) -> extism_pdk::FnResult<String> {
 mod tests {
     use super::*;
 
-    fn gate_in_progress_at_xiaoju(index: u8, order_a: Vec<i32>) -> GateCtx {
-        GateCtx {
-            player_a: 10,
-            player_b: 20,
-            order_a: Some(order_a),
-            order_b: Some(vec![203, 201, 202]),
-            state: MatchPhase::InProgress,
-            current_xiaoju_index: Some(index),
-            current_xiaoju_decided: false,
-            tiebreak_problem: None,
+    fn round_def() -> RoundDef {
+        RoundDef {
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
+            tiebreak: vec![319],
+            ..Default::default()
         }
     }
 
-    fn gate_with_decided_xiaoju(index: u8) -> GateCtx {
-        GateCtx {
+    fn match_at_xiaoju(index: u8, decided: bool) -> MatchState {
+        MatchState {
             player_a: 10,
             player_b: 20,
+            group_a: vec![101, 102, 103],
+            group_b: vec![201, 202, 203],
             order_a: Some(vec![103, 101, 102]),
             order_b: Some(vec![203, 201, 202]),
-            state: MatchPhase::InProgress,
-            current_xiaoju_index: Some(index),
-            current_xiaoju_decided: true,
-            tiebreak_problem: None,
+            phase: Phase::Playing,
+            xiaoju: vec![crate::model::XiaojuState {
+                index,
+                decided,
+                ..Default::default()
+            }],
+            ..Default::default()
         }
     }
 
@@ -428,33 +336,50 @@ mod tests {
 
     #[test]
     fn rejects_a_submission_to_a_problem_that_is_not_the_current_xiaoju_problem() {
-        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
-        assert_eq!(check(&ctx, 10, 101).unwrap_err().code, "NOT_YOUR_PROBLEM");
+        let m = match_at_xiaoju(0, false);
+        assert_eq!(
+            check(&m, &round_def(), 10, 101).unwrap_err().code,
+            "NOT_YOUR_PROBLEM"
+        );
     }
 
     #[test]
     fn rejects_a_submission_to_the_opponents_problem() {
         // Visibility already denies reading it, but the gate must not rely
         // on that: a player could still POST the id directly.
-        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
-        assert_eq!(check(&ctx, 10, 201).unwrap_err().code, "NOT_YOUR_PROBLEM");
+        let m = match_at_xiaoju(0, false);
+        assert_eq!(
+            check(&m, &round_def(), 10, 201).unwrap_err().code,
+            "NOT_YOUR_PROBLEM"
+        );
     }
 
     #[test]
     fn rejects_a_submission_after_the_xiaoju_is_decided() {
-        let ctx = gate_with_decided_xiaoju(0);
-        assert_eq!(check(&ctx, 10, 103).unwrap_err().code, "XIAOJU_CLOSED");
+        let m = match_at_xiaoju(0, true);
+        assert_eq!(
+            check(&m, &round_def(), 10, 103).unwrap_err().code,
+            "XIAOJU_CLOSED"
+        );
     }
 
     #[test]
     fn accepts_the_current_problem_from_the_right_player() {
         // Negative control for the three rejections above.
-        let ctx = gate_in_progress_at_xiaoju(0, vec![103, 101, 102]);
-        assert!(check(&ctx, 10, 103).is_ok());
+        let m = match_at_xiaoju(0, false);
+        assert!(check(&m, &round_def(), 10, 103).is_ok());
     }
 
-    // -- Host wiring: `check_submission_response`, real storage, no hand-
-    // built `GateCtx`. --
+    #[test]
+    fn both_players_may_submit_only_the_shared_problem_in_a_tiebreak() {
+        let m = match_at_xiaoju(3, false);
+        for player in [10, 20] {
+            assert!(check(&m, &round_def(), player, 319).is_ok());
+            assert!(check(&m, &round_def(), player, 103).is_err());
+        }
+    }
+
+    // -- Host wiring: `check_submission_response` with real storage. --
 
     fn seeded_setup() -> crate::model::Setup {
         crate::model::Setup {
@@ -483,7 +408,7 @@ mod tests {
     fn seed_match(
         host: &Host,
         contest_id: i32,
-        state: MatchPhase,
+        phase: Phase,
         xiaoju: Vec<crate::model::XiaojuState>,
     ) {
         host.storage
@@ -505,7 +430,7 @@ mod tests {
                     order_a: Some(vec![103, 101, 102]),
                     order_b: Some(vec![203, 201, 202]),
                     xiaoju,
-                    state,
+                    phase,
                     ..Default::default()
                 })
                 .unwrap()
@@ -546,7 +471,7 @@ mod tests {
     #[test]
     fn check_submission_response_accepts_the_right_players_current_problem() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        seed_match(&host, 7, Phase::Playing, open_xiaoju(0, false));
         host.db.queue_query_result(serde_json::json!([]));
         host.db
             .queue_query_result(serde_json::json!([{"now_ms": 0.0, "end_ms": null}]));
@@ -568,7 +493,7 @@ mod tests {
             let mut games = open_xiaoju(0, false);
             games[0].opened_at_ms = 1_000;
             games[0].base_deadline_ms = 5_000;
-            seed_match(&host, 7, MatchPhase::InProgress, games);
+            seed_match(&host, 7, Phase::Playing, games);
             host.db.queue_query_result(serde_json::json!([]));
             host.db
                 .queue_query_result(serde_json::json!([{ "now_ms": now }]));
@@ -587,7 +512,7 @@ mod tests {
     #[test]
     fn check_submission_response_rejects_a_player_with_no_match_this_round_as_not_in_match() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        seed_match(&host, 7, Phase::Playing, open_xiaoju(0, false));
         // 999 is not player_a (10) or player_b (20) of the seeded match.
         let resp = check_submission_response(&host, &event(999, 103, Some(7))).unwrap();
         assert_eq!(rejection_code(resp), "NOT_IN_MATCH");
@@ -596,7 +521,7 @@ mod tests {
     #[test]
     fn check_submission_response_rejects_before_the_match_has_started() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::Ordering, vec![]);
+        seed_match(&host, 7, Phase::Ordering, vec![]);
         let resp = check_submission_response(&host, &event(10, 103, Some(7))).unwrap();
         assert_eq!(rejection_code(resp), "MATCH_NOT_STARTED");
     }
@@ -604,7 +529,7 @@ mod tests {
     #[test]
     fn check_submission_response_rejects_a_problem_not_in_the_bracket_at_all() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        seed_match(&host, 7, Phase::Playing, open_xiaoju(0, false));
         let resp = check_submission_response(&host, &event(10, 999, Some(7))).unwrap();
         assert_eq!(rejection_code(resp), "NOT_YOUR_PROBLEM");
     }
@@ -623,7 +548,7 @@ mod tests {
     #[test]
     fn unfinished_feedback_blocks_the_next_submission() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        seed_match(&host, 7, Phase::Playing, open_xiaoju(0, false));
         host.db.queue_query_result(serde_json::json!([{
             "penalty_count": 0, "pending_submission_id": 42, "effective_at_us": 1_000_000
         }]));
@@ -634,10 +559,10 @@ mod tests {
     #[test]
     fn admission_penalties_apply_only_to_regular_games() {
         for (state, index, problem, seconds, expected) in [
-            (MatchPhase::InProgress, 0, 103, 7, 7),
-            (MatchPhase::InProgress, 0, 103, 0, 0),
-            (MatchPhase::Tiebreak, 3, 319, 20, 0),
-            (MatchPhase::Tiebreak, 3, 319, 7, 0),
+            (Phase::Playing, 0, 103, 7, 7),
+            (Phase::Playing, 0, 103, 0, 0),
+            (Phase::Playing, 3, 319, 20, 0),
+            (Phase::Playing, 3, 319, 7, 0),
         ] {
             let host = Host::mock();
             seed_match(&host, 7, state, open_xiaoju(index, false));
@@ -664,7 +589,7 @@ mod tests {
     #[test]
     fn a_score_penalty_does_not_shorten_the_submission_window() {
         let host = Host::mock();
-        seed_match(&host, 7, MatchPhase::InProgress, open_xiaoju(0, false));
+        seed_match(&host, 7, Phase::Playing, open_xiaoju(0, false));
         host.db.queue_query_result(serde_json::json!([{
             "penalty_count": 1, "pending_submission_id": null, "effective_at_us": null
         }]));

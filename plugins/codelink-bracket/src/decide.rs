@@ -1,20 +1,15 @@
-//! The bracket's state machine: deciding one 小局, then a whole match.
+//! Scoring: deciding one 小局 from its submissions, and what a match's
+//! settled games mean for the match.
 //!
-//! Two idempotent functions (quoted from
-//! `docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`):
-//!
-//! > Idempotency is load-bearing, not incidental: timer delivery is
-//! > at-least-once, and three independent triggers converge here.
-//!
-//! Judging completion, a 小局 deadline timer, and a staff force-decide can
-//! all land on the same match at unpredictable times and in any order; both
-//! [`decide_xiaoju`] and (once Task 8 adds it) `decide_match` must produce
-//! the SAME answer no matter how many times, or in what order relative to
-//! each other, they are re-driven.
+//! Judging completion, a deadline timer and staff can all re-evaluate the
+//! same match at unpredictable times and in any order, and timer delivery is
+//! at-least-once. [`decide_xiaoju`] therefore records a game's result at most
+//! once and reports the stored result on every later call, and
+//! [`match_outcome`] is a pure reading of the settled games.
 
 use broccoli_server_sdk::prelude::Verdict;
 
-use crate::model::{AdjudicationReason, MatchPhase, MatchState, Setup};
+use crate::model::{GameKind, MatchState, RoundDef};
 
 pub use broccoli_server_sdk::types::SubmissionLifecycle;
 
@@ -122,7 +117,7 @@ pub(crate) fn ac_settlement_at_us(
 /// Outcome of deciding one 小局.
 ///
 /// `Decided { winner: Option<i32> }` is deliberately a DIFFERENT shape from
-/// `MatchOutcome::Decided { winner: i32 }` (Task 8): a 小局 can legitimately
+/// [`MatchOutcome::Won`]: a 小局 can legitimately
 /// end with NEITHER player scoring ("如果在规定时间内双方均未能通过当前题
 /// 目，则该小局双方均不得分"), which this expresses as `Decided { winner:
 /// None }`. A match, by contrast, always produces a winner or reaches
@@ -195,9 +190,9 @@ pub(crate) fn decide_game_at_cutoff(
     penalty_seconds: i64,
 ) -> XiaojuOutcome {
     let Some(current) = m.xiaoju.last() else {
-        // Nothing open to decide. Callers (Task 9's `advance`) are expected
-        // to only call this while a 小局 is open, but there is no unsafe
-        // state to fall into here, so fail quiet rather than panic.
+        // Nothing open to decide. Callers only decide while a 小局 is open,
+        // but there is no unsafe state to fall into here, so fail quiet
+        // rather than panic.
         return XiaojuOutcome::NotYet;
     };
     if current.decided {
@@ -310,137 +305,66 @@ pub(crate) fn decide_game_at_cutoff(
     XiaojuOutcome::Decided { winner }
 }
 
-/// Outcome of deciding a whole match: the regular 小局, and any 附加赛
-/// (tiebreak) that follows a level score.
+/// What a match's settled games mean for the match.
 ///
-/// `Decided { winner: i32 }` is deliberately a DIFFERENT shape from
+/// `Won(i32)` is deliberately a DIFFERENT shape from
 /// [`XiaojuOutcome::Decided`]'s `winner: Option<i32>`: a MATCH always ends
-/// with a winner or escalates to [`MatchOutcome::NeedsAdjudication`], never
-/// scorelessly -- even though an individual 小局 or 附加赛 attempt can be.
-/// See [`XiaojuOutcome`]'s doc comment for the same warning from the other
-/// side; do not "harmonise" these two shapes.
+/// with a winner or goes to staff, never scorelessly -- even though an
+/// individual 小局 or 附加赛 attempt can. Do not "harmonise" these two shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchOutcome {
-    NotYet,
-    Decided { winner: i32 },
-    OpenTiebreak { problem_id: i32 },
-    NeedsAdjudication,
+    /// Another game follows: the next regular game, or the next tiebreak
+    /// attempt (see [`MatchState::game_kind`] for which).
+    NextGame,
+    Won(i32),
+    /// Every tiebreak problem ended scoreless.
+    TiebreaksExhausted,
 }
 
-/// Decide a match from its accumulated 小局 state.
+/// Read a match's outcome from its games, or `None` while a game is still
+/// unsettled (or none has been played).
 ///
-/// Reaching the stage's FT target ends a match after the current game is
-/// settled. Otherwise, after the BO game cap, higher `score_a`/`score_b` wins.
-/// A LEVEL score
-/// -- **including 0-0** -- opens the round's first 附加赛 problem:
-/// `if score_a == score_b && score_a > 0` is a real bug shape here, not a
-/// hypothetical one, because it silently leaves a 0-0 match undecided
-/// forever instead of sending it to a tiebreak (see
-/// `a_zero_zero_match_also_goes_to_a_tiebreak` below).
+/// Reaching the stage's FT target ends a match once the current game is
+/// settled. Otherwise, after the BO game cap, the higher score wins. A LEVEL
+/// score -- **including 0-0** -- goes to the round's first 附加赛 problem:
+/// `if score_a == score_b && score_a > 0` would silently leave a 0-0 match
+/// undecided forever instead (see `a_zero_zero_match_also_goes_to_a_tiebreak`).
 ///
-/// A 附加赛 attempt that ends scorelessly does not replay the same problem;
-/// it opens the NEXT problem in `RoundDef::tiebreak`'s order (see that
-/// field's doc comment for why). Exhausting the list without a decision
-/// reaches [`MatchOutcome::NeedsAdjudication`] rather than looping forever
-/// waiting for a 附加赛 problem that does not exist.
-///
-/// Idempotent for the same reason [`decide_xiaoju`] is: a match already
-/// `Decided` or `NeedsAdjudication` returns its stored outcome without
-/// touching state again, since judging completion, a timer, and a staff
-/// force-decide can all call this redundantly.
-pub fn decide_match(m: &mut MatchState, setup: &Setup) -> MatchOutcome {
-    match m.state {
-        MatchPhase::Decided => {
-            return MatchOutcome::Decided {
-                // `m.winner` is always `Some` once `m.state == Decided` --
-                // this function is the only writer of both, together.
-                winner: m.winner.unwrap_or(m.player_a),
-            };
-        }
-        MatchPhase::NeedsAdjudication => return MatchOutcome::NeedsAdjudication,
-        _ => {}
+/// A scoreless 附加赛 attempt does not replay the same problem; the next
+/// attempt uses the NEXT problem in `RoundDef::tiebreak`'s order (see that
+/// field's doc comment for why). Exhausting the list without a decision is
+/// [`MatchOutcome::TiebreaksExhausted`] rather than a wait for a 附加赛
+/// problem that does not exist.
+pub fn match_outcome(m: &MatchState, round_def: &RoundDef) -> Option<MatchOutcome> {
+    let last = m.xiaoju.last()?;
+    if m.xiaoju.iter().any(|game| !game.decided) {
+        return None;
     }
-
-    let Some(round_def) = setup.round_for_match(m.round, m.pos) else {
-        // No round definition to find 附加赛 problems in -- cannot safely
-        // proceed. Escalate rather than guess or panic.
-        m.state = MatchPhase::NeedsAdjudication;
-        m.adjudication_reason = Some(AdjudicationReason::SetupMissing);
-        return MatchOutcome::NeedsAdjudication;
-    };
-
-    if m.state == MatchPhase::Tiebreak {
-        let Some(current) = m.xiaoju.last() else {
-            return MatchOutcome::NotYet;
-        };
-        let decided = current.decided;
-        let tiebreak_winner = current.winner;
-        if !decided {
-            return MatchOutcome::NotYet;
-        }
-        return match tiebreak_winner {
-            Some(winner) => {
-                m.state = MatchPhase::Decided;
-                m.winner = Some(winner);
-                MatchOutcome::Decided { winner }
-            }
-            None => {
-                let next_index = m.tiebreak_index + 1;
-                match round_def.tiebreak.get(next_index) {
-                    Some(&problem_id) => {
-                        m.tiebreak_index = next_index;
-                        MatchOutcome::OpenTiebreak { problem_id }
-                    }
-                    None => {
-                        m.state = MatchPhase::NeedsAdjudication;
-                        m.adjudication_reason = Some(AdjudicationReason::TiebreakExhausted);
-                        MatchOutcome::NeedsAdjudication
-                    }
-                }
-            }
-        };
-    }
-
-    // Only settled games can trigger FT. The caller may retry while a game
-    // is still open, and that must never skip judging or create a winner.
-    if m.xiaoju.is_empty() || m.xiaoju.iter().any(|x| !x.decided) {
-        return MatchOutcome::NotYet;
+    if let GameKind::Tiebreak { attempt } = m.game_kind(last.index) {
+        return Some(match last.winner {
+            Some(winner) => MatchOutcome::Won(winner),
+            None if attempt + 1 < round_def.tiebreak.len() => MatchOutcome::NextGame,
+            None => MatchOutcome::TiebreaksExhausted,
+        });
     }
     let target_reached = usize::from(m.score_a.max(m.score_b)) >= round_def.win_target();
     if !target_reached && m.xiaoju.len() < m.group_a.len() {
-        return MatchOutcome::NotYet;
+        return Some(MatchOutcome::NextGame);
     }
-
-    match m.score_a.cmp(&m.score_b) {
-        std::cmp::Ordering::Greater => {
-            m.state = MatchPhase::Decided;
-            m.winner = Some(m.player_a);
-            MatchOutcome::Decided { winner: m.player_a }
+    Some(match m.score_a.cmp(&m.score_b) {
+        std::cmp::Ordering::Greater => MatchOutcome::Won(m.player_a),
+        std::cmp::Ordering::Less => MatchOutcome::Won(m.player_b),
+        std::cmp::Ordering::Equal if round_def.tiebreak.is_empty() => {
+            MatchOutcome::TiebreaksExhausted
         }
-        std::cmp::Ordering::Less => {
-            m.state = MatchPhase::Decided;
-            m.winner = Some(m.player_b);
-            MatchOutcome::Decided { winner: m.player_b }
-        }
-        std::cmp::Ordering::Equal => match round_def.tiebreak.first() {
-            Some(&problem_id) => {
-                m.state = MatchPhase::Tiebreak;
-                m.tiebreak_index = 0;
-                MatchOutcome::OpenTiebreak { problem_id }
-            }
-            None => {
-                m.state = MatchPhase::NeedsAdjudication;
-                m.adjudication_reason = Some(AdjudicationReason::TiebreakExhausted);
-                MatchOutcome::NeedsAdjudication
-            }
-        },
-    }
+        std::cmp::Ordering::Equal => MatchOutcome::NextGame,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MatchPhase, RoundDef, XiaojuState};
+    use crate::model::{Phase, Setup, XiaojuState};
 
     fn match_in_progress_at_xiaoju(index: u8) -> MatchState {
         MatchState {
@@ -460,7 +384,7 @@ mod tests {
                 decided: false,
                 ..Default::default()
             }],
-            state: MatchPhase::InProgress,
+            phase: Phase::Playing,
             ..Default::default()
         }
     }
@@ -600,7 +524,6 @@ mod tests {
     fn a_tiebreak_does_not_charge_the_regular_games_allowance() {
         let mut m = game_with_extra_time();
         m.xiaoju[0].index = 3;
-        m.state = MatchPhase::Tiebreak;
         decide_xiaoju(&mut m, &[], 3_000, 20);
         assert_eq!(m.extra_time_remaining_ms, 1_000);
         assert_eq!(m.xiaoju[0].extra_time_used_ms, 0);
@@ -814,7 +737,6 @@ mod tests {
         assert_eq!(ac_settlement_at_us(&m, &subs, &ac, 20), 390_000_000);
         assert_eq!(ac_settlement_at_us(&m, &subs, &ac, 0), 410_000_000);
         let mut tiebreak = m;
-        tiebreak.state = MatchPhase::Tiebreak;
         tiebreak.xiaoju[0].index = 3;
         assert_eq!(ac_settlement_at_us(&tiebreak, &subs, &ac, 20), 410_000_000);
     }
@@ -1214,10 +1136,9 @@ mod tests {
         }
     }
 
-    /// A match that has finished its 3 regular 小局 with the given winners
-    /// (`None` = that 小局 scored nobody), still in `InProgress` -- exactly
-    /// the state `decide_match` is called in right after the 3rd 小局's
-    /// `decide_xiaoju` call returns `Decided`.
+    /// A match whose regular 小局 so far ended with the given winners (`None`
+    /// = that 小局 scored nobody), as `match_outcome` reads it right after
+    /// `decide_xiaoju` settles the last of them.
     fn match_after_xiaoju(winners: &[Option<i32>]) -> MatchState {
         let mut score_a = 0u8;
         let mut score_b = 0u8;
@@ -1252,87 +1173,35 @@ mod tests {
             xiaoju,
             score_a,
             score_b,
-            state: MatchPhase::InProgress,
-            winner: None,
-            tiebreak_index: 0,
-            decided_at_ms: 0,
-            awaiting_submission_id: None,
-            adjudication_reason: None,
-            game_durations: None,
+            phase: Phase::Playing,
             ..Default::default()
         }
     }
 
-    /// A match already in `Tiebreak`, whose 附加赛 attempt at
-    /// `tiebreak_index` has been decided scorelessly (both regular 小局
-    /// finished level 1-1, then this 附加赛 attempt scored nobody too).
-    fn match_with_scoreless_tiebreak(tiebreak_index: usize) -> MatchState {
-        MatchState {
-            round: 1,
-            pos: 0,
-            player_a: 10,
-            player_b: 20,
-            group_a: vec![101, 102, 103],
-            group_b: vec![201, 202, 203],
-            order_a: Some(vec![103, 101, 102]),
-            order_b: Some(vec![203, 201, 202]),
-            xiaoju: vec![
-                XiaojuState {
-                    index: 0,
-                    opened_at_ms: 0,
-                    deadline_ms: i64::MAX,
-                    winner: Some(10),
-                    decided: true,
-                    ..Default::default()
-                },
-                XiaojuState {
-                    index: 1,
-                    opened_at_ms: 0,
-                    deadline_ms: i64::MAX,
-                    winner: Some(20),
-                    decided: true,
-                    ..Default::default()
-                },
-                XiaojuState {
-                    index: 2,
-                    opened_at_ms: 0,
-                    deadline_ms: i64::MAX,
-                    winner: None,
-                    decided: true,
-                    ..Default::default()
-                },
-                XiaojuState {
-                    index: 3 + tiebreak_index as u8,
-                    opened_at_ms: 0,
-                    deadline_ms: i64::MAX,
-                    winner: None,
-                    decided: true,
-                    ..Default::default()
-                },
-            ],
-            score_a: 1,
-            score_b: 1,
-            state: MatchPhase::Tiebreak,
-            winner: None,
-            tiebreak_index,
-            decided_at_ms: 0,
-            awaiting_submission_id: None,
-            adjudication_reason: None,
-            game_durations: None,
-            ..Default::default()
+    /// A match whose regular games finished level 1-1 and whose first
+    /// `attempts` 附加赛 attempts all scored nobody.
+    fn match_with_scoreless_tiebreaks(attempts: usize) -> MatchState {
+        let mut m = match_after_xiaoju(&[Some(10), Some(20), None]);
+        for _ in 0..attempts {
+            m.xiaoju.push(XiaojuState {
+                index: m.xiaoju.len() as u8,
+                deadline_ms: i64::MAX,
+                decided: true,
+                ..Default::default()
+            });
         }
+        m
+    }
+
+    fn outcome(m: &MatchState, setup: &Setup) -> Option<MatchOutcome> {
+        match_outcome(m, &setup.rounds[0])
     }
 
     #[test]
     fn two_zero_finishes_bo3_ft2_for_either_player_without_a_third_game() {
         for winner in [10, 20] {
-            let mut m = match_after_xiaoju(&[Some(winner), Some(winner)]);
-            let outcome = MatchOutcome::Decided { winner };
-            assert_eq!(decide_match(&mut m, &setup()), outcome);
-            assert_eq!(m.xiaoju.len(), 2);
-            assert_eq!(m.state, MatchPhase::Decided);
-            assert_eq!(m.winner, Some(winner));
-            assert_eq!(decide_match(&mut m, &setup()), outcome);
+            let m = match_after_xiaoju(&[Some(winner), Some(winner)]);
+            assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::Won(winner)));
         }
     }
 
@@ -1347,12 +1216,11 @@ mod tests {
             m.group_a = config.rounds[0].group_a.clone();
             m.group_b = config.rounds[0].group_b.clone();
             let expected = if wins == 3 {
-                MatchOutcome::Decided { winner: 10 }
+                MatchOutcome::Won(10)
             } else {
-                MatchOutcome::NotYet
+                MatchOutcome::NextGame
             };
-            assert_eq!(decide_match(&mut m, &config), expected);
-            assert_eq!(m.xiaoju.len(), wins);
+            assert_eq!(outcome(&m, &config), Some(expected));
         }
     }
 
@@ -1360,108 +1228,80 @@ mod tests {
     fn ft_is_independent_of_bo_and_can_preserve_the_play_all_rule() {
         let mut config = setup();
         config.rounds[0].wins_to_advance = Some(1);
-        let mut m = match_after_xiaoju(&[Some(20)]);
-        assert_eq!(
-            decide_match(&mut m, &config),
-            MatchOutcome::Decided { winner: 20 }
-        );
+        let m = match_after_xiaoju(&[Some(20)]);
+        assert_eq!(outcome(&m, &config), Some(MatchOutcome::Won(20)));
         config.rounds[0].wins_to_advance = Some(3);
-        let mut m = match_after_xiaoju(&[Some(10), Some(10)]);
-        assert_eq!(decide_match(&mut m, &config), MatchOutcome::NotYet);
+        let m = match_after_xiaoju(&[Some(10), Some(10)]);
+        assert_eq!(outcome(&m, &config), Some(MatchOutcome::NextGame));
     }
 
     #[test]
     fn scoreless_games_use_the_bo_cap_without_counting_toward_ft() {
         let mut m = match_after_xiaoju(&[Some(10), None]);
-        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::NextGame));
         m.xiaoju.push(XiaojuState {
             index: 2,
             decided: true,
             ..Default::default()
         });
-        assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::Decided { winner: 10 }
-        );
-        assert_eq!(m.score_a, 1);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::Won(10)));
     }
 
     #[test]
     fn an_unsettled_game_cannot_trigger_ft() {
         let mut m = match_after_xiaoju(&[Some(10), Some(10)]);
         m.xiaoju.last_mut().unwrap().decided = false;
-        assert_eq!(decide_match(&mut m, &setup()), MatchOutcome::NotYet);
+        assert_eq!(outcome(&m, &setup()), None);
     }
 
     #[test]
     fn higher_score_after_three_xiaoju_wins() {
-        let mut m = match_after_xiaoju(&[Some(10), Some(20), Some(10)]); // 2-1
-        assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::Decided { winner: 10 }
-        );
+        let m = match_after_xiaoju(&[Some(10), Some(20), Some(10)]); // 2-1
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::Won(10)));
     }
 
     #[test]
     fn a_scoreless_xiaoju_counts_for_neither_side() {
         // 2-0 with one 小局 scoring nobody still decides the match.
-        let mut m = match_after_xiaoju(&[Some(10), None, Some(10)]);
-        assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::Decided { winner: 10 }
-        );
+        let m = match_after_xiaoju(&[Some(10), None, Some(10)]);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::Won(10)));
     }
 
     #[test]
-    fn a_level_score_opens_the_first_tiebreak_problem() {
-        let mut m = match_after_xiaoju(&[Some(10), Some(20), None]); // 1-1
-        assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::OpenTiebreak {
-                problem_id: setup().rounds[0].tiebreak[0]
-            }
-        );
+    fn a_level_score_continues_with_the_first_tiebreak_problem() {
+        let m = match_after_xiaoju(&[Some(10), Some(20), None]); // 1-1
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::NextGame));
+        assert_eq!(m.game_kind(3), GameKind::Tiebreak { attempt: 0 });
     }
 
     #[test]
     fn a_zero_zero_match_also_goes_to_a_tiebreak() {
         // 0-0 is level too - an `if score_a == score_b && score_a > 0` guard
         // would miss it and leave the match undecided forever.
-        let mut m = match_after_xiaoju(&[None, None, None]);
-        assert!(matches!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::OpenTiebreak { .. }
-        ));
+        let m = match_after_xiaoju(&[None, None, None]);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::NextGame));
     }
 
     #[test]
-    fn a_scoreless_tiebreak_opens_the_next_tiebreak_problem() {
-        let mut m = match_with_scoreless_tiebreak(0);
-        assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::OpenTiebreak {
-                problem_id: setup().rounds[0].tiebreak[1]
-            }
-        );
+    fn a_scoreless_tiebreak_continues_with_the_next_tiebreak_problem() {
+        let m = match_with_scoreless_tiebreaks(1);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::NextGame));
+        assert_eq!(m.game_kind(4), GameKind::Tiebreak { attempt: 1 });
+    }
+
+    #[test]
+    fn a_tiebreak_winner_wins_the_match() {
+        let mut m = match_with_scoreless_tiebreaks(1);
+        m.xiaoju.last_mut().unwrap().winner = Some(20);
+        assert_eq!(outcome(&m, &setup()), Some(MatchOutcome::Won(20)));
     }
 
     #[test]
     fn exhausting_the_tiebreak_list_needs_adjudication_rather_than_hanging() {
-        let mut m = match_with_scoreless_tiebreak(setup().rounds[0].tiebreak.len() - 1);
+        let m = match_with_scoreless_tiebreaks(setup().rounds[0].tiebreak.len());
         assert_eq!(
-            decide_match(&mut m, &setup()),
-            MatchOutcome::NeedsAdjudication
+            outcome(&m, &setup()),
+            Some(MatchOutcome::TiebreaksExhausted)
         );
-        assert_eq!(
-            m.adjudication_reason,
-            Some(AdjudicationReason::TiebreakExhausted)
-        );
-    }
-
-    #[test]
-    fn deciding_a_decided_match_is_a_no_op() {
-        let mut m = match_after_xiaoju(&[Some(10), Some(10), Some(10)]);
-        let first = decide_match(&mut m, &setup());
-        assert_eq!(decide_match(&mut m, &setup()), first);
     }
 }
