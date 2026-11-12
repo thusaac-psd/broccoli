@@ -7,6 +7,7 @@ use clap::Args;
 use console::style;
 
 use broccoli_cli_core::api::auth::DeviceCodeResponse;
+use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, PollResponse, persist_session};
 
 #[derive(Args)]
@@ -55,6 +56,7 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("\n  {e}. Retrying...");
+                poll.on_network_error();
                 continue;
             }
         };
@@ -93,8 +95,10 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
     bail!("Timed out waiting for authorization. Run `broccoli-dev login` again.");
 }
 
-/// The shortest wait between polls, used when the server asks for none.
-const MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// RFC 8628 3.2: the interval to use when the server gives none.
+const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
+/// Longest wait between polls while the server cannot be reached.
+const MAX_INTERVAL: Duration = Duration::from_secs(60);
 /// RFC 8628 3.5: each `slow_down` raises the interval by five seconds for
 /// every later poll.
 const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
@@ -103,6 +107,8 @@ const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
 struct DevicePoll {
     interval: Duration,
     deadline: Instant,
+    /// Consecutive polls that could not reach the server.
+    network_errors: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -116,19 +122,34 @@ enum Step {
 
 impl DevicePoll {
     fn new(code: &DeviceCodeResponse, now: Instant) -> Self {
+        let interval = match code.interval {
+            0 => DEFAULT_INTERVAL,
+            secs => Duration::from_secs(secs),
+        };
         Self {
-            interval: Duration::from_secs(code.interval).max(MIN_INTERVAL),
+            interval,
             deadline: now + Duration::from_secs(code.expires_in),
+            network_errors: 0,
         }
     }
 
     /// How long to wait before the next poll, or `None` once the code has
     /// expired.
     fn next_wait(&self, now: Instant) -> Option<Duration> {
-        (now + self.interval <= self.deadline).then_some(self.interval)
+        let wait = match self.network_errors {
+            0 => self.interval,
+            n => backoff::exponential(self.interval, n, MAX_INTERVAL.max(self.interval)),
+        };
+        (now + wait <= self.deadline).then_some(wait)
+    }
+
+    /// RFC 8628 3.5: back off exponentially while the server cannot be reached.
+    fn on_network_error(&mut self) {
+        self.network_errors += 1;
     }
 
     fn on_response(&mut self, response: PollResponse) -> Step {
+        self.network_errors = 0;
         if let Some(token) = response.token {
             return Step::Authorized(token);
         }
@@ -182,15 +203,27 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_interval_polls_at_the_minimum_until_the_code_expires() {
+    fn a_zero_interval_polls_at_the_default_until_the_code_expires() {
         let t = Instant::now();
-        let poll = DevicePoll::new(&code(0, 3), t);
-        assert_eq!(poll.next_wait(t), Some(MIN_INTERVAL));
+        let poll = DevicePoll::new(&code(0, 12), t);
+        assert_eq!(poll.next_wait(t), Some(DEFAULT_INTERVAL));
         assert_eq!(
-            poll.next_wait(t + Duration::from_secs(2)),
-            Some(MIN_INTERVAL)
+            poll.next_wait(t + Duration::from_secs(7)),
+            Some(DEFAULT_INTERVAL)
         );
-        assert_eq!(poll.next_wait(t + Duration::from_millis(2001)), None);
+        assert_eq!(poll.next_wait(t + Duration::from_millis(7001)), None);
+    }
+
+    #[test]
+    fn network_errors_back_off_until_the_server_answers() {
+        let t = Instant::now();
+        let mut poll = DevicePoll::new(&code(5, 900), t);
+        poll.on_network_error();
+        assert_eq!(poll.next_wait(t), Some(Duration::from_secs(10)));
+        poll.on_network_error();
+        assert_eq!(poll.next_wait(t), Some(Duration::from_secs(20)));
+        poll.on_response(error("authorization_pending"));
+        assert_eq!(poll.next_wait(t), Some(Duration::from_secs(5)));
     }
 
     #[test]
