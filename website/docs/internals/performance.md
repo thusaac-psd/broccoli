@@ -86,6 +86,11 @@ on ports 9100 and up, all on this host. `--fresh-db` recreates the database for
 each topology. `--max-test-cases-per-point` caps the submissions in one point
 so that 100-case points stay short.
 
+Clients poll every `--poll-interval-ms` (50) at concurrency 1, where the point
+measures latency, and every `--load-poll-interval-ms` (1000) above it. At 64
+clients a 50 ms poll is 1280 requests per second, about 9 statements each,
+which then dominates server and database CPU and hides the judging path.
+
 To prove a bottleneck, move one knob and rerun the same point. Settings pass
 through as environment variables:
 
