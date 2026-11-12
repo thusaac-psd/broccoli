@@ -66,7 +66,7 @@ pub struct Model {
     pub leased_at: Option<DateTimeUtc>,
     /// Times this judgement was requeued after its owner was lost or it got
     /// stuck; the budget is `max_dispatch_retries`.
-    #[sea_orm(column_name = "retry_count", default_value = 0)]
+    #[sea_orm(default_value = 0)]
     pub dispatch_retries: i32,
 
     pub created_at: DateTimeUtc,

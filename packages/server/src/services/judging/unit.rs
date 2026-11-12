@@ -359,8 +359,10 @@ async fn pick(
         None => String::new(),
     };
     let columns = match unit {
-        Unit::Judgement => "u.id, u.submission_id, u.is_current, u.retry_count",
-        Unit::CodeRun => "u.id, NULL::int AS submission_id, FALSE AS is_current, u.retry_count",
+        Unit::Judgement => "u.id, u.submission_id, u.is_current, u.dispatch_retries",
+        Unit::CodeRun => {
+            "u.id, NULL::int AS submission_id, FALSE AS is_current, u.dispatch_retries"
+        }
     };
     let rows = txn
         .query_all_raw(b.statement(format!(
@@ -375,7 +377,7 @@ async fn pick(
                 id: r.try_get("", "id")?,
                 submission_id: r.try_get("", "submission_id")?,
                 is_current: r.try_get("", "is_current")?,
-                dispatch_retries: r.try_get("", "retry_count")?,
+                dispatch_retries: r.try_get("", "dispatch_retries")?,
             })
         })
         .collect()
@@ -398,8 +400,8 @@ enum Requeue {
 impl Requeue {
     fn dispatch_retries(self) -> &'static str {
         match self {
-            Requeue::Released => "t.retry_count",
-            Requeue::Abandoned => "t.retry_count + 1",
+            Requeue::Released => "t.dispatch_retries",
+            Requeue::Abandoned => "t.dispatch_retries + 1",
             Requeue::SystemErrorRetry => "0",
         }
     }
@@ -419,7 +421,7 @@ async fn requeue(
     }
     let sets = format!(
         "status = '{queued}', owner_server_id = NULL, lease_heartbeat_at = NULL, \
-         leased_at = NULL, retry_count = {retries}, {cleared}",
+         leased_at = NULL, dispatch_retries = {retries}, {cleared}",
         queued = SubmissionStatus::Queued,
         retries = why.dispatch_retries(),
         cleared = unit.cleared_output_sets(),
@@ -439,7 +441,7 @@ async fn requeue(
             // One allocation per judgement: a submission with several
             // judgements in the batch takes that many consecutive epochs.
             let se_retry = if why == Requeue::SystemErrorRetry {
-                ", retry_count = s.retry_count + 1"
+                ", system_error_retries = s.system_error_retries + 1"
             } else {
                 ""
             };
@@ -704,7 +706,7 @@ pub(crate) async fn retry_system_errors(
         "u.is_current AND u.is_finalized \
          AND {system_error} \
          AND u.error_code IS DISTINCT FROM {refused} \
-         AND s.retry_count < {max} AND {handled}",
+         AND s.system_error_retries < {max} AND {handled}",
         system_error = system_error("u"),
         refused = b.bind(SubmissionDlqErrorCode::PLUGIN_REFUSED),
         max = b.bind(budget.max()),

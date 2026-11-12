@@ -338,7 +338,7 @@ async fn a_spent_dispatch_budget_finalizes_and_dead_letters_once_per_submission(
     let claimed = claim_one(&db, "dead").await;
     exec(
         &db,
-        "UPDATE submission_judgement SET retry_count = 2, \
+        "UPDATE submission_judgement SET dispatch_retries = 2, \
          lease_heartbeat_at = NOW() - INTERVAL '2 minutes'",
     )
     .await;
@@ -449,7 +449,7 @@ async fn a_system_error_is_retried_within_the_submission_budget() {
     let (_pg, db) = crate::test_support::postgres().await;
     let (s, _) = new_submission(&db).await;
     let claimed = claim_one(&db, "srv").await;
-    exec(&db, "UPDATE submission_judgement SET retry_count = 3").await;
+    exec(&db, "UPDATE submission_judgement SET dispatch_retries = 3").await;
     assert!(
         fail_dispatch(
             &db,
@@ -621,7 +621,7 @@ async fn abandon(db: &DatabaseConnection, retries: i32) {
     exec(
         db,
         &format!(
-            "UPDATE submission_judgement SET retry_count = {retries}, status = 'Running', \
+            "UPDATE submission_judgement SET dispatch_retries = {retries}, status = 'Running', \
              is_finalized = FALSE, finalized_at = NULL, owner_server_id = 'dead', \
              lease_heartbeat_at = NOW() - INTERVAL '2 minutes'"
         ),

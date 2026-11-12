@@ -64,7 +64,7 @@ pub struct Model {
 
     /// System-error retries spent since the last rejudge; the budget is
     /// `max_system_error_retries` (see `services::judging::RetryBudget`).
-    #[sea_orm(column_name = "retry_count", default_value = 0)]
+    #[sea_orm(default_value = 0)]
     pub system_error_retries: i32,
 
     pub created_at: DateTimeUtc,

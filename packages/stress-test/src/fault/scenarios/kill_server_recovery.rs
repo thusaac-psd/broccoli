@@ -45,16 +45,17 @@ impl Default for KillServerRecovery {
     }
 }
 
-/// A snapshot of the columns we care about for a submission row. Kept narrow
-/// so the harness can hand-roll the SELECT without depending on the server
-/// crate's SeaORM entities.
+/// A snapshot of the columns we care about for a submission: its status and
+/// the dispatch state of its current judgement. Kept narrow so the harness can
+/// hand-roll the SELECT without depending on the server crate's SeaORM
+/// entities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubmissionRow {
     pub id: i32,
     pub status: String,
     pub owner_server_id: Option<String>,
     pub lease_heartbeat_at: Option<DateTime<Utc>>,
-    pub retry_count: i32,
+    pub dispatch_retries: i32,
 }
 
 /// The outcome of comparing a submission's row before vs. after the kill.
@@ -511,9 +512,11 @@ async fn fetch_rows(pool: &sqlx::PgPool, ids: &[i32]) -> anyhow::Result<Vec<Subm
     }
     let rows = sqlx::query(
         r#"
-        SELECT id, status, owner_server_id, lease_heartbeat_at, retry_count
-        FROM submission
-        WHERE id = ANY($1)
+        SELECT s.id, s.status, j.owner_server_id, j.lease_heartbeat_at,
+               j.dispatch_retries
+        FROM submission s
+        JOIN submission_judgement j ON j.submission_id = s.id AND j.is_current
+        WHERE s.id = ANY($1)
         "#,
     )
     .bind(ids)
@@ -526,7 +529,7 @@ async fn fetch_rows(pool: &sqlx::PgPool, ids: &[i32]) -> anyhow::Result<Vec<Subm
             status: row.try_get("status")?,
             owner_server_id: row.try_get("owner_server_id")?,
             lease_heartbeat_at: row.try_get("lease_heartbeat_at")?,
-            retry_count: row.try_get("retry_count")?,
+            dispatch_retries: row.try_get("dispatch_retries")?,
         });
     }
     Ok(out)
@@ -542,7 +545,7 @@ mod tests {
             status: status.into(),
             owner_server_id: owner.map(Into::into),
             lease_heartbeat_at: None,
-            retry_count: 0,
+            dispatch_retries: 0,
         }
     }
 
