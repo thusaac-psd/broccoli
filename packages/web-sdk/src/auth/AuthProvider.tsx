@@ -8,7 +8,12 @@ import React, {
 
 import { useApiClient } from '@/api/use-api-client';
 import { AuthContext } from '@/auth/auth-context';
-import { nextRefreshInMs, sessionEffects } from '@/auth/session';
+import {
+  hintsSignedIn,
+  nextRefreshInMs,
+  sessionEffects,
+  sessionHint,
+} from '@/auth/session';
 import { useSession } from '@/auth/session-context';
 import type { LoginRequest } from '@/auth/types';
 
@@ -47,7 +52,7 @@ export function AuthProvider({
         const { hint, queries } = sessionEffects(prev, next);
         if (hint !== null) {
           try {
-            localStorage.setItem(sessionStatusKey, String(hint));
+            localStorage.setItem(sessionStatusKey, hint);
           } catch {
             // Storage blocked: the session still works in this tab.
           }
@@ -59,11 +64,17 @@ export function AuthProvider({
   );
 
   useEffect(() => {
-    // Another tab signed out. `signed-out` writes the string 'false' (and a
-    // removal yields null), so anything that is not 'true' is a sign-out.
+    // Another tab signed out (a removed hint counts as one), or signed in as
+    // another user: the shared cookie is theirs now, so renew to switch.
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === sessionStatusKey && event.newValue !== 'true') {
+      if (event.key !== sessionStatusKey) return;
+      if (!hintsSignedIn(event.newValue)) {
         session.dispatch({ type: 'signed-out' });
+        return;
+      }
+      const state = session.getState();
+      if (state.status === 'active' && event.newValue !== sessionHint(state)) {
+        void session.refresh();
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -76,7 +87,7 @@ export function AuthProvider({
     if (session.getState().status !== 'bootstrapping') return;
     let hinted = false;
     try {
-      hinted = localStorage.getItem(sessionStatusKey) === 'true';
+      hinted = hintsSignedIn(localStorage.getItem(sessionStatusKey));
     } catch {
       // No storage, no hint.
     }

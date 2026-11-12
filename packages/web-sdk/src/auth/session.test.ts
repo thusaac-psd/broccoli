@@ -10,6 +10,7 @@ import {
   SESSION_REFRESH_INTERVAL_MS,
   sessionEffects,
   type SessionState,
+  SIGNED_OUT_HINT,
   transition,
 } from './session.ts';
 
@@ -149,12 +150,12 @@ test('a sign-in or sign-out clears cached data and sets the hint for every tab',
     session: login('jwt-1'),
   });
   assert.deepEqual(sessionEffects(INITIAL_SESSION, active), {
-    hint: true,
+    hint: '7',
     queries: 'clear',
   });
   const out = transition(active, { type: 'signed-out' });
   assert.deepEqual(sessionEffects(active, out), {
-    hint: false,
+    hint: SIGNED_OUT_HINT,
     queries: 'clear',
   });
 });
@@ -166,7 +167,7 @@ test('a restored session refetches what ran without a token', () => {
     outcome: refreshed('jwt-1'),
   });
   assert.deepEqual(sessionEffects(INITIAL_SESSION, active), {
-    hint: true,
+    hint: '7',
     queries: 'invalidate',
   });
 });
@@ -228,4 +229,21 @@ test('a request rejected with the current token refreshes it', async () => {
     await session.tokenForRetry(sentAs(session.getState())),
     'jwt-2',
   );
+});
+
+test('a renewal that comes back as another user switches accounts', () => {
+  const alice = transition(INITIAL_SESSION, {
+    type: 'signed-in',
+    session: login('jwt-alice', 7),
+  });
+  const bob = transition(alice, {
+    type: 'refresh-settled',
+    epoch: alice.epoch,
+    outcome: { status: 'refreshed', session: login('jwt-bob', 8) },
+  });
+  assert.notEqual(bob.epoch, alice.epoch);
+  assert.deepEqual(sessionEffects(alice, bob), {
+    hint: '8',
+    queries: 'clear',
+  });
 });

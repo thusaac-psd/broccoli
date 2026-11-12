@@ -11,10 +11,16 @@ import type { User } from '@/auth/types';
 //   full interval after a renewal, sooner (with backoff) while the server is
 //   unreachable.
 //
-// `epoch` counts sign-ins and sign-outs. A refresh records the epoch it
-// started in, and its outcome is dropped if the epoch has moved since: a
-// refresh still in flight when the user signs out can never sign them back
-// in, and one that started before a login cannot replace its session.
+// `epoch` counts sign-ins, sign-outs and account switches (a renewal that
+// comes back as another user, because another tab signed in with the shared
+// cookie). A refresh records the epoch it started in, and its outcome is
+// dropped if the epoch has moved since: a refresh still in flight when the
+// user signs out can never sign them back in, and one that started before a
+// login cannot replace its session.
+//
+// The session hint, shared by every tab through localStorage, holds the
+// signed-in user's id, or `SIGNED_OUT_HINT`. A tab that sees another id
+// renews its own session to pick up the account the cookie now belongs to.
 
 /** Renew the access token (which lives about five minutes) this often. */
 export const SESSION_REFRESH_INTERVAL_MS = 4.5 * 60 * 1000;
@@ -78,7 +84,12 @@ export function transition(
       const { outcome } = event;
       switch (outcome.status) {
         case 'refreshed':
-          return activate(state.epoch, outcome.session);
+          return activate(
+            state.status === 'active' && state.user.id !== outcome.session.id
+              ? state.epoch + 1
+              : state.epoch,
+            outcome.session,
+          );
         case 'rejected':
           return { status: 'signedOut', epoch: state.epoch + 1 };
         case 'unavailable':
@@ -102,13 +113,25 @@ export function nextRefreshInMs(state: SessionState): number | null {
   }
 }
 
+export const SIGNED_OUT_HINT = 'signed-out';
+
+/** The session hint `state` stores for every tab. */
+export function sessionHint(state: SessionState): string {
+  return state.status === 'active' ? String(state.user.id) : SIGNED_OUT_HINT;
+}
+
+/** Whether a stored session hint says someone is signed in. */
+export function hintsSignedIn(hint: string | null): boolean {
+  return hint !== null && hint !== SIGNED_OUT_HINT;
+}
+
 /**
  * What a transition means outside the store. `hint` is the session hint to
  * store (shared with every tab through localStorage), `queries` what happens
  * to cached server data.
  */
 export interface SessionEffects {
-  hint: boolean | null;
+  hint: string | null;
   queries: 'clear' | 'invalidate' | null;
 }
 
@@ -118,11 +141,11 @@ export function sessionEffects(
 ): SessionEffects {
   if (next.epoch !== prev.epoch) {
     // Another account's data, or none: nothing cached may be shown again.
-    return { hint: next.status === 'active', queries: 'clear' };
+    return { hint: sessionHint(next), queries: 'clear' };
   }
   if (prev.status === 'bootstrapping' && next.status === 'active') {
     // Queries that ran before the token was restored got a 401.
-    return { hint: true, queries: 'invalidate' };
+    return { hint: sessionHint(next), queries: 'invalidate' };
   }
   return { hint: null, queries: null };
 }
