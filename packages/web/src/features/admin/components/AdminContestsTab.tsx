@@ -104,6 +104,7 @@ function ProblemPreviewDialog({
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
         <RecordLoader
           key={problemId}
+          allowCached
           queryKey={['problem-preview', problemId]}
           queryFn={async () => {
             const { data, error } = await apiClient.GET('/problems/{id}', {
