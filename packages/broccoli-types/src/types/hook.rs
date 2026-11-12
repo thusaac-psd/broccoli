@@ -85,6 +85,7 @@ mod tests {
     fn admission_response_preserves_the_event_and_encodes_typed_effects() {
         use super::super::*;
         let event = BeforeSubmissionEvent {
+            attempt_id: "attempt-1".into(),
             user_id: 1,
             problem_id: 2,
             contest_id: Some(3),

@@ -527,6 +527,7 @@ mod tests {
 
     fn event(user_id: i32, problem_id: i32, contest_id: Option<i32>) -> BeforeSubmissionEvent {
         BeforeSubmissionEvent {
+            attempt_id: "attempt-1".into(),
             user_id,
             problem_id,
             contest_id,

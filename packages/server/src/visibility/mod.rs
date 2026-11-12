@@ -530,6 +530,7 @@ mod tests {
             problem_id: 1,
             contest_id,
             contest_type: "ioi".into(),
+            attempt_id: None,
             status: SubmissionStatus::Pending,
             verdict: None,
             compile_output: None,

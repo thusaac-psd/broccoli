@@ -25,6 +25,7 @@ fn base_submission(id: i32, now: chrono::DateTime<Utc>) -> submission::Model {
         problem_id: 2,
         contest_id: None,
         contest_type: "ioi".to_string(),
+        attempt_id: None,
         status: SubmissionStatus::Pending,
         verdict: None,
         compile_output: None,

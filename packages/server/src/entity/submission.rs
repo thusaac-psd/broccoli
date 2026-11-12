@@ -20,6 +20,12 @@ pub struct Model {
     #[sea_orm(default_value = "ioi")]
     pub contest_type: String,
 
+    /// The `attempt_id` of the `before_submission` event that admitted this
+    /// submission. Hooks that reserve something per attempt look it up to see
+    /// whether the attempt has committed.
+    #[sea_orm(unique, nullable)]
+    pub attempt_id: Option<Uuid>,
+
     pub status: SubmissionStatus,
     #[sea_orm(column_type = "Text", nullable)]
     pub verdict: Option<Verdict>,

@@ -174,7 +174,9 @@ pub async fn create_submission(
         None => problem.default_contest_type.clone(),
     };
 
+    let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
+        attempt_id: attempt_id.to_string(),
         user_id: auth_user.user_id,
         problem_id,
         contest_id: None,
@@ -208,6 +210,7 @@ pub async fn create_submission(
         problem_id: Set(problem_id),
         contest_id: Set(None),
         contest_type: Set(contest_type),
+        attempt_id: Set(Some(attempt_id)),
         created_at: Set(now),
         ..Default::default()
     };
@@ -805,7 +808,9 @@ pub async fn create_contest_submission(
     let admission_owner = handler
         .submission_admission
         .then_some(handler.plugin_id.as_str());
+    let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
+        attempt_id: attempt_id.to_string(),
         user_id: auth_user.user_id,
         problem_id,
         contest_id: Some(contest_id),
@@ -833,6 +838,7 @@ pub async fn create_contest_submission(
         problem_id: Set(problem_id),
         contest_id: Set(Some(contest_id)),
         contest_type: Set(contest_type),
+        attempt_id: Set(Some(attempt_id)),
         created_at: Set(now),
         ..Default::default()
     };
