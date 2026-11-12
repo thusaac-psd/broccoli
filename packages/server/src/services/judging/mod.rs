@@ -87,7 +87,7 @@ pub(crate) use open::{
     open_judgement,
 };
 pub(crate) use plugin_writes::{
-    code_run_write, code_run_write_fence, judgement_write, write_fence,
+    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, write_fence,
 };
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,

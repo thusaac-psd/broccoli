@@ -22,10 +22,9 @@ Done already (for reference on the pattern):
   instead of redefining them verbatim, so the host proxy and the guest SDK share
   one type (the old pair serialized compatibly only by hand — a silent
   serde-drift trap).
-- `broccoli_types::types::push_judge_sets` / `push_double_opt[_str]` — the
-  judged `SET`-list builder is single-sourced behind a `SqlBindSink` trait; only
-  the host builds judging SQL (`server/src/services/judging/plugin_writes.rs`),
-  the guest sends structured updates.
+- `push_judge_sets` — the judged `SET`-list builder exists once, host-side in
+  `server/src/services/judging/plugin_writes.rs`; the guest sends structured
+  updates and builds no judging SQL.
 - `utils::blob::take_required_file` / `resolve_virtual_path` — the
   post-multipart required-file unwrap+validate and the `path`-else-filename
   virtual-path resolution are single-sourced out of

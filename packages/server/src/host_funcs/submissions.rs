@@ -63,7 +63,7 @@ impl Params {
     }
 }
 
-impl broccoli_server_sdk::types::SqlBindSink for Params {
+impl judging::SqlBindSink for Params {
     fn bind_value(&mut self, value: JsonValue) -> String {
         // No NUL scrubbing here: every statement runs through
         // sql::execute_on_pool, which strips NUL at the shared choke point.
