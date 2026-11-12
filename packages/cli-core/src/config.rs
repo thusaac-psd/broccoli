@@ -46,12 +46,12 @@ fn resolve_credentials_from_sources(
         .map(String::from)
         .or_else(|| env_lookup("BROCCOLI_URL"))
         .or(config_server);
-    let token = token.map(String::from).or_else(|| env_lookup("BROCCOLI_TOKEN"));
+    let token = token
+        .map(String::from)
+        .or_else(|| env_lookup("BROCCOLI_TOKEN"));
 
     let saved = match &server {
-        Some(server) => store
-            .read(server)?
-            .map(|tokens| (server.clone(), tokens)),
+        Some(server) => store.read(server)?.map(|tokens| (server.clone(), tokens)),
         None => store.most_recent()?,
     };
     match (token, server, saved) {
@@ -265,7 +265,8 @@ mod tests {
     #[test]
     fn an_explicit_token_never_borrows_the_saved_refresh_token() {
         let (_dir, store) = saved_store("https://judge");
-        let session = resolve(Some("https://judge"), Some("other-user"), &[], None, &store).unwrap();
+        let session =
+            resolve(Some("https://judge"), Some("other-user"), &[], None, &store).unwrap();
         assert_eq!(session.bearer().unwrap(), "other-user");
         // Without its own refresh token the explicit session cannot be
         // refreshed into the saved user's session.

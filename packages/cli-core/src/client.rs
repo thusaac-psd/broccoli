@@ -94,7 +94,8 @@ impl Client {
         if resp.status().as_u16() != 401 {
             return Ok(resp);
         }
-        self.session.refresh(&token, |refresh| self.exchange(refresh))?;
+        self.session
+            .refresh(&token, |refresh| self.exchange(refresh))?;
         let token = self.session.bearer()?;
         send(&format!("Bearer {token}")).map_err(|e| self.network(e))
     }
@@ -304,10 +305,7 @@ impl Client {
         self.parse_response(resp)
     }
 
-    pub fn list_clarifications(
-        &self,
-        contest_id: &str,
-    ) -> ClientResult<ClarificationListResponse> {
+    pub fn list_clarifications(&self, contest_id: &str) -> ClientResult<ClarificationListResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}/clarifications", contest_id))?;
         self.parse_response(resp)
     }

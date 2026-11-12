@@ -98,7 +98,12 @@ pub struct Session {
 impl Session {
     /// A session backed by the pair saved for `server` in `store`.
     pub fn stored(server: String, tokens: StoredTokens, store: CredentialsFile) -> Self {
-        Self::build(server, tokens.token, Some(tokens.refresh_token), Some(store))
+        Self::build(
+            server,
+            tokens.token,
+            Some(tokens.refresh_token),
+            Some(store),
+        )
     }
 
     /// A session for an access token given on the command line or in the
@@ -327,7 +332,10 @@ mod tests {
     #[test]
     fn a_rotation_saves_the_new_pair_whole() {
         let (_dir, file) = store();
-        file.lock().unwrap().write(SERVER, &pair("t0", "r0")).unwrap();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
         let session = process(&file);
 
         session
@@ -344,7 +352,10 @@ mod tests {
     #[test]
     fn a_process_that_lost_the_race_adopts_the_saved_pair() {
         let (_dir, file) = store();
-        file.lock().unwrap().write(SERVER, &pair("t0", "r0")).unwrap();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
         let watch = process(&file);
         let submit = process(&file);
 
@@ -360,7 +371,10 @@ mod tests {
     #[test]
     fn threads_that_hit_401_together_rotate_once() {
         let (_dir, file) = store();
-        file.lock().unwrap().write(SERVER, &pair("t0", "r0")).unwrap();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
         let session = process(&file);
         session
             .refresh("t0", |_| Exchange::Rotated(pair("t1", "r1")))
@@ -373,7 +387,10 @@ mod tests {
     #[test]
     fn a_refused_refresh_rejects_the_session_without_further_requests() {
         let (_dir, file) = store();
-        file.lock().unwrap().write(SERVER, &pair("t0", "r0")).unwrap();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
         let session = process(&file);
 
         assert_eq!(
@@ -388,7 +405,10 @@ mod tests {
     #[test]
     fn a_rejected_session_resumes_with_a_newer_login() {
         let (_dir, file) = store();
-        file.lock().unwrap().write(SERVER, &pair("t0", "r0")).unwrap();
+        file.lock()
+            .unwrap()
+            .write(SERVER, &pair("t0", "r0"))
+            .unwrap();
         let session = process(&file);
         let _ = session.refresh("t0", |_| Exchange::Refused);
 
@@ -410,9 +430,15 @@ mod tests {
         let t = Instant::now();
 
         let err = session
-            .refresh_at("t0", |_| Exchange::Unreachable("connection refused".into()), t)
+            .refresh_at(
+                "t0",
+                |_| Exchange::Unreachable("connection refused".into()),
+                t,
+            )
             .unwrap_err();
-        assert!(matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == t + REFRESH_RETRY));
+        assert!(
+            matches!(err, SessionError::Unavailable { retry_at, .. } if retry_at == t + REFRESH_RETRY)
+        );
 
         let before = t + REFRESH_RETRY - Duration::from_millis(1);
         assert!(session.bearer_at(before).is_err());
