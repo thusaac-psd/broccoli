@@ -1647,10 +1647,12 @@ fn handle_standings(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             .partition(|s| counts_as_live(s, freeze_start_ms, own_uid));
     let all_states = compute_problem_states(&pre_freeze, config.count_compile_error);
     let pending_map = compute_pending(&during_freeze, &all_states);
-    // First-to-solve balloon owner per problem. Global by nature, so it is
-    // suppressed (empty) in the restricted private-standings view, which only
-    // loaded the viewer's own submissions - see `compute_first_solvers`.
-    let first_solvers = compute_first_solvers(&all_states, restricted_user_id.is_some());
+    let first_solvers = compute_first_solvers(
+        &pre_freeze,
+        freeze_start_ms,
+        config.count_compile_error,
+        restricted_user_id.is_some(),
+    );
 
     // Build entries
     #[derive(Serialize)]

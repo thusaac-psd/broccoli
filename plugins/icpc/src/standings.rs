@@ -95,38 +95,38 @@ pub fn counts_as_live(
     sub.elapsed_ms < freeze_start_ms || Some(sub.user_id) == own_user_id
 }
 
-/// Owner of the coveted "first to solve" balloon per problem: the contestant
-/// with the earliest accepted solve, computed over ALL contestants' solved
-/// states (ties broken by the smaller `user_id` for a deterministic result).
-/// Returns `problem_id -> first-solver user_id`.
+/// Owner of the "first to solve" balloon per problem: the contestant with the
+/// earliest accepted solve among submissions made before `freeze_start_ms`
+/// (`i64::MAX` when the board is not frozen), ties broken by the smaller
+/// `user_id`. Returns `problem_id -> first-solver user_id`.
 ///
-/// `restricted` is the private-standings contestant view, where the caller only
-/// loaded the requesting contestant's OWN submissions. First-solve is a GLOBAL
-/// property that cannot be derived from a single team's data, and the
-/// private-standings invariant keeps other teams' progress hidden until the
-/// contest ends - announcing "you were first" would itself leak that no one else
-/// solved the problem earlier. So the flag is suppressed entirely (empty map)
-/// rather than falsely crowning the viewer on every problem they solved.
+/// The balloon is decided only from what every viewer of the board may see. A
+/// contestant's own submissions during the freeze stay live on their row, but
+/// another team may have solved the same problem earlier inside the freeze, so
+/// an in-freeze solve earns no balloon until the board is revealed.
 ///
-/// KNOWN LIMITATION (low severity, cosmetic): during a scoreboard FREEZE on a
-/// PUBLIC board (`restricted=false`), the caller's `states` include the viewer's
-/// OWN during-freeze solves (kept live) but exclude every other team's frozen
-/// solves. So if the viewer solves a problem during the freeze that another team
-/// solved earlier (also during the freeze, hence hidden), this wrongly shows the
-/// viewer a first-solve balloon until an organizer reveals the board. A correct
-/// fix computes first-solve from the truly-public frozen states (pre-freeze
-/// confirmed only, excluding the viewer's own during-freeze), separate from the
-/// per-viewer live partition used for their own score.
+/// `restricted` is the private-standings contestant view, which loaded only the
+/// viewer's own submissions. First-solve is a property of every team's data,
+/// and announcing "you were first" would itself leak that no one else solved
+/// the problem earlier, so the restricted view gets no balloons at all.
 pub fn compute_first_solvers(
-    states: &HashMap<(i32, i32), ProblemState>,
+    submissions: &[StandingsSubmission],
+    freeze_start_ms: i64,
+    count_compile_error: bool,
     restricted: bool,
 ) -> HashMap<i32, i32> {
     if restricted {
         return HashMap::new();
     }
+    let visible_to_all: Vec<StandingsSubmission> = submissions
+        .iter()
+        .filter(|s| s.elapsed_ms < freeze_start_ms)
+        .cloned()
+        .collect();
+    let states = compute_problem_states(&visible_to_all, count_compile_error);
 
     let mut best: HashMap<i32, (i64, i32)> = HashMap::new(); // problem_id -> (solve_ms, user_id)
-    for (&(user_id, problem_id), state) in states {
+    for (&(user_id, problem_id), state) in &states {
         if !state.solved {
             continue;
         }
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn first_solver_is_the_globally_earliest_accepted() {
         // Two teams solved problem 100; user 8 solved it earlier than user 7.
-        let states = compute_problem_states(
+        let first = compute_first_solvers(
             &[
                 StandingsSubmission {
                     submission_id: 1,
@@ -352,10 +352,11 @@ mod tests {
                     elapsed_ms: 40 * 60_000,
                 },
             ],
+            i64::MAX,
+            false,
             false,
         );
 
-        let first = compute_first_solvers(&states, false);
         assert_eq!(first.get(&100), Some(&8), "user 8 solved 100 first");
         assert_eq!(
             first.get(&200),
@@ -370,7 +371,7 @@ mod tests {
         // own submissions. Even though user 7 solved problem 100, first-solve is a
         // global property that someone else may already own - so the restricted
         // path must NOT crown the viewer. Suppressed entirely -> empty map.
-        let states = compute_problem_states(
+        let first = compute_first_solvers(
             &[StandingsSubmission {
                 submission_id: 1,
                 user_id: 7,
@@ -379,13 +380,36 @@ mod tests {
                 status: "Judged".into(),
                 elapsed_ms: 30 * 60_000,
             }],
+            i64::MAX,
             false,
+            true,
         );
-
-        let first = compute_first_solvers(&states, true);
         assert!(
             first.is_empty(),
             "restricted view must not flag any first solve, got {first:?}"
         );
+    }
+
+    #[test]
+    fn an_in_freeze_solve_earns_no_balloon_while_frozen() {
+        let accepted = |submission_id, user_id, elapsed_ms| StandingsSubmission {
+            submission_id,
+            user_id,
+            problem_id: 100,
+            verdict: Some(Verdict::Accepted),
+            status: "Judged".into(),
+            elapsed_ms,
+        };
+        let freeze_start = 240 * 60_000;
+        // The viewer (user 7) solved inside the freeze, and its own solve is in
+        // its live set; user 8 solved earlier, also inside the freeze.
+        let viewers_live = [accepted(2, 7, 250 * 60_000)];
+        let frozen = compute_first_solvers(&viewers_live, freeze_start, false, false);
+        assert!(frozen.is_empty(), "no balloon while frozen: {frozen:?}");
+
+        // Revealed: everyone's solves count and the true first solver wins.
+        let all = [accepted(1, 8, 245 * 60_000), accepted(2, 7, 250 * 60_000)];
+        let revealed = compute_first_solvers(&all, i64::MAX, false, false);
+        assert_eq!(revealed.get(&100), Some(&8));
     }
 }
