@@ -1,3 +1,4 @@
+import { useApiBasePath } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -36,6 +37,7 @@ export function MarkdownEditorWithAttachments({
   ...editorProps
 }: Props) {
   const { t } = useTranslation();
+  const apiBasePath = useApiBasePath();
   const { upload } = useAttachmentUpload(problemId);
 
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -240,7 +242,7 @@ export function MarkdownEditorWithAttachments({
 
       const attachment = await upload(file);
       if (attachment) {
-        const url = attachmentUrl(problemId, attachment.id);
+        const url = attachmentUrl(apiBasePath, problemId, attachment.id);
         const md = attachmentMarkdownRef(
           attachment.path,
           url,
@@ -252,6 +254,7 @@ export function MarkdownEditorWithAttachments({
       }
     },
     [
+      apiBasePath,
       upload,
       problemId,
       insertPlaceholder,
@@ -380,7 +383,7 @@ export function MarkdownEditorWithAttachments({
             ) {
               return {
                 suggestions: items.map((att) => {
-                  const url = attachmentUrl(problemId, att.id);
+                  const url = attachmentUrl(apiBasePath, problemId, att.id);
                   const isImg = isImageType(att.content_type);
                   const md = attachmentMarkdownRef(att.path, url, isImg);
                   return {
@@ -409,7 +412,7 @@ export function MarkdownEditorWithAttachments({
             ) {
               return {
                 suggestions: items.map((att) => {
-                  const url = attachmentUrl(problemId, att.id);
+                  const url = attachmentUrl(apiBasePath, problemId, att.id);
                   return {
                     label: att.path,
                     kind: monaco.languages.CompletionItemKind.File,
@@ -483,7 +486,7 @@ export function MarkdownEditorWithAttachments({
         () => fileInputRef.current?.click(),
       );
     },
-    [uploadAndInsert, problemId],
+    [apiBasePath, uploadAndInsert, problemId],
   );
 
   return (

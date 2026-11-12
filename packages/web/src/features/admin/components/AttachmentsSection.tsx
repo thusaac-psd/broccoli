@@ -1,4 +1,4 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiBasePath, useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -61,6 +61,7 @@ function FileTypeIcon({ contentType }: { contentType: string | null }) {
 export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
+  const apiBasePath = useApiBasePath();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
   const { upload: uploadFile } = useAttachmentUpload(problemId);
@@ -112,7 +113,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
       if (attachment) {
         setStaged((prev) => prev.filter((s) => s.id !== item.id));
-        const url = attachmentUrl(problemId, attachment.id);
+        const url = attachmentUrl(apiBasePath, problemId, attachment.id);
         const md = attachmentMarkdownRef(
           attachment.path,
           url,
@@ -126,7 +127,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
         });
       }
     },
-    [uploadFile, problemId, t],
+    [apiBasePath, uploadFile, problemId, t],
   );
 
   const handleUploadAll = useCallback(async () => {
@@ -162,7 +163,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
   const handleCopyMarkdown = useCallback(
     (file: Attachment) => {
-      const url = attachmentUrl(problemId, file.id);
+      const url = attachmentUrl(apiBasePath, problemId, file.id);
       const md = attachmentMarkdownRef(
         file.path,
         url,
@@ -173,7 +174,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
       toast.success(t('admin.attachments.markdownCopied'));
       setTimeout(() => setCopiedId(null), 2000);
     },
-    [problemId, t],
+    [apiBasePath, problemId, t],
   );
 
   const handleDelete = useCallback(
@@ -360,7 +361,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
               {/* Thumbnail or file type icon */}
               {isImageType(file.content_type) ? (
                 <AuthImage
-                  src={attachmentUrl(problemId, file.id)}
+                  src={attachmentUrl(apiBasePath, problemId, file.id)}
                   alt={file.path}
                   className="h-8 w-8 rounded object-cover shrink-0 border"
                 />

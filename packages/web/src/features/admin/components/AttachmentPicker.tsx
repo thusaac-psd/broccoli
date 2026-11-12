@@ -1,3 +1,4 @@
+import { useApiBasePath } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Popover, PopoverContent, PopoverTrigger } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -45,10 +46,11 @@ export function AttachmentPicker({
   onInsert,
 }: AttachmentPickerProps) {
   const { t } = useTranslation();
+  const apiBasePath = useApiBasePath();
   const [open, setOpen] = useState(false);
 
   function getMarkdown(att: Attachment) {
-    const url = attachmentUrl(problemId, att.id);
+    const url = attachmentUrl(apiBasePath, problemId, att.id);
     return attachmentMarkdownRef(att.path, url, isImageType(att.content_type));
   }
 
@@ -114,7 +116,7 @@ export function AttachmentPicker({
                     <GripVertical className="h-3 w-3 text-muted-foreground/40 shrink-0 group-hover:text-muted-foreground cursor-grab" />
                     {isImg ? (
                       <AuthImage
-                        src={attachmentUrl(problemId, att.id)}
+                        src={attachmentUrl(apiBasePath, problemId, att.id)}
                         alt={att.path}
                         className="h-8 w-8 rounded object-cover shrink-0 border"
                       />

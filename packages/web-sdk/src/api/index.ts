@@ -13,6 +13,7 @@ export {
   useServerTimeReached,
 } from '@/api/server-clock';
 export * from '@/api/types';
+export * from '@/api/use-api-base-path';
 export * from '@/api/use-api-client';
 export * from '@/api/use-api-fetch';
 export * from '@/api/use-plugin-api';
