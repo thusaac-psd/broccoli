@@ -242,6 +242,25 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             .await
     }
 
+    /// Records an operator's retry of message `id` in its retry history. The
+    /// message stays open until its subject recovers.
+    pub async fn record_retry(&self, id: i32, operator_id: i32) -> Result<(), DbErr> {
+        self.conn
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
+                r#"UPDATE dead_letter_message d SET
+                       retry_history = d.retry_history || jsonb_build_array(jsonb_build_object(
+                           'attempt', jsonb_array_length(d.retry_history) + 1,
+                           'error', 'Retried by operator ' || $2::text,
+                           'timestamp', NOW())),
+                       retry_count = jsonb_array_length(d.retry_history) + 1
+                   WHERE d.id = $1"#,
+                [id.into(), operator_id.to_string().into()],
+            ))
+            .await?;
+        Ok(())
+    }
+
     /// Resolves message `id` on behalf of operator `resolved_by`.
     pub async fn resolve(&self, id: i32, resolved_by: i32) -> Result<ResolveResult, DbErr> {
         let update = dead_letter_message::Entity::update_many()

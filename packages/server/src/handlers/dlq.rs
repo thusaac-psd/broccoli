@@ -11,7 +11,7 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
     TransactionTrait,
 };
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
 
 use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 use crate::dlq::{DlqService, ResolveResult, dlq_service};
@@ -161,27 +161,18 @@ enum StuckRetryOutcome {
     Skipped(StuckRetrySkip),
 }
 
-/// Re-queue one `stuck_submission` DLQ message for judging, in its OWN
-/// transaction.
+/// Re-queue one `stuck_submission` DLQ message for judging, in its own
+/// transaction, so one failing message in a bulk retry cannot abort its
+/// siblings.
 ///
-/// Owning the transaction per message is what makes the bulk path correct.
-/// Postgres aborts a whole transaction on the first statement error (or on a
-/// deadlock against the deferred-judgement steal scan, which locks the same
-/// (submission, judgement) pair in the opposite order): every later statement
-/// then fails with `25P02 current transaction is aborted` and the final
-/// `COMMIT` silently rolls back. A `continue`-on-error loop over a *shared*
-/// batch transaction therefore discards every successful sibling in the batch
-/// and loses the retried/skipped/errors accounting. A per-message transaction
-/// contains any failure to that one message; the caller reports it and the rest
-/// of the batch proceeds.
-///
-/// The lineage preparation mirrors the admin rejudge path: lock the submission
-/// `FOR UPDATE`, demote the stale finalized judgement and insert a fresh
-/// `is_current` one at a fresh epoch via `open_judgement`, reset the
-/// submission to `Queued` with its judged output cleared, and resolve the DLQ
-/// message. The claim fiber (`dispatcher/claim.rs`) promotes `Queued` to
-/// `Pending` and dispatches - no handler-side spawn, so an api crash between
-/// commit and dispatch cannot lose the retry.
+/// Locks follow the judging order (submission, then judgement, then dead
+/// letter): the message is read unlocked to find its submission, the
+/// submission is locked, and only then is the message locked and re-checked.
+/// The retry is an immediate rejudge (`open_judgement`), which the claim
+/// fiber dispatches. The message stays open with the retry recorded in its
+/// history; the judging lifecycle resolves it once the rejudge ends with a
+/// verdict that stands, and a retry that ends as a system error again leaves
+/// it open.
 async fn retry_stuck_submission(
     db: &DatabaseConnection,
     message_id: i32,
@@ -191,30 +182,23 @@ async fn retry_stuck_submission(
     let dlq = DlqService::new(&txn);
 
     let message = dlq
-        .get_by_id_for_update(message_id)
+        .get_by_id(message_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("DLQ message {} not found", message_id)))?;
-
     if message.resolved {
         return Ok(StuckRetryOutcome::Skipped(StuckRetrySkip::AlreadyResolved));
     }
-
     if message.message_type != DlqMessageType::StuckSubmission.as_str() {
         return Ok(StuckRetryOutcome::Skipped(
             StuckRetrySkip::NotStuckSubmission,
         ));
     }
-
     let Some(submission_id) = message.submission_id else {
         return Ok(StuckRetryOutcome::Skipped(
             StuckRetrySkip::UnknownSubmission,
         ));
     };
 
-    // Lock the submission FOR UPDATE, mirroring the admin rejudge handlers:
-    // it serializes this retry against a concurrent rejudge/steal on the same
-    // submission so the judgement-lineage demote+insert below can't race into
-    // a duplicate `is_current` row.
     let Some(sub) = submission::Entity::find_by_id(submission_id)
         .lock(LockType::Update)
         .one(&txn)
@@ -224,6 +208,13 @@ async fn retry_stuck_submission(
             StuckRetrySkip::SubmissionMissing { submission_id },
         ));
     };
+    let message = dlq
+        .get_by_id_for_update(message_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("DLQ message {} not found", message_id)))?;
+    if message.resolved {
+        return Ok(StuckRetryOutcome::Skipped(StuckRetrySkip::AlreadyResolved));
+    }
 
     // Only a submission whose verdict is a SystemError is retried; one that
     // is queued, in flight or judged is already being handled.
@@ -236,8 +227,6 @@ async fn retry_stuck_submission(
         ));
     }
 
-    // A DLQ retry is an immediate rejudge, opened exactly as the admin
-    // rejudge path opens one; the claim fiber dispatches it.
     open_judgement(
         &txn,
         sub.id,
@@ -247,30 +236,12 @@ async fn retry_stuck_submission(
         },
     )
     .await?;
-
-    match dlq.resolve(message_id, admin_user_id).await? {
-        ResolveResult::Resolved => {}
-        ResolveResult::AlreadyResolved => {
-            warn!(
-                id = message_id,
-                "DLQ message was resolved concurrently during retry"
-            );
-        }
-        ResolveResult::NotFound => {
-            return Err(AppError::Internal(
-                "DLQ message disappeared during retry".into(),
-            ));
-        }
-    }
-
+    dlq.record_retry(message_id, admin_user_id).await?;
     txn.commit().await?;
 
     Ok(StuckRetryOutcome::Requeued { submission_id })
 }
 
-/// Map an expected retry-skip condition to the single-message endpoint's HTTP
-/// error. The bulk endpoint tallies skips instead of erroring, so this mapping
-/// is intentionally only used by `retry_dlq_message`.
 fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
     match skip {
         StuckRetrySkip::AlreadyResolved => AppError::Conflict("Message already resolved".into()),
@@ -299,7 +270,7 @@ fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
     tag = "Dead Letter Queue",
     operation_id = "retryDlqMessage",
     summary = "Retry a DLQ message",
-    description = "Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, and stuck_submission_judgement messages are visibility-only from here. Marks the DLQ entry as resolved. Requires `dlq:manage` permission.",
+    description = "Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, and stuck_submission_judgement messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.",
     params(("id" = i32, Path, description = "DLQ message ID")),
     responses(
         (status = 200, description = "Submission re-dispatched", body = DlqRetryResponse),
