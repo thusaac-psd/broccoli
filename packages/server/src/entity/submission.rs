@@ -88,6 +88,9 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub retry_count: i32,
 
+    /// Stamped by the database clock on insert, so plugins compare it with
+    /// `NOW()` on one clock.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
     pub judged_at: Option<DateTimeUtc>,
 }

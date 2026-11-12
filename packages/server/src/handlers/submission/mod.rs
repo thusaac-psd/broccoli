@@ -193,7 +193,6 @@ pub async fn create_submission(
     .await?;
     dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins), None).await?;
 
-    let now = Utc::now();
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
@@ -211,7 +210,6 @@ pub async fn create_submission(
         contest_id: Set(None),
         contest_type: Set(contest_type),
         attempt_id: Set(Some(attempt_id)),
-        created_at: Set(now),
         ..Default::default()
     };
 
@@ -839,7 +837,6 @@ pub async fn create_contest_submission(
         contest_id: Set(Some(contest_id)),
         contest_type: Set(contest_type),
         attempt_id: Set(Some(attempt_id)),
-        created_at: Set(now),
         ..Default::default()
     };
 
