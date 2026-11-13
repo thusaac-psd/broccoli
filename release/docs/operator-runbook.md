@@ -394,12 +394,11 @@ get distinct ids. The installer writes the id into `.env.server` or
 (`.env.server.example` ships `server-1`), give each replica a unique stable
 value.
 
-**Why it matters:** each server consumes its own per-replica result queue
-(`operation_results.<server_id>`). If two replicas share the same ID, they will
-race to consume each other's results. If a replica's ID is randomized at startup
-(the fallback when `BROCCOLI__SERVER__ID` is empty and the OS hostname is
-unsuitable), every restart leaves a permanent ghost queue in Redis that fills
-memory until manually deleted.
+**Why it matters:** each server reads its own reply stream
+(`operation_tasks:reply:<server_id>`) and owns in-flight work under its ID. A
+second process with the same ID refuses to start. A replica whose ID changes at
+every restart (the random fallback when no stable ID can be derived) leaves its
+old reply stream behind until it expires, 10 minutes later.
 
 The release `install.sh` prompts for the ID; if you bypass the installer, audit
 each replica's env file before starting.

@@ -35,11 +35,6 @@ release adds idempotency key states, as the release introducing
 `completed_not_stored` and `outcome_unknown` does, upgrade every server node in
 one step outside contest hours instead of one at a time.
 
-The workers-first order preserves the rolling-upgrade path while per-replica
-operation-result queues are introduced. The legacy `operation_results` queue is
-kept for one release for compatibility and is scheduled for removal in the next
-release.
-
 ### Upgrading to the release with SHA-256 refresh tokens
 
 This release stores refresh-token validators as SHA-256 digests instead of
@@ -82,8 +77,7 @@ set -a; . ./.env.server; set +a
 curl -fsS http://127.0.0.1:${BROCCOLI_HTTP_BIND##*:}/healthz
 ```
 
-During the window, submissions should complete successfully and server logs
-should not show legacy `operation_results` warnings for new work.
+During the window, submissions should complete successfully.
 
 ## Node IDs and heartbeats
 
@@ -189,7 +183,7 @@ for f in images/*.tar.gz; do gzip -dc "$f" | docker load; done
 2. Run
    `docker compose --env-file .env.<role> -f docker-compose.<role>.yaml up -d`.
 3. Confirm the role health check.
-4. Check logs for failed submissions or operation-result queue warnings.
+4. Check logs for failed submissions.
 
 Roll back server nodes one at a time when a gateway is present. Roll back
 workers before servers when both roles were upgraded.
