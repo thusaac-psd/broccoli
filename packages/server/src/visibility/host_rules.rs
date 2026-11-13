@@ -128,6 +128,9 @@ pub(crate) struct HostScopes {
     /// visibility querier scoped to contest types is loaded; the contests
     /// join the fetch the batch makes anyway.
     pub resolve_contests: bool,
+    /// Input: submissions the caller already read, which Query 0 does not
+    /// fetch again.
+    pub known_submissions: HashMap<i32, submission::Model>,
     /// `submission_id -> submission.contest_id` for every `Resource::
     /// Submission` resolved by Query 0 (itself `None` for a contest-less
     /// submission). A `Resource::Submission`'s contest is otherwise
@@ -172,24 +175,28 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     // Query 0: submissions referenced by the batch. Needed up front - a
     // `Resource::Submission` only carries an id, so its owner/contest_id
     // have to be resolved before Query 1 knows which contests it needs.
-    let submission_ids: Vec<i32> = resources
-        .iter()
-        .filter_map(|r| match r {
-            Resource::Submission(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let submissions: HashMap<i32, submission::Model> = if submission_ids.is_empty() {
-        HashMap::new()
-    } else {
-        submission::Entity::find()
-            .filter(submission::Column::Id.is_in(submission_ids))
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|s| (s.id, s))
-            .collect()
-    };
+    let mut submissions: HashMap<i32, submission::Model> = HashMap::new();
+    let mut submission_ids: Vec<i32> = Vec::new();
+    for r in resources {
+        if let Resource::Submission(id) = r {
+            match scopes.known_submissions.get(id) {
+                Some(known) => {
+                    submissions.insert(*id, known.clone());
+                }
+                None => submission_ids.push(*id),
+            }
+        }
+    }
+    if !submission_ids.is_empty() {
+        submissions.extend(
+            submission::Entity::find()
+                .filter(submission::Column::Id.is_in(submission_ids))
+                .all(db)
+                .await?
+                .into_iter()
+                .map(|s| (s.id, s)),
+        );
+    }
     scopes
         .submission_contest_ids
         .extend(submissions.values().map(|s| (s.id, s.contest_id)));

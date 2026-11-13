@@ -415,18 +415,18 @@ pub async fn get_submission(
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let resource = Resource::Submission(id);
 
-    // Fail fast, before building the full detail response (user/problem/
-    // contest/judgement/test-case-result reads below), on a submission the
-    // kernel already knows is unreachable. This single decision folds in
-    // what `require_submission_visible` used to check by hand - owner
-    // bypass, the contest activation window, participation, and
-    // `submissions_visible` - see `visibility::host_rules::decide_submission`,
-    // a byte-for-byte port of that old logic.
+    // The kernel decides on the row read here instead of reading it again.
+    // A missing and an unreachable submission answer the same 404.
+    let sub = find_submission(&state.db, id).await?;
+    kernel.know_submission(sub.clone());
+    // Fail fast, before building the full detail response, on a submission
+    // the kernel finds unreachable: the owner bypass, the contest activation
+    // window, participation and `submissions_visible` (see
+    // `visibility::host_rules::decide_submission`).
     if kernel.decide(Action::Read, resource).await?.is_denied() {
         return Err(AppError::NotFound("Submission not found".into()));
     }
 
-    let sub = find_submission(&state.db, id).await?;
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
     let response = build_submission_response_with_cases(
         &state.db,

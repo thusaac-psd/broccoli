@@ -142,6 +142,8 @@ pub struct VisibilityKernel<'a> {
     state: &'a AppState,
     subject: Subject,
     memo: tokio::sync::Mutex<HashMap<(Action, Resource), Decision>>,
+    /// Submission rows the caller already read; see [`Self::know_submission`].
+    known_submissions: std::sync::Mutex<HashMap<i32, crate::entity::submission::Model>>,
 }
 
 impl<'a> VisibilityKernel<'a> {
@@ -152,7 +154,17 @@ impl<'a> VisibilityKernel<'a> {
             state,
             subject,
             memo: tokio::sync::Mutex::new(HashMap::new()),
+            known_submissions: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Hand the kernel a submission row this request already read, so
+    /// deciding on `Resource::Submission(sub.id)` does not read it again.
+    pub fn know_submission(&self, sub: crate::entity::submission::Model) {
+        self.known_submissions
+            .lock()
+            .expect("known submissions lock")
+            .insert(sub.id, sub);
     }
 
     /// Single-resource convenience wrapper over [`Self::decide_batch`].
@@ -236,6 +248,11 @@ impl<'a> VisibilityKernel<'a> {
             let mut scopes = HostScopes {
                 resolve_contests: !self.subject.is_admin_override()
                     && plugin_query::scoped_querier_loaded(self.state),
+                known_submissions: self
+                    .known_submissions
+                    .lock()
+                    .expect("known submissions lock")
+                    .clone(),
                 ..HostScopes::default()
             };
             let host_decisions = host_decide(
