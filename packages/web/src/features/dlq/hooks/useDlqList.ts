@@ -1,7 +1,7 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
 
-import type { DlqListResponse, DlqResolvedFilter } from '@/features/dlq/types';
+import type { DlqResolvedFilter } from '@/features/dlq/types';
 
 interface Params {
   page: number;
@@ -20,7 +20,7 @@ export function useDlqList({
   messageType,
   enabled = true,
 }: Params) {
-  const apiFetch = useApiFetch();
+  const apiClient = useApiClient();
 
   return useQuery({
     queryKey: ['dlq', 'list', { page, perPage, resolvedFilter, messageType }],
@@ -30,20 +30,22 @@ export function useDlqList({
     enabled,
     refetchInterval: REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: false,
-    queryFn: async (): Promise<DlqListResponse> => {
-      const search = new URLSearchParams();
-      search.set('page', String(page));
-      search.set('per_page', String(perPage));
-      if (resolvedFilter !== 'all') {
-        search.set(
-          'resolved',
-          resolvedFilter === 'resolved' ? 'true' : 'false',
-        );
-      }
-      if (messageType) search.set('message_type', messageType);
-      const res = await apiFetch(`/api/v1/dlq?${search.toString()}`);
-      if (!res.ok) throw new Error(`Failed to load DLQ list (${res.status})`);
-      return (await res.json()) as DlqListResponse;
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/dlq', {
+        params: {
+          query: {
+            page,
+            per_page: perPage,
+            resolved:
+              resolvedFilter === 'all'
+                ? undefined
+                : resolvedFilter === 'resolved',
+            message_type: messageType || undefined,
+          },
+        },
+      });
+      if (error) throw error;
+      return data;
     },
   });
 }

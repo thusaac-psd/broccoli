@@ -8,6 +8,12 @@ interface Props {
 
 const RESULT_QUEUE_HINT = 'result';
 
+const TONE = {
+  idle: 'text-muted-foreground',
+  backlog: 'text-destructive',
+  busy: 'text-foreground',
+};
+
 export function QueueDepthList({ queues }: Props) {
   const { t } = useTranslation();
 
@@ -24,11 +30,7 @@ export function QueueDepthList({ queues }: Props) {
       {queues.map((q) => {
         const isResultQueue = q.name.toLowerCase().includes(RESULT_QUEUE_HINT);
         const tone =
-          q.depth === 0
-            ? 'text-muted-foreground'
-            : isResultQueue
-              ? 'text-destructive'
-              : 'text-foreground';
+          q.depth === 0 ? TONE.idle : isResultQueue ? TONE.backlog : TONE.busy;
 
         return (
           <li key={q.name} className="flex items-center justify-between p-3">

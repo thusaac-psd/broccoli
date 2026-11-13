@@ -1,6 +1,7 @@
 import { SchemaField } from './SchemaField';
 import type {
   ConfigScope,
+  FieldProblem,
   InheritedConfig,
   JsonSchema,
   JsonSchemaProperty,
@@ -26,7 +27,7 @@ export function SchemaFields({
   rootValues: Record<string, unknown>;
   path: string[];
   updateValue: (path: string[], value: unknown) => void;
-  errors: Record<string, string>;
+  errors: Record<string, FieldProblem>;
   pluginId?: string;
   namespace?: string;
   scope?: ConfigScope;

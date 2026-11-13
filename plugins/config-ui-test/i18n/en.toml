@@ -1,0 +1,19 @@
+# Shared badges
+'configUiTest.pluginBadge' = '(plugin)'
+'configUiTest.pluginOverrideBadge' = '(plugin override)'
+
+# CollapsibleWrapper
+'configUiTest.collapsible.expand' = 'Expand'
+'configUiTest.collapsible.collapse' = 'Collapse'
+'configUiTest.collapsible.collapsedHint' = 'Scoring section collapsed — click Expand to configure'
+
+# ColorPickerField
+'configUiTest.colorPicker.defaultTitle' = 'Color'
+'configUiTest.colorPicker.preview' = 'Preview'
+
+# ModeCardSelector
+'configUiTest.modeCard.defaultTitle' = 'Mode'
+'configUiTest.modeCard.fast.description' = 'Quick checks, minimal validation'
+'configUiTest.modeCard.balanced.description' = 'Good trade-off between speed and coverage'
+'configUiTest.modeCard.thorough.description' = 'Full validation, slower but comprehensive'
+'configUiTest.modeCard.experimental.description' = 'Bleeding-edge features, may be unstable'

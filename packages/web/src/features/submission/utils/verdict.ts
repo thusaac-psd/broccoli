@@ -1,28 +1,11 @@
-import type { SubmissionStatus, Verdict } from '@broccoli/web-sdk/submission';
+import {
+  getStatusLabel,
+  type SubmissionStatus,
+  type Verdict,
+} from '@broccoli/web-sdk/submission';
 import type { BadgeProps } from '@broccoli/web-sdk/ui';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
-
-function getStatusLabel(status: SubmissionStatus, t: (key: string) => string) {
-  switch (status) {
-    case 'Queued':
-      return t('result.queued');
-    case 'Pending':
-      return t('result.pending');
-    case 'Compiling':
-      return t('result.compilingShort');
-    case 'Running':
-      return t('result.runningShort');
-    case 'Judged':
-      return t('result.judged');
-    case 'CompilationError':
-      return t('result.compilationError');
-    case 'SystemError':
-      return t('result.systemError');
-    default:
-      return t('result.unknownStatus');
-  }
-}
 
 function getVerdictLabel(verdict: Verdict, t: (key: string) => string) {
   const verdictText = verdictToString(verdict);

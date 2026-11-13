@@ -1,6 +1,11 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import {
+  isAlreadyDone,
+  useAsyncDialog,
+  useIdempotentRequest,
+} from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
+import type { TestCase } from '@broccoli/web-sdk/problem';
 import {
   Button,
   Dialog,
@@ -16,10 +21,13 @@ import {
 } from '@broccoli/web-sdk/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import { Upload } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { RecordLoader } from '@/components/RecordLoader';
 import { SwitchField } from '@/features/admin/components/SwitchField';
+import { invalidateProblemTestCases } from '@/features/admin/hooks/test-case-queries';
+import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 interface TestCaseFormDialogProps {
@@ -27,173 +35,64 @@ interface TestCaseFormDialogProps {
   testCaseId?: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  testCasesQueryKey: (string | number)[];
 }
 
-type UploadType = 'Input' | 'Output';
+interface TestCaseFormValues {
+  label: string;
+  input: string;
+  expectedOutput: string;
+  score: number;
+  isSample: boolean;
+  description: string;
+}
+
+const NEW_TEST_CASE: TestCaseFormValues = {
+  label: '',
+  input: '',
+  expectedOutput: '',
+  score: 0,
+  isSample: false,
+  description: '',
+};
+
+function testCaseFormValues(testCase: TestCase): TestCaseFormValues {
+  return {
+    label: testCase.label ?? '',
+    input: testCase.input,
+    expectedOutput: testCase.expected_output,
+    score: testCase.score,
+    isSample: testCase.is_sample,
+    description: testCase.description ?? '',
+  };
+}
+
+function testCaseFields(values: TestCaseFormValues) {
+  return {
+    input: values.input,
+    expected_output: values.expectedOutput,
+    score: values.score,
+    is_sample: values.isSample,
+    description: values.description || null,
+  };
+}
+
+function testCaseUpdateBody(values: TestCaseFormValues) {
+  return { ...testCaseFields(values), label: values.label.trim() || null };
+}
 
 export function TestCaseFormDialog({
   problemId,
   testCaseId,
   open,
   onOpenChange,
-  testCasesQueryKey,
 }: TestCaseFormDialogProps) {
   const { t } = useTranslation();
   const apiClient = useApiClient();
-  const queryClient = useQueryClient();
-  const sendIdempotent = useIdempotentRequest();
-  const isEdit = !!testCaseId;
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const fileOutputRef = useRef<HTMLInputElement>(null);
-
-  const [label, setLabel] = useState('');
-  const [input, setInput] = useState('');
-  const [expectedOutput, setExpectedOutput] = useState('');
-  const [score, setScore] = useState(0);
-  const [isSample, setIsSample] = useState(false);
-  const [description, setDescription] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
-  const [inputUploaded, setInputUploaded] = useState(false);
-  const [outputUploaded, setOutputUploaded] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    if (testCaseId) {
-      setLoadingData(true);
-      apiClient
-        .GET('/problems/{id}/test-cases/{tc_id}', {
-          params: { path: { id: problemId, tc_id: testCaseId } },
-        })
-        .then(({ data, error }) => {
-          setLoadingData(false);
-          if (error || !data) return;
-          setLabel(data.label ?? '');
-          setInput(data.input);
-          setExpectedOutput(data.expected_output);
-          setScore(data.score);
-          setIsSample(data.is_sample);
-          setDescription(data.description ?? '');
-        });
-    } else {
-      setLabel('');
-      setInput('');
-      setExpectedOutput('');
-      setScore(0);
-      setIsSample(false);
-      setDescription('');
-    }
-  }, [apiClient, open, testCaseId, problemId]);
-
-  const handleFileUpload = async (file: File) => {
-    try {
-      return await file.text();
-    } catch {
-      toast.error(t('admin.testCases.fileReadError'));
-      return undefined;
-    }
-  };
-
-  const handleFileChange = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-    type: UploadType,
-  ) => {
-    const inputEl = e.currentTarget;
-    const file = inputEl.files?.[0];
-    if (!file) return;
-
-    const content = await handleFileUpload(file);
-
-    inputEl.value = '';
-
-    if (!content) return;
-
-    if (type === 'Input') {
-      setInput(content);
-      setInputUploaded(true);
-    } else {
-      setExpectedOutput(content);
-      setOutputUploaded(true);
-    }
-  };
-
-  const triggerFileUpload = (type: UploadType) => {
-    console.log('Triggering file upload for', type);
-    if (type === 'Input') {
-      fileInputRef.current?.click();
-    } else {
-      fileOutputRef.current?.click();
-    }
-  };
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-
-    const createBody = {
-      input,
-      expected_output: expectedOutput,
-      score,
-      is_sample: isSample,
-      description: description || null,
-      label: label.trim(),
-    };
-    const updateBody = {
-      input,
-      expected_output: expectedOutput,
-      score,
-      is_sample: isSample,
-      description: description || null,
-      label: label.trim() || null,
-    };
-
-    const result = isEdit
-      ? await apiClient.PATCH('/problems/{id}/test-cases/{tc_id}', {
-          params: { path: { id: problemId, tc_id: testCaseId! } },
-          body: updateBody,
-        })
-      : await sendIdempotent({ problemId, body: createBody }, (key) =>
-          apiClient.POST('/problems/{id}/test-cases', {
-            headers: { 'Idempotency-Key': key },
-            params: { path: { id: problemId } },
-            body: createBody,
-          }),
-        );
-
-    setLoading(false);
-    if (
-      toastUnsettled(result.error, t, {
-        refetch: () =>
-          queryClient.invalidateQueries({ queryKey: testCasesQueryKey }),
-      })
-    ) {
-      // The form stays open: if the test case is not in the list, it can be
-      // sent again as it is.
-      return;
-    }
-    if (result.error && !isAlreadyDone(result.error)) {
-      toast.error(
-        getErrorMessage(
-          result.error,
-          isEdit ? t('admin.editError') : t('admin.createError'),
-        ),
-      );
-    } else {
-      toast.success(
-        isEdit ? t('toast.testCase.updated') : t('toast.testCase.created'),
-      );
-      queryClient.invalidateQueries({ queryKey: testCasesQueryKey });
-      queryClient.invalidateQueries({ queryKey: ['problem', problemId] });
-      queryClient.invalidateQueries({
-        queryKey: ['problem-sample-contents', problemId],
-      });
-      onOpenChange(false);
-    }
-  }
+  const dialog = useAsyncDialog({ open, onOpenChange });
+  const isEdit = testCaseId !== undefined;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
@@ -204,172 +103,275 @@ export function TestCaseFormDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {loadingData ? (
-          <div className="py-8 text-center text-muted-foreground">
-            {t('admin.loading')}
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="tc-input">
-                {t('admin.testCases.field.input')}
-              </Label>
-              <div className="flex justify-end gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  onChange={(e) => handleFileChange(e, 'Input')}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => triggerFileUpload('Input')}
-                  className="flex-1"
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  上传文件
-                </Button>
-              </div>
-              {!inputUploaded || input?.length <= 100 ? (
-                <Textarea
-                  id="tc-input"
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  rows={6}
-                  className="font-mono text-sm"
-                  placeholder="4&#10;2 7 11 15&#10;9"
-                />
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => {
-                    setInput('');
-                    setInputUploaded(false);
-                  }}
-                >
-                  已上传输入文件，内容已隐藏。长度：{input.length} 字符
-                </Button>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="tc-expected-output">
-                {t('admin.testCases.field.expectedOutput')}
-              </Label>
-              <div className="flex justify-end gap-2">
-                <input
-                  ref={fileOutputRef}
-                  type="file"
-                  className="hidden"
-                  onChange={(e) => handleFileChange(e, 'Output')}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => triggerFileUpload('Output')}
-                  className="flex-1"
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  上传文件
-                </Button>
-              </div>
-              {!outputUploaded || expectedOutput?.length <= 100 ? (
-                <Textarea
-                  id="tc-expected-output"
-                  value={expectedOutput}
-                  onChange={(e) => setExpectedOutput(e.target.value)}
-                  rows={6}
-                  className="font-mono text-sm"
-                  placeholder="0 1"
-                />
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => {
-                    setExpectedOutput('');
-                    setOutputUploaded(false);
-                  }}
-                >
-                  已上传输出文件，内容已隐藏。长度：{expectedOutput.length} 字符
-                </Button>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <div className="space-y-2">
-                <Label htmlFor="tc-label">
-                  {t('admin.testCases.field.label')}
-                </Label>
-                <Input
-                  id="tc-label"
-                  value={label}
-                  onChange={(e) => setLabel(e.target.value)}
-                  maxLength={64}
-                  required={!isEdit}
-                  placeholder="sample_01"
-                  className="font-mono"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="tc-score">
-                  {t('admin.testCases.field.score')}
-                </Label>
-                <Input
-                  id="tc-score"
-                  type="number"
-                  min={0}
-                  max={10000}
-                  value={score}
-                  onChange={(e) => setScore(Number(e.target.value))}
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="tc-description">
-                  {t('admin.testCases.field.description')}
-                </Label>
-                <Textarea
-                  id="tc-description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  maxLength={4096}
-                  rows={3}
-                  placeholder="Explains this sample (markdown supported)"
-                />
-              </div>
-            </div>
-
-            <Separator />
-
-            <div className="space-y-3">
-              <Label className="text-sm text-muted-foreground">
-                {t('admin.field.options')}
-              </Label>
-              <SwitchField
-                id="tc-is-sample"
-                label={t('admin.testCases.field.isSample')}
-                checked={isSample}
-                onCheckedChange={setIsSample}
+        {isEdit ? (
+          <RecordLoader
+            key={testCaseId}
+            queryKey={['test-case-edit', problemId, testCaseId]}
+            queryFn={async () => {
+              const { data, error } = await apiClient.GET(
+                '/problems/{id}/test-cases/{tc_id}',
+                { params: { path: { id: problemId, tc_id: testCaseId } } },
+              );
+              if (error) throw error;
+              return data;
+            }}
+          >
+            {(testCase) => (
+              <TestCaseForm
+                problemId={problemId}
+                testCaseId={testCaseId}
+                initial={testCaseFormValues(testCase)}
+                dialog={dialog}
               />
-            </div>
-
-            <DialogFooter>
-              <Button type="submit" disabled={loading}>
-                {loading
-                  ? t('admin.saving')
-                  : isEdit
-                    ? t('admin.edit')
-                    : t('admin.testCases.create')}
-              </Button>
-            </DialogFooter>
-          </form>
+            )}
+          </RecordLoader>
+        ) : (
+          <TestCaseForm
+            problemId={problemId}
+            initial={NEW_TEST_CASE}
+            dialog={dialog}
+          />
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+function TestCaseForm({
+  problemId,
+  testCaseId,
+  initial,
+  dialog,
+}: {
+  problemId: number;
+  /** The test case being edited; creates a new one when absent. */
+  testCaseId?: number;
+  initial: TestCaseFormValues;
+  dialog: ReturnType<typeof useAsyncDialog>;
+}) {
+  const { t } = useTranslation();
+  const apiClient = useApiClient();
+  const queryClient = useQueryClient();
+  const sendIdempotent = useIdempotentRequest();
+  const [values, setValues] = useState(initial);
+  const isEdit = testCaseId !== undefined;
+
+  const set =
+    <K extends keyof TestCaseFormValues>(field: K) =>
+    (value: TestCaseFormValues[K]) =>
+      setValues((prev) => ({ ...prev, [field]: value }));
+
+  async function save() {
+    const createBody = {
+      ...testCaseFields(values),
+      label: values.label.trim(),
+    };
+
+    const result = isEdit
+      ? await apiClient.PATCH('/problems/{id}/test-cases/{tc_id}', {
+          params: { path: { id: problemId, tc_id: testCaseId } },
+          body: changedFields(
+            testCaseUpdateBody(initial),
+            testCaseUpdateBody(values),
+          ),
+        })
+      : await sendIdempotent({ problemId, body: createBody }, (key) =>
+          apiClient.POST('/problems/{id}/test-cases', {
+            headers: { 'Idempotency-Key': key },
+            params: { path: { id: problemId } },
+            body: createBody,
+          }),
+        );
+
+    const refetch = () => invalidateProblemTestCases(queryClient, problemId);
+    // Unsettled: the form stays open, so if the test case is not in the
+    // list it can be sent again as it is.
+    if (toastUnsettled(result.error, t, { refetch })) throw result.error;
+    if (result.error && !isAlreadyDone(result.error)) {
+      toast.error(
+        getErrorMessage(
+          result.error,
+          isEdit ? t('admin.editError') : t('admin.createError'),
+        ),
+      );
+      throw result.error;
+    }
+    toast.success(
+      isEdit ? t('toast.testCase.updated') : t('toast.testCase.created'),
+    );
+    refetch();
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    void dialog.submit(save);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <fieldset disabled={dialog.submitting} className="space-y-4">
+        <TestDataField
+          id="tc-input"
+          label={t('admin.testCases.field.input')}
+          value={values.input}
+          onChange={set('input')}
+          placeholder={t('admin.testCases.inputPlaceholder')}
+        />
+        <TestDataField
+          id="tc-expected-output"
+          label={t('admin.testCases.field.expectedOutput')}
+          value={values.expectedOutput}
+          onChange={set('expectedOutput')}
+          placeholder={t('admin.testCases.outputPlaceholder')}
+        />
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="space-y-2">
+            <Label htmlFor="tc-label">{t('admin.testCases.field.label')}</Label>
+            <Input
+              id="tc-label"
+              value={values.label}
+              onChange={(e) => set('label')(e.target.value)}
+              maxLength={64}
+              required={!isEdit}
+              placeholder={t('admin.testCases.labelPlaceholder')}
+              className="font-mono"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="tc-score">{t('admin.testCases.field.score')}</Label>
+            <Input
+              id="tc-score"
+              type="number"
+              min={0}
+              max={10000}
+              value={values.score}
+              onChange={(e) => set('score')(Number(e.target.value))}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="tc-description">
+              {t('admin.testCases.field.description')}
+            </Label>
+            <Textarea
+              id="tc-description"
+              value={values.description}
+              onChange={(e) => set('description')(e.target.value)}
+              maxLength={4096}
+              rows={3}
+              placeholder={t('admin.testCases.descriptionPlaceholder')}
+            />
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="space-y-3">
+          <Label className="text-sm text-muted-foreground">
+            {t('admin.field.options')}
+          </Label>
+          <SwitchField
+            id="tc-is-sample"
+            label={t('admin.testCases.field.isSample')}
+            checked={values.isSample}
+            onCheckedChange={set('isSample')}
+          />
+        </div>
+      </fieldset>
+
+      <DialogFooter>
+        <Button type="submit" disabled={dialog.submitting}>
+          {dialog.submitting
+            ? t('admin.saving')
+            : isEdit
+              ? t('admin.save')
+              : t('admin.testCases.create')}
+        </Button>
+      </DialogFooter>
+    </form>
+  );
+}
+
+/** Uploaded text longer than this is not shown in the textarea. */
+const MAX_SHOWN_UPLOAD_LENGTH = 100;
+
+/**
+ * A test data textarea that can also be filled from a file. A long uploaded
+ * file is kept out of the textarea; clicking its summary clears it.
+ */
+function TestDataField({
+  id,
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  const { t } = useTranslation();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploaded, setUploaded] = useState(false);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
+    if (!file) return;
+    try {
+      const content = await file.text();
+      onChange(content);
+      setUploaded(true);
+    } catch {
+      toast.error(t('admin.testCases.fileReadError'));
+    } finally {
+      inputEl.value = '';
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{label}</Label>
+      <input
+        ref={fileRef}
+        type="file"
+        className="hidden"
+        onChange={handleFile}
+      />
+      <Button
+        type="button"
+        variant="outline"
+        onClick={() => fileRef.current?.click()}
+        className="w-full"
+      >
+        <Upload className="h-4 w-4 mr-2" />
+        {t('admin.testCases.uploadFile')}
+      </Button>
+      {uploaded && value.length > MAX_SHOWN_UPLOAD_LENGTH ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          onClick={() => {
+            onChange('');
+            setUploaded(false);
+          }}
+        >
+          {t('admin.testCases.uploadedHidden', { length: value.length })}
+        </Button>
+      ) : (
+        <Textarea
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={6}
+          className="font-mono text-sm"
+          placeholder={placeholder}
+        />
+      )}
+    </div>
   );
 }

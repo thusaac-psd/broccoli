@@ -22,6 +22,7 @@ import type {
   ServerTableResponse,
 } from '@/hooks/use-server-table';
 import { useServerTable } from '@/hooks/use-server-table';
+import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Input } from '@/ui/input';
 import { Skeleton } from '@/ui/skeleton';
@@ -93,14 +94,17 @@ function PaginationControls({
   isFetching: boolean;
 }) {
   const { total, total_pages } = pagination;
+  const { t } = useTranslation();
   const canPrev = page > 1;
   const canNext = page < total_pages;
 
   return (
     <div className="flex items-center justify-between px-4 py-3 border-t">
       <span className="text-xs text-muted-foreground">
-        {total} result{total !== 1 ? 's' : ''}
-        {isFetching && ' · loading...'}
+        {total === 1
+          ? t('table.resultOne')
+          : t('table.results', { count: total })}
+        {isFetching && ` · ${t('table.loading')}`}
       </span>
       <div className="flex items-center gap-1">
         <Button

@@ -24,6 +24,9 @@ const PER_PAGE = 25;
 
 const FILTER_OPTIONS: DlqResolvedFilter[] = ['unresolved', 'all', 'resolved'];
 
+const STAT_SKELETONS = ['unresolved', 'resolved', 'op', 'stuck'];
+const ROW_SKELETONS = ['s1', 's2', 's3', 's4', 's5'];
+
 export default function AdminDlqPage() {
   const { t } = useTranslation();
   const { user } = useAuth();
@@ -67,7 +70,7 @@ export default function AdminDlqPage() {
 
       {stats.isLoading && !stats.data && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {['unresolved', 'resolved', 'op', 'stuck'].map((k) => (
+          {STAT_SKELETONS.map((k) => (
             <Skeleton key={k} className="h-24 w-full" />
           ))}
         </div>
@@ -107,7 +110,7 @@ export default function AdminDlqPage() {
 
           {list.isLoading && !list.data && (
             <div className="space-y-2">
-              {['s1', 's2', 's3', 's4', 's5'].map((k) => (
+              {ROW_SKELETONS.map((k) => (
                 <Skeleton key={k} className="h-12 w-full" />
               ))}
             </div>

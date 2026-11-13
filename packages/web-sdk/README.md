@@ -19,25 +19,24 @@ for working setups.
 
 The root export is empty. Import from a subpath:
 
-| Import                              | What it provides                                     |
-| ----------------------------------- | ---------------------------------------------------- |
-| `@broccoli/web-sdk/plugin`          | `PluginRegistryProvider`, `usePluginRegistry`, types |
-| `@broccoli/web-sdk/slot`            | The `Slot` component                                 |
-| `@broccoli/web-sdk/ui`              | UI kit: `Button`, `DataTable`, `Dialog`, `Tabs`, …   |
-| `@broccoli/web-sdk/api`             | `useApiFetch`, the API client, `serverNow`           |
-| `@broccoli/web-sdk/hooks`           | `useIdempotentRequest`, `useServerTable`, …          |
-| `@broccoli/web-sdk/i18n`            | Translation hooks and types                          |
-| `@broccoli/web-sdk/auth`            | Auth state                                           |
-| `@broccoli/web-sdk/permissions`     | Permission name constants                            |
-| `@broccoli/web-sdk/contest`         | Contest types                                        |
-| `@broccoli/web-sdk/problem`         | Problem types and presentation                       |
-| `@broccoli/web-sdk/submission`      | Submission types and helpers                         |
-| `@broccoli/web-sdk/clarification`   | Clarification types                                  |
-| `@broccoli/web-sdk/sidebar`         | Sidebar state                                        |
-| `@broccoli/web-sdk/theme`           | Theme state                                          |
-| `@broccoli/web-sdk/utils`           | `cn`, date and number formatting                     |
-| `@broccoli/web-sdk/tailwind-preset` | Tailwind preset for plugin styles                    |
-| `@broccoli/web-sdk/plugin.css`      | Base plugin stylesheet                               |
+| Import                            | What it provides                                     |
+| --------------------------------- | ---------------------------------------------------- |
+| `@broccoli/web-sdk/plugin`        | `PluginRegistryProvider`, `usePluginRegistry`, types |
+| `@broccoli/web-sdk/slot`          | The `Slot` component                                 |
+| `@broccoli/web-sdk/ui`            | UI kit: `Button`, `DataTable`, `Dialog`, `Tabs`, …   |
+| `@broccoli/web-sdk/api`           | `usePluginApi`, the API client, `serverNow`          |
+| `@broccoli/web-sdk/hooks`         | `useIdempotentRequest`, `useServerTable`, …          |
+| `@broccoli/web-sdk/i18n`          | Translation hooks and types                          |
+| `@broccoli/web-sdk/auth`          | Auth state                                           |
+| `@broccoli/web-sdk/permissions`   | Permission name constants                            |
+| `@broccoli/web-sdk/contest`       | Contest types                                        |
+| `@broccoli/web-sdk/problem`       | Problem types and presentation                       |
+| `@broccoli/web-sdk/submission`    | Submission types and helpers                         |
+| `@broccoli/web-sdk/clarification` | Clarification types                                  |
+| `@broccoli/web-sdk/sidebar`       | Sidebar state                                        |
+| `@broccoli/web-sdk/theme`         | Theme state                                          |
+| `@broccoli/web-sdk/utils`         | `cn`, date and number formatting                     |
+| `@broccoli/web-sdk/plugin.css`    | Base plugin stylesheet                               |
 
 ## How slots work
 
@@ -58,9 +57,9 @@ component only when the current user and contest satisfy them.
 
 ## Set up the provider
 
-Wrap the app once. `backendUrl` is where the registry fetches active plugins.
-`lazyPlugins` is for plugins bundled with the app and code-split with dynamic
-`import()`; remote plugins delivered by the server need no entry here.
+Wrap the app once. `backendUrl` is where the registry fetches active plugins;
+the server delivers every plugin's bundle, so there is nothing to register in
+frontend code.
 
 ```tsx
 import { PluginRegistryProvider } from '@broccoli/web-sdk/plugin';
@@ -78,13 +77,16 @@ function App() {
 
 Build plugin UI from `@broccoli/web-sdk/ui` so it matches the app: `Button`,
 `Badge`, `Card`, `Dialog`, `Select`, `Tabs`, `Textarea`, `DataTable`,
-`FileDropZone`, `Sidebar`, `Sonner` toasts, and more. Use the Tailwind preset
-and the plugin stylesheet to pick up the same tokens:
+`FileDropZone`, `Sidebar`, `Sonner` toasts, and more. Import the plugin
+stylesheet from the plugin's own CSS entry to pick up the same tokens:
 
-```ts
-// tailwind config
-import preset from '@broccoli/web-sdk/tailwind-preset';
-export default { presets: [preset] };
+```css
+@import '@broccoli/web-sdk/dist/plugin.css';
+@source './**/*.{ts,tsx}';
+
+@layer plugin {
+  @tailwind utilities;
+}
 ```
 
 ## Where to go next

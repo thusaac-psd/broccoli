@@ -13,7 +13,12 @@ import { BlobRefField } from './BlobRefField';
 import { FieldError } from './FieldError';
 import { NumericInput } from './NumericInput';
 import { SchemaFields } from './SchemaFields';
-import type { ConfigScope, InheritedConfig, JsonSchemaProperty } from './types';
+import type {
+  ConfigScope,
+  FieldProblem,
+  InheritedConfig,
+  JsonSchemaProperty,
+} from './types';
 import { defaultForType } from './utils';
 
 function DefaultBadge() {
@@ -47,7 +52,7 @@ export function SchemaField({
   rootValues: Record<string, unknown>;
   path: string[];
   updateValue: (path: string[], value: unknown) => void;
-  errors: Record<string, string>;
+  errors: Record<string, FieldProblem>;
   pluginId?: string;
   namespace?: string;
   scope?: ConfigScope;
@@ -266,7 +271,7 @@ export function SchemaField({
                 </option>
               ))}
             </select>
-            <FieldError message={error} />
+            <FieldError problem={error} />
             {annotation}
           </div>
         </div>
@@ -317,7 +322,7 @@ export function SchemaField({
               unit={prop['x-unit']}
               inheritedPlaceholder={inheritedPlaceholder}
             />
-            <FieldError message={error} />
+            <FieldError problem={error} />
             {annotation}
           </div>
         </div>
@@ -394,7 +399,7 @@ export function SchemaField({
               {addLabel}
             </Button>
           </div>
-          <FieldError message={error} />
+          <FieldError problem={error} />
         </div>
       );
     }
@@ -435,7 +440,7 @@ export function SchemaField({
               minLength={prop.minLength}
               maxLength={prop.maxLength}
             />
-            <FieldError message={error} />
+            <FieldError problem={error} />
             {annotation}
           </div>
         </div>

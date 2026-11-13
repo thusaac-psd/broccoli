@@ -4,16 +4,24 @@ import { Slot } from '@broccoli/web-sdk/slot';
 import { Button, SheetFooter } from '@broccoli/web-sdk/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import { RotateCcw, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+
+import { RecordLoader } from '@/components/RecordLoader';
 
 import { SchemaFields } from './SchemaFields';
-import type { ConfigScope, InheritedConfig, JsonSchema } from './types';
+import type {
+  ConfigScope,
+  FieldProblem,
+  InheritedConfig,
+  JsonSchema,
+} from './types';
 import {
   deepMerge,
   extractDefaults,
   hasOwnDescendantValue,
   hasOwnValueAtPath,
   resolveInheritedValue,
+  setAtPath,
   validateAll,
 } from './utils';
 
@@ -31,17 +39,44 @@ export interface ConfigFormProps {
   invalidateQueryKeys?: string[][];
 }
 
-export function ConfigForm({
+/** A user's edit of one field: the value now at `path`. */
+interface FieldEdit {
+  path: string[];
+  value: unknown;
+}
+
+export function ConfigForm(props: ConfigFormProps) {
+  const { schema, open, pluginId, scope, getConfig } = props;
+  if (!open) return null;
+  return (
+    <RecordLoader
+      key={`${pluginId ?? ''}:${schema.namespace}:${JSON.stringify(scope)}`}
+      queryKey={['config-form', pluginId, schema.namespace, scope]}
+      queryFn={() =>
+        getConfig().catch((err: unknown) => {
+          // Nothing stored yet: the form starts from the defaults.
+          if ((err as { code?: unknown } | null)?.code === 'NOT_FOUND') {
+            return {};
+          }
+          throw err;
+        })
+      }
+    >
+      {(stored) => <ConfigFormFields {...props} initialStored={stored} />}
+    </RecordLoader>
+  );
+}
+
+function ConfigFormFields({
   schema,
-  open,
   pluginId,
   scope,
   inherited,
-  getConfig,
+  initialStored,
   putConfig,
   deleteConfig,
   invalidateQueryKeys,
-}: ConfigFormProps) {
+}: ConfigFormProps & { initialStored: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const jsonSchema = schema.json_schema as JsonSchema;
@@ -60,47 +95,29 @@ export function ConfigForm({
     return merged;
   }, [schemaDefaults, inherited]);
 
-  const [values, setValues] = useState<Record<string, unknown>>(defaults);
-  const [storedValues, setStoredValues] = useState<Record<string, unknown>>({});
-  const [dirtyFields, setDirtyFields] = useState<Set<string>>(new Set());
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [storedValues, setStoredValues] = useState(initialStored);
+  // The form shows the stored config over the defaults (or the defaults
+  // alone after "Defaults"), with the user's edits on top. Derived rather
+  // than copied, so defaults that arrive later (inherited values) show up in
+  // every field the user has not set.
+  const [fromDefaults, setFromDefaults] = useState(false);
+  const [edits, setEdits] = useState<ReadonlyMap<string, FieldEdit>>(
+    () => new Map(),
+  );
+  const values = useMemo(() => {
+    let result = fromDefaults ? defaults : deepMerge(defaults, storedValues);
+    for (const { path, value } of edits.values()) {
+      result = setAtPath(result, path, value);
+    }
+    return result;
+  }, [defaults, storedValues, fromDefaults, edits]);
+
+  const [errors, setErrors] = useState<Record<string, FieldProblem>>({});
   const [loading, setLoading] = useState(false);
-  const [loadingData, setLoadingData] = useState(false);
   const [message, setMessage] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setMessage(null);
-    setErrors({});
-    setLoadingData(true);
-
-    getConfig()
-      .then((config) => {
-        setStoredValues(config);
-        setValues(deepMerge(defaults, config));
-      })
-      .catch((err) => {
-        if (err?.code !== 'NOT_FOUND') {
-          setMessage({ type: 'error', text: t('plugins.config.loadError') });
-        }
-        setStoredValues({});
-        setValues(defaults);
-      })
-      .finally(() => setLoadingData(false));
-  }, [open, schema.namespace]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (
-      !loadingData &&
-      !hasOwnDescendantValue(storedValues, []) &&
-      dirtyFields.size === 0
-    ) {
-      setValues(deepMerge(defaults, storedValues));
-    }
-  }, [defaults]); // eslint-disable-line react-hooks/exhaustive-deps -- only re-sync when defaults change (i.e., inherited arrived)
 
   const isUsingDefaultsOnly = useMemo(
     () => !hasOwnDescendantValue(storedValues, []),
@@ -116,34 +133,18 @@ export function ConfigForm({
   );
 
   const isDirty = useCallback(
-    (path: string[]) => dirtyFields.has(path.join('.')),
-    [dirtyFields],
+    (path: string[]) => edits.has(path.join('.')),
+    [edits],
   );
 
   const updateValue = useCallback((path: string[], value: unknown) => {
+    if (path.length === 0) return;
     const dotPath = path.join('.');
-    setDirtyFields((prev) => {
-      if (prev.has(dotPath)) return prev;
-      const next = new Set(prev);
-      next.add(dotPath);
-      return next;
-    });
-
-    setValues((prev) => {
-      if (path.length === 0) return prev;
-      const next = structuredClone(prev);
-      let target: Record<string, unknown> = next;
-      for (let i = 0; i < path.length - 1; i++) {
-        if (
-          target[path[i]] === undefined ||
-          typeof target[path[i]] !== 'object'
-        ) {
-          // Create array or object depending on whether next segment is numeric
-          target[path[i]] = /^\d+$/.test(path[i + 1]) ? [] : {};
-        }
-        target = target[path[i]] as Record<string, unknown>;
-      }
-      target[path[path.length - 1]] = value;
+    setEdits((prev) => {
+      const next = new Map(prev);
+      // Re-inserted last, so a later edit of a parent applies after it.
+      next.delete(dotPath);
+      next.set(dotPath, { path, value });
       return next;
     });
 
@@ -168,8 +169,9 @@ export function ConfigForm({
     setMessage(null);
 
     const dirtyTopKeys = new Set<string>();
-    for (const dp of dirtyFields) {
-      dirtyTopKeys.add(dp.split('.')[0]);
+    for (const { path } of edits.values()) dirtyTopKeys.add(path[0]);
+    if (fromDefaults) {
+      for (const key of Object.keys(storedValues)) dirtyTopKeys.add(key);
     }
     const payload: Record<string, unknown> = {};
     for (const key of Object.keys(values)) {
@@ -185,7 +187,8 @@ export function ConfigForm({
       setMessage({ type: 'error', text: t('plugins.config.saveError') });
     } else {
       setStoredValues(payload);
-      setDirtyFields(new Set());
+      setFromDefaults(false);
+      setEdits(new Map());
       setMessage({ type: 'success', text: t('plugins.config.saveSuccess') });
       if (invalidateQueryKeys) {
         for (const key of invalidateQueryKeys) {
@@ -196,8 +199,8 @@ export function ConfigForm({
   }
 
   function handleReset() {
-    setValues(defaults);
-    setDirtyFields(new Set());
+    setFromDefaults(true);
+    setEdits(new Map());
     setErrors({});
     setMessage(null);
   }
@@ -213,8 +216,8 @@ export function ConfigForm({
       setMessage({ type: 'error', text: t('plugins.config.deleteError') });
     } else {
       setStoredValues({});
-      setValues(defaults);
-      setDirtyFields(new Set());
+      setFromDefaults(false);
+      setEdits(new Map());
       setErrors({});
       setMessage({
         type: 'success',
@@ -226,14 +229,6 @@ export function ConfigForm({
         }
       }
     }
-  }
-
-  if (loadingData) {
-    return (
-      <div className="py-12 text-center text-muted-foreground text-sm">
-        {t('plugins.config.loading')}
-      </div>
-    );
   }
 
   return (

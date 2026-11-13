@@ -2,6 +2,7 @@ export * from '@/ui/badge';
 export * from '@/ui/button';
 export * from '@/ui/calendar';
 export * from '@/ui/card';
+export * from '@/ui/confirm-dialog';
 export * from '@/ui/data-table';
 export * from '@/ui/date-time-picker';
 export * from '@/ui/dialog';

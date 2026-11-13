@@ -1,6 +1,11 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button, FileDropZone, Input } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  FileDropZone,
+  Input,
+  useConfirmDialog,
+} from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, Loader2, Trash2, Upload, X } from 'lucide-react';
@@ -34,6 +39,7 @@ export function AdditionalFilesSection({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const [staged, setStaged] = useState<StagedFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -89,7 +95,9 @@ export function AdditionalFilesSection({
     async (item: StagedFile): Promise<boolean> => {
       if (!item.language) {
         toast.error(
-          `${item.file.name}: ${t('admin.additionalFiles.selectLanguageFirst')}`,
+          t('admin.additionalFiles.selectLanguageFirstFor', {
+            name: item.file.name,
+          }),
         );
         return false;
       }
@@ -171,22 +179,24 @@ export function AdditionalFilesSection({
   // --- Delete / Download ---
 
   const handleDelete = useCallback(
-    async (file: AdditionalFile) => {
-      if (!window.confirm(t('admin.deleteConfirm'))) return;
-      const { error } = await apiClient.DELETE(
-        '/problems/{id}/additional-files/{ref_id}',
-        { params: { path: { id: problemId, ref_id: file.id } } },
-      );
-      if (error) {
-        toast.error(
-          getErrorMessage(error, t('admin.additionalFiles.deleteError')),
-        );
-      } else {
-        toast.success(t('admin.additionalFiles.deleted'));
-        queryClient.invalidateQueries({ queryKey });
-      }
-    },
-    [apiClient, problemId, queryClient, queryKey, t],
+    (file: AdditionalFile) =>
+      confirm({
+        title: t('admin.deleteConfirm'),
+        description: file.filename,
+        confirmLabel: t('admin.delete'),
+        destructive: true,
+        failureMessage: t('admin.additionalFiles.deleteError'),
+        onConfirm: async () => {
+          const { error } = await apiClient.DELETE(
+            '/problems/{id}/additional-files/{ref_id}',
+            { params: { path: { id: problemId, ref_id: file.id } } },
+          );
+          if (error) throw error;
+          toast.success(t('admin.additionalFiles.deleted'));
+          queryClient.invalidateQueries({ queryKey });
+        },
+      }),
+    [apiClient, confirm, problemId, queryClient, queryKey, t],
   );
 
   const handleDownload = useCallback(
@@ -415,6 +425,7 @@ export function AdditionalFilesSection({
           })}
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }

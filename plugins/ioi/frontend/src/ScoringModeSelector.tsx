@@ -37,6 +37,9 @@ const MODES = [
   },
 ] as const;
 
+/** Accent for modes that are neither selected nor inherited. */
+const INACTIVE_ACCENT = 'var(--muted-foreground, #9ca3af)';
+
 export function ScoringModeSelector({
   value,
   schema,
@@ -93,9 +96,7 @@ export function ScoringModeSelector({
             const isSelected = !showAsPlaceholder && selected === mode.key;
             const isInherited = inherited === mode.key;
             const accentColor =
-              isSelected || isInherited
-                ? mode.accent
-                : 'var(--muted-foreground, #9ca3af)';
+              isSelected || isInherited ? mode.accent : INACTIVE_ACCENT;
 
             return (
               <button

@@ -1,6 +1,7 @@
 import { Upload } from 'lucide-react';
 import { type ReactNode, useCallback, useRef, useState } from 'react';
 
+import { useTranslation } from '@/i18n';
 import { cn } from '@/utils';
 
 interface FileDropZoneProps {
@@ -22,6 +23,7 @@ export function FileDropZone({
   'aria-label': ariaLabel,
   children,
 }: FileDropZoneProps) {
+  const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -100,7 +102,7 @@ export function FileDropZone({
     <div
       role="button"
       tabIndex={disabled ? -1 : 0}
-      aria-label={ariaLabel ?? 'Upload files'}
+      aria-label={ariaLabel ?? t('fileDrop.label')}
       aria-disabled={disabled || undefined}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
@@ -130,7 +132,7 @@ export function FileDropZone({
       {children ?? (
         <>
           <Upload className="h-5 w-5" />
-          <span>Drop files here or click to browse</span>
+          <span>{t('fileDrop.prompt')}</span>
         </>
       )}
     </div>

@@ -30,8 +30,13 @@ export async function fetchAttachments(
   }));
 }
 
-export function attachmentUrl(problemId: number, refId: string): string {
-  return `/api/v1/problems/${problemId}/attachments/${refId}`;
+/** An attachment's URL under the API base path (`useApiBasePath()`). */
+export function attachmentUrl(
+  apiBasePath: string,
+  problemId: number,
+  refId: string,
+): string {
+  return `${apiBasePath}/problems/${problemId}/attachments/${refId}`;
 }
 
 export function isImageType(contentType: string | null): boolean {

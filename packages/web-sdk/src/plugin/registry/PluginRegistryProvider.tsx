@@ -16,12 +16,11 @@ import {
 import { PluginRegistryContext } from '@/plugin/registry/plugin-registry-context';
 import type {
   ActivePluginManifest,
-  LazyPluginLoader,
   PluginModule,
   SlotConfig,
 } from '@/plugin/types';
 import { backoffDelay, type BackoffPolicy } from '@/utils/backoff';
-import { retryImport, retryLoad } from '@/utils/chunk-load';
+import { retryLoad } from '@/utils/chunk-load';
 
 // While the server cannot be asked for its plugin list, or a plugin it lists
 // would not load (a gateway 502 while the server restarts), sync again with
@@ -35,11 +34,6 @@ const PLUGIN_LOAD_ATTEMPTS = 4;
 interface PluginRegistryProviderProps {
   children: ReactNode;
   backendUrl: string;
-  /**
-   * Lazy plugin loaders. Each loader is a function returning a dynamic
-   * `import()` so Vite can code-split them into separate chunks.
-   */
-  lazyPlugins?: LazyPluginLoader[];
 }
 
 /** A unique query string, so a fresh load bypasses the HTTP and module caches. */
@@ -85,7 +79,6 @@ function removePluginCss(pluginId: string) {
 export function PluginRegistryProvider({
   children,
   backendUrl,
-  lazyPlugins,
 }: PluginRegistryProviderProps) {
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -147,33 +140,18 @@ export function PluginRegistryProvider({
   );
   const view = useMemo(() => registryView(loads), [loads]);
 
-  // Until the local plugins are in and the server's list has been fetched
-  // once, pages show a loading state rather than an empty one.
+  // Until the server's list has been fetched once, pages show a loading
+  // state rather than an empty one.
   const [listed, setListed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const local = Promise.all(
-      (lazyPlugins ?? []).map(async (loader) => {
-        try {
-          const module = await retryImport(loader);
-          await registry.load(module.manifest, 'local', async () => module);
-        } catch (error) {
-          console.error('Failed to load lazy plugin:', error);
-        }
-      }),
-    );
-
     const syncUntilLoaded = async (attempt: number) => {
       const result = await registry.sync();
       if (cancelled) return;
-      if (result !== 'unreachable') {
-        await local;
-        if (cancelled) return;
-        setListed(true);
-      }
+      if (result !== 'unreachable') setListed(true);
       if (result !== 'ok') {
         timer = setTimeout(
           () => void syncUntilLoaded(attempt + 1),
@@ -188,7 +166,6 @@ export function PluginRegistryProvider({
       clearTimeout(timer);
     };
     // The plugin set is fixed for the provider's lifetime.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registry]);
 
   const loadPlugin = useCallback(

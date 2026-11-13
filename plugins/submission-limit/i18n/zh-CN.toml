@@ -1,0 +1,28 @@
+# LimitRejection
+'limit.result' = '结果'
+'limit.limitReached' = '已达上限'
+'limit.submissionLimitReached' = '已达到提交次数上限'
+'limit.allUsed' = '你已用完该题的所有提交次数'
+'limit.usedCount' = '已用 {used} / {total}'
+'limit.zeroRemaining' = '剩余 0 次'
+
+# SubmissionLimitStatus
+'limit.submissions' = '提交次数'
+'limit.submittedNoLimit' = '已提交 {count} 次 — 无限制'
+'limit.remaining' = '剩余 {count} 次'
+'limit.reached' = '已达上限'
+
+# LimitConfigInfo
+'limit.unlimited' = '0（不限）'
+'limit.sourceContest' = '比赛'
+'limit.sourceProblem' = '题目'
+'limit.contestHint' = '比赛题目级覆盖设置优先，未设置时回退到各题目自身的设置。'
+'limit.inheritInfo' = '未设置时，继承来自{source}的值 {value}。'
+'limit.priority' = '优先级：比赛 > 题目。'
+'limit.overrideInfo' = '覆盖比赛和题目的设置。未设置时使用默认值。'
+'limit.notSet' = '未设置'
+'limit.notSetWithDefault' = '未设置（默认：{default}）'
+'limit.active' = '生效中'
+'limit.source.problem' = '来自题目'
+'limit.source.contest' = '来自比赛'
+'limit.source.contest_problem' = '覆盖'

@@ -4,7 +4,7 @@ import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { Button } from '@broccoli/web-sdk/ui';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Flame, List, Pencil, Trash2, Users } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
@@ -12,6 +12,7 @@ import { useNavigate, useParams } from 'react-router';
 import {
   ContestFormDialog,
   ContestProblemsDialog,
+  useDeleteContestConfirm,
 } from '@/features/admin/components/AdminContestsTab';
 import { ManageParticipantsDialog } from '@/features/admin/components/ManageParticipantsDialog';
 import { PrewarmDialog } from '@/features/contest/components/PrewarmDialog';
@@ -22,7 +23,6 @@ export function ContestAdminActions() {
   const { user } = useAuth();
   const authReady = useAuthReady();
   const apiClient = useApiClient();
-  const queryClient = useQueryClient();
   const navigate = useNavigate();
 
   const id = Number(contestId);
@@ -44,19 +44,9 @@ export function ContestAdminActions() {
   const [problemsOpen, setProblemsOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const [warmOpen, setWarmOpen] = useState(false);
+  const [confirmDelete, deleteDialog] = useDeleteContestConfirm();
 
   if (!user?.permissions?.includes(CONTEST_MANAGE) || !contest) return null;
-
-  async function handleDelete() {
-    if (!window.confirm(t('admin.deleteConfirm'))) return;
-    const { error } = await apiClient.DELETE('/contests/{id}', {
-      params: { path: { id } },
-    });
-    if (!error) {
-      queryClient.invalidateQueries({ queryKey: ['admin-contests'] });
-      navigate('/contests');
-    }
-  }
 
   return (
     <div className="rounded-lg border p-4 space-y-1">
@@ -104,7 +94,7 @@ export function ContestAdminActions() {
         variant="ghost"
         size="sm"
         className="w-full justify-start gap-2 h-8 text-xs text-destructive hover:text-destructive"
-        onClick={handleDelete}
+        onClick={() => confirmDelete(contest, () => navigate('/contests'))}
       >
         <Trash2 className="h-3.5 w-3.5" />
         {t('admin.delete')}
@@ -130,6 +120,7 @@ export function ContestAdminActions() {
         open={warmOpen}
         onOpenChange={setWarmOpen}
       />
+      {deleteDialog}
     </div>
   );
 }

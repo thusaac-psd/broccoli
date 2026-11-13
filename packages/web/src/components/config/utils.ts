@@ -1,4 +1,4 @@
-import type { JsonSchema, JsonSchemaProperty } from './types';
+import type { FieldProblem, JsonSchema, JsonSchemaProperty } from './types';
 
 export { resolveInheritedValue } from '@broccoli/web-sdk/slot';
 
@@ -38,6 +38,29 @@ export function deepMerge(
     }
   }
   return result;
+}
+
+/**
+ * A copy of `values` with `value` at `path`. Missing containers on the way
+ * are created: an array when the next segment is an index, else an object.
+ */
+export function setAtPath(
+  values: Record<string, unknown>,
+  path: readonly string[],
+  value: unknown,
+): Record<string, unknown> {
+  if (path.length === 0) return values;
+  const next = structuredClone(values);
+  let target: Record<string, unknown> = next;
+  for (let i = 0; i < path.length - 1; i++) {
+    const segment = path[i];
+    if (target[segment] === null || typeof target[segment] !== 'object') {
+      target[segment] = /^\d+$/.test(path[i + 1]) ? [] : {};
+    }
+    target = target[segment] as Record<string, unknown>;
+  }
+  target[path[path.length - 1]] = value;
+  return next;
 }
 
 export function hasOwnValueAtPath(
@@ -83,30 +106,36 @@ function hasAnyOwnValue(value: unknown): boolean {
 export function validateField(
   value: unknown,
   prop: JsonSchemaProperty,
-): string | null {
+): FieldProblem | null {
   if (value === undefined || value === null) return null;
 
   if (prop.type === 'number' || prop.type === 'integer') {
     if (typeof value !== 'number' || Number.isNaN(value)) {
-      return 'Must be a valid number';
+      return { key: 'config.validation.number' };
     }
     if (prop.type === 'integer' && !Number.isInteger(value)) {
-      return 'Must be a whole number';
+      return { key: 'config.validation.integer' };
     }
     if (prop.minimum !== undefined && value < prop.minimum) {
-      return `Must be at least ${String(prop.minimum)}`;
+      return { key: 'config.validation.min', params: { min: prop.minimum } };
     }
     if (prop.maximum !== undefined && value > prop.maximum) {
-      return `Must be at most ${String(prop.maximum)}`;
+      return { key: 'config.validation.max', params: { max: prop.maximum } };
     }
   }
 
   if (prop.type === 'string' && typeof value === 'string') {
     if (prop.minLength !== undefined && value.length < prop.minLength) {
-      return `Must be at least ${String(prop.minLength)} characters`;
+      return {
+        key: 'config.validation.minLength',
+        params: { min: prop.minLength },
+      };
     }
     if (prop.maxLength !== undefined && value.length > prop.maxLength) {
-      return `Must be at most ${String(prop.maxLength)} characters`;
+      return {
+        key: 'config.validation.maxLength',
+        params: { max: prop.maxLength },
+      };
     }
   }
 
@@ -117,7 +146,7 @@ function validateItems(
   items: unknown[],
   itemSchema: JsonSchemaProperty,
   parentPath: string[],
-  errors: Record<string, string>,
+  errors: Record<string, FieldProblem>,
 ): void {
   for (let i = 0; i < items.length; i++) {
     const itemPath = [...parentPath, String(i)];
@@ -151,8 +180,8 @@ export function validateAll(
   values: Record<string, unknown>,
   schema: JsonSchema,
   prefix: string[] = [],
-): Record<string, string> {
-  const errors: Record<string, string> = {};
+): Record<string, FieldProblem> {
+  const errors: Record<string, FieldProblem> = {};
   if (!schema.properties) return errors;
 
   for (const [key, prop] of Object.entries(schema.properties)) {

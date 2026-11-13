@@ -139,7 +139,7 @@ function FleetSection({ fleet }: { fleet: PluginFleet }) {
                 <span className="font-mono">{r.server_id}</span>
                 {r.version && (
                   <span className="text-muted-foreground font-mono">
-                    v{r.version}
+                    {t('common.version', { version: r.version })}
                   </span>
                 )}
                 <Badge variant={REPLICA_BADGE[r.status]} className="text-xs">
@@ -465,7 +465,8 @@ export function PluginDetailDialog({
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-xs">
                     {plugin.id}
-                    {plugin.version && ` · v${plugin.version}`}
+                    {plugin.version &&
+                      ` · ${t('common.version', { version: plugin.version })}`}
                   </span>
                   <PluginFleetBadge fleet={plugin.fleet} />
                   {plugin.enabled &&

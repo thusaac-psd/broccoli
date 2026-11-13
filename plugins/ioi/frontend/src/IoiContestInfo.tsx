@@ -30,6 +30,9 @@ const FEEDBACK_KEYS: Record<string, string> = {
   none: 'ioi.contestInfo.feedback.none',
 };
 
+/** The contest format's proper name, shown as is in every language. */
+const FORMAT_NAME = 'IOI';
+
 export function IoiContestInfo() {
   const { contestId } = useParams();
   const cId = contestId ? Number(contestId) : undefined;
@@ -51,7 +54,7 @@ export function IoiContestInfo() {
           variant="default"
           className="uppercase text-[11px] font-bold tracking-wide"
         >
-          IOI
+          {FORMAT_NAME}
         </Badge>
         <span className="text-sm font-semibold text-foreground">
           {mode.title}

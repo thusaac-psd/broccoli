@@ -9,6 +9,8 @@ export type ApiFetch = (
 
 export interface ApiClientContextValue {
   apiClient: ApiClient;
+  /** The absolute API base URL every request is resolved against. */
+  baseUrl: string;
   /** Authenticated fetch for untyped endpoints (e.g. plugin APIs). */
   apiFetch: ApiFetch;
 }

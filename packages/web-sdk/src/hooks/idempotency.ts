@@ -276,3 +276,43 @@ export async function sendIdempotent<T>(
     return sent.result;
   }
 }
+
+/**
+ * Where an idempotent send left its operation:
+ *
+ * - settled: it took effect. `data` is the response, or undefined when an
+ *   earlier send already succeeded and its response is gone.
+ * - not settled: an earlier send may or may not have taken effect
+ *   (`outcome-unknown`) or is still running (`in-progress`). The caller must
+ *   refetch what it would have changed and tell the user to check before
+ *   sending it again.
+ */
+export type IdempotentResult<T> =
+  | { settled: true; data: T | undefined }
+  | { settled: false; outcome: 'outcome-unknown' | 'in-progress' };
+
+/**
+ * Resolve `send` (a `sendIdempotent` call) to its `IdempotentResult`. Any
+ * other failure is rethrown, to be reported as a failure.
+ */
+export async function settleIdempotent<T>(
+  send: Promise<T>,
+): Promise<IdempotentResult<T>> {
+  try {
+    return { settled: true, data: await send };
+  } catch (error) {
+    const outcome = idempotencyOutcome(error);
+    if (outcome === 'already-done') return { settled: true, data: undefined };
+    if (outcome) return { settled: false, outcome };
+    throw error;
+  }
+}
+
+/** The i18n key telling the user what an unsettled operation means. */
+export function unsettledMessageKey(
+  outcome: 'outcome-unknown' | 'in-progress',
+): string {
+  return outcome === 'in-progress'
+    ? 'toast.idempotency.inProgress'
+    : 'toast.idempotency.outcomeUnknown';
+}

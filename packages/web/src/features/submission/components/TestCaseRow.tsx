@@ -5,7 +5,7 @@ import {
   type TestCaseResult,
 } from '@broccoli/web-sdk/submission';
 import { Button } from '@broccoli/web-sdk/ui';
-import { cn } from '@broccoli/web-sdk/utils';
+import { cn, formatKibibytes } from '@broccoli/web-sdk/utils';
 import {
   AlertCircle,
   CheckCircle2,
@@ -78,10 +78,14 @@ const VERDICT_CONFIG: Record<
   },
 };
 
-export function formatMemory(kb: number): string {
-  const mb = kb / 1024;
-  return mb.toFixed(mb >= 10 ? 0 : 1);
-}
+/** The outputs a test case's details show, in order. */
+const DETAIL_FIELDS = [
+  'checker_output',
+  'input',
+  'expected_output',
+  'stdout',
+  'stderr',
+] as const;
 
 export function TestCaseRow({
   testCase,
@@ -127,11 +131,7 @@ export function TestCaseRow({
             </div>
           )}
           {testCase.memory_used != null && (
-            <div>
-              {t('result.memoryValue', {
-                value: formatMemory(testCase.memory_used),
-              })}
-            </div>
+            <div>{formatKibibytes(testCase.memory_used)}</div>
           )}
         </div>
       </div>
@@ -149,15 +149,7 @@ export function TestCaseRow({
       )}
       {hasDetails && detailsOpen && (
         <div className="px-3 pb-3 space-y-2">
-          {(
-            [
-              'checker_output',
-              'input',
-              'expected_output',
-              'stdout',
-              'stderr',
-            ] as const
-          ).map((field) => (
+          {DETAIL_FIELDS.map((field) => (
             <TestCaseOutput
               key={field}
               submissionId={submissionId}

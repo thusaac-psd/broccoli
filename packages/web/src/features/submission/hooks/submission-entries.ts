@@ -17,6 +17,11 @@ export interface SubmissionEntry {
   /** Unique client-side ID for this entry */
   id: number;
   submission: Submission | null;
+  /**
+   * The submission's id once the server accepted it, before a poll has
+   * fetched the submission itself (an admin fan-out only learns the id).
+   */
+  submissionId?: number;
   codeRun: CodeRun | null;
   status: EntryStatus;
   error: SubmissionError | null;
@@ -45,6 +50,8 @@ export type EntryAction =
   | { type: 'added'; entries: SubmissionEntry[] }
   /** The server accepted the submit or run. */
   | { type: 'accepted'; id: number; result: EntryResult }
+  /** The server accepted a submission but returned only its id. */
+  | { type: 'accepted'; id: number; submissionId: number; result?: never }
   | { type: 'polled'; id: number; result: EntryResult }
   | { type: 'failed'; id: number; error: SubmissionError }
   /** The entry has nothing to show here (it is in the submissions list). */
@@ -94,7 +101,13 @@ export function entriesReducer(
       const next =
         action.type === 'failed'
           ? { ...entry, status: 'error' as const, error: action.error }
-          : withResult(entry, action.result);
+          : action.result
+            ? withResult(entry, action.result)
+            : {
+                ...entry,
+                submissionId: action.submissionId,
+                status: 'polling' as const,
+              };
       return entries.map((e, i) => (i === index ? next : e));
     }
   }
@@ -108,9 +121,8 @@ export function pollTarget(
   if (entry.isRun) {
     return entry.codeRun ? { kind: 'codeRun', id: entry.codeRun.id } : null;
   }
-  return entry.submission
-    ? { kind: 'submission', id: entry.submission.id }
-    : null;
+  const id = entry.submission?.id ?? entry.submissionId;
+  return id === undefined ? null : { kind: 'submission', id };
 }
 
 export const POLL_INTERVAL_MS = 1_000;

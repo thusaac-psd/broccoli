@@ -5,6 +5,7 @@
  * slot. It shows which parent scope provides the effective inherited value and
  * displays the full cascade hierarchy.
  */
+import { useTranslation } from '@/i18n';
 import type { InheritedConfig } from '@/slot/config-field-slot-props';
 import { resolveInheritedValue } from '@/slot/config-field-slot-props';
 import { cn } from '@/utils';
@@ -61,6 +62,7 @@ export function ConfigInheritanceInfo({
   formatValue,
   labels,
 }: ConfigInheritanceInfoProps) {
+  const { t } = useTranslation();
   const isContestProblem = scope?.scope === 'contest_problem';
   const isContest = scope?.scope === 'contest';
 
@@ -166,7 +168,7 @@ export function ConfigInheritanceInfo({
               )}
               {row.disabled && (
                 <span className="text-[11px] text-muted-foreground/60 italic">
-                  (disabled)
+                  {t('config.inheritance.disabled')}
                 </span>
               )}
               {!row.disabled && row.label === activeInherited?.source && (

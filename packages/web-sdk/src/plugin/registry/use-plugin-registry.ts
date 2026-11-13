@@ -2,7 +2,6 @@ import { use } from 'react';
 
 import { PluginRegistryContext } from '@/plugin/registry/plugin-registry-context';
 
-// Hook to access the plugin registry context
 export function usePluginRegistry() {
   const context = use(PluginRegistryContext);
   if (!context) {
@@ -11,22 +10,4 @@ export function usePluginRegistry() {
     );
   }
   return context;
-}
-
-// Hook to check if a plugin is enabled
-export function usePluginEnabled(pluginId: string) {
-  const { plugins } = usePluginRegistry();
-  return plugins.has(pluginId);
-}
-
-// Hook to get all active plugins
-export function usePlugins() {
-  const { plugins } = usePluginRegistry();
-  return Array.from(plugins.entries()).map(([, plugin]) => plugin);
-}
-
-// Hook to use plugin components
-export function usePluginComponent(componentName: string) {
-  const { components } = usePluginRegistry();
-  return components[componentName] || null;
 }

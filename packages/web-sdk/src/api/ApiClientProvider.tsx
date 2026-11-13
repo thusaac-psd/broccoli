@@ -185,7 +185,10 @@ export function ApiClientProvider({
     [resolvedBaseUrl, session],
   );
 
-  const value = useMemo(() => ({ apiClient, apiFetch }), [apiClient, apiFetch]);
+  const value = useMemo(
+    () => ({ apiClient, baseUrl: resolvedBaseUrl, apiFetch }),
+    [apiClient, resolvedBaseUrl, apiFetch],
+  );
 
   return (
     <SessionContext value={session}>

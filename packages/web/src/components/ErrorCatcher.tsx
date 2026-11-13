@@ -68,7 +68,7 @@ export function ErrorCatcher({ code }: ErrorPageProps) {
       <div className="mt-8 flex justify-center gap-4">
         <Button onClick={() => navigate(-1)} variant="default">
           <Home className="mr-2 h-4 w-4" />
-          {'return to back page'}
+          {t('error.action.goBack')}
         </Button>
       </div>
     </div>

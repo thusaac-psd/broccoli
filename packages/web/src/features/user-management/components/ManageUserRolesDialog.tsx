@@ -15,6 +15,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Plus, Trash2 } from 'lucide-react';
@@ -42,7 +43,7 @@ export function ManageUserRolesDialog({
   const [selectedRole, setSelectedRole] = useState('');
   const [manualRole, setManualRole] = useState('');
   const [isAssigning, setIsAssigning] = useState(false);
-  const [revokingRole, setRevokingRole] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirmDialog();
 
   const { data: userDetail, isLoading: isLoadingUser } = useQuery({
     queryKey: ['admin-user-detail', userId],
@@ -86,7 +87,6 @@ export function ManageUserRolesDialog({
     if (!open) return;
     setManualRole('');
     setSelectedRole(assignableRoles[0] ?? '');
-    setRevokingRole(null);
   }, [open, assignableRoles]);
 
   async function handleAssignRole() {
@@ -122,29 +122,25 @@ export function ManageUserRolesDialog({
     queryClient.invalidateQueries({ queryKey: ['admin-user-detail', userId] });
   }
 
-  async function handleRevokeRole(roleName: string) {
+  function handleRevokeRole(roleName: string) {
     if (!userId) return;
-
-    if (
-      !window.confirm(t('users.users.revokeRoleConfirm', { role: roleName }))
-    ) {
-      return;
-    }
-
-    setRevokingRole(roleName);
-    const { error } = await apiClient.DELETE('/users/{id}/roles/{role}', {
-      params: { path: { id: userId, role: roleName } },
+    confirm({
+      title: t('users.users.revokeRoleConfirm', { role: roleName }),
+      confirmLabel: t('users.revoke'),
+      destructive: true,
+      failureMessage: t('users.users.revokeRoleError'),
+      onConfirm: async () => {
+        const { error } = await apiClient.DELETE('/users/{id}/roles/{role}', {
+          params: { path: { id: userId, role: roleName } },
+        });
+        if (error) throw error;
+        toast.success(t('users.users.revokeRoleSuccess'));
+        queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+        queryClient.invalidateQueries({
+          queryKey: ['admin-user-detail', userId],
+        });
+      },
     });
-    setRevokingRole(null);
-
-    if (error) {
-      toast.error(getErrorMessage(error, t('users.users.revokeRoleError')));
-      return;
-    }
-
-    toast.success(t('users.users.revokeRoleSuccess'));
-    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
-    queryClient.invalidateQueries({ queryKey: ['admin-user-detail', userId] });
   }
 
   const canAssignFromSelect = roleOptions.length > 0 && !!selectedRole;
@@ -188,18 +184,10 @@ export function ManageUserRolesDialog({
                       variant="ghost"
                       size="sm"
                       className="text-destructive hover:text-destructive"
-                      disabled={
-                        isAssigning ||
-                        isLoadingUser ||
-                        revokingRole === roleName
-                      }
+                      disabled={isAssigning || isLoadingUser}
                       onClick={() => handleRevokeRole(roleName)}
                     >
-                      {revokingRole === roleName ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4" />
-                      )}
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 ))}
@@ -263,6 +251,7 @@ export function ManageUserRolesDialog({
             {t('users.common.close')}
           </Button>
         </DialogFooter>
+        {confirmDialog}
       </DialogContent>
     </Dialog>
   );

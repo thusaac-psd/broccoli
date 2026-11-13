@@ -81,6 +81,7 @@ export const en: Record<string, string> = {
   'error.action.reload': 'Reload page',
   'error.action.retry': 'Try again',
   'error.action.back': 'Go back',
+  'error.action.goBack': 'Go back',
 
   // Overview
   'overview.title': 'Overview',
@@ -123,6 +124,8 @@ export const en: Record<string, string> = {
   'submissions.bulkRejudge.queued': 'Queued {count} submissions for rejudge.',
   'submissions.bulkRejudge.error': 'Failed to bulk rejudge submissions.',
   'submissions.bulkRejudge.applyImmediately': 'Apply immediately',
+  'submissions.inContest': '· contest #{id}',
+  'submissions.pinnedTo': 'Pinned to {worker}',
 
   // Homepage
   'homepage.title': 'Broccoli Online Judge',
@@ -191,13 +194,17 @@ export const en: Record<string, string> = {
   'editor.emptyOutput': '(empty)',
   'editor.compilationError': 'Compilation Error',
   'editor.compilerOutput': 'Compiler Output',
+  'editor.caseLabel': 'Case {index}',
+  'editor.stdin': 'stdin',
+  'editor.stdout': 'stdout',
+  'editor.stderr': 'stderr',
 
   // Submission result
   'result.title': 'Result',
   'result.submitPrompt': 'Submit your code to see results',
   'result.judging': 'Judging...',
   'result.time': 'Time: {value}ms',
-  'result.memory': 'Memory: {value}MB',
+  'result.memory': 'Memory: {value}',
   'result.testCase': 'Test Case #{id}',
   'result.noResults': 'No test results available',
   'result.accepted': 'Accepted',
@@ -217,7 +224,6 @@ export const en: Record<string, string> = {
   'result.cancelled': 'Cancelled',
   'result.systemMessage': 'System Message',
   'result.memoryLimit': 'Memory Limit',
-  'result.unknownStatus': 'Unknown Status',
   'result.unknownVerdict': 'Unknown Verdict',
   'result.submitError': 'Failed to submit. Please try again.',
   'result.rejection.rateLimited': 'Too Many Requests',
@@ -235,7 +241,6 @@ export const en: Record<string, string> = {
   'result.scoreInProgress': 'In progress',
   'result.scoreUnavailable': '—',
   'result.timeValue': '{value}ms',
-  'result.memoryValue': '{value}MB',
   'result.latestOverviewTitle': 'Recent Submission Overview',
   'result.latestOverviewEmpty': 'No submissions yet.',
 
@@ -349,6 +354,8 @@ export const en: Record<string, string> = {
   'contest.qa.directMessages': 'Direct Messages',
   'contest.qa.messages': 'Messages',
   'contest.qa.empty': 'No questions yet.',
+  'contest.countdown.start': 'Start',
+  'contest.countdown.end': 'End',
 
   // Ranking
   'ranking.title': 'Ranking',
@@ -575,6 +582,7 @@ export const en: Record<string, string> = {
   'admin.participants.registeredAt': 'Registered',
   'admin.participants.add': 'Add',
   'admin.participants.removeConfirm': 'Remove {username} from this contest?',
+  'admin.participants.remove': 'Remove',
   'admin.bulkParticipantsJsonLabel': 'JSON File or JSON Content',
   'admin.bulkParticipantsJsonPlaceholder':
     '["alice", { "username": "team001", "display_name": "Team One", "password": "custom_pass123" }]',
@@ -651,6 +659,12 @@ export const en: Record<string, string> = {
   'admin.submissionFormat.addFile': 'Add File',
   'admin.submissionFormat.empty': 'No language configured yet.',
   'admin.loading': 'Loading...',
+  'admin.problemPreview.title': '#{id} — {title}',
+  'admin.problemPreview.limits': '{time}ms · {memory}',
+  'admin.problemFallbackLabel': 'Problem {id}',
+  'admin.contest.titlePlaceholder': 'Weekly Contest #42',
+  'admin.contest.descriptionPlaceholder':
+    'Contest description (Markdown supported)',
 
   // Additional Files (admin)
   'admin.additionalFiles.title': 'Additional Files',
@@ -664,6 +678,8 @@ export const en: Record<string, string> = {
   'admin.additionalFiles.downloadError': 'Failed to download file.',
   'admin.additionalFiles.selectLanguageFirst':
     'Please select a language first.',
+  'admin.additionalFiles.selectLanguageFirstFor':
+    '{name}: select a language first.',
   'admin.additionalFiles.dropzone': 'Drop files here or click to browse',
   'admin.additionalFiles.language': 'Language',
   'admin.additionalFiles.path': 'Virtual path (optional)',
@@ -735,9 +751,16 @@ export const en: Record<string, string> = {
   'admin.testCases.create': 'Create Test Case',
   'admin.testCases.createDesc': 'Add a new test case to this problem.',
   'admin.testCases.edit': 'Edit Test Case',
+  'admin.testCases.uploadFile': 'Upload File',
+  'admin.testCases.fileReadError': 'Failed to read the file.',
+  'admin.testCases.uploadedHidden':
+    'File uploaded; its content is hidden. Length: {length} characters. Click to clear.',
+  'admin.testCases.descriptionPlaceholder':
+    'Explains this sample (Markdown supported)',
   'admin.testCases.sample': 'Sample',
   'admin.testCases.deleteError':
     'Failed to delete test case. It may have judge results.',
+  'admin.testCases.field.position': '#',
   'admin.testCases.field.input': 'Input',
   'admin.testCases.field.expectedOutput': 'Expected Output',
   'admin.testCases.field.score': 'Score',
@@ -777,6 +800,9 @@ export const en: Record<string, string> = {
     'Output format must contain exactly one *',
   'admin.testCases.bulkUpload.outputFormatRequired':
     'Output format is required.',
+  'admin.testCases.labelPlaceholder': 'sample_01',
+  'admin.testCases.outputPlaceholder': '0 1',
+  'admin.testCases.inputPlaceholder': '4\n2 7 11 15\n9',
 
   // Toast notifications
   'toast.contest.created': 'Contest created successfully.',
@@ -958,16 +984,14 @@ export const en: Record<string, string> = {
 
   // Resource config
   'admin.configure': 'Configure',
+  'admin.problem.titlePlaceholder': 'Two Sum',
+  'admin.problem.contentPlaceholder': 'Problem statement (Markdown supported)',
   'config.title': 'Configuration: {name}',
   'config.description': 'Plugin configuration for this resource.',
   'config.noSchemas': 'No plugin configuration available for this resource.',
 
   // Language switcher
   'locale.switch': 'Language',
-  // Amazing button plugin
-  'plugin.amazingButton.label': 'Amazing Button',
-  'plugin.amazingButton.alert': 'Amazing!',
-  'plugin.amazingButton.pageTitle': 'Amazing Page!',
 
   // Validation
   'validation.titleRequired': 'Title is required.',
@@ -1013,6 +1037,30 @@ export const en: Record<string, string> = {
   'clarification.private': 'Private',
   'clarification.public': 'Public',
   'clarification.send': 'Send',
+  'clarification.sending': 'Sending…',
+  'clarification.ask.trigger': 'Ask Question',
+  'clarification.ask.title': 'Ask a Question',
+  'clarification.ask.placeholder':
+    'Describe your issue clearly (e.g., problem ID, specific error)...',
+  'clarification.ask.hint':
+    'Your question will be visible only to judges until they decide to make it public.',
+  'clarification.announce.trigger': 'Announcement',
+  'clarification.announce.title': 'Post Announcement',
+  'clarification.announce.placeholder':
+    'Write an announcement visible to all participants...',
+  'clarification.announce.hint':
+    'This announcement will be immediately visible to all participants.',
+  'clarification.announce.submit': 'Post',
+  'clarification.dm.trigger': 'Message',
+  'clarification.dm.title': 'Send Direct Message',
+  'clarification.dm.recipient': 'Recipient',
+  'clarification.dm.userId': 'ID: {id}',
+  'clarification.dm.change': 'Change',
+  'clarification.dm.searchPlaceholder': 'Search participants...',
+  'clarification.dm.noParticipants': 'No participants found',
+  'clarification.dm.placeholder': 'Write a message to this participant...',
+  'clarification.dm.hint':
+    'This message will only be visible to the selected participant.',
   'clarification.makePublic': 'Make public',
   'clarification.makePrivate': 'Make private',
   'clarification.publishReplyOnly': 'Publish reply only',
@@ -1041,6 +1089,31 @@ export const en: Record<string, string> = {
 
   // Common
   'common.cancel': 'Cancel',
+  'common.withShortcut': '{action} ({shortcut})',
+  'common.loading': 'Loading...',
+  'common.loadFailed':
+    'Could not load this. Check your connection and try again.',
+  'common.retry': 'Retry',
+  'common.version': 'v{version}',
+  'common.close': 'Close',
+  'confirm.confirm': 'Confirm',
+  'config.validation.number': 'Must be a valid number',
+  'config.validation.integer': 'Must be a whole number',
+  'config.validation.min': 'Must be at least {min}',
+  'config.validation.max': 'Must be at most {max}',
+  'config.validation.minLength': 'Must be at least {min} characters',
+  'config.validation.maxLength': 'Must be at most {max} characters',
+  'config.blob.default': 'Default',
+  'config.blob.replaceLabel': 'Replace {name}',
+  'config.blob.replace': 'Replace',
+  'config.blob.uploadLabel': 'Upload {name}',
+  'config.blob.prompt': 'Drop file here or click to browse',
+  'config.blob.retryLabel': 'Retry upload',
+  'config.blob.uploadFailed': 'Upload failed',
+  'config.inheritance.disabled': '(disabled)',
+  'users.revoke': 'Revoke',
+  'users.deletedUser': '[Deleted User]',
+  'confirm.failed': 'The action failed. Please try again.',
 
   // System / admin monitoring
   'sidebar.allSubmissions': 'All Submissions',
@@ -1082,9 +1155,15 @@ export const en: Record<string, string> = {
   'system.worker.ip': 'IP',
   'system.worker.system': 'System',
   'system.worker.cpus': '{count} CPUs',
+  'system.worker.pid': 'pid {pid}',
 
   // Dead Letter Queue
   'sidebar.dlq': 'Dead Letter Queue',
+  'sidebar.mobileTitle': 'Sidebar',
+  'sidebar.mobileDescription': 'Displays the mobile sidebar.',
+  'sidebar.toggle': 'Toggle Sidebar',
+  'sidebar.expand': 'Expand Sidebar',
+  'sidebar.collapse': 'Collapse Sidebar',
   'dlq.title': 'Dead Letter Queue',
   'dlq.subtitle':
     'Messages that exhausted their retry budget. Inspect, retry, or resolve them here.',
@@ -1150,4 +1229,41 @@ export const en: Record<string, string> = {
   'dlq.detail.deleteError': 'Delete failed.',
   'dlq.detail.deleteConfirm':
     'Mark this message as resolved without retrying? This cannot be undone.',
+  'markdown.write': 'Write',
+  'markdown.preview': 'Preview',
+  'markdown.nothingToPreview': 'Nothing to preview',
+  'errorReporter.title': 'Something went wrong',
+  'errorReporter.description':
+    'The page hit an unexpected error. Your submissions and contest data are safe on the server; reloading usually fixes it.',
+  'errorReporter.reload': 'Reload page',
+  'errorReporter.back': 'Go back',
+  'deviceAuth.promptAuthenticated': 'authenticated',
+  'deviceAuth.codeDigit': 'Code digit {index}',
+  'cliAuth.authorized': 'Authorized',
+  'cliAuth.signedInAs': 'Signed in as {username}',
+  'cliAuth.pasteToken':
+    'Paste this token in your terminal to complete login. You can close this tab afterwards.',
+  'cliAuth.title': 'Authorize Broccoli CLI',
+  'cliAuth.redirectBlocked':
+    'The provided redirect target was not a local address and has been blocked for your security. After authorizing, copy the token shown and paste it into your terminal manually.',
+  'cliAuth.requestFor':
+    'The broccoli CLI on your terminal wants to access your account {username}.',
+  'cliAuth.request':
+    'The broccoli CLI on your terminal wants to access your account.',
+  'cliAuth.scope':
+    'This will let the CLI submit solutions, check scores, and manage your contest participation on your behalf.',
+  'cliAuth.authorize': 'Authorize',
+  'cliAuth.switchUser': 'Sign in as a different user',
+  'extension.componentError': 'Component Error',
+  'extension.componentMissing':
+    'A plugin registered this route, but its component {component} is missing.',
+  'table.resultOne': '1 result',
+  'table.results': '{count} results',
+  'table.loading': 'loading...',
+  'dateTime.time': 'Time:',
+  'dateTime.hours': 'Hours',
+  'dateTime.minutes': 'Minutes',
+  'dateTime.clear': 'Clear',
+  'fileDrop.label': 'Upload files',
+  'fileDrop.prompt': 'Drop files here or click to browse',
 };

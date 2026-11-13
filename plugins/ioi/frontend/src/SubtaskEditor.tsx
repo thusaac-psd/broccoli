@@ -1,3 +1,4 @@
+import { getErrorMessage } from '@broccoli/web-sdk/api';
 /**
  * Visual subtask definition editor for IOI-style contest problems.
  */
@@ -18,6 +19,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
 import type React from 'react';
@@ -217,6 +219,9 @@ function parseRanges(input: string): number[] {
 /** Monospace font class shorthand. */
 const monoClass = 'font-mono tabular-nums';
 
+/** Glyph on the buttons that remove a test case or subtask. */
+const REMOVE_GLYPH = '\u2715';
+
 /** Shared preview content for test case hover cards. */
 function PreviewContent({ tc }: { tc: TestCaseListItem }) {
   const { t } = useTranslation();
@@ -237,7 +242,7 @@ function PreviewContent({ tc }: { tc: TestCaseListItem }) {
           </span>
         )}
         <span className={cn(monoClass, 'text-[11px] opacity-50 ml-auto')}>
-          {tc.score} pts
+          {t('ioi.subtask.points', { score: tc.score })}
         </span>
       </div>
       {tc.description && (
@@ -290,6 +295,7 @@ function TcChip({
   onDragStart?: (e: React.DragEvent) => void;
   isDuplicate?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <HoverCard openDelay={0} closeDelay={300}>
       <HoverCardTrigger asChild>
@@ -331,9 +337,10 @@ function TcChip({
               e.stopPropagation();
               onRemove();
             }}
+            aria-label={t('ioi.subtask.removeTestCase', { label: tcLabel(tc) })}
             className="bg-transparent border-none cursor-pointer text-[10px] opacity-30 px-px py-0 text-inherit leading-none transition-opacity duration-150 hover:opacity-80"
           >
-            ✕
+            {REMOVE_GLYPH}
           </button>
         </span>
       </HoverCardTrigger>
@@ -359,6 +366,7 @@ function PoolCard({
   onDragStart: (e: React.DragEvent) => void;
   isDuplicate?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <HoverCard openDelay={0} closeDelay={300}>
       <HoverCardTrigger asChild>
@@ -402,7 +410,7 @@ function PoolCard({
             )}
             {tc.is_sample && (
               <span className="text-[8px] font-bold uppercase tracking-tight px-[5px] py-px rounded-[3px] bg-indigo-500/10 text-indigo-500">
-                S
+                {t('ioi.subtask.sampleAbbr')}
               </span>
             )}
             <span className={cn(monoClass, 'text-[10px] opacity-40 ml-auto')}>
@@ -712,7 +720,7 @@ function UnifiedSearch({
         ref={listboxRef}
         id={listboxId}
         role="listbox"
-        aria-label="Search results"
+        aria-label={t('ioi.subtask.searchResults')}
         className={ddClass}
         style={dropdownPositionStyle}
         onMouseDown={(e) => {
@@ -788,11 +796,11 @@ function UnifiedSearch({
               </span>
               {tc.is_sample && (
                 <span className="text-[8px] font-bold uppercase px-1 rounded-[3px] bg-indigo-500/10 text-indigo-500">
-                  S
+                  {t('ioi.subtask.sampleAbbr')}
                 </span>
               )}
               <span className={cn(monoClass, 'text-[9px] opacity-35 ml-auto')}>
-                {tc.score} pts
+                {t('ioi.subtask.points', { score: tc.score })}
               </span>
               {otherOwner !== null && (
                 <span className="text-[9px] italic opacity-60">
@@ -998,6 +1006,7 @@ export function SubtaskEditor({
 
   // State
   const [openPools, setOpenPools] = useState<Record<number, boolean>>({});
+  const [confirm, confirmDialog] = useConfirmDialog();
   const [warningsExpanded, setWarningsExpanded] = useState(true);
   const [lastClicked, setLastClicked] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] =
@@ -1051,21 +1060,27 @@ export function SubtaskEditor({
         count > 0
           ? t('ioi.subtask.removeConfirm', { name, count })
           : t('ioi.subtask.removeConfirmEmpty', { name });
-      if (!window.confirm(msg)) return;
-      onChange(subtasks.filter((_, i) => i !== index));
-      setSubtaskKeys((prev) => prev.filter((_, i) => i !== index));
-      // Shift index-keyed state maps so entries above the removed index move down by 1
-      setOpenPools((prev) => {
-        const shifted: Record<number, boolean> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const ki = Number(k);
-          if (ki < index) shifted[ki] = v;
-          else if (ki > index) shifted[ki - 1] = v;
-        }
-        return shifted;
+      confirm({
+        title: msg,
+        confirmLabel: t('ioi.subtask.remove'),
+        destructive: true,
+        onConfirm: () => {
+          onChange(subtasks.filter((_, i) => i !== index));
+          setSubtaskKeys((prev) => prev.filter((_, i) => i !== index));
+          // Shift index-keyed state maps so entries above the removed index move down by 1
+          setOpenPools((prev) => {
+            const shifted: Record<number, boolean> = {};
+            for (const [k, v] of Object.entries(prev)) {
+              const ki = Number(k);
+              if (ki < index) shifted[ki] = v;
+              else if (ki > index) shifted[ki - 1] = v;
+            }
+            return shifted;
+          });
+        },
       });
     },
-    [subtasks, onChange, t],
+    [subtasks, onChange, confirm, t],
   );
 
   const addSubtask = useCallback(() => {
@@ -1336,7 +1351,7 @@ export function SubtaskEditor({
                     : 'bg-amber-500/10 text-amber-600',
                 )}
               >
-                {totalMax} pts
+                {t('ioi.subtask.points', { score: totalMax })}
               </span>
             </>
           )}
@@ -1418,9 +1433,9 @@ export function SubtaskEditor({
         </div>
       )}
 
-      {problemId && tcError && (
+      {problemId && tcError != null && (
         <div className="px-4 py-3 rounded-lg bg-red-500/[0.06] border border-red-500/20 flex items-center justify-between text-xs text-red-600">
-          <span>{tcError}</span>
+          <span>{getErrorMessage(tcError, t('ioi.subtask.loadFailed'))}</span>
           <Button
             variant="outline"
             size="sm"
@@ -1698,7 +1713,7 @@ export function SubtaskEditor({
                   title={t('ioi.subtask.removeSubtask')}
                   className="size-[30px] opacity-30 hover:opacity-100 hover:text-destructive hover:border-destructive hover:bg-red-500/[0.06] transition-all duration-150"
                 >
-                  ✕
+                  {REMOVE_GLYPH}
                 </Button>
               </div>
 
@@ -1757,7 +1772,7 @@ export function SubtaskEditor({
                 {/* Assigned chips */}
                 <div
                   className="flex flex-wrap gap-1 min-h-7 max-h-40 overflow-y-auto items-center"
-                  title="Hover over a chip to preview test case data"
+                  title={t('ioi.subtask.chipPreviewHint')}
                 >
                   {subtask.test_cases.map((tcId) => {
                     const tc = tcByLabel.get(tcId);
@@ -1781,9 +1796,12 @@ export function SubtaskEditor({
                                 ),
                               })
                             }
+                            aria-label={t('ioi.subtask.removeTestCase', {
+                              label: tcId,
+                            })}
                             className="bg-transparent border-none cursor-pointer text-[10px] opacity-50 px-px py-0 text-inherit"
                           >
-                            ✕
+                            {REMOVE_GLYPH}
                           </button>
                         </span>
                       );
@@ -1845,16 +1863,16 @@ export function SubtaskEditor({
                           onClick={() => {
                             if (subtask.test_cases.length === 0) return;
                             const n = subtask.test_cases.length;
-                            if (
-                              window.confirm(
-                                t('ioi.subtask.clearConfirm', {
-                                  count: n,
-                                  name: subtask.name,
-                                }),
-                              )
-                            ) {
-                              updateSubtask(idx, { test_cases: [] });
-                            }
+                            confirm({
+                              title: t('ioi.subtask.clearConfirm', {
+                                count: n,
+                                name: subtask.name,
+                              }),
+                              confirmLabel: t('ioi.subtask.clear'),
+                              destructive: true,
+                              onConfirm: () =>
+                                updateSubtask(idx, { test_cases: [] }),
+                            });
                           }}
                           className="text-[9px] font-semibold opacity-50 uppercase tracking-tight h-auto py-0.5 px-2"
                         >
@@ -1911,6 +1929,7 @@ export function SubtaskEditor({
       >
         {t('ioi.subtask.addSubtask')}
       </Button>
+      {confirmDialog}
     </div>
   );
 }

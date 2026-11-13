@@ -52,26 +52,36 @@ export function parseSubmissionError(err: unknown): SubmissionError {
   return { code: 'UNKNOWN', message: String(err) };
 }
 
+/**
+ * The i18n key of each submission status. Typed against the API schema's
+ * `SubmissionStatus`, so a status the server adds or drops fails to compile
+ * here instead of falling through to a wrong label.
+ */
+const STATUS_LABEL_KEYS = {
+  Queued: 'result.queued',
+  Pending: 'result.pending',
+  Compiling: 'result.compilingShort',
+  Running: 'result.runningShort',
+  Judged: 'result.judged',
+  CompilationError: 'result.compilationError',
+  SystemError: 'result.systemError',
+} as const satisfies Record<SubmissionStatus, string>;
+
+/** Every submission status, in lifecycle order. */
+const SUBMISSION_STATUSES = Object.keys(
+  STATUS_LABEL_KEYS,
+) as SubmissionStatus[];
+
+export const SUBMISSION_STATUS_FILTER_OPTIONS: readonly SubmissionStatusFilterValue[] =
+  ['all', ...SUBMISSION_STATUSES];
+
 export function getStatusLabel(
   status: SubmissionStatusFilterValue,
   t: (key: string) => string,
-) {
-  switch (status) {
-    case 'all':
-      return t('submissions.filters.allStatuses');
-    case 'Pending':
-      return t('result.pending');
-    case 'Compiling':
-      return t('result.compilingShort');
-    case 'Running':
-      return t('result.runningShort');
-    case 'Judged':
-      return t('result.judged');
-    case 'CompilationError':
-      return t('result.compilationError');
-    default:
-      return t('result.systemError');
-  }
+): string {
+  return status === 'all'
+    ? t('submissions.filters.allStatuses')
+    : t(STATUS_LABEL_KEYS[status]);
 }
 
 export function toSubmissionStatus(

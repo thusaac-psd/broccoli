@@ -1,7 +1,10 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 import { Badge } from '@broccoli/web-sdk/ui';
-import { formatRelativeDatetime } from '@broccoli/web-sdk/utils';
+import {
+  formatKibibytes,
+  formatRelativeDatetime,
+} from '@broccoli/web-sdk/utils';
 import { AlertCircle, ArrowLeft, Loader2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 
@@ -19,7 +22,6 @@ import { getVerdictBadge } from '@/features/submission/utils/verdict';
 
 import { SubmissionJudgementHistory } from './SubmissionJudgementHistory';
 import { SubmissionResult } from './SubmissionResult';
-import { formatMemory } from './TestCaseRow';
 
 interface SubmissionDetailViewProps {
   submissionId: number;
@@ -93,7 +95,7 @@ export function SubmissionDetailView({
               <span className="ml-auto font-mono text-lg font-bold tabular-nums text-foreground">
                 {scoreDisplay.value}
                 <span className="text-sm font-normal text-muted-foreground ml-1">
-                  pts
+                  {t('result.pointsUnit')}
                 </span>
               </span>
             ) : (
@@ -141,14 +143,14 @@ export function SubmissionDetailView({
             {result?.time_used != null && (
               <MetaItem label={t('result.timeHeader')}>
                 <span className="font-mono tabular-nums text-foreground">
-                  {result.time_used}ms
+                  {t('result.timeValue', { value: result.time_used })}
                 </span>
               </MetaItem>
             )}
             {result?.memory_used != null && (
               <MetaItem label={t('result.memoryHeader')}>
                 <span className="font-mono tabular-nums text-foreground">
-                  {formatMemory(result.memory_used)}MB
+                  {formatKibibytes(result.memory_used)}
                 </span>
               </MetaItem>
             )}

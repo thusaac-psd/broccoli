@@ -57,7 +57,6 @@
 'codelink-bracket.live.awaitingJudge' = '截止时间已到，但更早的一次提交仍在评测，正在等待评测结果。'
 
 'codelink-bracket.card.you' = '你'
-'codelink-bracket.confirm.cancel' = '取消'
 'codelink-bracket.error.rejudge' = '重新评测失败。'
 'codelink-bracket.game.column' = '小局'
 'codelink-bracket.game.live' = '进行中'
@@ -68,6 +67,7 @@
 'codelink-bracket.game.lost' = '负'
 'codelink-bracket.game.noScore' = '不得分'
 'codelink-bracket.match.number' = '第 {n} 场'
+'codelink-bracket.match.format' = 'BO{bestOf} / FT{winsToAdvance}'
 'codelink-bracket.match.openSubmission' = '查看 #{id}'
 'codelink-bracket.match.rejudge' = '重新评测 #{id}'
 'codelink-bracket.match.contestEnded' = '下午场已到结束时间，本场比赛尚未分出胜负，选手无法再提交，需工作人员裁定。'
@@ -102,6 +102,7 @@
 'codelink-bracket.setup.autofill' = '按题目顺序填充'
 'codelink-bracket.setup.bench' = '其他已报名选手（{count}）'
 'codelink-bracket.setup.breakMinutes' = '阶段开始前休息（分钟）'
+'codelink-bracket.setup.loadFailed' = '无法加载赛程设置。'
 'codelink-bracket.setup.confirmDescription' = '比赛开始后种子固定，各阶段开启后该阶段配置固定。'
 'codelink-bracket.setup.confirmTitle' = '生成对阵表？'
 'codelink-bracket.setup.create' = '生成对阵表'

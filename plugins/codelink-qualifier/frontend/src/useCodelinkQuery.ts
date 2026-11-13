@@ -1,4 +1,4 @@
-import { useApiFetch } from '@broccoli/web-sdk/api';
+import { usePluginApi } from '@broccoli/web-sdk/api';
 import { useQuery } from '@tanstack/react-query';
 
 import type { ContestInfoResponse } from './types';
@@ -8,18 +8,14 @@ export function useCodelinkQuery<T extends ContestInfoResponse>(
   endpoint: 'info' | 'standings',
   autoRefresh = true,
 ) {
-  const apiFetch = useApiFetch();
+  const api = usePluginApi('codelink-qualifier');
   return useQuery({
     queryKey: [`codelink-qualifier-${endpoint}`, contestId],
     enabled: !!contestId,
-    queryFn: async (): Promise<T> => {
-      const response = await apiFetch(
-        `/api/v1/p/codelink-qualifier/api/plugins/codelink-qualifier/contests/${contestId}/${endpoint}`,
-      );
-      if (!response.ok)
-        throw new Error(`Codelink ${endpoint}: ${response.status}`);
-      return response.json();
-    },
+    queryFn: () =>
+      api.get<T>(
+        `/api/plugins/codelink-qualifier/contests/${contestId}/${endpoint}`,
+      ),
     // Polling starts after the server supplies this contest's interval. Zero
     // disables it. Continuing across phase changes includes queued judgements.
     refetchInterval: (query) => {
