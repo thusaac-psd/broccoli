@@ -274,9 +274,7 @@ impl WorkerAppConfig {
 
         let raw: serde_json::Value = s.clone().try_deserialize()?;
         let mut config: Self = s.try_deserialize()?;
-        let known =
-            serde_json::to_value(&config).map_err(|e| ConfigError::Message(e.to_string()))?;
-        config.unknown_keys = common::config::unknown_keys(&raw, &known);
+        config.unknown_keys = common::config::unknown_keys(&raw, common::config::KNOWN_SETTINGS);
         config.worker.id = common::node_identity::resolve_node_id(
             common::liveness::NodeRole::Worker,
             &config.worker.id,

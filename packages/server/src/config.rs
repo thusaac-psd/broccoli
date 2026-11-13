@@ -620,9 +620,7 @@ impl AppConfig {
     fn from_config(s: Config) -> Result<Self, ConfigError> {
         let raw: serde_json::Value = s.clone().try_deserialize()?;
         let mut config: Self = s.try_deserialize()?;
-        let known =
-            serde_json::to_value(&config).map_err(|e| ConfigError::Message(e.to_string()))?;
-        config.unknown_keys = common::config::unknown_keys(&raw, &known);
+        config.unknown_keys = common::config::unknown_keys(&raw, common::config::KNOWN_SETTINGS);
         config.validate()?;
         Ok(config)
     }
@@ -831,6 +829,41 @@ mod tests {
         assert_eq!(
             cfg.unknown_keys,
             vec!["server.claim_batch_size".to_string()]
+        );
+    }
+
+    /// [`common::config::KNOWN_SETTINGS`] is exactly what the server and the
+    /// worker read, so a key either binary reads never warns and a removed
+    /// key always does.
+    #[test]
+    fn the_known_settings_are_what_the_server_and_worker_read() {
+        // The object storage section is optional; present, it shows its keys.
+        let server: AppConfig = Config::builder()
+            .set_override("auth.jwt_secret", "test-secret")
+            .unwrap()
+            .set_override("storage.object_storage.bucket", "b")
+            .unwrap()
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        let worker: worker::config::WorkerAppConfig = serde_json::from_value(
+            serde_json::json!({ "storage": { "object_storage": { "bucket": "b" } } }),
+        )
+        .unwrap();
+        let mut read = common::config::setting_paths(&serde_json::to_value(&server).unwrap());
+        read.extend(common::config::setting_paths(
+            &serde_json::to_value(&worker).unwrap(),
+        ));
+        let listed: std::collections::BTreeSet<String> = common::config::KNOWN_SETTINGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let missing: Vec<_> = read.difference(&listed).collect();
+        let stale: Vec<_> = listed.difference(&read).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "update common::config::KNOWN_SETTINGS: add {missing:#?}, remove {stale:#?}"
         );
     }
 

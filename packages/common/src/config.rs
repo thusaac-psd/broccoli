@@ -167,39 +167,175 @@ impl Default for ObservabilityConfig {
     }
 }
 
-/// Dotted paths of settings in `raw` (what the config file and environment
-/// supplied) that the binary does not read: present in `raw` but not in
-/// `known`, the parsed config serialized back. A key under an empty map in
-/// `known` is taken as a map entry, not an unknown key.
-pub fn unknown_keys(raw: &serde_json::Value, known: &serde_json::Value) -> Vec<String> {
-    fn walk(
-        raw: &serde_json::Value,
-        known: &serde_json::Value,
-        prefix: &str,
-        out: &mut Vec<String>,
-    ) {
-        let (Some(raw), Some(known)) = (raw.as_object(), known.as_object()) else {
-            return;
-        };
-        if known.is_empty() {
-            return;
-        }
-        for (key, value) in raw {
-            let path = if prefix.is_empty() {
-                key.clone()
-            } else {
-                format!("{prefix}.{key}")
-            };
-            match known.get(key) {
-                Some(inner) => walk(value, inner, &path, out),
-                None => out.push(path),
+/// Every setting a Broccoli binary reads, as a dotted path; `a.*` stands for
+/// any key under the map `a`. The server and the worker share one config file
+/// and, on a single host, one environment, so a key is unknown only when no
+/// binary reads it. The server's tests pin this list to the union of both
+/// binaries' parsed configs.
+pub const KNOWN_SETTINGS: &[&str] = &[
+    "auth.jwt_secret",
+    "auth.login_failure_limit",
+    "auth.login_failure_window_secs",
+    "batch_max_age_secs",
+    "bootstrap.admin_password",
+    "bootstrap.admin_username",
+    "bootstrap.reset_admin",
+    "database.plugin_url",
+    "database.statement_timeout_secs",
+    "database.tcp_keepalives",
+    "database.url",
+    "mq.dlq.base_delay_ms",
+    "mq.dlq.max_delay_ms",
+    "mq.dlq.max_inflight_secs",
+    "mq.dlq.max_retries",
+    "mq.dlq.retry_cleanup_interval_secs",
+    "mq.dlq.retry_max_age_secs",
+    "mq.dlq.stuck_job_scan_interval_secs",
+    "mq.dlq.stuck_job_timeout_secs",
+    "mq.enabled",
+    "mq.operation_queue_name",
+    "mq.url",
+    "observability.log_filter",
+    "observability.log_format",
+    "observability.otlp.endpoint",
+    "observability.otlp.service_name",
+    "plugin.cache_dir",
+    "plugin.call_timeout_secs",
+    "plugin.enable_wasi",
+    "plugin.evaluator_parallelism",
+    "plugin.instance_min_calls_before_recycle",
+    "plugin.instance_reclaim_bytes",
+    "plugin.max_instance_memory_pages",
+    "plugin.plugins_dir",
+    "plugin.pool_acquire_timeout_secs",
+    "plugin.pool_idle_timeout_secs",
+    "plugin.pool_max_instances",
+    "plugin.uploads_enabled",
+    "server.cancel_primitive_enabled",
+    "server.claim_fiber_enabled",
+    "server.cors.allow_origins",
+    "server.cors.max_age",
+    "server.dispatcher_admission_queue_max",
+    "server.dispatcher_concurrency",
+    "server.dispatcher_lease_steal_enabled",
+    "server.dispatcher_semaphore_enabled",
+    "server.evaluate_batch_fanout_concurrency",
+    "server.frontend_dist",
+    "server.host",
+    "server.id",
+    "server.lease_refresh_interval_secs",
+    "server.lease_ttl_secs",
+    "server.max_blocking_threads",
+    "server.max_dispatch_retries",
+    "server.max_queued_submissions",
+    "server.max_system_error_retries",
+    "server.operation_batch_publish_concurrency",
+    "server.plugin_timer_batch",
+    "server.plugin_timer_lease_secs",
+    "server.plugin_timer_max_attempts",
+    "server.plugin_timer_tick_interval_secs",
+    "server.port",
+    "server.public_base_url",
+    "server.rate_limit_auth",
+    "server.steal_batch_size",
+    "server.steal_scan_interval_secs",
+    "server.trusted_proxies",
+    "storage.backend",
+    "storage.cache_dir",
+    "storage.data_dir",
+    "storage.max_blob_size",
+    "storage.max_cache_size",
+    "storage.object_storage.access_key",
+    "storage.object_storage.bucket",
+    "storage.object_storage.endpoint",
+    "storage.object_storage.path_style",
+    "storage.object_storage.region",
+    "storage.object_storage.secret_key",
+    "storage.object_storage.temp_dir",
+    "submission.max_size",
+    "submission.rate_limit_per_minute",
+    "worker.allow_insecure_no_cgroups",
+    "worker.box_slot_lock_dir",
+    "worker.cache_follower_max_wait_secs",
+    "worker.cache_follower_poll_interval_ms",
+    "worker.cache_leader_election_enabled",
+    "worker.cache_leader_heartbeat_interval_secs",
+    "worker.cache_leader_ttl_secs",
+    "worker.enable_cgroups",
+    "worker.fairness_unsafe_allow",
+    "worker.id",
+    "worker.isolate_bin",
+    "worker.max_concurrency",
+    "worker.sandbox_backend",
+    "worker.tools.dir",
+];
+
+/// The dotted leaf paths of `value`. An empty map yields `path.*`, an entry
+/// of a map with no fixed keys.
+pub fn setting_paths(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    fn walk(value: &serde_json::Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+        match value.as_object() {
+            Some(map) if map.is_empty() && !prefix.is_empty() => {
+                out.insert(format!("{prefix}.*"));
+            }
+            Some(map) => {
+                for (key, inner) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    walk(inner, &path, out);
+                }
+            }
+            None => {
+                out.insert(prefix.to_owned());
             }
         }
     }
-    let mut out = Vec::new();
-    walk(raw, known, "", &mut out);
-    out.sort();
+    let mut out = std::collections::BTreeSet::new();
+    walk(value, "", &mut out);
     out
+}
+
+/// Settings in `raw` (what the config file and environment supplied) that no
+/// binary reads: for each, the shortest dotted prefix that no entry of
+/// `known` (see [`KNOWN_SETTINGS`]) covers.
+pub fn unknown_keys(raw: &serde_json::Value, known: &[&str]) -> Vec<String> {
+    let covers = |prefix: &str| {
+        known.iter().any(|entry| {
+            entry == &prefix
+                || entry
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
+    let in_map = |path: &str| {
+        known.iter().any(|entry| {
+            entry
+                .strip_suffix(".*")
+                .and_then(|map| path.strip_prefix(map))
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for path in setting_paths(raw) {
+        let path = path.strip_suffix(".*").unwrap_or(&path);
+        let mut end = 0;
+        for segment in path.split('.') {
+            end += segment.len();
+            let prefix = &path[..end];
+            if in_map(prefix) {
+                break;
+            }
+            if !covers(prefix) {
+                out.insert(prefix.to_owned());
+                break;
+            }
+            end += 1;
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// Logs one warning per setting the binary does not read (see
@@ -222,16 +358,26 @@ mod unknown_key_tests {
     use serde_json::json;
 
     #[test]
-    fn keys_the_binary_does_not_read_are_reported_with_their_path() {
-        let known = json!({ "server": { "port": 3000, "id": "" }, "plugins": {} });
+    fn keys_no_binary_reads_are_reported_by_their_shortest_unknown_prefix() {
+        let known = ["server.port", "server.id", "worker.id", "plugins.*"];
         let raw = json!({
             "server": { "port": "4000", "claim_batch_size": "8" },
+            "worker": { "id": "w-1" },
             "clock": { "max_skew_ms": "0" },
             "plugins": { "anything": { "nested": 1 } },
         });
         assert_eq!(
             unknown_keys(&raw, &known),
             vec!["clock".to_string(), "server.claim_batch_size".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_empty_map_is_a_map_of_any_keys() {
+        let paths = setting_paths(&json!({ "a": { "b": 1, "m": {} }, "l": [1] }));
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec!["a.b".to_string(), "a.m.*".to_string(), "l".to_string()]
         );
     }
 }

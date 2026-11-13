@@ -11,9 +11,10 @@ override to the role's env file (`.env.server`, `.env.worker`, ...) and
 restart the role: the whole env file reaches the container. A single-host
 install keeps every secret in `.env.single-host`, which no container gets whole;
 its overrides go in `.env.single-host.server` and `.env.single-host.worker`.
-A key the binary
-does not read, for example one that has been removed or is misspelled, is
-logged at boot as `Ignoring an unknown configuration key` and has no effect.
+A key no Broccoli binary reads, for example one that has been removed or is
+misspelled, is logged at boot as `Ignoring an unknown configuration key` and
+has no effect. A server key given to a worker, or the other way round, is
+ignored without a warning, so one config file can serve both.
 
 ## Required
 
