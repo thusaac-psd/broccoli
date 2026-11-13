@@ -13,6 +13,7 @@ mod environment;
 mod execution;
 mod metrics;
 mod paths;
+mod teardown;
 
 use crate::toolchain_fingerprint::{SharedFingerprint, ToolchainFingerprint};
 

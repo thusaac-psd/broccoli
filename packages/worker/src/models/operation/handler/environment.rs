@@ -1,14 +1,14 @@
 use super::super::models::{IOConfig, IOTarget, SessionFile, Step};
 use super::super::sandbox::ExecutionResult;
+use super::OperationHandler;
 use super::metrics::{materialization_path_kind, session_file_kind};
 use super::paths::{create_fifo, safe_join, validate_pipe_name};
-use super::{EnvironmentList, OperationHandler};
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 impl OperationHandler {
     pub(super) async fn create_sandbox(&self, box_id: &str) -> Result<PathBuf> {
@@ -268,22 +268,6 @@ impl OperationHandler {
             }
         }
         Ok(collected)
-    }
-
-    /// Remove every environment's sandbox, logging failures.
-    pub(super) async fn cleanup_environments(
-        &self,
-        environments: &HashMap<String, EnvironmentList>,
-    ) {
-        for env in environments.values() {
-            if let Err(e) = self
-                .sandbox_manager
-                .remove_sandbox(env.box_id.as_str())
-                .await
-            {
-                error!(env_id = %env.id, error = %e, "Failed to cleanup sandbox");
-            }
-        }
     }
 }
 
