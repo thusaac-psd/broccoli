@@ -40,32 +40,36 @@ pub fn create_dispatch_functions(plugin_id: String, deps: OperationHostDeps) -> 
     let user_data = super::host_data(DispatchContext { plugin_id, deps });
 
     vec![
-        Function::new(
+        super::host_function(
             "start_operation_batch",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Blocks,
             start_operation_batch_fn,
         ),
-        Function::new(
+        super::host_function(
             "start_detached_windowed_operation",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Returns,
             start_detached_windowed_operation_fn,
         ),
-        Function::new(
+        super::host_function(
             "get_next_operation_result",
             [ValType::I64],
             [ValType::I64],
             user_data.clone(),
+            super::Waits::Blocks,
             get_next_operation_result_fn,
         ),
-        Function::new(
+        super::host_function(
             "cancel_operation_batch",
             [ValType::I64],
             [],
             user_data,
+            super::Waits::Returns,
             cancel_operation_batch_fn,
         ),
     ]

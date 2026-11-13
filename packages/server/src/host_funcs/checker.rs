@@ -43,11 +43,12 @@ pub fn create_resolve_checker_function(
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "resolve_checker",
         [ValType::I64],
         [ValType::I64],
         checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        super::Waits::Blocks,
         resolve_checker_fn,
     )
 }
@@ -57,11 +58,12 @@ pub fn create_interpret_checker_function(
     checker_stage_registry: CheckerStageRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "interpret_checker_result",
         [ValType::I64],
         [ValType::I64],
         checker_stage_data(plugin_id, checker_stage_registry, plugin_manager),
+        super::Waits::Blocks,
         interpret_checker_fn,
     )
 }

@@ -84,12 +84,18 @@ Idle threads leave after 30 s.
 
 ## Parking
 
-`HostCall::enter` (`packages/server/src/host_funcs/mod.rs`), the prologue every
-host function runs, holds a `plugin_core::executor::Parked` for the body. It
-gives the call's token back, and on drop takes one back ahead of every queued
-call (`Admission::resume`). A burst of contest submissions therefore all
-proceed even when there are far more of them than tokens: each holds a token
-only while its guest is actually computing.
+Every host function declares whether it waits on something outside the
+guest (`host_funcs::Waits`) where it is built (`host_funcs::host_function`).
+One that `Blocks` (SQL, storage, timers, submissions, config, result waits,
+batch starts, cancels that reach Redis, nested calls) runs its whole body
+inside `plugin_core::executor::parked`: the call's token goes back, and on
+return it takes one back ahead of its class's queued calls
+(`Admission::resume`). One that `Returns` at once (`log_info`, the
+`register_*` registry updates, starting a detached session, cancelling an
+operation batch) keeps its token, so a guest that logs never risks waiting
+for a token it just held. A burst of contest submissions therefore all
+proceed even when there are far more of them than tokens: each holds a
+token only while its guest is actually computing.
 
 The thread-local `CallScope` that carries the token, class, deadline and depth
 is installed and restored by a guard, so a panicking guest or host function

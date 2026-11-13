@@ -61,19 +61,57 @@ pub(crate) fn host_data<C>(ctx: C) -> UserData<Arc<C>> {
     UserData::new(Arc::new(ctx))
 }
 
+/// Whether a host function waits on something outside the guest: the
+/// database, the queue, a judging result or another plugin call. Every host
+/// function declares it where it is built ([`host_function`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Waits {
+    /// The call is parked for the whole body: its CPU token goes to another
+    /// call and comes back, ahead of its class's queued calls, when the
+    /// body returns (see [`plugin_core::executor::parked`]).
+    Blocks,
+    /// The body returns at once (a log line, an in-memory registry update);
+    /// the call keeps its token.
+    Returns,
+}
+
+/// Build host function `name`, parking its call around the body when it
+/// [`Waits::Blocks`].
+pub(crate) fn host_function<T, F>(
+    name: &'static str,
+    params: impl IntoIterator<Item = ValType>,
+    results: impl IntoIterator<Item = ValType>,
+    user_data: UserData<T>,
+    waits: Waits,
+    f: F,
+) -> Function
+where
+    T: 'static,
+    F: Fn(&mut CurrentPlugin, &[Val], &mut [Val], UserData<T>) -> Result<(), extism::Error>
+        + Send
+        + Sync
+        + 'static,
+{
+    match waits {
+        Waits::Blocks => Function::new(
+            name,
+            params,
+            results,
+            user_data,
+            move |plugin: &mut CurrentPlugin, inputs: &[Val], outputs: &mut [Val], data| {
+                plugin_core::executor::parked(|| f(plugin, inputs, outputs, data))
+            },
+        ),
+        Waits::Returns => Function::new(name, params, results, user_data, f),
+    }
+}
+
 /// An in-flight host fn call: the snapshot of its context plus the entered
 /// `host_fn` span, which closes when the guard is dropped at the end of the
 /// body. Derefs to the context.
-///
-/// The calling plugin call is parked for the guard's life: it gives its CPU
-/// token back while the body blocks on the database, the queue, a result
-/// wait or a nested plugin call, and takes one back ahead of every queued
-/// call when the guard drops (see [`plugin_core::executor::parked`]).
 #[must_use = "dropping the guard closes the host_fn span"]
 pub(crate) struct HostCall<C> {
     ctx: Arc<C>,
-    // Dropped first: the call resumes while the span is still open.
-    _parked: plugin_core::executor::Parked,
     _span: EnteredSpan,
 }
 
@@ -90,11 +128,7 @@ impl<C: HostFnContext> HostCall<C> {
             .map_err(|_| extism::Error::msg("Lock poisoned"))?
             .clone();
         let span = host_fn_span(host_fn, ctx.plugin_id()).entered();
-        Ok(Self {
-            ctx,
-            _parked: plugin_core::executor::Parked::enter(),
-            _span: span,
-        })
+        Ok(Self { ctx, _span: span })
     }
 }
 
@@ -179,6 +213,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
         &[I64],
         &[],
         str::to_string,
+        Waits::Returns,
         logger::log_info,
     );
     register_storage_functions(&mut hr, privileged_db);
@@ -200,6 +235,7 @@ fn register_fn<T, F>(
     params: &[ValType],
     results: &[ValType],
     user_data: impl Fn(&str) -> T + Send + Sync + 'static,
+    waits: Waits,
     f: F,
 ) where
     T: Send + Sync + 'static,
@@ -211,11 +247,12 @@ fn register_fn<T, F>(
 {
     let (params, results) = (params.to_vec(), results.to_vec());
     hr.register(capability, move |plugin_id| {
-        Function::new(
+        host_function(
             name,
             params.clone(),
             results.clone(),
             host_data(user_data(plugin_id)),
+            waits,
             f.clone(),
         )
     });
@@ -239,6 +276,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         &[I64],
         &[],
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_set,
     );
     register_fn(
@@ -248,6 +286,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         &[I64],
         &[I64],
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_get,
     );
     register_fn(
@@ -257,6 +296,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         &[I64],
         &[I64],
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_compare_and_set,
     );
     register_fn(
@@ -266,6 +306,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         &[I64],
         &[],
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_delete,
     );
     register_fn(
@@ -275,6 +316,7 @@ fn register_storage_functions(hr: &mut HostFunctionRegistry, privileged_db: &Dat
         &[I64],
         &[I64],
         with_db(privileged_db),
+        Waits::Blocks,
         storage::store_scan,
     );
 }
@@ -292,6 +334,7 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &Datab
         &[I64],
         &[I64],
         with_db(privileged_db),
+        Waits::Blocks,
         timer::timer_schedule,
     );
     register_fn(
@@ -301,6 +344,7 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, privileged_db: &Datab
         &[I64],
         &[I64],
         with_db(privileged_db),
+        Waits::Blocks,
         timer::timer_cancel,
     );
 }
@@ -316,6 +360,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64, I64],
         &[I64],
         with_db(db),
+        Waits::Blocks,
         sql::db_execute,
     );
     register_fn(
@@ -325,6 +370,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64, I64],
         &[I64],
         with_db(db),
+        Waits::Blocks,
         sql::db_query,
     );
 
@@ -340,6 +386,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64],
         &[I64],
         with_txns(),
+        Waits::Blocks,
         sql::db_begin,
     );
     register_fn(
@@ -349,6 +396,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64, I64, I64],
         &[I64],
         with_txns(),
+        Waits::Blocks,
         sql::db_query_in,
     );
     register_fn(
@@ -358,6 +406,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64, I64, I64],
         &[I64],
         with_txns(),
+        Waits::Blocks,
         sql::db_execute_in,
     );
     register_fn(
@@ -367,6 +416,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64],
         &[I64],
         with_txns(),
+        Waits::Blocks,
         sql::db_commit,
     );
     register_fn(
@@ -376,6 +426,7 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         &[I64],
         &[I64],
         with_txns(),
+        Waits::Blocks,
         sql::db_rollback,
     );
 }
@@ -419,7 +470,16 @@ fn register_submission_functions(
         ),
     ];
     for (name, f) in functions {
-        register_fn(hr, cap, name, &[I64], &[I64], with_db(privileged_db), f);
+        register_fn(
+            hr,
+            cap,
+            name,
+            &[I64],
+            &[I64],
+            with_db(privileged_db),
+            Waits::Blocks,
+            f,
+        );
     }
 }
 

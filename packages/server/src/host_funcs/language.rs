@@ -24,7 +24,7 @@ pub fn create_resolve_language_function(
     resolver_registry: LanguageResolverRegistry,
     plugin_manager: Arc<dyn PluginInvoker>,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "resolve_language",
         [ValType::I64],
         [ValType::I64],
@@ -33,6 +33,7 @@ pub fn create_resolve_language_function(
             resolver_registry,
             plugin_manager,
         }),
+        super::Waits::Blocks,
         resolve_language_fn,
     )
 }

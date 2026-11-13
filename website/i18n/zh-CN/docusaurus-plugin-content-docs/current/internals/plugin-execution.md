@@ -49,7 +49,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 ## 挂起
 
-每个宿主函数都会执行的序言 `HostCall::enter`（`packages/server/src/host_funcs/mod.rs`）在函数体期间持有一个 `plugin_core::executor::Parked`。它交还调用的令牌，并在析构时先于所有排队调用取回一个令牌（`Admission::resume`）。因此即使比赛提交的数量远多于令牌，整批提交也都能推进：每个提交只在其客体真正计算时持有令牌。
+每个宿主函数都在构建处（`host_funcs::host_function`）声明它是否等待客体之外的东西（`host_funcs::Waits`）。声明为 `Blocks` 的函数（SQL、存储、定时器、提交、配置、结果等待、批次启动、会访问 Redis 的取消、嵌套调用）在 `plugin_core::executor::parked` 中运行整个函数体：调用交还其令牌，并在返回时先于其类别的排队调用取回一个令牌（`Admission::resume`）。声明为 `Returns` 的函数立即返回（`log_info`、`register_*` 注册表更新、启动分离会话、取消操作批次），保留其令牌，因此记录日志的客体不会为了刚刚持有的令牌而等待。因此即使比赛提交的数量远多于令牌，整批提交也都能推进：每个提交只在其客体真正计算时持有令牌。
 
 携带令牌、类别、截止时间和深度的线程局部 `CallScope` 由守卫安装和恢复，因此 panic 的客体或宿主函数不会留下过期的作用域。
 
