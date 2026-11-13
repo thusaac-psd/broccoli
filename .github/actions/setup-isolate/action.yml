@@ -1,0 +1,40 @@
+name: Set up isolate
+description: >
+  Build and install the pinned isolate release, start its cgroup keeper, and
+  raise num_boxes, the way the worker image does.
+
+inputs:
+  version:
+    description: isolate git tag to build.
+    required: false
+    default: v2.0
+  num_boxes:
+    description: >
+      Box ids this host provides. Box ids are a host-wide namespace the workers
+      share, and one communication test case can need a box per contestant
+      process, so judging must never run out. Matches Dockerfile.worker and
+      release/native/config/isolate.conf.
+    required: false
+    default: "10000"
+
+runs:
+  using: composite
+  steps:
+    - name: Install isolate
+      shell: bash
+      env:
+        ISOLATE_VERSION: ${{ inputs.version }}
+        ISOLATE_NUM_BOXES: ${{ inputs.num_boxes }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
+        git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
+        sudo make -C "$RUNNER_TEMP/isolate" install
+        sudo sed -i "s/^#\? *num_boxes *=.*/num_boxes = $ISOLATE_NUM_BOXES/" /usr/local/etc/isolate
+        grep -q "^num_boxes = $ISOLATE_NUM_BOXES$" /usr/local/etc/isolate
+        sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
+        sudo systemctl daemon-reload
+        sudo systemctl start isolate.service
+        isolate --version
+        isolate-check-environment || true
