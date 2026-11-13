@@ -595,7 +595,8 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
 }
 
 /// Depth of every stream of the queue: the shared and dead-letter streams,
-/// each live worker's private stream and this server's reply stream.
+/// each worker's private stream (live, or dead and not yet drained) and this
+/// server's reply stream.
 pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
     let Some(mq) = state.mq.as_ref() else {
         return Vec::new();
@@ -606,13 +607,19 @@ pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
         topology.dead_letter(),
         topology.reply(&state.config.server.id),
     ];
+    // Live workers' private streams, and dead workers' until they are drained.
     keys.extend(
         read_workers(state)
             .await
             .iter()
             .map(|worker| topology.private(&worker.id)),
     );
+    match mq.pinned_workers().await {
+        Ok(ids) => keys.extend(ids.iter().map(|id| topology.private(id))),
+        Err(e) => warn!(error = %e, "Reading the pinned workers failed"),
+    }
     keys.sort();
+    keys.dedup();
     let depths = match mq.depths(&keys).await {
         Ok(depths) => depths,
         Err(e) => {

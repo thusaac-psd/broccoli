@@ -267,12 +267,11 @@ impl Mq {
         )
     }
 
-    /// Move the private streams of dead workers to the shared stream. Live
-    /// workers' streams are left alone. Returns the entries moved.
-    pub async fn drain_dead_private_streams(&self) -> Result<usize, MqError> {
-        let t = &self.topology;
-        let pinned_set = t.pinned_set();
-        let owners: Vec<String> = self
+    /// Workers that may have a private stream (live, or dead and not drained
+    /// yet).
+    pub async fn pinned_workers(&self) -> Result<Vec<String>, MqError> {
+        let pinned_set = self.topology.pinned_set();
+        Ok(self
             .conn
             .run(|mut c| async move {
                 redis::cmd("SMEMBERS")
@@ -280,7 +279,14 @@ impl Mq {
                     .query_async(&mut c)
                     .await
             })
-            .await?;
+            .await?)
+    }
+
+    /// Move the private streams of dead workers to the shared stream. Live
+    /// workers' streams are left alone. Returns the entries moved.
+    pub async fn drain_dead_private_streams(&self) -> Result<usize, MqError> {
+        let t = &self.topology;
+        let owners = self.pinned_workers().await?;
         let mut moved = 0;
         for worker_id in &owners {
             loop {
