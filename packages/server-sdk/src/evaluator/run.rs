@@ -70,11 +70,12 @@ pub fn evaluate_run(host: &Host, req: &OnCodeRunInput) -> Result<OnCodeRunOutput
     {
         Ok(session) => session,
         Err(e) => {
-            for tc in test_cases {
-                let r = TcResult::system_error(tc.id, format!("BATCH_START_FAILED: {e:?}"));
-                insert_code_run_tc_result(host, req.id, req.judge_epoch, &r)?;
-                verdicts.push(r);
-            }
+            let failed: Vec<TcResult> = test_cases
+                .iter()
+                .map(|tc| TcResult::system_error(tc.id, format!("BATCH_START_FAILED: {e:?}")))
+                .collect();
+            insert_code_run_tc_results(host, req.id, req.judge_epoch, &failed)?;
+            verdicts.extend(failed);
             return finalize_code_run(host, req.id, req.judge_epoch, &verdicts);
         }
     };
@@ -96,17 +97,18 @@ pub fn evaluate_run(host: &Host, req: &OnCodeRunInput) -> Result<OnCodeRunOutput
             Ok(Some(verdict)) => {
                 let r = TcResult::from_verdict(&verdict);
                 if r.verdict == Verdict::CompileError {
-                    insert_code_run_tc_result(host, req.id, req.judge_epoch, &r)?;
+                    let first_new = verdicts.len();
                     verdicts.push(r);
-                    let collected_ids: HashSet<i32> =
-                        verdicts.iter().map(|r| r.test_case_id).collect();
-                    for tc in test_cases {
-                        if !collected_ids.contains(&tc.id) {
-                            let r = TcResult::skipped(tc.id, "SKIPPED_SHORT_CIRCUIT".into());
-                            insert_code_run_tc_result(host, req.id, req.judge_epoch, &r)?;
-                            verdicts.push(r);
-                        }
-                    }
+                    let skipped = unrecorded(test_cases, &verdicts, |id| {
+                        TcResult::skipped(id, "SKIPPED_SHORT_CIRCUIT".into())
+                    });
+                    verdicts.extend(skipped);
+                    insert_code_run_tc_results(
+                        host,
+                        req.id,
+                        req.judge_epoch,
+                        &verdicts[first_new..],
+                    )?;
                     let _ = eval_session.cancel_all();
                     break;
                 }
@@ -114,7 +116,12 @@ pub fn evaluate_run(host: &Host, req: &OnCodeRunInput) -> Result<OnCodeRunOutput
                     host.code_run.set_running(req.id, req.judge_epoch)?;
                     marked_running = true;
                 }
-                insert_code_run_tc_result(host, req.id, req.judge_epoch, &r)?;
+                insert_code_run_tc_results(
+                    host,
+                    req.id,
+                    req.judge_epoch,
+                    std::slice::from_ref(&r),
+                )?;
                 verdicts.push(r);
                 collected += 1;
             }
@@ -136,14 +143,11 @@ pub fn evaluate_run(host: &Host, req: &OnCodeRunInput) -> Result<OnCodeRunOutput
     }
 
     if timed_out {
-        let collected_ids: HashSet<i32> = verdicts.iter().map(|r| r.test_case_id).collect();
-        for tc in test_cases {
-            if !collected_ids.contains(&tc.id) {
-                let r = TcResult::system_error(tc.id, "EVALUATION_TIMEOUT".into());
-                insert_code_run_tc_result(host, req.id, req.judge_epoch, &r)?;
-                verdicts.push(r);
-            }
-        }
+        let missing = unrecorded(test_cases, &verdicts, |id| {
+            TcResult::system_error(id, "EVALUATION_TIMEOUT".into())
+        });
+        insert_code_run_tc_results(host, req.id, req.judge_epoch, &missing)?;
+        verdicts.extend(missing);
         let _ = eval_session.cancel_all();
     }
 
@@ -207,24 +211,43 @@ impl TcResult {
     }
 }
 
-fn insert_code_run_tc_result(
+/// A result made by `fill` for every case `verdicts` has none for.
+fn unrecorded(
+    test_cases: &[TestCaseRow],
+    verdicts: &[TcResult],
+    fill: impl Fn(i32) -> TcResult,
+) -> Vec<TcResult> {
+    let recorded: HashSet<i32> = verdicts.iter().map(|r| r.test_case_id).collect();
+    test_cases
+        .iter()
+        .filter(|tc| !recorded.contains(&tc.id))
+        .map(|tc| fill(tc.id))
+        .collect()
+}
+
+/// Insert `results` in one host call.
+fn insert_code_run_tc_results(
     host: &Host,
     code_run_id: i32,
     judge_epoch: i32,
-    r: &TcResult,
+    results: &[TcResult],
 ) -> Result<(), SdkError> {
-    host.code_run.insert_results(&[CodeRunResultRow {
-        code_run_id,
-        judge_epoch,
-        run_index: r.test_case_id,
-        verdict: r.verdict.clone(),
-        score: r.score,
-        time_used: r.time_used,
-        memory_used: r.memory_used,
-        message: r.message.clone(),
-        stdout: r.stdout.clone(),
-        stderr: r.stderr.clone(),
-    }])
+    let rows: Vec<CodeRunResultRow> = results
+        .iter()
+        .map(|r| CodeRunResultRow {
+            code_run_id,
+            judge_epoch,
+            run_index: r.test_case_id,
+            verdict: r.verdict.clone(),
+            score: r.score,
+            time_used: r.time_used,
+            memory_used: r.memory_used,
+            message: r.message.clone(),
+            stdout: r.stdout.clone(),
+            stderr: r.stderr.clone(),
+        })
+        .collect();
+    host.code_run.insert_results(&rows)
 }
 
 fn finalize_code_run(
@@ -357,6 +380,18 @@ mod tests {
                 .iter()
                 .all(|update| update.status != Some(SubmissionStatus::Running))
         );
+    }
+
+    #[test]
+    fn a_compile_error_records_every_code_run_case_in_one_insert() {
+        let host = Host::mock();
+        host.eval.queue_result(TestCaseVerdict::compile_error(1));
+        let req = code_run_input(vec![test_case(1), test_case(2), test_case(3)]);
+
+        evaluate_run(&host, &req).unwrap();
+
+        assert_eq!(host.code_run.results().len(), 3);
+        assert_eq!(host.code_run.insert_call_count(), 1);
     }
 
     #[test]
