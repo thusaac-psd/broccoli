@@ -32,7 +32,8 @@ stops nothing. Two consequences shape everything below:
 
 `packages/plugin-core/src/admission.rs` holds `C` CPU tokens per server,
 `TOKENS_PER_CORE` (2) per available core unless `plugin.max_concurrent_calls`
-says otherwise. A token means "running guest code", not "call in progress".
+says otherwise; a setting below `MIN_TOKENS` (2, one per class) is raised to
+it with a warning. A token means "running guest code", not "call in progress".
 
 | Class | Calls | Share |
 |---|---|---|

@@ -17,7 +17,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 ## 准入
 
-`packages/plugin-core/src/admission.rs` 为每台服务器持有 `C` 个 CPU 令牌，除非 `plugin.max_concurrent_calls` 另有设置，否则为每个可用核心 `TOKENS_PER_CORE`（2）个。令牌表示“正在运行客体代码”，而不是“调用进行中”。
+`packages/plugin-core/src/admission.rs` 为每台服务器持有 `C` 个 CPU 令牌，除非 `plugin.max_concurrent_calls` 另有设置，否则为每个可用核心 `TOKENS_PER_CORE`（2）个。低于 `MIN_TOKENS`（2，每个类别一个）的设置会被提升到该值并记录警告。令牌表示“正在运行客体代码”，而不是“调用进行中”。
 
 | 类别 | 调用 | 份额 |
 |---|---|---|

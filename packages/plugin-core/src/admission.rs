@@ -130,6 +130,9 @@ impl CallKind {
     }
 }
 
+/// The fewest tokens a host runs with: one per [`CallClass`].
+pub const MIN_TOKENS: usize = 2;
+
 /// Tokens a server runs guests with, per available core. Guest code is CPU
 /// bound, so one token per core would saturate the cores only if no call ever
 /// stalled while holding a token; calls do stall briefly (building an
@@ -185,11 +188,12 @@ pub struct Capacity {
 
 impl Capacity {
     /// `tokens` CPU tokens split evenly between the classes (interactive gets
-    /// the odd one). The judging and work caps start from defaults until the
-    /// host sets them from its in-flight cap and fan-out bound
+    /// the odd one), at least [`MIN_TOKENS`] so each class has one. The
+    /// judging and work caps start from defaults until the host sets them
+    /// from its in-flight cap and fan-out bound
     /// ([`Admission::set_background_caps`]).
     pub fn new(tokens: usize) -> Self {
-        let tokens = tokens.max(2);
+        let tokens = tokens.max(MIN_TOKENS);
         let interactive = tokens.div_ceil(2);
         let mut caps = [0; 5];
         caps[CallKind::Request.index()] = tokens * REQUESTS_PER_TOKEN;

@@ -119,7 +119,16 @@ impl Executor {
     /// count) and `memory_budget` bytes (or the automatic budget).
     pub fn for_this_host(max_concurrent_calls: Option<usize>, memory_budget: Option<u64>) -> Self {
         let capacity = match max_concurrent_calls {
-            Some(tokens) => Capacity::new(tokens),
+            Some(tokens) => {
+                if tokens < crate::admission::MIN_TOKENS {
+                    tracing::warn!(
+                        configured = tokens,
+                        used = crate::admission::MIN_TOKENS,
+                        "plugin.max_concurrent_calls is below one token per call class; raising it"
+                    );
+                }
+                Capacity::new(tokens)
+            }
             None => Capacity::for_this_host(),
         };
         Self::new(capacity, MemoryBudget::for_this_host(memory_budget))
