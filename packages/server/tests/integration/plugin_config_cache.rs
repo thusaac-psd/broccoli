@@ -27,57 +27,105 @@ async fn cached_value(app: &TestApp) -> Option<i64> {
         .and_then(|row| row.config["v"].as_i64())
 }
 
+/// Queues one submission on `app`'s database, ready for any replica to claim.
+async fn queue_submission(app: &TestApp, user: &str) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+    let token = app
+        .create_user_with_role(user, "password123", "admin")
+        .await;
+    let user_id = server::entity::user::Entity::find()
+        .filter(server::entity::user::Column::Username.eq(user))
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let problem_id = app.create_problem(&token, "Cache probe").await;
+    app.insert_submission(server::entity::submission::ActiveModel {
+        files: Set(serde_json::json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_type: Set("standard".into()),
+        ..Default::default()
+    })
+    .await;
+}
+
+/// Claims on `replica` without any listener: only the claim statement can
+/// tell it about config changes.
+async fn claim(replica: &TestApp) -> u32 {
+    let server_id = replica.state.config.server.id.clone();
+    server::dispatcher::claim::claim_once(&replica.state, &server_id, 32, 256)
+        .await
+        .expect("claim pass")
+        .judgements
+        .0
+}
+
+/// The exact interleaving the cache must survive: a config change commits,
+/// then a submission commits, then a replica that has cached the old config,
+/// and has heard no notification, claims that submission.
 #[tokio::test]
-async fn a_change_committed_before_a_claim_pass_is_seen_by_the_claiming_replica() {
+async fn config_committed_before_a_submission_is_seen_when_it_is_claimed() {
     let a = TestApp::spawn().await;
     let b = a.spawn_replica(SpawnOptions::default()).await;
     write_config(&a, 1).await;
     assert_eq!(cached_value(&b).await, Some(1));
+    // Settle the counter B has seen, as a claim with nothing new would.
+    queue_submission(&a, "warmup").await;
+    assert_eq!(claim(&b).await, 1);
+    assert_eq!(cached_value(&b).await, Some(1));
 
     write_config(&a, 2).await;
-    let server_id = b.state.config.server.id.clone();
-    server::dispatcher::claim::claim_once(&b.state, &server_id, 32, 256)
-        .await
-        .expect("claim pass");
+    queue_submission(&a, "after_change").await;
+    assert_eq!(cached_value(&b).await, Some(1), "nothing told B yet");
+    assert_eq!(claim(&b).await, 1);
 
     assert_eq!(cached_value(&b).await, Some(2));
 }
 
+/// With its fallback tick an hour away and nothing queued, only the change
+/// notification can reach the listening replica.
 #[tokio::test]
-async fn a_change_reaches_a_listening_replica_without_a_claim() {
+async fn a_change_reaches_a_listening_replica_by_notification() {
     let a = TestApp::spawn().await;
-    let b = a
-        .spawn_replica(SpawnOptions {
-            start_dispatcher: true,
-            ..Default::default()
-        })
-        .await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
+    let (cancel, cancelled) = tokio::sync::watch::channel(false);
+    let fiber = tokio::spawn(server::dispatcher::claim::run_with_fallback_tick(
+        b.state.clone(),
+        b.state.config.server.id.clone(),
+        Duration::from_secs(3_600),
+        cancelled,
+    ));
+    b.wait_until_claim_listening().await;
     write_config(&a, 1).await;
     assert_eq!(cached_value(&b).await, Some(1));
 
     write_config(&a, 2).await;
     tokio::time::timeout(Duration::from_secs(10), async {
         while cached_value(&b).await != Some(2) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("the change notification reaches the replica");
+    cancel.send(true).unwrap();
+    fiber.await.unwrap();
 }
 
 #[tokio::test]
 async fn a_deleted_row_stops_being_served() {
     let a = TestApp::spawn().await;
+    let b = a.spawn_replica(SpawnOptions::default()).await;
     write_config(&a, 1).await;
-    assert_eq!(cached_value(&a).await, Some(1));
+    assert_eq!(cached_value(&b).await, Some(1));
     a.db.execute_unprepared("DELETE FROM plugin_config WHERE ref_id = 'cache-probe'")
         .await
         .expect("delete");
-    let server_id = a.state.config.server.id.clone();
-    server::dispatcher::claim::claim_once(&a.state, &server_id, 32, 256)
-        .await
-        .expect("claim pass");
-    assert_eq!(cached_value(&a).await, None);
+    queue_submission(&a, "after_delete").await;
+    assert_eq!(claim(&b).await, 1);
+    assert_eq!(cached_value(&b).await, None);
 }
 
 async fn epoch(db: &sea_orm::DatabaseConnection) -> i64 {

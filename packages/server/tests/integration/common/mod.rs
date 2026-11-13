@@ -882,6 +882,33 @@ impl TestApp {
         }
     }
 
+    /// Waits until a session of this app's database is listening for claim
+    /// notifications.
+    pub async fn wait_until_claim_listening(&self) {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let sql = format!(
+            "SELECT COUNT(*)::bigint AS n FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%{}%'",
+            server::services::judging::CLAIM_CHANNEL
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let row = self
+                    .db
+                    .query_one_raw(Statement::from_string(DbBackend::Postgres, sql.clone()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if row.try_get::<i64>("", "n").unwrap() > 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the claim fiber listens");
+    }
+
     fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }

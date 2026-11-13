@@ -290,11 +290,11 @@ pub async fn claim_once(
     batch_size: u32,
     max_in_flight: u32,
 ) -> anyhow::Result<ClaimPass> {
-    let start = judging::pass_start(&state.db, server_id).await?;
-    state
-        .plugin_config_cache
-        .observe_epoch(start.plugin_config_epoch);
-    let in_flight = start.in_flight;
+    let in_flight = if max_in_flight == 0 {
+        0
+    } else {
+        judging::count_in_flight(&state.db, server_id).await?
+    };
     // The contest types this replica can judge right now; see
     // `dispatcher::prefer_local_handler`.
     let contest_types = super::local_contest_types(state).await;
@@ -309,6 +309,12 @@ pub async fn claim_once(
     if !slots.is_empty() {
         let claimed =
             judging::claim_judgements(&state.db, server_id, judgement_room, &contest_types).await?;
+        // Before any claimed unit is judged: config committed before its
+        // submission is then visible (see `services::plugin_config_cache`).
+        if let Some(epoch) = claimed.plugin_config_epoch {
+            state.plugin_config_cache.observe_epoch(epoch);
+        }
+        let claimed = claimed.units;
         claimed_judgements = claimed.len() as u32;
         record_judgement_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
@@ -338,6 +344,10 @@ pub async fn claim_once(
     if !slots.is_empty() {
         let claimed =
             judging::claim_code_runs(&state.db, server_id, code_run_room, &contest_types).await?;
+        if let Some(epoch) = claimed.plugin_config_epoch {
+            state.plugin_config_cache.observe_epoch(epoch);
+        }
+        let claimed = claimed.units;
         claimed_code_runs = claimed.len() as u32;
         record_code_run_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
