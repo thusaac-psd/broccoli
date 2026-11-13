@@ -2375,9 +2375,9 @@ async fn feedback_publication_failure_retries_after_committing_the_match() {
         max_attempts: 1,
         ..Default::default()
     };
-        let key = format!("match:{}:0:effective:1:{}", fx.contest_id, accepted.id());
-        for _ in 0..2 {
-            advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
+    let key = format!("match:{}:0:effective:1:{}", fx.contest_id, accepted.id());
+    for _ in 0..2 {
+        advance_clock_to_ms(&fx.app, timer_fire_at_ms(&fx.app, &key).await).await;
         tick_once(&fx.app.state, &config).await.unwrap();
         let committed = get_match(&fx.app, fx.contest_id, 0, &fx.staff_token).await;
         assert_eq!(committed["state"], "decided", "{committed}");
