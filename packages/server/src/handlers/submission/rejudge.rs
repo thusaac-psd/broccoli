@@ -4,7 +4,6 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use sea_orm::*;
 use serde::Deserialize;
 use tracing::{info, instrument};
@@ -502,7 +501,6 @@ pub async fn admin_fan_out_submission(
     };
 
     let language = payload.language.trim().to_string();
-    let now = Utc::now();
     let files_json = files_to_json(&payload.files);
 
     let mut models = Vec::with_capacity(payload.target_worker_ids.len());
@@ -515,7 +513,6 @@ pub async fn admin_fan_out_submission(
             contest_id: Set(payload.contest_id),
             contest_type: Set(contest_type.clone()),
             target_worker_id: Set(Some(worker_id.clone())),
-            created_at: Set(now),
             ..Default::default()
         };
         // Queued with its first judgement, pinned to the worker through
