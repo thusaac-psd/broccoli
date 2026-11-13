@@ -1,20 +1,34 @@
-//! Measures the SQL a judged test case and a submission poll cost, from
-//! `pg_stat_statements`. A measurement, not a check: run it with
-//! `E2E_SANDBOX_BACKEND=mock cargo test -p server --test e2e statement_counts -- --ignored --nocapture`.
+//! The SQL a judged test case and a submission poll cost, counted with
+//! `pg_stat_statements` in this test's own database and held under fixed
+//! bounds, so a change that adds per-case or per-poll statements fails here.
+//! `--nocapture` prints the statements behind each count.
+
+use std::collections::HashMap;
 
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 use crate::common::E2eTestApp;
 
-/// Calls per normalized statement in this test's database since the last
-/// reset.
-async fn statement_calls(app: &E2eTestApp) -> Vec<(String, i64)> {
+/// Statements one more test case may cost a judged submission, whatever its
+/// checker: its one result row. The app's background loops (claim ticks,
+/// leases) run meanwhile and count too, so the budget sits half a statement
+/// above; a second statement per case fails.
+const MAX_PER_TEST_CASE: f64 = 1.5;
+
+/// Statements one `GET /submissions/{id}` of a judged submission may cost:
+/// the submission, its results and the view context. Half a statement of
+/// room for background loops; a fourth statement per poll fails.
+const MAX_PER_POLL: f64 = 3.5;
+
+/// Calls so far per normalized statement in this test's database. Other
+/// databases on the shared test server are never read or reset.
+async fn snapshot(app: &E2eTestApp) -> HashMap<String, i64> {
     app.db
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
-            "SELECT query, calls::bigint AS calls FROM pg_stat_statements \
+            "SELECT query, sum(calls)::bigint AS calls FROM pg_stat_statements \
              WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
-             AND query NOT LIKE '%pg_stat_statements%' ORDER BY calls DESC",
+             AND query NOT LIKE '%pg_stat_statements%' GROUP BY query",
         ))
         .await
         .expect("pg_stat_statements is loaded in the test database server")
@@ -28,11 +42,15 @@ async fn statement_calls(app: &E2eTestApp) -> Vec<(String, i64)> {
         .collect()
 }
 
-async fn reset(app: &E2eTestApp) {
-    app.db
-        .execute_unprepared("SELECT pg_stat_statements_reset()")
-        .await
-        .expect("reset pg_stat_statements");
+/// Calls per statement between two snapshots, most frequent first.
+fn since(before: &HashMap<String, i64>, after: &HashMap<String, i64>) -> Vec<(String, i64)> {
+    let mut delta: Vec<(String, i64)> = after
+        .iter()
+        .map(|(q, n)| (q.clone(), n - before.get(q).copied().unwrap_or(0)))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    delta.sort_by_key(|(q, n)| (-n, q.clone()));
+    delta
 }
 
 fn total(calls: &[(String, i64)]) -> i64 {
@@ -75,23 +93,25 @@ async fn judge(app: &E2eTestApp, admin: &str, checker: &str, cases: usize) -> Ve
     }
     // The second submission shows the steady state: config read once, after
     // the checker upload, is cached by then.
-    for round in 0..2 {
-        reset(app).await;
+    let mut measured = Vec::new();
+    for _ in 0..2 {
+        let before = snapshot(app).await;
         let sub = app
             .create_submission(problem_id, admin, "cpp", super::CPP_SUM)
             .await;
         let res = app.wait_for_submission_terminal(sub, admin, 120).await;
         assert_eq!(res.body["status"], "Judged", "{}", res.text);
-        if round == 1 {
-            return statement_calls(app).await;
-        }
+        measured = since(&before, &snapshot(app).await);
     }
-    unreachable!()
+    measured
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "a measurement; prints statement counts"]
-async fn reports_statements_per_test_case_and_per_poll() {
+async fn a_test_case_and_a_poll_stay_within_their_statement_budgets() {
+    if std::env::var("E2E_SERVER_URL").is_ok() {
+        // A remote stack's database is shared with whatever else runs on it.
+        return;
+    }
     let app = E2eTestApp::spawn().await;
     let admin = app
         .create_user_with_role("counter", "pass1234", "admin")
@@ -108,12 +128,18 @@ async fn reports_statements_per_test_case_and_per_poll() {
             })
             .filter(|(_, n)| *n > 0)
             .collect();
-        delta.sort_by_key(|(_, n)| -n);
-        print_top(&format!("per test case ({checker} checker)"), &delta, 20.0);
+        delta.sort_by_key(|(q, n)| (-n, q.clone()));
+        let label = format!("per test case ({checker} checker)");
+        print_top(&label, &delta, 20.0);
         print_top(
             &format!("whole submission of 25 ({checker} checker)"),
             &large,
             1.0,
+        );
+        let per_case = (total(&large) - total(&small)) as f64 / 20.0;
+        assert!(
+            per_case <= MAX_PER_TEST_CASE,
+            "{label}: {per_case:.1} statements, budget {MAX_PER_TEST_CASE} (run with --nocapture for the list)"
         );
     }
 
@@ -124,12 +150,18 @@ async fn reports_statements_per_test_case_and_per_poll() {
         .await;
     app.wait_for_submission_terminal(sub, &admin, 60).await;
     const POLLS: i64 = 50;
-    reset(&app).await;
+    let before = snapshot(&app).await;
     for _ in 0..POLLS {
         let res = app
             .get_with_token(&format!("/api/v1/submissions/{sub}"), &admin)
             .await;
         assert_eq!(res.status, 200, "{}", res.text);
     }
-    print_top("per poll", &statement_calls(&app).await, POLLS as f64);
+    let polls = since(&before, &snapshot(&app).await);
+    print_top("per poll", &polls, POLLS as f64);
+    let per_poll = total(&polls) as f64 / POLLS as f64;
+    assert!(
+        per_poll <= MAX_PER_POLL,
+        "per poll: {per_poll:.1} statements, budget {MAX_PER_POLL} (run with --nocapture for the list)"
+    );
 }
