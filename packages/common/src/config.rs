@@ -168,10 +168,15 @@ impl Default for ObservabilityConfig {
 }
 
 /// Every setting a Broccoli binary reads, as a dotted path; `a.*` stands for
-/// any key under the map `a`. The server and the worker share one config file
-/// and, on a single host, one environment, so a key is unknown only when no
-/// binary reads it. The server's tests pin this list to the union of both
-/// binaries' parsed configs.
+/// any key under the map `a`. The one source of what the binaries accept:
+/// each builds its typed config only from the settings listed here (see
+/// [`read_known`]), so a setting a binary gains is listed here or never
+/// reaches it. The server and the worker can share one config file, so a key
+/// is unknown only when no binary reads it.
+///
+/// Derived from the config types instead, it would need one crate that sees
+/// both binaries' types; the server's live in the server crate, which the
+/// worker does not depend on.
 pub const KNOWN_SETTINGS: &[&str] = &[
     "auth.jwt_secret",
     "auth.login_failure_limit",
@@ -298,6 +303,39 @@ pub fn setting_paths(value: &serde_json::Value) -> std::collections::BTreeSet<St
     out
 }
 
+/// Keeps of `built` (the config file, environment and defaults) only the
+/// settings in [`KNOWN_SETTINGS`], for a binary to deserialize its typed
+/// config from, and returns the dotted paths of the rest (see
+/// [`unknown_keys`]) for [`warn_unknown_keys`].
+pub fn read_known(
+    built: ::config::Config,
+) -> Result<(::config::Config, Vec<String>), ::config::ConfigError> {
+    let mut raw: serde_json::Value = built.try_deserialize()?;
+    let unknown = unknown_keys(&raw, KNOWN_SETTINGS);
+    for path in &unknown {
+        remove_path(&mut raw, path);
+    }
+    let known = ::config::Config::try_from(&raw)?;
+    Ok((known, unknown))
+}
+
+fn remove_path(value: &mut serde_json::Value, path: &str) {
+    let (parent, leaf) = match path.rsplit_once('.') {
+        Some((parent, leaf)) => (Some(parent), leaf),
+        None => (None, path),
+    };
+    let mut node = value;
+    for segment in parent.into_iter().flat_map(|p| p.split('.')) {
+        match node.get_mut(segment) {
+            Some(next) => node = next,
+            None => return,
+        }
+    }
+    if let Some(map) = node.as_object_mut() {
+        map.remove(leaf);
+    }
+}
+
 /// Settings in `raw` (what the config file and environment supplied) that no
 /// binary reads: for each, the shortest dotted prefix that no entry of
 /// `known` (see [`KNOWN_SETTINGS`]) covers.
@@ -356,6 +394,33 @@ pub fn warn_unknown_keys(keys: &[String], env_prefix: &str) {
 mod unknown_key_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_binary_reads_only_listed_settings_and_hears_of_the_rest() {
+        let built = ::config::Config::builder()
+            .set_override("mq.url", "redis://infra:6379")
+            .unwrap()
+            .set_override("mq.dlq.max_retries", "7")
+            .unwrap()
+            .set_override("server.claim_batch_size", 8)
+            .unwrap()
+            .set_override("clock.max_skew_ms", 0)
+            .unwrap()
+            .build()
+            .unwrap();
+        let (known, unknown) = read_known(built).unwrap();
+        assert_eq!(
+            unknown,
+            vec!["clock".to_string(), "server.claim_batch_size".to_string()]
+        );
+        let mq: MqAppConfig = known.get("mq").unwrap();
+        assert_eq!(mq.url, "redis://infra:6379");
+        assert_eq!(
+            mq.dlq.max_retries, 7,
+            "a string from the environment still parses"
+        );
+        assert!(known.get::<i64>("server.claim_batch_size").is_err());
+    }
 
     #[test]
     fn keys_no_binary_reads_are_reported_by_their_shortest_unknown_prefix() {
