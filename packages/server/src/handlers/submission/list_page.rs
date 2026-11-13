@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use super::filter::apply_filter_to_list;
 use super::response::build_submission_list_items;
+// visibility-bypass-audited: `visible_page` decides every row it fetches with
+// `VisibilityKernel::decide_batch` and keeps only the ones not denied, and
+// decides the cursor row in the same batch, so no row reaches a page, or
+// positions one, without the kernel.
 use crate::entity::{submission, user};
 use crate::error::AppError;
 use crate::models::shared::ListPagination;
