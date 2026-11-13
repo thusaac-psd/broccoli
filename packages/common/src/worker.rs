@@ -83,6 +83,14 @@ pub enum TaskReply {
     },
 }
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
+#[async_trait]
+pub trait Executor: Send + Sync {
+    fn if_accept(&self, _task_type: &str) -> bool;
+    async fn execute(&self, task: Task) -> Result<TaskResult>;
+}
+
 #[cfg(test)]
 mod reply_tests {
     use super::{TaskReply, TaskResult, TaskStartedNotification};
@@ -155,12 +163,4 @@ mod reply_tests {
             })
         );
     }
-}
-
-// `async_trait` marks each method `#[must_use]` on top of its boxed future.
-#[allow(clippy::double_must_use)]
-#[async_trait]
-pub trait Executor: Send + Sync {
-    fn if_accept(&self, _task_type: &str) -> bool;
-    async fn execute(&self, task: Task) -> Result<TaskResult>;
 }
