@@ -196,7 +196,7 @@ pub fn deserialize_noting_ignored<T: serde::de::DeserializeOwned>(
 }
 
 /// Logs one warning per setting the binary does not read (see
-/// [`unknown_keys`]): a removed key, or a typo. Setting `a.b` comes from
+/// [`deserialize_noting_ignored`]): a removed key, or a typo. Setting `a.b` comes from
 /// `a.b` in the config file or `{env_prefix}__A__B` in the environment.
 pub fn warn_unknown_keys(keys: &[String], env_prefix: &str) {
     for key in keys {
