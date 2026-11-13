@@ -3,34 +3,14 @@ use async_trait::async_trait;
 use broccoli_types::types::HookResponse;
 use common::event::GenericEvent;
 use common::hook::{GenericHook, GenericHookAction, HookAction};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+pub use broccoli_types::manifest::{HookMode, HookScope};
 
 use crate::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use crate::traits::PluginManager;
 
 pub const PLUGIN_RUNTIME_ERROR_CODE: &str = "__BROCCOLI_PLUGIN_RUNTIME_ERROR";
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum HookScope {
-    /// Runs where the plugin applies: for a problem, contest, or contest
-    /// problem whose plugin config enables it, and always for submissions to
-    /// a contest whose type this plugin registered. See
-    /// `server::hooks::resource_enablements`.
-    #[default]
-    Resource,
-    /// Runs for every event on the server.
-    Global,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "lowercase")]
-pub enum HookMode {
-    #[default]
-    Blocking,
-    Notify,
-}
 
 /// Map a plugin's `HookResponse` onto the host's hook action. Free function
 /// (rather than an inherent impl) because `HookResponse` is the shared

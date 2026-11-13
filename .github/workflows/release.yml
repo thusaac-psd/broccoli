@@ -650,7 +650,7 @@ jobs:
                 --url http://127.0.0.1:3100 \
                 --admin-username admin \
                 --admin-password "$BROCCOLI_ADMIN_PASSWORD" \
-                --correctness-only
+                --skip-load
             '
 
   release:

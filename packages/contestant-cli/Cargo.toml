@@ -5,7 +5,7 @@ description = "Contestant CLI for Broccoli (login, submit, test, watch contests)
 license = "MIT"
 repository = "https://github.com/THUSAAC-PSD/broccoli"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [[bin]]
 name = "broccoli"

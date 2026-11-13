@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::client::AuthCreds;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum LoadProfile {
@@ -8,6 +10,41 @@ pub enum LoadProfile {
     Judge,
     /// Mixed contest-traffic profile: page reads, scoreboard polling, code-runs, and submissions.
     Mixed,
+}
+
+/// Admin credentials: a bearer token, or a username and password to log in
+/// with (and log in again with when the token expires).
+#[derive(Args, Debug, Clone)]
+pub struct AdminCreds {
+    /// Admin bearer token. Provide this OR --admin-username + --admin-password.
+    #[arg(long)]
+    pub admin_token: Option<String>,
+    /// Admin username (used with --admin-password to log in).
+    #[arg(long)]
+    pub admin_username: Option<String>,
+    /// Admin password (used with --admin-username to log in).
+    #[arg(long)]
+    pub admin_password: Option<String>,
+}
+
+impl AdminCreds {
+    pub fn auth(&self) -> Result<AuthCreds, String> {
+        match (
+            &self.admin_token,
+            &self.admin_username,
+            &self.admin_password,
+        ) {
+            (Some(token), _, _) => Ok(AuthCreds::Token(token.clone())),
+            (None, Some(username), Some(password)) => Ok(AuthCreds::UsernamePassword {
+                username: username.clone(),
+                password: password.clone(),
+            }),
+            _ => Err(
+                "must provide --admin-token, or both --admin-username and --admin-password"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// Top-level subcommands. Stress mode (the default) takes no subcommand; the
@@ -63,15 +100,8 @@ pub struct BurstArgs {
     /// Base URL of the server (e.g. `http://localhost:3000`).
     #[arg(long)]
     pub server_url: String,
-    /// Admin bearer token. Provide this OR --admin-username + --admin-password.
-    #[arg(long)]
-    pub admin_token: Option<String>,
-    /// Admin username (used with --admin-password to login).
-    #[arg(long)]
-    pub admin_username: Option<String>,
-    /// Admin password (used with --admin-username to login).
-    #[arg(long)]
-    pub admin_password: Option<String>,
+    #[command(flatten)]
+    pub admin: AdminCreds,
     /// Total number of submissions to post.
     #[arg(long, default_value_t = 1000)]
     pub submission_count: usize,
@@ -133,9 +163,9 @@ pub struct KillServerRecoveryArgs {
     /// Base URL of the server replica fleet (e.g. `http://localhost:3000`).
     #[arg(long)]
     pub server_url: String,
-    /// Admin bearer token used to post submissions.
-    #[arg(long)]
-    pub admin_token: String,
+    /// Credentials the submissions are posted with.
+    #[command(flatten)]
+    pub admin: AdminCreds,
     /// Shell command executed under `sh -c` to kill the target server replica
     /// (e.g. `docker compose kill server-1`).
     #[arg(long)]
@@ -200,14 +230,8 @@ pub struct Cli {
     #[arg(long, default_value = "")]
     pub url: String,
 
-    #[arg(long)]
-    pub admin_token: Option<String>,
-
-    #[arg(long)]
-    pub admin_username: Option<String>,
-
-    #[arg(long)]
-    pub admin_password: Option<String>,
+    #[command(flatten)]
+    pub admin: AdminCreds,
 
     #[arg(long, default_value_t = 200)]
     pub total: u64,
@@ -250,17 +274,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 20)]
     pub contest_concurrency: u32,
 
-    #[arg(long, default_value_t = false)]
-    pub skip_correctness: bool,
-
+    /// Skip the load phase. A run that bootstraps its own fixtures still
+    /// judges every scenario once in the correctness phase.
     #[arg(long, default_value_t = false)]
     pub skip_load: bool,
-
-    /// Removed: `--correctness-only` is no longer supported and is rejected at
-    /// startup (the stress test always runs load, bootstrapping A+B fixtures when
-    /// no --contest-id is given).
-    #[arg(long, default_value_t = false)]
-    pub correctness_only: bool,
 
     #[arg(long, default_value_t = false)]
     pub keep_fixtures: bool,
@@ -301,21 +318,7 @@ impl Cli {
             return Err("--url is required in stress mode".to_string());
         }
 
-        let has_token = self.admin_token.is_some();
-        let has_user_pass = self.admin_username.is_some() && self.admin_password.is_some();
-        if !has_token && !has_user_pass {
-            return Err(
-                "must provide --admin-token, or both --admin-username and --admin-password"
-                    .to_string(),
-            );
-        }
-
-        if self.correctness_only {
-            return Err(
-                "--correctness-only is no longer supported; the stress test now runs load against real contest data, or bootstraps A+B fixtures when no --contest-id is provided"
-                    .to_string(),
-            );
-        }
+        self.admin.auth()?;
 
         if self.total == 0 {
             return Err("--total must be greater than zero".to_string());

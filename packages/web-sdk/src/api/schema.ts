@@ -2739,11 +2739,8 @@ export interface components {
       updated_at: string;
     };
     /**
-     * @description A single contest type registration entry.
-     *
-     *     Submission visibility is not a contest-type hook: each plugin's
-     *     `topic = "visibility"` query function answers it through
-     *     `crate::visibility`.
+     * @description A single contest type registration entry. Submission visibility is not
+     *     part of it: plugins govern visibility through their `visibility` queries.
      */
     ContestTypeEntry: {
       /**
@@ -4082,7 +4079,10 @@ export interface components {
       /** @example alice */
       username?: string | null;
     };
-    /** @enum {string} */
+    /**
+     * @description Where a submission is in its lifecycle.
+     * @enum {string}
+     */
     SubmissionStatus:
       | 'Queued'
       | 'Pending'

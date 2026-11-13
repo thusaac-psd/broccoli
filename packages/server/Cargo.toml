@@ -14,6 +14,7 @@ tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_mall
 anyhow.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
+broccoli-api-types.workspace = true
 broccoli-server-sdk.workspace = true
 common = { workspace = true, features = ["sea-orm", "object-storage"] }
 crossbeam.workspace = true

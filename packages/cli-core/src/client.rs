@@ -1,84 +1,192 @@
-use std::collections::HashMap;
-
-use anyhow::{Context, bail};
+use anyhow::Context;
+use broccoli_api_types::auth::{
+    CliRefreshRequest, CliTokenResponse, DeviceCodeResponse, DeviceTokenRequest, LoginRequest,
+    LoginResponse, MeResponse,
+};
+use broccoli_api_types::clarification::{
+    ClarificationListResponse, ClarificationResponse, CreateClarificationRequest,
+};
+use broccoli_api_types::code_run::{CodeRunResponse, CustomTestCaseInput, RunCodeRequest};
+use broccoli_api_types::contest::{
+    ContestListResponse, ContestProblemResponse, ContestResponse, ContestUserContextResponse,
+};
+use broccoli_api_types::error::ErrorBody;
+use broccoli_api_types::problem::{ProblemResponse, ProblemSamplesResponse};
+use broccoli_api_types::submission::{
+    CreateSubmissionRequest, SubmissionFileDto, SubmissionListResponse, SubmissionResponse,
+};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
-use crate::config::{Credentials, save_credentials, save_credentials_full};
-use crate::model::{SubmissionStatus, Verdict};
-use crate::tokenstore::{TokenStore, Tokens};
+use crate::credentials::{CredentialsFile, StoredTokens};
+use crate::session::{Exchange, Session, SessionError};
 
-/// Shared API client; refreshes the access token and retries once on 401.
-///
-/// The token pair lives in a [`TokenStore`] rather than the client, so the
-/// client is `Send + Sync` and several clients (or threads) can share one token
-/// rotation instead of each wrapping the whole client in `Arc<Mutex<Client>>`.
+/// Why a request failed, in a form callers can act on.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    /// The session is rejected (log in again) or temporarily unavailable.
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    /// The server could not be reached.
+    #[error("Could not reach {server}: {cause}. Check your network connection.")]
+    Network { server: String, cause: String },
+    /// The server answered with an error.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+    /// The server answered 2xx with a body this client cannot read.
+    #[error("Failed to parse server response: {0}")]
+    Decode(String),
+}
+
+pub type ClientResult<T> = Result<T, ClientError>;
+
+type Response = http::Response<ureq::Body>;
+
+/// API client over one [`Session`]. On a 401 it refreshes the session once and
+/// resends the request. Clones of the session share its token rotation, so the
+/// client is `Send + Sync` and can be shared across threads.
 pub struct Client {
-    server: String,
-    tokens: TokenStore,
+    session: Session,
     agent: ureq::Agent,
 }
 
 impl Client {
-    /// Build a client that persists refreshed tokens back to the credentials
-    /// file (the default for a stand-alone CLI process).
-    pub fn new(creds: Credentials) -> Self {
-        let server = creds.server;
-        let persist_server = server.clone();
-        let tokens = TokenStore::new(
-            Tokens {
-                token: creds.token,
-                refresh_token: creds.refresh_token,
-            },
-            move |t| {
-                let _ =
-                    save_credentials_full(&persist_server, &t.token, t.refresh_token.as_deref());
-            },
-        );
-        Self::with_token_store(server, tokens)
-    }
-
-    /// Build a client over an externally-owned [`TokenStore`], so multiple
-    /// clients can share one token rotation (and one persistence policy).
-    pub fn with_token_store(server: String, tokens: TokenStore) -> Self {
+    pub fn new(session: Session) -> Self {
         let agent = crate::tls::build_agent(
             Some(std::time::Duration::from_secs(10)),
             Some(std::time::Duration::from_secs(30)),
         );
-        Self {
-            server,
-            tokens,
-            agent,
-        }
+        Self { session, agent }
     }
 
-    /// The shared token store, for constructing sibling clients that share this
-    /// client's token rotation.
-    pub fn token_store(&self) -> TokenStore {
-        self.tokens.clone()
+    /// A client for the unauthenticated endpoints (login, device flow).
+    pub fn anonymous(server: &str) -> Self {
+        Self::new(Session::explicit(server.to_string(), String::new()))
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 
     pub fn server(&self) -> &str {
-        &self.server
+        self.session.server()
     }
 
-    pub fn get_json_value(&self, path: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self.get(path)?;
-        self.parse_response(resp)
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.server(), path)
     }
 
-    fn bearer(&self) -> String {
-        format!("Bearer {}", self.tokens.access_token())
+    fn network(&self, e: ureq::Error) -> ClientError {
+        ClientError::Network {
+            server: self.server().to_string(),
+            cause: e.to_string(),
+        }
+    }
+
+    /// Send an authenticated request built by `send` (given the bearer
+    /// header). On 401 the session is refreshed and the request resent once.
+    fn authorized(
+        &self,
+        send: impl Fn(&str) -> Result<Response, ureq::Error>,
+    ) -> ClientResult<Response> {
+        let token = self.session.bearer()?;
+        let resp = send(&format!("Bearer {token}")).map_err(|e| self.network(e))?;
+        if resp.status().as_u16() != 401 {
+            return Ok(resp);
+        }
+        self.session
+            .refresh(&token, |refresh| self.exchange(refresh))?;
+        let token = self.session.bearer()?;
+        send(&format!("Bearer {token}")).map_err(|e| self.network(e))
+    }
+
+    /// Present a refresh token to `POST /auth/cli-refresh`.
+    fn exchange(&self, refresh_token: &str) -> Exchange {
+        let sent = self
+            .agent
+            .post(&self.url("/api/v1/auth/cli-refresh"))
+            .send_json(CliRefreshRequest {
+                refresh_token: refresh_token.to_string(),
+            });
+        let resp = match sent {
+            Ok(resp) => resp,
+            Err(e) => return Exchange::unreachable(e.to_string()),
+        };
+        match resp.status().as_u16() {
+            200 => match resp.into_body().read_json::<CliTokenResponse>() {
+                Ok(body) => Exchange::Rotated(StoredTokens {
+                    token: body.token,
+                    refresh_token: body.refresh_token,
+                }),
+                Err(e) => Exchange::unreachable(format!("unreadable refresh response: {e}")),
+            },
+            status => {
+                let retry_after = retry_after(&resp);
+                refused_or_unreachable(status, ApiError::from_response(resp), retry_after)
+            }
+        }
+    }
+
+    fn get(&self, path: &str) -> ClientResult<Response> {
+        let url = self.url(path);
+        self.authorized(|bearer| self.agent.get(&url).header("Authorization", bearer).call())
+    }
+
+    fn post<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<Response> {
+        let url = self.url(path);
+        self.authorized(|bearer| {
+            self.agent
+                .post(&url)
+                .header("Authorization", bearer)
+                .send_json(body)
+        })
+    }
+
+    fn delete(&self, path: &str) -> ClientResult<Response> {
+        let url = self.url(path);
+        self.authorized(|bearer| {
+            self.agent
+                .delete(&url)
+                .header("Authorization", bearer)
+                .call()
+        })
+    }
+
+    /// POST to an endpoint that needs no session.
+    fn post_anonymous<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<Response> {
+        self.agent
+            .post(&self.url(path))
+            .send_json(body)
+            .map_err(|e| self.network(e))
+    }
+
+    fn check_status(resp: Response) -> ClientResult<Response> {
+        if resp.status().is_success() {
+            Ok(resp)
+        } else {
+            Err(ApiError::from_response(resp).into())
+        }
+    }
+
+    fn parse_response<T: DeserializeOwned>(&self, resp: Response) -> ClientResult<T> {
+        Self::check_status(resp)?
+            .into_body()
+            .read_json::<T>()
+            .map_err(|e| ClientError::Decode(e.to_string()))
+    }
+
+    fn parse_empty(&self, resp: Response) -> ClientResult<()> {
+        Self::check_status(resp).map(drop)
     }
 
     /// Upload a packaged plugin archive to the admin plugin-upload endpoint as
-    /// `multipart/form-data`, refreshing the access token on 401 and retrying
-    /// transient 5xx failures with exponential backoff. Routing this through the
-    /// client (instead of a raw HTTP call) means a token that expires mid
-    /// `plugin watch` session is refreshed rather than failing the upload.
-    pub fn upload_plugin(&self, archive: &[u8]) -> anyhow::Result<()> {
+    /// `multipart/form-data`, retrying transient failures with exponential
+    /// backoff. A token that expires mid `plugin watch` is refreshed like any
+    /// other request.
+    pub fn upload_plugin(&self, archive: &[u8]) -> ClientResult<()> {
         const MAX_RETRIES: u32 = 3;
         const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
         let boundary = "----broccolicli7MA4YWxkTrZu0gWupload";
         let mut body = Vec::with_capacity(archive.len() + 256);
@@ -90,293 +198,103 @@ impl Client {
         body.extend_from_slice(archive);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let content_type = format!("multipart/form-data; boundary={boundary}");
-        let url = format!("{}/api/v1/admin/plugins/upload", self.server);
+        let url = self.url("/api/v1/admin/plugins/upload");
 
-        let send = || {
-            self.agent
-                .post(&url)
-                .header("Authorization", &self.bearer())
-                .header("Content-Type", &content_type)
-                .send(&body[..])
-                .with_context(|| {
-                    format!(
-                        "Could not reach {} — check your network connection.",
-                        self.server
-                    )
+        let mut attempt = 0;
+        loop {
+            let result = self
+                .authorized(|bearer| {
+                    self.agent
+                        .post(&url)
+                        .header("Authorization", bearer)
+                        .header("Content-Type", &content_type)
+                        .send(&body[..])
                 })
-        };
-
-        let mut last_err: Option<String> = None;
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                std::thread::sleep(INITIAL_DELAY * 2u32.pow(attempt - 1));
-            }
-
-            let used = self.tokens.access_token();
-            let resp = match send() {
-                Ok(r) => r,
-                Err(e) => {
-                    last_err = Some(e.to_string());
-                    continue;
-                }
+                .and_then(|resp| self.parse_empty(resp));
+            let transient = match &result {
+                Err(ClientError::Network { .. }) => true,
+                Err(ClientError::Api(e)) => e.status >= 500,
+                _ => false,
             };
-            let resp = self.with_refresh(&used, resp, send)?;
-
-            let status = resp.status().as_u16();
-            if (200..300).contains(&status) {
-                return Ok(());
+            if !transient || attempt == MAX_RETRIES {
+                return result;
             }
-            let text = resp.into_body().read_to_string().unwrap_or_default();
-            if status == 401 {
-                bail!("Authentication failed (401). Run `broccoli login` to re-authenticate.");
-            }
-            if status >= 500 {
-                last_err = Some(format!("Upload failed ({status}): {text}"));
-                continue;
-            }
-            bail!("Upload failed ({status}): {text}");
+            std::thread::sleep(crate::backoff::exponential(
+                INITIAL_DELAY,
+                attempt,
+                MAX_DELAY,
+            ));
+            attempt += 1;
         }
-
-        bail!(
-            "{}. Giving up after {} attempts",
-            last_err.unwrap_or_else(|| "Upload failed".into()),
-            MAX_RETRIES + 1
-        );
     }
 
-    /// Refresh the access token, serialized and deduplicated across threads by
-    /// the token store. `used` is the access token the failed request carried.
-    fn refresh_on_401(&self, used: &str) -> anyhow::Result<()> {
-        self.tokens.refresh_if_current(used, |refresh_token| {
-            let resp = self
-                .agent
-                .post(&format!("{}/api/v1/auth/cli-refresh", self.server))
-                .send_json(serde_json::json!({ "refresh_token": refresh_token }))
-                .with_context(|| {
-                    format!(
-                        "Could not reach {} — check your network connection.",
-                        self.server
-                    )
-                })?;
-
-            if resp.status().as_u16() != 200 {
-                bail!("Session expired. Run `broccoli login` to re-authenticate.");
-            }
-
-            let body: CliTokenResponse = resp
-                .into_body()
-                .read_json()
-                .context("Failed to parse refresh response")?;
-
-            Ok(Tokens {
-                token: body.token,
-                refresh_token: Some(body.refresh_token),
-            })
-        })
-    }
-
-    /// On 401 with a refresh token, refresh and re-run `retry`; else return `resp`.
-    /// `used` is the access token `retry`'s failed attempt carried, so a racing
-    /// refresh by another thread is detected and not repeated.
-    fn with_refresh<F>(
-        &self,
-        used: &str,
-        resp: http::Response<ureq::Body>,
-        retry: F,
-    ) -> anyhow::Result<http::Response<ureq::Body>>
-    where
-        F: FnOnce() -> anyhow::Result<http::Response<ureq::Body>>,
-    {
-        let needs_refresh = resp.status().as_u16() == 401 && self.tokens.refresh_token().is_some();
-        if needs_refresh && self.refresh_on_401(used).is_ok() {
-            return retry();
-        }
-        Ok(resp)
-    }
-
-    fn get(&self, path: &str) -> anyhow::Result<http::Response<ureq::Body>> {
-        let url = format!("{}{}", self.server, path);
-        let send = || {
-            self.agent
-                .get(&url)
-                .header("Authorization", &self.bearer())
-                .call()
-                .with_context(|| {
-                    format!(
-                        "Could not reach {} — check your network connection.",
-                        self.server
-                    )
-                })
+    pub fn login(&self, username: &str, password: &str) -> ClientResult<LoginResponse> {
+        let body = LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
         };
-        let used = self.tokens.access_token();
-        let resp = send()?;
-        self.with_refresh(&used, resp, send)
+        let resp = self.post_anonymous("/api/v1/auth/login", &body)?;
+        self.parse_response(resp)
     }
 
-    fn post(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> anyhow::Result<http::Response<ureq::Body>> {
-        let url = format!("{}{}", self.server, path);
-        let send = || {
-            self.agent
-                .post(&url)
-                .header("Authorization", &self.bearer())
-                .send_json(&body)
-                .with_context(|| {
-                    format!(
-                        "Could not reach {} — check your network connection.",
-                        self.server
-                    )
-                })
+    pub fn request_device_code(&self) -> ClientResult<DeviceCodeResponse> {
+        let resp = self.post_anonymous("/api/v1/auth/device-code", &serde_json::json!({}))?;
+        self.parse_response(resp)
+    }
+
+    /// Poll the device flow. The server answers a pending, slowed-down or
+    /// expired code with 400 and an RFC 8628 `error`, which is returned as a
+    /// [`PollResponse`] rather than an error.
+    pub fn poll_device_token(&self, device_code: &str) -> ClientResult<PollResponse> {
+        let body = DeviceTokenRequest {
+            device_code: device_code.to_string(),
         };
-        let used = self.tokens.access_token();
-        let resp = send()?;
-        self.with_refresh(&used, resp, send)
-    }
-
-    fn delete(&self, path: &str) -> anyhow::Result<http::Response<ureq::Body>> {
-        let url = format!("{}{}", self.server, path);
-        let send = || {
-            self.agent
-                .delete(&url)
-                .header("Authorization", &self.bearer())
-                .call()
-                .with_context(|| {
-                    format!(
-                        "Could not reach {} — check your network connection.",
-                        self.server
-                    )
-                })
+        let resp = self.post_anonymous("/api/v1/auth/device-token", &body)?;
+        let resp = match resp.status().as_u16() {
+            200 | 400 => resp,
+            _ => return Err(ApiError::from_response(resp).into()),
         };
-        let used = self.tokens.access_token();
-        let resp = send()?;
-        self.with_refresh(&used, resp, send)
-    }
-
-    /// Bail on non-2xx with a clean message; return `resp` on success.
-    fn check_status(
-        resp: http::Response<ureq::Body>,
-    ) -> anyhow::Result<http::Response<ureq::Body>> {
-        let status = resp.status().as_u16();
-        if status == 401 {
-            bail!(
-                "Authentication failed (401).\n\
-                 Run `broccoli login` to re-authenticate."
-            );
-        }
-        if !(200..300).contains(&status) {
-            let mut body = resp.into_body();
-            let text = body.read_to_string().unwrap_or_default();
-            // prefer the structured message over raw JSON
-            if let Ok(err) = serde_json::from_str::<ServerError>(&text) {
-                if !err.message.is_empty() {
-                    bail!("{}", err.message);
-                }
-            }
-            bail!("Server returned {}: {}", status, text);
-        }
-        Ok(resp)
-    }
-
-    /// Check status, then parse the body.
-    fn parse_response<T: DeserializeOwned>(
-        &self,
-        resp: http::Response<ureq::Body>,
-    ) -> anyhow::Result<T> {
-        let resp = Self::check_status(resp)?;
         resp.into_body()
-            .read_json::<T>()
-            .context("Failed to parse server response")
+            .read_json()
+            .map_err(|e| ClientError::Decode(e.to_string()))
     }
 
-    /// Check status for a no-body response.
-    fn parse_empty(&self, resp: http::Response<ureq::Body>) -> anyhow::Result<()> {
-        Self::check_status(resp)?;
-        Ok(())
-    }
-
-    pub fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginResponse> {
-        let body = serde_json::json!({ "username": username, "password": password });
-        let resp = self
-            .agent
-            .post(&format!("{}/api/v1/auth/login", self.server))
-            .send_json(&body)
-            .with_context(|| {
-                format!(
-                    "Could not reach {} — check your network connection.",
-                    self.server
-                )
-            })?;
-        self.parse_response(resp)
-    }
-
-    pub fn request_device_code(&self) -> anyhow::Result<DeviceCodeResponse> {
-        let resp = self
-            .agent
-            .post(&format!("{}/api/v1/auth/device-code", self.server))
-            .send_json(serde_json::json!({}))
-            .with_context(|| {
-                format!(
-                    "Could not reach {} — check your network connection.",
-                    self.server
-                )
-            })?;
-        self.parse_response(resp)
-    }
-
-    pub fn poll_device_token(&self, device_code: &str) -> anyhow::Result<PollResponse> {
-        let body = serde_json::json!({ "device_code": device_code });
-        let resp = self
-            .agent
-            .post(&format!("{}/api/v1/auth/device-token", self.server))
-            .send_json(&body)
-            .with_context(|| {
-                format!(
-                    "Could not reach {} — check your network connection.",
-                    self.server
-                )
-            })?;
-        self.parse_response(resp)
-    }
-
-    pub fn me(&self) -> anyhow::Result<MeResponse> {
+    pub fn me(&self) -> ClientResult<MeResponse> {
         let resp = self.get("/api/v1/auth/me")?;
         self.parse_response(resp)
     }
 
     /// Exchange the access token for a refresh token; called once after login.
-    pub fn issue_cli_token(&self) -> anyhow::Result<CliTokenResponse> {
-        let resp = self.post("/api/v1/auth/cli-token", serde_json::json!({}))?;
+    pub fn issue_cli_token(&self) -> ClientResult<CliTokenResponse> {
+        let resp = self.post("/api/v1/auth/cli-token", &serde_json::json!({}))?;
         self.parse_response(resp)
     }
 
-    pub fn list_contests(&self) -> anyhow::Result<ContestListResponse> {
+    pub fn list_contests(&self) -> ClientResult<ContestListResponse> {
         let resp = self.get("/api/v1/contests")?;
         self.parse_response(resp)
     }
 
-    pub fn get_contest(&self, id: &str) -> anyhow::Result<ContestResponse> {
+    pub fn get_contest(&self, id: &str) -> ClientResult<ContestResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}", id))?;
         self.parse_response(resp)
     }
 
-    pub fn get_contest_my_info(&self, id: &str) -> anyhow::Result<ContestUserContextResponse> {
+    pub fn get_contest_my_info(&self, id: &str) -> ClientResult<ContestUserContextResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}/me", id))?;
         self.parse_response(resp)
     }
 
-    pub fn register_for_contest(&self, id: &str) -> anyhow::Result<()> {
+    pub fn register_for_contest(&self, id: &str) -> ClientResult<()> {
         let resp = self.post(
             &format!("/api/v1/contests/{}/register", id),
-            serde_json::json!({}),
+            &serde_json::json!({}),
         )?;
         self.parse_empty(resp)
     }
 
     /// DELETE on the register path.
-    pub fn unregister_from_contest(&self, id: &str) -> anyhow::Result<()> {
+    pub fn unregister_from_contest(&self, id: &str) -> ClientResult<()> {
         let resp = self.delete(&format!("/api/v1/contests/{}/register", id))?;
         self.parse_empty(resp)
     }
@@ -384,15 +302,12 @@ impl Client {
     pub fn list_contest_problems(
         &self,
         contest_id: &str,
-    ) -> anyhow::Result<Vec<ContestProblemResponse>> {
+    ) -> ClientResult<Vec<ContestProblemResponse>> {
         let resp = self.get(&format!("/api/v1/contests/{}/problems", contest_id))?;
         self.parse_response(resp)
     }
 
-    pub fn list_clarifications(
-        &self,
-        contest_id: &str,
-    ) -> anyhow::Result<ClarificationListResponse> {
+    pub fn list_clarifications(&self, contest_id: &str) -> ClientResult<ClarificationListResponse> {
         let resp = self.get(&format!("/api/v1/contests/{}/clarifications", contest_id))?;
         self.parse_response(resp)
     }
@@ -401,14 +316,16 @@ impl Client {
         &self,
         contest_id: &str,
         content: &str,
-    ) -> anyhow::Result<ClarificationResponse> {
-        let body = serde_json::json!({
-            "content": content,
-            "clarification_type": "question",
-        });
+    ) -> ClientResult<ClarificationResponse> {
+        let body = CreateClarificationRequest {
+            content: content.to_string(),
+            clarification_type: "question".to_string(),
+            recipient_id: None,
+            is_public: None,
+        };
         let resp = self.post(
             &format!("/api/v1/contests/{}/clarifications", contest_id),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -416,7 +333,7 @@ impl Client {
     /// A standalone problem, read outside every contest. A problem reached
     /// through a contest must use [`Client::get_contest_problem`] instead, or
     /// another contest holding the same problem can hide it.
-    pub fn get_problem(&self, problem_id: &str) -> anyhow::Result<ProblemDetailResponse> {
+    pub fn get_problem(&self, problem_id: &str) -> ClientResult<ProblemResponse> {
         let resp = self.get(&format!("/api/v1/problems/{}", problem_id))?;
         self.parse_response(resp)
     }
@@ -427,7 +344,7 @@ impl Client {
         &self,
         contest_id: &str,
         problem_id: &str,
-    ) -> anyhow::Result<ProblemDetailResponse> {
+    ) -> ClientResult<ProblemResponse> {
         let resp = self.get(&format!(
             "/api/v1/contests/{}/problems/{}",
             contest_id, problem_id
@@ -439,7 +356,7 @@ impl Client {
         &self,
         contest_id: &str,
         problem_id: &str,
-    ) -> anyhow::Result<ProblemSamplesResponse> {
+    ) -> ClientResult<ProblemSamplesResponse> {
         let resp = self.get(&format!(
             "/api/v1/contests/{}/problems/{}/samples",
             contest_id, problem_id
@@ -454,18 +371,18 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         contest_type: Option<&str>,
-    ) -> anyhow::Result<SubmissionResponse> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "contest_type": contest_type,
-        });
+    ) -> ClientResult<SubmissionResponse> {
+        let body = CreateSubmissionRequest {
+            files,
+            language: language.to_string(),
+            contest_type: contest_type.map(String::from),
+        };
         let resp = self.post(
             &format!(
                 "/api/v1/contests/{}/problems/{}/submissions",
                 contest_id, problem_id
             ),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -477,20 +394,20 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         contest_type: Option<&str>,
-    ) -> anyhow::Result<SubmissionResponse> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "contest_type": contest_type,
-        });
+    ) -> ClientResult<SubmissionResponse> {
+        let body = CreateSubmissionRequest {
+            files,
+            language: language.to_string(),
+            contest_type: contest_type.map(String::from),
+        };
         let resp = self.post(
             &format!("/api/v1/problems/{}/submissions", problem_id),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
 
-    pub fn get_submission(&self, id: &str) -> anyhow::Result<SubmissionResponse> {
+    pub fn get_submission(&self, id: &str) -> ClientResult<SubmissionResponse> {
         let resp = self.get(&format!("/api/v1/submissions/{}", id))?;
         self.parse_response(resp)
     }
@@ -503,7 +420,7 @@ impl Client {
         user_id: Option<&str>,
         page: Option<u32>,
         per_page: Option<u32>,
-    ) -> anyhow::Result<SubmissionListResponse> {
+    ) -> ClientResult<SubmissionListResponse> {
         let mut path = format!("/api/v1/contests/{}/submissions", contest_id);
         let mut params: Vec<String> = Vec::new();
         if let Some(pid) = problem_id {
@@ -527,7 +444,7 @@ impl Client {
     }
 
     /// Fetch a code-run by ID (used to poll for asynchronous results).
-    pub fn get_code_run(&self, id: i64) -> anyhow::Result<serde_json::Value> {
+    pub fn get_code_run(&self, id: i32) -> ClientResult<CodeRunResponse> {
         let resp = self.get(&format!("/api/v1/code-runs/{}", id))?;
         self.parse_response(resp)
     }
@@ -540,18 +457,18 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "custom_test_cases": custom_test_cases,
-        });
+    ) -> ClientResult<CodeRunResponse> {
+        let body = RunCodeRequest {
+            files,
+            language: language.to_string(),
+            custom_test_cases,
+        };
         let resp = self.post(
             &format!(
                 "/api/v1/contests/{}/problems/{}/code-runs",
                 contest_id, problem_id
             ),
-            body,
+            &body,
         )?;
         self.parse_response(resp)
     }
@@ -563,80 +480,132 @@ impl Client {
         files: Vec<SubmissionFileDto>,
         language: &str,
         custom_test_cases: Vec<CustomTestCaseInput>,
-    ) -> anyhow::Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "files": files,
-            "language": language,
-            "custom_test_cases": custom_test_cases,
-        });
-        let resp = self.post(&format!("/api/v1/problems/{}/code-runs", problem_id), body)?;
+    ) -> ClientResult<CodeRunResponse> {
+        let body = RunCodeRequest {
+            files,
+            language: language.to_string(),
+            custom_test_cases,
+        };
+        let resp = self.post(&format!("/api/v1/problems/{}/code-runs", problem_id), &body)?;
         self.parse_response(resp)
     }
 }
 
-/// Exchange the short-lived device-flow/callback access token for a fresh
-/// access token plus a long-lived refresh token, and store both so later
-/// commands can keep refreshing instead of dying when the access token
-/// expires. Older servers without `/auth/cli-token` fall back to storing the
-/// access token alone.
+/// Exchange a freshly obtained access token (device flow, browser callback or
+/// password login) for a new access token plus a refresh token, and save the
+/// pair to `credentials.json`. Nothing is saved unless both tokens were issued.
 pub fn persist_session(server: &str, access_token: &str) -> anyhow::Result<()> {
-    let client = Client::new(Credentials {
-        server: server.to_string(),
-        token: access_token.to_string(),
-        refresh_token: None,
-    });
-    match client.issue_cli_token() {
-        Ok(cli) => save_credentials_full(server, &cli.token, Some(&cli.refresh_token))
-            .context("Failed to save credentials")?,
-        Err(_) => save_credentials(server, access_token).context("Failed to save credentials")?,
+    let client = Client::new(Session::explicit(
+        server.to_string(),
+        access_token.to_string(),
+    ));
+    let issued = client
+        .issue_cli_token()
+        .context("Failed to obtain a refresh token")?;
+    CredentialsFile::default_location()
+        .lock()?
+        .write(
+            server,
+            &StoredTokens {
+                token: issued.token,
+                refresh_token: issued.refresh_token,
+            },
+        )
+        .context("Failed to save credentials")
+}
+
+/// Classify a failed refresh. Only the server saying the token is invalid
+/// (401, or a token error code) ends the session; any other answer (a rate
+/// limit, a proxy's 403/404, a server failure) says nothing about the refresh
+/// token, so the session waits and retries.
+fn refused_or_unreachable(
+    status: u16,
+    error: ApiError,
+    retry_after: Option<std::time::Duration>,
+) -> Exchange {
+    if status == 401 || error.rejects_token() {
+        Exchange::Refused
+    } else {
+        Exchange::Unreachable {
+            cause: error.to_string(),
+            retry_after,
+        }
     }
-    Ok(())
 }
 
-/// Standard server error body (`{code, message, details}`).
-#[derive(Debug, Clone, Deserialize)]
-struct ServerError {
-    #[allow(dead_code)]
-    #[serde(default)]
-    code: String,
-    #[serde(default)]
-    message: String,
+/// The server's `Retry-After`, in seconds (the server never sends the
+/// HTTP-date form).
+fn retry_after(resp: &Response) -> Option<std::time::Duration> {
+    resp.headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
 }
 
-/// Response from `/auth/cli-token` and `/auth/cli-refresh`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CliTokenResponse {
-    pub token: String,
-    pub refresh_token: String,
+/// A request the server answered with a non-2xx status. `code` is the
+/// machine-readable [`ErrorBody::code`] (an API contract); callers match on it
+/// instead of on the human message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoginResponse {
-    pub token: String,
-    pub id: i32,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub permissions: Vec<String>,
+impl ApiError {
+    /// The server's codes for a missing or invalid token.
+    pub const TOKEN_CODES: [&'static str; 2] = ["TOKEN_MISSING", "TOKEN_INVALID"];
+
+    /// Whether the server refused the credentials themselves.
+    pub fn rejects_token(&self) -> bool {
+        Self::TOKEN_CODES.contains(&self.code.as_str())
+    }
+
+    /// The `code` of a body that is not an [`ErrorBody`] (a proxy page, an
+    /// empty body).
+    pub const UNSTRUCTURED: &'static str = "UNSTRUCTURED";
+
+    fn from_response(resp: http::Response<ureq::Body>) -> Self {
+        let status = resp.status().as_u16();
+        let text = resp.into_body().read_to_string().unwrap_or_default();
+        match serde_json::from_str::<ErrorBody>(&text) {
+            Ok(body) => Self {
+                status,
+                code: body.code,
+                message: body.message,
+            },
+            Err(_) => Self {
+                status,
+                code: Self::UNSTRUCTURED.to_string(),
+                message: text,
+            },
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MeResponse {
-    pub id: i32,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub permissions: Vec<String>,
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code.as_str() {
+            _ if self.rejects_token() => write!(
+                f,
+                "{} Run `broccoli login` to re-authenticate.",
+                self.message
+            ),
+            Self::UNSTRUCTURED if self.message.is_empty() => {
+                write!(f, "Server returned {}", self.status)
+            }
+            Self::UNSTRUCTURED => write!(f, "Server returned {}: {}", self.status, self.message),
+            _ => f.write_str(&self.message),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
+impl std::error::Error for ApiError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Body of `POST /auth/device-token`: `token` once the device is authorized,
+/// otherwise an RFC 8628 `error`.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct PollResponse {
     #[serde(default)]
     pub error: Option<String>,
@@ -644,194 +613,33 @@ pub struct PollResponse {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestListItem {
-    pub id: i32,
-    pub title: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub is_public: bool,
-    #[serde(default)]
-    pub contest_type: Option<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestListResponse {
-    pub data: Vec<ContestListItem>,
-}
+    fn error(status: u16, code: &str) -> ApiError {
+        ApiError {
+            status,
+            code: code.into(),
+            message: String::new(),
+        }
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestResponse {
-    pub id: i32,
-    pub title: String,
-    pub description: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub is_public: bool,
-    #[serde(default)]
-    pub contest_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestUserContextResponse {
-    pub contest_id: i32,
-    pub user_id: i32,
-    pub is_registered: bool,
-    pub registered_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionFileDto {
-    pub filename: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionResponse {
-    pub id: i32,
-    pub language: String,
-    pub status: SubmissionStatus,
-    pub problem_id: i32,
-    #[serde(default)]
-    pub problem_title: String,
-    #[serde(default)]
-    pub contest_id: Option<i32>,
-    pub created_at: String,
-    #[serde(default)]
-    pub result: Option<JudgeResultResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JudgeResultResponse {
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-    #[serde(default)]
-    pub compile_output: Option<String>,
-    #[serde(default)]
-    pub error_message: Option<String>,
-    #[serde(default)]
-    pub judged_at: Option<String>,
-    #[serde(default)]
-    pub test_case_results: Vec<TestCaseResultResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestCaseResultResponse {
-    pub id: i32,
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-    #[serde(default)]
-    pub input: Option<String>,
-    #[serde(default)]
-    pub expected_output: Option<String>,
-    #[serde(default)]
-    pub stdout: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionListItem {
-    pub id: i32,
-    pub language: String,
-    pub status: SubmissionStatus,
-    #[serde(default)]
-    pub verdict: Option<Verdict>,
-    pub problem_id: i32,
-    #[serde(default)]
-    pub problem_title: String,
-    #[serde(default)]
-    pub contest_id: Option<i32>,
-    pub created_at: String,
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    pub time_used: Option<i32>,
-    #[serde(default)]
-    pub memory_used: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmissionListResponse {
-    pub data: Vec<SubmissionListItem>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContestProblemResponse {
-    pub contest_id: i32,
-    pub problem_id: i32,
-    pub label: String,
-    pub position: i32,
-    pub problem_title: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SampleCase {
-    pub input: String,
-    pub output: String,
-    /// Optional markdown note explaining this sample. Absent on older servers.
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProblemSamplesResponse {
-    pub samples: Vec<SampleCase>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProblemDetailResponse {
-    pub id: i32,
-    pub title: String,
-    pub content: String,
-    #[serde(default)]
-    pub time_limit: i32,
-    #[serde(default)]
-    pub memory_limit: i32,
-    #[serde(default)]
-    pub problem_type: String,
-    /// Required filenames per language, when the problem fixes them.
-    #[serde(default)]
-    pub submission_format: Option<HashMap<String, Vec<String>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomTestCaseInput {
-    pub input: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_output: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationResponse {
-    pub id: i32,
-    pub contest_id: i32,
-    #[serde(default)]
-    pub author_name: String,
-    pub content: String,
-    pub clarification_type: String,
-    #[serde(default)]
-    pub is_public: bool,
-    #[serde(default)]
-    pub reply_content: Option<String>,
-    #[serde(default)]
-    pub reply_author_name: Option<String>,
-    #[serde(default)]
-    pub resolved: bool,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationListResponse {
-    pub data: Vec<ClarificationResponse>,
+    #[test]
+    fn only_token_rejections_end_the_session() {
+        assert!(matches!(
+            refused_or_unreachable(401, error(401, "TOKEN_INVALID"), None),
+            Exchange::Refused
+        ));
+        assert!(matches!(
+            refused_or_unreachable(400, error(400, "TOKEN_INVALID"), None),
+            Exchange::Refused
+        ));
+        for status in [403, 404, 429, 502] {
+            assert!(matches!(
+                refused_or_unreachable(status, error(status, ApiError::UNSTRUCTURED), None),
+                Exchange::Unreachable { .. }
+            ));
+        }
+    }
 }

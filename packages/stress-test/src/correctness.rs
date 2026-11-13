@@ -1,20 +1,13 @@
 use std::time::{Duration, Instant};
 
-use anyhow::anyhow;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::bootstrap::BootstrapState;
 use crate::client::Client;
-use crate::dto::{
-    CreateSubmissionRequest, SubmissionFileDto, SubmissionResponse, SubmissionStatus, Verdict,
-};
-use crate::error::{StressError, StressResult};
+use crate::dto::{CreateSubmissionRequest, SubmissionFileDto, SubmissionStatus, Verdict};
 use crate::events::{Event, Phase};
 use crate::scenarios::Scenario;
-
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrectnessOutcome {
@@ -125,7 +118,10 @@ async fn run_scenario(
         }
     };
 
-    match poll_until_terminal(client, submitted.id, per_job_timeout).await {
+    match client
+        .wait_for_submission(submitted.id, per_job_timeout)
+        .await
+    {
         Ok(final_resp) => {
             let actual_status = final_resp.status;
             let actual_verdict = final_resp
@@ -213,67 +209,16 @@ fn scenario_passes(
     true
 }
 
-async fn poll_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach a terminal status within {:?} (last status = {:?})",
-                submission_id,
-                timeout,
-                resp.status,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{AuthCreds, Client};
+
     use crate::scenarios::SCENARIOS;
-    use serde_json::{Value, json};
+    use crate::test_support::*;
+
     use std::collections::HashMap;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn login_body(token: &str) -> Value {
-        json!({
-            "token": token,
-            "id": 1,
-            "username": "admin",
-            "roles": ["admin"],
-            "permissions": []
-        })
-    }
-
-    async fn build_client_with_login(server: &MockServer, token: &str) -> Client {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(login_body(token)))
-            .mount(server)
-            .await;
-
-        Client::new(
-            server.uri(),
-            AuthCreds::UsernamePassword {
-                username: "admin".into(),
-                password: "secret".into(),
-            },
-        )
-        .await
-        .expect("client builds")
-    }
 
     const TEST_CONTEST_ID: i32 = 9001;
 
@@ -288,63 +233,6 @@ mod tests {
                 .map(|(i, s)| (s.id, 100 + i as i32))
                 .collect(),
             owns_fixtures: true,
-        }
-    }
-
-    fn submission_json(id: i32, status: &str, verdict: Option<&str>) -> Value {
-        let result = match verdict {
-            Some(v) => json!({
-                "verdict": v,
-                "score": 100.0,
-                "time_used": 10,
-                "memory_used": 1024,
-                "compile_output": null,
-                "error_message": null,
-                "judged_at": "2026-05-01T00:00:00Z",
-                "test_case_results": []
-            }),
-            None => Value::Null,
-        };
-        json!({
-            "id": id,
-            "language": "cpp",
-            "status": status,
-            "user_id": 1,
-            "username": "admin",
-            "problem_id": 100,
-            "problem_title": "stress-test",
-            "contest_id": null,
-            "contest_type": "icpc",
-            "judge_epoch": 0,
-            "created_at": "2026-05-01T00:00:00Z",
-            "result": result,
-        })
-    }
-
-    fn verdict_wire(v: &Verdict) -> &'static str {
-        match v {
-            Verdict::Accepted => "Accepted",
-            Verdict::WrongAnswer => "WrongAnswer",
-            Verdict::TimeLimitExceeded => "TimeLimitExceeded",
-            Verdict::MemoryLimitExceeded => "MemoryLimitExceeded",
-            Verdict::RuntimeError => "RuntimeError",
-            Verdict::SystemError => "SystemError",
-            Verdict::Skipped => "Skipped",
-            Verdict::Cancelled => "Cancelled",
-            Verdict::Other(_) => "Other",
-        }
-    }
-
-    fn submission_status_wire(s: SubmissionStatus) -> &'static str {
-        match s {
-            SubmissionStatus::Queued => "Queued",
-            SubmissionStatus::Pending => "Pending",
-            SubmissionStatus::Compiling => "Compiling",
-            SubmissionStatus::Running => "Running",
-            SubmissionStatus::Judged => "Judged",
-            SubmissionStatus::CompilationError => "CompilationError",
-            SubmissionStatus::SystemError => "SystemError",
-            SubmissionStatus::Unknown => "Unknown",
         }
     }
 
@@ -366,7 +254,7 @@ mod tests {
                 .and(path(post_path.clone()))
                 .respond_with(ResponseTemplate::new(201).set_body_json(submission_json(
                     submission_id,
-                    "Pending",
+                    SubmissionStatus::Pending,
                     None,
                 )))
                 .mount(server)
@@ -376,31 +264,22 @@ mod tests {
                 .get(scenario.id)
                 .cloned()
                 .unwrap_or_else(|| (scenario.expected_status, scenario.expected_verdict.clone()));
-            let v_wire = verdict.as_ref().map(verdict_wire);
             Mock::given(method("GET"))
                 .and(path(get_path))
                 .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
                     submission_id,
-                    submission_status_wire(status),
-                    v_wire,
+                    status,
+                    verdict,
                 )))
                 .mount(server)
                 .await;
         }
     }
 
-    fn drain(rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
-        let mut out = Vec::new();
-        while let Ok(e) = rx.try_recv() {
-            out.push(e);
-        }
-        out
-    }
-
     #[tokio::test]
     async fn passes_when_every_scenario_verdict_matches() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let outcomes = HashMap::new();
@@ -447,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn fails_fast_on_first_mismatch() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let target_scenario = &SCENARIOS[2];
@@ -513,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn system_error_is_always_a_failure() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         let scenario = &SCENARIOS[0];
         assert_eq!(scenario.expected_status, SubmissionStatus::Judged);
@@ -528,16 +407,18 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/555/problems/200/submissions"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(submission_json(7777, "Pending", None)),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(submission_json(
+                7777,
+                SubmissionStatus::Pending,
+                None,
+            )))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/submissions/7777"))
             .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
                 7777,
-                "SystemError",
+                SubmissionStatus::SystemError,
                 None,
             )))
             .mount(&server)
@@ -575,7 +456,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn timeout_treated_as_failure() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
 
         let scenario = &SCENARIOS[0];
         let state = BootstrapState {
@@ -588,17 +469,21 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/api/v1/contests/555/problems/300/submissions"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(submission_json(42, "Pending", None)),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(submission_json(
+                42,
+                SubmissionStatus::Pending,
+                None,
+            )))
             .mount(&server)
             .await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/submissions/42"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(submission_json(42, "Running", None)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(submission_json(
+                42,
+                SubmissionStatus::Running,
+                None,
+            )))
             .mount(&server)
             .await;
 
@@ -644,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn outcome_reports_actual_failed_scenario_id() {
         let server = MockServer::start().await;
-        let client = build_client_with_login(&server, "tok").await;
+        let client = client_with_login(&server, "tok").await;
         let state = make_state();
 
         let target = &SCENARIOS[5];

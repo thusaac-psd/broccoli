@@ -1,8 +1,9 @@
 use std::io::IsTerminal;
 
 use anyhow::Context;
-use broccoli_cli_core::client::{Client, SubmissionListItem, SubmissionResponse};
-use broccoli_cli_core::model::{SubmissionStatus, Verdict};
+use broccoli_cli_core::api::submission::{SubmissionListItem, SubmissionResponse};
+use broccoli_cli_core::client::Client;
+use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, Verdict, VerdictDisplay};
 use broccoli_cli_core::{config, fmt};
 use clap::Args;
 use console::{Style, StyledObject, style};

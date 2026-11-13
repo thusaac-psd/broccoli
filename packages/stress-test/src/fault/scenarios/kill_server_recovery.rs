@@ -6,7 +6,7 @@
 //!
 //! The harness:
 //!   1. POSTs N submissions to `${server_url}/api/v1/problems/{id}/submissions`
-//!      using `${admin_token}` as bearer auth.
+//!      as the admin, through [`crate::client::Client`].
 //!   2. Polls Postgres until at least one submission has reached
 //!      `Compiling`/`Running` with a non-NULL `owner_server_id`.
 //!   3. Executes `${kill_command}` via `sh -c` (e.g.
@@ -27,22 +27,16 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::process::Command;
 
 use super::{Scenario, ScenarioContext, ScenarioOutcome};
+use crate::client::{AuthCreds, Client};
+use crate::dto::{CreateSubmissionRequest, SubmissionFileDto};
 use crate::fault::transcript::{EventKind, Severity, Transcript};
 
 pub struct KillServerRecovery {
+    pub server_url: String,
+    pub creds: AuthCreds,
     pub submission_count: usize,
     pub observe_timeout_secs: u64,
     pub problem_id: i32,
-}
-
-impl Default for KillServerRecovery {
-    fn default() -> Self {
-        Self {
-            submission_count: 10,
-            observe_timeout_secs: 75,
-            problem_id: 1,
-        }
-    }
 }
 
 /// A snapshot of the columns we care about for a submission: its status and
@@ -111,15 +105,6 @@ impl Scenario for KillServerRecovery {
             .db_url
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("kill_server_recovery requires --db-url"))?;
-        let server_url = ctx
-            .server_url
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("kill_server_recovery requires --server-url"))?
-            .trim_end_matches('/');
-        let admin_token = ctx
-            .admin_token
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("kill_server_recovery requires --admin-token"))?;
         let kill_command = ctx
             .kill_command
             .as_deref()
@@ -205,29 +190,13 @@ impl Scenario for KillServerRecovery {
             }
         }
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
-        let healthz = format!("{}/healthz", server_url);
-        match http.get(&healthz).send().await {
-            Ok(r) if r.status().is_success() => {}
-            Ok(r) => {
-                transcript.record(
-                    EventKind::Setup,
-                    Severity::Error,
-                    format!("server /healthz returned {}", r.status()),
-                );
-                transcript.finish(false);
-                return Ok(ScenarioOutcome {
-                    passed: false,
-                    transcript,
-                });
-            }
+        let client = match Client::new(self.server_url.clone(), self.creds.clone()).await {
+            Ok(client) => client,
             Err(e) => {
                 transcript.record(
                     EventKind::Setup,
                     Severity::Error,
-                    format!("server /healthz unreachable: {e}"),
+                    format!("admin login failed: {e}"),
                 );
                 transcript.finish(false);
                 return Ok(ScenarioOutcome {
@@ -235,6 +204,18 @@ impl Scenario for KillServerRecovery {
                     transcript,
                 });
             }
+        };
+        if let Err(e) = client.get_public_bytes("/healthz").await {
+            transcript.record(
+                EventKind::Setup,
+                Severity::Error,
+                format!("server /healthz failed: {e}"),
+            );
+            transcript.finish(false);
+            return Ok(ScenarioOutcome {
+                passed: false,
+                transcript,
+            });
         }
 
         transcript.record(
@@ -244,50 +225,32 @@ impl Scenario for KillServerRecovery {
         );
 
         // ---- Inject phase 1: post submissions. ----------------------------
-        let submit_url = format!(
-            "{}/api/v1/problems/{}/submissions",
-            server_url, self.problem_id
-        );
-        let body = serde_json::json!({
-            "files": [{
-                "filename": "main.py",
-                "content": "print('hi')\n"
+        let request = CreateSubmissionRequest {
+            files: vec![SubmissionFileDto {
+                filename: "main.py".into(),
+                content: "print('hi')\n".into(),
             }],
-            "language": "python3"
-        });
+            language: "python3".into(),
+            contest_type: None,
+        };
 
         let mut submission_ids: Vec<i32> = Vec::with_capacity(self.submission_count);
         for i in 0..self.submission_count {
-            let resp = http
-                .post(&submit_url)
-                .bearer_auth(admin_token)
-                .json(&body)
-                .send()
-                .await?;
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                transcript.record(
-                    EventKind::Setup,
-                    Severity::Error,
-                    format!(
-                        "submission #{i} failed: status={status} body={}",
-                        text.chars().take(200).collect::<String>()
-                    ),
-                );
-                transcript.finish(false);
-                return Ok(ScenarioOutcome {
-                    passed: false,
-                    transcript,
-                });
+            match client.create_submission(self.problem_id, &request).await {
+                Ok(submission) => submission_ids.push(submission.id),
+                Err(e) => {
+                    transcript.record(
+                        EventKind::Setup,
+                        Severity::Error,
+                        format!("submission #{i} failed: {e}"),
+                    );
+                    transcript.finish(false);
+                    return Ok(ScenarioOutcome {
+                        passed: false,
+                        transcript,
+                    });
+                }
             }
-            let v: serde_json::Value = resp.json().await?;
-            let id = v
-                .get("id")
-                .and_then(|x| x.as_i64())
-                .ok_or_else(|| anyhow::anyhow!("submission response missing id"))?
-                as i32;
-            submission_ids.push(id);
         }
         transcript.record_with(
             EventKind::Setup,

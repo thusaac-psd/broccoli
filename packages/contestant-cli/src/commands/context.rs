@@ -16,12 +16,11 @@ pub fn discover_context() -> Option<ProjectContext> {
     let cwd = std::env::current_dir().ok()?;
     for dir in cwd.ancestors() {
         let path = dir.join(CONTEXT_FILE);
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(ctx) = toml::from_str(&content) {
-                    return Some(ctx);
-                }
-            }
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(ctx) = toml::from_str(&content)
+        {
+            return Some(ctx);
         }
     }
     None

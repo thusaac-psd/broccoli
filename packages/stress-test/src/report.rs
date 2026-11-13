@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::correctness::CorrectnessOutcome;
 use crate::load::LoadOutcome;
 use crate::mixed::MixedOutcome;
 
@@ -14,7 +15,7 @@ pub struct RunSummary {
     pub target_url: String,
     pub duration: Duration,
     pub bootstrap_error: Option<String>,
-    pub correctness: Option<CorrectnessSummary>,
+    pub correctness: Option<CorrectnessOutcome>,
     pub load: Option<LoadSummary>,
     pub mixed: Option<MixedSummary>,
     pub passthrough: PassthroughSummary,
@@ -28,13 +29,6 @@ pub struct DlqDelta {
     pub baseline_unresolved: u64,
     pub final_unresolved: u64,
     pub new_by_error_code: Vec<(String, u64)>,
-}
-
-#[derive(Debug)]
-pub struct CorrectnessSummary {
-    pub total: usize,
-    pub passed: usize,
-    pub failed_scenarios: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -214,7 +208,7 @@ fn round_duration(d: Duration) -> f64 {
     (d.as_secs_f64() * 1000.0).round() / 1000.0
 }
 
-fn correctness_json(c: Option<&CorrectnessSummary>) -> Value {
+fn correctness_json(c: Option<&CorrectnessOutcome>) -> Value {
     match c {
         None => Value::Null,
         Some(c) => json!({
@@ -674,7 +668,7 @@ mod tests {
             target_url: "http://localhost:3000".into(),
             duration: Duration::from_secs_f64(21.7),
             bootstrap_error: None,
-            correctness: Some(CorrectnessSummary {
+            correctness: Some(CorrectnessOutcome {
                 total: 9,
                 passed: 9,
                 failed_scenarios: vec![],
@@ -731,7 +725,7 @@ mod tests {
     #[test]
     fn to_json_correctness_failure_lists_scenarios() {
         let mut s = pass_summary();
-        s.correctness = Some(CorrectnessSummary {
+        s.correctness = Some(CorrectnessOutcome {
             total: 9,
             passed: 8,
             failed_scenarios: vec!["abcppmle".into()],

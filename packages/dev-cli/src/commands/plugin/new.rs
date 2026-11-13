@@ -146,7 +146,7 @@ fn determine_kind(args: &NewPluginArgs) -> Result<ScaffoldKind> {
     }
 }
 
-fn write_plugin_toml(dir: &Path, vars: &TemplateVars, kind: ScaffoldKind) -> Result<()> {
+fn render_plugin_toml(vars: &TemplateVars, kind: ScaffoldKind) -> String {
     let mut content = crate::template::render(TMPL_PLUGIN_HEADER, vars);
 
     if matches!(kind, ScaffoldKind::Backend | ScaffoldKind::Full) {
@@ -157,6 +157,11 @@ fn write_plugin_toml(dir: &Path, vars: &TemplateVars, kind: ScaffoldKind) -> Res
         content.push_str(&crate::template::render(TMPL_PLUGIN_WEB, vars));
     }
 
+    content
+}
+
+fn write_plugin_toml(dir: &Path, vars: &TemplateVars, kind: ScaffoldKind) -> Result<()> {
+    let content = render_plugin_toml(vars, kind);
     let path = dir.join("plugin.toml");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -283,7 +288,41 @@ fn print_summary(name: &str, kind: ScaffoldKind, dir: &Path, files: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    use broccoli_types::manifest::PluginManifest;
+
     use super::*;
+
+    #[test]
+    fn scaffolded_plugin_toml_parses_for_every_kind() {
+        let vars = TemplateVars {
+            plugin_name: "my-plugin".into(),
+            plugin_name_snake: "my_plugin".into(),
+            plugin_name_pascal: "MyPlugin".into(),
+            server_sdk_dep: String::new(),
+            web_sdk_dep: String::new(),
+            web_root: "web/dist".into(),
+        };
+
+        for kind in [
+            ScaffoldKind::Backend,
+            ScaffoldKind::Frontend,
+            ScaffoldKind::Full,
+        ] {
+            let manifest: PluginManifest = toml::from_str(&render_plugin_toml(&vars, kind))
+                .unwrap_or_else(|e| panic!("{kind:?} scaffold manifest does not parse: {e}"));
+            assert_eq!(manifest.name, "my-plugin");
+            assert_eq!(
+                manifest.has_server(),
+                kind != ScaffoldKind::Frontend,
+                "{kind:?}"
+            );
+            assert_eq!(
+                manifest.has_web(),
+                kind != ScaffoldKind::Backend,
+                "{kind:?}"
+            );
+        }
+    }
 
     fn scratch_dir(name: &str) -> PathBuf {
         let dir =

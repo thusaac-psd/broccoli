@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::Args;
 use console::style;
 
@@ -37,9 +37,7 @@ pub fn run(args: InfoArgs) -> anyhow::Result<()> {
     println!();
 
     let now = Utc::now();
-    let end = DateTime::parse_from_rfc3339(&contest.end_time)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or(now);
+    let end = contest.end_time;
 
     if now > end {
         println!(

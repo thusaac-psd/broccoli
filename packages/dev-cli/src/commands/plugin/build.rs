@@ -4,10 +4,10 @@ use std::process::Command;
 use anyhow::{Context, bail};
 use clap::Args;
 use console::style;
-use serde::Deserialize;
 
 use crate::dev_config;
 
+use super::read_manifest;
 use super::wasm::copy_wasm_artifact;
 
 #[derive(Args)]
@@ -20,25 +20,6 @@ pub struct BuildPluginArgs {
 
     #[arg(long)]
     pub release: bool,
-}
-
-#[derive(Deserialize)]
-struct MinimalManifest {
-    name: Option<String>,
-    server: Option<ServerSection>,
-    web: Option<WebSection>,
-}
-
-#[derive(Deserialize)]
-struct ServerSection {
-    entry: String,
-}
-
-#[derive(Deserialize)]
-struct WebSection {
-    root: String,
-    #[allow(dead_code)]
-    entry: String,
 }
 
 pub fn run(args: BuildPluginArgs) -> anyhow::Result<()> {
@@ -56,12 +37,9 @@ pub fn run(args: BuildPluginArgs) -> anyhow::Result<()> {
         );
     }
 
-    let manifest_content =
-        std::fs::read_to_string(&manifest_path).context("Failed to read plugin.toml")?;
-    let manifest: MinimalManifest =
-        toml::from_str(&manifest_content).context("Failed to parse plugin.toml")?;
+    let manifest = read_manifest(&manifest_path)?;
 
-    let plugin_name = manifest.name.as_deref().unwrap_or("plugin");
+    let plugin_name = manifest.name.as_str();
     let mut built_anything = false;
 
     if let Some(server) = manifest.server.as_ref() {

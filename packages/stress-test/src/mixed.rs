@@ -13,14 +13,13 @@ use tokio::time::{Instant, sleep};
 use crate::bootstrap::BootstrapState;
 use crate::client::Client;
 use crate::dto::{
-    BulkAddParticipantsRequest, CodeRunResponse, CreateSubmissionRequest, CreateUserEntry,
-    CustomTestCaseInput, RunCodeRequest, SubmissionFileDto, SubmissionResponse,
+    BulkAddParticipantsRequest, CreateSubmissionRequest, CreateUserEntry, CustomTestCaseInput,
+    RunCodeRequest, SubmissionFileDto,
 };
 use crate::error::{StressError, StressResult};
 use crate::events::{Event, Phase};
 use crate::scenarios::Scenario;
 
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HISTOGRAM_LOW: u64 = 1;
 const HISTOGRAM_HIGH: u64 = 600_000;
 const HISTOGRAM_SIGFIG: u8 = 3;
@@ -384,7 +383,7 @@ async fn execute_action(
             let code_run = client
                 .run_contest_code(state.contest_id, problem_id, &req)
                 .await?;
-            poll_code_run_until_terminal(client, code_run.id, timeout).await?;
+            client.wait_for_code_run(code_run.id, timeout).await?;
             Ok(())
         }
         MixedAction::OfficialSubmission => {
@@ -392,7 +391,7 @@ async fn execute_action(
             let submission = client
                 .create_contest_submission(state.contest_id, problem_id, &req)
                 .await?;
-            poll_submission_until_terminal(client, submission.id, timeout).await?;
+            client.wait_for_submission(submission.id, timeout).await?;
             Ok(())
         }
         MixedAction::ScoreboardRead => {
@@ -418,6 +417,7 @@ async fn build_contestant_clients(
     let entries: Vec<CreateUserEntry> = (0..config.contestants)
         .map(|idx| CreateUserEntry {
             username: contestant_username(client.run_id(), idx),
+            display_name: None,
             password: Some(contestant_password(client.run_id(), idx)),
         })
         .collect();
@@ -540,50 +540,6 @@ fn build_code_run_request(scenario: &Scenario) -> RunCodeRequest {
             input: "1 2\n".to_string(),
             expected_output: Some("3\n".to_string()),
         }],
-    }
-}
-
-async fn poll_submission_until_terminal(
-    client: &Client,
-    submission_id: i32,
-    timeout: Duration,
-) -> StressResult<SubmissionResponse> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let resp = client.get_submission(submission_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "submission {} did not reach a terminal status within {:?}",
-                submission_id,
-                timeout,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
-    }
-}
-
-async fn poll_code_run_until_terminal(
-    client: &Client,
-    code_run_id: i32,
-    timeout: Duration,
-) -> StressResult<CodeRunResponse> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let resp = client.get_code_run(code_run_id).await?;
-        if resp.status.is_terminal() {
-            return Ok(resp);
-        }
-        if Instant::now() >= deadline {
-            return Err(StressError::Other(anyhow!(
-                "code run {} did not reach a terminal status within {:?}",
-                code_run_id,
-                timeout,
-            )));
-        }
-        sleep(POLL_INTERVAL).await;
     }
 }
 

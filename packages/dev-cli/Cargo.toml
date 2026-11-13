@@ -8,7 +8,7 @@ readme = "README.md"
 keywords = ["broccoli", "cli", "plugin", "wasm", "online-judge"]
 categories = ["command-line-utilities", "development-tools"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 
 [[bin]]
 name = "broccoli-dev"
@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 broccoli-cli-core = { path = "../cli-core" }
+broccoli-types.workspace = true
 anyhow.workspace = true
 toml.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -32,4 +33,3 @@ rand.workspace = true
 ctrlc = "3"
 libc = "0.2"
 shlex = "1"
-ureq = { version = "3", features = ["json"] }

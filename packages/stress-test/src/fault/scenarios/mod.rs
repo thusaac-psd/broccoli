@@ -10,8 +10,6 @@ use super::transcript::Transcript;
 pub struct ScenarioContext {
     pub redis_url: String,
     pub db_url: Option<String>,
-    pub server_url: Option<String>,
-    pub admin_token: Option<String>,
     pub kill_command: Option<String>,
 }
 

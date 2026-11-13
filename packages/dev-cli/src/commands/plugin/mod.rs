@@ -3,6 +3,10 @@ pub mod new;
 mod wasm;
 pub mod watch;
 
+use std::path::Path;
+
+use anyhow::Context;
+use broccoli_types::manifest::PluginManifest;
 use clap::{Args, Subcommand};
 
 use self::build::BuildPluginArgs;
@@ -20,4 +24,13 @@ pub enum PluginCommand {
     New(NewPluginArgs),
     Build(BuildPluginArgs),
     Watch(WatchPluginArgs),
+}
+
+fn read_manifest(path: &Path) -> anyhow::Result<PluginManifest> {
+    let content = std::fs::read_to_string(path).context("Failed to read plugin.toml")?;
+    parse_manifest(&content)
+}
+
+fn parse_manifest(content: &str) -> anyhow::Result<PluginManifest> {
+    toml::from_str(content).context("Failed to parse plugin.toml")
 }

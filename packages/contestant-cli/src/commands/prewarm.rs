@@ -43,12 +43,12 @@ pub fn run() -> anyhow::Result<()> {
 /// Server URL from saved credentials, then $BROCCOLI_URL, then config, else default.
 fn resolve_server() -> String {
     if let Ok(creds) = config::resolve_credentials(None, None) {
-        return creds.server;
+        return creds.server().to_string();
     }
-    if let Ok(url) = std::env::var("BROCCOLI_URL") {
-        if !url.trim().is_empty() {
-            return url;
-        }
+    if let Ok(url) = std::env::var("BROCCOLI_URL")
+        && !url.trim().is_empty()
+    {
+        return url;
     }
     if let Some(server) = config::load_user_config().server {
         return server;

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +6,7 @@ use crate::entity::dead_letter_message;
 use crate::error::AppError;
 
 use super::shared::{Pagination, validate_bulk_ids};
+pub use broccoli_api_types::dlq::{DlqStatsResponse, MessageTypeCounts};
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -140,28 +139,6 @@ impl From<dead_letter_message::Model> for DlqMessageDetailResponse {
 pub struct DlqListResponse {
     pub data: Vec<DlqMessageResponse>,
     pub pagination: Pagination,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct MessageTypeCounts {
-    #[schema(example = 1)]
-    pub operation_task: u64,
-    #[schema(example = 3)]
-    pub stuck_submission: u64,
-    #[schema(example = 1)]
-    pub stuck_code_run: u64,
-    #[schema(example = 1)]
-    pub stuck_submission_judgement: u64,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct DlqStatsResponse {
-    #[schema(example = 5)]
-    pub total_unresolved: u64,
-    #[schema(example = 42)]
-    pub total_resolved: u64,
-    pub unresolved_by_message_type: MessageTypeCounts,
-    pub unresolved_by_error_code: HashMap<String, u64>,
 }
 
 impl From<DlqStats> for DlqStatsResponse {
