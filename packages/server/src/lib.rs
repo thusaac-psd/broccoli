@@ -328,18 +328,27 @@ fn spa_fallback_service(
 /// Upper bound on handling one API request.
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long before [`REQUEST_TIMEOUT`] the request's plugin calls give up, so
+/// a call that cannot finish answers 503 (retry) before the timeout layer
+/// answers 408 (outcome unknown).
+pub(crate) const PLUGIN_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The deadline of a request's plugin calls, measured from its start.
+const PLUGIN_DEADLINE: std::time::Duration = REQUEST_TIMEOUT.saturating_sub(PLUGIN_DEADLINE_MARGIN);
+
 tokio::task_local! {
-    /// When the request being handled times out.
+    /// When the plugin calls of the request being handled reach their deadline.
     static REQUEST_DEADLINE: std::time::Instant;
 }
 
-/// When the request this task is handling times out: the deadline of every
-/// interactive plugin call it makes. Outside a request (a test driving a
-/// handler's logic directly) a full request timeout from now.
+/// The deadline of every interactive plugin call the request this task is
+/// handling makes: [`PLUGIN_DEADLINE_MARGIN`] before the request times out.
+/// Outside a request (a test driving a handler's logic directly) that long
+/// from now.
 pub(crate) fn request_deadline() -> std::time::Instant {
     REQUEST_DEADLINE
         .try_with(|deadline| *deadline)
-        .unwrap_or_else(|_| std::time::Instant::now() + REQUEST_TIMEOUT)
+        .unwrap_or_else(|_| std::time::Instant::now() + PLUGIN_DEADLINE)
 }
 
 /// Options for an interactive plugin call made by the current request.
@@ -354,7 +363,7 @@ async fn with_request_deadline(
 ) -> axum::response::Response {
     REQUEST_DEADLINE
         .scope(
-            std::time::Instant::now() + REQUEST_TIMEOUT,
+            std::time::Instant::now() + PLUGIN_DEADLINE,
             next.run(request),
         )
         .await

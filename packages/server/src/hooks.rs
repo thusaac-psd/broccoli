@@ -38,10 +38,9 @@ fn hook_call(class: CallClass) -> CallOptions {
 }
 
 fn is_unavailable(error: &anyhow::Error) -> bool {
-    matches!(
-        error.downcast_ref::<PluginError>(),
-        Some(PluginError::Unavailable { .. })
-    )
+    error
+        .downcast_ref::<PluginError>()
+        .is_some_and(PluginError::is_unavailable)
 }
 
 struct HookEntry {

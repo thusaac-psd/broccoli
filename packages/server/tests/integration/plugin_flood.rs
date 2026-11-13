@@ -55,9 +55,9 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
     let one_call = single.elapsed();
 
     let baseline_threads = threads();
-    // Shed under overload: a call runs (200), gives up queued at its deadline
-    // (503), or the request's own 60s timeout fires first (408). A hard 500
-    // never happens.
+    // Shed under overload: a call runs (200) or gives up at its deadline
+    // (503), which falls before the request's own timeout, so no call ends in
+    // a 408 or a hard 500.
     let ran = Arc::new(AtomicUsize::new(0));
     let shed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
@@ -69,7 +69,7 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
             tokio::spawn(async move {
                 match app.get_without_token(&route).await.status {
                     200 => ran.fetch_add(1, Ordering::Relaxed),
-                    503 | 408 => shed.fetch_add(1, Ordering::Relaxed),
+                    503 => shed.fetch_add(1, Ordering::Relaxed),
                     _ => failed.fetch_add(1, Ordering::Relaxed),
                 };
             })
@@ -108,7 +108,7 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
 
     println!(
         "flood: calls={calls} burn={burn}M one_call={one_call:?} drained_in={drained:?} \
-         ran={} shed_503_408={} failed={}",
+         ran={} shed_503={} failed={}",
         ran.load(Ordering::Relaxed),
         shed.load(Ordering::Relaxed),
         failed.load(Ordering::Relaxed),
@@ -126,6 +126,6 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
     assert_eq!(
         failed.load(Ordering::Relaxed),
         0,
-        "a flood call failed hard (not 200/503/408)"
+        "a flood call ended in neither 200 nor 503"
     );
 }

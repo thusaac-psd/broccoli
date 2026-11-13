@@ -295,7 +295,9 @@ impl From<PluginError> for AppError {
                 AppError::PluginNotReady(err.to_string())
             }
             PluginError::Serialization(_) => AppError::Validation(err.to_string()),
-            PluginError::Unavailable { .. } => {
+            PluginError::Unavailable { .. }
+            | PluginError::ShuttingDown
+            | PluginError::InstanceBuild { .. } => {
                 tracing::warn!("{err}");
                 AppError::PluginUnavailable
             }
@@ -396,21 +398,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unavailable_plugin_is_a_503_with_retry_after() {
-        let err: AppError = PluginError::Unavailable {
-            plugin_id: "p".into(),
-            func_name: "f".into(),
+    async fn a_plugin_that_cannot_answer_now_is_a_503_with_retry_after() {
+        for err in [
+            PluginError::Unavailable {
+                plugin_id: "p".into(),
+                func_name: "f".into(),
+            },
+            PluginError::ShuttingDown,
+            PluginError::InstanceBuild {
+                plugin_id: "p".into(),
+                message: "out of memory".into(),
+            },
+        ] {
+            let response = AppError::from(err).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response.headers().get("Retry-After").unwrap(),
+                &PLUGIN_RETRY_AFTER_SECS.to_string()
+            );
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "PLUGIN_UNAVAILABLE");
         }
-        .into();
-        let response = err.into_response();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            response.headers().get("Retry-After").unwrap(),
-            &PLUGIN_RETRY_AFTER_SECS.to_string()
-        );
-        let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["code"], "PLUGIN_UNAVAILABLE");
     }
 
     /// Sanity check that 429 RateLimited and 503 Overloaded both

@@ -70,7 +70,9 @@ serves both the `before_submission` request path and background
 notifications.
 
 The pool lookup happens after admission, so a call queued across a reload
-runs on the new version.
+runs on the new version. A reload builds the new entry in full before it
+replaces the old one, so a call never finds the plugin between versions, and
+a reload that fails leaves the old version serving.
 
 ## Guest threads
 
@@ -123,7 +125,9 @@ with `CallOptions::nested()`.
 
 Every call has a deadline. Interactive calls use the request's
 (`crate::request_deadline`, set per request by a middleware around the
-request timeout), hooks the earlier of that and 30 s, timers their claim
+request timeout to `PLUGIN_DEADLINE_MARGIN`, 1 s, before that timeout, so a
+call that cannot finish answers 503 before the timeout layer answers 408),
+hooks the earlier of that and 30 s, timers their claim
 lease, judging and operations `plugin.call_timeout_secs`.
 
 One process-wide thread (`packages/plugin-core/src/deadline.rs`) keeps a heap
@@ -153,9 +157,13 @@ A call still queued at its deadline, or cancelled at it, fails with
 
 ## Unavailable is never a decision
 
-`Unavailable` says the server is busy, never anything about the request.
+`PluginError::is_unavailable` is true for an error that says the plugin
+cannot answer right now, never anything about the request: `Unavailable`
+(the deadline), `ShuttingDown` (the server is draining), `NotLoaded` (the
+plugin is not loaded here) and `InstanceBuild` (no instance could be built).
 
-- `visibility::query_plugins` returns a `Result`. `Unavailable` becomes
+- `visibility::query_plugins` returns a `Result`. An unavailable querier
+  becomes
   `AppError::PluginUnavailable`: `503 PLUGIN_UNAVAILABLE` with
   `Retry-After: 2`. It is never folded into `Deny`, which would turn a list
   into an empty page, a cursor into a 400 and a single read into a 404. Every

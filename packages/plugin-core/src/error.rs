@@ -59,6 +59,11 @@ pub enum PluginError {
         func_name: String,
     },
 
+    /// No instance of the plugin could be built for this call (out of memory,
+    /// the module file gone). Not an answer from the plugin.
+    #[error("Plugin '{plugin_id}' could not start an instance: {message}")]
+    InstanceBuild { plugin_id: String, message: String },
+
     /// A host function called back into a plugin deeper than
     /// [`crate::executor::MAX_DEPTH`] allows.
     #[error(
@@ -69,6 +74,22 @@ pub enum PluginError {
         func_name: String,
         max_depth: u8,
     },
+}
+
+impl PluginError {
+    /// Whether this says the plugin cannot answer right now rather than
+    /// anything about the request: the call reached its deadline, the server
+    /// is draining, the plugin is between loads, or no instance could be
+    /// built. Callers answer these as "try again", never as a decision.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(
+            self,
+            PluginError::Unavailable { .. }
+                | PluginError::ShuttingDown
+                | PluginError::NotLoaded(_)
+                | PluginError::InstanceBuild { .. }
+        )
+    }
 }
 
 #[derive(Debug, Error)]

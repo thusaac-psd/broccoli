@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 pub use broccoli_types::manifest::{HookMode, HookScope};
 
-use crate::error::PluginError;
 use crate::executor::CallOptions;
 use crate::traits::PluginManager;
 
@@ -200,7 +199,7 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
             )),
             // Not an answer from the plugin: the caller turns it into "try
             // again", never into a decision.
-            Err(e @ PluginError::Unavailable { .. }) => Err(e.into()),
+            Err(e) if e.is_unavailable() => Err(e.into()),
             Err(e) => {
                 tracing::error!(
                     plugin_id = %self.plugin_id,

@@ -270,10 +270,9 @@ fn run_guest(
     if std::time::Instant::now() >= resolved.deadline {
         return Err(unavailable());
     }
-    let mut plugin = pool.get().map_err(|e| {
-        PluginError::Internal(format!(
-            "Failed to build an instance of plugin '{plugin_id}': {e}"
-        ))
+    let mut plugin = pool.get().map_err(|e| PluginError::InstanceBuild {
+        plugin_id: plugin_id.clone(),
+        message: e.to_string(),
     })?;
     if !plugin.function_exists(&func_name) {
         return Err(PluginError::FunctionNotFound {
@@ -364,6 +363,69 @@ pub trait PluginManager: PluginInvoker {
         Ok(())
     }
 
+    /// The instance pool for `entry`, or `None` for a plugin with no server
+    /// side. Builds no instance: they are built on demand.
+    fn build_runtime(
+        &self,
+        plugin_id: &str,
+        entry: &PluginEntry,
+    ) -> Result<Option<crate::pool::InstancePool>, PluginError> {
+        let Some((entry_point, permissions)) = self.resolve(&entry.manifest) else {
+            return Ok(None);
+        };
+        let wasm_path = entry.root_dir.join(&entry_point);
+        if !wasm_path.exists() {
+            return Err(PluginError::LoadFailed(format!(
+                "Wasm file not found at path: {}",
+                wasm_path.display()
+            )));
+        }
+
+        let budget = self.executor().budget().clone();
+        // A runaway trap on one instance's linear memory, so an unbounded
+        // allocation fails its own call instead of exhausting the
+        // server. Far above any legitimate working set. Each call's
+        // deadline is enforced by the deadline thread; the manifest
+        // timeout, a margin past the longest deadline any call gets, is
+        // the backstop for a guest the deadline thread never cancelled.
+        let manifest = Manifest::new([Wasm::file(&wasm_path)])
+            .with_memory_max(budget.instance_memory_pages())
+            .with_timeout(
+                self.get_config().call_timeout() + crate::config::TIMEOUT_BACKSTOP_MARGIN,
+            );
+        let host_functions = self.get_host_functions().resolve(plugin_id, &permissions);
+        let wasi = self.get_config().enable_wasi;
+        let compile_cache = crate::config::compile_cache_config(&self.get_config().cache_dir);
+
+        let build_metrics = self.get_metrics().cloned();
+        let build_plugin_id = plugin_id.to_string();
+        let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
+            let started = std::time::Instant::now();
+            let builder = PluginBuilder::new(&manifest)
+                .with_wasi(wasi)
+                .with_functions(host_functions.clone());
+            let builder = match &compile_cache {
+                Some(config) => builder.with_cache_config(config),
+                None => builder,
+            };
+            let built = builder.build();
+            if let Some(metrics) = build_metrics.as_ref() {
+                let attrs = [KeyValue::new("plugin.id", build_plugin_id.clone())];
+                metrics
+                    .plugin_instance_create_duration
+                    .record(started.elapsed().as_secs_f64(), &attrs);
+                metrics.plugin_instance_created_total.add(1, &attrs);
+            }
+            built
+        });
+        Ok(Some(crate::pool::InstancePool::new(
+            plugin_id,
+            source,
+            budget,
+            self.get_metrics().cloned(),
+        )))
+    }
+
     #[instrument(skip(self), fields(plugin_id = %plugin_id))]
     fn load_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
         let mut registry = self
@@ -379,62 +441,7 @@ pub trait PluginManager: PluginInvoker {
             return Ok(());
         }
 
-        let mut runtime = None;
-        if let Some((entry_point, permissions)) = self.resolve(&plugin_entry.manifest) {
-            let wasm_path = plugin_entry.root_dir.join(&entry_point);
-            if !wasm_path.exists() {
-                return Err(PluginError::LoadFailed(format!(
-                    "Wasm file not found at path: {}",
-                    wasm_path.display()
-                )));
-            }
-
-            let budget = self.executor().budget().clone();
-            // A runaway trap on one instance's linear memory, so an unbounded
-            // allocation fails its own call instead of exhausting the
-            // server. Far above any legitimate working set. Each call's
-            // deadline is enforced by the deadline thread; the manifest
-            // timeout, a margin past the longest deadline any call gets, is
-            // the backstop for a guest the deadline thread never cancelled.
-            let manifest = Manifest::new([Wasm::file(&wasm_path)])
-                .with_memory_max(budget.instance_memory_pages())
-                .with_timeout(
-                    self.get_config().call_timeout() + crate::config::TIMEOUT_BACKSTOP_MARGIN,
-                );
-            let host_functions = self.get_host_functions().resolve(plugin_id, &permissions);
-            let wasi = self.get_config().enable_wasi;
-            let compile_cache = crate::config::compile_cache_config(&self.get_config().cache_dir);
-
-            let build_metrics = self.get_metrics().cloned();
-            let build_plugin_id = plugin_id.to_string();
-            let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
-                let started = std::time::Instant::now();
-                let builder = PluginBuilder::new(&manifest)
-                    .with_wasi(wasi)
-                    .with_functions(host_functions.clone());
-                let builder = match &compile_cache {
-                    Some(config) => builder.with_cache_config(config),
-                    None => builder,
-                };
-                let built = builder.build();
-                if let Some(metrics) = build_metrics.as_ref() {
-                    let attrs = [KeyValue::new("plugin.id", build_plugin_id.clone())];
-                    metrics
-                        .plugin_instance_create_duration
-                        .record(started.elapsed().as_secs_f64(), &attrs);
-                    metrics.plugin_instance_created_total.add(1, &attrs);
-                }
-                built
-            });
-            runtime = Some(crate::pool::InstancePool::new(
-                plugin_id,
-                source,
-                budget,
-                self.get_metrics().cloned(),
-            ));
-        }
-
-        plugin_entry.runtime = runtime;
+        plugin_entry.runtime = self.build_runtime(plugin_id, plugin_entry)?;
         plugin_entry.status = PluginStatus::Loaded;
 
         info!("Plugin {} loaded successfully", plugin_entry.manifest);
@@ -552,16 +559,19 @@ pub trait PluginManager: PluginInvoker {
             entry.root_dir.clone()
         };
 
-        let new_entry = PluginEntry::from_dir(&root_dir)?;
+        // Built in full before it replaces the old entry, so a call made
+        // during the reload finds the old version or the new one, never an
+        // unloaded plugin.
+        let mut new_entry = PluginEntry::from_dir(&root_dir)?;
+        new_entry.runtime = self.build_runtime(plugin_id, &new_entry)?;
+        new_entry.status = PluginStatus::Loaded;
+        info!("Plugin {} reloaded", new_entry.manifest);
 
-        {
-            let mut registry = self.get_registry().write().map_err(|_| {
-                PluginError::Internal("Failed to acquire registry write lock".into())
-            })?;
-            registry.insert(plugin_id.to_string(), new_entry);
-        }
-
-        self.load_plugin(plugin_id)?;
+        let mut registry = self
+            .get_registry()
+            .write()
+            .map_err(|_| PluginError::Internal("Failed to acquire registry write lock".into()))?;
+        registry.insert(plugin_id.to_string(), new_entry);
         Ok(())
     }
 

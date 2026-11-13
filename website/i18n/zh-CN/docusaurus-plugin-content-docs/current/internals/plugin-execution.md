@@ -41,7 +41,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 种类是必填参数。`CallOptions` 没有默认值，trait 也没有便捷的 `call`；每个调用点都要选择 `interactive`、`judging`、`background`、`background_hook`、`lifecycle` 或 `nested`。钩子的种类来自分发点（`hooks::dispatch_hooks`），因为同一个 `PluginHook` 既服务 `before_submission` 请求路径，也服务后台通知。
 
-池的查找发生在准入之后，因此跨越一次重载而排队的调用会在新版本上运行。
+池的查找发生在准入之后，因此跨越一次重载而排队的调用会在新版本上运行。重载先完整构建新条目再替换旧条目，因此调用永远不会遇到处于两个版本之间的插件；重载失败时旧版本继续服务。
 
 ## 客体线程
 
@@ -64,7 +64,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 ## 截止时间
 
-每个调用都有截止时间。交互调用使用请求的截止时间（`crate::request_deadline`，由包在请求超时外的中间件为每个请求设置），钩子取它与 30 秒中较早者，定时器使用其认领租约，评测和操作使用 `plugin.call_timeout_secs`。
+每个调用都有截止时间。交互调用使用请求的截止时间（`crate::request_deadline`，由包在请求超时外的中间件为每个请求设置为该超时之前 `PLUGIN_DEADLINE_MARGIN`（1 秒），使无法完成的调用在超时层返回 408 之前先返回 503），钩子取它与 30 秒中较早者，定时器使用其认领租约，评测和操作使用 `plugin.call_timeout_secs`。
 
 一个进程级线程（`packages/plugin-core/src/deadline.rs`）为每个运行中的调用维护 `(Instant, CancelHandle)` 堆，并在截止时间到达时取消客体。挂起在宿主函数中的客体在返回客体代码时陷入 trap。
 
@@ -76,9 +76,9 @@ extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 
 
 ## Unavailable 永远不是一个决定
 
-`Unavailable` 表示服务器繁忙，与请求本身无关。
+`PluginError::is_unavailable` 对表示插件此刻无法回答、而与请求本身无关的错误为真：`Unavailable`（截止时间）、`ShuttingDown`（服务器正在排空）、`NotLoaded`（插件未在本机加载）和 `InstanceBuild`（无法构建实例）。
 
-- `visibility::query_plugins` 返回 `Result`。`Unavailable` 变为 `AppError::PluginUnavailable`：带 `Retry-After: 2` 的 `503 PLUGIN_UNAVAILABLE`。它绝不会并入 `Deny`，否则列表会变成空页面、游标变成 400、单条读取变成 404。查询者的其他失败属于错误的回答，仍然拒绝整批资源。
+- `visibility::query_plugins` 返回 `Result`。不可用的查询者变为 `AppError::PluginUnavailable`：带 `Retry-After: 2` 的 `503 PLUGIN_UNAVAILABLE`。它绝不会并入 `Deny`，否则列表会变成空页面、游标变成 400、单条读取变成 404。查询者的其他失败属于错误的回答，仍然拒绝整批资源。
 - 不可用的阻塞钩子同样返回 503，而不是失败关闭的拒绝；不可用的通知钩子被跳过。
 - 服务器端从不重试交互调用。Web 客户端把 503 视为临时状态（`packages/web-sdk/src/api/errors.ts` 中的 `isTemporaryApiError`），由 TanStack Query 退避重试。
 - 后台调用方保留各自的语义：在租约结束时被截断的定时器投递在租约过期后重试，到达截止时间的评测调用是一个系统错误，由 SystemError 回收器重新评测。

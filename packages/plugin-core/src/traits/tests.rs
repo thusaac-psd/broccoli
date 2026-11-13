@@ -545,3 +545,19 @@ async fn a_dropped_request_is_counted_in_flight_until_its_guest_returns() {
     h.fixture.release();
     until(|| in_flight() == 0.0).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_reload_leaves_the_loaded_version_serving() {
+    let h = Harness::new(2);
+    std::fs::write(
+        h.dir.path().join(PLUGIN).join("plugin.toml"),
+        "name = \"p\"\nversion = \"0.2.0\"\n\n[server]\nentry = \"missing.wat\"\npermissions = [\"test\"]\n",
+    )
+    .unwrap();
+    assert!(h.manager.reload_plugin(PLUGIN).is_err());
+    h.spawn("mark", CallOptions::background(later()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![1]);
+}

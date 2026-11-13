@@ -1,8 +1,9 @@
 //! Batched plugin visibility query - the point where an UNTRUSTED plugin
 //! response enters the host's access-control decision.
 //!
-//! [`query_plugins`] fails in exactly one way: a querier that could not answer
-//! before the request's deadline ([`PluginError::Unavailable`]) is
+//! [`query_plugins`] fails in exactly one way: a querier that cannot answer
+//! right now ([`PluginError::is_unavailable`]: past the request's deadline,
+//! the server draining, the plugin between loads, no instance to run it) is
 //! [`AppError::PluginUnavailable`], a 503 the client retries. That is load on
 //! this server, never a decision, so it never turns into `Deny` (which would
 //! show an empty page, a 404 or a rejected cursor). Every other failure mode -
@@ -600,7 +601,10 @@ pub(crate) async fn query_plugins(
 
         let output = match call_result {
             Ok(out) => Ok(out),
-            Err(e @ PluginError::Unavailable { .. }) => return Err(e.into()),
+            Err(e) if e.is_unavailable() => {
+                tracing::warn!(plugin_id = %querier.plugin_id, error = %e, "visibility querier unavailable");
+                return Err(AppError::PluginUnavailable);
+            }
             Err(e) => {
                 tracing::error!(
                     plugin_id = %querier.plugin_id,
