@@ -985,6 +985,7 @@
 'common.loading' = '加载中…'
 'common.loadFailed' = '加载失败，请检查网络连接后重试。'
 'common.retry' = '重试'
+'common.temporarilyUnavailable' = '服务器正忙，稍后将自动重试。'
 'common.version' = 'v{version}'
 'common.close' = '关闭'
 'confirm.confirm' = '确认'

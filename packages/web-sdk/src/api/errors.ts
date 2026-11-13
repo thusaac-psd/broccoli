@@ -20,6 +20,26 @@ export function parseApiError(value: unknown): ApiError | null {
 }
 
 /**
+ * Error codes that mean "this server is busy right now" (HTTP 503 with a
+ * `Retry-After`): the request was neither refused nor answered, and the same
+ * request succeeds once load drops.
+ */
+export const TEMPORARY_ERROR_CODES: readonly string[] = [
+  'PLUGIN_UNAVAILABLE',
+  'QUEUE_OVERLOADED',
+  'CONTEST_TYPE_UNAVAILABLE',
+];
+
+/**
+ * Whether `err` is a temporary error: show it as "busy, retrying" and retry,
+ * never as a failure of the request.
+ */
+export function isTemporaryApiError(err: unknown): boolean {
+  const parsed = parseApiError(err);
+  return parsed !== null && TEMPORARY_ERROR_CODES.includes(parsed.code);
+}
+
+/**
  * Extract a human-readable error message from an API error envelope or a
  * generic Error. Falls back to the provided fallback string.
  */
