@@ -87,7 +87,15 @@ extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 
 
 ## 评测扇出
 
-服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：即整个集群每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个中本服务器所占的份额。`WorkerSlots` 是存活容量的唯一记录：评测机心跳中 `max_concurrency` 之和，以及存活服务器的数量（`common::liveness::live_workers_and_server_count`，对两种角色执行一次 `SCAN` 和一次流水线读取），由一个任务每 15 秒刷新一次。认领协程的进行中上限也是同样的份额：取配置的每服务器下限与本服务器在每个存活评测机槽位 8 个中所占份额的较大者。在看到任何容量之前，假定每个本地核心一个槽位。单个操作批次内的发布以固定的 32 个为窗口进行。
+服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：即整个集群每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个中本服务器所占的份额。`WorkerSlots` 是存活容量的唯一记录：评测机心跳中 `max_concurrency` 之和，以及存活服务器的数量（`common::liveness::live_workers_and_server_count`，对两种角色执行一次 `SCAN` 和一次流水线读取），由一个任务每 15 秒刷新一次，用于确定规模的存活信息不再有其他读取方。由它派生的每个数值都只有一个归属：
+
+| 数值 | 归属 | 取值 |
+|---|---|---|
+| 扇出上限 | `dispatcher::fanout::fan_out_limit` | 每个存活槽位 2 个中本服务器所占的份额 |
+| 进行中上限 | `dispatcher::claim::in_flight_cap` | 每个存活槽位 8 个中本服务器所占的份额，至少 256 |
+| 队列上限 | `dispatcher::queue_depth::derived_queue_cap` | 整个集群每个存活槽位 200 个，至少 5000 |
+
+在看到任何容量之前，扇出假定每个本地核心一个槽位，其余数值取下限。单个操作批次内的发布以固定的 32 个为窗口进行。
 
 ## 内存
 
@@ -109,4 +117,4 @@ Argon2 运行在自己的线程上（`utils/hash.rs`），每个核心一个，�
 
 ## 设置
 
-`plugin.max_concurrent_calls`、`plugin.memory_budget` 和 `plugin.call_timeout_secs` 是仅有的调节项；前两项自动确定。定时器租约为调用超时加 `LEASE_MARGIN`（30 秒）。曾用于调节池和扇出的键列在 `config::REMOVED_KEYS` 中；启动时会对仍被设置的键发出警告。
+`plugin.max_concurrent_calls`、`plugin.memory_budget` 和 `plugin.call_timeout_secs` 是仅有的调节项；前两项自动确定。定时器租约为调用超时加 `LEASE_MARGIN`（30 秒）。任何二进制程序都不读取的设置（例如曾用于调节池或扇出的键）会被忽略，并在启动时由一条警告列出（`common::config::warn_unknown_keys`）。

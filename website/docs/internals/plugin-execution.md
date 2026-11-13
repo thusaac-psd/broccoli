@@ -192,11 +192,18 @@ The test cases a server has outstanding at workers are bounded by
 `WorkerSlots` is the one record of live capacity: the sum of `max_concurrency`
 over the worker heartbeats and the number of live servers
 (`common::liveness::live_workers_and_server_count`, one `SCAN` over both roles
-and one pipelined read), refreshed by one task every 15 s. The claim fiber's
-in-flight cap is the same kind of share: the configured per-server floor, or
-this server's share of 8 per live worker slot when that is larger. Until any
-capacity is seen, one slot per local core is assumed. Inside one operation
-batch, publishes run in a fixed window of 32.
+and one pipelined read), refreshed by one task every 15 s, and nothing else
+reads liveness for sizing. Every figure derived from it has one owner:
+
+| Figure | Owner | Value |
+|---|---|---|
+| Fan-out bound | `dispatcher::fanout::fan_out_limit` | this server's share of 2 per live slot |
+| In-flight cap | `dispatcher::claim::in_flight_cap` | this server's share of 8 per live slot, at least 256 |
+| Queue cap | `dispatcher::queue_depth::derived_queue_cap` | 200 per live slot fleet-wide, at least 5000 |
+
+Until any capacity is seen, one slot per local core is assumed for fan-out
+and the floors apply. Inside one operation batch, publishes run in a fixed
+window of 32.
 
 ## Memory
 
@@ -247,6 +254,6 @@ tokio's blocking pool, so a plugin flood cannot delay login.
 
 `plugin.max_concurrent_calls`, `plugin.memory_budget` and
 `plugin.call_timeout_secs` are the only knobs; the first two size themselves.
-The timer lease is the call timeout plus `LEASE_MARGIN` (30 s). Keys that used to
-tune pools and fan-out are listed in `config::REMOVED_KEYS`; boot warns about
-any that is still set.
+The timer lease is the call timeout plus `LEASE_MARGIN` (30 s). A setting no
+binary reads, such as a key that used to tune pools or fan-out, is ignored and
+named in one warning at boot (`common::config::warn_unknown_keys`).

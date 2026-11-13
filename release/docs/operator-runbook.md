@@ -346,10 +346,10 @@ current load per plugin, and `broccoli_plugin_instance_evicted_total` how often
 the memory budget dropped instances. Sustained queueing with every token busy is
 CPU exhaustion: add server replicas.
 
-A removed key (`POOL_MAX_INSTANCES`, `EVALUATOR_PARALLELISM`,
-`SERVER__MAX_BLOCKING_THREADS` and others) still set in the server's config file
-or its process environment logs a warning at boot naming each one; the keys are
-ignored. The compose template passes the server only the variables it lists, so
+A key no binary reads (a removed one such as `POOL_MAX_INSTANCES`,
+`EVALUATOR_PARALLELISM` or `SERVER__MAX_BLOCKING_THREADS`, or a typo) still set
+in the server's config file or its process environment is ignored and named in
+one warning at boot. The compose template passes the server only the variables it lists, so
 an old value left in `.env` never reaches the server and logs nothing: delete
 it.
 

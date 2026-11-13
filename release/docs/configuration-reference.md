@@ -62,7 +62,6 @@ Leave these alone unless a measurement says otherwise.
 | `lease_ttl_secs`, `lease_refresh_interval_secs`, `steal_scan_interval_secs`, `steal_batch_size` | `60`, `10`, `15`, `8` | Lease recovery timing |
 | `max_dispatch_retries`, `max_system_error_retries` | `5`, `10` | Retry budgets |
 | `cancel_primitive_enabled` | `false` | Redis-backed operation cancellation |
-| `max_blocking_threads` | 16 per CPU, 512 to 8192 | Tokio blocking pool |
 | `claim_fiber_enabled` | `true` | Turn off to stop a server from dispatching while debugging |
 | `plugin_timer_tick_interval_secs`, `plugin_timer_batch`, `plugin_timer_max_attempts` | `1`, `64`, `5` | Plugin timer delivery |
 | `batch_max_age_secs` (top level) | `7200` | Age at which an unfinished evaluate batch is reaped |
