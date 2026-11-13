@@ -555,7 +555,7 @@ struct SubRow {
 ///
 /// Reads `status` alongside `verdict`: a submission whose judging failed
 /// with a platform fault (`SystemError`) writes NO verdict (see
-/// `mark_submission_system_error_with_epoch` and the stuck-job handler in
+/// the host's dispatch-failure and stuck-job paths in
 /// `packages/server`), so `verdict.is_none()` alone cannot tell "still being
 /// judged" apart from "terminally failed, no verdict ever coming" -- see
 /// `decide::is_in_flight`'s doc comment. `status::text AS status` follows

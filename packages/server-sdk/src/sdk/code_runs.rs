@@ -33,86 +33,26 @@ impl CodeRuns {
 
 #[cfg(target_arch = "wasm32")]
 impl CodeRuns {
+    /// Writes `update` onto the code run. The host owns the statement and
+    /// fences it on the run's epoch while it is in flight, so a write from a
+    /// dispatch the host has since requeued changes nothing.
     pub fn update(&self, update: &CodeRunUpdate) -> Result<(), SdkError> {
-        use crate::db::Params;
-
-        let mut p = Params::new();
-        let mut sets = Vec::new();
-
-        super::shared::push_judge_sets(
-            &mut p,
-            &mut sets,
-            &update.status,
-            &update.verdict,
-            &update.score,
-            &update.time_used,
-            &update.memory_used,
-            &update.compile_output,
-            &update.error_code,
-            &update.error_message,
-        );
-
-        if sets.is_empty() {
-            return Ok(());
-        }
-
-        let sql = format!(
-            "UPDATE code_run SET {} WHERE id = {} AND judge_epoch = {} \
-             AND status NOT IN ('Judged', 'CompilationError', 'SystemError')",
-            sets.join(", "),
-            p.bind(update.code_run_id),
-            p.bind(update.judge_epoch),
-        );
-        super::shared::raw_execute(&sql, &p.into_args())?;
+        let payload = serde_json::to_string(update)?;
+        let result_json = unsafe { crate::host::raw::code_run_update(payload)? };
+        let resp: super::shared::HostDbResponse = serde_json::from_str(&result_json)?;
+        resp.into_result()?;
         Ok(())
     }
 
+    /// Inserts per-run results, behind the same fence as [`Self::update`].
     pub fn insert_results(&self, results: &[CodeRunResultRow]) -> Result<(), SdkError> {
-        use crate::db::Params;
-        use crate::types::sanitize_result_text_field;
-        use serde_json::json;
-
         if results.is_empty() {
             return Ok(());
         }
-
-        let mut p = Params::new();
-        let mut rows = Vec::with_capacity(results.len());
-
-        for r in results {
-            let score_val = if r.score.is_finite() { r.score } else { 0.0 };
-            let message = r.message.as_deref().map(sanitize_result_text_field);
-            let stdout = r.stdout.as_deref().map(sanitize_result_text_field);
-            let stderr = r.stderr.as_deref().map(sanitize_result_text_field);
-            rows.push(format!(
-                "({}, {}, {}, {}, {}, {}::int, {}::int, {}::text, {}::text, {}::text, NOW())",
-                p.bind(r.code_run_id),
-                p.bind(r.judge_epoch),
-                p.bind(r.run_index),
-                p.bind(r.verdict.to_db_str()),
-                p.bind(score_val),
-                p.bind(json!(r.time_used)),
-                p.bind(json!(r.memory_used)),
-                p.bind(json!(message.as_deref())),
-                p.bind(json!(stdout.as_deref())),
-                p.bind(json!(stderr.as_deref())),
-            ));
-        }
-
-        let sql = format!(
-            "INSERT INTO code_run_result \
-             (code_run_id, judge_epoch, run_index, verdict, score, \
-              time_used, memory_used, checker_output, stdout, stderr, created_at) \
-             SELECT v.code_run_id, v.judge_epoch, v.run_index, v.verdict, v.score, \
-                    v.time_used, v.memory_used, v.checker_output, v.stdout, v.stderr, v.created_at \
-             FROM (VALUES {}) AS v( \
-                 code_run_id, judge_epoch, run_index, verdict, score, \
-                 time_used, memory_used, checker_output, stdout, stderr, created_at \
-             ) \
-             JOIN code_run cr ON cr.id = v.code_run_id AND cr.judge_epoch = v.judge_epoch",
-            rows.join(", ")
-        );
-        super::shared::raw_execute(&sql, &p.into_args())?;
+        let payload = serde_json::to_string(results)?;
+        let result_json = unsafe { crate::host::raw::code_run_insert_results(payload)? };
+        let resp: super::shared::HostDbResponse = serde_json::from_str(&result_json)?;
+        resp.into_result()?;
         Ok(())
     }
 }

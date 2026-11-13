@@ -1,11 +1,11 @@
-//! The claim fiber's in-flight cap counts, per server, the submissions it has
+//! The claim fiber's in-flight cap counts, per server, the judgements it has
 //! claimed and not finished. Uses a unique owner id so parallel tests that
 //! share the database (and the fixture's own server id) cannot interfere.
 
 use crate::common::TestApp;
 use common::SubmissionStatus;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use server::entity::{submission, user};
+use server::entity::{submission, submission_judgement, user};
 
 async fn insert(
     app: &TestApp,
@@ -14,15 +14,14 @@ async fn insert(
     owner: Option<&str>,
     status: SubmissionStatus,
 ) {
-    submission::ActiveModel {
+    let sub = submission::ActiveModel {
         files: Set(serde_json::json!([{ "filename": "main.cpp", "content": "int main() {}" }])),
         language: Set("cpp".into()),
         user_id: Set(user_id),
         problem_id: Set(problem_id),
         contest_id: Set(None),
         contest_type: Set("standard".into()),
-        status: Set(status),
-        owner_server_id: Set(owner.map(str::to_string)),
+        status: Set(status.clone()),
         judge_epoch: Set(0),
         created_at: Set(chrono::Utc::now()),
         ..Default::default()
@@ -30,10 +29,23 @@ async fn insert(
     .insert(&app.db)
     .await
     .expect("insert submission");
+    submission_judgement::ActiveModel {
+        submission_id: Set(sub.id),
+        version: Set(1),
+        is_current: Set(true),
+        is_finalized: Set(status.is_terminal()),
+        status: Set(status),
+        owner_server_id: Set(owner.map(str::to_string)),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert judgement");
 }
 
 #[tokio::test]
-async fn in_flight_counts_only_this_servers_unfinished_submissions() {
+async fn in_flight_counts_only_this_servers_unfinished_judgements() {
     let app = TestApp::spawn().await;
     let token = app
         .create_user_with_role("claim_cap_admin", "password123", "admin")
@@ -77,7 +89,7 @@ async fn in_flight_counts_only_this_servers_unfinished_submissions() {
     .await;
     insert(&app, problem, user_id, None, SubmissionStatus::Queued).await;
 
-    let n = server::dispatcher::claim::count_in_flight(&app.state, &me)
+    let n = server::services::judging::count_in_flight(&app.db, &me)
         .await
         .expect("count in flight");
     assert_eq!(n, 3);

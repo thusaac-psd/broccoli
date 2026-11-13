@@ -9,9 +9,9 @@
 //! plugin path.
 //!
 //! The natural backpressure signal is therefore **the live count of
-//! `status='Queued'` rows across the three tables that carry the
-//! durable-accept lifecycle**: `submission`, `code_run`, and
-//! `submission_judgement`. When that depth exceeds
+//! queued dispatch units**: `submission_judgement` and `code_run` rows
+//! in `status='Queued'` (a queued submission is counted through its
+//! current judgement). When that depth exceeds
 //! `server.max_queued_submissions`, accepting more work would only
 //! grow the buffer between ingress and dispatch - degrading p95
 //! POST->Pending latency without changing throughput. Better to shed
@@ -27,60 +27,30 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFi
 
 use common::SubmissionStatus;
 
-use crate::entity::{code_run, submission, submission_judgement};
+use crate::entity::{code_run, submission_judgement};
 use crate::error::AppError;
 use crate::state::AppState;
 
 /// `Retry-After` seconds returned to clients when the durable queue
 /// is full.
 ///
-/// The default `server.claim_poll_interval_ms` is `1000` (1s); 2s is
-/// one claim tick plus a small jitter buffer so retried requests are
-/// likely to land after at least one drain pass has run. Hard-coded
-/// rather than configurable to match the existing
-/// `permits::RETRY_AFTER_SECS = 1` convention - the latency horizon
-/// of a single claim tick is the right unit, and adding a knob to
-/// turn what's effectively "wait one tick" into "wait N ticks" would
-/// just invite operators to set it too high.
+/// A full queue drains as fast as in-flight room frees up, and the
+/// claim fiber's fallback tick (`server.claim_poll_interval_ms`, 1s by
+/// default) bounds how long freed room can go unnoticed; 2s is one tick
+/// plus a small buffer so a retried request is likely to land after room
+/// was taken. Hard-coded rather than configurable to match the existing
+/// `permits::RETRY_AFTER_SECS = 1` convention; a knob would just invite
+/// operators to set it too high.
 pub const RETRY_AFTER_SECS: u64 = 2;
 
-/// Counts rows in the durable-accept lifecycle that are currently in
-/// `status='Queued'`. The three tables are queried sequentially with
-/// short SELECTs - three round-trips dominate the cost.
-///
-/// **Index status (honesty disclaimer):** the `status` column on
-/// `submission`, `code_run`, and `submission_judgement` does **not**
-/// carry a btree index today - see the entity definitions at
-/// `packages/server/src/entity/submission.rs`,
-/// `packages/server/src/entity/code_run.rs`, and
-/// `packages/server/src/entity/submission_judgement.rs` (no
-/// `#[sea_orm(indexed)]` on `Status`). Each COUNT is therefore a
-/// sequential scan. At the default cap of ~5000 live `Queued`
-/// rows across the three tables, a seq scan on Postgres is
-/// sub-millisecond and the three round-trips dominate wall time -
-/// not a real cost in practice.
-///
-/// **Escape hatch if load testing later shows it matters:** a
-/// *partial* index - `CREATE INDEX ... ON submission (status) WHERE
-/// status = 'Queued'` (and likewise on the other two tables) - is the
-/// right tool. Low-cardinality status enums benefit more from a
-/// partial index keyed on the hot value than from a full btree, and
-/// the partial form keeps the index tiny because only `Queued` rows
-/// are indexed (steady-state size = the cap, ~5000 rows). Partial
-/// indexes require a raw SQL migration outside SeaORM's schema-sync
-/// flow, so add one only if production telemetry shows the COUNTs
-/// becoming a hotspot.
-///
-/// A single UNION ALL would shave a round-trip but complicates the
-/// SeaORM call surface for negligible benefit.
+/// Counts queued dispatch units: judgements (current or deferred) and code
+/// runs in `status='Queued'`. The judgement scan uses the index on
+/// `submission_judgement.status`; `code_run.status` carries none, which is
+/// fine at the default cap of a few thousand live rows.
 pub async fn count_queued_rows<C>(db: &C) -> Result<u64, AppError>
 where
     C: ConnectionTrait,
 {
-    let submissions = submission::Entity::find()
-        .filter(submission::Column::Status.eq(SubmissionStatus::Queued))
-        .count(db)
-        .await?;
     let code_runs = code_run::Entity::find()
         .filter(code_run::Column::Status.eq(SubmissionStatus::Queued))
         .count(db)
@@ -89,7 +59,7 @@ where
         .filter(submission_judgement::Column::Status.eq(SubmissionStatus::Queued))
         .count(db)
         .await?;
-    Ok(submissions + code_runs + judgements)
+    Ok(code_runs + judgements)
 }
 
 /// Returns `Err(AppError::Overloaded)` if the live queued-depth is

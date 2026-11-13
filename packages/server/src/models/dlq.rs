@@ -36,15 +36,24 @@ pub struct DlqMessageResponse {
     pub error_code: String,
     #[schema(example = "Database connection timeout")]
     pub error_message: String,
+    /// Attempts recorded in `retry_history`: failed deliveries of an operation
+    /// task, or each dead-lettering and operator retry of stuck work.
     #[schema(example = 3)]
     pub retry_count: i32,
     #[schema(example = "2025-09-01T08:00:00Z")]
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
+    /// When the message was last dead-lettered; a recurrence reopens the
+    /// message and moves this forward. Lists sort by it, newest first.
+    #[schema(example = "2025-09-02T10:00:00Z")]
+    pub last_failed_at: DateTime<Utc>,
+    /// Resolved by an operator, or, for a stuck submission, automatically once
+    /// it finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// The operator who resolved it; null when it was resolved automatically.
     pub resolved_by: Option<i32>,
 }
 
@@ -60,6 +69,7 @@ impl From<dead_letter_message::Model> for DlqMessageResponse {
             retry_count: m.retry_count,
             first_failed_at: m.first_failed_at,
             created_at: m.created_at,
+            last_failed_at: m.last_failed_at,
             resolved: m.resolved,
             resolved_at: m.resolved_at,
             resolved_by: m.resolved_by,
@@ -82,6 +92,8 @@ pub struct DlqMessageDetailResponse {
     pub error_code: String,
     #[schema(example = "Database connection timeout")]
     pub error_message: String,
+    /// Attempts recorded in `retry_history`: failed deliveries of an operation
+    /// task, or each dead-lettering and operator retry of stuck work.
     #[schema(example = 3)]
     pub retry_count: i32,
     pub retry_history: serde_json::Value,
@@ -89,9 +101,16 @@ pub struct DlqMessageDetailResponse {
     pub first_failed_at: DateTime<Utc>,
     #[schema(example = "2025-09-01T08:05:00Z")]
     pub created_at: DateTime<Utc>,
+    /// When the message was last dead-lettered; a recurrence reopens the
+    /// message and moves this forward. Lists sort by it, newest first.
+    #[schema(example = "2025-09-02T10:00:00Z")]
+    pub last_failed_at: DateTime<Utc>,
+    /// Resolved by an operator, or, for a stuck submission, automatically once
+    /// it finished with a verdict other than a system error.
     #[schema(example = false)]
     pub resolved: bool,
     pub resolved_at: Option<DateTime<Utc>>,
+    /// The operator who resolved it; null when it was resolved automatically.
     pub resolved_by: Option<i32>,
 }
 
@@ -109,6 +128,7 @@ impl From<dead_letter_message::Model> for DlqMessageDetailResponse {
             retry_history: m.retry_history,
             first_failed_at: m.first_failed_at,
             created_at: m.created_at,
+            last_failed_at: m.last_failed_at,
             resolved: m.resolved,
             resolved_at: m.resolved_at,
             resolved_by: m.resolved_by,

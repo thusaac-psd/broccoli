@@ -99,7 +99,7 @@ pub async fn insert_admitted(
         ));
     }
     new.created_at = Set(now);
-    let model = new.insert(&txn).await?;
+    let (model, _judgement) = crate::services::judging::create_submission(&txn, new).await?;
     txn.execute_raw(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO submission_feedback (submission_id, contest_id, user_id, plugin_id, state_key, metadata, slot_key) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         [model.id.into(), model.contest_id.into(), model.user_id.into(), plugin_id.into(),

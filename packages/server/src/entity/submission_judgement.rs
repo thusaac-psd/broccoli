@@ -30,9 +30,8 @@ pub struct Model {
     /// partial unique index `idx_submission_judgement_one_current`.
     #[sea_orm(default_value = false)]
     pub is_current: bool,
-    /// Set to true when the worker pipeline reaches a terminal status
-    /// (Judged, CompilationError, SystemError). Pending and in-progress
-    /// judgements stay false.
+    /// True exactly when `status` is terminal (Judged, CompilationError,
+    /// SystemError). A finalized judgement accepts no plugin writes.
     #[sea_orm(default_value = false)]
     pub is_finalized: bool,
 
@@ -42,6 +41,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub note: Option<String>,
 
+    #[sea_orm(indexed)]
     pub status: SubmissionStatus,
     #[sea_orm(column_type = "Text", nullable)]
     pub verdict: Option<Verdict>,
@@ -55,23 +55,31 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
 
-    /// Bumped each time the judgement is sent to the worker so stale
-    /// workers can be rejected. Mirrors `submission.judge_epoch`.
+    /// Fencing token of this judgement's current dispatch, allocated from
+    /// `submission.max_judge_epoch` whenever the judgement is opened or
+    /// requeued. Plugin writes carrying any other epoch are rejected.
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
 
     #[sea_orm(column_type = "String(StringLen::N(128))", nullable)]
     pub owner_server_id: Option<String>,
     pub lease_heartbeat_at: Option<DateTimeUtc>,
-    /// Immutable dispatch anchor; see `submission::Model::leased_at`.
+    /// When the current dispatch was claimed, by the database clock. Unlike
+    /// `lease_heartbeat_at` it is never refreshed, so the stuck detector can
+    /// bound a dispatch's age even while a live server keeps its lease.
     #[sea_orm(nullable)]
     pub leased_at: Option<DateTimeUtc>,
-    /// Dispatch attempts so far (1 after the first); see
-    /// `submission::Model::retry_count`.
+    /// Times this judgement was requeued after its owner was lost or it got
+    /// stuck; the budget is `max_dispatch_retries`.
     #[sea_orm(default_value = 0)]
-    pub retry_count: i32,
+    pub dispatch_retries: i32,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
+    /// When the unit last became `Queued` (created, rejudged or requeued), by
+    /// the database clock: what a queue backlog's age is measured from.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub queued_at: DateTimeUtc,
     pub finalized_at: Option<DateTimeUtc>,
 
     #[sea_orm(belongs_to, from = "submission_id", to = "id")]

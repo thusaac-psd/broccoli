@@ -1091,7 +1091,7 @@ export interface paths {
     };
     /**
      * List dead letter messages
-     * @description Returns a paginated list of dead letter messages. Requires `dlq:manage` permission.
+     * @description Returns a paginated list of dead letter messages, most recently failed first. Requires `dlq:manage` permission.
      */
     get: operations['listDlqMessages'];
     put?: never;
@@ -1133,7 +1133,7 @@ export interface paths {
     put?: never;
     /**
      * Bulk-retry DLQ messages
-     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError or Pending state are retryable; other message types are skipped. Requires `dlq:manage` permission.
+     * @description Retries multiple dead letter messages by resetting their submissions to Queued (the claim fiber then promotes each to Pending) and re-dispatching to the plugin-based judging system. Supports either specific message IDs or filter-based selection. Only stuck_submission messages with a known submission_id in SystemError state are retryable; other message types are skipped. Requires `dlq:manage` permission.
      */
     post: operations['bulkRetryDlq'];
     delete?: never;
@@ -1197,7 +1197,7 @@ export interface paths {
     put?: never;
     /**
      * Retry a DLQ message
-     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, and stuck_submission_judgement messages are visibility-only from here. Marks the DLQ entry as resolved. Requires `dlq:manage` permission.
+     * @description Retries a dead letter message by resetting the submission to Queued (the claim fiber then promotes it to Pending) and re-dispatching it to the plugin-based judging system. Only stuck_submission messages can be retried; operation_task, stuck_code_run, and stuck_submission_judgement messages are visibility-only from here. The message stays unresolved with the retry recorded in its history until the rejudge ends with a verdict other than a system error, which resolves it. Requires `dlq:manage` permission.
      */
     post: operations['retryDlqMessage'];
     delete?: never;
@@ -1912,7 +1912,7 @@ export interface paths {
     put?: never;
     /**
      * Discard a non-current submission judgement
-     * @description Deletes a non-current judgement and its test-case result rows. Requires `submission:rejudge` permission.
+     * @description Deletes a non-current judgement and its test-case result rows, and resolves its dead letter message, if any. Requires `submission:rejudge` permission.
      */
     post: operations['discardSubmissionJudgement'];
     delete?: never;
@@ -3003,19 +3003,35 @@ export interface components {
        * @example 1
        */
       id: number;
+      /**
+       * Format: date-time
+       * @description When the message was last dead-lettered; a recurrence reopens the
+       *     message and moves this forward. Lists sort by it, newest first.
+       * @example 2025-09-02T10:00:00Z
+       */
+      last_failed_at: string;
       /** @example job-abc123 */
       message_id: string;
       /** @example stuck_submission */
       message_type: string;
       payload: unknown;
-      /** @example false */
+      /**
+       * @description Resolved by an operator, or, for a stuck submission, automatically once
+       *     it finished with a verdict other than a system error.
+       * @example false
+       */
       resolved: boolean;
       /** Format: date-time */
       resolved_at?: string | null;
-      /** Format: int32 */
+      /**
+       * Format: int32
+       * @description The operator who resolved it; null when it was resolved automatically.
+       */
       resolved_by?: number | null;
       /**
        * Format: int32
+       * @description Attempts recorded in `retry_history`: failed deliveries of an operation
+       *     task, or each dead-lettering and operator retry of stuck work.
        * @example 3
        */
       retry_count: number;
@@ -3046,18 +3062,34 @@ export interface components {
        * @example 1
        */
       id: number;
+      /**
+       * Format: date-time
+       * @description When the message was last dead-lettered; a recurrence reopens the
+       *     message and moves this forward. Lists sort by it, newest first.
+       * @example 2025-09-02T10:00:00Z
+       */
+      last_failed_at: string;
       /** @example job-abc123 */
       message_id: string;
       /** @example stuck_submission */
       message_type: string;
-      /** @example false */
+      /**
+       * @description Resolved by an operator, or, for a stuck submission, automatically once
+       *     it finished with a verdict other than a system error.
+       * @example false
+       */
       resolved: boolean;
       /** Format: date-time */
       resolved_at?: string | null;
-      /** Format: int32 */
+      /**
+       * Format: int32
+       * @description The operator who resolved it; null when it was resolved automatically.
+       */
       resolved_by?: number | null;
       /**
        * Format: int32
+       * @description Attempts recorded in `retry_history`: failed deliveries of an operation
+       *     task, or each dead-lettering and operator retry of stuck work.
        * @example 3
        */
       retry_count: number;

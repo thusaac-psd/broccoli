@@ -43,8 +43,8 @@ pub use operation::{
     TaskExecutionResult,
 };
 pub use persistence::{
-    CodeRunResultRow, CodeRunUpdate, SqlBindSink, SubmissionStatus, SubmissionUpdate,
-    TestCaseResultRow, push_judge_sets, sanitize_result_text_field, sanitize_text_field,
+    CodeRunResultRow, CodeRunUpdate, SubmissionStatus, SubmissionUpdate, TestCaseResultRow,
+    sanitize_result_text_field, sanitize_text_field,
 };
 pub use query::{ProblemCheckerInfo, TestCaseData, TestCaseRow};
 pub use submission::{OnSubmissionInput, OnSubmissionOutput, SourceFile};

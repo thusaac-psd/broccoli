@@ -8,9 +8,9 @@ use tracing::{Instrument, error, info, instrument, warn};
 
 use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 
-use crate::consumers::mark_code_run_system_error_with_epoch;
 use crate::entity::{code_run, problem};
 use crate::models::code_run::CustomTestCaseInput;
+use crate::services::judging::{self, Unit};
 use crate::state::AppState;
 use crate::utils::judging::files_log_summary;
 
@@ -25,19 +25,18 @@ use crate::utils::judging::files_log_summary;
 /// budget so only a genuinely stuck call trips it.
 const CODE_RUN_DISPATCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// Mark a code_run as SystemError, LOGGING a failure of the mark itself instead
-/// of swallowing it with `let _ =`. If the terminalizing write fails (e.g. a
-/// transient DB error) the row would otherwise be left silently stuck in a
-/// non-terminal state with no trace of why, so surface it.
+/// Finalizes a code run whose dispatch failed as SystemError, fenced on the
+/// dispatch's epoch, logging a failure of the write itself: the run then
+/// stays in flight until a detector requeues it.
 async fn mark_code_run_error_or_log(
     db: &sea_orm::DatabaseConnection,
     code_run_id: i32,
     code: &str,
     message: &str,
-    judge_epoch: Option<i32>,
+    judge_epoch: i32,
 ) {
     if let Err(e) =
-        mark_code_run_system_error_with_epoch(db, code_run_id, code, message, judge_epoch).await
+        judging::fail_dispatch(db, Unit::CodeRun, code_run_id, judge_epoch, code, message).await
     {
         error!(
             code_run_id,
@@ -89,7 +88,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                     "No plugin registered for contest type {:?}",
                     code_run.contest_type
                 ),
-                Some(code_run.judge_epoch),
+                code_run.judge_epoch,
             )
             .await;
             return;
@@ -108,7 +107,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.id,
                 "PROBLEM_NOT_FOUND",
                 &format!("Problem {} not found", code_run.problem_id),
-                Some(code_run.judge_epoch),
+                code_run.judge_epoch,
             )
             .await;
             return;
@@ -120,7 +119,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.id,
                 "DATABASE_ERROR",
                 &format!("Failed to fetch problem: {}", e),
-                Some(code_run.judge_epoch),
+                code_run.judge_epoch,
             )
             .await;
             return;
@@ -136,7 +135,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.id,
                 "INVALID_FILES",
                 &format!("Failed to parse code run files: {}", e),
-                Some(code_run.judge_epoch),
+                code_run.judge_epoch,
             )
             .await;
             return;
@@ -188,7 +187,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                 code_run.id,
                 "SERIALIZATION_ERROR",
                 &format!("Failed to serialize input: {}", e),
-                Some(code_run.judge_epoch),
+                code_run.judge_epoch,
             )
             .await;
             return;
@@ -254,7 +253,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                             "Code run dispatch exceeded {}s timeout",
                             CODE_RUN_DISPATCH_TIMEOUT.as_secs()
                         ),
-                        Some(judge_epoch),
+                        judge_epoch,
                     )
                     .await;
                     return;
@@ -280,7 +279,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                                 &output
                                     .error_message
                                     .unwrap_or_else(|| "Unknown plugin error".to_string()),
-                                Some(judge_epoch),
+                                judge_epoch,
                             )
                             .await;
                         } else {
@@ -299,7 +298,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                             code_run_id,
                             "PLUGIN_INVALID_OUTPUT",
                             &format!("Plugin returned invalid output: {}", e),
-                            Some(judge_epoch),
+                            judge_epoch,
                         )
                         .await;
                     }
@@ -316,7 +315,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
                         code_run_id,
                         "PLUGIN_EXECUTION_ERROR",
                         &e.to_string(),
-                        Some(judge_epoch),
+                        judge_epoch,
                     )
                     .await;
                 }

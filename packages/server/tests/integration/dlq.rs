@@ -404,10 +404,10 @@ mod dlq_retry {
         let problem_id = app.create_problem(&admin_token, "Retry Test Problem").await;
 
         let sub_id = insert_submission(&app, 1, problem_id, SubmissionStatus::SystemError).await;
-        // The stuck detector DLQs a submission once its retry budget is spent.
+        // Its system-error retries are spent, so the SystemError stands.
         submission::ActiveModel {
             id: Set(sub_id),
-            retry_count: Set(6),
+            system_error_retries: Set(6),
             ..Default::default()
         }
         .update(&app.db)
@@ -430,17 +430,23 @@ mod dlq_retry {
         assert!(sub.error_code.is_none());
         assert!(sub.error_message.is_none());
         assert_eq!(
-            sub.retry_count, 0,
+            sub.system_error_retries, 0,
             "a DLQ retry starts a new judging attempt with a fresh retry budget"
         );
+        let judgement = app.current_judgement(sub_id).await;
+        assert_eq!(judgement.status, SubmissionStatus::Queued);
+        assert_eq!(judgement.dispatch_retries, 0);
 
         let msg = dead_letter_message::Entity::find_by_id(dlq_id)
             .one(&app.db)
             .await
             .expect("DB query failed")
             .expect("DLQ message should exist");
-        assert!(msg.resolved);
-        assert!(msg.resolved_at.is_some());
+        assert!(
+            !msg.resolved,
+            "the message stays open until the rejudge ends with a verdict that stands"
+        );
+        assert_eq!(msg.retry_count, 4, "the retry is recorded in its history");
     }
 
     #[tokio::test]
@@ -583,9 +589,9 @@ mod bulk_retry_dlq {
         assert_eq!(res.body["retried"], 2);
         assert_eq!(res.body["skipped"], 0);
 
-        // Handler spawns dispatch_to_plugin after commit; status races and
-        // can flip back to SystemError before we read. Stable observables:
-        // error_code is no longer "STUCK_JOB", and the DLQ entry is resolved.
+        // The claim fiber may already be dispatching the rejudge, so the
+        // stable observables are the cleared error code and the retry
+        // recorded on each still-open message.
         let s1 = submission::Entity::find_by_id(sub1)
             .one(&app.db)
             .await
@@ -605,13 +611,15 @@ mod bulk_retry_dlq {
             .await
             .unwrap()
             .unwrap();
-        assert!(m1.resolved);
+        assert!(!m1.resolved);
+        assert_eq!(m1.retry_count, 4);
         let m2 = dead_letter_message::Entity::find_by_id(dlq2)
             .one(&app.db)
             .await
             .unwrap()
             .unwrap();
-        assert!(m2.resolved);
+        assert!(!m2.resolved);
+        assert_eq!(m2.retry_count, 4);
     }
 
     #[tokio::test]

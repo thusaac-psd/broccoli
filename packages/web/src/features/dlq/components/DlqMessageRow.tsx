@@ -64,11 +64,15 @@ export function DlqMessageRow({ message, onClick }: Props) {
         {message.retry_count}
       </td>
       <td className="p-3 align-top text-xs text-muted-foreground tabular-nums whitespace-nowrap">
-        {timeAgo(message.created_at, t)}
+        {timeAgo(message.last_failed_at, t)}
       </td>
       <td className="p-3 align-top">
         {message.resolved ? (
-          <Badge variant="secondary">{t('dlq.row.resolved')}</Badge>
+          <Badge variant="secondary">
+            {message.resolved_by === null
+              ? t('dlq.row.recovered')
+              : t('dlq.row.resolved')}
+          </Badge>
         ) : (
           <Badge
             variant="outline"

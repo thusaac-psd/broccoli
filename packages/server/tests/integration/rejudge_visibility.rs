@@ -93,6 +93,7 @@ async fn insert_judged_submission(app: &TestApp, problem_id: i32, owner_id: i32)
         memory_used: Set(Some(128)),
         compile_output: Set(Some("g++ main.cpp -o main\n".into())),
         judge_epoch: Set(1),
+        max_judge_epoch: Set(1),
         created_at: Set(now),
         judged_at: Set(Some(now)),
         ..Default::default()

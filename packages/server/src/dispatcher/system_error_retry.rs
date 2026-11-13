@@ -1,49 +1,30 @@
 //! SystemError-retry reaper.
 //!
-//! A `SystemError` verdict reflects a SYSTEM-side condition - the interactive
-//! manager failed to compile under contention, a contestant compile step hit a
-//! sandbox error, an operation result was lost - never the contestant's own
-//! code. The contest invariant forbids such a condition from standing as the
-//! contestant's verdict.
-//!
-//! This fiber reconciles from the durable terminal state rather than any
-//! in-flight control-flow site, which is what makes it path-agnostic: it does
-//! not matter whether the submission was judged synchronously (batch) or via the
-//! detached operation path (interactive) - both finalize the same
-//! `submission_judgement` row, and the reaper sees it. It periodically scans for
-//! current, finalized judgements whose terminal outcome is a `SystemError` in any
-//! of its shapes - plugin-finalized (`status == Judged` + `verdict ==
-//! SystemError`) or stuck-handler-terminal / dispatch-exhaustion (`status ==
-//! SystemError`) - with retry budget remaining, requeues them to a fresh epoch
-//! (in lockstep with the parent submission, results wiped - see
-//! `crate::services::submission_dispatch::requeue_judgement_for_system_error_retry`)
-//! and re-dispatches them. Bounded by `max_system_error_retries`; only when the
-//! budget is exhausted does the `SystemError` stand (a genuinely broken problem).
-//!
-//! The reaper lives in a top-level fiber (not in the dispatch call graph), so the
-//! re-dispatch is a plain `dispatch_to_plugin_with_judgement` call with no
-//! recursion. Re-dispatch passes `fire_after_judging = true` so a retried
-//! submission still fires its after-judging hooks when it finally completes.
+//! A `SystemError` reflects a system-side condition (contention, a lost
+//! operation result, a dispatch failure, a stuck job), never the
+//! contestant's own code, so it must not stand as the contestant's verdict.
+//! This fiber reconciles from the durable terminal state, whatever path
+//! finalized it: it requeues current judgements that finalized as a
+//! `SystemError` in any shape while their submission has system-error
+//! retries left (`max_system_error_retries`), and the claim fiber judges them
+//! again. Only when that budget is spent does the `SystemError` stand. See
+//! `services::judging::retry_system_errors`.
 
 use std::time::Duration;
 
-use common::{SubmissionDlqErrorCode, SubmissionStatus, Verdict};
-use sea_orm::EntityTrait;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::entity::submission_judgement;
+use crate::services::judging::{self, RetryBudget};
 use crate::state::AppState;
 
 /// How often to scan for retryable SystemError verdicts. Kept short so a
-/// transient failure recovers quickly, but the scan is a cheap indexed query.
+/// transient failure recovers quickly; the scan is a cheap indexed query.
 const SCAN_INTERVAL_SECS: u64 = 5;
-/// Maximum judgements requeued per scan. Deliberately small: re-judges hold a
-/// dispatcher permit for their whole duration, so a large batch would starve
-/// live contest submissions. A backlog instead drains a few per tick as spare
-/// capacity allows - slow is fine, the invariant is only that no SystemError is
-/// ever abandoned.
-const SCAN_BATCH_SIZE: u64 = 8;
+/// Maximum judgements requeued per scan. Deliberately small, so a backlog of
+/// retries drains a few per tick instead of crowding out live submissions in
+/// the claim queue.
+const SCAN_BATCH_SIZE: u32 = 8;
 
 pub async fn run(
     state: AppState,
@@ -51,15 +32,18 @@ pub async fn run(
     max_system_error_retries: u32,
     mut cancel: watch::Receiver<bool>,
 ) {
+    let budget = RetryBudget::new(max_system_error_retries);
     let mut interval = tokio::time::interval(Duration::from_secs(SCAN_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                let scan = scan_once(&state, &server_id, max_system_error_retries);
-                if let Some(Err(e)) = common::deadline::bounded("dispatcher.system_error_retry", common::deadline::BACKGROUND_STEP, scan).await {
-                    error!(server_id = %server_id, error = %e, "SystemError-retry scan failed");
+                let scan = scan_once(&state, budget);
+                match common::deadline::bounded("dispatcher.system_error_retry", common::deadline::BACKGROUND_STEP, scan).await {
+                    Some(Ok(0)) | None => {}
+                    Some(Ok(requeued)) => info!(server_id = %server_id, requeued, "Requeued SystemError verdicts for a bounded retry"),
+                    Some(Err(e)) => error!(server_id = %server_id, error = %e, "SystemError-retry scan failed"),
                 }
             }
             changed = cancel.changed() => {
@@ -71,382 +55,10 @@ pub async fn run(
     }
 }
 
-async fn scan_once(
-    state: &AppState,
-    server_id: &str,
-    max_system_error_retries: u32,
-) -> anyhow::Result<()> {
-    let max = std::cmp::min(max_system_error_retries, i32::MAX as u32) as i32;
-
+/// One scan. Rejudging on a replica without a handler for the contest type
+/// would only fail again, so a judgement is left to a replica that has one
+/// (see `dispatcher::prefer_local_handler`).
+async fn scan_once(state: &AppState, budget: RetryBudget) -> anyhow::Result<u64> {
     let local = super::local_contest_types(state).await;
-    let candidates = find_retryable_system_errors(&state.db, max, SCAN_BATCH_SIZE, &local).await?;
-
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    let mut requeued = 0u32;
-    for judgement in candidates {
-        // Respect dispatcher admission control: reserve a permit BEFORE
-        // re-dispatching, exactly as the steal does. Re-judges then share the
-        // fleet's bounded judging capacity instead of fanning out unbounded - a
-        // backlog of SystemErrors drains gradually rather than overwhelming the
-        // workers (which can wedge interactive judging). When the queue is full,
-        // stop this scan; the remaining candidates are retried next tick (no
-        // SystemError is ever abandoned).
-        let slot = match state.dispatcher_permits.reserve() {
-            Ok(slot) => slot,
-            Err(e) => {
-                warn!(
-                    server_id = %server_id,
-                    requeued,
-                    retry_after_secs = e.retry_after_secs,
-                    "SystemError-retry scan paused: dispatcher queue full; remaining retries deferred"
-                );
-                break;
-            }
-        };
-
-        // `requeue_*` re-reads under its own transaction and is epoch-gated, so a
-        // concurrent reaper (multi-replica) or a steal that already advanced this
-        // judgement loses harmlessly (returns None). No owner scoping is needed.
-        match crate::services::submission_dispatch::requeue_judgement_for_system_error_retry(
-            &state.db,
-            judgement.submission_id,
-            judgement.id,
-            judgement.judge_epoch,
-            server_id,
-            max_system_error_retries,
-        )
-        .await
-        {
-            Ok(Some(resubmission)) => {
-                requeued += 1;
-                warn!(
-                    server_id = %server_id,
-                    submission_id = resubmission.id,
-                    judgement_id = judgement.id,
-                    new_epoch = resubmission.judge_epoch,
-                    retry_count = resubmission.retry_count,
-                    "Re-judging a SystemError verdict (system condition, not the contestant's code)"
-                );
-                let state = state.clone();
-                let judgement_id = judgement.id;
-                slot.spawn("system_error_retry", async move {
-                    crate::services::submission_dispatch::dispatch_submission_to_plugin_with_judgement(
-                        state,
-                        resubmission,
-                        Some(judgement_id),
-                        true,
-                    )
-                    .await;
-                });
-            }
-            // `slot` is dropped here, returning the reserved permit.
-            Ok(None) => {}
-            Err(e) => {
-                error!(
-                    server_id = %server_id,
-                    submission_id = judgement.submission_id,
-                    judgement_id = judgement.id,
-                    error = %e,
-                    "Failed to requeue SystemError judgement; leaving the verdict in place"
-                );
-            }
-        }
-    }
-
-    if requeued > 0 {
-        info!(server_id = %server_id, requeued, "Re-dispatched SystemError verdicts for bounded retry");
-    }
-
-    Ok(())
-}
-
-/// Current, finalized judgements whose terminal outcome is a `SystemError` in
-/// ANY shape, with retry budget remaining. Path-agnostic: whatever finalized
-/// them (synchronous batch, detached interactive, stuck-handler terminal, or
-/// dispatch-exhaustion) wrote one of these rows. `retry_count < max` keeps a
-/// genuinely broken problem terminalizing after a finite number of attempts.
-///
-/// Two shapes are selected, and only these:
-/// * `status == Judged AND verdict == SystemError` - plugin-finalized;
-/// * `status == SystemError` - stuck-handler terminal / dispatch-exhaustion
-///   (verdict typically NULL).
-///
-/// A deterministic plugin refusal (`error_code == PLUGIN_REFUSED`, see
-/// `OnSubmissionOutput::refused`) is a `SystemError` too, but re-running it
-/// can only fail the same way, so it is excluded.
-///
-/// A contestant `CompileError` lands as `status == CompilationError` (never
-/// `SystemError`), so it is never selected; nor are own-code verdicts
-/// (`status == Judged` with WA/TLE/MLE/RE), non-current, or unfinalized rows.
-///
-/// Rejudging on a replica without a handler for the contest type would only
-/// fail again and burn the retry budget, so a judgement is left to a replica
-/// that has one (see `dispatcher::prefer_local_handler`).
-async fn find_retryable_system_errors(
-    db: &sea_orm::DatabaseConnection,
-    max_retry_count: i32,
-    batch_size: u64,
-    local_contest_types: &[String],
-) -> Result<Vec<submission_judgement::Model>, sea_orm::DbErr> {
-    let sql = format!(
-        r#"SELECT * FROM submission_judgement
-           WHERE is_current = TRUE
-             AND is_finalized = TRUE
-             AND ((status = $1 AND verdict = $2) OR status = $3)
-             AND (error_code IS NULL OR error_code <> $7)
-             AND retry_count < $4
-             AND {handled}
-           ORDER BY id
-           LIMIT $5"#,
-        handled = super::prefer_local_handler_for("submission_judgement", "$6"),
-    );
-    submission_judgement::Entity::find()
-        .from_raw_sql(sea_orm::Statement::from_sql_and_values(
-            sea_orm::DbBackend::Postgres,
-            sql,
-            [
-                SubmissionStatus::Judged.to_string().into(),
-                Verdict::SystemError.to_string().into(),
-                SubmissionStatus::SystemError.to_string().into(),
-                max_retry_count.into(),
-                (batch_size as i64).into(),
-                local_contest_types.to_vec().into(),
-                SubmissionDlqErrorCode::PLUGIN_REFUSED.into(),
-            ],
-        ))
-        .all(db)
-        .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::entity::{problem, submission, user};
-    use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, QueryFilter, Set};
-
-    async fn seed_submission(db: &DatabaseConnection) -> i32 {
-        let now = chrono::Utc::now();
-        // A test may seed several submissions; each gets its own user.
-        let username = format!("reaper-user-{}", uuid::Uuid::new_v4());
-        let u = user::ActiveModel {
-            username: Set(username.clone()),
-            display_name: Set(username),
-            password: Set("x".to_string()),
-            created_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert user");
-        let p = problem::ActiveModel {
-            title: Set("reaper-problem".to_string()),
-            content: Set("c".to_string()),
-            time_limit: Set(1000),
-            memory_limit: Set(262_144),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert problem");
-        submission::ActiveModel {
-            files: Set(serde_json::json!({})),
-            language: Set("cpp".to_string()),
-            user_id: Set(u.id),
-            problem_id: Set(p.id),
-            status: Set(SubmissionStatus::Judged),
-            judge_epoch: Set(0),
-            created_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert submission")
-        .id
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn seed_judgement(
-        db: &DatabaseConnection,
-        submission_id: i32,
-        is_current: bool,
-        is_finalized: bool,
-        status: SubmissionStatus,
-        verdict: Option<Verdict>,
-        retry_count: i32,
-    ) -> i32 {
-        let now = chrono::Utc::now();
-        submission_judgement::ActiveModel {
-            submission_id: Set(submission_id),
-            version: Set(1),
-            is_current: Set(is_current),
-            is_finalized: Set(is_finalized),
-            status: Set(status),
-            verdict: Set(verdict),
-            judge_epoch: Set(0),
-            retry_count: Set(retry_count),
-            finalized_at: Set(is_finalized.then(chrono::Utc::now)),
-            created_at: Set(now),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .expect("insert judgement")
-        .id
-    }
-
-    /// The reaper selects ONLY current, finalized, `Judged`+`SystemError`
-    /// judgements with retry budget - and nothing else. This is the safety
-    /// boundary that keeps contestant verdicts (CompileError, WrongAnswer) and
-    /// exhausted/superseded rows untouched.
-    #[tokio::test]
-    async fn reaper_selects_only_retryable_system_errors() {
-        let (_pg, db) = crate::test_support::postgres().await;
-
-        // SHOULD be selected: current, finalized, Judged + SystemError, budget.
-        let s_ok = seed_submission(&db).await;
-        let j_ok = seed_judgement(
-            &db,
-            s_ok,
-            true,
-            true,
-            SubmissionStatus::Judged,
-            Some(Verdict::SystemError),
-            0,
-        )
-        .await;
-
-        // NOT selected - exhausted (retry_count == max).
-        let s_exhausted = seed_submission(&db).await;
-        seed_judgement(
-            &db,
-            s_exhausted,
-            true,
-            true,
-            SubmissionStatus::Judged,
-            Some(Verdict::SystemError),
-            5,
-        )
-        .await;
-
-        // NOT selected - contestant CompileError (status=CompilationError).
-        let s_ce = seed_submission(&db).await;
-        seed_judgement(
-            &db,
-            s_ce,
-            true,
-            true,
-            SubmissionStatus::CompilationError,
-            None,
-            0,
-        )
-        .await;
-
-        // NOT selected - contestant WrongAnswer.
-        let s_wa = seed_submission(&db).await;
-        seed_judgement(
-            &db,
-            s_wa,
-            true,
-            true,
-            SubmissionStatus::Judged,
-            Some(Verdict::WrongAnswer),
-            0,
-        )
-        .await;
-
-        // NOT selected - a superseded (non-current) SystemError.
-        let s_old = seed_submission(&db).await;
-        seed_judgement(
-            &db,
-            s_old,
-            false,
-            true,
-            SubmissionStatus::Judged,
-            Some(Verdict::SystemError),
-            0,
-        )
-        .await;
-
-        // NOT selected - still judging (not finalized).
-        let s_running = seed_submission(&db).await;
-        seed_judgement(
-            &db,
-            s_running,
-            true,
-            false,
-            SubmissionStatus::Running,
-            None,
-            0,
-        )
-        .await;
-
-        // SHOULD be selected - stuck-handler terminal / dispatch-exhaustion shape:
-        // status=SystemError with a NULL verdict, current, finalized, budget. The
-        // reaper previously matched only Judged+SystemError, abandoning this.
-        let s_stuck = seed_submission(&db).await;
-        let j_stuck = seed_judgement(
-            &db,
-            s_stuck,
-            true,
-            true,
-            SubmissionStatus::SystemError,
-            None,
-            0,
-        )
-        .await;
-
-        // NOT selected - a plugin's deterministic refusal. SHOULD be selected -
-        // an ordinary (retryable) plugin failure.
-        let s_refused = seed_submission(&db).await;
-        let j_refused = seed_judgement(
-            &db,
-            s_refused,
-            true,
-            true,
-            SubmissionStatus::SystemError,
-            None,
-            0,
-        )
-        .await;
-        let s_plugin_err = seed_submission(&db).await;
-        let j_plugin_err = seed_judgement(
-            &db,
-            s_plugin_err,
-            true,
-            true,
-            SubmissionStatus::SystemError,
-            None,
-            0,
-        )
-        .await;
-        for (id, code) in [
-            (j_refused, SubmissionDlqErrorCode::PLUGIN_REFUSED),
-            (j_plugin_err, "PLUGIN_ERROR"),
-        ] {
-            submission_judgement::Entity::update_many()
-                .col_expr(
-                    submission_judgement::Column::ErrorCode,
-                    sea_orm::sea_query::Expr::value(Some(code.to_string())),
-                )
-                .filter(submission_judgement::Column::Id.eq(id))
-                .exec(&db)
-                .await
-                .expect("set error code");
-        }
-
-        let found = find_retryable_system_errors(&db, 5, 64, &[])
-            .await
-            .expect("query candidates");
-        let ids: Vec<i32> = found.iter().map(|j| j.id).collect();
-        assert_eq!(
-            ids,
-            vec![j_ok, j_stuck, j_plugin_err],
-            "both the Judged+SystemError and the status=SystemError shapes (with budget) are selected"
-        );
-    }
+    Ok(judging::retry_system_errors(&state.db, budget, SCAN_BATCH_SIZE, &local).await?)
 }

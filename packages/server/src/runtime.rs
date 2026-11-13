@@ -585,13 +585,15 @@ fn cors_layer(cors: &crate::config::CorsConfig) -> anyhow::Result<CorsLayer> {
 /// stop grace of container supervisors, so a normal stop is not a SIGKILL.
 const PLUGIN_CALL_DRAIN: Duration = Duration::from_secs(8);
 
-/// Release every in-flight row this server owns so the fleet re-dispatches
-/// it (see [`crate::dispatcher::steal::release_owned_leases`]).
+/// Requeue every in-flight unit this server owns so the fleet dispatches it
+/// again (see [`crate::services::judging::release_leases`]).
 async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str, phase: &str) {
-    match crate::dispatcher::steal::release_owned_leases(db, server_id).await {
-        Ok((submissions, code_runs, judgements)) => info!(
+    match crate::services::judging::release_leases(db, server_id).await {
+        Ok(counts) => info!(
             server_id,
-            submissions, code_runs, judgements, "{phase}: released own in-flight work"
+            judgements = counts.judgements,
+            code_runs = counts.code_runs,
+            "{phase}: requeued own in-flight work"
         ),
         Err(e) => warn!(
             server_id,

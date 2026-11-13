@@ -50,17 +50,22 @@ pub struct Model {
     #[sea_orm(column_type = "String(StringLen::N(128))", nullable)]
     pub owner_server_id: Option<String>,
     pub lease_heartbeat_at: Option<DateTimeUtc>,
-    /// Immutable dispatch anchor; see `submission::Model::leased_at`.
+    /// When the current dispatch was claimed; see
+    /// `submission_judgement::Model::leased_at`.
     #[sea_orm(nullable)]
     pub leased_at: Option<DateTimeUtc>,
-    /// Dispatch attempts so far (1 after the first); see
-    /// `submission::Model::retry_count`.
+    /// Times this run was requeued after its owner was lost or it got stuck;
+    /// the budget is `max_dispatch_retries`.
     #[sea_orm(default_value = 0)]
-    pub retry_count: i32,
+    pub dispatch_retries: i32,
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
 
     pub created_at: DateTimeUtc,
+    /// When the unit last became `Queued` (created, rejudged or requeued), by
+    /// the database clock: what a queue backlog's age is measured from.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
+    pub queued_at: DateTimeUtc,
     pub judged_at: Option<DateTimeUtc>,
 }
 

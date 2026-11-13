@@ -60,90 +60,6 @@ pub fn sanitize_result_text_field(s: &str) -> Cow<'_, str> {
     Cow::Owned(truncated)
 }
 
-/// Sink for positional SQL bind parameters: binds a value and returns its
-/// placeholder (e.g. `$3`). Implemented by the guest SDK's `db::Params` and the
-/// server's host-fn mirror, so [`push_judge_sets`] can be single-sourced across
-/// the host/guest boundary while each side keeps its own bind policy (the guest
-/// scrubs NUL eagerly; the host defers to the SQL execution choke point).
-pub trait SqlBindSink {
-    fn bind_value(&mut self, value: serde_json::Value) -> String;
-}
-
-/// Build the `SET` column list shared by the `submission`/`code_run` cache row
-/// and its mirrored judgement row from a judged update.
-///
-/// The tri-state `Option<Option<_>>` fields distinguish "leave untouched"
-/// (`None`) from "set NULL" (`Some(None)`); a terminal status also stamps
-/// `judged_at = NOW()`, and a non-finite score is clamped to 0. Host and guest
-/// MUST build byte-identical SQL, so the decision table lives here once rather
-/// than forked at each call site (see docs/plans/dedup-backlog.md).
-#[allow(clippy::too_many_arguments)]
-pub fn push_judge_sets<P: SqlBindSink>(
-    p: &mut P,
-    sets: &mut Vec<String>,
-    status: &Option<SubmissionStatus>,
-    verdict: &Option<Option<Verdict>>,
-    score: &Option<f64>,
-    time_used: &Option<Option<i32>>,
-    memory_used: &Option<Option<i32>>,
-    compile_output: &Option<Option<String>>,
-    error_code: &Option<Option<String>>,
-    error_message: &Option<Option<String>>,
-) {
-    if let Some(status) = status {
-        sets.push(format!("status = {}", p.bind_value(status.as_str().into())));
-        if status.is_terminal() {
-            sets.push("judged_at = NOW()".into());
-        }
-    }
-
-    match verdict {
-        Some(Some(v)) => sets.push(format!("verdict = {}", p.bind_value(v.to_db_str().into()))),
-        Some(None) => sets.push("verdict = NULL".into()),
-        None => {}
-    }
-
-    if let Some(score) = score {
-        let val = if score.is_finite() { *score } else { 0.0 };
-        sets.push(format!("score = {}", p.bind_value(val.into())));
-    }
-
-    push_double_opt(p, sets, "time_used", time_used);
-    push_double_opt(p, sets, "memory_used", memory_used);
-    push_double_opt_str(p, sets, "compile_output", compile_output);
-    push_double_opt_str(p, sets, "error_code", error_code);
-    push_double_opt_str(p, sets, "error_message", error_message);
-}
-
-fn push_double_opt<P: SqlBindSink>(
-    p: &mut P,
-    sets: &mut Vec<String>,
-    col: &str,
-    val: &Option<Option<i32>>,
-) {
-    match val {
-        Some(Some(v)) => sets.push(format!("{col} = {}", p.bind_value((*v).into()))),
-        Some(None) => sets.push(format!("{col} = NULL")),
-        None => {}
-    }
-}
-
-fn push_double_opt_str<P: SqlBindSink>(
-    p: &mut P,
-    sets: &mut Vec<String>,
-    col: &str,
-    val: &Option<Option<String>>,
-) {
-    match val {
-        Some(Some(v)) => sets.push(format!(
-            "{col} = {}",
-            p.bind_value(sanitize_result_text_field(v).as_ref().into())
-        )),
-        Some(None) => sets.push(format!("{col} = NULL")),
-        None => {}
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmissionStatus {
     Compiling,
@@ -251,17 +167,53 @@ pub struct TestCaseResultRow {
     pub stderr: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodeRunUpdate {
     pub code_run_id: i32,
     pub judge_epoch: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<SubmissionStatus>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub verdict: Option<Option<Verdict>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_finite_opt_f64"
+    )]
     pub score: Option<f64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub time_used: Option<Option<i32>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub memory_used: Option<Option<i32>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub compile_output: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub error_code: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
     pub error_message: Option<Option<String>>,
 }
 
@@ -274,12 +226,13 @@ impl CodeRunUpdate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeRunResultRow {
     pub code_run_id: i32,
     pub judge_epoch: i32,
     pub run_index: i32,
     pub verdict: Verdict,
+    #[serde(serialize_with = "serialize_finite_f64")]
     pub score: f64,
     pub time_used: Option<i32>,
     pub memory_used: Option<i32>,
@@ -291,73 +244,6 @@ pub struct CodeRunResultRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Records bound values and hands back sequential `$N` placeholders, so a
-    /// test can assert exactly what SQL `push_judge_sets` builds.
-    struct RecordingSink {
-        args: Vec<serde_json::Value>,
-    }
-
-    impl SqlBindSink for RecordingSink {
-        fn bind_value(&mut self, value: serde_json::Value) -> String {
-            self.args.push(value);
-            format!("${}", self.args.len())
-        }
-    }
-
-    #[test]
-    fn push_judge_sets_builds_expected_set_list_and_args() {
-        let mut p = RecordingSink { args: Vec::new() };
-        let mut sets = Vec::new();
-        push_judge_sets(
-            &mut p,
-            &mut sets,
-            &Some(SubmissionStatus::Judged), // terminal -> also stamps judged_at
-            &Some(Some(Verdict::Accepted)),  // Some(Some) -> bound
-            &Some(f64::NAN),                 // non-finite -> clamped to 0
-            &Some(Some(120)),                // Some(Some) -> bound
-            &Some(None),                     // Some(None) -> = NULL, no bind
-            &Some(Some("compile log".to_string())), // Some(Some) -> bound (sanitized)
-            &None,                           // None -> column untouched
-            &Some(None),                     // Some(None) -> = NULL, no bind
-        );
-
-        let expected: Vec<String> = [
-            "status = $1",
-            "judged_at = NOW()",
-            "verdict = $2",
-            "score = $3",
-            "time_used = $4",
-            "memory_used = NULL",
-            "compile_output = $5",
-            "error_message = NULL",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        assert_eq!(sets, expected);
-        assert_eq!(
-            p.args,
-            vec![
-                serde_json::json!("Judged"),
-                serde_json::json!("Accepted"),
-                serde_json::json!(0.0),
-                serde_json::json!(120),
-                serde_json::json!("compile log"),
-            ]
-        );
-    }
-
-    #[test]
-    fn push_judge_sets_all_none_writes_nothing() {
-        let mut p = RecordingSink { args: Vec::new() };
-        let mut sets = Vec::new();
-        push_judge_sets(
-            &mut p, &mut sets, &None, &None, &None, &None, &None, &None, &None, &None,
-        );
-        assert!(sets.is_empty());
-        assert!(p.args.is_empty());
-    }
 
     #[test]
     fn sanitize_text_field_passes_through_clean_strings() {
@@ -435,6 +321,28 @@ mod tests {
         let b = serde_json::to_string(&explicit_null).unwrap();
         assert!(!a.contains("verdict"), "absent field must be omitted: {a}");
         assert!(b.contains("\"verdict\":null"), "null must be present: {b}");
+    }
+
+    #[test]
+    fn code_run_update_round_trips_with_absent_and_null_distinct() {
+        let update = CodeRunUpdate {
+            code_run_id: 4,
+            judge_epoch: 5,
+            status: Some(SubmissionStatus::Judged),
+            verdict: Some(None),
+            ..Default::default()
+        };
+        let wire = serde_json::to_string(&update).unwrap();
+        assert!(
+            !wire.contains("score"),
+            "absent field must be omitted: {wire}"
+        );
+        assert!(
+            wire.contains("\"verdict\":null"),
+            "null must be present: {wire}"
+        );
+        let back: CodeRunUpdate = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, update);
     }
 
     #[test]

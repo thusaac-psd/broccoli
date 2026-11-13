@@ -10,10 +10,10 @@ Done already (for reference on the pattern):
 - `services/windowed_session.rs` — shared windowed-session engine extracted from
   `operation_batch.rs` / `evaluate_batch` (commit e618f98); a later
   drain-on-refill-failure fix then landed once instead of twice.
-- `entity/judgement_reset.rs` — single source for the judged-output column clear
-  list used by `dispatcher/steal.rs`, `dlq/stuck/recovery.rs`, and
-  `services/submission_dispatch.rs` (whose pre-extraction judgement reset was
-  missing `CompileOutput`).
+- `services/judging/` — the one owner of every judgement and code-run
+  transition; the judged-output column clear list (`cleared_output_sets`), the
+  submission cache mirror (`MIRROR_SETS`) and the status sets
+  (`common::StatusPhase`) each exist once.
 - `Verdict::severity` — canonical table now lives only in
   `broccoli_types::types::Verdict`; `common::Verdict` delegates and carries a
   drift-pin test.
@@ -22,13 +22,9 @@ Done already (for reference on the pattern):
   instead of redefining them verbatim, so the host proxy and the guest SDK share
   one type (the old pair serialized compatibly only by hand — a silent
   serde-drift trap).
-- `broccoli_types::types::push_judge_sets` / `push_double_opt[_str]` — the
-  judged `SET`-list builder is single-sourced behind a `SqlBindSink` trait; the
-  guest SDK (`server-sdk/src/sdk/shared.rs`) and the host mirror
-  (`server/src/host_funcs/submissions.rs`) share the builder while each keeps
-  its own bind policy (guest scrubs NUL eagerly at bind time; host defers to the
-  `sql::execute_on_pool` choke point). Golden tests pin the exact SET-list/arg
-  contract against drift.
+- `push_judge_sets` — the judged `SET`-list builder exists once, host-side in
+  `server/src/services/judging/plugin_writes.rs`; the guest sends structured
+  updates and builds no judging SQL.
 - `utils::blob::take_required_file` / `resolve_virtual_path` — the
   post-multipart required-file unwrap+validate and the `path`-else-filename
   virtual-path resolution are single-sourced out of

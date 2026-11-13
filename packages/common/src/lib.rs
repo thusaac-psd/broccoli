@@ -29,4 +29,4 @@ pub mod worker;
 
 pub use config::{DlqConfig, MqAppConfig};
 pub use dlq::{DlqEnvelope, DlqErrorCode, DlqMessageType, SubmissionDlqErrorCode};
-pub use submission_status::{SubmissionStatus, Verdict};
+pub use submission_status::{StatusPhase, SubmissionStatus, Verdict};
