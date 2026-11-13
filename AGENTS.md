@@ -121,9 +121,9 @@ It needs no setup. The credentials default to the ones
 
 Settings are required (URLs, secrets), derived (pool sizes, the claim loop,
 cookie security, log format) or advanced overrides with defaults, listed in
-`release/docs/configuration-reference.md`. Do not add a key whose value can
-be derived from the machine or the request; a removed key needs no shim,
-since the binaries warn about every key they do not read.
+`release/docs/configuration-reference.md`. Do not add a key whose value can be
+derived from the machine or the request; a removed key needs no shim, since the
+binaries warn about every key they do not read.
 
 ## Architecture Notes From The Current Tree
 
