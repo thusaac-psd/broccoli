@@ -17,7 +17,7 @@
 //! A queued waiter is an async future. Dropping it leaves the queue, so a
 //! request that went away no longer waits for a token.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::Instant;
@@ -111,8 +111,9 @@ struct State {
     next_waiter: u64,
     /// Queued top-level calls per class, oldest first.
     queued: [BTreeMap<u64, oneshot::Sender<Token>>; 2],
-    /// Parked calls returning from a host function, served before any queue.
-    resuming: std::collections::VecDeque<(CallClass, SyncSender<Token>)>,
+    /// Parked calls returning from a host function, per class. Within the
+    /// class a token goes to, they go ahead of its queued calls.
+    resuming: [VecDeque<SyncSender<Token>>; 2],
 }
 
 impl State {
@@ -125,9 +126,14 @@ impl State {
             || self.admitted[class.index()] < self.capacity.interactive_admitted
     }
 
-    /// The class the next free token goes to, if any queued call may take it.
+    /// The class the next free token goes to, if any waiter of it may take
+    /// it: a class below its share first, so a class whose calls keep
+    /// parking and resuming cannot hold every token.
     fn next_class(&self) -> Option<CallClass> {
-        let waiting = |c: CallClass| !self.queued[c.index()].is_empty() && self.may_admit(c);
+        let waiting = |c: CallClass| {
+            !self.resuming[c.index()].is_empty()
+                || (!self.queued[c.index()].is_empty() && self.may_admit(c))
+        };
         let below_share = |c: CallClass| self.running[c.index()] < self.capacity.share(c);
         CallClass::ALL
             .into_iter()
@@ -169,7 +175,7 @@ impl Admission {
             admitted: [0; 2],
             next_waiter: 0,
             queued: [BTreeMap::new(), BTreeMap::new()],
-            resuming: Default::default(),
+            resuming: [VecDeque::new(), VecDeque::new()],
         })))
     }
 
@@ -232,8 +238,8 @@ impl Admission {
     }
 
     /// Take a token for a parked call of `class` returning to guest code,
-    /// ahead of every queued call. Blocks the calling thread; gives up at
-    /// `deadline`, after which the guest is cancelled anyway.
+    /// ahead of its class's queued calls. Blocks the calling thread; gives up
+    /// at `deadline`, after which the guest is cancelled anyway.
     pub fn resume(&self, class: CallClass, deadline: Instant) -> Option<Token> {
         let rx: Receiver<Token> = {
             let mut state = self.0.lock();
@@ -243,7 +249,7 @@ impl Admission {
                 return Some(self.token(class));
             }
             let (tx, rx) = sync_channel(1);
-            state.resuming.push_back((class, tx));
+            state.resuming[class.index()].push_back(tx);
             rx
         };
         rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -266,33 +272,35 @@ impl Admission {
         }
     }
 
-    /// Hand freed tokens to waiters, resuming calls first. Called with the
-    /// lock held after a token or an admission frees up.
+    /// Hand freed tokens to waiters: the class by share, then within it
+    /// resuming calls before queued ones. Called with the lock held after a
+    /// token or an admission frees up.
     fn grant(&self, state: &mut State) {
         while state.running_total() < state.capacity.tokens {
-            if let Some((class, tx)) = state.resuming.pop_front() {
-                state.running[class.index()] += 1;
+            let Some(class) = state.next_class() else {
+                return;
+            };
+            let i = class.index();
+            if let Some(tx) = state.resuming[i].pop_front() {
+                state.running[i] += 1;
                 if let Err(TrySendError::Full(mut token) | TrySendError::Disconnected(mut token)) =
                     tx.try_send(self.token(class))
                 {
                     // The resumer stopped waiting; the token stays free.
                     token.armed = false;
-                    state.running[class.index()] -= 1;
+                    state.running[i] -= 1;
                 }
                 continue;
             }
-            let Some(class) = state.next_class() else {
+            let Some((_, tx)) = state.queued[i].pop_first() else {
                 return;
             };
-            let Some((_, tx)) = state.queued[class.index()].pop_first() else {
-                return;
-            };
-            state.running[class.index()] += 1;
-            state.admitted[class.index()] += 1;
+            state.running[i] += 1;
+            state.admitted[i] += 1;
             if let Err(mut token) = tx.send(self.token(class)) {
                 token.armed = false;
-                state.running[class.index()] -= 1;
-                state.admitted[class.index()] -= 1;
+                state.running[i] -= 1;
+                state.admitted[i] -= 1;
             }
         }
     }
@@ -509,7 +517,7 @@ mod tests {
             let a = a.clone();
             move || a.resume(CallClass::Background, far()).map(|t| t.class())
         });
-        while a.0.lock().resuming.is_empty() {
+        while a.0.lock().resuming[CallClass::Background.index()].is_empty() {
             std::thread::yield_now();
         }
         drop(other);
@@ -534,5 +542,42 @@ mod tests {
         let _background = admit(&a, CallClass::Background).await;
         parked.pop();
         let _granted = waiter.await.unwrap().unwrap();
+    }
+
+    /// Park a resumer of `class` on its own thread; returns once it waits.
+    fn resumer(a: &Admission, class: CallClass) -> std::thread::JoinHandle<Option<CallClass>> {
+        let before = a.0.lock().resuming[class.index()].len();
+        let handle = std::thread::spawn({
+            let a = a.clone();
+            move || a.resume(class, far()).map(|t| t.class())
+        });
+        while a.0.lock().resuming[class.index()].len() == before {
+            std::thread::yield_now();
+        }
+        handle
+    }
+
+    #[tokio::test]
+    async fn interactive_gets_a_token_while_background_resumers_keep_arriving() {
+        let a = Admission::new(Capacity::new(4));
+        // Background holds every token through calls that park and resume.
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(admit(&a, CallClass::Background).await);
+        }
+        let mut resumers = vec![resumer(&a, CallClass::Background)];
+        let interactive = queue(&a, CallClass::Interactive).await;
+        // A background token frees; another background resumer arrives
+        // before the next one does. Interactive, below its share, gets the
+        // first; the resumers get what is left.
+        held.pop();
+        resumers.push(resumer(&a, CallClass::Background));
+        let _granted = interactive.await.unwrap().unwrap();
+        assert_eq!(a.running(CallClass::Interactive), 1);
+        assert_eq!(a.0.lock().resuming[CallClass::Background.index()].len(), 2);
+        drop(held);
+        for r in resumers {
+            assert_eq!(r.join().unwrap(), Some(CallClass::Background));
+        }
     }
 }
