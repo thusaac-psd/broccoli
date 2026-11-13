@@ -147,7 +147,9 @@ struct Inner {
     /// Where samples come from; `None` for a clock that never resamples.
     url: Option<String>,
     /// The dedicated sampling connection, opened on first use and after a
-    /// failure.
+    /// failure. It bypasses [`crate::db::DatabaseConnection`], which owns NUL
+    /// in bound values: it only runs [`CLOCK_QUERY`], which binds none, and a
+    /// pooled handle would put pool waits inside the timed round trip.
     conn: tokio::sync::Mutex<Option<PgConnection>>,
     /// Fixed reference for turning `Instant`s into integers.
     base: Instant,
