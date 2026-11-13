@@ -44,6 +44,7 @@ const sidebars: SidebarsConfig = {
         'internals/judging-lifecycle',
         'internals/message-queue',
         'internals/plugin-distribution',
+        'internals/sandbox-overhead',
       ],
     },
   ],
