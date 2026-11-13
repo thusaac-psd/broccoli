@@ -112,11 +112,44 @@ impl Mq {
         if major.is_none_or(|m| m < MIN_REDIS_MAJOR) {
             return Err(MqError::RedisTooOld { found });
         }
+        let t = &mq.topology;
+        mq.check_key_types(&[
+            (t.shared(), "stream"),
+            (t.dead_letter(), "stream"),
+            (t.pinned_set(), "set"),
+        ])
+        .await?;
         Ok(mq)
     }
 
     pub fn topology(&self) -> &Topology {
         &self.topology
+    }
+
+    /// Check that each key is missing or of its expected type (`TYPE`), so a
+    /// foreign key under the queue's name fails boot with its name instead of
+    /// failing every command with `WRONGTYPE`.
+    pub async fn check_key_types(&self, keys: &[(String, &'static str)]) -> Result<(), MqError> {
+        let types: Vec<String> = self
+            .conn
+            .run(|mut c| async move {
+                let mut pipe = redis::pipe();
+                for (key, _) in keys {
+                    pipe.cmd("TYPE").arg(key);
+                }
+                pipe.query_async(&mut c).await
+            })
+            .await?;
+        for ((key, expected), found) in keys.iter().zip(types) {
+            if found != "none" && found != *expected {
+                return Err(MqError::WrongKeyType {
+                    key: key.clone(),
+                    expected,
+                    found,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Publish an operation task: to `pin`'s private stream when that worker

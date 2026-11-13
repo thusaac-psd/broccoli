@@ -118,6 +118,22 @@ async fn a_redis_older_than_7_is_refused() {
 }
 
 #[tokio::test]
+async fn a_queue_key_of_another_type_is_refused_by_name() {
+    let (_c, url) = redis().await;
+    let _: () = redis::cmd("SET")
+        .arg(format!("{BASE}:dlq"))
+        .arg("not a stream")
+        .query_async(&mut admin(&url).await)
+        .await
+        .unwrap();
+    let err = Mq::connect(&url, BASE).await.err().expect("refused");
+    assert!(
+        matches!(&err, mq::MqError::WrongKeyType { key, found, .. } if key == "ops:dlq" && found == "string"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn published_tasks_are_delivered_once_and_gone_after_ack() {
     let (_c, url) = redis().await;
     let mq = Mq::connect(&url, BASE).await.unwrap();

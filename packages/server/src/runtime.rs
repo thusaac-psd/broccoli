@@ -196,7 +196,9 @@ impl ServerRuntime {
                     );
                     Some(queue)
                 }
-                Err(e @ mq::MqError::RedisTooOld { .. }) => return Err(e.into()),
+                Err(e @ (mq::MqError::RedisTooOld { .. } | mq::MqError::WrongKeyType { .. })) => {
+                    return Err(e.into());
+                }
                 Err(e) => {
                     warn!("MQ connection failed, submissions won't be queued: {}", e);
                     None
@@ -280,10 +282,14 @@ impl ServerRuntime {
         };
 
         if let Some(mq) = &mq {
+            mq.check_key_types(&[(mq.topology().reply(&server_id), "stream")])
+                .await
+                .context("Checking this server's reply stream key")?;
             let consumer = mq.dead_letter_consumer(&server_id);
-            if let Err(e) = consumer.ensure_groups().await {
-                warn!(error = %e, "Creating the dead-letter consumer group failed; the first read retries it");
-            }
+            consumer
+                .ensure_groups()
+                .await
+                .context("Creating the dead-letter consumer group")?;
             tokio::spawn(consume_operation_dlq(db.clone(), consumer));
             info!("Operation DLQ consumer started");
         }

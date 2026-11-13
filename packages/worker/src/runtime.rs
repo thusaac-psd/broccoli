@@ -125,6 +125,10 @@ impl WorkerRuntime {
             max_retries = config.mq.dlq.max_retries,
             "MQ connected"
         );
+        mq.task_consumer(&config.worker.id)
+            .ensure_groups()
+            .await
+            .context("Creating this worker's consumer groups")?;
 
         // Claim the worker ID before acting under it: a second live process with
         // the same ID would share this worker's private stream, pending entries

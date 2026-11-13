@@ -12,4 +12,13 @@ pub enum MqError {
          (it uses stream commands added in 6.2 and 7.0)"
     )]
     RedisTooOld { found: String },
+    #[error(
+        "Redis key {key} is a {found}, not a {expected}: it is not the message queue's. \
+         Remove it or pick another mq.operation_queue_name"
+    )]
+    WrongKeyType {
+        key: String,
+        expected: &'static str,
+        found: String,
+    },
 }
