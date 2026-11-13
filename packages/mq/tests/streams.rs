@@ -541,7 +541,27 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
         .await
         .unwrap();
 
-    assert_eq!(mq.drain_dead_private_streams().await.unwrap(), 2);
+    // An entry without a payload also sits in the private stream.
+    let _: String = redis::cmd("XADD")
+        .arg(mq.topology().private("w1"))
+        .arg("*")
+        .arg("junk")
+        .arg("1")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    assert_eq!(mq.drain_dead_private_streams().await.unwrap(), 3);
+    let dlq = mq.dead_letter_consumer("server-1");
+    dlq.ensure_groups().await.unwrap();
+    let letters = dlq.reader().read(10).await.unwrap();
+    assert_eq!(
+        letters.len(),
+        1,
+        "the entry without a payload is a dead letter"
+    );
+    let letter = letters[0].payload.as_ref().expect("a well-formed envelope");
+    assert_eq!(letter.error_code, DlqErrorCode::DeserializationError);
     let w2 = mq.task_consumer("w2");
     w2.ensure_groups().await.unwrap();
     let mut got = w2.reader().read(10).await.unwrap();

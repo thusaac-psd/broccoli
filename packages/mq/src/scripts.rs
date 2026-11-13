@@ -124,9 +124,12 @@ return lost
 /// Move a dead worker's private stream to the shared stream, keeping each
 /// entry's delivery count in `n`. Does nothing while the worker is live.
 ///
-/// KEYS: worker liveness key, private stream, shared stream, pinned set.
-/// ARGV: worker id, group, batch size. Returns the entries moved, or -1 when
-/// the worker is live.
+/// An entry without a payload cannot be run anywhere: it becomes a
+/// `DESERIALIZATION_ERROR` dead letter (a `common::DlqEnvelope`) instead.
+///
+/// KEYS: worker liveness key, private stream, shared stream, pinned set,
+/// dead-letter stream. ARGV: worker id, group, batch size, dead-letter length
+/// cap. Returns the entries moved, or -1 when the worker is live.
 pub(crate) static DRAIN_PRIVATE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r#"
@@ -150,6 +153,12 @@ for _, e in ipairs(entries) do
   end
   if payload then
     redis.call('XADD', KEYS[3], '*', 'p', payload, 'n', prior)
+  else
+    local envelope = '{"message_id":"' .. id .. '","message_type":"operation_task",'
+      .. '"submission_id":null,"payload":{"stream":"' .. KEYS[2] .. '"},'
+      .. '"error_code":"DESERIALIZATION_ERROR","error_message":"entry has no payload field",'
+      .. '"retry_history":[]}'
+    redis.call('XADD', KEYS[5], 'MAXLEN', '~', ARGV[4], '*', 'p', envelope)
   end
   redis.call('XDEL', KEYS[2], id)
 end

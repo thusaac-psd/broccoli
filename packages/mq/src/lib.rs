@@ -292,9 +292,11 @@ impl Mq {
                             .key(t.private(worker_id))
                             .key(t.shared())
                             .key(t.pinned_set())
+                            .key(t.dead_letter())
                             .arg(worker_id)
                             .arg(WORKERS_GROUP)
                             .arg(DRAIN_BATCH)
+                            .arg(DEAD_LETTER_MAXLEN)
                             .invoke_async(&mut c)
                             .await
                     })
