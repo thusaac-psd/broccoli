@@ -283,9 +283,19 @@ pub(crate) async fn claim_code_runs(
         .await
 }
 
-/// Units (judgements and code runs) `server_id` owns that are in flight:
-/// what the claim fiber's in-flight cap counts.
-pub async fn count_in_flight(db: &DatabaseConnection, server_id: &str) -> Result<u64, DbErr> {
+/// What a claim pass starts from, read in one statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassStart {
+    /// Units (judgements and code runs) the server owns that are in flight:
+    /// what the claim fiber's in-flight cap counts.
+    pub in_flight: u64,
+    /// `plugin_config_epoch.version`; see
+    /// [`crate::services::plugin_config_cache`].
+    pub plugin_config_epoch: i64,
+}
+
+/// Reads [`PassStart`] for `server_id`.
+pub async fn pass_start(db: &DatabaseConnection, server_id: &str) -> Result<PassStart, DbErr> {
     let count = |unit: Unit| {
         format!(
             "(SELECT COUNT(*) FROM {table} WHERE owner_server_id = $1 AND status IN {in_flight})",
@@ -297,15 +307,20 @@ pub async fn count_in_flight(db: &DatabaseConnection, server_id: &str) -> Result
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "SELECT ({} + {})::bigint AS n",
+                "SELECT ({} + {})::bigint AS n, \
+                 (SELECT version FROM plugin_config_epoch) AS epoch",
                 count(Unit::Judgement),
                 count(Unit::CodeRun)
             ),
             [server_id.into()],
         ))
-        .await?;
-    let n: i64 = row.map(|r| r.try_get("", "n")).transpose()?.unwrap_or(0);
-    Ok(u64::try_from(n).unwrap_or(0))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("claim pass start".into()))?;
+    let n: i64 = row.try_get("", "n")?;
+    Ok(PassStart {
+        in_flight: u64::try_from(n).unwrap_or(0),
+        plugin_config_epoch: row.try_get::<Option<i64>>("", "epoch")?.unwrap_or(0),
+    })
 }
 
 /// Rows of each unit a lease operation touched.

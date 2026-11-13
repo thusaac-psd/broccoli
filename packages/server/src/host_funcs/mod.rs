@@ -52,6 +52,12 @@ impl<A, B> HostFnContext for (String, A, B) {
     }
 }
 
+impl<A, B, C> HostFnContext for (String, A, B, C) {
+    fn plugin_id(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Wrap a host fn context for `Function::new`.
 ///
 /// extism's `UserData` is an `Arc<Mutex<T>>` shared by every pooled instance of
@@ -505,13 +511,20 @@ fn register_config_functions(
 ) {
     let db = privileged_db.clone();
     let registry = deps.plugin_manager.get_registry().clone();
+    let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:read", move |plugin_id| {
-        config::create_config_get_function(plugin_id.to_string(), db.clone(), registry.clone())
+        config::create_config_get_function(
+            plugin_id.to_string(),
+            db.clone(),
+            registry.clone(),
+            cache.clone(),
+        )
     });
 
     let db = privileged_db.clone();
+    let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
-        config::create_config_set_function(plugin_id.to_string(), db.clone())
+        config::create_config_set_function(plugin_id.to_string(), db.clone(), cache.clone())
     });
 }
 

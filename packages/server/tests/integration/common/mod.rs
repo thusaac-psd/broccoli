@@ -679,6 +679,8 @@ impl TestApp {
         let (test_metrics, test_prom_registry) =
             common::observability::init_metrics("broccoli-test");
 
+        let plugin_config_cache =
+            server::services::plugin_config_cache::PluginConfigCache::default();
         let server_plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
@@ -701,6 +703,7 @@ impl TestApp {
                 config: app_config.clone(),
                 metrics: Some(test_metrics.clone()),
                 redis_client: None,
+                plugin_config_cache: plugin_config_cache.clone(),
             },
             Some(test_metrics.clone()),
         )
@@ -779,6 +782,7 @@ impl TestApp {
             plugins,
             db: db.clone(),
             clock: clock.clone(),
+            plugin_config_cache,
             config: app_config,
             mq: None,
             redis_client,

@@ -35,6 +35,7 @@ pub struct HostFunctionSystemDeps {
     pub config: AppConfig,
     pub metrics: Option<common::metrics::Metrics>,
     pub redis_client: Option<Arc<redis::Client>>,
+    pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
 }
 
 #[derive(Clone)]
@@ -77,6 +78,7 @@ pub struct EvaluateHostDeps {
     pub contest_type_registry: ContestTypeRegistry,
     pub metrics: Option<common::metrics::Metrics>,
     pub redis_client: Option<Arc<redis::Client>>,
+    pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     pub cancel_primitive_enabled: bool,
 }
 
@@ -133,6 +135,7 @@ impl HostFunctionDeps {
             contest_type_registry: self.system.contest_type_registry.clone(),
             metrics: self.system.metrics.clone(),
             redis_client: self.system.redis_client.clone(),
+            plugin_config_cache: self.system.plugin_config_cache.clone(),
             cancel_primitive_enabled: self.system.config.server.cancel_primitive_enabled,
         }
     }

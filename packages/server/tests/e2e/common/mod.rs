@@ -360,6 +360,8 @@ impl E2eTestApp {
         let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
 
+        let plugin_config_cache =
+            server::services::plugin_config_cache::PluginConfigCache::default();
         let plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
@@ -382,6 +384,7 @@ impl E2eTestApp {
                 config: app_config.clone(),
                 metrics: None,
                 redis_client: None,
+                plugin_config_cache: plugin_config_cache.clone(),
             },
             None,
         )
@@ -397,6 +400,7 @@ impl E2eTestApp {
             plugins,
             db: db.clone(),
             clock,
+            plugin_config_cache,
             config: app_config,
             mq: Some(mq.clone()),
             redis_client: None,

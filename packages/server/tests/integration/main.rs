@@ -30,6 +30,7 @@ mod permission_fixture;
 mod platform_clock;
 mod plugin;
 mod plugin_config;
+mod plugin_config_cache;
 mod plugin_fleet;
 mod plugin_timer;
 mod plugin_upload;

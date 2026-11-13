@@ -106,4 +106,4 @@ pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
     reclaim_abandoned, refresh_leases, retry_system_errors,
 };
-pub use unit::{Unit, UnitCounts, count_in_flight, release_leases};
+pub use unit::{PassStart, Unit, UnitCounts, pass_start, release_leases};

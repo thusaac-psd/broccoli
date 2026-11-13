@@ -553,7 +553,8 @@ impl BootSession {
         &self.db
     }
 
-    /// Schema sync, versioned migrations and the claim notification trigger.
+    /// Schema sync, versioned migrations, the claim notification trigger and
+    /// the plugin config version stamp.
     pub async fn migrate(&self) -> Result<(), DbErr> {
         let db = &self.db;
         crate::migration::refuse_unknown_migrations(db).await?;
@@ -561,7 +562,8 @@ impl BootSession {
         // schema they cannot express (see `crate::migration`).
         db.get_schema_registry("server::entity::*").sync(db).await?;
         Migrator::up(db, None).await?;
-        crate::services::judging::install_claim_notify(db).await
+        crate::services::judging::install_claim_notify(db).await?;
+        crate::services::plugin_config_cache::install_plugin_config_epoch(db).await
     }
 
     /// Release the lock and close the session. Dropping a `BootSession`

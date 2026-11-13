@@ -22,6 +22,8 @@ use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
 use sea_orm::sqlx::postgres::PgListener;
+
+use crate::services::plugin_config_cache::PluginConfigCache;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::{Notify, watch};
 use tracing::{error, info, warn};
@@ -101,6 +103,7 @@ pub async fn run(
     tokio::spawn(listen(
         state.config.database.url.clone(),
         server_id.clone(),
+        state.plugin_config_cache.clone(),
         wake.clone(),
         saturated.clone(),
         cancel.clone(),
@@ -161,13 +164,14 @@ pub async fn run(
 }
 
 /// Turns claim notifications into wakes of the claim fiber until `cancel`
-/// fires. A `Queued` notification always wakes it; a freed one only when it
+/// fires, and passes plugin config changes to `config_cache`. A `Queued` notification always wakes it; a freed one only when it
 /// is for this server and the last pass was held back for room. Notifications
 /// sent while this is not listening are lost, so every (re)connect wakes the
 /// fiber too.
 async fn listen(
     url: String,
     server_id: String,
+    config_cache: PluginConfigCache,
     wake: Arc<Notify>,
     saturated: Arc<AtomicBool>,
     mut cancel: watch::Receiver<bool>,
@@ -177,7 +181,7 @@ async fn listen(
     loop {
         let started = Instant::now();
         tokio::select! {
-            result = listen_session(&url, &server_id, &wake, &saturated) => {
+            result = listen_session(&url, &server_id, &config_cache, &wake, &saturated) => {
                 let Err(error) = result;
                 warn!(
                     server_id = %server_id,
@@ -205,6 +209,7 @@ async fn listen(
 async fn listen_session(
     url: &str,
     server_id: &str,
+    config_cache: &PluginConfigCache,
     wake: &Notify,
     saturated: &AtomicBool,
 ) -> Result<Infallible, sea_orm::sqlx::Error> {
@@ -217,6 +222,9 @@ async fn listen_session(
             wake.notify_one();
             continue;
         };
+        if config_cache.observe_notification(notification.payload()) {
+            continue;
+        }
         let wanted = match judging::ClaimWake::parse(notification.payload()) {
             Some(judging::ClaimWake::Queued) => true,
             Some(judging::ClaimWake::Freed { server_id: owner }) => {
@@ -284,11 +292,9 @@ pub async fn claim_once(
     batch_size: u32,
     max_in_flight: u32,
 ) -> anyhow::Result<ClaimPass> {
-    let in_flight = if max_in_flight == 0 {
-        0
-    } else {
-        judging::count_in_flight(&state.db, server_id).await?
-    };
+    let start = judging::pass_start(&state.db, server_id).await?;
+    state.plugin_config_cache.observe(start.plugin_config_epoch);
+    let in_flight = start.in_flight;
     // The contest types this replica can judge right now; see
     // `dispatcher::prefer_local_handler`.
     let contest_types = super::local_contest_types(state).await;

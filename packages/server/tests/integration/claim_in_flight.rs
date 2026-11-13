@@ -89,8 +89,9 @@ async fn in_flight_counts_only_this_servers_unfinished_judgements() {
     .await;
     insert(&app, problem, user_id, None, SubmissionStatus::Queued).await;
 
-    let n = server::services::judging::count_in_flight(&app.db, &me)
+    let n = server::services::judging::pass_start(&app.db, &me)
         .await
-        .expect("count in flight");
+        .expect("count in flight")
+        .in_flight;
     assert_eq!(n, 3);
 }

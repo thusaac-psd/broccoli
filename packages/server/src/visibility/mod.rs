@@ -692,6 +692,7 @@ mod tests {
             plugins,
             db,
             clock: crate::clock::PlatformClock::local_for_tests(),
+            plugin_config_cache: Default::default(),
             config: AppConfig {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),

@@ -166,7 +166,7 @@ async fn claiming_puts_the_judgement_in_flight_and_the_submission_follows() {
             .is_empty(),
         "a claimed judgement is not claimed again"
     );
-    assert_eq!(count_in_flight(&db, "srv-a").await.unwrap(), 1);
+    assert_eq!(pass_start(&db, "srv-a").await.unwrap().in_flight, 1);
 }
 
 #[tokio::test]
@@ -813,7 +813,7 @@ async fn the_in_flight_cap_counts_judgements_and_code_runs() {
             .len(),
         1
     );
-    assert_eq!(count_in_flight(&db, "srv").await.unwrap(), 2);
+    assert_eq!(pass_start(&db, "srv").await.unwrap().in_flight, 2);
 }
 
 #[tokio::test]

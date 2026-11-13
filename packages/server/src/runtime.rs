@@ -334,6 +334,12 @@ impl ServerRuntime {
         }
 
         let hook_registry = crate::hooks::new_shared_registry();
+        // Only a server whose claim fiber listens hears of config changes.
+        let plugin_config_cache = if app_config.server.claim_fiber_enabled {
+            crate::services::plugin_config_cache::PluginConfigCache::default()
+        } else {
+            crate::services::plugin_config_cache::PluginConfigCache::uncached()
+        };
 
         let manager = ServerManager::new(
             app_config.plugin.clone(),
@@ -353,6 +359,7 @@ impl ServerRuntime {
                 config: app_config.clone(),
                 metrics: Some(metrics.clone()),
                 redis_client: redis_client.clone(),
+                plugin_config_cache: plugin_config_cache.clone(),
             },
             Some(metrics.clone()),
         )
@@ -384,6 +391,7 @@ impl ServerRuntime {
             plugins: manager,
             db: db.clone(),
             clock,
+            plugin_config_cache,
             config: app_config.clone(),
             mq: mq.clone(),
             redis_client: redis_client.clone(),

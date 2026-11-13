@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::entity::{additional_file, plugin_config, problem, test_case};
+use crate::entity::{additional_file, problem, test_case};
 use crate::host_funcs::context::EvaluateHostDeps;
 use crate::registry::{EvaluateBatches, EvaluatorFunctions};
 use crate::services::batch_table::{BatchSender, Removal};
