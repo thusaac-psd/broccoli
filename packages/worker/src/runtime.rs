@@ -211,10 +211,9 @@ impl WorkerRuntime {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_signal = shutdown.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("Shutdown signal received; refusing new tasks and beginning drain");
-                shutdown_for_signal.store(true, Ordering::SeqCst);
-            }
+            common::shutdown::signal().await;
+            info!("Shutdown signal received; refusing new tasks and beginning drain");
+            shutdown_for_signal.store(true, Ordering::SeqCst);
         });
 
         let drain_timeout = Duration::from_secs(30);

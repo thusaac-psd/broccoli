@@ -24,6 +24,7 @@ pub mod redact;
 pub mod redis_conn;
 pub mod retry;
 pub mod rlimit;
+pub mod shutdown;
 pub mod storage;
 pub mod submission_status;
 pub mod warm;
