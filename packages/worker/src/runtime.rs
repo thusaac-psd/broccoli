@@ -398,24 +398,7 @@ async fn run_consume_loop<F, Fut>(
                     error!(entry = %entry.id, "Task handler panicked; abandoning the task");
                     Settlement::Abandon
                 });
-            let settled = match settlement {
-                Settlement::Ack => tasks.ack(&entry).await,
-                Settlement::DeadLetter(envelope) => tasks.dead_letter(&entry, &envelope).await,
-                Settlement::Abandon => {
-                    warn!(entry = %entry.id, "Task abandoned; it is redelivered once idle");
-                    Ok(Settled::Done)
-                }
-            };
-            match settled {
-                Ok(Settled::Done) => {}
-                Ok(Settled::HandedOver) => warn!(
-                    entry = %entry.id,
-                    "Another worker took this task over while it ran; leaving it to that worker"
-                ),
-                Err(e) => {
-                    error!(entry = %entry.id, error = %e, "Settling a task failed; it will be redelivered")
-                }
-            }
+            settle(&tasks, &entry, settlement).await;
         });
     }
 
@@ -431,6 +414,39 @@ async fn run_consume_loop<F, Fut>(
     }
     drain_in_flight(&in_flight, drain_timeout).await;
     refresher.abort();
+}
+
+/// Settle a finished task. A settle that fails (Redis unreachable) is retried
+/// with backoff while the entry stays held, and so refreshed: letting it go
+/// would have another worker run a task that already finished.
+async fn settle(tasks: &GroupConsumer<Task>, entry: &EntryRef, settlement: Settlement) {
+    let mut attempt: u8 = 0;
+    loop {
+        let settled = match &settlement {
+            Settlement::Ack => tasks.ack(entry).await,
+            Settlement::DeadLetter(envelope) => tasks.dead_letter(entry, envelope).await,
+            Settlement::Abandon => {
+                warn!(entry = %entry.id, "Task abandoned; it is redelivered once idle");
+                return;
+            }
+        };
+        match settled {
+            Ok(Settled::Done) => return,
+            Ok(Settled::HandedOver) => {
+                warn!(
+                    entry = %entry.id,
+                    "Another worker took this task over while it ran; leaving it to that worker"
+                );
+                return;
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                let delay = common::retry::calculate_backoff(attempt, 250, 5_000);
+                warn!(entry = %entry.id, attempt, error = %e, "Settling a task failed; retrying");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 /// Refresh every held entry each [`mq::REFRESH_INTERVAL`] until aborted.
@@ -743,6 +759,43 @@ mod tests {
         });
         assert!(task.await.unwrap_err().is_panic());
         assert!(held.snapshot().is_empty());
+    }
+
+    /// A settle that fails while Redis is down is retried, not given up:
+    /// the finished task is acknowledged once Redis is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_settle_is_retried_until_it_lands() {
+        use testcontainers::core::ContainerPort;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let container = Redis::default()
+            .with_tag("7-alpine")
+            .with_mapped_port(port, ContainerPort::Tcp(6379))
+            .start()
+            .await
+            .expect("start redis");
+        let mq = Mq::connect(&format!("redis://127.0.0.1:{port}"), "ops")
+            .await
+            .unwrap();
+        let tasks = mq.task_consumer("w");
+        tasks.ensure_groups().await.unwrap();
+        mq.publish_task(&task("done"), None).await.unwrap();
+        let delivery = tasks.reader().read(1).await.unwrap().remove(0);
+
+        container.stop().await.expect("stop redis");
+        let settling = tokio::spawn({
+            let tasks = tasks.clone();
+            let entry = delivery.entry.clone();
+            async move { settle(&tasks, &entry, Settlement::Ack).await }
+        });
+        container.start().await.expect("restart redis");
+        settling.await.expect("the settle lands once Redis is back");
+
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
     }
 
     async fn mq_url(container: &testcontainers::ContainerAsync<Redis>) -> String {
