@@ -201,11 +201,16 @@ pub enum RenewOutcome {
 }
 
 /// Renew iff the key still carries our instance token; take it again if it is
-/// gone. Each owned stream (`KEYS[2..]`, TTL in `ARGV[3 + i]`) is created
-/// empty when missing and gets its TTL again. Returns `{code, created}`: code
-/// 1 (renewed), 2 (reacquired) or 0 (held by someone else), and the 1-based
-/// indexes of the owned streams that had to be created.
+/// gone, unless this process already released it (`KEYS[2]`, the release
+/// marker, exists: a renewal still queued at Redis when the release ran).
+/// Each owned stream (`KEYS[3..]`, TTL in `ARGV[1 + i]`) is created empty
+/// when missing and gets its TTL again. Returns `{code, created}`: code 1
+/// (renewed), 2 (reacquired) or 0 (held by someone else, or released), and
+/// the 1-based indexes of the owned streams that had to be created.
 const RENEW_LUA: &str = r#"
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return {0, {}}
+end
 local cur = redis.call('GET', KEYS[1])
 local code = 2
 if cur then
@@ -217,24 +222,31 @@ if cur then
 end
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
 local created = {}
-for i = 2, #KEYS do
+for i = 3, #KEYS do
   if redis.call('EXISTS', KEYS[i]) == 0 then
     redis.call('XADD', KEYS[i], 'MAXLEN', 0, '*', '_', '')
-    table.insert(created, i - 1)
+    table.insert(created, i - 2)
   end
-  redis.call('PEXPIRE', KEYS[i], ARGV[i + 2])
+  redis.call('PEXPIRE', KEYS[i], ARGV[i + 1])
 end
 return {code, created}
 "#;
 
-/// Delete the key and the owned streams iff the key still carries our instance
-/// token.
+/// Delete the key and the owned streams (`KEYS[3..]`) iff the key still
+/// carries our instance token, and leave the release marker (`KEYS[2]`, for
+/// one TTL) so a renewal of ours that is still in flight cannot take the ID
+/// back.
 const RELEASE_LUA: &str = r#"
+redis.call('SET', KEYS[2], 1, 'PX', ARGV[2])
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local ok, doc = pcall(cjson.decode, cur)
 if ok and type(doc) == 'table' and doc.instance == ARGV[1] then
-  return redis.call('DEL', unpack(KEYS))
+  local keys = {KEYS[1]}
+  for i = 3, #KEYS do
+    table.insert(keys, KEYS[i])
+  end
+  return redis.call('DEL', unpack(keys))
 end
 return 0
 "#;
@@ -378,6 +390,7 @@ impl NodeClaim {
                 let mut invocation = script.prepare_invoke();
                 invocation
                     .key(&self.key)
+                    .key(self.release_marker())
                     .arg(&self.instance)
                     .arg(&value)
                     .arg(self.ttl.as_millis() as u64);
@@ -414,6 +427,7 @@ impl NodeClaim {
             .with_conn(|mut conn| async move {
                 redis::Script::new(RELEASE_LUA)
                     .key(&self.key)
+                    .key(self.release_marker())
                     .key(
                         self.owned_streams
                             .iter()
@@ -421,11 +435,19 @@ impl NodeClaim {
                             .collect::<Vec<_>>(),
                     )
                     .arg(&self.instance)
+                    .arg(self.ttl.as_millis() as u64)
                     .invoke_async(&mut conn)
                     .await
             })
             .await?;
         Ok(())
+    }
+
+    /// Marks this process's claim as released. Keyed by the per-process
+    /// instance token, outside the liveness key prefix, so no reader takes
+    /// it for a node.
+    fn release_marker(&self) -> String {
+        format!("broccoli:released:{}", self.instance)
     }
 
     /// Renew the claim every [`RENEW_INTERVAL`] with a fresh `payload()`
@@ -847,6 +869,31 @@ mod tests {
             .await
             .unwrap();
         assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn a_renewal_after_the_release_does_not_take_the_id_back() {
+        let (client, _c) = redis().await;
+        let claim = NodeClaim::claim_at_boot(
+            client.clone(),
+            NodeRole::Worker,
+            "w-released",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        claim.release().await.unwrap();
+        // A renewal that reaches Redis after the release, as a timed-out
+        // one still queued there would.
+        assert_eq!(
+            claim.renew(serde_json::json!({})).await.unwrap(),
+            RenewOutcome::Lost
+        );
+        assert!(
+            get(&client, "broccoli:worker:heartbeat:w-released")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
