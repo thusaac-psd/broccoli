@@ -51,7 +51,8 @@ pub fn generate_random_string() -> String {
 /// pool. It is deliberately slow (tens of milliseconds of CPU): on an async
 /// worker it would stall every request scheduled there, and on the blocking
 /// pool it would queue behind plugin calls, so a plugin flood would block
-/// login. Jobs beyond the threads wait in the channel, holding no thread.
+/// login. Jobs beyond the threads wait in the channel, holding no thread. A
+/// job that panics ends that job, not its thread.
 static PASSWORD_POOL: std::sync::LazyLock<std::sync::mpsc::Sender<PasswordJob>> =
     std::sync::LazyLock::new(|| {
         let (tx, rx) = std::sync::mpsc::channel::<PasswordJob>();
@@ -67,7 +68,11 @@ static PASSWORD_POOL: std::sync::LazyLock<std::sync::mpsc::Sender<PasswordJob>> 
                     loop {
                         let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
                         match job {
-                            Ok(job) => job(),
+                            // The job's result sender drops with it, so
+                            // its caller gets an error.
+                            Ok(job) => {
+                                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                            }
                             Err(_) => return,
                         }
                     }
@@ -121,6 +126,21 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_its_caller_and_keeps_its_thread() {
+        // One panic per pool thread: a pool that lost a thread per panic
+        // would have none left, and the next job would fail to send.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        for _ in 0..threads {
+            assert!(
+                on_password_pool(|| panic!("bug in a password job"))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(on_password_pool(|| 7).await.unwrap(), 7);
+    }
 
     #[test]
     fn password_checks_run_while_the_blocking_pool_is_exhausted() {
