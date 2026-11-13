@@ -204,7 +204,7 @@ function SourceSection({
       </div>
       {source.archive_hash && (
         <p className="font-mono text-[11px] text-muted-foreground break-all">
-          sha256 {source.archive_hash}
+          {t('plugins.archiveHash', { hash: source.archive_hash })}
         </p>
       )}
       {uploaded && onRemoveUpload && !confirming && (
