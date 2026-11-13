@@ -70,12 +70,10 @@ async fn new_work_is_claimed_without_waiting_for_the_poll_tick() {
 
     // A poll tick that never comes within the test.
     let (cancel, cancelled) = tokio::sync::watch::channel(false);
-    let fiber = tokio::spawn(server::dispatcher::claim::run(
+    let fiber = tokio::spawn(server::dispatcher::claim::run_with_fallback_tick(
         app.state.clone(),
         format!("claim-wake-{}", uuid::Uuid::new_v4()),
-        3_600_000,
-        32,
-        0,
+        Duration::from_secs(3_600),
         cancelled,
     ));
     wait_until_listening(&app).await;

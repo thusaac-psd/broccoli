@@ -514,6 +514,9 @@ pub struct SpawnOptions {
     pub shared_db: Option<String>,
     /// Sets `plugin.uploads_enabled = false`.
     pub plugin_uploads_disabled: bool,
+    /// Submissions and code runs per user per minute; `None` keeps the
+    /// fixture default (no limit tested).
+    pub rate_limit_per_minute: Option<u32>,
 }
 
 impl TestApp {
@@ -621,9 +624,6 @@ impl TestApp {
                 // tests that rely on the `Queued`-on-POST flow see the
                 // row transition all the way to dispatch.
                 claim_fiber_enabled: true,
-                claim_poll_interval_ms: 100,
-                claim_batch_size: 32,
-                max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
                 plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
@@ -631,15 +631,11 @@ impl TestApp {
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
-                max_connections: 2,
-                plugin_max_connections: 1,
-                plugin_privileged_max_connections: 1,
                 plugin_url: None,
                 ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
-                secure_cookies: false,
                 login_failure_limit: 0,
                 login_failure_window_secs: 60,
             },
@@ -649,7 +645,12 @@ impl TestApp {
                 uploads_enabled: !options.plugin_uploads_disabled,
                 ..Default::default()
             },
-            submission: SubmissionConfig::default(),
+            submission: SubmissionConfig {
+                rate_limit_per_minute: options
+                    .rate_limit_per_minute
+                    .unwrap_or_else(|| SubmissionConfig::default().rate_limit_per_minute),
+                ..SubmissionConfig::default()
+            },
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
                 enabled: false,
@@ -658,6 +659,7 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
+            unknown_keys: Vec::new(),
         };
 
         if let Some(cap) = options.max_queued_submissions {

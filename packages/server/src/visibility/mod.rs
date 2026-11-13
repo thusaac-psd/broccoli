@@ -740,9 +740,6 @@ mod tests {
                     evaluate_batch_fanout_concurrency: 64,
                     operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
-                    claim_poll_interval_ms: 1000,
-                    claim_batch_size: 32,
-                    max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
                     plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
@@ -750,15 +747,11 @@ mod tests {
                 },
                 database: DatabaseConfig {
                     url: "mock://visibility-kernel-test".to_string(),
-                    max_connections: 1,
-                    plugin_max_connections: 1,
-                    plugin_privileged_max_connections: 1,
                     plugin_url: None,
                     ..Default::default()
                 },
                 auth: AuthConfig {
                     jwt_secret: "test-secret".to_string(),
-                    secure_cookies: false,
                     login_failure_limit: 0,
                     login_failure_window_secs: 60,
                 },
@@ -772,6 +765,7 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
+                unknown_keys: Vec::new(),
             },
             mq: None,
             redis_client: None,

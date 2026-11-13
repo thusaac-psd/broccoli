@@ -129,6 +129,8 @@ impl Default for OtlpConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ObservabilityConfig {
+    /// `json`, `pretty`, or `auto` (the default): `pretty` on a terminal,
+    /// `json` otherwise (a container or a service manager's log).
     #[serde(default = "default_log_format")]
     pub log_format: String,
     #[serde(default = "default_log_filter")]
@@ -138,7 +140,18 @@ pub struct ObservabilityConfig {
 }
 
 fn default_log_format() -> String {
-    "pretty".into()
+    "auto".into()
+}
+
+impl ObservabilityConfig {
+    /// Whether logs are written as JSON, resolving `auto` against stdout.
+    pub fn json_logs(&self) -> bool {
+        match self.log_format.to_ascii_lowercase().as_str() {
+            "json" => true,
+            "pretty" => false,
+            _ => !std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        }
+    }
 }
 fn default_log_filter() -> String {
     "info".into()
@@ -151,5 +164,74 @@ impl Default for ObservabilityConfig {
             log_filter: default_log_filter(),
             otlp: OtlpConfig::default(),
         }
+    }
+}
+
+/// Dotted paths of settings in `raw` (what the config file and environment
+/// supplied) that the binary does not read: present in `raw` but not in
+/// `known`, the parsed config serialized back. A key under an empty map in
+/// `known` is taken as a map entry, not an unknown key.
+pub fn unknown_keys(raw: &serde_json::Value, known: &serde_json::Value) -> Vec<String> {
+    fn walk(
+        raw: &serde_json::Value,
+        known: &serde_json::Value,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) {
+        let (Some(raw), Some(known)) = (raw.as_object(), known.as_object()) else {
+            return;
+        };
+        if known.is_empty() {
+            return;
+        }
+        for (key, value) in raw {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            match known.get(key) {
+                Some(inner) => walk(value, inner, &path, out),
+                None => out.push(path),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(raw, known, "", &mut out);
+    out.sort();
+    out
+}
+
+/// Logs one warning per setting the binary does not read (see
+/// [`unknown_keys`]): a removed key, or a typo. Setting `a.b` comes from
+/// `a.b` in the config file or `{env_prefix}__A__B` in the environment.
+pub fn warn_unknown_keys(keys: &[String], env_prefix: &str) {
+    for key in keys {
+        let env = format!("{env_prefix}__{}", key.replace('.', "__").to_uppercase());
+        tracing::warn!(
+            key,
+            env,
+            "Ignoring an unknown configuration key; it may have been removed or misspelled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unknown_key_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn keys_the_binary_does_not_read_are_reported_with_their_path() {
+        let known = json!({ "server": { "port": 3000, "id": "" }, "plugins": {} });
+        let raw = json!({
+            "server": { "port": "4000", "claim_batch_size": "8" },
+            "clock": { "max_skew_ms": "0" },
+            "plugins": { "anything": { "nested": 1 } },
+        });
+        assert_eq!(
+            unknown_keys(&raw, &known),
+            vec!["clock".to_string(), "server.claim_batch_size".to_string()]
+        );
     }
 }

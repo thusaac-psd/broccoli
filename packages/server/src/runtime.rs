@@ -42,6 +42,7 @@ pub struct ServerRuntime {
 impl ServerRuntime {
     pub async fn build(mut app_config: AppConfig) -> anyhow::Result<Self> {
         let telemetry_guard = common::observability::init_tracing(&app_config.observability);
+        common::config::warn_unknown_keys(&app_config.unknown_keys, "BROCCOLI");
 
         let server_id = resolve_server_id(
             &app_config.server.id,
@@ -77,12 +78,11 @@ impl ServerRuntime {
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
 
-        let db = crate::database::connect_main_pool(
-            &app_config.database.url,
-            app_config.database.max_connections,
-            &db_session,
-        )
-        .await?;
+        let pools = crate::database::PoolSizes::for_host(&app_config);
+        info!(?pools, "Database pool sizes");
+        let db =
+            crate::database::connect_main_pool(&app_config.database.url, pools.main, &db_session)
+                .await?;
         // Dedicated pool for plugin host-function DB calls, isolated from the
         // main pool above (handlers/dispatcher/windowed-eval). Prevents
         // connection-protocol desync from other operations corrupting clean
@@ -101,7 +101,7 @@ impl ServerRuntime {
             boot.conn(),
             &app_config.database.url,
             app_config.database.plugin_url.as_deref(),
-            app_config.database.plugin_max_connections,
+            pools.plugin,
             &db_session,
         )
         .await?;
@@ -137,14 +137,11 @@ impl ServerRuntime {
         // `broccoli_plugin` role for the raw `sql` capability (phase 2).
         let privileged_plugin_db = crate::database::init_plugin_db_privileged(
             &app_config.database.url,
-            app_config.database.plugin_privileged_max_connections,
+            pools.plugin_privileged,
             &db_session,
         )
         .await?;
         info!(
-            plugin_max_connections = app_config.database.plugin_max_connections,
-            plugin_privileged_max_connections =
-                app_config.database.plugin_privileged_max_connections,
             "Initialized isolated plugin host-function DB pools (restricted sql + privileged writes)"
         );
         // URLs for the guaranteed fresh-connection fallback when pool retries are

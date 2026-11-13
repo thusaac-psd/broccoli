@@ -463,6 +463,37 @@ pub async fn init_db_with_max_connections(
     connect_main_pool(db_url, max_connections, session).await
 }
 
+/// How many connections each of a server's three pools may hold, derived
+/// from this host's CPUs and the plugin evaluator admission. Together they
+/// stay at or below 64, so a few servers plus their workers fit the infra
+/// Postgres's `max_connections`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSizes {
+    /// Handlers, the dispatcher and background loops.
+    pub main: u32,
+    /// Raw plugin SQL (the restricted pool).
+    pub plugin: u32,
+    /// The structured plugin write host functions (the privileged pool).
+    pub plugin_privileged: u32,
+}
+
+impl PoolSizes {
+    pub fn derive(cpus: usize, evaluator_parallelism: usize) -> Self {
+        let clamp = |n: usize, lo: u32, hi: u32| u32::try_from(n).unwrap_or(hi).clamp(lo, hi);
+        Self {
+            main: clamp(cpus.saturating_mul(4), 16, 40),
+            plugin: clamp(evaluator_parallelism / 2, 4, 16),
+            plugin_privileged: clamp(evaluator_parallelism / 4, 2, 8),
+        }
+    }
+
+    /// The sizes for this host and `config`.
+    pub fn for_host(config: &crate::config::AppConfig) -> Self {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Self::derive(cpus, config.plugin.resolve_evaluator_parallelism())
+    }
+}
+
 /// The main pool (handlers, dispatcher, background loops). No schema work.
 pub async fn connect_main_pool(
     db_url: &str,
@@ -573,6 +604,26 @@ impl BootSession {
             .execute_raw(self.lock_stmt("SELECT pg_advisory_unlock($1)"))
             .await?;
         self.db.close().await
+    }
+}
+
+#[cfg(test)]
+mod pool_size_tests {
+    use super::PoolSizes;
+
+    #[test]
+    fn pools_grow_with_the_host_and_stay_within_a_fixed_budget() {
+        let small = PoolSizes::derive(2, 2);
+        assert_eq!(
+            (small.main, small.plugin, small.plugin_privileged),
+            (16, 4, 2)
+        );
+        let large = PoolSizes::derive(128, 256);
+        assert_eq!(
+            (large.main, large.plugin, large.plugin_privileged),
+            (40, 16, 8)
+        );
+        assert!(large.main + large.plugin + large.plugin_privileged <= 64);
     }
 }
 

@@ -301,7 +301,7 @@ impl OperationTaskExecutor {
         let database_config = &config.database;
         let db = match common::db::connect(
             &database_config.url,
-            &common::db::PgPoolSpec::new(database_config.max_connections, 1),
+            &common::db::PgPoolSpec::new(config.database_pool_size(), 1),
             &database_config.session(),
         )
         .await

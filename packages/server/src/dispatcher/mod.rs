@@ -126,21 +126,9 @@ impl Dispatcher {
         }
 
         if claim_enabled {
-            // Fail loudly at startup on a 0 batch-size rather than logging
-            // a warning per poll-tick forever. Operators who want the fiber
-            // off should set `server.claim_fiber_enabled = false`; a 0
-            // batch is almost always a typo on a different knob.
-            assert!(
-                deps.config.claim_batch_size > 0,
-                "server.claim_batch_size must be > 0 when claim_fiber_enabled is true; \
-                 set claim_fiber_enabled=false to stop the fiber instead"
-            );
             handles.push(tokio::spawn(claim::run(
                 deps.state.clone(),
                 deps.server_id.clone(),
-                deps.config.claim_poll_interval_ms,
-                deps.config.claim_batch_size,
-                deps.config.max_in_flight_submissions,
                 cancel_rx.clone(),
             )));
         } else {
@@ -192,8 +180,6 @@ impl Dispatcher {
             server_id = %deps.server_id,
             lease_steal_enabled,
             claim_enabled,
-            claim_poll_interval_ms = deps.config.claim_poll_interval_ms,
-            claim_batch_size = deps.config.claim_batch_size,
             lease_ttl_secs = deps.config.lease_ttl_secs,
             lease_refresh_interval_secs = deps.config.lease_refresh_interval_secs,
             steal_scan_interval_secs = deps.config.steal_scan_interval_secs,

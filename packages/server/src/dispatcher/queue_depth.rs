@@ -33,8 +33,7 @@ use crate::state::AppState;
 /// is full.
 ///
 /// A full queue drains as fast as in-flight room frees up, and the
-/// claim fiber's fallback tick (`server.claim_poll_interval_ms`, 1s by
-/// default) bounds how long freed room can go unnoticed; 2s is one tick
+/// claim fiber's 1 s fallback tick bounds how long freed room can go unnoticed; 2s is one tick
 /// plus a small buffer so a retried request is likely to land after room
 /// was taken. Hard-coded rather than configurable to match the existing
 /// `permits::RETRY_AFTER_SECS = 1` convention; a knob would just invite

@@ -76,27 +76,22 @@ const LISTEN_RETRY_MAX: Duration = Duration::from_secs(30);
 /// repeat while each fills its batch and room is left, so a backlog drains at
 /// claim speed rather than one batch per tick. Replicas all wake on the same
 /// notification; `SKIP LOCKED` in the claim splits the work between them.
-pub async fn run(
+pub async fn run(state: AppState, server_id: String, cancel: watch::Receiver<bool>) {
+    run_with_fallback_tick(state, server_id, FALLBACK_TICK, cancel).await
+}
+
+/// [`run`] with another fallback tick, so a test can show that notifications
+/// alone drive claims.
+pub async fn run_with_fallback_tick(
     state: AppState,
     server_id: String,
-    interval_ms: u64,
-    batch_size: u32,
-    max_in_flight: u32,
+    fallback_tick: Duration,
     mut cancel: watch::Receiver<bool>,
 ) {
-    // The poll interval clamps to a 50ms floor so a misconfigured
-    // `claim_poll_interval_ms=0` doesn't busy-spin against Postgres.
-    let interval_dur = Duration::from_millis(std::cmp::max(interval_ms, 50));
-    let mut interval = tokio::time::interval(interval_dur);
+    let mut interval = tokio::time::interval(fallback_tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    info!(
-        server_id = %server_id,
-        interval_ms = interval_dur.as_millis() as u64,
-        batch_size,
-        max_in_flight,
-        "Claim fiber started"
-    );
+    info!(server_id = %server_id, "Claim fiber started");
 
     let wake = Arc::new(Notify::new());
     let saturated = Arc::new(AtomicBool::new(false));
@@ -136,13 +131,13 @@ pub async fn run(
             "dispatcher.claim",
             common::deadline::BACKGROUND_STEP,
             async {
-                if max_in_flight > 0 && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
+                if slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
                     live_slots = live_worker_slots(&state).await;
                     slots_checked = Some(Instant::now());
                 }
-                let cap = effective_cap(max_in_flight, live_slots);
+                let cap = effective_cap(live_slots);
                 loop {
-                    match claim_once(&state, &server_id, batch_size, cap).await {
+                    match claim_once(&state, &server_id, CLAIM_BATCH, cap).await {
                         Ok(pass) => {
                             saturated.store(pass.waits_for_room(), Ordering::Relaxed);
                             if !pass.more_may_wait() || pass.held_back {
@@ -392,19 +387,28 @@ const SLOTS_REFRESH: Duration = Duration::from_secs(15);
 /// cap can never become the bottleneck before the workers do.
 const IN_FLIGHT_PER_WORKER_SLOT: u64 = 8;
 
-/// The in-flight cap in force: the configured value is a floor that scales up
-/// with the cluster's live worker slots, so a large deployment is never
-/// throttled by a default nobody tuned. `configured == 0` disables the cap.
-fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
-    if configured == 0 {
-        return 0;
-    }
+/// The in-flight cap before any worker heartbeat is seen.
+const IN_FLIGHT_FLOOR: u64 = 256;
+
+/// The claim fiber's fallback tick. Claims are driven by notifications; this
+/// only covers ones lost while the listening connection was down.
+const FALLBACK_TICK: Duration = Duration::from_secs(1);
+
+/// Rows one claim statement takes per table. Passes repeat while each fills
+/// its batch and room is left, so this bounds a statement, not how fast a
+/// backlog drains.
+const CLAIM_BATCH: u32 = 32;
+
+/// How many judgements and code runs this server judges at once (claimed,
+/// not finished): 8 per live worker slot, at least [`IN_FLIGHT_FLOOR`]. A
+/// burst past it stays `Queued` in the database, claimable by any server.
+fn effective_cap(live_worker_slots: u64) -> u32 {
     let scaled = live_worker_slots.saturating_mul(IN_FLIGHT_PER_WORKER_SLOT);
-    u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
+    u32::try_from(std::cmp::max(scaled, IN_FLIGHT_FLOOR)).unwrap_or(u32::MAX)
 }
 
 /// Sum of `max_concurrency` over live workers. 0 when Redis is unavailable,
-/// which leaves the configured floor.
+/// which leaves the floor.
 async fn live_worker_slots(state: &AppState) -> u64 {
     crate::handlers::system::read_workers(state)
         .await
@@ -541,15 +545,12 @@ mod tests {
 
     #[test]
     fn the_cap_grows_with_live_worker_capacity_and_never_below_the_floor() {
-        // Small cluster (4 workers x 1 slot): the configured floor applies.
-        assert_eq!(effective_cap(256, 4), 256);
+        // Small cluster (4 workers x 1 slot): the floor applies.
+        assert_eq!(effective_cap(4), 256);
         // No heartbeat data: still the floor.
-        assert_eq!(effective_cap(256, 0), 256);
-        // Large cluster (100 workers x 8 slots): scales past the floor, so an
-        // untuned default cannot throttle it.
-        assert_eq!(effective_cap(256, 800), 6_400);
-        // Disabled stays disabled.
-        assert_eq!(effective_cap(0, 800), 0);
+        assert_eq!(effective_cap(0), 256);
+        // Large cluster (800 slots): scales past the floor.
+        assert_eq!(effective_cap(800), 6_400);
     }
 
     #[test]

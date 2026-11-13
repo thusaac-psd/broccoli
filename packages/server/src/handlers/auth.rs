@@ -101,6 +101,7 @@ pub async fn register(
 pub async fn login(
     State(state): State<AppState>,
     ClientIp(client_ip): ClientIp,
+    https: ReachedOverHttps,
     jar: CookieJar,
     AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -150,7 +151,7 @@ pub async fn login(
     let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
 
     let refresh_token = mint_refresh_token(&state.db, user.id).await?;
-    let cookie = refresh::build_refresh_cookie(&refresh_token, state.config.auth.secure_cookies);
+    let cookie = refresh::build_refresh_cookie(&refresh_token, https.0);
 
     Ok((jar.add(cookie), Json(LoginResponse::from(grant))))
 }
@@ -171,6 +172,7 @@ pub async fn login(
 #[instrument(skip(state, jar))]
 pub async fn refresh(
     State(state): State<AppState>,
+    https: ReachedOverHttps,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
     let presented = jar
@@ -180,8 +182,7 @@ pub async fn refresh(
 
     let (grant, refresh_token) =
         rotate_refresh_token(&state.db, &state.config.auth.jwt_secret, &presented).await?;
-    let new_cookie =
-        refresh::build_refresh_cookie(&refresh_token, state.config.auth.secure_cookies);
+    let new_cookie = refresh::build_refresh_cookie(&refresh_token, https.0);
 
     Ok((jar.add(new_cookie), Json(LoginResponse::from(grant))))
 }
@@ -200,13 +201,14 @@ pub async fn refresh(
 #[instrument(skip(state, jar))]
 pub async fn logout(
     State(state): State<AppState>,
+    https: ReachedOverHttps,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(cookie) = jar.get(refresh::REFRESH_COOKIE_NAME) {
         revoke_presented(&state.db, cookie.value()).await?;
     }
 
-    let removal_cookie = refresh::build_removal_cookie(state.config.auth.secure_cookies);
+    let removal_cookie = refresh::build_removal_cookie(https.0);
 
     Ok((StatusCode::NO_CONTENT, jar.add(removal_cookie)))
 }
@@ -314,6 +316,40 @@ fn resolve_public_origin(
     format!("http://{}:{}", server.host, server.port)
 }
 
+/// Whether the client reached this server over HTTPS: `X-Forwarded-Proto`
+/// from a trusted proxy (the TLS gateway), else plain HTTP. The refresh
+/// cookie is `Secure` exactly then, since a browser drops a `Secure` cookie
+/// set over plain HTTP.
+#[derive(Debug, Clone, Copy)]
+pub struct ReachedOverHttps(pub bool);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ReachedOverHttps {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let forwarded_trusted = matches!(
+            parts.extensions.get::<ClientIpSource>(),
+            Some(ClientIpSource::RightmostXForwardedFor)
+        );
+        Ok(Self(
+            request_scheme(&parts.headers, forwarded_trusted) == "https",
+        ))
+    }
+}
+
+/// The scheme the client used: `X-Forwarded-Proto` when the peer is a
+/// trusted proxy, otherwise `http`.
+fn request_scheme(headers: &HeaderMap, forwarded_trusted: bool) -> String {
+    if forwarded_trusted {
+        leftmost_token(headers, "x-forwarded-proto").unwrap_or_else(|| "http".to_string())
+    } else {
+        "http".to_string()
+    }
+}
+
 /// Derive `scheme://authority` from the request headers. Forwarded headers are
 /// honored only when the peer is a trusted proxy; otherwise the untrusted
 /// `Host` header is used over an assumed `http` scheme. Returns None when no
@@ -325,12 +361,7 @@ fn origin_from_request(headers: &HeaderMap, forwarded_trusted: bool) -> Option<S
         host_header(headers)
     }?;
 
-    let scheme = if forwarded_trusted {
-        leftmost_token(headers, "x-forwarded-proto").unwrap_or_else(|| "http".to_string())
-    } else {
-        "http".to_string()
-    };
-
+    let scheme = request_scheme(headers, forwarded_trusted);
     Some(format!("{scheme}://{authority}"))
 }
 

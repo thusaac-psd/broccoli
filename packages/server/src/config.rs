@@ -13,24 +13,6 @@ pub use common::storage::config::BlobStoreConfig;
 pub struct DatabaseConfig {
     #[serde(default = "default_database_url")]
     pub url: String,
-    #[serde(default = "default_database_max_connections")]
-    pub max_connections: u32,
-    /// Size of the RESTRICTED plugin pool (raw `host.db.*` SQL), isolated from the
-    /// main pool to avoid cross-operation connection-protocol desync (the spurious
-    /// 0x00 bug). There is a SECOND, privileged plugin pool sized by
-    /// `plugin_privileged_max_connections`, so total backend connections are
-    /// `max_connections + plugin_max_connections + plugin_privileged_max_connections`
-    /// - Postgres `max_connections` must accommodate all three.
-    #[serde(default = "default_plugin_max_connections")]
-    pub plugin_max_connections: u32,
-    /// Size of the PRIVILEGED plugin pool that backs the structured, server-owned
-    /// host fns (`host.submission.*`, `host.storage.*`, `config:write`). These are
-    /// short finalize-time writes, far lower-concurrency than raw plugin SQL, so it
-    /// defaults smaller than `plugin_max_connections` to keep the total connection
-    /// footprint down. Raise it for write-heavy plugins or high evaluator
-    /// parallelism (its own acquire waits would otherwise slow finalize).
-    #[serde(default = "default_plugin_privileged_max_connections")]
-    pub plugin_privileged_max_connections: u32,
     /// Optional dedicated connection string for the RESTRICTED plugin SQL pool,
     /// authenticating as a pre-provisioned least-privilege LOGIN role (e.g.
     /// `broccoli_plugin_login`, a NOINHERIT member of `broccoli_plugin`). Set
@@ -59,9 +41,6 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: default_database_url(),
-            max_connections: default_database_max_connections(),
-            plugin_max_connections: default_plugin_max_connections(),
-            plugin_privileged_max_connections: default_plugin_privileged_max_connections(),
             plugin_url: None,
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
@@ -71,18 +50,6 @@ impl Default for DatabaseConfig {
 
 fn default_database_url() -> String {
     "postgres://postgres:password@localhost:5432/broccoli".into()
-}
-
-fn default_database_max_connections() -> u32 {
-    20
-}
-
-fn default_plugin_max_connections() -> u32 {
-    20
-}
-
-fn default_plugin_privileged_max_connections() -> u32 {
-    10
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -262,28 +229,6 @@ pub struct ServerConfig {
     /// debugging.
     #[serde(default = "default_claim_fiber_enabled")]
     pub claim_fiber_enabled: bool,
-    /// Fallback poll interval (ms) for the claim fiber. Default 1000ms. The
-    /// fiber claims as soon as a claim notification says work was queued or
-    /// room freed up; this tick only covers notifications lost while its
-    /// listening connection was down. A no-op poll is one in-flight count
-    /// and one `SELECT ... LIMIT $batch FOR UPDATE SKIP LOCKED` per table.
-    #[serde(default = "default_claim_poll_interval_ms")]
-    pub claim_poll_interval_ms: u64,
-    /// Bounded SELECT LIMIT for one claim pass: at most this many rows per
-    /// table. Passes repeat while each fills its batch and in-flight room
-    /// is left, so this bounds one statement, not how fast a backlog drains.
-    #[serde(default = "default_claim_batch_size")]
-    pub claim_batch_size: u32,
-    /// Floor for how many judgements and code runs this server judges at
-    /// once (claimed, not finished). The cap in force is the larger of this and 8 x the
-    /// live worker slots seen in heartbeats, so it grows with the cluster
-    /// and never throttles below worker capacity. The claim fiber takes at
-    /// most `cap - in_flight` rows, so a burst stays `Queued` in the
-    /// database (claimable by any server) instead of piling into one
-    /// process. Judging is detached after dispatch, so nothing else bounds
-    /// this. 0 = no cap.
-    #[serde(default = "default_max_in_flight_submissions")]
-    pub max_in_flight_submissions: u32,
     /// Tick interval (seconds) for the plugin-timer delivery loop. Default 1s
     /// to suit sub-second-adjacent deadlines (e.g. a match window's fixed
     /// end time); the loop is a single indexed query against a table that is
@@ -342,9 +287,6 @@ impl Default for ServerConfig {
             evaluate_batch_fanout_concurrency: default_evaluate_batch_fanout_concurrency(),
             operation_batch_publish_concurrency: default_operation_batch_publish_concurrency(),
             claim_fiber_enabled: default_claim_fiber_enabled(),
-            claim_poll_interval_ms: default_claim_poll_interval_ms(),
-            claim_batch_size: default_claim_batch_size(),
-            max_in_flight_submissions: default_max_in_flight_submissions(),
             plugin_timer_tick_interval_secs: default_plugin_timer_tick_interval_secs(),
             plugin_timer_lease_secs: default_plugin_timer_lease_secs(),
             plugin_timer_batch: default_plugin_timer_batch(),
@@ -416,18 +358,6 @@ fn default_operation_batch_publish_concurrency() -> u32 {
 
 fn default_claim_fiber_enabled() -> bool {
     true
-}
-
-fn default_claim_poll_interval_ms() -> u64 {
-    1000
-}
-
-fn default_claim_batch_size() -> u32 {
-    32
-}
-
-fn default_max_in_flight_submissions() -> u32 {
-    256
 }
 
 fn default_plugin_timer_tick_interval_secs() -> u64 {
@@ -518,8 +448,6 @@ where
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AuthConfig {
     pub jwt_secret: String,
-    #[serde(default = "default_secure_cookies")]
-    pub secure_cookies: bool,
     /// Max FAILED login attempts per (username, client IP) within
     /// `login_failure_window_secs` before the pair is briefly throttled. Counts
     /// only failures and clears on success, so it never throttles a legitimate
@@ -532,10 +460,6 @@ pub struct AuthConfig {
     /// the maximum a throttled pair ever waits before it frees on its own.
     #[serde(default = "default_login_failure_window_secs")]
     pub login_failure_window_secs: u64,
-}
-
-fn default_secure_cookies() -> bool {
-    true
 }
 
 fn default_login_failure_limit() -> u32 {
@@ -567,8 +491,10 @@ fn default_submission_max_size() -> usize {
     1_048_576
 }
 
+/// One submission or code run a second per user: an abuse guard, not contest
+/// policy (a contest limits attempts through its plugins).
 fn default_submission_rate_limit_per_minute() -> u32 {
-    10
+    60
 }
 
 /// The bootstrap admin account (see `seed::ensure_bootstrap_admin`).
@@ -615,6 +541,10 @@ pub struct AppConfig {
     pub batch_max_age_secs: u64,
     #[serde(default)]
     pub bootstrap: BootstrapConfig,
+    /// Settings the environment or config file supplied that this binary does
+    /// not read, warned about once logging is up.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
 fn default_batch_max_age_secs() -> u64 {
@@ -696,8 +626,17 @@ impl AppConfig {
                     .try_parsing(true),
             )
             .build()?;
+        Self::from_config(s)
+    }
 
-        let config: Self = s.try_deserialize()?;
+    /// Parse and validate built configuration, noting the keys it does not
+    /// read.
+    fn from_config(s: Config) -> Result<Self, ConfigError> {
+        let raw: serde_json::Value = s.clone().try_deserialize()?;
+        let mut config: Self = s.try_deserialize()?;
+        let known =
+            serde_json::to_value(&config).map_err(|e| ConfigError::Message(e.to_string()))?;
+        config.unknown_keys = common::config::unknown_keys(&raw, &known);
         config.validate()?;
         Ok(config)
     }
@@ -887,17 +826,34 @@ mod tests {
             cfg.database.url,
             "postgres://postgres:password@localhost:5432/broccoli"
         );
-        assert_eq!(cfg.database.max_connections, 20);
-        assert!(cfg.auth.secure_cookies);
         assert_eq!(cfg.plugin.plugins_dir, PathBuf::from("./plugins"));
         assert!(cfg.plugin.enable_wasi);
         assert_eq!(cfg.submission.max_size, 1_048_576);
-        assert_eq!(cfg.submission.rate_limit_per_minute, 10);
+        assert_eq!(cfg.submission.rate_limit_per_minute, 60);
         assert!(cfg.mq.enabled);
         assert_eq!(cfg.mq.url, "redis://localhost:6379");
-        assert_eq!(cfg.observability.log_format, "pretty");
+        assert_eq!(cfg.observability.log_format, "auto");
         assert_eq!(cfg.observability.log_filter, "info");
         assert!(cfg.bootstrap.admin_username.is_empty());
+    }
+
+    #[test]
+    fn a_key_the_server_does_not_read_is_reported() {
+        let built = Config::builder()
+            .set_override("auth.jwt_secret", "test-secret")
+            .unwrap()
+            .set_override("server.claim_batch_size", 8)
+            .unwrap()
+            .set_override("server.port", 4000)
+            .unwrap()
+            .build()
+            .unwrap();
+        let cfg = AppConfig::from_config(built).unwrap();
+        assert_eq!(cfg.server.port, 4000);
+        assert_eq!(
+            cfg.unknown_keys,
+            vec!["server.claim_batch_size".to_string()]
+        );
     }
 
     fn config_with(overrides: &[(&str, i64)]) -> AppConfig {
@@ -956,7 +912,7 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.max_system_error_retries, 10);
         assert_eq!(cfg.submission.max_size, 42);
-        assert_eq!(cfg.submission.rate_limit_per_minute, 10);
+        assert_eq!(cfg.submission.rate_limit_per_minute, 60);
     }
 
     #[test]
