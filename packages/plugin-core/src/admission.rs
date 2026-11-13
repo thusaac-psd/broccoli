@@ -154,6 +154,7 @@ pub struct Token {
 pub struct Admitted {
     admission: Admission,
     class: CallClass,
+    queued: bool,
 }
 
 /// A top-level call that reached its deadline while queued.
@@ -203,7 +204,7 @@ impl Admission {
                 state.running[class.index()] += 1;
                 state.admitted[class.index()] += 1;
                 drop(state);
-                return Ok((self.admitted(class), self.token(class)));
+                return Ok((self.admitted(class, false), self.token(class)));
             }
             let (tx, rx) = oneshot::channel();
             let id = state.next_waiter;
@@ -222,7 +223,7 @@ impl Admission {
             Ok(Ok(token)) => {
                 // The grant already counted this call as admitted.
                 waiting.granted = true;
-                Ok((self.admitted(class), token))
+                Ok((self.admitted(class, true), token))
             }
             // The sender is only dropped after a failed delivery, which
             // cannot happen while `waiting.rx` is alive.
@@ -257,10 +258,11 @@ impl Admission {
         }
     }
 
-    fn admitted(&self, class: CallClass) -> Admitted {
+    fn admitted(&self, class: CallClass, queued: bool) -> Admitted {
         Admitted {
             admission: self.clone(),
             class,
+            queued,
         }
     }
 
@@ -325,6 +327,13 @@ impl Drop for Waiting<'_> {
         };
         // Released outside the lock: the token's drop takes it again.
         drop(raced);
+    }
+}
+
+impl Admitted {
+    /// Whether the call had to queue for its token.
+    pub fn queued(&self) -> bool {
+        self.queued
     }
 }
 

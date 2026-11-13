@@ -206,28 +206,28 @@
       "fieldConfig": { "defaults": { "unit": "s" } }
     },
     {
-      "title": "Plugin instance acquire latency (p99)",
+      "title": "Plugin admission wait (p99)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le, plugin_id, plugin_function, outcome) (rate(broccoli_plugin_instance_acquire_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{plugin_id}}/{{plugin_function}} {{outcome}}",
+          "expr": "histogram_quantile(0.99, sum by (le, plugin_class, outcome) (rate(broccoli_plugin_admission_wait_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{plugin_class}} {{outcome}}",
           "refId": "A"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "s" } }
     },
     {
-      "title": "Plugin pool contention rate",
+      "title": "Plugin calls queued for a CPU token",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (plugin_id, plugin_function, bucket) (rate(broccoli_plugin_pool_contention_total[5m])) * 60",
-          "legendFormat": "{{plugin_id}}/{{plugin_function}} {{bucket}}",
+          "expr": "sum by (plugin_class) (rate(broccoli_plugin_admission_queued_total[5m])) * 60",
+          "legendFormat": "{{plugin_class}}",
           "refId": "A"
         }
       ],

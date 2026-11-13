@@ -83,6 +83,14 @@ pub trait PluginInvoker: Send + Sync {
                 let waited = std::time::Instant::now();
                 let outcome = admission.admit(class, resolved.deadline).await;
                 if let Some(metrics) = self.get_metrics() {
+                    if outcome
+                        .as_ref()
+                        .is_ok_and(|(admitted, _)| admitted.queued())
+                    {
+                        metrics
+                            .plugin_admission_queued_total
+                            .add(1, &[KeyValue::new("plugin.class", class.as_str())]);
+                    }
                     metrics.plugin_admission_wait_duration.record(
                         waited.elapsed().as_secs_f64(),
                         &[

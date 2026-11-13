@@ -129,13 +129,13 @@ pub struct BurstArgs {
     /// Optional no-semaphore or unbounded-fanout contention delta to compare
     /// against when --metrics-url is provided.
     #[arg(long)]
-    pub baseline_plugin_pool_contention_delta: Option<u64>,
+    pub baseline_plugin_admission_queued_delta: Option<u64>,
     /// Maximum allowed fraction of the baseline contention delta.
     #[arg(long, default_value_t = 0.2)]
-    pub max_plugin_pool_contention_baseline_ratio: f64,
-    /// Absolute plugin-pool-contention delta cap when --metrics-url is provided.
+    pub max_plugin_admission_queued_baseline_ratio: f64,
+    /// Absolute plugin-admission-queued delta cap when --metrics-url is provided.
     #[arg(long, default_value_t = 10)]
-    pub max_plugin_pool_contention_delta: u64,
+    pub max_plugin_admission_queued_delta: u64,
     /// Require fanout saturation to be observed, proving the semaphore engaged.
     #[arg(long, default_value_t = false)]
     pub require_fanout_saturation: bool,

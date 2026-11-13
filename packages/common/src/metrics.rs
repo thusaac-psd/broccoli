@@ -32,6 +32,9 @@ pub struct Metrics {
     /// Time a top-level plugin call waited for a CPU token, by class and
     /// whether it was admitted or reached its deadline first.
     pub plugin_admission_wait_duration: Histogram<f64>,
+    /// Top-level plugin calls that found no free CPU token and queued, by
+    /// class: the contention signal.
+    pub plugin_admission_queued_total: Counter<u64>,
     pub plugin_call_failures: Counter<u64>,
     /// Plugin calls in progress (queued calls excluded), by plugin.
     pub plugin_calls_in_flight: UpDownCounter<i64>,
@@ -272,6 +275,10 @@ impl Metrics {
                 .with_unit("s")
                 .with_description("Time a plugin call waited for a CPU token")
                 .with_boundaries(PLUGIN_BUCKETS_SECONDS.to_vec())
+                .build(),
+            plugin_admission_queued_total: meter
+                .u64_counter("broccoli.plugin.admission.queued")
+                .with_description("Plugin calls that queued for a CPU token")
                 .build(),
             plugin_calls_in_flight: meter
                 .i64_up_down_counter("broccoli.plugin.calls.in_flight")

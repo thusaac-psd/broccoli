@@ -120,6 +120,7 @@ impl Fanout {
     /// Wait until one more test case may be outstanding.
     pub async fn acquire(&self) -> FanoutPermit {
         let start = Instant::now();
+        let mut waited = false;
         loop {
             let released = self.0.released.notified();
             let resized = self.0.slots.0.changed.notified();
@@ -133,16 +134,22 @@ impl Fanout {
                     break;
                 }
             }
+            waited = true;
             tokio::select! {
                 _ = released => {}
                 _ = resized => {}
             }
         }
         if let Some(metrics) = self.0.metrics.as_ref() {
-            metrics.evaluate_batch_fanout_wait_duration.record(
-                start.elapsed().as_secs_f64() * 1_000.0,
-                &[KeyValue::new("batch.kind", "evaluate")],
-            );
+            let labels = [KeyValue::new("batch.kind", "evaluate")];
+            metrics
+                .evaluate_batch_fanout_wait_duration
+                .record(start.elapsed().as_secs_f64() * 1_000.0, &labels);
+            if waited {
+                metrics
+                    .evaluate_batch_fanout_saturated_total
+                    .add(1, &labels);
+            }
         }
         FanoutPermit(self.0.clone())
     }
