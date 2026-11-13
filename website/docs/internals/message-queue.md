@@ -199,8 +199,8 @@ stream.
   microseconds (a map lookup and a channel send), so a single reader per server
   keeps up with any burst the workers can produce.
 - Publishing is one round trip per task (`XADD`, or the routing script). The
-  operation batch path already issues them concurrently
-  (`server.operation_batch_publish_concurrency`).
+  operation batch path issues up to 32 of them at once per batch
+  (`PUBLISH_WINDOW` in `services/operation_batch.rs`).
 
 ## Failure behaviour
 

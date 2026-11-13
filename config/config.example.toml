@@ -104,9 +104,14 @@ temp_dir = ""
 [plugin]
 plugins_dir = "./plugins"
 enable_wasi = true
-# Drop a pooled plugin instance after it sits unused this long (seconds), so
-# a burst's instances do not stay resident. 0 keeps them forever.
-# pool_idle_timeout_secs = 300
+# Guests running at once; default two per core.
+# max_concurrent_calls = 8
+# Resident memory above which idle plugin instances are dropped, in bytes or
+# a size such as "4GiB"; default 3/4 of the cgroup memory limit, or 1/4 of
+# the machine's memory without one.
+# memory_budget = "4GiB"
+# How long a judging, operation or timer call may run, in seconds.
+# call_timeout_secs = 300
 
 [observability]
 log_format = "pretty"       # "pretty" for dev, "json" for production

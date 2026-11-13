@@ -259,8 +259,8 @@ drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
 
 For 100 submissions × 50 testcases × 5 s on 7 machines × 4 slots ≈ 30 minutes.
 
-Each server sizes its evaluator admission locally, from
-`BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM` (see the plugin pool section below).
+Each server sizes its plugin execution from its own cores and memory (see the
+plugin execution section below); nothing in this formula needs a server setting.
 
 **Deployment topology**
 
@@ -368,70 +368,45 @@ redis-cli -a "$REDIS_PASSWORD" XPENDING operation_tasks workers  # in flight, pe
 redis-cli -a "$REDIS_PASSWORD" XLEN operation_tasks:dlq          # dead letters not yet recorded
 ```
 
-## Plugin Pool Sizing
+## Plugin Execution
 
-The server holds per-plugin pools of WASM instances. Each parallel test-case
-evaluation acquires (1) an evaluator-semaphore slot and (2) one instance from
-the evaluator plugin's pool, then optionally re-enters the host to call the
-checker plugin, which acquires one instance from the checker plugin's pool.
+Every plugin call is admitted before it runs. A server holds two CPU tokens per
+core; a call takes one before it gets a thread and gives it back while it waits
+in a host function (a database query, a judging result, a call into another
+plugin). Half the tokens are guaranteed to interactive calls (visibility,
+request hooks, plugin routes) and half to background calls (judging, operations,
+timers); either side borrows the other's idle tokens. Plugin instances are built
+on demand and dropped, least recently used first, when the process's resident
+memory passes its budget.
 
-**The constraint:**
+There are three settings, and all of them size themselves:
 
-```
-BROCCOLI__PLUGIN__POOL_MAX_INSTANCES >= BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM
-```
+| Setting                                  | Default                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------- |
+| `BROCCOLI__PLUGIN__MAX_CONCURRENT_CALLS` | two per available core                                                          |
+| `BROCCOLI__PLUGIN__MEMORY_BUDGET`        | 3/4 of the container's memory limit, or 1/4 of the machine's memory without one |
+| `BROCCOLI__PLUGIN__CALL_TIMEOUT_SECS`    | 300                                                                             |
 
-The server enforces this at startup: if `pool_max_instances` is smaller, it is
-raised to match `evaluator_parallelism` and a warning is logged
-(`pool_max_instances < evaluator_parallelism; raising pool size to match`). To
-silence the warning, set `BROCCOLI__PLUGIN__POOL_MAX_INSTANCES` explicitly.
+Leave them unset unless a measurement says otherwise. A machine shared with
+Postgres, Redis or a worker without a container memory limit should get an
+explicit `MEMORY_BUDGET` (for example `4GiB`).
 
-**Why it matters:**
+**When it is busy.** A request whose plugin cannot answer before the request's
+deadline gets `503 PLUGIN_UNAVAILABLE` with `Retry-After`; the web client shows
+it as a temporary state and retries. It is never shown as a missing page or an
+empty list. Judging waits instead: a judging call queues until a token is free.
 
-- For independent plugins (e.g. `icpc-contest` calling `standard-checkers`),
-  violating the constraint is **not** a deadlock — but the evaluator semaphore
-  ends up sized larger than actual capacity, so excess admitted callers queue
-  inside `plugin_manager.call_raw` waiting for a pool slot. Symptom:
-  `plugin_instance_acquire_duration` climbs, latency tails fan out, and the
-  fleet capacity calculation overestimates throughput.
-- For self-checking plugins (a contest plugin that re-enters its own pool to
-  invoke a checker handler), violating the constraint **is** a deadlock: every
-  pool slot is held by a caller waiting for another slot. Auto-bump prevents
-  this case at startup.
+**What to watch.** `broccoli_plugin_admission_queued_total` counts calls that
+found no free token, `broccoli_plugin_admission_wait_duration_seconds` how long
+they waited (`outcome="expired"` means they gave up at their deadline),
+`broccoli_plugin_calls_in_flight` and `broccoli_plugin_instances_live` show the
+current load per plugin, and `broccoli_plugin_instance_evicted_total` how often
+the memory budget dropped instances. Sustained queueing with every token busy is
+CPU exhaustion: add server replicas.
 
-Both knobs are per-server-replica.
-
-- `pool_max_instances` (default 32, but auto-raised to `evaluator_parallelism`
-  at startup if smaller) caps concurrent calls into any single plugin. Every
-  loaded plugin gets its own pool of this size.
-- `evaluator_parallelism` (default = `std::thread::available_parallelism()`) is
-  the maximum number of test-case evaluations a server admits concurrently.
-  Raise it for contest workloads with high per-submission test-case fan-out.
-
-For a typical contest workload on a high-core box, set both explicitly so the
-auto-bump warning stays quiet and intent is obvious:
-
-```
-BROCCOLI__PLUGIN__POOL_MAX_INSTANCES=64
-BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM=64
-```
-
-`docker-compose.server.yaml.template` passes both to every server, with these
-values as its defaults; set them in `.env.server` to change them. To size
-tokio's blocking pool by hand, set `BROCCOLI__SERVER__MAX_BLOCKING_THREADS`
-there too; when it is unset the server picks a value from the CPU count.
-
-**Diagnosing pool contention.** Both the deadlock case and the queueing case
-show up as climbing `plugin_instance_acquire_duration` for the bottlenecked
-plugin and flat `plugin_instance_acquire_failures` (callers wait rather than
-fail). The auto-bump removes the misconfigured-pool failure mode; remaining
-contention is genuine capacity exhaustion and requires either more replicas or
-higher `pool_max_instances` (at the cost of WASM instance memory).
-
-The longer-term fix is to move checker invocation out of the contest plugin call
-path (so the contest call returns before the checker runs), which makes the
-constraint disappear. That refactor is tracked as a follow-up and is not part of
-Phase 1.
+Configuration still setting a removed key (`POOL_MAX_INSTANCES`,
+`EVALUATOR_PARALLELISM`, `SERVER__MAX_BLOCKING_THREADS` and others) logs a
+warning at boot naming each one; the keys are ignored.
 
 ## Multi-Replica Server Identity
 
