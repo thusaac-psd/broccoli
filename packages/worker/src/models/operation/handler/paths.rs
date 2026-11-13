@@ -3,6 +3,20 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+/// Create a FIFO at `path`, readable and writable by everyone the umask allows,
+/// as `mkfifo(1)` does, without spawning it.
+pub(super) fn create_fifo(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `c_path` is a valid NUL-terminated string for the call.
+    if unsafe { libc::mkfifo(c_path.as_ptr(), 0o666) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 pub(super) fn safe_join(base: &Path, relative: &str) -> Result<PathBuf> {
     let mut resolved = base.to_path_buf();
     for component in Path::new(relative).components() {

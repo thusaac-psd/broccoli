@@ -140,6 +140,18 @@ RUN if [ "$USE_CN_MIRRORS" = "true" ]; then \
       pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
+# The installed config raises isolate's `num_boxes` from 1000 to 10000. Box ids
+# are a host-wide namespace every worker on the host shares, and one test case
+# can need a box per contestant process (a communication problem allows up to
+# 64) plus a manager and a compile box, so judging must never run out of ids.
+# Box N runs as uid and gid `first_uid + N`. isolate's default base, 60000,
+# puts 10000 boxes over nobody (65534) and systemd's DynamicUser range
+# (61184..65519), so the base is moved to 1900000000: uids 1900000000..
+# 1900009999 sit above systemd-nspawn's container range (524288..1879048191),
+# below 2^31, and clear of every account and subordinate-id range a host
+# allocates by default.
+# Keep this in step with release/native/config/isolate.conf and
+# .github/actions/setup-isolate.
 RUN isolate_repo="$ISOLATE_REPO" && \
     if [ "$USE_CN_MIRRORS" = "true" ] && [ -n "$ISOLATE_REPO_CN_MIRROR" ]; then \
       isolate_repo="$ISOLATE_REPO_CN_MIRROR"; \
@@ -151,7 +163,14 @@ RUN isolate_repo="$ISOLATE_REPO" && \
     install -m 0755 isolate-check-environment /out/isolate/usr/local/bin/isolate-check-environment && \
     install -m 0755 isolate-cg-keeper /out/isolate/usr/local/sbin/isolate-cg-keeper && \
     install -m 0644 default.cf /out/isolate/usr/local/etc/isolate && \
-    install -m 0644 default.cf /out/isolate/usr/local/share/isolate/default.cf
+    install -m 0644 default.cf /out/isolate/usr/local/share/isolate/default.cf && \
+    sed -i -e 's/^#\? *num_boxes *=.*/num_boxes = 10000/' \
+      -e 's/^#\? *first_uid *=.*/first_uid = 1900000000/' \
+      -e 's/^#\? *first_gid *=.*/first_gid = 1900000000/' \
+      /out/isolate/usr/local/etc/isolate && \
+    grep -q '^num_boxes = 10000$' /out/isolate/usr/local/etc/isolate && \
+    grep -q '^first_uid = 1900000000$' /out/isolate/usr/local/etc/isolate && \
+    grep -q '^first_gid = 1900000000$' /out/isolate/usr/local/etc/isolate
 
 FROM ${RUNTIME_IMAGE} AS runtime-base
 

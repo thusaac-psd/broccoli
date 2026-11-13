@@ -162,6 +162,11 @@ pub struct Step {
     pub argv: Vec<String>,
     pub conf: RunOptions,
     pub io: IOConfig,
+    /// Files the worker uploads to the blob store after the step runs; their
+    /// hashes come back in [`TaskExecutionResult::collected_outputs`]. A file
+    /// that is the step's own stdout or stderr redirect, and whose exact bytes
+    /// [`ExecutionResult::stdout`] or [`ExecutionResult::stderr`] already
+    /// carries, is not uploaded and has no hash.
     pub collect: Vec<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
@@ -415,6 +420,7 @@ pub struct TaskExecutionResult {
     pub task_id: String,
     pub success: bool,
     pub sandbox_result: ExecutionResult,
+    /// Blob hash of each uploaded [`Step::collect`] file, by name.
     #[serde(default)]
     pub collected_outputs: HashMap<String, String>,
 }

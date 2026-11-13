@@ -63,6 +63,8 @@ pub(super) struct CodeRunsMock {
     insert_errors: RefCell<VecDeque<SdkError>>,
     updates: RefCell<Vec<CodeRunUpdate>>,
     results: RefCell<Vec<CodeRunResultRow>>,
+    /// Number of `insert_results` calls that succeeded.
+    insert_call_count: RefCell<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -73,6 +75,7 @@ impl CodeRunsMock {
             insert_errors: RefCell::new(VecDeque::new()),
             updates: RefCell::new(Vec::new()),
             results: RefCell::new(Vec::new()),
+            insert_call_count: RefCell::new(0),
         }
     }
 }
@@ -91,6 +94,7 @@ impl CodeRuns {
         if let Some(err) = self.inner.insert_errors.borrow_mut().pop_front() {
             return Err(err);
         }
+        *self.inner.insert_call_count.borrow_mut() += 1;
         self.inner.results.borrow_mut().extend_from_slice(results);
         Ok(())
     }
@@ -115,6 +119,11 @@ impl CodeRuns {
 
     pub fn results(&self) -> Vec<CodeRunResultRow> {
         self.inner.results.borrow().clone()
+    }
+
+    /// Number of `insert_results` calls that succeeded.
+    pub fn insert_call_count(&self) -> usize {
+        *self.inner.insert_call_count.borrow()
     }
 }
 

@@ -12,15 +12,22 @@ use super::models::{MountSource, OperationTask};
 use super::sandbox::SandboxManager;
 use super::sandbox::isolate::IsolateSandboxManager;
 use super::sandbox::mock::MockSandboxManager;
-use super::task_cache::{DatabaseTaskCacheStore, NoopTaskCacheStore, TaskCacheStore};
+use super::task_cache::{
+    DatabaseTaskCacheStore, MemoizedTaskCacheStore, NoopTaskCacheStore, TaskCacheStore,
+};
 use crate::config::WorkerAppConfig;
-use crate::models::operation::handler::{CompileCache, OperationHandler};
+use crate::models::operation::handler::{
+    BoxIds, CompileCache, OperationHandler, isolate_num_boxes,
+};
 use crate::toolchain_fingerprint;
 use anyhow::Result;
 use async_trait::async_trait;
 use common::storage::config::create_blob_store;
 use common::worker::*;
 use tracing::{error, info, warn};
+
+/// How many box ids the mock sandbox shares; it has no isolate config.
+const DEFAULT_MOCK_BOX_IDS: u32 = 1000;
 
 pub struct OperationTaskExecutor {
     operation_executor: OperationHandler,
@@ -36,7 +43,7 @@ impl OperationTaskExecutor {
         config: &WorkerAppConfig,
         metrics: common::metrics::Metrics,
     ) -> Result<Self> {
-        Self::configure_box_slot_lock_dir(config);
+        let box_ids = Self::box_ids_from_config(config)?;
         let fingerprint = toolchain_fingerprint::SharedFingerprint::probe(
             toolchain_fingerprint::default_probes(),
         )
@@ -106,9 +113,15 @@ impl OperationTaskExecutor {
                 },
                 metrics,
             )
-            .with_tools_dir(tools_dir.clone()),
+            .with_tools_dir(tools_dir.clone())
+            .with_box_ids(box_ids),
             tools_dir,
         })
+    }
+
+    /// Wait, at most `bound`, for the sandbox removals of finished operations.
+    pub async fn finish_sandbox_removals(&self, bound: Duration) {
+        self.operation_executor.finish_sandbox_removals(bound).await;
     }
 
     /// The file cacher jobs materialize blobs through, for the pre-warm
@@ -117,32 +130,37 @@ impl OperationTaskExecutor {
         self.operation_executor.file_cacher()
     }
 
-    /// Apply `[worker] box_slot_lock_dir` before any sandbox is created (the
-    /// box-id slot is claimed lazily on first use, so it must be set first).
-    ///
-    /// A worker in a container with no shared lock dir configured is the exact
-    /// setup that collapses every worker on a host into box-id slot 0, so warn
-    /// loudly: nothing else surfaces it until correct solutions start coming
-    /// back SystemError / TimeLimitExceeded under load.
-    fn configure_box_slot_lock_dir(config: &WorkerAppConfig) {
-        match &config.worker.box_slot_lock_dir {
-            Some(dir) => {
-                super::handler::configure_slot_lock_dir(std::path::PathBuf::from(dir));
-                info!(box_slot_lock_dir = %dir, "Isolate box-id slot lock dir configured");
+    /// The host's box ids: locked in `[worker] box_id_lock_dir`, numbered
+    /// `0..num_boxes` from the isolate config with the isolate backend. A lock
+    /// dir that cannot hold locks, or an isolate config that cannot be read,
+    /// stops the worker here rather than letting it share ids it cannot lock.
+    fn box_ids_from_config(config: &WorkerAppConfig) -> Result<Arc<BoxIds>> {
+        let dir = match &config.worker.box_id_lock_dir {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                if running_in_container() {
+                    warn!(
+                        "worker is running in a container with no [worker] box_id_lock_dir set: \
+                         it locks its isolate box ids in its PRIVATE temp dir. If more than one \
+                         worker container runs on this host they will initialise each other's \
+                         boxes under running programs. Point every worker on the host at one \
+                         shared directory via BROCCOLI__WORKER__BOX_ID_LOCK_DIR."
+                    );
+                }
+                std::env::temp_dir().join("broccoli-box-ids")
             }
-            None if running_in_container() => {
-                warn!(
-                    "worker is running in a container with no [worker] box_slot_lock_dir set: \
-                     it will claim its isolate box-id slot from its PRIVATE temp dir. If more \
-                     than one worker container runs on this host they will all claim slot 0, \
-                     run contestant code as the same UID, and exhaust each other's process \
-                     limit (execve EAGAIN -> SystemError / TimeLimitExceeded). Point every \
-                     worker on the host at one shared directory via \
-                     BROCCOLI__WORKER__BOX_SLOT_LOCK_DIR."
-                );
-            }
-            None => {}
-        }
+        };
+        let count = if config.worker.sandbox_backend.eq_ignore_ascii_case("mock") {
+            DEFAULT_MOCK_BOX_IDS
+        } else {
+            let path = &config.worker.isolate_config;
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("cannot read the isolate config {path}: {e}"))?;
+            isolate_num_boxes(&text).map_err(|e| anyhow::anyhow!("isolate config {path}: {e}"))?
+        };
+        let box_ids = BoxIds::open(&dir, count)?;
+        info!(box_id_lock_dir = %dir.display(), box_ids = count, "Isolate box ids configured");
+        Ok(box_ids)
     }
 
     /// Reject an operation up front when it requests a platform tool this
@@ -360,7 +378,9 @@ impl OperationTaskExecutor {
         {
             Ok(()) => {
                 info!("DatabaseTaskCacheStore initialized");
-                Box::new(DatabaseTaskCacheStore::new(db_for_cache))
+                Box::new(MemoizedTaskCacheStore::new(DatabaseTaskCacheStore::new(
+                    db_for_cache,
+                )))
             }
             Err(e) => {
                 warn!(error = %e, "Failed to ensure task_cache table, using NoopTaskCacheStore");

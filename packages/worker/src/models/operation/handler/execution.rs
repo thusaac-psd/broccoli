@@ -5,12 +5,13 @@ use super::super::sandbox::{
     DirectoryOptions, DirectoryRule, ExecutionResult, RunOptions, SandboxManager, SandboxStatus,
 };
 use super::super::task_cache::TaskCacheStore;
-use super::box_id::{allocate_box_id, next_channel_seq};
+use super::box_id::{BoxIds, next_channel_seq};
 use super::metrics::{sandbox_exit_kind, sandbox_status_label, step_kind};
 use super::paths::{
-    platform_tool_directory_rule, resolve_step_output_src, stage_step_output_file,
+    create_fifo, platform_tool_directory_rule, resolve_step_output_src, stage_step_output_file,
     validate_pipe_name,
 };
+use super::teardown::Leftovers;
 use super::{EnvironmentList, OperationHandler, StepMetricRecord};
 use anyhow::{Context, Result, anyhow};
 use futures::future::{FutureExt, join_all};
@@ -21,6 +22,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+
+/// How many box ids a handler built without [`OperationHandler::with_box_ids`]
+/// shares, as in isolate's default config.
+const DEFAULT_BOX_IDS: u32 = 1000;
 
 impl OperationHandler {
     pub fn new(
@@ -45,11 +50,32 @@ impl OperationHandler {
         metrics: common::metrics::Metrics,
     ) -> Self {
         Self {
-            sandbox_manager,
+            sandbox_manager: Arc::from(sandbox_manager),
             file_cacher,
             cache,
             metrics,
             tools_dir: None,
+            box_ids: BoxIds::in_temp_dir(DEFAULT_BOX_IDS),
+            teardown: Default::default(),
+        }
+    }
+
+    /// Take box ids from `box_ids` (builder style, like `with_tools_dir`).
+    pub fn with_box_ids(mut self, box_ids: Arc<BoxIds>) -> Self {
+        self.box_ids = box_ids;
+        self
+    }
+
+    /// Wait, at most `bound`, for the sandbox removals of finished
+    /// operations. A graceful shutdown calls this after the last operation, so
+    /// the boxes are gone before the worker exits; a removal still running at
+    /// the bound is left to the next `--init` of its box.
+    pub async fn finish_sandbox_removals(&self, bound: Duration) {
+        if tokio::time::timeout(bound, self.teardown.settle())
+            .await
+            .is_err()
+        {
+            warn!(?bound, "Sandbox removals still running at shutdown");
         }
     }
 
@@ -75,8 +101,13 @@ impl OperationHandler {
             operation.tasks.len()
         );
 
+        // Sandboxes still being removed after the previous operation must be
+        // gone before this one creates its own, so no step runs beside a
+        // removal and no box id is reused while its box is still dirty.
+        self.teardown.settle().await;
+
         // Run every stage under a panic guard so the sandbox + channels
-        // cleanup below ALWAYS runs, and runs once. Each stage records what it
+        // removal below ALWAYS runs, and runs once. Each stage records what it
         // created in `environments` / `channels_dir` as it goes, so a stage
         // that fails or panics midway leaves nothing behind, and its own
         // error is the one returned.
@@ -91,17 +122,23 @@ impl OperationHandler {
         .catch_unwind()
         .await;
 
-        if let Some(dir) = &channels_dir
-            && let Err(e) = tokio::fs::remove_dir_all(dir).await
-        {
-            error!(error = %e, "Failed to clean up shared channels directory");
+        let leftovers = Leftovers {
+            environments,
+            channels_dir,
+        };
+        // The removal runs in the background, off the result's path; the
+        // next operation waits for it (see `teardown`). A panic is re-raised
+        // only after its removal.
+        if outcome.is_ok() {
+            self.teardown.defer(self.sandbox_manager.clone(), leftovers);
+        } else {
+            leftovers.remove(&*self.sandbox_manager).await;
         }
-        self.cleanup_environments(&environments).await;
 
         let (task_results, global_success) = match outcome {
             Ok(result) => result?,
             Err(panic) => {
-                error!("A step future panicked; sandboxes cleaned up, re-raising the panic");
+                error!("A step future panicked; sandboxes removed, re-raising the panic");
                 std::panic::resume_unwind(panic);
             }
         };
@@ -119,30 +156,46 @@ impl OperationHandler {
         })
     }
 
-    /// Create one sandbox per environment and load its files, recording each
-    /// sandbox in `environments` as soon as it exists so the caller removes
-    /// it whatever happens next.
+    /// Create one sandbox per environment, all at once, and load its files,
+    /// recording each sandbox in `environments` once it exists so the caller
+    /// removes it whatever happens next. Returns the first failure.
     async fn create_environments(
         &self,
         operation: &OperationTask,
         environments: &mut HashMap<String, EnvironmentList>,
     ) -> Result<()> {
-        for env_config in operation.environments.iter() {
-            let box_id = allocate_box_id();
-            debug!(env_id = %env_config.id, box_id = %box_id, "Initializing environment");
-            let working_dir = self
-                .create_sandbox(box_id.as_str())
-                .await
-                .context("Failed to create sandbox")?;
-            environments.insert(
-                env_config.id.clone(),
-                EnvironmentList::new(env_config.id.clone(), box_id, working_dir.clone()),
-            );
-            self.load_environment_files(&working_dir, &env_config.files_in)
-                .await
-                .context("Failed to load environment files")?;
+        let box_ids = self.box_ids.reserve(operation.environments.len()).await?;
+        let created = join_all(operation.environments.iter().zip(box_ids).map(
+            |(env_config, box_id)| async move {
+                debug!(env_id = %env_config.id, box_id = %box_id, "Initializing environment");
+                let working_dir = self.create_sandbox(box_id.as_str()).await;
+                let loaded = match &working_dir {
+                    Ok(dir) => self.load_environment_files(dir, &env_config.files_in).await,
+                    Err(_) => Ok(()),
+                };
+                (env_config, box_id, working_dir, loaded)
+            },
+        ))
+        .await;
+
+        let mut first_error = None;
+        for (env_config, box_id, working_dir, loaded) in created {
+            match working_dir {
+                Ok(working_dir) => {
+                    environments.insert(
+                        env_config.id.clone(),
+                        EnvironmentList::new(env_config.id.clone(), box_id, working_dir),
+                    );
+                    if let Err(e) = loaded {
+                        first_error.get_or_insert(e.context("Failed to load environment files"));
+                    }
+                }
+                Err(e) => {
+                    first_error.get_or_insert(e.context("Failed to create sandbox"));
+                }
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Everything after the environments exist: channels, keep-alives and the
@@ -274,10 +327,7 @@ impl OperationHandler {
                         );
                         continue;
                     }
-                    let _ = tokio::process::Command::new("mkfifo")
-                        .arg(&fifo_path)
-                        .output()
-                        .await;
+                    let _ = create_fifo(&fifo_path);
                     if !path_is_fifo(&fifo_path) {
                         continue;
                     }
@@ -730,7 +780,10 @@ impl OperationHandler {
         };
 
         let success = exec_result.exit_code == Some(0);
-        let collected_outputs = match self.collect_output(&env.working_dir, &step.collect).await {
+        let collected_outputs = match self
+            .collect_output(&env.working_dir, step, &exec_result)
+            .await
+        {
             Ok(outputs) => outputs,
             Err(e) => {
                 // The step already ran to a clean exit; the failure here is
@@ -1141,18 +1194,8 @@ fn open_channel_keepalive(fifo_path: &Path) -> Option<std::fs::File> {
 async fn create_channel_fifos(dir: &Path, channels: &[Channel]) -> Result<()> {
     for channel in channels {
         let fifo_path = dir.join(&channel.name);
-        let output = tokio::process::Command::new("mkfifo")
-            .arg(&fifo_path)
-            .output()
-            .await
-            .context("Failed to execute mkfifo for channel")?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "mkfifo failed for channel {}: {}",
-                channel.name,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        create_fifo(&fifo_path)
+            .with_context(|| format!("mkfifo failed for channel {}", channel.name))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1251,11 +1294,7 @@ mod channel_keepalive_tests {
         let dir = std::env::temp_dir().join(format!("broccoli-ka-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("sol_out");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(status.success(), "mkfifo failed");
+        create_fifo(&fifo).expect("mkfifo");
 
         let keepalive = open_channel_keepalive(&fifo).expect("keep-alive opens O_RDWR");
 
@@ -1391,11 +1430,7 @@ mod channel_keepalive_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("sol_out");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(status.success(), "mkfifo failed");
+        create_fifo(&fifo).expect("mkfifo");
         (dir, fifo)
     }
 
@@ -1808,7 +1843,12 @@ mod step_execution_tests {
 
         // The mock sandbox runs a real child: exit 0 leaves the collect file behind.
         let mock = MockSandboxManager::new(base.clone());
-        let box_id = allocate_box_id();
+        let box_id = BoxIds::in_temp_dir(DEFAULT_BOX_IDS)
+            .reserve(1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
         let working_dir = mock
             .create_sandbox(Some(box_id.as_str()))
             .await

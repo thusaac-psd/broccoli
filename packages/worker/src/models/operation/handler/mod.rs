@@ -7,17 +7,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod box_id;
-pub use box_id::configure_slot_lock_dir;
+pub use box_id::{BoxIdError, BoxIds, isolate_num_boxes};
 mod caching;
 mod environment;
 mod execution;
 mod metrics;
 mod paths;
+mod teardown;
 
 use crate::toolchain_fingerprint::{SharedFingerprint, ToolchainFingerprint};
 
 pub struct OperationHandler {
-    sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
+    sandbox_manager: Arc<dyn SandboxManager + Send + Sync>,
     file_cacher: Arc<dyn FileCacher>,
     cache: CompileCache,
     metrics: common::metrics::Metrics,
@@ -25,6 +26,10 @@ pub struct OperationHandler {
     /// `MountSource::PlatformTool { name }` resolves to `<tools_dir>/<name>`.
     /// `None` until configured via [`OperationHandler::with_tools_dir`].
     tools_dir: Option<PathBuf>,
+    /// The host's box ids.
+    box_ids: Arc<BoxIds>,
+    /// Removals of earlier operations' sandboxes still running.
+    teardown: teardown::Teardown,
 }
 
 /// How a handler shares cacheable step outputs (compiles) with other
@@ -60,8 +65,7 @@ impl CompileCache {
 
 struct EnvironmentList {
     id: String,
-    /// RAII reservation for this environment's isolate box id; released when the
-    /// environment (and thus this struct) is dropped. See [`box_id::BoxId`].
+    /// This environment's box id, held until the environment is dropped.
     box_id: box_id::BoxId,
     working_dir: PathBuf,
 }

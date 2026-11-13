@@ -1,13 +1,14 @@
-use super::super::models::{IOConfig, IOTarget, SessionFile};
+use super::super::models::{IOConfig, IOTarget, SessionFile, Step};
+use super::super::sandbox::ExecutionResult;
+use super::OperationHandler;
 use super::metrics::{materialization_path_kind, session_file_kind};
-use super::paths::{safe_join, validate_pipe_name};
-use super::{EnvironmentList, OperationHandler};
+use super::paths::{create_fifo, safe_join, validate_pipe_name};
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 impl OperationHandler {
     pub(super) async fn create_sandbox(&self, box_id: &str) -> Result<PathBuf> {
@@ -188,23 +189,13 @@ impl OperationHandler {
                     return Ok(Some(pipe_path));
                 }
 
-                let output = tokio::process::Command::new("mkfifo")
-                    .arg(&pipe_path)
-                    .output()
-                    .await
-                    .context("Failed to execute mkfifo")?;
-
-                if !output.status.success() {
+                if let Err(e) = create_fifo(&pipe_path) {
                     if let Ok(meta) = tokio::fs::metadata(&pipe_path).await
                         && meta.file_type().is_fifo()
                     {
                         return Ok(Some(pipe_path));
                     }
-                    return Err(anyhow!(
-                        "mkfifo failed for {}: {}",
-                        pipe_path.display(),
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+                    return Err(anyhow!("mkfifo failed for {}: {e}", pipe_path.display()));
                 }
 
                 Ok(Some(pipe_path))
@@ -212,16 +203,23 @@ impl OperationHandler {
         }
     }
 
+    /// Upload each of `step.collect` and return its blob hash by name.
+    ///
+    /// A file that is the step's own stdout or stderr redirect, and whose
+    /// exact bytes `result` already carries inline, is not uploaded and gets
+    /// no hash: the inline text is its content. A larger or non-text redirect
+    /// (one the inline preview truncates or rewrites) is uploaded as usual.
     pub(super) async fn collect_output(
         &self,
         working_dir: &Path,
-        collect_files: &[String],
+        step: &Step,
+        result: &ExecutionResult,
     ) -> Result<HashMap<String, String>> {
         let mut collected = HashMap::new();
         let real_base = tokio::fs::canonicalize(working_dir)
             .await
             .unwrap_or_else(|_| working_dir.to_path_buf());
-        for file_path in collect_files {
+        for file_path in &step.collect {
             let src = safe_join(working_dir, file_path)?;
             if tokio::fs::try_exists(&src).await.unwrap_or(false) {
                 // `safe_join` only validates the path STRING. The sandboxed
@@ -246,6 +244,12 @@ impl OperationHandler {
                     );
                     continue;
                 }
+                if let Some(inline) = inline_copy(step, result, file_path)
+                    && holds_exactly(&real, inline).await
+                {
+                    debug!(file = %file_path, "Collected output travels inline");
+                    continue;
+                }
                 let hash = self
                     .file_cacher
                     .upload_from_path(&real)
@@ -265,20 +269,29 @@ impl OperationHandler {
         }
         Ok(collected)
     }
+}
 
-    /// Remove every environment's sandbox, logging failures.
-    pub(super) async fn cleanup_environments(
-        &self,
-        environments: &HashMap<String, EnvironmentList>,
-    ) {
-        for env in environments.values() {
-            if let Err(e) = self
-                .sandbox_manager
-                .remove_sandbox(env.box_id.as_str())
-                .await
-            {
-                error!(env_id = %env.id, error = %e, "Failed to cleanup sandbox");
-            }
-        }
+/// The inline text `result` carries for `file_path`, when that file is the
+/// step's stdout or stderr redirect target.
+fn inline_copy<'a>(step: &Step, result: &'a ExecutionResult, file_path: &str) -> Option<&'a str> {
+    let redirects =
+        |target: &IOTarget| matches!(target, IOTarget::File { path } if path == file_path);
+    if redirects(&step.io.stdout) {
+        Some(&result.stdout)
+    } else if redirects(&step.io.stderr) {
+        Some(&result.stderr)
+    } else {
+        None
+    }
+}
+
+/// Whether the file at `path` holds exactly the bytes of `text`. The length is
+/// compared first, so a file larger than the inline preview is never read.
+async fn holds_exactly(path: &Path, text: &str) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.len() == text.len() as u64 => tokio::fs::read(path)
+            .await
+            .is_ok_and(|bytes| bytes == text.as_bytes()),
+        _ => false,
     }
 }
