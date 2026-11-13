@@ -4,12 +4,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use axum_client_ip::ClientIpSource;
 use axum_extra::extract::CookieJar;
 use sea_orm::*;
 use tracing::instrument;
 
-use crate::client_ip::ClientIp;
+use crate::client_ip::{ClientIp, ForwardedHop};
 use crate::config::ServerConfig;
 // visibility-bypass-audited: this module has no permission gate to name
 // because it has no third-party resource parameter to gate - every query is
@@ -284,7 +283,8 @@ fn normalize_user_code(code: &str) -> String {
 /// Resolution order, most authoritative first:
 /// 1. `server.public_base_url` when set - the operator's explicit declaration.
 /// 2. The request's own reachable authority: `X-Forwarded-Host` /
-///    `X-Forwarded-Proto` when the peer is a trusted proxy, otherwise the
+///    `X-Forwarded-Proto` at the client's hop when the peer is a trusted
+///    proxy (see [`ForwardedHop`]), otherwise the
 ///    `Host` header. The caller just reached us at this authority, so a link
 ///    built from it routes back. The URL is only ever returned to that same
 ///    caller, so a spoofed header poisons only the spoofer's own link.
@@ -293,7 +293,7 @@ fn normalize_user_code(code: &str) -> String {
 fn resolve_public_origin(
     server: &ServerConfig,
     headers: &HeaderMap,
-    forwarded_trusted: bool,
+    forwarded: Option<ForwardedHop>,
 ) -> String {
     if let Some(base) = server.public_base_url.as_deref() {
         let base = base.trim().trim_end_matches('/');
@@ -302,7 +302,7 @@ fn resolve_public_origin(
         }
     }
 
-    if let Some(origin) = origin_from_request(headers, forwarded_trusted) {
+    if let Some(origin) = origin_from_request(headers, forwarded) {
         return origin;
     }
 
@@ -317,7 +317,8 @@ fn resolve_public_origin(
 }
 
 /// Whether the client reached this server over HTTPS: `X-Forwarded-Proto`
-/// from a trusted proxy (the TLS gateway), else plain HTTP. The refresh
+/// from a trusted proxy (the TLS gateway), read at the hop the client IP
+/// comes from, else plain HTTP. The refresh
 /// cookie is `Secure` exactly then, since a browser drops a `Secure` cookie
 /// set over plain HTTP.
 #[derive(Debug, Clone, Copy)]
@@ -330,38 +331,29 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ReachedOverHttps {
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let forwarded_trusted = matches!(
-            parts.extensions.get::<ClientIpSource>(),
-            Some(ClientIpSource::RightmostXForwardedFor)
-        );
-        Ok(Self(
-            request_scheme(&parts.headers, forwarded_trusted) == "https",
-        ))
+        let forwarded = parts.extensions.get::<ForwardedHop>().copied();
+        Ok(Self(request_scheme(&parts.headers, forwarded) == "https"))
     }
 }
 
 /// The scheme the client used: `X-Forwarded-Proto` when the peer is a
 /// trusted proxy, otherwise `http`.
-fn request_scheme(headers: &HeaderMap, forwarded_trusted: bool) -> String {
-    if forwarded_trusted {
-        leftmost_token(headers, "x-forwarded-proto").unwrap_or_else(|| "http".to_string())
-    } else {
-        "http".to_string()
-    }
+fn request_scheme(headers: &HeaderMap, forwarded: Option<ForwardedHop>) -> String {
+    forwarded
+        .and_then(|hop| hop.value(headers, "x-forwarded-proto"))
+        .unwrap_or_else(|| "http".to_string())
 }
 
 /// Derive `scheme://authority` from the request headers. Forwarded headers are
 /// honored only when the peer is a trusted proxy; otherwise the untrusted
 /// `Host` header is used over an assumed `http` scheme. Returns None when no
 /// host authority is present.
-fn origin_from_request(headers: &HeaderMap, forwarded_trusted: bool) -> Option<String> {
-    let authority = if forwarded_trusted {
-        leftmost_token(headers, "x-forwarded-host").or_else(|| host_header(headers))
-    } else {
-        host_header(headers)
-    }?;
+fn origin_from_request(headers: &HeaderMap, forwarded: Option<ForwardedHop>) -> Option<String> {
+    let authority = forwarded
+        .and_then(|hop| hop.value(headers, "x-forwarded-host"))
+        .or_else(|| host_header(headers))?;
 
-    let scheme = request_scheme(headers, forwarded_trusted);
+    let scheme = request_scheme(headers, forwarded);
     Some(format!("{scheme}://{authority}"))
 }
 
@@ -371,19 +363,6 @@ fn host_header(headers: &HeaderMap) -> Option<String> {
         None
     } else {
         Some(value.to_string())
-    }
-}
-
-/// First comma-separated token of a header value (e.g. `a, b` -> `a`), trimmed.
-/// Proxies append to `X-Forwarded-*` lists left-to-right, so the leftmost token
-/// is the value seen by the outermost (client-facing) proxy.
-fn leftmost_token(headers: &HeaderMap, name: &str) -> Option<String> {
-    let value = headers.get(name)?.to_str().ok()?;
-    let token = value.split(',').next()?.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
     }
 }
 
@@ -400,11 +379,11 @@ fn leftmost_token(headers: &HeaderMap, name: &str) -> Option<String> {
         (status = 429, description = "Too many pending device codes (RATE_LIMITED)", body = ErrorBody),
     ),
 )]
-#[instrument(skip(state, headers, source))]
+#[instrument(skip(state, headers, forwarded))]
 pub async fn request_device_code(
     State(state): State<AppState>,
     headers: HeaderMap,
-    source: Option<Extension<ClientIpSource>>,
+    forwarded: Option<Extension<ForwardedHop>>,
     AppJson(_payload): AppJson<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, AppError> {
     let (device_code, user_code) = device_auth::create(
@@ -415,11 +394,11 @@ pub async fn request_device_code(
     )
     .await?;
 
-    let forwarded_trusted = matches!(
-        source,
-        Some(Extension(ClientIpSource::RightmostXForwardedFor))
+    let origin = resolve_public_origin(
+        &state.config.server,
+        &headers,
+        forwarded.map(|Extension(hop)| hop),
     );
-    let origin = resolve_public_origin(&state.config.server, &headers, forwarded_trusted);
 
     Ok(Json(DeviceCodeResponse {
         device_code,
@@ -608,7 +587,7 @@ mod device_origin_tests {
             ("x-forwarded-host", "proxy.example"),
         ]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, true),
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(1))),
             "https://judge.example.org"
         );
     }
@@ -618,7 +597,7 @@ mod device_origin_tests {
         let cfg = server_config();
         let h = headers(&[("host", "judge.lan:3000")]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, false),
+            resolve_public_origin(&cfg, &h, None),
             "http://judge.lan:3000"
         );
     }
@@ -630,7 +609,7 @@ mod device_origin_tests {
         let mut cfg = server_config();
         cfg.host = "0.0.0.0".to_string();
         let h = headers(&[("host", "judge.lan:3000")]);
-        let origin = resolve_public_origin(&cfg, &h, false);
+        let origin = resolve_public_origin(&cfg, &h, None);
         assert_eq!(origin, "http://judge.lan:3000");
         assert!(!origin.contains("0.0.0.0"));
     }
@@ -644,7 +623,7 @@ mod device_origin_tests {
             ("x-forwarded-proto", "https"),
         ]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, true),
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(1))),
             "https://judge.example.org"
         );
     }
@@ -659,7 +638,7 @@ mod device_origin_tests {
         ]);
         // Forwarded headers from an untrusted peer are not honored: scheme stays
         // http and the authority is the real Host, not the spoofed forward.
-        assert_eq!(resolve_public_origin(&cfg, &h, false), "http://judge.lan");
+        assert_eq!(resolve_public_origin(&cfg, &h, None), "http://judge.lan");
     }
 
     #[test]
@@ -670,7 +649,7 @@ mod device_origin_tests {
         cfg.host = "0.0.0.0".to_string();
         let h = headers(&[("host", "judge.lan:3000")]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, true),
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(1))),
             "http://judge.lan:3000"
         );
     }
@@ -680,19 +659,27 @@ mod device_origin_tests {
         let cfg = server_config();
         let h = headers(&[("x-forwarded-host", "judge.example")]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, true),
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(1))),
             "http://judge.example"
         );
     }
 
     #[test]
-    fn forwarded_lists_take_the_leftmost_token() {
+    fn forwarded_lists_are_read_at_the_client_hop() {
         let cfg = server_config();
         let h = headers(&[
             ("x-forwarded-host", "a.example, b.example"),
             ("x-forwarded-proto", "https, http"),
         ]);
-        assert_eq!(resolve_public_origin(&cfg, &h, true), "https://a.example");
+        assert_eq!(
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(2))),
+            "https://a.example"
+        );
+        // One trusted hop: the entries further left are the client's own.
+        assert_eq!(
+            resolve_public_origin(&cfg, &h, Some(ForwardedHop(1))),
+            "http://b.example"
+        );
     }
 
     #[test]
@@ -701,7 +688,7 @@ mod device_origin_tests {
         cfg.cors.allow_origins = vec!["https://cors.example/".to_string()];
         let h = headers(&[]);
         assert_eq!(
-            resolve_public_origin(&cfg, &h, false),
+            resolve_public_origin(&cfg, &h, None),
             "https://cors.example"
         );
     }
@@ -714,9 +701,6 @@ mod device_origin_tests {
         // Documents the unavoidable last resort: no request authority, no CORS
         // origin, no explicit base URL. Operators hit this only with an empty
         // Host header, which real clients do not send.
-        assert_eq!(
-            resolve_public_origin(&cfg, &h, false),
-            "http://0.0.0.0:3000"
-        );
+        assert_eq!(resolve_public_origin(&cfg, &h, None), "http://0.0.0.0:3000");
     }
 }
