@@ -221,6 +221,18 @@ pub struct WorkerAppConfig {
     pub unknown_keys: Vec<String>,
 }
 
+/// What the server reads from a config file it shares with the worker: not
+/// unknown here.
+const SERVER_SETTINGS: &[&str] = &[
+    "server",
+    "auth",
+    "bootstrap",
+    "submission",
+    "plugin",
+    "batch_max_age_secs",
+    "database.plugin_url",
+];
+
 impl WorkerAppConfig {
     /// Connections the worker's database pool may hold.
     pub fn database_pool_size(&self) -> u32 {
@@ -271,8 +283,8 @@ impl WorkerAppConfig {
             )
             .build()?;
 
-        let (s, unknown_keys) = common::config::read_known(s)?;
-        let mut config: Self = s.try_deserialize()?;
+        let (mut config, unknown_keys): (Self, _) =
+            common::config::deserialize_noting_ignored(s, SERVER_SETTINGS)?;
         config.unknown_keys = unknown_keys;
         config.worker.id = common::node_identity::resolve_node_id(
             common::liveness::NodeRole::Worker,
@@ -287,6 +299,32 @@ impl WorkerAppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_setting_the_server_reads_is_not_unknown_here() {
+        let built = Config::builder()
+            .set_override("worker.max_concurrency", 2)
+            .unwrap()
+            .set_override("storage.backend", "database")
+            .unwrap()
+            .set_override("storage.cache_dir", "/var/cache/broccoli")
+            .unwrap()
+            .set_override("server.port", 3000)
+            .unwrap()
+            .set_override("plugin.pool_max_instances", 64)
+            .unwrap()
+            .set_override("database.plugin_url", "postgres://plugin@db/broccoli")
+            .unwrap()
+            .set_override("worker.max_concurency", 4)
+            .unwrap()
+            .build()
+            .unwrap();
+        let (config, unknown): (WorkerAppConfig, _) =
+            common::config::deserialize_noting_ignored(built, SERVER_SETTINGS).unwrap();
+        assert_eq!(config.worker.max_concurrency, 2);
+        assert_eq!(config.storage.cache_dir, "/var/cache/broccoli");
+        assert_eq!(unknown, vec!["worker.max_concurency".to_string()]);
+    }
 
     #[test]
     fn worker_config_defaults_to_single_safe_slot() {

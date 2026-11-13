@@ -585,6 +585,10 @@ impl ServerConfig {
 /// consistent with the availability-first stance on auth.
 pub const MIN_RECOMMENDED_JWT_SECRET_BYTES: usize = 32;
 
+/// What the worker reads from a config file it shares with the server: not
+/// unknown here.
+const WORKER_SETTINGS: &[&str] = &["worker", "storage.cache_dir", "storage.max_cache_size"];
+
 impl AppConfig {
     /// True when `auth.jwt_secret` is shorter than the recommended minimum.
     pub fn jwt_secret_is_weak(&self) -> bool {
@@ -618,8 +622,8 @@ impl AppConfig {
     /// Parse and validate built configuration, noting the keys it does not
     /// read.
     fn from_config(s: Config) -> Result<Self, ConfigError> {
-        let (s, unknown_keys) = common::config::read_known(s)?;
-        let mut config: Self = s.try_deserialize()?;
+        let (mut config, unknown_keys): (Self, _) =
+            common::config::deserialize_noting_ignored(s, WORKER_SETTINGS)?;
         config.unknown_keys = unknown_keys;
         config.validate()?;
         Ok(config)
@@ -830,6 +834,25 @@ mod tests {
             cfg.unknown_keys,
             vec!["server.claim_batch_size".to_string()]
         );
+    }
+
+    #[test]
+    fn a_setting_the_worker_reads_is_not_unknown_here() {
+        let built = Config::builder()
+            .set_override("auth.jwt_secret", "test-secret")
+            .unwrap()
+            .set_override("worker.max_concurrency", 2)
+            .unwrap()
+            .set_override("storage.cache_dir", "/var/cache/broccoli")
+            .unwrap()
+            .set_override("storage.backend", "database")
+            .unwrap()
+            .set_override("submission.max_sise", 1)
+            .unwrap()
+            .build()
+            .unwrap();
+        let cfg = AppConfig::from_config(built).unwrap();
+        assert_eq!(cfg.unknown_keys, vec!["submission.max_sise".to_string()]);
     }
 
     fn config_with(overrides: &[(&str, i64)]) -> AppConfig {
