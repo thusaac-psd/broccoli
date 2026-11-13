@@ -16,6 +16,13 @@
 //! ahead of time do not pay off either: initialising one while a step runs
 //! would put process spawns and cgroup setup beside a timed run, and between
 //! operations the next one waits for that work anyway.
+//!
+//! Checkers keep a box of their own, platform tools included. On real isolate
+//! a second box adds about 0.4 ms at the median to a whole operation
+//! (`operation_1_box` against `operation_2_boxes` in `tests/isolate_overhead.rs`),
+//! and `--init` and `--cleanup` cost about 0.7 ms each, so running a checker
+//! outside isolate would save less than a millisecond for a jail with its own
+//! escape surface.
 
 use super::super::sandbox::SandboxManager;
 use super::EnvironmentList;
