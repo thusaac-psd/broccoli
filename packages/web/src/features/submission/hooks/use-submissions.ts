@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useSessionView } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -6,38 +7,34 @@ import {
   isTerminalStatus,
   parseSubmissionError,
   type Submission,
-  type SubmissionError,
 } from '@broccoli/web-sdk/submission';
+import { sleep } from '@broccoli/web-sdk/utils';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { pairFanOutSubmissions } from '@/features/submission/hooks/fan-out-response';
+import {
+  entriesReducer,
+  type EntryResult,
+  pollEntry,
+  type PollResponse,
+  pollTarget,
+  type SubmissionEntry,
+} from '@/features/submission/hooks/submission-entries';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
-const POLL_INTERVAL_MS = 1000;
+export type { SubmissionEntry } from '@/features/submission/hooks/submission-entries';
 
-export interface SubmissionEntry {
-  /** Unique client-side ID for this entry */
-  id: number;
-  submission: Submission | null;
-  codeRun: CodeRun | null;
-  status: 'submitting' | 'polling' | 'done' | 'error';
-  error: SubmissionError | null;
-  /** True for "run code" entries */
-  isRun?: boolean;
-  /**
-   * Shared key linking sibling entries created together by an admin fan-out
-   * (one submit, N pinned submissions). Entries with the same groupKey are
-   * rendered together as a comparison strip.
-   */
-  groupKey?: string;
-  /**
-   * Worker this entry was pinned to, if any. Used by the comparison strip and
-   * the per-row label.
-   */
-  targetWorkerId?: string;
-}
+const submissionResult = (submission: Submission): EntryResult => ({
+  submission,
+  terminal: isTerminalStatus(submission.status),
+});
+
+const codeRunResult = (codeRun: CodeRun): EntryResult => ({
+  codeRun,
+  terminal: isTerminalStatus(codeRun.status),
+});
 
 interface SubmissionFile {
   filename: string;
@@ -85,111 +82,72 @@ export function useSubmissions({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
-  const [entries, setEntries] = useState<SubmissionEntry[]>([]);
+  const [entries, dispatch] = useReducer(entriesReducer, []);
   const [activeEntryId, setActiveEntryId] = useState<number | null>(null);
-  const pollersRef = useRef<Map<number, ReturnType<typeof setInterval>>>(
-    new Map(),
-  );
   // Idempotency-Key bound to the submission itself: re-clicking Submit after
   // a network error resends the same key (the server replays a submission
   // whose response was lost), while edited code or another language gets a
   // fresh key, so the server can never replay the old code in its place.
   const sendIdempotent = useIdempotentRequest();
+  const session = useSessionView();
 
-  const stopPolling = useCallback((entryId: number) => {
-    const interval = pollersRef.current.get(entryId);
-    if (interval) {
-      clearInterval(interval);
-      pollersRef.current.delete(entryId);
+  // One poller per entry in `polling`, started and stopped from the entries
+  // themselves: an entry that is final, failed or gone has none.
+  const pollersRef = useRef(new Map<number, AbortController>());
+  useEffect(() => {
+    const pollers = pollersRef.current;
+    const wanted = new Map(
+      entries.flatMap((entry) => {
+        const target = pollTarget(entry);
+        return target ? [[entry.id, target] as const] : [];
+      }),
+    );
+    for (const [entryId, poller] of pollers) {
+      if (!wanted.has(entryId)) {
+        poller.abort();
+        pollers.delete(entryId);
+      }
     }
-  }, []);
-
-  const stopAllPolling = useCallback(() => {
-    for (const [id, interval] of Array.from(pollersRef.current)) {
-      clearInterval(interval);
-      pollersRef.current.delete(id);
+    for (const [entryId, target] of wanted) {
+      if (pollers.has(entryId)) continue;
+      const poller = new AbortController();
+      pollers.set(entryId, poller);
+      const fetchOnce = async (signal: AbortSignal): Promise<PollResponse> => {
+        const path = { id: target.id };
+        if (target.kind === 'codeRun') {
+          const res = await apiClient.GET('/code-runs/{id}', {
+            params: { path },
+            signal,
+          });
+          return res.error
+            ? { ok: false, status: res.response.status, error: res.error }
+            : { ok: true, result: codeRunResult(res.data) };
+        }
+        const res = await apiClient.GET('/submissions/{id}', {
+          params: { path },
+          signal,
+        });
+        return res.error
+          ? { ok: false, status: res.response.status, error: res.error }
+          : { ok: true, result: submissionResult(res.data) };
+      };
+      void pollEntry(entryId, poller.signal, {
+        fetch: fetchOnce,
+        sleep,
+        dispatch,
+        toError: parseSubmissionError,
+        isSignedOut: () => session.getState().status === 'signedOut',
+      });
     }
+  }, [entries, apiClient, session]);
+
+  useEffect(() => {
+    const pollers = pollersRef.current;
+    return () => {
+      pollers.forEach((poller) => poller.abort());
+      pollers.clear();
+    };
   }, []);
-
-  const startSubmissionPolling = useCallback(
-    (entryId: number, submissionId: number) => {
-      stopPolling(entryId);
-
-      const interval = setInterval(async () => {
-        try {
-          const { data, error: fetchError } = await apiClient.GET(
-            '/submissions/{id}',
-            { params: { path: { id: submissionId } } },
-          );
-          if (fetchError) {
-            console.error('Failed to poll submission:', fetchError);
-            return;
-          }
-
-          setEntries((prev) =>
-            prev.map((e) => {
-              if (e.id !== entryId) return e;
-              const isDone = isTerminalStatus(data.status);
-              return {
-                ...e,
-                submission: data,
-                status: isDone ? 'done' : 'polling',
-              };
-            }),
-          );
-
-          if (isTerminalStatus(data.status)) {
-            stopPolling(entryId);
-          }
-        } catch (err) {
-          console.error('Polling error:', err);
-        }
-      }, POLL_INTERVAL_MS);
-
-      pollersRef.current.set(entryId, interval);
-    },
-    [apiClient, stopPolling],
-  );
-
-  const startCodeRunPolling = useCallback(
-    (entryId: number, codeRunId: number) => {
-      stopPolling(entryId);
-
-      const interval = setInterval(async () => {
-        try {
-          const { data, error: fetchError } = await apiClient.GET(
-            '/code-runs/{id}',
-            { params: { path: { id: codeRunId } } },
-          );
-          if (fetchError) {
-            console.error('Failed to poll code run:', fetchError);
-            return;
-          }
-
-          setEntries((prev) =>
-            prev.map((e) => {
-              if (e.id !== entryId) return e;
-              const isDone = isTerminalStatus(data.status);
-              return {
-                ...e,
-                codeRun: data,
-                status: isDone ? 'done' : 'polling',
-              };
-            }),
-          );
-
-          if (isTerminalStatus(data.status)) {
-            stopPolling(entryId);
-          }
-        } catch (err) {
-          console.error('Code run polling error:', err);
-        }
-      }, POLL_INTERVAL_MS);
-
-      pollersRef.current.set(entryId, interval);
-    },
-    [apiClient, stopPolling],
-  );
 
   const submit = useCallback(
     async (
@@ -229,7 +187,7 @@ export function useSubmissions({
           }),
         );
 
-        setEntries((prev) => [...placeholderEntries, ...prev]);
+        dispatch({ type: 'added', entries: placeholderEntries });
         setActiveEntryId(placeholderEntries[0]?.id ?? null);
 
         try {
@@ -254,44 +212,38 @@ export function useSubmissions({
           // all". See `fan-out-response.ts` for the full reasoning.
           const pairings = pairFanOutSubmissions(targetWorkerIds, created);
 
-          setEntries((prev) =>
-            prev.map((e) => {
-              if (e.groupKey !== groupKey) return e;
-              const index = placeholderEntries.findIndex((p) => p.id === e.id);
-              const pairing = index === -1 ? undefined : pairings[index];
-              if (!pairing) return e;
-
-              if (pairing.withheld) {
-                // The mutation succeeded - `pairing.submission.id` is real -
-                // but the caller's own Read visibility into this submission
-                // is Deny, so the server disclosed nothing else about it.
-                // Polling `GET /submissions/{id}` would just 404 forever
-                // (that endpoint degrades the same Deny decision to a 404
-                // rather than a sparse body), so we don't start it, and we
-                // say so explicitly rather than leaving the entry looking
-                // like it's still in flight.
-                return {
-                  ...e,
-                  status: 'error' as const,
-                  error: {
-                    code: 'SUBMISSION_WITHHELD',
-                    message: t('toast.submission.fanOutWithheld', {
-                      workerId: e.targetWorkerId ?? pairing.workerId,
-                    }),
-                  },
-                };
-              }
-
-              return {
-                ...e,
-                // Safe: `pairing.withheld` is false, so every field this
-                // relies on (status, result, ...) is actually present - see
-                // `isWithheldFanOutSubmission`.
-                submission: pairing.submission as unknown as Submission,
-                status: 'polling' as const,
-              };
-            }),
-          );
+          placeholderEntries.forEach((placeholder, index) => {
+            const pairing = pairings[index];
+            if (!pairing) return;
+            if (pairing.withheld) {
+              // The mutation succeeded - `pairing.submission.id` is real -
+              // but the caller's own Read visibility into this submission
+              // is Deny, so the server disclosed nothing else about it.
+              // `GET /submissions/{id}` degrades the same Deny decision to a
+              // 404, so the entry says so instead of polling.
+              dispatch({
+                type: 'failed',
+                id: placeholder.id,
+                error: {
+                  code: 'SUBMISSION_WITHHELD',
+                  message: t('toast.submission.fanOutWithheld', {
+                    workerId: placeholder.targetWorkerId ?? pairing.workerId,
+                  }),
+                },
+              });
+              return;
+            }
+            dispatch({
+              type: 'accepted',
+              id: placeholder.id,
+              // Safe: `pairing.withheld` is false, so every field this
+              // relies on (status, result, ...) is actually present - see
+              // `isWithheldFanOutSubmission`.
+              result: submissionResult(
+                pairing.submission as unknown as Submission,
+              ),
+            });
+          });
 
           invalidateSubmissionLists();
 
@@ -300,23 +252,11 @@ export function useSubmissions({
               count: String(created.length),
             }),
           );
-
-          pairings.forEach((pairing, index) => {
-            if (pairing.withheld) return;
-            const placeholder = placeholderEntries[index];
-            if (placeholder) {
-              startSubmissionPolling(placeholder.id, pairing.submission.id);
-            }
-          });
         } catch (err) {
           console.error('Fan-out submission failed:', err);
-          const submissionError = parseSubmissionError(err);
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.groupKey === groupKey
-                ? { ...e, status: 'error' as const, error: submissionError }
-                : e,
-            ),
+          const error = parseSubmissionError(err);
+          placeholderEntries.forEach((placeholder) =>
+            dispatch({ type: 'failed', id: placeholder.id, error }),
           );
           toast.error(t('toast.submission.error'));
         }
@@ -334,7 +274,7 @@ export function useSubmissions({
         error: null,
       };
 
-      setEntries((prev) => [newEntry, ...prev]);
+      dispatch({ type: 'added', entries: [newEntry] });
       setActiveEntryId(entryId);
 
       try {
@@ -382,23 +322,17 @@ export function useSubmissions({
 
         if (!data) {
           // It is in the submissions list; there is nothing to poll here.
-          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          dispatch({ type: 'withdrawn', id: entryId });
           setActiveEntryId(null);
           toast.success(t('toast.submission.alreadySubmitted'));
           return;
         }
-        const submission = data;
-
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, submission, status: 'polling' as const }
-              : e,
-          ),
-        );
-
+        dispatch({
+          type: 'accepted',
+          id: entryId,
+          result: submissionResult(data),
+        });
         toast.success(t('toast.submission.submitted'));
-        startSubmissionPolling(entryId, submission.id);
       } catch (err) {
         if (
           toastUnsettled(err, t, {
@@ -409,31 +343,20 @@ export function useSubmissions({
           // Not a failure of this code: an earlier attempt to submit it may
           // have gone through (the refetched list shows it if so) or is
           // still running. There is nothing to poll here either way.
-          setEntries((prev) => prev.filter((e) => e.id !== entryId));
+          dispatch({ type: 'withdrawn', id: entryId });
           setActiveEntryId(null);
           return;
         }
         console.error('Submission failed:', err);
-        const submissionError = parseSubmissionError(err);
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, status: 'error' as const, error: submissionError }
-              : e,
-          ),
-        );
+        dispatch({
+          type: 'failed',
+          id: entryId,
+          error: parseSubmissionError(err),
+        });
         toast.error(t('toast.submission.error'));
       }
     },
-    [
-      apiClient,
-      contestId,
-      problemId,
-      queryClient,
-      sendIdempotent,
-      startSubmissionPolling,
-      t,
-    ],
+    [apiClient, contestId, problemId, queryClient, sendIdempotent, t],
   );
 
   const run = useCallback(
@@ -453,7 +376,7 @@ export function useSubmissions({
         isRun: true,
       };
 
-      setEntries((prev) => [newEntry, ...prev]);
+      dispatch({ type: 'added', entries: [newEntry] });
       setActiveEntryId(entryId);
 
       const custom_test_cases = customTestCases.map((tc) => ({
@@ -485,30 +408,23 @@ export function useSubmissions({
           data = res.data;
         }
 
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, codeRun: data, status: 'polling' as const }
-              : e,
-          ),
-        );
-
+        dispatch({
+          type: 'accepted',
+          id: entryId,
+          result: codeRunResult(data),
+        });
         toast.success(t('toast.submission.running'));
-        startCodeRunPolling(entryId, data.id);
       } catch (err) {
         console.error('Run failed:', err);
-        const submissionError = parseSubmissionError(err);
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entryId
-              ? { ...e, status: 'error' as const, error: submissionError }
-              : e,
-          ),
-        );
+        dispatch({
+          type: 'failed',
+          id: entryId,
+          error: parseSubmissionError(err),
+        });
         toast.error(t('toast.submission.error'));
       }
     },
-    [apiClient, contestId, problemId, startCodeRunPolling, t],
+    [apiClient, contestId, problemId, t],
   );
 
   const submissionEntries = entries.filter((e) => !e.isRun);
@@ -518,17 +434,11 @@ export function useSubmissions({
     (e) => e.status === 'submitting' || e.status === 'polling',
   );
 
-  // Reset when problem changes
+  // A new problem starts with no entries; their pollers stop with them.
   useEffect(() => {
-    stopAllPolling();
-    setEntries([]);
+    dispatch({ type: 'reset' });
     setActiveEntryId(null);
-  }, [problemId, stopAllPolling]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => stopAllPolling();
-  }, [stopAllPolling]);
+  }, [problemId]);
 
   return {
     entries,

@@ -1,8 +1,11 @@
-// A lazily loaded chunk can fail to load: the connection dropped for a moment,
-// or the site was redeployed and the chunks this (cached) page points at are
-// gone. Reloading fetches a fresh page and its current chunks, so that is the
-// right answer, once. If the reload did not help, reloading again would only
-// loop, so a second failure soon after shows an error page instead.
+import { isKnownOffline } from '@broccoli/web-sdk/utils';
+
+// The last resort for code that failed to load (see `chunk-load.ts` in the
+// SDK, which retries every lazy import first): the site was most likely
+// redeployed and the chunks this (cached) page points at are gone. Reloading
+// fetches a fresh page and its current chunks, so that is the right answer,
+// once. If the reload did not help, reloading again would only loop, so a
+// second failure soon after shows an error page instead.
 //
 // While the browser knows it is offline a reload can only land on the
 // browser's own offline page, which has no way back into the app, so none is
@@ -11,17 +14,6 @@
 
 const RELOAD_STAMP_KEY = 'broccoli:chunk-reload-at';
 const RELOAD_GUARD_MS = 60_000;
-
-const CHUNK_LOAD_MESSAGE =
-  /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|is not a valid JavaScript MIME type|Unable to preload CSS|Loading (CSS )?chunk .+ failed/i;
-
-/** Whether `error` is a failure to load code, not a bug in it. */
-export function isChunkLoadError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.name === 'ChunkLoadError' || CHUNK_LOAD_MESSAGE.test(error.message)
-  );
-}
 
 function lastReloadAt(): number | null {
   try {
@@ -34,30 +26,15 @@ function lastReloadAt(): number | null {
 }
 
 /**
- * Whether the browser knows it has no network. Only `false` from
- * `navigator.onLine` is trustworthy; `true` just means some interface is up.
- */
-export function isKnownOffline(): boolean {
-  return typeof navigator !== 'undefined' && navigator.onLine === false;
-}
-
-/** Calls `listener` whenever the browser goes online or offline. */
-export function subscribeToOnlineStatus(listener: () => void): () => void {
-  window.addEventListener('online', listener);
-  window.addEventListener('offline', listener);
-  return () => {
-    window.removeEventListener('online', listener);
-    window.removeEventListener('offline', listener);
-  };
-}
-
-/**
  * Whether `reloadForFreshChunks()` would reload: the browser is not known to
  * be offline, and it has not just done so.
  */
 export function canReloadForFreshChunks(): boolean {
   if (isKnownOffline()) return false;
   const last = lastReloadAt();
+  // The stamp outlives the page, so it takes the wall clock, not
+  // `performance.now()`; `Math.abs` keeps a clock jump from blocking reloads.
+  // eslint-disable-next-line no-restricted-properties
   return last !== null && Math.abs(Date.now() - last) >= RELOAD_GUARD_MS;
 }
 
@@ -68,6 +45,7 @@ export function canReloadForFreshChunks(): boolean {
 export function reloadForFreshChunks(): boolean {
   if (!canReloadForFreshChunks()) return false;
   try {
+    // eslint-disable-next-line no-restricted-properties -- see above
     sessionStorage.setItem(RELOAD_STAMP_KEY, String(Date.now()));
   } catch {
     return false;

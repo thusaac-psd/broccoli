@@ -3,25 +3,19 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
-  useState,
+  useSyncExternalStore,
 } from 'react';
 
-import {
-  type RefreshedSession,
-  useApiClient,
-  useRefreshSession,
-  useSetApiAccessToken,
-} from '@/api';
-import {
-  AUTH_SESSION_EXPIRED_EVENT,
-  type LoginRequest,
-  type User,
-} from '@/auth';
+import { useApiClient } from '@/api/use-api-client';
 import { AuthContext } from '@/auth/auth-context';
-
-// Refresh the access token every 4.5 minutes
-const REFRESH_INTERVAL_MS = 4.5 * 60 * 1000;
+import {
+  hintsSignedIn,
+  nextRefreshInMs,
+  sessionEffects,
+  sessionHint,
+} from '@/auth/session';
+import { useSession } from '@/auth/session-context';
+import type { LoginRequest } from '@/auth/types';
 
 interface AuthProviderProps {
   children: React.ReactNode;
@@ -29,105 +23,86 @@ interface AuthProviderProps {
 }
 
 /**
- * AuthProvider manages the dual-token authentication lifecycle.
- * Access Token (JWT) is stored in memory and synced with ApiClientProvider.
+ * AuthProvider drives the dual-token session the API client owns (see
+ * `session.ts`): it bootstraps it on load, renews it in the background, and
+ * carries its effects (the cross-tab session hint, cached data) out.
+ * Access Token (JWT) lives only in memory, in the session.
  * Refresh Token is stored in an HttpOnly cookie (handled by the browser).
- * Session Hint is stored in localStorage to persist login intent across reloads.
+ * Session Hint is stored in localStorage to persist login intent across
+ * reloads and to sign every tab out together.
  */
 export function AuthProvider({
   children,
   sessionStatusKey,
 }: AuthProviderProps) {
-  const [user, setUser] = useState<User | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const bootstrapStartedRef = useRef(false);
-  // Whether the bootstrap refresh has settled (the server answered).
-  const settledRef = useRef(false);
-  // When the next background refresh runs: a full interval after a success,
-  // sooner (with backoff) while the server is unreachable, never once the
-  // session is over. A fresh object re-arms the timer even for the same delay.
-  const [nextRefresh, setNextRefresh] = useState<{ inMs: number } | null>(null);
-
+  const session = useSession();
+  const state = useSyncExternalStore(
+    session.subscribe,
+    session.getState,
+    session.getState,
+  );
   const apiClient = useApiClient();
-  const setApiAccessToken = useSetApiAccessToken();
-  const refreshApiSession = useRefreshSession();
-
   const queryClient = useQueryClient();
 
-  const updateAccessToken = useCallback(
-    (token: string | null) => {
-      setAccessToken(token);
-      setApiAccessToken(token);
-    },
-    [setApiAccessToken],
+  // Every transition's effects, whoever caused it: this provider, a
+  // 401-triggered refresh in the API client, or another tab.
+  useEffect(
+    () =>
+      session.subscribe((next, prev) => {
+        const { hint, queries } = sessionEffects(prev, next);
+        if (hint !== null) {
+          try {
+            localStorage.setItem(sessionStatusKey, hint);
+          } catch {
+            // Storage blocked: the session still works in this tab.
+          }
+        }
+        if (queries === 'clear') queryClient.clear();
+        if (queries === 'invalidate') void queryClient.invalidateQueries();
+      }),
+    [session, sessionStatusKey, queryClient],
   );
 
-  // Starts (or renews) the session from a login or refresh response.
-  const startSession = useCallback(
-    (data: RefreshedSession) => {
-      updateAccessToken(data.token);
-      setUser({
-        id: data.id,
-        username: data.username,
-        display_name: data.display_name,
-        roles: data.roles,
-        permissions: data.permissions,
-      });
-      localStorage.setItem(sessionStatusKey, 'true');
-      setNextRefresh({ inMs: REFRESH_INTERVAL_MS });
-    },
-    [updateAccessToken, sessionStatusKey],
-  );
+  useEffect(() => {
+    // Another tab signed out (a removed hint counts as one), or signed in as
+    // another user: the shared cookie is theirs now, so renew to switch.
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== sessionStatusKey) return;
+      if (!hintsSignedIn(event.newValue)) {
+        session.dispatch({ type: 'signed-out' });
+        return;
+      }
+      const state = session.getState();
+      if (state.status === 'active' && event.newValue !== sessionHint(state)) {
+        void session.refresh();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [session, sessionStatusKey]);
 
-  // Ends the session in this tab and, through the session hint, in every
-  // other tab. Only for an explicit logout or a definitive auth rejection:
-  // anything weaker would sign out tabs whose session is fine.
-  const clearSession = useCallback(() => {
-    localStorage.setItem(sessionStatusKey, 'false');
-    updateAccessToken(null);
-    setUser(null);
-    setNextRefresh(null);
-    settledRef.current = true;
-    setIsLoading(false);
-    queryClient.clear();
-  }, [updateAccessToken, sessionStatusKey, queryClient]);
-
-  const logout = useCallback(async () => {
-    // Notify backend to revoke the refresh token
-    await apiClient.POST('/auth/logout').catch(() => {
-      // Ignore network errors on logout
-    });
-    clearSession();
-  }, [apiClient, clearSession]);
-
-  // Shares the API client's refresh, so this background refresh can never race
-  // a 401-triggered one for the single-use refresh cookie.
-  const refresh = useCallback(async () => {
-    const outcome = await refreshApiSession();
-
-    if (outcome.status === 'unavailable') {
-      // Offline, a gateway 502, a database blip: the session is probably
-      // fine, so keep it (and keep the bootstrap pending) and ask again.
-      setNextRefresh({ inMs: outcome.retryInMs });
-      return;
+  // Bootstrap. While the server is unreachable the session stays
+  // `bootstrapping` and retries, rather than concluding nobody is signed in.
+  useEffect(() => {
+    if (session.getState().status !== 'bootstrapping') return;
+    let hinted = false;
+    try {
+      hinted = hintsSignedIn(localStorage.getItem(sessionStatusKey));
+    } catch {
+      // No storage, no hint.
     }
+    if (hinted) void session.refresh();
+    else session.dispatch({ type: 'no-session' });
+  }, [session, sessionStatusKey]);
 
-    if (outcome.status === 'rejected') {
-      clearSession();
-      return;
-    }
-
-    startSession(outcome.session);
-
-    if (!settledRef.current) {
-      settledRef.current = true;
-      setIsLoading(false);
-      // Re-run any queries that fired before the access token was restored
-      // and got a 401 because no Authorization header was attached.
-      queryClient.invalidateQueries();
-    }
-  }, [refreshApiSession, clearSession, startSession, queryClient]);
+  // Background renewal (and the bootstrap's retries). Every transition is a
+  // new state object, so each one re-arms the timer.
+  useEffect(() => {
+    const delay = nextRefreshInMs(state);
+    if (delay === null) return;
+    const timer = setTimeout(() => void session.refresh(), delay);
+    return () => clearTimeout(timer);
+  }, [session, state]);
 
   const login = useCallback(
     async (data: LoginRequest) => {
@@ -138,75 +113,34 @@ export function AuthProvider({
       if (error) throw new Error(error.message);
       if (!resData) throw new Error('Unexpected login response');
 
-      startSession(resData);
-      queryClient.clear();
+      session.dispatch({ type: 'signed-in', session: resData });
     },
-    [apiClient, startSession, queryClient],
+    [apiClient, session],
   );
 
-  // Sync state with other tabs or infrastructure events
-  useEffect(() => {
-    // The API client announces that the server definitively rejected the
-    // refresh cookie (see `recoverSession`).
-    const handleSessionExpired = () => clearSession();
+  const logout = useCallback(
+    () =>
+      session.signOut(() =>
+        // Revokes the refresh cookie; a network error leaves it to expire.
+        apiClient.POST('/auth/logout').catch(() => undefined),
+      ),
+    [apiClient, session],
+  );
 
-    const handleStorage = (event: StorageEvent) => {
-      // Another tab signalled logout: `clearSession` writes the string 'false'
-      // (and a removal yields null), so treat anything that is not 'true' as
-      // logged-out. Checking only for null missed the 'false' write, leaving
-      // sibling tabs authenticated after a logout on a shared machine.
-      if (event.key === sessionStatusKey && event.newValue !== 'true') {
-        clearSession();
-      }
-    };
-
-    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired);
-    window.addEventListener('storage', handleStorage);
-
-    const initAuth = async () => {
-      if (bootstrapStartedRef.current) return;
-      bootstrapStartedRef.current = true;
-
-      const sessionHint = localStorage.getItem(sessionStatusKey);
-      if (sessionHint === 'true') {
-        // Settles the bootstrap once the server has answered either way;
-        // while it is unreachable the app keeps waiting instead of
-        // concluding the user is signed out.
-        await refresh();
-      } else {
-        settledRef.current = true;
-        setIsLoading(false);
-      }
-    };
-
-    initAuth();
-
-    return () => {
-      window.removeEventListener(
-        AUTH_SESSION_EXPIRED_EVENT,
-        handleSessionExpired,
-      );
-      window.removeEventListener('storage', handleStorage);
-    };
-  }, [clearSession, refresh, sessionStatusKey]);
-
-  // Automatic background refresh loop
-  useEffect(() => {
-    if (!nextRefresh) return;
-    const timer = setTimeout(() => void refresh(), nextRefresh.inMs);
-    return () => clearTimeout(timer);
-  }, [nextRefresh, refresh]);
+  const refresh = useCallback(async () => {
+    await session.refresh();
+  }, [session]);
 
   const value = useMemo(
     () => ({
-      user,
-      accessToken,
-      isLoading,
+      user: state.status === 'active' ? state.user : null,
+      accessToken: state.status === 'active' ? state.token : null,
+      isLoading: state.status === 'bootstrapping',
       login,
       logout,
       refresh,
     }),
-    [user, accessToken, isLoading, login, logout, refresh],
+    [state, login, logout, refresh],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

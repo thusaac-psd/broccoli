@@ -1,3 +1,4 @@
+import { useServerNow } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { type Submission, useSubmitGate } from '@broccoli/web-sdk/submission';
@@ -5,7 +6,6 @@ import { cn } from '@broccoli/web-sdk/utils';
 
 import { useBracket } from './hooks/useBracket';
 import { useMyMatch } from './hooks/useMyMatch';
-import { useNow } from './hooks/useNow';
 import {
   deriveCountdownStatus,
   formatCountdownLabel,
@@ -66,7 +66,7 @@ export function BracketLiveXiaoju({
   submissions,
 }: LiveXiaojuViewProps) {
   const { t } = useTranslation();
-  const now = useNow();
+  const now = useServerNow(1_000);
   // Keeps the problem lists fresh as the viewer's match moves on (see
   // `useRevealRefresh`); the result itself is not needed here.
   useMyMatch(contestId);

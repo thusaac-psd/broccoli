@@ -8,6 +8,8 @@ import { Input } from '@/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/ui/popover';
 import { cn } from '@/utils';
 
+import { serverNow } from '@/api/server-clock';
+
 export interface DateTimePickerProps {
   value: Date | undefined;
   onChange: (date: Date | undefined) => void;
@@ -46,7 +48,7 @@ function DateTimePicker({
     const num = parseInt(raw, 10);
     if (isNaN(num)) return;
 
-    const base = value ? new Date(value) : new Date();
+    const base = value ? new Date(value) : new Date(serverNow());
     if (!value) {
       base.setSeconds(0, 0);
     }

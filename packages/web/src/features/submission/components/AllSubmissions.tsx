@@ -46,7 +46,7 @@ export function AllSubmissions() {
   // Sync the input back when URL changes externally (e.g. browser back/forward),
   // but not when the user is actively typing.
   useEffect(() => {
-    const sinceLastEdit = Date.now() - lastUserEditRef.current;
+    const sinceLastEdit = performance.now() - lastUserEditRef.current;
     if (sinceLastEdit > SEARCH_DEBOUNCE_MS + 50) {
       setSearchInput(appliedQ);
     }
@@ -150,7 +150,7 @@ export function AllSubmissions() {
             placeholder={t('submissions.filters.searchPlaceholder')}
             value={searchInput}
             onChange={(e) => {
-              lastUserEditRef.current = Date.now();
+              lastUserEditRef.current = performance.now();
               setSearchInput(e.target.value);
             }}
             className="pl-8 h-9"

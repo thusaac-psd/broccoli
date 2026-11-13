@@ -6,7 +6,8 @@ import { useEffect, useReducer, useSyncExternalStore } from 'react';
 // must ask by the server's clock. This module estimates the offset between
 // the two from the `Date` header of responses the app receives anyway (no
 // extra requests), and every contest-timing computation goes through
-// `serverNow()` instead of `Date.now()`.
+// `serverNow()` instead of `Date.now()` (which a lint rule bans in frontend
+// code).
 //
 // `Date` has whole-second resolution and is stamped somewhere between when the
 // request was sent and when the response arrived, so each response bounds the

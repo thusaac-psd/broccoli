@@ -1,3 +1,4 @@
+import { useServerNow } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -12,7 +13,6 @@ import {
 import { cn } from '@broccoli/web-sdk/utils';
 import { type ComponentProps, type ReactNode, useState } from 'react';
 
-import { useNow } from './hooks/useNow';
 import {
   deriveCountdownStatus,
   formatCountdownLabel,
@@ -63,7 +63,7 @@ export function StatusPill({
  * server is starting it); null when there is no start time yet.
  */
 export function useStartsIn(startsAtMs: number | null): string | null {
-  const now = useNow();
+  const now = useServerNow(1_000);
   if (startsAtMs === null) return null;
   const left = startsAtMs - now;
   return left > 0 ? formatDurationMs(left) : 'now';
@@ -77,7 +77,7 @@ export function useGameClock(match: MatchView): {
   extraText: string | null;
   overdue: boolean;
 } | null {
-  const now = useNow();
+  const now = useServerNow(1_000);
   const { t } = useTranslation();
   const live =
     match.state === 'in_progress' ||
