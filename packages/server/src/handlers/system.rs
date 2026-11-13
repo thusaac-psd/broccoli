@@ -5,12 +5,12 @@ use axum::{Json, extract::State};
 use broccoli_server_sdk::permissions as perm;
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
-use redis::AsyncCommands;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
 };
 use tracing::{instrument, warn};
 
+use common::liveness::{self, NodeRole};
 use common::worker::HeartbeatPayload;
 
 // visibility-bypass-audited: all three handlers require perm::SYSTEM_VIEW,
@@ -26,35 +26,13 @@ use crate::models::system::{
 };
 use crate::state::AppState;
 
-pub(crate) const HEARTBEAT_KEY_PREFIX: &str = common::worker::WORKER_HEARTBEAT_KEY_PREFIX;
-/// A worker whose heartbeat is older than this counts as stale (it refreshes
-/// every 5s; the key itself expires at `WORKER_HEARTBEAT_TTL_SECS`).
-const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Age of a worker heartbeat from its key's remaining TTL in milliseconds
-/// (`PTTL`): the worker sets a fresh `WORKER_HEARTBEAT_TTL_SECS` TTL on every
-/// write, so the time since that write is the TTL minus what is left. Both
-/// are measured by Redis, so no worker or server clock is involved: comparing
-/// the payload's `last_seen` (worker clock) with this server's clock made a
-/// few seconds of skew drop live workers from capacity. `None` when the key
-/// has no TTL or vanished in between: not a live heartbeat.
-fn heartbeat_age(ttl_ms: i64) -> Option<std::time::Duration> {
-    if ttl_ms < 0 {
-        return None;
-    }
-    let full_ms = common::worker::WORKER_HEARTBEAT_TTL_SECS.saturating_mul(1000);
-    Some(std::time::Duration::from_millis(
-        full_ms.saturating_sub(ttl_ms as u64),
-    ))
-}
-
 #[utoipa::path(
     get,
     path = "/workers",
     tag = "System",
     operation_id = "listSystemWorkers",
     summary = "List active workers",
-    description = "Returns workers that have written a heartbeat to Redis within the past ~15 seconds. Requires `system:view` permission.",
+    description = "Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). Requires `system:view` permission.",
     responses(
         (status = 200, description = "List of workers", body = WorkersResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -79,7 +57,7 @@ pub async fn list_workers(
     tag = "System",
     operation_id = "listSystemQueues",
     summary = "List MQ queue depths",
-    description = "Returns the current depth of each Broccoli MQ queue (operation tasks, results, DLQ). Requires `system:view` permission.",
+    description = "Returns the depth of each message queue stream (shared operation tasks, each live worker's pinned tasks, this server's replies, dead letters), split into unread and pending entries. Requires `system:view` permission.",
     responses(
         (status = 200, description = "Queue depths", body = QueuesResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -144,14 +122,12 @@ pub async fn system_overview(
     }))
 }
 
-/// Returns the set of worker IDs that have a live (non-stale) heartbeat in
-/// Redis. Used by admin endpoints that need to validate `target_worker_id`
-/// values before they are persisted on submissions.
+/// The ids of the live workers. Used by admin endpoints that validate
+/// `target_worker_id` values before they are persisted on submissions.
 pub(crate) async fn live_worker_ids(state: &AppState) -> std::collections::HashSet<String> {
     read_workers(state)
         .await
         .into_iter()
-        .filter(|w| !w.stale)
         .map(|w| w.id)
         .collect()
 }
@@ -184,8 +160,33 @@ pub fn spawn_queue_depth_sampler(state: AppState, interval: Duration) {
     });
 }
 
+/// Shared operation backlog at which the depth sampler raises an error: work
+/// is arriving faster than the workers take it, and under `noeviction` a full
+/// Redis refuses every write. Watch `broccoli_mq_queue_depth{queue_role="operation"}`.
+const SHARED_BACKLOG_ALARM: u64 = 50_000;
+
 async fn record_queue_depths(state: &AppState, previous: &mut HashMap<QueueDepthKey, u64>) {
     let queues = read_queues(state).await;
+    for queue in &queues {
+        if queue_role(state, &queue.name) != mq::StreamRole::Shared.as_str() {
+            continue;
+        }
+        let before = previous
+            .get(&QueueDepthKey {
+                role: mq::StreamRole::Shared.as_str().into(),
+                name: queue.name.clone(),
+            })
+            .copied()
+            .unwrap_or(0);
+        if queue.depth >= SHARED_BACKLOG_ALARM && before < SHARED_BACKLOG_ALARM {
+            tracing::error!(
+                stream = %queue.name,
+                depth = queue.depth,
+                threshold = SHARED_BACKLOG_ALARM,
+                "The shared operation backlog crossed its alarm threshold; add workers or find what stopped them"
+            );
+        }
+    }
     let samples = queues
         .iter()
         .map(|queue| {
@@ -251,20 +252,11 @@ async fn record_submission_lifecycle_metrics(
 }
 
 fn queue_role(state: &AppState, queue_name: &str) -> &'static str {
-    if queue_name == state.config.mq.operation_queue_name {
-        "operation"
-    } else if queue_name
-        .strip_prefix(&state.config.mq.operation_queue_name)
-        .is_some_and(|suffix| suffix.starts_with(":worker:"))
-    {
-        "operation_private"
-    } else if queue_name == state.config.mq.operation_result_queue_name {
-        "operation_result"
-    } else if queue_name == state.config.mq.operation_dlq_queue_name {
-        "operation_dlq"
-    } else {
-        "unknown"
-    }
+    state
+        .mq
+        .as_ref()
+        .and_then(|mq| mq.topology().role_of(queue_name))
+        .map_or("unknown", mq::StreamRole::as_str)
 }
 
 fn queue_depth_deltas(
@@ -516,177 +508,110 @@ impl SubmissionInFlightDelta {
     }
 }
 
+/// The live workers (see [`common::liveness`]) with the payload each last
+/// wrote, sorted by id. Empty when Redis is unavailable.
 pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
     let Some(client) = state.redis_client.as_ref() else {
         return Vec::new();
     };
-
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
+    let nodes = match client.get_multiplexed_async_connection().await {
+        Ok(mut conn) => {
+            liveness::live_nodes(
+                &mut conn,
+                &state.config.mq.operation_queue_name,
+                NodeRole::Worker,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let nodes = match nodes {
+        Ok(nodes) => nodes,
         Err(e) => {
-            warn!(error = %e, "Failed to connect to Redis for worker heartbeats");
+            warn!(error = %e, "Reading worker liveness keys failed");
             return Vec::new();
         }
     };
-
-    let pattern = format!("{HEARTBEAT_KEY_PREFIX}*");
-    let keys: Vec<String> = match conn.scan_match::<&str, String>(&pattern).await {
-        Ok(mut iter) => {
-            let mut acc: Vec<String> = Vec::new();
-            while let Some(item) = iter.next_item().await {
-                match item {
-                    Ok(key) => acc.push(key),
-                    Err(e) => {
-                        warn!(error = %e, "Worker heartbeat SCAN entry failed");
-                        return Vec::new();
-                    }
+    nodes
+        .into_iter()
+        .filter_map(|node| {
+            let p = match serde_json::from_str::<HeartbeatPayload>(&node.payload) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(worker_id = %node.id, error = %e, "Unparseable worker heartbeat");
+                    return None;
                 }
-            }
-            acc
-        }
-        Err(e) => {
-            warn!(error = %e, "Worker heartbeat SCAN failed");
-            return Vec::new();
-        }
-    };
-
-    if keys.is_empty() {
-        return Vec::new();
-    }
-
-    // One round trip: the payloads plus each key's remaining TTL, from which
-    // the heartbeat's age follows on the Redis clock (see `heartbeat_age`).
-    let mut pipe = redis::pipe();
-    pipe.cmd("MGET").arg(&keys);
-    for key in &keys {
-        pipe.cmd("PTTL").arg(key);
-    }
-    let mut replies: Vec<redis::Value> = match pipe.query_async(&mut conn).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "Worker heartbeat MGET/PTTL failed");
-            return Vec::new();
-        }
-    };
-    if replies.len() != keys.len() + 1 {
-        warn!("Worker heartbeat pipeline returned an unexpected reply count");
-        return Vec::new();
-    }
-    let ttls_ms: Vec<i64> = replies
-        .split_off(1)
-        .into_iter()
-        .map(|v| redis::from_redis_value(v).unwrap_or(-2))
-        .collect();
-    let values: Vec<Option<String>> =
-        match redis::from_redis_value(replies.pop().expect("one MGET reply")) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, "Worker heartbeat MGET reply unparseable");
-                return Vec::new();
-            }
-        };
-
-    let mut workers: Vec<WorkerInfo> = values
-        .into_iter()
-        .zip(ttls_ms)
-        .filter_map(|(v, ttl_ms)| {
-            let payload = serde_json::from_str::<HeartbeatPayload>(&v?).ok()?;
-            Some((payload, heartbeat_age(ttl_ms)?))
+            };
+            Some(WorkerInfo {
+                id: node.id,
+                started_at: p.started_at,
+                last_seen: p.last_seen,
+                seconds_since_last_seen: node.age.as_secs(),
+                in_flight: p.in_flight,
+                max_concurrency: p.max_concurrency,
+                fairness_mode: p.fairness_mode,
+                sandbox_backend: p.sandbox_backend,
+                version: p.version,
+                hostname: p.hostname,
+                ip_addresses: p.ip_addresses,
+                os: p.os,
+                arch: p.arch,
+                cpu_count: p.cpu_count,
+                pid: p.pid,
+            })
         })
-        .map(|(p, age)| WorkerInfo {
-            id: p.id,
-            started_at: p.started_at,
-            last_seen: p.last_seen,
-            seconds_since_last_seen: age.as_secs(),
-            stale: age > STALE_AFTER,
-            in_flight: p.in_flight,
-            max_concurrency: p.max_concurrency,
-            fairness_mode: Some(p.fairness_mode),
-            sandbox_backend: p.sandbox_backend,
-            version: p.version,
-            hostname: p.hostname,
-            ip_addresses: p.ip_addresses,
-            os: p.os,
-            arch: p.arch,
-            cpu_count: p.cpu_count,
-            pid: p.pid,
-        })
-        .collect();
-
-    workers.sort_by(|a, b| a.id.cmp(&b.id));
-    workers
+        .collect()
 }
 
+/// Depth of every stream of the queue: the shared and dead-letter streams,
+/// each worker's private stream (live, or dead and not yet drained) and this
+/// server's reply stream.
 pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
     let Some(mq) = state.mq.as_ref() else {
         return Vec::new();
     };
-
-    let mut queue_names = vec![
-        state.config.mq.operation_queue_name.clone(),
-        state.config.mq.operation_result_queue_name.clone(),
-        state.config.mq.operation_dlq_queue_name.clone(),
+    let topology = mq.topology();
+    let mut keys = vec![
+        topology.shared(),
+        topology.dead_letter(),
+        topology.reply(&state.config.server.id),
     ];
-
-    for worker in read_workers(state).await {
-        if !worker.stale {
-            queue_names.push(format!(
-                "{}:worker:{}",
-                state.config.mq.operation_queue_name, worker.id
-            ));
+    // Live workers' private streams, and dead workers' until they are drained.
+    keys.extend(
+        read_workers(state)
+            .await
+            .iter()
+            .map(|worker| topology.private(&worker.id)),
+    );
+    match mq.pinned_workers().await {
+        Ok(ids) => keys.extend(ids.iter().map(|id| topology.private(id))),
+        Err(e) => warn!(error = %e, "Reading the pinned workers failed"),
+    }
+    keys.sort();
+    keys.dedup();
+    let depths = match mq.depths(&keys).await {
+        Ok(depths) => depths,
+        Err(e) => {
+            warn!(error = %e, "MQ depth lookup failed");
+            return Vec::new();
         }
-    }
-    queue_names.sort();
-    queue_names.dedup();
-
-    let mut out = Vec::with_capacity(queue_names.len());
-    for name in queue_names {
-        let breakdown: HashMap<String, u64> = match mq.size(&name).await {
-            Ok(map) => map,
-            Err(e) => {
-                warn!(queue = %name, error = %e, "MQ size lookup failed");
-                HashMap::new()
-            }
-        };
-        let depth: u64 = breakdown.values().sum();
-        out.push(QueueInfo {
-            name,
-            depth,
-            breakdown,
-        });
-    }
-    out
+    };
+    depths
+        .into_iter()
+        .map(|d| QueueInfo {
+            name: d.key,
+            depth: d.unread + d.pending,
+            breakdown: HashMap::from([
+                ("unread".to_string(), d.unread),
+                ("pending".to_string(), d.pending),
+            ]),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn heartbeat_age_is_the_ttl_already_spent() {
-        let full = common::worker::WORKER_HEARTBEAT_TTL_SECS * 1000;
-        assert_eq!(heartbeat_age(full as i64), Some(std::time::Duration::ZERO));
-        assert_eq!(
-            heartbeat_age(full as i64 - 4_000),
-            Some(std::time::Duration::from_secs(4))
-        );
-        // No TTL (-1) or a key that expired in between (-2): not live.
-        assert_eq!(heartbeat_age(-1), None);
-        assert_eq!(heartbeat_age(-2), None);
-    }
-
     use super::*;
-
-    #[test]
-    fn heartbeat_payload_reads_fairness_mode_and_tolerates_legacy() {
-        let with = r#"{"id":"w","started_at":"2026-05-01T00:00:00Z","last_seen":"2026-05-01T00:00:00Z","in_flight":0,"max_concurrency":4,"fairness_mode":"pinned","sandbox_backend":"isolate","version":"0.1.0"}"#;
-        let p: HeartbeatPayload = serde_json::from_str(with).unwrap();
-        assert_eq!(p.fairness_mode, "pinned");
-
-        // Legacy worker heartbeats predating the field must still parse (the
-        // shared payload defaults `fairness_mode` to "unknown").
-        let legacy = r#"{"id":"w","started_at":"2026-05-01T00:00:00Z","last_seen":"2026-05-01T00:00:00Z","in_flight":0,"max_concurrency":null,"sandbox_backend":"isolate","version":"0.1.0"}"#;
-        let p: HeartbeatPayload = serde_json::from_str(legacy).unwrap();
-        assert_eq!(p.fairness_mode, "unknown");
-    }
 
     #[test]
     fn queue_depth_delta_tracks_absolute_samples() {

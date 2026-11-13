@@ -20,6 +20,9 @@ impl SubmissionDlqErrorCode {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DlqErrorCode {
     MaxRetriesExceeded,
+    /// The queue handed the task out more than `mq::MAX_DELIVERIES` times:
+    /// every worker it reached died or wedged while holding it.
+    RedeliveryExhausted,
     DeserializationError,
     StuckJob,
     DispatchRetryExhausted,
@@ -29,6 +32,7 @@ impl DlqErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::MaxRetriesExceeded => "MAX_RETRIES_EXCEEDED",
+            Self::RedeliveryExhausted => "REDELIVERY_EXHAUSTED",
             Self::DeserializationError => "DESERIALIZATION_ERROR",
             Self::StuckJob => "STUCK_JOB",
             Self::DispatchRetryExhausted => "DISPATCH_RETRY_EXHAUSTED",

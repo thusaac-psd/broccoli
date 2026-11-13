@@ -413,7 +413,7 @@ impl DbClock {
 pub async fn shared_redis_port() -> u16 {
     let (_, port) = SHARED_REDIS
         .get_or_init(|| async {
-            let container = Redis::default()
+            let container = common::test_util::redis_image()
                 .start()
                 .await
                 .expect("Failed to start Redis container");

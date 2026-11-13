@@ -92,12 +92,10 @@ mod system_view_permission {
 mod worker_liveness {
     use super::*;
     use crate::common::SpawnOptions;
-    use common::worker::{
-        HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX, WORKER_HEARTBEAT_TTL_SECS,
-    };
+    use common::liveness::{NodeRole, TTL};
+    use common::worker::HeartbeatPayload;
     use redis::AsyncCommands;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     async fn write_heartbeat(conn: &mut redis::aio::MultiplexedConnection, id: &str, ttl: u64) {
         // The worker's clock is an hour behind the server's.
@@ -120,7 +118,7 @@ mod worker_liveness {
         };
         let _: () = conn
             .set_ex(
-                format!("{WORKER_HEARTBEAT_KEY_PREFIX}{id}"),
+                NodeRole::Worker.key(&common::config::default_operation_queue_name(), id),
                 serde_json::to_string(&payload).unwrap(),
                 ttl,
             )
@@ -130,7 +128,10 @@ mod worker_liveness {
 
     #[tokio::test]
     async fn a_fresh_heartbeat_is_live_whatever_the_worker_clock_says() {
-        let redis = Redis::default().start().await.expect("start redis");
+        let redis = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
         let port = redis.get_host_port_ipv4(6379).await.unwrap();
         let url = format!("redis://127.0.0.1:{port}");
         let mut conn = redis::Client::open(url.as_str())
@@ -139,9 +140,9 @@ mod worker_liveness {
             .await
             .unwrap();
         // Fresh: just written with the full TTL.
-        write_heartbeat(&mut conn, "fresh", WORKER_HEARTBEAT_TTL_SECS).await;
-        // Old: its TTL says it was written 12s ago, past the 10s staleness.
-        write_heartbeat(&mut conn, "old", WORKER_HEARTBEAT_TTL_SECS - 12).await;
+        write_heartbeat(&mut conn, "fresh", TTL.as_secs()).await;
+        // Old: its TTL says it was written 12s ago; still live until it expires.
+        write_heartbeat(&mut conn, "old", TTL.as_secs() - 12).await;
 
         let app = TestApp::spawn_with_options(SpawnOptions {
             redis_url: Some(url),
@@ -160,8 +161,7 @@ mod worker_liveness {
                 .find(|w| w["id"] == id)
                 .unwrap_or_else(|| panic!("worker {id} listed: {}", res.text))
         };
-        assert_eq!(by_id("fresh")["stale"], false, "{}", res.text);
         assert!(by_id("fresh")["seconds_since_last_seen"].as_u64().unwrap() <= 2);
-        assert_eq!(by_id("old")["stale"], true, "{}", res.text);
+        assert!(by_id("old")["seconds_since_last_seen"].as_u64().unwrap() >= 11);
     }
 }

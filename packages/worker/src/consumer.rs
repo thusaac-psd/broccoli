@@ -2,30 +2,37 @@ use std::sync::Arc;
 
 use common::metrics::Metrics;
 use common::retry::{RetryCleanupGuard, RetryDecision, RetryTracker, calculate_backoff};
-use common::worker::Task;
+use common::worker::{Task, TaskResult};
 use common::{DlqConfig, DlqEnvelope, DlqErrorCode, DlqMessageType};
-use mq::{BroccoliError, BrokerMessage};
+use mq::{Delivery, Mq, StreamRole};
 use opentelemetry::KeyValue;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use common::cancel::RedisCancelChecker;
 
-use crate::dedup::{ClaimOutcome, RedisTaskDedup, task_dedup_ttl_secs};
-use crate::metrics::{
-    TaskMetricGuard, WorkerPermitMetricGuard, record_mq_consume, record_mq_publish,
-};
+use crate::metrics::{TaskMetricGuard, WorkerPermitMetricGuard, record_mq_consume};
 use crate::models::worker::Worker;
 use crate::task_runner::{PublishRetry, execute_task, publish_result};
+
+/// What the consume loop does with a delivery once its handler is done.
+#[derive(Debug)]
+pub enum Settlement {
+    /// Done with it: acknowledge and delete.
+    Ack,
+    /// Move it to the dead-letter stream as this envelope.
+    DeadLetter(Box<DlqEnvelope>),
+    /// Leave it pending and stop refreshing it, so it is redelivered once it
+    /// has been idle for `mq::CLAIM_IDLE`.
+    Abandon,
+}
 
 #[derive(Clone)]
 pub struct WorkerConsumer {
     worker: Arc<Worker>,
-    mq: Arc<mq::Mq>,
-    dlq_queue: String,
+    mq: Mq,
     dlq_config: DlqConfig,
     retry_tracker: Arc<Mutex<RetryTracker>>,
-    dedup: Option<Arc<RedisTaskDedup>>,
     cancel_checker: Option<Arc<RedisCancelChecker>>,
     metrics: Metrics,
     worker_id: String,
@@ -34,11 +41,9 @@ pub struct WorkerConsumer {
 
 pub struct WorkerConsumerDeps {
     pub worker: Arc<Worker>,
-    pub mq: Arc<mq::Mq>,
-    pub dlq_queue: String,
+    pub mq: Mq,
     pub dlq_config: DlqConfig,
     pub retry_tracker: Arc<Mutex<RetryTracker>>,
-    pub dedup: Option<Arc<RedisTaskDedup>>,
     pub cancel_checker: Option<Arc<RedisCancelChecker>>,
     pub metrics: Metrics,
     pub worker_id: String,
@@ -49,10 +54,8 @@ impl WorkerConsumer {
         Self {
             worker: deps.worker,
             mq: deps.mq,
-            dlq_queue: deps.dlq_queue,
             dlq_config: deps.dlq_config,
             retry_tracker: deps.retry_tracker,
-            dedup: deps.dedup,
             cancel_checker: deps.cancel_checker,
             metrics: deps.metrics,
             worker_id: deps.worker_id,
@@ -60,26 +63,47 @@ impl WorkerConsumer {
         }
     }
 
-    /// Process one already-consumed task under the per-task worker-permit metric
-    /// guard, returning the ack/reject decision (`Ok` -> acknowledge, `Err` ->
-    /// reject/retry).
+    /// Process one delivery under the per-task worker-permit metric guard.
     ///
-    /// Unlike the former `handler`, this does NOT short-circuit on shutdown. The
-    /// manual consume loop in `crate::runtime` stops CONSUMING the instant
-    /// shutdown is signaled, so a task that has already been taken off the queue
-    /// is always run to completion during the drain window instead of being
-    /// rejected - the old shutdown-reject path burned the retry budget and pushed
-    /// still-valid tasks into the failed queue on every graceful shutdown.
-    pub async fn run_task(&self, message: BrokerMessage<Task>) -> Result<(), BroccoliError> {
+    /// The consume loop in `crate::runtime` stops reading the instant shutdown
+    /// is signaled, so a delivery handed to this is always run to completion
+    /// during the drain window.
+    pub async fn run_task(&self, delivery: Delivery<Task>) -> Settlement {
         let _worker_permit_guard = WorkerPermitMetricGuard::new(&self.metrics, &self.worker_id);
-        self.process_message(message).await
+        self.process_delivery(delivery).await
     }
 
-    #[tracing::instrument(skip(self, message), fields(job_id, task_type, executor))]
-    pub async fn process_message(&self, message: BrokerMessage<Task>) -> Result<(), BroccoliError> {
+    #[tracing::instrument(skip(self, delivery), fields(job_id, task_type, executor))]
+    pub async fn process_delivery(&self, delivery: Delivery<Task>) -> Settlement {
         let consume_start = std::time::Instant::now();
-        let attempts = message.attempts;
-        let task = message.payload;
+        let stream = self
+            .mq
+            .topology()
+            .role_of(&delivery.entry.stream)
+            .unwrap_or(StreamRole::Shared);
+        let deliveries = delivery.deliveries;
+        let task = match delivery.payload {
+            Ok(task) => task,
+            Err(e) => {
+                error!(error = %e, "Dead-lettering an undecodable operation task");
+                record_mq_consume(
+                    &self.metrics,
+                    stream,
+                    "undecodable",
+                    deliveries,
+                    consume_start,
+                );
+                return Settlement::DeadLetter(Box::new(DlqEnvelope {
+                    message_id: delivery.entry.id.clone(),
+                    message_type: DlqMessageType::OperationTask,
+                    submission_id: None,
+                    payload: serde_json::json!({ "raw": e.raw }),
+                    error_code: DlqErrorCode::DeserializationError,
+                    error_message: e.reason,
+                    retry_history: vec![],
+                }));
+            }
+        };
         let task_id = task.id.clone();
         tracing::Span::current().record("job_id", tracing::field::display(&task_id));
         tracing::Span::current().record("task_type", tracing::field::display(&task.task_type));
@@ -94,56 +118,27 @@ impl WorkerConsumer {
         let _task_metric_guard =
             TaskMetricGuard::new(&self.metrics, task_attrs.clone(), worker_attrs);
 
-        if let Some(enqueued_at_unix_ms) = task.enqueued_at_unix_ms {
-            let now = chrono::Utc::now().timestamp_millis();
-            let age_secs = now.saturating_sub(enqueued_at_unix_ms) as f64 / 1000.0;
-            self.metrics.mq_message_age.record(
-                age_secs,
-                &[
-                    KeyValue::new("queue", "operation"),
-                    KeyValue::new("message.type", "operation_task"),
-                ],
-            );
+        let queued_secs = delivery.queued_for.as_secs_f64();
+        self.metrics.mq_message_age.record(
+            queued_secs,
+            &[
+                KeyValue::new("queue", stream.as_str()),
+                KeyValue::new("message.type", "operation_task"),
+            ],
+        );
+        self.metrics
+            .task_queue_wait_duration
+            .record(queued_secs, &task_attrs);
+        if deliveries > 1 {
             self.metrics
-                .task_queue_wait_duration
-                .record(age_secs, &task_attrs);
+                .mq_redeliveries_total
+                .add(1, &[KeyValue::new("queue", stream.as_str())]);
         }
 
-        if let Some(dedup) = self.dedup.as_ref() {
-            // Per-operation TTL (step limits + slack, floored at the fallback) so
-            // the claim outlives the run without lingering long after it finishes.
-            let ttl_secs = task_dedup_ttl_secs(&task, dedup.fallback_ttl_secs());
-            match dedup.try_claim_with_ttl(&task_id, ttl_secs).await {
-                ClaimOutcome::Claimed => {
-                    let mut attrs = task_attrs.clone();
-                    attrs.push(KeyValue::new("outcome", "claimed"));
-                    self.metrics.task_dedup_claims_total.add(1, &attrs);
-                }
-                ClaimOutcome::Stolen => {
-                    let mut attrs = task_attrs.clone();
-                    attrs.push(KeyValue::new("outcome", "stolen"));
-                    self.metrics.task_dedup_claims_total.add(1, &attrs);
-                    warn!(
-                        job_id = %task_id,
-                        "Stole claim from a worker with no live heartbeat — re-judging"
-                    );
-                }
-                ClaimOutcome::HeldByOther => {
-                    let mut attrs = task_attrs.clone();
-                    attrs.push(KeyValue::new("outcome", "held_by_other"));
-                    self.metrics.task_dedup_claims_total.add(1, &attrs);
-                    info!(job_id = %task_id, "Task already claimed by a live worker, skipping");
-                    record_mq_consume(
-                        &self.metrics,
-                        "operation",
-                        "operation_task",
-                        "dedup_skip",
-                        attempts,
-                        consume_start,
-                    );
-                    return Ok(());
-                }
-            }
+        if delivery.deliveries > mq::MAX_DELIVERIES {
+            return self
+                .finish_poison(&task, &task_attrs, stream, deliveries, consume_start)
+                .await;
         }
 
         if let Some(ref tc) = task.trace_context
@@ -169,13 +164,12 @@ impl WorkerConsumer {
                     self.metrics.tasks_completed_total.add(1, &attrs);
                     record_mq_consume(
                         &self.metrics,
-                        "operation",
-                        "operation_task",
+                        stream,
                         "cancelled_by_host",
-                        attempts,
+                        deliveries,
                         consume_start,
                     );
-                    return Ok(());
+                    return Settlement::Ack;
                 }
                 Ok(false) => {}
                 Err(e) => {
@@ -189,6 +183,7 @@ impl WorkerConsumer {
             task_type = %task.task_type,
             executor_name = %task.executor_name,
             worker_id = %self.worker_id,
+            deliveries,
             trace_id = common::observability::current_trace_id().as_deref().unwrap_or(""),
             "Received task"
         );
@@ -227,28 +222,13 @@ impl WorkerConsumer {
                         .task_process_duration
                         .record(task_start.elapsed().as_secs_f64(), &completion_attrs);
                     self.metrics.tasks_completed_total.add(1, &completion_attrs);
-                    record_mq_consume(
-                        &self.metrics,
-                        "operation",
-                        "operation_task",
-                        outcome,
-                        attempts,
-                        consume_start,
-                    );
+                    record_mq_consume(&self.metrics, stream, outcome, deliveries, consume_start);
                     // A result that could not be delivered within the publish
-                    // window is handed back to the broker for redelivery. Drop
-                    // our dedup claim first: it can outlive this attempt, and a
-                    // worker that receives the redelivery would otherwise see
-                    // it held, skip the task and ack it away. This is best
-                    // effort: if Redis is still failing, the reject can fail too
-                    // (under OOM the vendored reject drops the message from the
-                    // processing list before its re-publish is refused).
-                    if published.is_err()
-                        && let Some(dedup) = self.dedup.as_ref()
-                    {
-                        dedup.release(&task_id).await;
-                    }
-                    return published.map_err(|e| BroccoliError::Publish(e.to_string()));
+                    // window leaves the task to be redelivered.
+                    return match published {
+                        Ok(()) => Settlement::Ack,
+                        Err(_) => Settlement::Abandon,
+                    };
                 }
                 Err(e) => {
                     let error_str = e.to_string();
@@ -279,19 +259,41 @@ impl WorkerConsumer {
                             tokio::time::sleep(delay).await;
                         }
                         RetryDecision::Exhausted { history } => {
-                            self.finish_exhausted(
-                                &task,
-                                &task_id,
-                                &task_attrs,
-                                attempts,
+                            let mut exhausted_attrs = task_attrs.clone();
+                            exhausted_attrs.push(KeyValue::new("outcome", "exhausted"));
+                            self.metrics.task_retries_total.add(1, &exhausted_attrs);
+                            self.metrics
+                                .task_process_duration
+                                .record(task_start.elapsed().as_secs_f64(), &exhausted_attrs);
+                            self.metrics.tasks_completed_total.add(1, &exhausted_attrs);
+                            error!(
+                                job_id = %task_id,
+                                retry_count = history.len(),
+                                error = %error_str,
+                                "Max retries exhausted, sending to DLQ"
+                            );
+                            cleanup_guard.defuse();
+                            record_mq_consume(
+                                &self.metrics,
+                                stream,
+                                "exhausted",
+                                deliveries,
                                 consume_start,
-                                task_start,
-                                error_str,
-                                history,
-                                &mut cleanup_guard,
-                            )
-                            .await;
-                            return Ok(());
+                            );
+                            let message = format!(
+                                "Operation failed after {} retries: {error_str}",
+                                history.len()
+                            );
+                            return self
+                                .dead_letter_with_reply(
+                                    &task,
+                                    &task_attrs,
+                                    message,
+                                    DlqErrorCode::MaxRetriesExceeded,
+                                    error_str,
+                                    history,
+                                )
+                                .await;
                         }
                     }
                 }
@@ -299,129 +301,96 @@ impl WorkerConsumer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn finish_exhausted(
+    /// A task every earlier consumer died or wedged on: do not run it again.
+    async fn finish_poison(
         &self,
         task: &Task,
-        task_id: &str,
         task_attrs: &[KeyValue],
-        attempts: u8,
+        stream: StreamRole,
+        deliveries: u32,
         consume_start: std::time::Instant,
-        task_start: std::time::Instant,
-        error_str: String,
-        history: Vec<common::retry::RetryAttempt>,
-        cleanup_guard: &mut RetryCleanupGuard<'_>,
-    ) {
-        let mut exhausted_attrs = task_attrs.to_vec();
-        exhausted_attrs.push(KeyValue::new("outcome", "exhausted"));
-        self.metrics.task_retries_total.add(1, &exhausted_attrs);
-        self.metrics.dlq_messages_total.add(1, &exhausted_attrs);
-        self.metrics
-            .task_process_duration
-            .record(task_start.elapsed().as_secs_f64(), &exhausted_attrs);
-        self.metrics.tasks_completed_total.add(1, &exhausted_attrs);
-
+    ) -> Settlement {
         error!(
-            job_id = %task_id,
-            retry_count = history.len(),
-            error = %error_str,
-            "Max retries exhausted, sending to DLQ"
+            job_id = %task.id,
+            deliveries,
+            "Task was delivered more than {} times; sending to DLQ without running it",
+            mq::MAX_DELIVERIES
         );
+        let mut attrs = task_attrs.to_vec();
+        attrs.push(KeyValue::new("outcome", "redelivery_exhausted"));
+        self.metrics.tasks_completed_total.add(1, &attrs);
+        record_mq_consume(
+            &self.metrics,
+            stream,
+            "redelivery_exhausted",
+            deliveries,
+            consume_start,
+        );
+        let reason = format!(
+            "Operation was delivered {deliveries} times and never finished: the workers running it stopped"
+        );
+        self.dead_letter_with_reply(
+            task,
+            task_attrs,
+            reason.clone(),
+            DlqErrorCode::RedeliveryExhausted,
+            reason,
+            vec![],
+        )
+        .await
+    }
 
-        let error_result = common::worker::TaskResult {
-            task_id: task_id.to_string(),
+    /// Tell the waiting server the task failed with `reply_error`, then hand
+    /// the task to the dead-letter stream.
+    async fn dead_letter_with_reply(
+        &self,
+        task: &Task,
+        task_attrs: &[KeyValue],
+        reply_error: String,
+        error_code: DlqErrorCode,
+        error_message: String,
+        retry_history: Vec<common::retry::RetryAttempt>,
+    ) -> Settlement {
+        let mut dlq_attrs = task_attrs.to_vec();
+        dlq_attrs.push(KeyValue::new("error_code", error_code.as_str()));
+        self.metrics.dlq_messages_total.add(1, &dlq_attrs);
+
+        let mut error_result = TaskResult {
+            task_id: task.id.clone(),
             success: false,
             output: serde_json::json!({}),
-            error: Some(format!(
-                "Operation failed after {} retries: {}",
-                history.len(),
-                error_str
-            )),
-            task_type: Some(task.task_type.clone()),
-            operation: Some(task.executor_name.clone()),
-            worker_id: Some(self.worker_id.clone()),
-            enqueued_at_unix_ms: task.enqueued_at_unix_ms,
+            error: Some(reply_error),
+            task_type: None,
+            operation: None,
+            worker_id: None,
         };
-        let publish_start = std::time::Instant::now();
-        if let Err(e) = self
-            .mq
-            .publish(task.reply_queue_name(), None, &error_result, None)
-            .await
+        error_result.attach_worker_metadata(task, &self.worker_id);
+        if publish_result(
+            task,
+            &error_result,
+            &self.mq,
+            &self.metrics,
+            self.publish_retry,
+        )
+        .await
+        .is_err()
         {
-            record_mq_publish(
-                &self.metrics,
-                task.reply_queue_name(),
-                "task_result",
-                "error",
-                publish_start,
-            );
-            error!(job_id = %task_id, error = %e, "Failed to publish error result for operation task");
-        } else {
-            record_mq_publish(
-                &self.metrics,
-                task.reply_queue_name(),
-                "task_result",
-                "success",
-                publish_start,
-            );
+            error!(job_id = %task.id, "Failed to publish the error result for a dead-lettered task");
         }
 
         let payload = serde_json::to_value(task).unwrap_or_else(|ser_err| {
             error!(error = %ser_err, "Failed to serialize task for DLQ");
-            serde_json::json!({ "task_id": task_id })
+            serde_json::json!({ "task_id": task.id })
         });
-
-        let envelope = DlqEnvelope {
-            message_id: task_id.to_string(),
+        Settlement::DeadLetter(Box::new(DlqEnvelope {
+            message_id: task.id.clone(),
             message_type: DlqMessageType::OperationTask,
             submission_id: None,
             payload,
-            error_code: DlqErrorCode::MaxRetriesExceeded,
-            error_message: error_str,
-            retry_history: history,
-        };
-
-        let dlq_publish_start = std::time::Instant::now();
-        if let Err(dlq_err) = self
-            .mq
-            .publish(&self.dlq_queue, None, &envelope, None)
-            .await
-        {
-            record_mq_publish(
-                &self.metrics,
-                &self.dlq_queue,
-                "dlq_envelope",
-                "error",
-                dlq_publish_start,
-            );
-            error!(
-                job_id = %task_id,
-                error = %dlq_err,
-                "CRITICAL: Failed to publish to DLQ, message may be lost"
-            );
-        } else {
-            record_mq_publish(
-                &self.metrics,
-                &self.dlq_queue,
-                "dlq_envelope",
-                "success",
-                dlq_publish_start,
-            );
-        }
-
-        if let Some(dedup) = self.dedup.as_ref() {
-            dedup.release(task_id).await;
-        }
-
-        cleanup_guard.defuse();
-        record_mq_consume(
-            &self.metrics,
-            "operation",
-            "operation_task",
-            "exhausted",
-            attempts,
-            consume_start,
-        );
+            error_code,
+            error_message,
+            retry_history,
+        }))
     }
 }
 
@@ -430,10 +399,14 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use common::cancel::{RedisCancelChecker, set_cancel_batch_key, set_cancel_op_keys};
-    use common::worker::{Executor, TaskResult};
+    use common::liveness::NodeRole;
+    use common::node_identity::NodeClaim;
+    use common::worker::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
+
+    const SERVER: &str = "server-1";
 
     struct CountingExecutor {
         calls: Arc<AtomicUsize>,
@@ -455,7 +428,6 @@ mod tests {
                 task_type: None,
                 operation: None,
                 worker_id: None,
-                enqueued_at_unix_ms: None,
             })
         }
     }
@@ -466,209 +438,286 @@ mod tests {
             task_type: "operation".into(),
             executor_name: "operation".into(),
             payload: serde_json::json!({}),
-            result_queue: "worker-cancel-test-results".into(),
+            reply_to: SERVER.into(),
             operation_batch_id: batch_id.map(str::to_string),
-            reply_queue: None,
-            priority: None,
             trace_context: None,
-            enqueued_at_unix_ms: None,
         }
     }
 
-    async fn consumer_with_cancel_checker(
-        redis_url: &str,
+    struct Harness {
+        _redis: testcontainers::ContainerAsync<Redis>,
+        _server: NodeClaim,
+        url: String,
+        mq: Mq,
+        consumer: WorkerConsumer,
         calls: Arc<AtomicUsize>,
-    ) -> WorkerConsumer {
-        let worker = Worker::with_no_executors();
-        worker.register_executor("operation", Arc::new(CountingExecutor { calls }));
-        let mq = mq::init_mq(mq::MqConfig {
-            url: redis_url.to_string(),
-            pool_size: 1,
-        })
-        .await
-        .expect("test MQ should connect to Redis");
-        let (metrics, _registry) =
-            common::observability::init_metrics("worker-cancel-consumer-test");
+        admin: redis::aio::MultiplexedConnection,
+    }
 
-        WorkerConsumer::new(WorkerConsumerDeps {
+    /// A worker consumer against a fresh Redis in which server `SERVER` is
+    /// live and has its reply stream.
+    async fn harness() -> Harness {
+        let redis = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("redis");
+        let port = redis.get_host_port_ipv4(6379).await.expect("port");
+        let url = format!("redis://127.0.0.1:{port}");
+        let mq = Mq::connect(&url, "ops").await.expect("mq");
+        let admin = redis::Client::open(url.as_str())
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        // Server `SERVER` as it runs: its claim owns its reply stream, which
+        // the first renewal creates.
+        let server = NodeClaim::claim_at_boot(
+            redis::Client::open(url.as_str()).unwrap(),
+            "ops",
+            NodeRole::Server,
+            SERVER,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap()
+        .own_stream(mq.topology().reply(SERVER), mq::REPLY_STREAM_TTL, || {});
+        server.renew(serde_json::json!({})).await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = Worker::with_no_executors();
+        worker.register_executor(
+            "operation",
+            Arc::new(CountingExecutor {
+                calls: calls.clone(),
+            }),
+        );
+        let (metrics, _registry) = common::observability::init_metrics("worker-consumer-test");
+        let consumer = WorkerConsumer::new(WorkerConsumerDeps {
             worker: Arc::new(worker),
-            mq: Arc::new(mq),
-            dlq_queue: "worker-cancel-test-dlq".into(),
+            mq: mq.clone(),
             dlq_config: DlqConfig::default(),
             retry_tracker: Arc::new(Mutex::new(RetryTracker::default())),
-            dedup: None,
             cancel_checker: Some(Arc::new(
-                RedisCancelChecker::new(redis_url).expect("cancel checker should connect"),
+                RedisCancelChecker::new(&url).expect("cancel checker should connect"),
             )),
             metrics,
-            worker_id: "worker-cancel-test".into(),
-        })
+            worker_id: "worker-test".into(),
+        });
+        Harness {
+            _redis: redis,
+            _server: server,
+            url,
+            mq,
+            consumer,
+            calls,
+            admin,
+        }
+    }
+
+    impl Harness {
+        /// Publish `t` and take it as worker `worker-test`.
+        async fn deliver(&self, t: &Task) -> Delivery<Task> {
+            let group = self.mq.task_consumer("worker-test");
+            group.ensure_groups().await.unwrap();
+            self.mq.publish_task(t, None).await.unwrap();
+            group.reader().read(1).await.unwrap().remove(0)
+        }
+
+        /// Commands Redis has refused for lack of memory so far: each failed
+        /// reply publish is one.
+        async fn oom_rejections(&mut self) -> u64 {
+            let stats: String = redis::cmd("INFO")
+                .arg("errorstats")
+                .query_async(&mut self.admin)
+                .await
+                .unwrap();
+            stats
+                .lines()
+                .find_map(|line| line.strip_prefix("errorstat_OOM:count="))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
+        async fn replies(&mut self) -> u64 {
+            redis::cmd("XLEN")
+                .arg(self.mq.topology().reply(SERVER))
+                .query_async(&mut self.admin)
+                .await
+                .unwrap()
+        }
     }
 
     #[tokio::test]
     async fn redis_cancel_keys_preempt_execution() {
-        let redis = Redis::default()
-            .start()
-            .await
-            .expect("redis testcontainer should start");
-        let port = redis
-            .get_host_port_ipv4(6379)
-            .await
-            .expect("redis port should be mapped");
-        let redis_url = format!("redis://127.0.0.1:{port}");
-        let client = redis::Client::open(redis_url.as_str()).expect("redis URL should be valid");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+        let h = harness().await;
+        let client = redis::Client::open(h.url.as_str()).unwrap();
 
         let op_cancelled = task("cancelled-by-op-key", None);
         set_cancel_op_keys(&client, std::slice::from_ref(&op_cancelled.id))
             .await
             .expect("op cancel key should be written");
-        consumer
-            .process_message(BrokerMessage::new(op_cancelled, None))
-            .await
-            .expect("cancelled op-key task should be acknowledged");
+        let d = h.deliver(&op_cancelled).await;
+        assert!(matches!(
+            h.consumer.process_delivery(d).await,
+            Settlement::Ack
+        ));
 
         let batch_cancelled = task("cancelled-by-batch-key", Some("batch-cancelled"));
         set_cancel_batch_key(&client, "batch-cancelled")
             .await
             .expect("batch cancel key should be written");
-        consumer
-            .process_message(BrokerMessage::new(batch_cancelled, None))
-            .await
-            .expect("cancelled batch-key task should be acknowledged");
+        let d = h.deliver(&batch_cancelled).await;
+        assert!(matches!(
+            h.consumer.process_delivery(d).await,
+            Settlement::Ack
+        ));
 
         assert_eq!(
-            calls.load(Ordering::SeqCst),
+            h.calls.load(Ordering::SeqCst),
             0,
             "cancelled tasks must not reach the executor"
         );
     }
 
-    /// Regression: when only the result PUBLISH fails (here Redis is OOM under
-    /// `noeviction`), the worker must retry the publish of the computed result,
-    /// not re-run the sandbox job and then discard the verdict.
+    /// When only the result PUBLISH fails (here Redis is OOM under
+    /// `noeviction`), the worker retries the publish of the computed result,
+    /// not the sandbox job.
     #[tokio::test]
     async fn publish_failure_retries_publish_without_re_executing() {
-        let redis = Redis::default().start().await.expect("redis");
-        let port = redis.get_host_port_ipv4(6379).await.expect("port");
-        let redis_url = format!("redis://127.0.0.1:{port}");
-        let client = redis::Client::open(redis_url.as_str()).unwrap();
-        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+        let mut h = harness().await;
+        let mut consumer = h.consumer.clone();
         consumer.cancel_checker = None;
         consumer.publish_retry = PublishRetry {
             base_delay_ms: 50,
             max_delay_ms: 200,
             deadline: std::time::Duration::from_secs(30),
         };
+        let d = h.deliver(&task("publish-retry", None)).await;
 
+        let config = |value: &str| {
+            redis::cmd("CONFIG")
+                .arg("SET")
+                .arg("maxmemory")
+                .arg(value)
+                .to_owned()
+        };
         let _: () = redis::cmd("CONFIG")
             .arg("SET")
             .arg("maxmemory-policy")
             .arg("noeviction")
-            .query_async(&mut admin)
+            .query_async(&mut h.admin)
             .await
             .unwrap();
-        let _: () = redis::cmd("CONFIG")
-            .arg("SET")
-            .arg("maxmemory")
-            .arg("1")
-            .query_async(&mut admin)
-            .await
-            .unwrap();
+        let _: () = config("1").query_async(&mut h.admin).await.unwrap();
 
-        let t = task("publish-retry", None);
-        let reply_queue = t.reply_queue_name().to_string();
-        let run =
-            tokio::spawn(
-                async move { consumer.process_message(BrokerMessage::new(t, None)).await },
-            );
-
-        // Let several publish attempts fail, then relieve the memory pressure.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let run = tokio::spawn(async move { consumer.process_delivery(d).await });
+        // Wait until the publish has failed (and been retried) twice, then
+        // relieve the memory pressure.
+        while h.oom_rejections().await < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(!run.is_finished(), "the publish must still be retrying");
-        let _: () = redis::cmd("CONFIG")
-            .arg("SET")
-            .arg("maxmemory")
-            .arg("0")
-            .query_async(&mut admin)
-            .await
-            .unwrap();
+        let _: () = config("0").query_async(&mut h.admin).await.unwrap();
 
-        run.await
-            .unwrap()
-            .expect("the task completes once the publish goes through");
+        assert!(matches!(run.await.unwrap(), Settlement::Ack));
         assert_eq!(
-            calls.load(Ordering::SeqCst),
+            h.calls.load(Ordering::SeqCst),
             1,
             "a publish failure must not re-run the job"
         );
-        let depth: i64 = redis::cmd("ZCARD")
-            .arg(&reply_queue)
-            .query_async(&mut admin)
-            .await
-            .unwrap();
-        assert_eq!(depth, 1, "exactly one (successful) result is published");
+        assert_eq!(h.replies().await, 1, "exactly one result is published");
     }
 
-    /// Regression: when the publish window runs out the task is handed back for
-    /// redelivery, so this worker's dedup claim must be released; otherwise the
-    /// worker that receives the redelivery sees it held, skips and acks it.
+    /// A result that cannot be delivered within the publish window leaves
+    /// the task pending, to be redelivered.
     #[tokio::test]
-    async fn exhausted_publish_releases_the_dedup_claim() {
-        let redis = Redis::default().start().await.expect("redis");
-        let port = redis.get_host_port_ipv4(6379).await.expect("port");
-        let redis_url = format!("redis://127.0.0.1:{port}");
-        let client = redis::Client::open(redis_url.as_str()).unwrap();
-        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut consumer = consumer_with_cancel_checker(&redis_url, calls.clone()).await;
+    async fn an_undeliverable_result_abandons_the_task() {
+        let mut h = harness().await;
+        let mut consumer = h.consumer.clone();
         consumer.cancel_checker = None;
-        consumer.dedup = Some(Arc::new(
-            RedisTaskDedup::new(&redis_url, 600, "worker-cancel-test".into()).unwrap(),
-        ));
         consumer.publish_retry = PublishRetry {
             base_delay_ms: 50,
             max_delay_ms: 100,
             deadline: std::time::Duration::from_millis(500),
         };
-
-        // The dedup claim fits before memory runs out; the result publish never does.
-        let t = task("publish-exhausted", None);
-        let dedup_key = format!("broccoli:dedup:{}", t.id);
-        let _: () = redis::cmd("CONFIG")
+        let d = h.deliver(&task("publish-exhausted", None)).await;
+        // Redis is full: every reply publish fails until the window runs out.
+        let _: () = redis::pipe()
+            .cmd("CONFIG")
             .arg("SET")
             .arg("maxmemory-policy")
             .arg("noeviction")
-            .query_async(&mut admin)
-            .await
-            .unwrap();
-        let claimed = consumer.dedup.as_ref().unwrap().try_claim(&t.id).await;
-        assert!(matches!(claimed, ClaimOutcome::Claimed));
-        let _: () = redis::cmd("CONFIG")
+            .ignore()
+            .cmd("CONFIG")
             .arg("SET")
             .arg("maxmemory")
             .arg("1")
-            .query_async(&mut admin)
+            .ignore()
+            .query_async(&mut h.admin)
             .await
             .unwrap();
 
-        let result = consumer.process_message(BrokerMessage::new(t, None)).await;
-        assert!(
-            result.is_err(),
-            "an undeliverable result is handed back to the broker"
-        );
-        let held: bool = redis::cmd("EXISTS")
-            .arg(&dedup_key)
-            .query_async(&mut admin)
-            .await
-            .unwrap();
-        assert!(
-            !held,
-            "the dedup claim must be released before the redelivery"
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            consumer.process_delivery(d).await,
+            Settlement::Abandon
+        ));
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A reply for a server that is gone is dropped, and the task is done.
+    #[tokio::test]
+    async fn a_result_for_a_gone_server_is_dropped() {
+        let mut h = harness().await;
+        let mut consumer = h.consumer.clone();
+        consumer.cancel_checker = None;
+        let mut t = task("orphan", None);
+        t.reply_to = "gone".into();
+        let d = h.deliver(&t).await;
+        assert!(matches!(
+            consumer.process_delivery(d).await,
+            Settlement::Ack
+        ));
+        assert_eq!(h.replies().await, 0);
+    }
+
+    /// A task over the delivery limit is not run: the server gets a failed
+    /// reply and the task becomes a dead letter.
+    #[tokio::test]
+    async fn a_poison_task_is_dead_lettered_without_running() {
+        let mut h = harness().await;
+        let t = task("poison", None);
+        let group = h.mq.task_consumer("worker-test");
+        group.ensure_groups().await.unwrap();
+        h.mq.publish_task(&t, None).await.unwrap();
+        let mut d = group.reader().read(1).await.unwrap().remove(0);
+        let mut owner = "worker-test".to_string();
+        // Each worker that takes it dies holding it.
+        for n in 0..mq::MAX_DELIVERIES {
+            common::test_util::age_entry(
+                &mut h.admin,
+                &d.entry.stream,
+                mq::WORKERS_GROUP,
+                &owner,
+                &d.entry.id,
+                mq::CLAIM_IDLE * 2,
+            )
+            .await;
+            owner = format!("crashed-{n}");
+            d =
+                h.mq.task_consumer(&owner)
+                    .reclaim(1)
+                    .await
+                    .unwrap()
+                    .remove(0);
+        }
+        assert!(d.is_poison());
+
+        let settlement = h.consumer.process_delivery(d).await;
+        let Settlement::DeadLetter(envelope) = settlement else {
+            panic!("expected a dead letter, got {settlement:?}");
+        };
+        assert_eq!(envelope.error_code, DlqErrorCode::RedeliveryExhausted);
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(h.replies().await, 1, "the server is told the task failed");
     }
 }

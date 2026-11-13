@@ -84,8 +84,6 @@ pub struct WorkerConfig {
     /// persistently undersized limit.
     #[serde(default = "default_max_concurrency")]
     pub max_concurrency: u32,
-    #[serde(default = "default_dedup_ttl_secs")]
-    pub dedup_ttl_secs: u64,
     #[serde(default)]
     pub fairness_unsafe_allow: bool,
     #[serde(default = "default_cache_leader_election_enabled")]
@@ -142,9 +140,6 @@ fn default_sandbox_backend() -> String {
 fn default_max_concurrency() -> u32 {
     1
 }
-fn default_dedup_ttl_secs() -> u64 {
-    600
-}
 fn default_cache_leader_election_enabled() -> bool {
     true
 }
@@ -170,7 +165,6 @@ impl Default for WorkerConfig {
             allow_insecure_no_cgroups: default_allow_insecure_no_cgroups(),
             sandbox_backend: default_sandbox_backend(),
             max_concurrency: default_max_concurrency(),
-            dedup_ttl_secs: default_dedup_ttl_secs(),
             fairness_unsafe_allow: false,
             cache_leader_election_enabled: default_cache_leader_election_enabled(),
             cache_leader_ttl_secs: default_cache_leader_ttl_secs(),
@@ -243,7 +237,6 @@ impl WorkerAppConfig {
             .set_default("worker.allow_insecure_no_cgroups", false)?
             .set_default("worker.sandbox_backend", "isolate")?
             .set_default("worker.max_concurrency", 1_i64)?
-            .set_default("worker.dedup_ttl_secs", 600_i64)?
             .set_default("worker.fairness_unsafe_allow", false)?
             .set_default("worker.cache_leader_election_enabled", true)?
             .set_default("worker.cache_leader_ttl_secs", 60_i64)?
@@ -252,20 +245,11 @@ impl WorkerAppConfig {
             .set_default("worker.cache_follower_max_wait_secs", 30_i64)?
             .set_default("mq.enabled", true)?
             .set_default("mq.url", "redis://localhost:6379")?
-            .set_default("mq.pool_size", 5_i64)?
             // Reference the shared `common` serde defaults so the worker's
             // builder defaults cannot drift from the server's.
             .set_default(
                 "mq.operation_queue_name",
                 common::config::default_operation_queue_name(),
-            )?
-            .set_default(
-                "mq.operation_result_queue_name",
-                common::config::default_operation_result_queue_name(),
-            )?
-            .set_default(
-                "mq.operation_dlq_queue_name",
-                common::config::default_operation_dlq_queue_name(),
             )?
             .set_default("observability.log_format", "pretty")?
             .set_default("observability.log_filter", "info")?
@@ -290,7 +274,7 @@ impl WorkerAppConfig {
 
         let mut config: Self = s.try_deserialize()?;
         config.worker.id = common::node_identity::resolve_node_id(
-            common::node_identity::NodeRole::Worker,
+            common::liveness::NodeRole::Worker,
             &config.worker.id,
             false,
         )
@@ -309,7 +293,6 @@ mod tests {
 
         assert_eq!(worker.max_concurrency, 1);
         assert!(!worker.fairness_unsafe_allow);
-        assert_eq!(worker.dedup_ttl_secs, 600);
     }
 
     #[test]
@@ -351,7 +334,6 @@ mod tests {
             id = "worker-a"
             max_concurrency = 4
             fairness_unsafe_allow = true
-            dedup_ttl_secs = 900
             "#,
         )
         .expect("worker config");
@@ -359,6 +341,5 @@ mod tests {
         assert_eq!(worker.id, "worker-a");
         assert_eq!(worker.max_concurrency, 4);
         assert!(worker.fairness_unsafe_allow);
-        assert_eq!(worker.dedup_ttl_secs, 900);
     }
 }

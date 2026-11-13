@@ -64,11 +64,6 @@ RUN if [ "$USE_CN_MIRRORS" = "true" ]; then \
 COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
 COPY --from=chef /app/recipe.json recipe.json
 COPY rust-toolchain.toml rust-toolchain.toml
-# The root [patch.crates-io] repoints broccoli_queue at the vendored crate under
-# third_party/. `cargo chef cook` resolves that patch before `COPY . .`, so the
-# vendored source must be present now or cook panics ("patch location ... does
-# not contain packages matching broccoli_queue").
-COPY third_party third_party
 
 # rust-toolchain.toml pins the active toolchain (nightly) from this point on,
 # so the musl target must be added HERE (not earlier, before the pin is in

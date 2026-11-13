@@ -5,7 +5,6 @@
 
 mod config;
 mod consumer;
-mod dedup;
 mod error;
 mod fairness;
 mod heartbeat;
@@ -51,8 +50,13 @@ async fn main() -> anyhow::Result<()> {
 /// heartbeat key every few seconds with a short TTL, so the key exists only
 /// while the worker's own Redis connection works. A key written from another
 /// host means two workers share this worker id.
-async fn check_own_heartbeat(redis_url: &str, worker_id: &str) -> anyhow::Result<()> {
-    use common::worker::{HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX};
+async fn check_own_heartbeat(
+    redis_url: &str,
+    namespace: &str,
+    worker_id: &str,
+) -> anyhow::Result<()> {
+    use common::liveness::NodeRole;
+    use common::worker::HeartbeatPayload;
 
     let client = redis::Client::open(redis_url).context("Failed to initialize Redis client")?;
     let mut conn = client
@@ -60,7 +64,7 @@ async fn check_own_heartbeat(redis_url: &str, worker_id: &str) -> anyhow::Result
         .await
         .context("Failed to connect to Redis")?;
     let raw: Option<String> = redis::cmd("GET")
-        .arg(format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}"))
+        .arg(NodeRole::Worker.key(namespace, worker_id))
         .query_async(&mut conn)
         .await
         .context("Redis heartbeat read failed")?;
@@ -108,7 +112,11 @@ async fn run_healthcheck() -> anyhow::Result<()> {
     if config.mq.enabled {
         tokio::time::timeout(
             Duration::from_secs(5),
-            check_own_heartbeat(&config.mq.url, &config.worker.id),
+            check_own_heartbeat(
+                &config.mq.url,
+                &config.mq.operation_queue_name,
+                &config.worker.id,
+            ),
         )
         .await
         .context("Redis heartbeat check timed out")??;
@@ -142,25 +150,29 @@ async fn run_healthcheck() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     async fn set_heartbeat(url: &str, worker_id: &str, hostname: Option<String>) {
-        let payload = serde_json::json!({
-            "id": worker_id,
-            "started_at": chrono::Utc::now(),
-            "last_seen": chrono::Utc::now(),
-            "in_flight": 0,
-            "sandbox_backend": "isolate",
-            "version": "test",
-            "hostname": hostname,
-        });
+        let payload = serde_json::to_value(common::worker::HeartbeatPayload {
+            id: worker_id.to_string(),
+            started_at: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+            in_flight: 0,
+            max_concurrency: None,
+            fairness_mode: "unknown".into(),
+            sandbox_backend: "isolate".into(),
+            version: "test".into(),
+            hostname,
+            ip_addresses: Vec::new(),
+            os: None,
+            arch: None,
+            cpu_count: None,
+            pid: None,
+        })
+        .unwrap();
         let client = redis::Client::open(url).unwrap();
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
         let _: () = redis::cmd("SET")
-            .arg(format!(
-                "{}{worker_id}",
-                common::worker::WORKER_HEARTBEAT_KEY_PREFIX
-            ))
+            .arg(common::liveness::NodeRole::Worker.key("ops", worker_id))
             .arg(payload.to_string())
             .arg("EX")
             .arg(15)
@@ -171,23 +183,26 @@ mod tests {
 
     #[tokio::test]
     async fn healthcheck_requires_this_workers_live_heartbeat() {
-        let container = Redis::default().start().await.expect("start redis");
+        let container = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
         let port = container.get_host_port_ipv4(6379).await.unwrap();
         let url = format!("redis://127.0.0.1:{port}");
         let local = hostname::get().ok().and_then(|h| h.into_string().ok());
 
         // Redis is reachable, but no worker process is heartbeating: unhealthy.
-        let err = check_own_heartbeat(&url, "w1").await.unwrap_err();
+        let err = check_own_heartbeat(&url, "ops", "w1").await.unwrap_err();
         assert!(err.to_string().contains("no live heartbeat"), "{err:#}");
 
         set_heartbeat(&url, "w1", local.clone()).await;
-        check_own_heartbeat(&url, "w1")
+        check_own_heartbeat(&url, "ops", "w1")
             .await
             .expect("live heartbeat from this host");
 
         // Same worker id heartbeating from another host: a duplicate id.
         set_heartbeat(&url, "w2", Some("some-other-host".into())).await;
-        let err = check_own_heartbeat(&url, "w2").await.unwrap_err();
+        let err = check_own_heartbeat(&url, "ops", "w2").await.unwrap_err();
         assert!(err.to_string().contains("share this worker id"), "{err:#}");
     }
 }

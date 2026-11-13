@@ -10,6 +10,8 @@ object-storage = ["dep:rust-s3", "dep:tokio-util", "dep:futures"]
 # `storage::object_storage::testing`: a SeaweedFS testcontainer for other
 # crates' tests.
 testing = ["object-storage", "dep:testcontainers"]
+# A real Redis for tests (`common::test_util`).
+test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
 libc = "0.2"
@@ -43,6 +45,7 @@ uuid.workspace = true
 redis.workspace = true
 hostname = "0.4"
 testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, features = ["redis"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -13,7 +13,6 @@ use broccoli_server_sdk::types::{
 use common::storage::BlobStore;
 use common::worker::{Task, TaskResult};
 use futures::stream::{self, StreamExt, TryStreamExt};
-use mq::{MqQueue, config::PublishConfig};
 use opentelemetry::KeyValue;
 use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use tokio::sync::mpsc;
@@ -30,37 +29,22 @@ const INLINE_FILE_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
 
 #[async_trait]
 pub trait OperationTaskPublisher: Send + Sync {
+    /// Publish `task`, pinned to worker `pin` while that worker is live.
     async fn publish_operation_task(
         &self,
-        target_queue: &str,
         task: &Task,
-        publish_config: Option<PublishConfig>,
-    ) -> anyhow::Result<()>;
-}
-
-pub struct MqOperationTaskPublisher {
-    mq: Arc<MqQueue>,
-}
-
-impl MqOperationTaskPublisher {
-    pub fn new(mq: Arc<MqQueue>) -> Self {
-        Self { mq }
-    }
+        pin: Option<&str>,
+    ) -> anyhow::Result<mq::Route>;
 }
 
 #[async_trait]
-impl OperationTaskPublisher for MqOperationTaskPublisher {
+impl OperationTaskPublisher for mq::Mq {
     async fn publish_operation_task(
         &self,
-        target_queue: &str,
         task: &Task,
-        publish_config: Option<PublishConfig>,
-    ) -> anyhow::Result<()> {
-        self.mq
-            .publish(target_queue, None, task, publish_config)
-            .await
-            .map(|_| ())
-            .with_context(|| "MQ publish error")
+        pin: Option<&str>,
+    ) -> anyhow::Result<mq::Route> {
+        Ok(self.publish_task(task, pin).await?)
     }
 }
 
@@ -93,21 +77,16 @@ fn operation_result_e2e_labels(
     }
 }
 
-fn record_operation_result_e2e(
-    metrics: Option<&common::metrics::Metrics>,
+/// Record an operation's time from its publish to its result's arrival, both
+/// on this server's monotonic clock.
+pub(crate) fn record_operation_result_e2e(
+    metrics: &common::metrics::Metrics,
     task_result: &TaskResult,
     outcome: &'static str,
+    elapsed: Duration,
 ) {
-    let Some(metrics) = metrics else {
-        return;
-    };
-    let Some(enqueued_at_unix_ms) = task_result.enqueued_at_unix_ms else {
-        return;
-    };
-
     let labels = operation_result_e2e_labels(task_result, outcome);
-    let now = chrono::Utc::now().timestamp_millis();
-    let duration_seconds = now.saturating_sub(enqueued_at_unix_ms) as f64 / 1_000.0;
+    let duration_seconds = elapsed.as_secs_f64();
     let attrs = [
         KeyValue::new("task_type", labels.task_type),
         KeyValue::new("operation", labels.operation),
@@ -200,10 +179,8 @@ pub async fn start_operation_batch(
             // Waiter insert must precede publish for THIS op, or a fast
             // reply could arrive before anyone is waiting for it. These
             // two sync calls happen before the awaits below.
-            deps.operation_waiters.insert(
-                correlation_id.clone(),
-                OperationWaiter::new(op_tx),
-            );
+            deps.operation_waiters
+                .insert(correlation_id.clone(), OperationWaiter::new(op_tx));
             spawn_waiter_forwarder(
                 correlation_id.clone(),
                 op_rx,
@@ -212,34 +189,19 @@ pub async fn start_operation_batch(
                 deps.metrics.clone(),
             );
 
-            // Resolve the target queue for a pinned operation. An invalid worker
-            // id, OR a valid id whose worker has no live heartbeat, falls back to
-            // the shared queue rather than stranding the task on a dead worker's
-            // private queue. Only pinned ops pay the Redis liveness check, and it
-            // fails open so a transient Redis hiccup never drops a live pin.
-            let effective_target = match op.target_worker_id.as_deref() {
+            // A pin is a cache-locality hint: an invalid worker id is dropped,
+            // and the queue routes a pin for a dead worker to the shared stream.
+            let pin = match op.target_worker_id.as_deref() {
                 Some(worker_id) if !crate::config::is_valid_server_id(worker_id) => {
                     tracing::warn!(
                         plugin_id = %plugin_id,
                         target = %worker_id,
-                        "Rejecting operation with invalid target_worker_id; falling back to shared queue"
+                        "Ignoring an invalid target_worker_id"
                     );
                     None
                 }
-                Some(worker_id)
-                    if !target_worker_is_live(deps.redis_client.as_deref(), worker_id).await =>
-                {
-                    tracing::warn!(
-                        plugin_id = %plugin_id,
-                        target = %worker_id,
-                        "Pinned target worker has no live heartbeat; falling back to shared queue"
-                    );
-                    None
-                }
-                other => other,
+                other => other.map(str::to_string),
             };
-            let target_queue =
-                target_operation_queue(&deps.operation_queue_name, effective_target);
 
             if let (Some(eval_batch_id), Some(test_case_id)) =
                 (op.evaluate_batch_id.clone(), op.test_case_id)
@@ -262,12 +224,9 @@ pub async fn start_operation_batch(
                 executor_name: "operation".to_string(),
                 payload: serde_json::to_value(&op)
                     .with_context(|| "Failed to serialize operation")?,
-                result_queue: deps.operation_result_queue_name.clone(),
+                reply_to: deps.server_id.clone(),
                 operation_batch_id: None,
-                reply_queue: Some(deps.operation_result_queue_name.clone()),
-                priority: normalize_publish_priority(op.priority, &correlation_id),
                 trace_context: common::observability::inject_trace_context(),
-                enqueued_at_unix_ms: Some(chrono::Utc::now().timestamp_millis()),
             };
 
             let publisher = deps
@@ -276,16 +235,14 @@ pub async fn start_operation_batch(
                 .ok_or_else(|| anyhow!("MQ not available"))?;
             let publish_start = Instant::now();
             let publish_result = publisher
-                .publish_operation_task(
-                    &target_queue,
-                    &task,
-                    task.priority
-                        .map(|p| PublishConfig::builder().priority(p).build()),
-                )
+                .publish_operation_task(&task, pin.as_deref())
                 .await;
             record_mq_publish(
                 deps.metrics.as_ref(),
-                &target_queue,
+                match &publish_result {
+                    Ok(mq::Route::Pinned) => mq::StreamRole::Private,
+                    Ok(mq::Route::Shared) | Err(_) => mq::StreamRole::Shared,
+                },
                 "operation_task",
                 if publish_result.is_ok() {
                     "success"
@@ -649,7 +606,6 @@ impl WaitPolicy<TaskResult> for OperationWait {
     }
 
     fn on_delivered(&self, wait: &WaitCtx<'_, TaskResult>, task_result: &TaskResult) {
-        record_operation_result_e2e(wait.metrics, task_result, "delivered");
         wait.record_outcome(
             "result",
             Some(KeyValue::new(
@@ -778,7 +734,6 @@ fn spawn_waiter_forwarder(
                     task_type: Some("operation".to_string()),
                     operation: Some("operation".to_string()),
                     worker_id: None,
-                    enqueued_at_unix_ms: None,
                 };
                 let _ = batch_tx.send(error_result);
                 pending_count.fetch_sub(1, Ordering::SeqCst);
@@ -790,62 +745,6 @@ fn spawn_waiter_forwarder(
             }
         }
     });
-}
-
-fn target_operation_queue(shared_queue: &str, target_worker_id: Option<&str>) -> String {
-    match target_worker_id {
-        Some(worker_id) if crate::config::is_valid_server_id(worker_id) => {
-            common::worker::worker_private_queue_name(shared_queue, worker_id)
-        }
-        _ => shared_queue.to_string(),
-    }
-}
-
-/// Whether a pinned target worker currently has a live heartbeat in Redis.
-/// Worker heartbeat keys carry a 15s TTL (see the worker heartbeat writer), so a
-/// simple `EXISTS` is a fresh-liveness signal. Fails OPEN: a missing Redis handle
-/// or a lookup error returns `true` (keep the pin), so a transient Redis hiccup
-/// never mis-routes a legitimately pinned task off its target worker.
-async fn target_worker_is_live(redis: Option<&redis::Client>, worker_id: &str) -> bool {
-    let Some(client) = redis else {
-        return true;
-    };
-    let Ok(mut conn) = client.get_multiplexed_async_connection().await else {
-        return true;
-    };
-    let key = format!("{}{worker_id}", common::worker::WORKER_HEARTBEAT_KEY_PREFIX);
-    let exists: Result<i64, redis::RedisError> =
-        redis::cmd("EXISTS").arg(&key).query_async(&mut conn).await;
-    match exists {
-        Ok(n) => n > 0,
-        // Fail OPEN (see doc above): a lookup error keeps the pin rather than
-        // mis-routing a legitimately pinned task off its target worker on a
-        // transient Redis hiccup. `matches!(exists, Ok(n) if n > 0)` silently
-        // failed CLOSED, contradicting this function's documented contract.
-        Err(_) => true,
-    }
-}
-
-/// Clamp a plugin-authored operation priority into broccoli_queue's valid
-/// `1..=5` range (1 = highest, 5 = lowest). `PublishConfig::builder().priority`
-/// `assert!`s the value is in range and PANICS otherwise; the priority comes
-/// straight off a plugin's `OperationTask`, so a stray `0` or `>5` would abort
-/// the publish and, on the detached path, kill the whole windowed session
-/// (every pending op then stalls to the 30-minute ceiling). Clamp instead of
-/// panicking, and warn so the plugin bug stays visible.
-fn normalize_publish_priority(priority: Option<u8>, correlation_id: &str) -> Option<u8> {
-    priority.map(|p| {
-        let clamped = p.clamp(1, 5);
-        if clamped != p {
-            tracing::warn!(
-                correlation_id,
-                requested = p,
-                clamped,
-                "operation priority out of broccoli_queue's 1..=5 range; clamped to avoid a publish panic"
-            );
-        }
-        clamped
-    })
 }
 
 async fn externalize_large_inline_files(
@@ -886,7 +785,7 @@ async fn externalize_large_inline_files(
 
 fn record_mq_publish(
     metrics: Option<&common::metrics::Metrics>,
-    queue: &str,
+    stream: mq::StreamRole,
     message_type: &'static str,
     outcome: &'static str,
     start: Instant,
@@ -895,7 +794,7 @@ fn record_mq_publish(
         return;
     };
     let attrs = [
-        KeyValue::new("queue", queue.to_string()),
+        KeyValue::new("queue", stream.as_str()),
         KeyValue::new("message.type", message_type),
         KeyValue::new("outcome", outcome),
     ];
@@ -937,7 +836,6 @@ mod tests {
             task_type: None,
             operation: None,
             worker_id: None,
-            enqueued_at_unix_ms: None,
         }
     }
 
@@ -1031,7 +929,6 @@ mod tests {
             task_type: Some("operation".to_string()),
             operation: Some("compile".to_string()),
             worker_id: Some("worker-a".to_string()),
-            enqueued_at_unix_ms: Some(1_234),
         };
 
         let labels = operation_result_e2e_labels(&result, "delivered");
@@ -1050,83 +947,10 @@ mod tests {
             }],
             tasks: vec![],
             channels: vec![],
-            priority: None,
             target_worker_id: None,
             evaluate_batch_id: None,
             test_case_id: None,
         }
-    }
-
-    #[test]
-    fn invalid_target_worker_falls_back_to_shared_queue() {
-        assert_eq!(target_operation_queue("ops", Some("../bad")), "ops");
-        assert_eq!(target_operation_queue("ops", None), "ops");
-    }
-
-    #[test]
-    fn valid_target_worker_uses_private_queue() {
-        assert_eq!(
-            target_operation_queue("ops", Some("worker-1")),
-            "ops:worker:worker-1"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn target_worker_is_live_reflects_the_heartbeat_key() {
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::redis::Redis;
-
-        let container = Redis::default().start().await.expect("start redis");
-        let port = container
-            .get_host_port_ipv4(6379)
-            .await
-            .expect("redis port");
-        let client =
-            redis::Client::open(format!("redis://127.0.0.1:{port}")).expect("redis client");
-        let mut conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .expect("connect");
-
-        // Mirror the worker heartbeat writer: a key with a TTL under the prefix.
-        let key = format!(
-            "{}worker-alive",
-            common::worker::WORKER_HEARTBEAT_KEY_PREFIX
-        );
-        let _: () = redis::cmd("SET")
-            .arg(&key)
-            .arg("{}")
-            .arg("EX")
-            .arg(15)
-            .query_async(&mut conn)
-            .await
-            .expect("seed heartbeat");
-
-        assert!(
-            target_worker_is_live(Some(&client), "worker-alive").await,
-            "a worker with a live heartbeat key is live"
-        );
-        assert!(
-            !target_worker_is_live(Some(&client), "worker-dead").await,
-            "a worker with no heartbeat key is not live"
-        );
-        assert!(
-            target_worker_is_live(None, "anything").await,
-            "no Redis handle fails open so a legitimately pinned task keeps its target"
-        );
-    }
-
-    #[test]
-    fn normalize_publish_priority_clamps_out_of_range() {
-        // None stays None; in-range passes through; 0 and >5 clamp into 1..=5 so
-        // the broccoli_queue `assert!(1..=5)` in `.priority()` cannot panic.
-        assert_eq!(normalize_publish_priority(None, "cid"), None);
-        assert_eq!(normalize_publish_priority(Some(1), "cid"), Some(1));
-        assert_eq!(normalize_publish_priority(Some(5), "cid"), Some(5));
-        assert_eq!(normalize_publish_priority(Some(3), "cid"), Some(3));
-        assert_eq!(normalize_publish_priority(Some(0), "cid"), Some(1));
-        assert_eq!(normalize_publish_priority(Some(6), "cid"), Some(5));
-        assert_eq!(normalize_publish_priority(Some(u8::MAX), "cid"), Some(5));
     }
 
     #[tokio::test]
@@ -1173,14 +997,12 @@ mod tests {
             operation_publisher: None,
             operation_batches: Arc::new(dashmap::DashMap::new()),
             operation_waiters: Arc::new(dashmap::DashMap::new()),
-            operation_queue_name: "ops".to_string(),
-            operation_result_queue_name: "ops-results".to_string(),
+            server_id: "server-1".to_string(),
             blob_store,
             metrics: None,
             evaluate_ops_registry:
                 crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default(),
             operation_batch_publish_concurrency: 32,
-            redis_client: None,
         };
 
         let err = start_operation_batch("plugin".to_string(), deps, vec![])
@@ -1223,13 +1045,11 @@ mod tests {
             operation_publisher: None,
             operation_batches: operation_batches.clone(),
             operation_waiters: operation_waiters.clone(),
-            operation_queue_name: "ops".to_string(),
-            operation_result_queue_name: "ops-results".to_string(),
+            server_id: "server-1".to_string(),
             blob_store,
             metrics: None,
             evaluate_ops_registry: evaluate_ops_registry.clone(),
             operation_batch_publish_concurrency: 32,
-            redis_client: None,
         };
 
         cleanup_failed_operation_batch(

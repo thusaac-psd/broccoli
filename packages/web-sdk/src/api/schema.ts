@@ -229,7 +229,7 @@ export interface paths {
     };
     /**
      * List MQ queue depths
-     * @description Returns the current depth of each Broccoli MQ queue (operation tasks, results, DLQ). Requires `system:view` permission.
+     * @description Returns the depth of each message queue stream (shared operation tasks, each live worker's pinned tasks, this server's replies, dead letters), split into unread and pending entries. Requires `system:view` permission.
      */
     get: operations['listSystemQueues'];
     put?: never;
@@ -249,7 +249,7 @@ export interface paths {
     };
     /**
      * List active workers
-     * @description Returns workers that have written a heartbeat to Redis within the past ~15 seconds. Requires `system:view` permission.
+     * @description Returns the live workers: those whose liveness key in Redis has not expired (it lives 15 seconds without renewal). Requires `system:view` permission.
      */
     get: operations['listSystemWorkers'];
     put?: never;
@@ -3628,13 +3628,16 @@ export interface components {
       samples: components['schemas']['SampleCase'][];
     };
     QueueInfo: {
-      /** @description Per-state breakdown (e.g. `{"queued": 0, "processing": 0, "failed": 0}`). */
+      /**
+       * @description `unread` (no consumer has taken them) and `pending` (taken, not yet
+       *     acknowledged), e.g. `{"unread": 0, "pending": 0}`.
+       */
       breakdown: {
         [key: string]: number;
       };
       /**
        * Format: int64
-       * @description Total messages across all sub-queues (pending, processing, etc.).
+       * @description Entries in the stream: unread plus pending.
        * @example 0
        */
       depth: number;
@@ -4486,11 +4489,10 @@ export interface components {
       cpu_count?: number | null;
       /**
        * @description The worker's fairness mode (e.g. `pinned`, `cooperative`, `unknown`),
-       *     reported in its heartbeat. `None` for legacy workers that predate the
-       *     field. See the worker `fairness` module.
+       *     reported in its heartbeat. See the worker `fairness` module.
        * @example pinned
        */
-      fairness_mode?: string | null;
+      fairness_mode: string;
       /**
        * @description OS hostname of the machine running this worker. Useful for identifying
        *     physical machines in a lab.
@@ -4525,12 +4527,11 @@ export interface components {
       sandbox_backend: string;
       /**
        * Format: int64
-       * @description Seconds since the worker last wrote a heartbeat. 0 means just now.
+       * @description Seconds since the worker last renewed its liveness key, measured on the
+       *     Redis clock. 0 means just now.
        * @example 3
        */
       seconds_since_last_seen: number;
-      /** @description True when the heartbeat is older than 10s - worker is likely unhealthy. */
-      stale: boolean;
       /** Format: date-time */
       started_at: string;
       /** @example 0.1.0 */
@@ -4547,7 +4548,10 @@ export interface components {
       fraction: number;
       /** @description False if this live worker hasn't reported any progress yet. */
       reported: boolean;
-      /** @description True if the worker's heartbeat is stale (it may have died mid-warm). */
+      /**
+       * @description True if the worker reported progress and is no longer live (it may have
+       *     died mid-warm).
+       */
       stale: boolean;
       /**
        * @description `pending` | `warming` | `complete` | `error`.

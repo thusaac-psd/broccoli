@@ -1,20 +1,22 @@
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use common::retry::{RetryTracker, spawn_cleanup_task};
 use common::worker::Task;
-use mq::{BroccoliError, BrokerMessage, MqConfig, init_mq};
+use futures::FutureExt;
+use mq::{Delivery, EntryRef, GroupConsumer, Mq, Settled};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use common::cancel::RedisCancelChecker;
-use common::node_identity::{NodeClaim, NodeRole};
+use common::liveness::NodeRole;
+use common::node_identity::NodeClaim;
 
 use crate::config::WorkerAppConfig;
-use crate::consumer::{WorkerConsumer, WorkerConsumerDeps};
-use crate::dedup::RedisTaskDedup;
+use crate::consumer::{Settlement, WorkerConsumer, WorkerConsumerDeps};
 use crate::fairness::{WorkerCapacity, effective_worker_capacity};
 use crate::heartbeat::{HeartbeatConfig, HeartbeatHandle, InFlightCounter};
 use crate::metrics::spawn_metrics_server;
@@ -23,7 +25,7 @@ use crate::system_info::{SystemInfo, is_wsl};
 
 pub struct WorkerRuntime {
     config: WorkerAppConfig,
-    mq: Arc<mq::Mq>,
+    mq: Mq,
     consumer: WorkerConsumer,
     in_flight: InFlightCounter,
     heartbeat: HeartbeatHandle,
@@ -114,25 +116,23 @@ impl WorkerRuntime {
 
         check_clock_skew(&config).await?;
 
-        let mq = Arc::new(
-            init_mq(MqConfig {
-                url: config.mq.url.clone(),
-                pool_size: config.mq.pool_size,
-            })
+        let mq = Mq::connect(&config.mq.url, &config.mq.operation_queue_name)
             .await
-            .context("Failed to initialize MQ")?,
-        );
+            .context("Failed to initialize MQ")?;
 
         info!(
             operation_queue_name = %config.mq.operation_queue_name,
-            operation_dlq_queue_name = %config.mq.operation_dlq_queue_name,
             max_retries = config.mq.dlq.max_retries,
             "MQ connected"
         );
+        mq.task_consumer(&config.worker.id)
+            .ensure_groups()
+            .await
+            .context("Creating this worker's consumer groups")?;
 
         // Claim the worker ID before acting under it: a second live process with
-        // the same ID would share this worker's private queue, dedup claims and
-        // heartbeat, so it refuses to start instead.
+        // the same ID would share this worker's private stream, pending entries
+        // and heartbeat, so it refuses to start instead.
         info!(
             hostname = ?system_info.hostname,
             ip_addresses = ?system_info.ip_addresses,
@@ -153,6 +153,7 @@ impl WorkerRuntime {
         };
         let claim = NodeClaim::claim_at_boot(
             redis::Client::open(config.mq.url.as_str()).context("Invalid MQ URL")?,
+            &config.mq.operation_queue_name,
             NodeRole::Worker,
             &config.worker.id,
             heartbeat_config.payload(started_at, &in_flight),
@@ -161,24 +162,6 @@ impl WorkerRuntime {
         // Renew from now on: executor setup below can outlast the claim's TTL.
         let heartbeat =
             crate::heartbeat::spawn(claim, heartbeat_config, started_at, in_flight.clone());
-
-        let dedup = match RedisTaskDedup::new(
-            &config.mq.url,
-            config.worker.dedup_ttl_secs,
-            config.worker.id.clone(),
-        ) {
-            Ok(d) => {
-                info!(
-                    "Task dedup initialized (fallback TTL={}s; per-operation TTL derived from step resource limits)",
-                    config.worker.dedup_ttl_secs
-                );
-                Some(Arc::new(d))
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to initialize task dedup, running without dedup");
-                None
-            }
-        };
 
         let cancel_checker = match RedisCancelChecker::new(&config.mq.url) {
             Ok(c) => Some(Arc::new(c)),
@@ -209,11 +192,9 @@ impl WorkerRuntime {
 
         let consumer = WorkerConsumer::new(WorkerConsumerDeps {
             worker,
-            mq: Arc::clone(&mq),
-            dlq_queue: config.mq.operation_dlq_queue_name.clone(),
+            mq: mq.clone(),
             dlq_config,
             retry_tracker,
-            dedup,
             cancel_checker,
             metrics,
             worker_id: config.worker.id.clone(),
@@ -235,41 +216,26 @@ impl WorkerRuntime {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_signal = shutdown.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("Shutdown signal received; refusing new tasks and beginning drain");
-                shutdown_for_signal.store(true, Ordering::SeqCst);
-            }
+            common::shutdown::signal().await;
+            info!("Shutdown signal received; refusing new tasks and beginning drain");
+            shutdown_for_signal.store(true, Ordering::SeqCst);
         });
 
         let drain_timeout = Duration::from_secs(30);
 
-        let shared_queue = self.config.mq.operation_queue_name.clone();
-        let private_queue = common::worker::worker_private_queue_name(
-            &self.config.mq.operation_queue_name,
-            &self.config.worker.id,
-        );
-        info!(
-            shared_queue = %shared_queue,
-            private_queue = %private_queue,
-            "Subscribing to operation queues"
-        );
-
-        // The manual consume loop the worker fully controls (see
-        // [`run_consume_loop`]): on shutdown it stops pulling new tasks, leaving
-        // still-queued work in Redis, instead of the old `process_messages(Some(N))`
-        // whose DETACHED consume tasks kept pulling through the drain window and
-        // rejected every pulled task into the failed queue on every shutdown.
+        let tasks = self.mq.task_consumer(&self.config.worker.id);
+        info!(streams = ?tasks.streams(), "Consuming operation tasks");
         let consumer = self.consumer.clone();
         run_consume_loop(
-            Arc::clone(&self.mq),
-            [shared_queue, private_queue],
+            self.mq.clone(),
+            tasks,
             self.capacity.max_concurrency,
             self.in_flight.clone(),
             shutdown.clone(),
             drain_timeout,
-            move |message| {
+            move |delivery| {
                 let consumer = consumer.clone();
-                async move { consumer.run_task(message).await }
+                async move { consumer.run_task(delivery).await }
             },
         )
         .await;
@@ -280,13 +246,6 @@ impl WorkerRuntime {
     }
 }
 
-/// The worker's operation consume loop, extracted from [`WorkerRuntime::run`] so
-/// it can be driven directly in tests. It OWNS the consume decision: it checks
-/// `shutdown` before every `try_consume`, so the instant shutdown is signaled it
-/// stops pulling and any still-queued work stays in the broker for another
-/// worker. A task already taken is run to completion via `handle` and then acked
-/// (or rejected for retry on `Err`) during the drain. One semaphore bounds total
-/// in-flight work to `max_concurrency` across both queues.
 /// Compare this worker's clock with Postgres and Redis (see `common::clock`)
 /// on a short-lived connection; the worker keeps no shared pool of its own.
 async fn check_clock_skew(config: &WorkerAppConfig) -> anyhow::Result<()> {
@@ -307,26 +266,82 @@ async fn check_clock_skew(config: &WorkerAppConfig) -> anyhow::Result<()> {
     result
 }
 
+/// The entries this worker holds, read but not yet settled. They are
+/// refreshed every [`mq::REFRESH_INTERVAL`] so no other worker reclaims them.
+#[derive(Clone, Default)]
+struct Held(Arc<StdMutex<HashSet<EntryRef>>>);
+
+impl Held {
+    fn insert(&self, entry: &EntryRef) {
+        self.0.lock().unwrap().insert(entry.clone());
+    }
+
+    fn remove(&self, entry: &EntryRef) {
+        self.0.lock().unwrap().remove(entry);
+    }
+
+    fn snapshot(&self) -> Vec<EntryRef> {
+        self.0.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Stop holding `entry` when the guard drops, however its task ends.
+    fn release_on_drop(&self, entry: EntryRef) -> HeldGuard {
+        HeldGuard {
+            held: self.clone(),
+            entry,
+        }
+    }
+}
+
+struct HeldGuard {
+    held: Held,
+    entry: EntryRef,
+}
+
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        self.held.remove(&self.entry);
+    }
+}
+
+/// The worker's consume loop, extracted from [`WorkerRuntime::run`] so it can
+/// be driven directly in tests.
+///
+/// It starts by taking back the entries it held before a restart, and does
+/// so again after a failed read, whose reply may have delivered entries that
+/// never arrived. It reads from the worker's private and shared streams with one blocking
+/// read for as many tasks as it has free slots, and every
+/// [`mq::REFRESH_INTERVAL`] reclaims tasks other workers abandoned and drains
+/// dead workers' private streams. Entries it reads beyond its free slots wait
+/// in a local buffer. A task is run by `handle`, which says how to settle it.
+/// Every held entry, running or buffered, is refreshed until it is settled.
+///
+/// Once `shutdown` is set it reads nothing more, gives buffered tasks back to
+/// their stream, and waits up to `drain_timeout` for running ones.
 async fn run_consume_loop<F, Fut>(
-    mq: Arc<mq::Mq>,
-    queues: [String; 2],
+    mq: Mq,
+    tasks: GroupConsumer<Task>,
     max_concurrency: usize,
     in_flight: InFlightCounter,
     shutdown: Arc<AtomicBool>,
     drain_timeout: Duration,
     handle: F,
 ) where
-    F: Fn(BrokerMessage<Task>) -> Fut + Clone + Send + 'static,
-    Fut: std::future::Future<Output = Result<(), BroccoliError>> + Send + 'static,
+    F: Fn(Delivery<Task>) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = Settlement> + Send + 'static,
 {
+    if let Err(e) = tasks.ensure_groups().await {
+        warn!(error = %e, "Creating the consumer groups failed; the first read retries it");
+    }
     let permits = Arc::new(tokio::sync::Semaphore::new(max_concurrency.max(1)));
-    let idle_poll = Duration::from_millis(50);
-    let consume_backoff = Duration::from_secs(1);
-    let mut next_queue = 0usize;
+    let held = Held::default();
+    let refresher = tokio::spawn(refresh_held(tasks.clone(), held.clone()));
+    let mut reader = tasks.reader();
+    let mut buffer: VecDeque<Delivery<Task>> = VecDeque::new();
+    let mut next_reclaim = Instant::now();
+    let mut adopt = true;
 
     while !shutdown.load(Ordering::Relaxed) {
-        // Bound concurrency, but wake on shutdown rather than blocking on a permit
-        // while every slot is busy.
         let permit = tokio::select! {
             biased;
             _ = wait_for_shutdown(&shutdown) => break,
@@ -335,83 +350,138 @@ async fn run_consume_loop<F, Fut>(
                 Err(_) => break,
             }
         };
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
 
-        // Poll each queue once (round-robin) for a ready task. `try_consume` is
-        // non-blocking, so an empty queue never parks us past a shutdown check.
-        let mut taken: Option<(String, BrokerMessage<Task>)> = None;
-        let mut had_error = false;
-        for _ in 0..queues.len() {
-            let queue = queues[next_queue % queues.len()].clone();
-            next_queue = next_queue.wrapping_add(1);
-            match mq.try_consume::<Task>(&queue, None).await {
-                Ok(Some(message)) => {
-                    taken = Some((queue, message));
-                    break;
+        if buffer.is_empty() {
+            // Room for the permit just taken plus every other free one.
+            let room = permits.available_permits() + 1;
+            let fetched = if adopt {
+                // Entries this worker owns but does not track: held before
+                // a restart, or read by a request whose reply was lost.
+                adopt = false;
+                tasks.adopt_own(room, &held.snapshot()).await
+            } else if Instant::now() >= next_reclaim {
+                next_reclaim = Instant::now() + mq::REFRESH_INTERVAL;
+                if let Err(e) = mq.drain_dead_private_streams().await {
+                    warn!(error = %e, "Draining dead workers' private streams failed");
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(queue = %queue, error = %e, "Operation consume error; backing off");
-                    had_error = true;
-                    break;
-                }
-            }
-        }
-
-        let Some((queue, message)) = taken else {
-            // Nothing ready (or a transient consume error): release the permit and
-            // idle briefly, still responsive to shutdown. The broker returns a
-            // connection error after a few bounded retries, so a consume error
-            // backs off here and the next poll reconnects.
-            drop(permit);
-            let backoff = if had_error {
-                consume_backoff
+                tasks.reclaim(room).await
             } else {
-                idle_poll
+                reader.read(room).await
             };
-            tokio::select! {
-                _ = tokio::time::sleep(backoff) => {}
-                _ = wait_for_shutdown(&shutdown) => break,
+            match fetched {
+                Ok(batch) => {
+                    for delivery in batch {
+                        held.insert(&delivery.entry);
+                        buffer.push_back(delivery);
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Operation consume error; backing off");
+                    adopt = true;
+                    drop(permit);
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        _ = wait_for_shutdown(&shutdown) => break,
+                    }
+                    continue;
+                }
             }
+        }
+        let Some(delivery) = buffer.pop_front() else {
             continue;
         };
 
-        let mq = Arc::clone(&mq);
+        let tasks = tasks.clone();
+        let held = held.clone();
         let handle = handle.clone();
-        // Acquire the in-flight guard SYNCHRONOUSLY here, before the spawn, so the
-        // counter is incremented the instant the task is consumed - not on the
-        // spawned future's first poll. Otherwise, if shutdown fires right after
-        // this consume, the loop can break and `drain_in_flight` read current()==0
-        // (the future not yet polled) and return, abandoning this just-consumed
-        // task mid-flight (recovered only later via broker redelivery). The guard
-        // is moved into the task and dropped when it is fully resolved.
+        // Taken synchronously, before the spawn, so a shutdown right after
+        // this never sees the counter at 0 with this task about to start.
         let in_flight_guard = in_flight.guard();
         tokio::spawn(async move {
-            // Hold the in-flight guard and the permit across BOTH processing and
-            // the ack/reject, so `drain_in_flight` waits until the task is fully
-            // resolved (acked or rejected), not just executed.
             let _in_flight = in_flight_guard;
             let _permit = permit;
-            match handle(message.clone()).await {
-                Ok(()) => {
-                    if let Err(e) = mq.acknowledge::<Task>(&queue, message).await {
-                        error!(queue = %queue, error = %e, "Failed to acknowledge task");
-                    }
-                }
-                Err(e) => {
-                    warn!(queue = %queue, error = %e, "Task processing failed; rejecting for retry");
-                    if let Err(e) = mq.reject::<Task>(&queue, message).await {
-                        error!(queue = %queue, error = %e, "Failed to reject task");
-                    }
-                }
-            }
+            let entry = delivery.entry.clone();
+            let _held = held.release_on_drop(entry.clone());
+            // A panicking handler abandons the task: it is redelivered once
+            // idle, and dead-lettered once it has failed MAX_DELIVERIES times.
+            let settlement = std::panic::AssertUnwindSafe(handle(delivery))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    error!(entry = %entry.id, "Task handler panicked; abandoning the task");
+                    Settlement::Abandon
+                });
+            settle(&tasks, &entry, settlement).await;
         });
     }
 
     info!("Shutdown signaled; no longer consuming. Draining in-flight tasks");
+    for delivery in buffer.drain(..) {
+        match tasks.requeue(&delivery).await {
+            Ok(Settled::Done | Settled::HandedOver) => {}
+            Err(e) => {
+                warn!(entry = %delivery.entry.id, error = %e, "Giving a task back failed; it is redelivered once idle")
+            }
+        }
+        held.remove(&delivery.entry);
+    }
     drain_in_flight(&in_flight, drain_timeout).await;
+    refresher.abort();
+}
+
+/// Settle a finished task. A settle that fails (Redis unreachable) is retried
+/// with backoff while the entry stays held, and so refreshed: letting it go
+/// would have another worker run a task that already finished.
+async fn settle(tasks: &GroupConsumer<Task>, entry: &EntryRef, settlement: Settlement) {
+    let mut attempt: u8 = 0;
+    loop {
+        let settled = match &settlement {
+            Settlement::Ack => tasks.ack(entry).await,
+            Settlement::DeadLetter(envelope) => tasks.dead_letter(entry, envelope).await,
+            Settlement::Abandon => {
+                warn!(entry = %entry.id, "Task abandoned; it is redelivered once idle");
+                return;
+            }
+        };
+        match settled {
+            Ok(Settled::Done) => return,
+            Ok(Settled::HandedOver) => {
+                warn!(
+                    entry = %entry.id,
+                    "Another worker took this task over while it ran; leaving it to that worker"
+                );
+                return;
+            }
+            Err(e) => {
+                attempt = attempt.saturating_add(1);
+                let delay = common::retry::calculate_backoff(attempt, 250, 5_000);
+                warn!(entry = %entry.id, attempt, error = %e, "Settling a task failed; retrying");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// Refresh every held entry each [`mq::REFRESH_INTERVAL`] until aborted.
+async fn refresh_held(tasks: GroupConsumer<Task>, held: Held) {
+    let mut ticker = tokio::time::interval(mq::REFRESH_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let entries = held.snapshot();
+        if entries.is_empty() {
+            continue;
+        }
+        match tasks.refresh(&entries).await {
+            Ok(lost) => {
+                for entry in lost {
+                    warn!(entry = %entry.id, "Another worker took over a task this worker still holds");
+                    held.remove(&entry);
+                }
+            }
+            Err(e) => warn!(error = %e, "Refreshing held tasks failed"),
+        }
+    }
 }
 
 async fn wait_for_shutdown(flag: &Arc<AtomicBool>) {
@@ -457,128 +527,313 @@ mod tests {
             task_type: "operation".to_string(),
             executor_name: "operation".to_string(),
             payload: serde_json::json!({}),
-            result_queue: "results".to_string(),
+            reply_to: "server-1".to_string(),
             operation_batch_id: None,
-            reply_queue: None,
-            priority: None,
             trace_context: None,
-            enqueued_at_unix_ms: None,
         }
     }
 
-    async fn redis_mq() -> (Arc<mq::Mq>, testcontainers::ContainerAsync<Redis>) {
-        let container = Redis::default().start().await.expect("start redis");
+    async fn redis_mq() -> (Mq, testcontainers::ContainerAsync<Redis>) {
+        let container = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
         let port = container
             .get_host_port_ipv4(6379)
             .await
             .expect("redis port");
-        let mq = init_mq(MqConfig {
-            url: format!("redis://127.0.0.1:{port}"),
-            pool_size: 4,
-        })
-        .await
-        .expect("init mq");
-        (Arc::new(mq), container)
+        let mq = Mq::connect(&format!("redis://127.0.0.1:{port}"), "ops")
+            .await
+            .expect("connect mq");
+        (mq, container)
     }
 
-    /// Regression test for the shutdown task-loss bug: with shutdown ALREADY
-    /// signaled, the loop consumes nothing, so queued tasks stay in the broker
-    /// instead of being pulled and rejected into the failed queue.
+    /// With shutdown already signaled the loop takes nothing, so queued tasks
+    /// stay unread for other workers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_before_start_leaves_queued_tasks_in_the_broker() {
+    async fn shutdown_before_start_leaves_queued_tasks_unread() {
         let (mq, _container) = redis_mq().await;
-        let queue = "operation_tasks".to_string();
         for i in 0..3 {
-            mq.publish::<Task>(&queue, None, &task(&format!("t{i}")), None)
+            mq.publish_task(&task(&format!("t{i}")), None)
                 .await
                 .expect("publish");
         }
 
         run_consume_loop(
-            Arc::clone(&mq),
-            [queue.clone(), format!("{queue}:worker:w")],
+            mq.clone(),
+            mq.task_consumer("w"),
             4,
             InFlightCounter::new(),
-            Arc::new(AtomicBool::new(true)), // already shutting down
+            Arc::new(AtomicBool::new(true)),
             Duration::from_secs(1),
-            |_msg| async { Ok(()) },
+            |_d| async { Settlement::Ack },
         )
         .await;
 
-        let mut remaining = 0;
-        while mq
-            .try_consume::<Task>(&queue, None)
-            .await
-            .unwrap()
-            .is_some()
-        {
-            remaining += 1;
-        }
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
         assert_eq!(
-            remaining, 3,
-            "a worker shutting down must leave every queued task untouched in the broker"
+            (depths[0].unread, depths[0].pending),
+            (3, 0),
+            "a worker shutting down must leave every queued task unread"
         );
     }
 
-    /// Happy path: the loop consumes queued tasks, runs the handler, and acks
-    /// them (they do not reappear), then stops cleanly when shutdown is signaled.
+    /// The loop runs every queued task and acknowledges it, then stops
+    /// cleanly on shutdown.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumes_and_acks_queued_tasks_then_stops_on_shutdown() {
         let (mq, _container) = redis_mq().await;
-        let queue = "operation_tasks".to_string();
         for i in 0..5 {
-            mq.publish::<Task>(&queue, None, &task(&format!("t{i}")), None)
+            mq.publish_task(&task(&format!("t{i}")), None)
                 .await
                 .expect("publish");
         }
 
         let processed = Arc::new(AtomicUsize::new(0));
+        let all_done = Arc::new(tokio::sync::Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
-
-        let loop_processed = Arc::clone(&processed);
-        let loop_shutdown = Arc::clone(&shutdown);
-        let loop_mq = Arc::clone(&mq);
-        let loop_queue = queue.clone();
-        let join = tokio::spawn(async move {
-            run_consume_loop(
-                loop_mq,
-                [loop_queue.clone(), format!("{loop_queue}:worker:w")],
-                4,
-                InFlightCounter::new(),
-                loop_shutdown,
-                Duration::from_secs(5),
-                move |_msg| {
-                    let processed = Arc::clone(&loop_processed);
-                    async move {
-                        processed.fetch_add(1, Ordering::Relaxed);
-                        Ok(())
-                    }
-                },
-            )
-            .await;
+        let join = tokio::spawn({
+            let processed = Arc::clone(&processed);
+            let all_done = Arc::clone(&all_done);
+            let shutdown = Arc::clone(&shutdown);
+            let mq = mq.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    2,
+                    InFlightCounter::new(),
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |_d| {
+                        let processed = Arc::clone(&processed);
+                        let all_done = Arc::clone(&all_done);
+                        async move {
+                            if processed.fetch_add(1, Ordering::SeqCst) + 1 == 5 {
+                                all_done.notify_one();
+                            }
+                            Settlement::Ack
+                        }
+                    },
+                )
+                .await;
+            }
         });
 
-        for _ in 0..100 {
-            if processed.load(Ordering::Relaxed) >= 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(
-            processed.load(Ordering::Relaxed),
-            5,
-            "the loop must consume and process every queued task"
-        );
+        all_done.notified().await;
+        assert_eq!(processed.load(Ordering::SeqCst), 5);
 
         shutdown.store(true, Ordering::Relaxed);
         join.await.expect("consume loop joins after shutdown");
 
-        assert!(
-            mq.try_consume::<Task>(&queue, None)
-                .await
-                .unwrap()
-                .is_none(),
-            "acked tasks must not reappear in the queue"
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!(
+            (depths[0].unread, depths[0].pending),
+            (0, 0),
+            "acknowledged tasks are gone"
         );
+    }
+
+    /// A worker that restarts takes back what it held before at once,
+    /// without waiting out the claim threshold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_worker_takes_back_its_own_pending_tasks() {
+        let (mq, _container) = redis_mq().await;
+        let before_crash = mq.task_consumer("w");
+        before_crash.ensure_groups().await.unwrap();
+        mq.publish_task(&task("held-at-crash"), None).await.unwrap();
+        assert_eq!(before_crash.reader().read(1).await.unwrap().len(), 1);
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<u32>();
+        let seen_tx = Arc::new(StdMutex::new(Some(seen_tx)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let join = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let mq = mq.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    InFlightCounter::new(),
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |d| {
+                        let seen_tx = Arc::clone(&seen_tx);
+                        async move {
+                            if let Some(tx) = seen_tx.lock().unwrap().take() {
+                                let _ = tx.send(d.deliveries);
+                            }
+                            Settlement::Ack
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        assert_eq!(seen_rx.await.unwrap(), 2, "taken back as a second delivery");
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.unwrap();
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
+    }
+
+    /// An abandoned task stays pending under this worker, to be reclaimed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abandoned_task_stays_pending() {
+        let (mq, _container) = redis_mq().await;
+        mq.publish_task(&task("t"), None).await.expect("publish");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(tokio::sync::Notify::new());
+        let join = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let done = Arc::clone(&done);
+            let mq = mq.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    InFlightCounter::new(),
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |_d| {
+                        let done = Arc::clone(&done);
+                        async move {
+                            done.notify_one();
+                            Settlement::Abandon
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        done.notified().await;
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.unwrap();
+
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 1));
+    }
+
+    /// A handler that panics abandons its task: the worker stops holding it,
+    /// so it becomes reclaimable instead of being refreshed forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_task_is_released_for_redelivery() {
+        let (mq, _container) = redis_mq().await;
+        mq.publish_task(&task("boom"), None).await.expect("publish");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (ran_tx, ran_rx) = tokio::sync::oneshot::channel::<()>();
+        let ran_tx = Arc::new(StdMutex::new(Some(ran_tx)));
+        let in_flight = InFlightCounter::new();
+        let join = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let mq = mq.clone();
+            let in_flight = in_flight.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    in_flight,
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |_d| {
+                        let ran_tx = Arc::clone(&ran_tx);
+                        async move {
+                            if let Some(tx) = ran_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            panic!("handler bug");
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        ran_rx.await.expect("the handler ran");
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.expect("the loop survives a panicking handler");
+        assert_eq!(
+            in_flight.current(),
+            0,
+            "the panicked task is no longer in flight"
+        );
+
+        // Nothing holds it any more: aged past the threshold, it is reclaimable.
+        let mut conn = redis::Client::open(mq_url(&_container).await.as_str())
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let pending: Vec<(String, String, u64, u64)> = redis::cmd("XPENDING")
+            .arg(mq.topology().shared())
+            .arg(mq::WORKERS_GROUP)
+            .arg("-")
+            .arg("+")
+            .arg(10)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1, "the task stays pending for redelivery");
+        common::test_util::age_entry(
+            &mut conn,
+            &mq.topology().shared(),
+            mq::WORKERS_GROUP,
+            "w",
+            &pending[0].0,
+            mq::CLAIM_IDLE * 2,
+        )
+        .await;
+        let reclaimed = mq.task_consumer("w2").reclaim(1).await.unwrap();
+        assert_eq!(reclaimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_held_entry_is_released_when_its_task_panics() {
+        let held = Held::default();
+        let entry = EntryRef {
+            stream: Arc::from("ops"),
+            id: "1-0".into(),
+        };
+        held.insert(&entry);
+        let task = tokio::spawn({
+            let guard = held.release_on_drop(entry.clone());
+            async move {
+                let _guard = guard;
+                panic!("handler bug");
+            }
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(held.snapshot().is_empty());
+    }
+
+    /// A settle that fails while Redis is down is retried, not given up:
+    /// the finished task is acknowledged once Redis is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_settle_is_retried_until_it_lands() {
+        let (container, url) = common::test_util::restartable_redis().await;
+        let mq = Mq::connect(&url, "ops").await.unwrap();
+        let tasks = mq.task_consumer("w");
+        tasks.ensure_groups().await.unwrap();
+        mq.publish_task(&task("done"), None).await.unwrap();
+        let delivery = tasks.reader().read(1).await.unwrap().remove(0);
+
+        container.stop().await.expect("stop redis");
+        let settling = tokio::spawn({
+            let tasks = tasks.clone();
+            let entry = delivery.entry.clone();
+            async move { settle(&tasks, &entry, Settlement::Ack).await }
+        });
+        container.start().await.expect("restart redis");
+        settling.await.expect("the settle lands once Redis is back");
+
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
+    }
+
+    async fn mq_url(container: &testcontainers::ContainerAsync<Redis>) -> String {
+        let port = container.get_host_port_ipv4(6379).await.unwrap();
+        format!("redis://127.0.0.1:{port}")
     }
 }

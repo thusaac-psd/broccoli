@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use common::metrics::Metrics;
 use common::retry::calculate_backoff;
 use common::worker::{Task, TaskReply, TaskResult, TaskStartedNotification};
+use mq::{Mq, ReplyOutcome};
 use tracing::{error, info, warn};
 
 use crate::error::WorkerError;
@@ -20,7 +20,7 @@ use crate::models::worker::Worker;
 pub async fn execute_task(
     task: &Task,
     worker: &Arc<Worker>,
-    mq: &Arc<mq::Mq>,
+    mq: &Mq,
     metrics: &Metrics,
     worker_id: &str,
 ) -> Result<TaskResult, WorkerError> {
@@ -34,9 +34,8 @@ pub async fn execute_task(
         publish_started(
             TaskStartedNotification {
                 task_id: task.id.clone(),
-                started_at_unix_ms: Utc::now().timestamp_millis(),
             },
-            task.reply_queue_name(),
+            &task.reply_to,
             mq,
             metrics,
         );
@@ -78,103 +77,97 @@ impl Default for PublishRetry {
     }
 }
 
-/// Publish an already-computed `result` to the task's reply queue, retrying
-/// only the publish (never the execution) with backoff per `retry`.
+/// Publish an already-computed `result` to the server waiting for it,
+/// retrying only the publish (never the execution) with backoff per `retry`.
+/// A server that is gone is not waited for: its reply is dropped.
 pub async fn publish_result(
     task: &Task,
     result: &TaskResult,
-    mq: &Arc<mq::Mq>,
+    mq: &Mq,
     metrics: &Metrics,
     retry: PublishRetry,
 ) -> Result<(), WorkerError> {
     let reply = TaskReply::Completed {
         result: result.clone(),
     };
-    let reply_queue = task.reply_queue_name();
     let started = std::time::Instant::now();
     let mut attempt: u8 = 0;
     loop {
         let publish_start = std::time::Instant::now();
-        match mq.publish(reply_queue, None, &reply, None).await {
-            Ok(_) => {
-                record_mq_publish(
-                    metrics,
-                    reply_queue,
-                    "task_result",
-                    "success",
-                    publish_start,
-                );
+        let error = match mq.publish_reply(&task.reply_to, &reply).await {
+            Ok(ReplyOutcome::Delivered) => {
+                record_mq_publish(metrics, "task_result", "success", publish_start);
                 info!(
                     job_id = %task.id,
-                    task_result_id = %result.task_id,
                     success = result.success,
-                    result_queue = %reply_queue,
+                    reply_to = %task.reply_to,
                     publish_attempts = attempt + 1,
                     "Task finished"
                 );
                 return Ok(());
             }
-            Err(e) => {
-                record_mq_publish(metrics, reply_queue, "task_result", "error", publish_start);
-                attempt = attempt.saturating_add(1);
-                if started.elapsed() >= retry.deadline {
-                    error!(
-                        job_id = %task.id,
-                        result_queue = %reply_queue,
-                        attempts = attempt,
-                        error = %e,
-                        "Giving up publishing the computed task result"
-                    );
-                    return Err(WorkerError::Mq(e.to_string()));
-                }
-                let delay = calculate_backoff(attempt, retry.base_delay_ms, retry.max_delay_ms);
+            Ok(ReplyOutcome::ServerGone) => {
+                record_mq_publish(metrics, "task_result", "server_gone", publish_start);
                 warn!(
                     job_id = %task.id,
-                    result_queue = %reply_queue,
-                    attempt,
-                    delay_ms = delay.as_millis() as u64,
-                    error = %e,
-                    "Failed to publish task result; retrying the publish only"
+                    reply_to = %task.reply_to,
+                    "The server waiting for this result is gone; dropping it"
                 );
-                tokio::time::sleep(delay).await;
+                return Ok(());
             }
+            Err(e) => e.to_string(),
+        };
+        record_mq_publish(metrics, "task_result", "error", publish_start);
+        attempt = attempt.saturating_add(1);
+        if started.elapsed() >= retry.deadline {
+            error!(
+                job_id = %task.id,
+                reply_to = %task.reply_to,
+                attempts = attempt,
+                error = %error,
+                "Giving up publishing the computed task result"
+            );
+            return Err(WorkerError::Mq(error));
         }
+        let delay = calculate_backoff(attempt, retry.base_delay_ms, retry.max_delay_ms);
+        warn!(
+            job_id = %task.id,
+            reply_to = %task.reply_to,
+            attempt,
+            delay_ms = delay.as_millis() as u64,
+            error = %error,
+            "Failed to publish task result; retrying the publish only"
+        );
+        tokio::time::sleep(delay).await;
     }
 }
 
+/// Tell the server the task started. Best effort: a lost notification only
+/// delays the server's start bookkeeping until the result arrives.
 fn publish_started(
     notification: TaskStartedNotification,
-    reply_queue: &str,
-    mq: &Arc<mq::Mq>,
+    reply_to: &str,
+    mq: &Mq,
     metrics: &Metrics,
 ) {
     let task_id = notification.task_id.clone();
-    let reply_queue = reply_queue.to_string();
-    let mq = Arc::clone(mq);
+    let reply_to = reply_to.to_string();
+    let mq = mq.clone();
     let metrics = metrics.clone();
 
     tokio::spawn(async move {
         let publish_start = std::time::Instant::now();
         let reply = TaskReply::Started { notification };
-        match mq.publish(&reply_queue, None, &reply, None).await {
-            Ok(_) => record_mq_publish(
-                &metrics,
-                &reply_queue,
-                "task_started",
-                "success",
-                publish_start,
-            ),
+        match mq.publish_reply(&reply_to, &reply).await {
+            Ok(ReplyOutcome::Delivered) => {
+                record_mq_publish(&metrics, "task_started", "success", publish_start)
+            }
+            Ok(_) => record_mq_publish(&metrics, "task_started", "dropped", publish_start),
             Err(e) => {
-                record_mq_publish(
-                    &metrics,
-                    &reply_queue,
-                    "task_started",
-                    "error",
-                    publish_start,
-                );
+                record_mq_publish(&metrics, "task_started", "error", publish_start);
                 warn!(
                     job_id = %task_id,
-                    result_queue = %reply_queue,
+                    reply_to = %reply_to,
                     error = %e,
                     "Failed to publish task started notification"
                 );

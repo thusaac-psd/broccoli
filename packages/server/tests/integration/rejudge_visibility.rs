@@ -25,13 +25,13 @@
 
 use broccoli_server_sdk::permissions as perm;
 use chrono::Utc;
-use common::worker::{HeartbeatPayload, WORKER_HEARTBEAT_KEY_PREFIX};
+use common::liveness::{NodeRole, TTL};
+use common::worker::HeartbeatPayload;
 use common::{SubmissionStatus, Verdict};
 use redis::AsyncCommands;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use server::entity::{problem, submission, submission_judgement, user};
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
 
 use crate::common::{SpawnOptions, TestApp, routes};
 
@@ -431,18 +431,18 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
         cpu_count: None,
         pid: None,
     };
-    let key = format!("{WORKER_HEARTBEAT_KEY_PREFIX}{worker_id}");
+    let key = NodeRole::Worker.key(&common::config::default_operation_queue_name(), worker_id);
     let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");
     // Mirror the worker's writer: the key's TTL is what makes it live.
     let _: () = conn
-        .set_ex(&key, &value, common::worker::WORKER_HEARTBEAT_TTL_SECS)
+        .set_ex(&key, &value, TTL.as_secs())
         .await
         .expect("write heartbeat key");
 }
 
 #[tokio::test]
 async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
-    let redis = Redis::default()
+    let redis = common::test_util::redis_image()
         .start()
         .await
         .expect("failed to start Redis container");

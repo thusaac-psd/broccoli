@@ -169,7 +169,7 @@ fn next_result_extends_timeout_until_tracked_operation_execution_budget_expires(
         "queued operation should silently extend the first timeout"
     );
 
-    registry.mark_operation_started("op-1", chrono::Utc::now().timestamp_millis());
+    registry.mark_operation_started("op-1");
     std::thread::sleep(Duration::from_millis(10));
     assert!(
         done_rx.try_recv().is_err(),
@@ -210,7 +210,7 @@ fn next_result_uses_first_started_operation_for_multi_op_test_case() {
         ["op-1".to_string(), "op-2".to_string()],
     );
 
-    registry.mark_operation_started("op-1", chrono::Utc::now().timestamp_millis());
+    registry.mark_operation_started("op-1");
     std::thread::sleep(Duration::from_millis(30));
 
     assert!(
@@ -350,7 +350,6 @@ fn callback_path_tags_operation_tasks_with_evaluate_context() {
         environments: vec![],
         tasks: vec![],
         channels: vec![],
-        priority: None,
         target_worker_id: None,
         evaluate_batch_id: None,
         test_case_id: None,
@@ -377,7 +376,6 @@ fn callback_path_decodes_operation_results_from_task_result_output() {
         task_type: Some("operation".to_string()),
         operation: Some("operation".to_string()),
         worker_id: Some("worker-1".to_string()),
-        enqueued_at_unix_ms: None,
     };
 
     let decoded = operation_results_from_task_results(vec![task_result]).unwrap();
@@ -396,7 +394,6 @@ fn callback_path_rejects_task_result_without_operation_output() {
         task_type: Some("operation".to_string()),
         operation: Some("operation".to_string()),
         worker_id: Some("worker-1".to_string()),
-        enqueued_at_unix_ms: None,
     };
 
     let err = operation_results_from_task_results(vec![task_result]).unwrap_err();

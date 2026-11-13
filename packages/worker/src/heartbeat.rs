@@ -143,24 +143,4 @@ mod tests {
         assert!(json.contains("\"ip_addresses\":[\"192.168.1.10\"]"));
         assert!(json.contains("\"os\":\"linux\""));
     }
-
-    #[test]
-    fn payload_deserializes_legacy_without_system_fields() {
-        let legacy = r#"{
-            "id":"old-worker",
-            "started_at":"2026-05-01T00:00:00Z",
-            "last_seen":"2026-05-01T00:00:05Z",
-            "in_flight":0,
-            "max_concurrency":null,
-            "sandbox_backend":"isolate",
-            "version":"0.1.0"
-        }"#;
-        let p: HeartbeatPayload = serde_json::from_str(legacy).expect("legacy payload");
-        assert_eq!(p.id, "old-worker");
-        assert!(p.hostname.is_none());
-        assert!(p.ip_addresses.is_empty());
-        assert!(p.os.is_none());
-        assert!(p.cpu_count.is_none());
-        assert_eq!(p.fairness_mode, "unknown");
-    }
 }

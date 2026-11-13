@@ -30,7 +30,8 @@ pub struct WorkerWarmStatus {
     /// `pending` | `warming` | `complete` | `error`.
     #[schema(example = "warming")]
     pub state: String,
-    /// True if the worker's heartbeat is stale (it may have died mid-warm).
+    /// True if the worker reported progress and is no longer live (it may have
+    /// died mid-warm).
     pub stale: bool,
     /// False if this live worker hasn't reported any progress yet.
     pub reported: bool,

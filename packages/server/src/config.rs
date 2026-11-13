@@ -151,8 +151,7 @@ pub struct ServerConfig {
     /// true, the host-default fallback is rejected.
     #[serde(default)]
     pub expects_multi_replica: bool,
-    /// Master switch for lease refresh, steal scanning, and reply-queue
-    /// sweeping. Defaults off for opt-in rollout.
+    /// Master switch for lease refresh and steal scanning. Defaults off.
     #[serde(default)]
     pub dispatcher_lease_steal_enabled: bool,
     /// Admission-control switch for plugin-dispatch background tasks.
@@ -197,8 +196,6 @@ pub struct ServerConfig {
     pub steal_scan_interval_secs: u64,
     #[serde(default = "default_steal_batch_size")]
     pub steal_batch_size: u32,
-    #[serde(default = "default_sweep_interval_secs")]
-    pub sweep_interval_secs: u64,
     /// Dispatch retries a judgement or code run gets after its owner was
     /// lost or it got stuck (the lease steal and the stuck-job detector share
     /// this budget). Once they are spent the unit is finalized as
@@ -213,35 +210,6 @@ pub struct ServerConfig {
     /// that fails deterministically.
     #[serde(default = "default_max_system_error_retries")]
     pub max_system_error_retries: u32,
-    /// When true, log ghost reply queues and debounce them without deleting
-    /// the Redis keys. Defaults to false now that the sweeper has soaked in
-    /// dry-run through earlier UP rollouts; flip back to true if you need to
-    /// audit what would be deleted before letting the sweeper act.
-    #[serde(default = "default_sweeper_dry_run")]
-    pub sweeper_dry_run: bool,
-    /// Master switch for the dead-worker operation reaper. When a worker crashes,
-    /// the broker (no visibility timeout) strands its in-flight operation in
-    /// `<queue>_processing` and any queued work in its private ZSET; the reaper
-    /// requeues both onto the shared queue once the owner's heartbeat lapses,
-    /// closing the up-to-30-minute waiter-timeout recovery gap. Active by default.
-    #[serde(default = "default_operation_reaper_enabled")]
-    pub operation_reaper_enabled: bool,
-    /// Tick period for the operation reaper.
-    #[serde(default = "default_operation_reaper_interval_secs")]
-    pub operation_reaper_interval_secs: u64,
-    /// Debounce a dead worker for this long (on top of the 15s heartbeat TTL)
-    /// before requeuing its strands, so a worker briefly between heartbeats is
-    /// not reaped out from under itself.
-    #[serde(default = "default_operation_reaper_grace_secs")]
-    pub operation_reaper_grace_secs: i64,
-    /// Per-tick requeue cap, bounding the reaper's blast radius. Any remainder is
-    /// logged and picked up on the next tick.
-    #[serde(default = "default_operation_reaper_max_requeues_per_tick")]
-    pub operation_reaper_max_requeues_per_tick: usize,
-    /// When true, the operation reaper logs the strands it WOULD requeue without
-    /// mutating Redis. Defaults false (the reaper is a recovery, not a delete).
-    #[serde(default = "default_operation_reaper_dry_run")]
-    pub operation_reaper_dry_run: bool,
     /// Master switch for Redis-backed operation cancellation keys. Defaults
     /// off so worker-side cancellation checks can soak independently.
     #[serde(default)]
@@ -278,8 +246,8 @@ pub struct ServerConfig {
     /// roughly `total_publish_ms / N` plus MQ-broker throughput limits.
     ///
     /// Default 32. Trade-off: higher values reduce dispatch latency but
-    /// multiply concurrent load on the Redis MQ broker (each publish is one
-    /// RPUSH plus optional priority sorting). Tune down on a constrained MQ
+    /// multiply concurrent load on Redis (each publish is one `XADD`, or one
+    /// routing script for a pinned task). Tune down on a constrained MQ
     /// host; tune up when broker is over-provisioned and submission bursts
     /// dominate latency.
     #[serde(default = "default_operation_batch_publish_concurrency")]
@@ -364,16 +332,8 @@ impl Default for ServerConfig {
             lease_refresh_interval_secs: default_lease_refresh_interval_secs(),
             steal_scan_interval_secs: default_steal_scan_interval_secs(),
             steal_batch_size: default_steal_batch_size(),
-            sweep_interval_secs: default_sweep_interval_secs(),
             max_dispatch_retries: default_max_dispatch_retries(),
             max_system_error_retries: default_max_system_error_retries(),
-            sweeper_dry_run: default_sweeper_dry_run(),
-            operation_reaper_enabled: default_operation_reaper_enabled(),
-            operation_reaper_interval_secs: default_operation_reaper_interval_secs(),
-            operation_reaper_grace_secs: default_operation_reaper_grace_secs(),
-            operation_reaper_max_requeues_per_tick: default_operation_reaper_max_requeues_per_tick(
-            ),
-            operation_reaper_dry_run: default_operation_reaper_dry_run(),
             cancel_primitive_enabled: false,
             max_blocking_threads: None,
             batch_evaluator_fanout_concurrency: default_batch_evaluator_fanout_concurrency(),
@@ -432,10 +392,6 @@ fn default_steal_batch_size() -> u32 {
     8
 }
 
-fn default_sweep_interval_secs() -> u64 {
-    300
-}
-
 fn default_max_dispatch_retries() -> u32 {
     5
 }
@@ -445,30 +401,6 @@ fn default_max_system_error_retries() -> u32 {
     // SystemError (e.g. a checker that always dies on one case) terminalizes in
     // minutes instead of churning the box for a contest.
     10
-}
-
-fn default_sweeper_dry_run() -> bool {
-    false
-}
-
-fn default_operation_reaper_enabled() -> bool {
-    true
-}
-
-fn default_operation_reaper_interval_secs() -> u64 {
-    30
-}
-
-fn default_operation_reaper_grace_secs() -> i64 {
-    30
-}
-
-fn default_operation_reaper_max_requeues_per_tick() -> usize {
-    1000
-}
-
-fn default_operation_reaper_dry_run() -> bool {
-    false
 }
 
 fn default_batch_evaluator_fanout_concurrency() -> u32 {
@@ -698,17 +630,10 @@ pub fn resolve_server_id(
     expects_multi_replica: bool,
 ) -> Result<String, common::node_identity::NodeIdError> {
     common::node_identity::resolve_node_id(
-        common::node_identity::NodeRole::Server,
+        common::liveness::NodeRole::Server,
         configured,
         expects_multi_replica,
     )
-}
-
-/// Centralized derivation of the per-replica operation-result queue name.
-/// Suffixing with `server_id` ensures each replica's `consume_operation_results`
-/// only receives results for tasks it dispatched.
-pub fn per_replica_result_queue_name(base: &str, server_id: &str) -> String {
-    format!("{}.{}", base, server_id)
 }
 
 /// Auto-default for tokio's `max_blocking_threads`: 16x available CPUs,
@@ -783,9 +708,6 @@ mod tests {
         assert!(!is_valid_server_id(""));
         assert!(!is_valid_server_id("has space"));
         assert!(!is_valid_server_id("colon:bad"));
-        assert!(!is_valid_server_id("server_processing"));
-        assert!(!is_valid_server_id("server_failed"));
-        assert!(!is_valid_server_id("server_fairness_set"));
         assert!(!is_valid_server_id(&"x".repeat(129)));
     }
 
@@ -822,18 +744,6 @@ mod tests {
         assert!(resolve_server_id("   ", true).is_err());
         assert!(resolve_server_id("has space", true).is_err());
         assert_eq!(resolve_server_id("server-1", true).unwrap(), "server-1");
-    }
-
-    #[test]
-    fn per_replica_queue_name_appends_dotted_suffix() {
-        assert_eq!(
-            per_replica_result_queue_name("operation_results", "alpha"),
-            "operation_results.alpha"
-        );
-        assert_eq!(
-            per_replica_result_queue_name("operation_results", "server-1"),
-            "operation_results.server-1"
-        );
     }
 
     #[derive(Debug, Deserialize)]

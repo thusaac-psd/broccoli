@@ -1037,7 +1037,6 @@ export const en: Record<string, string> = {
   'system.queues.description': 'Current depth of MQ queues handled by workers.',
   'system.queues.empty': 'MQ is disabled or unreachable.',
   'system.worker.online': 'online',
-  'system.worker.stale': 'stale',
   'system.worker.inFlight': 'In-flight',
   'system.worker.uptime': 'up {time}',
   'system.worker.justNow': 'just now',

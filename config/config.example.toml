@@ -45,7 +45,6 @@ sandbox_backend = "isolate"
 isolate_bin = "isolate"
 enable_cgroups = true
 max_concurrency = 1
-dedup_ttl_secs = 600
 fairness_unsafe_allow = false
 
 [database]
@@ -54,14 +53,9 @@ url = "postgres://postgres:broccoli_pg_secret@localhost:5433/broccoli"
 [mq]
 enabled = true
 url = "redis://:broccoli_redis_secret@localhost:6379"
-pool_size = 5
+# Prefix of every message queue stream key (see the "Message queue" internals
+# page of the docs site).
 operation_queue_name = "operation_tasks"
-operation_result_queue_name = "operation_results"
-operation_dlq_queue_name = "operation_tasks_dlq"
-# How long the server waits between polls of an empty result queue. Contest
-# plugins judge one test case at a time, so this is paid per case: 50 ms costs
-# ~0.16 s per case and ~490 idle Redis ops/s; 20 ms ~0.15 s and ~1150 ops/s.
-result_poll_interval_ms = 50
 
 [mq.dlq]
 max_retries = 3
