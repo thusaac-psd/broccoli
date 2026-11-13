@@ -69,7 +69,7 @@ const LISTEN_RETRY_MAX: Duration = Duration::from_secs(30);
 /// Long-running fiber loop until the cancel channel fires.
 ///
 /// A claim pass runs when a claim notification arrives (see
-/// [`judging::ClaimWake`]) or, as a fallback, `interval_ms` after the last
+/// `judging::ClaimWake`) or, as a fallback, `interval_ms` after the last
 /// pass. Wakes that arrive during a pass fold into one more pass, and passes
 /// repeat while each fills its batch and room is left, so a backlog drains at
 /// claim speed rather than one batch per tick. Replicas all wake on the same
