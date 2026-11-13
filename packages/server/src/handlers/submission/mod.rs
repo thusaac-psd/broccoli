@@ -45,7 +45,7 @@ use crate::utils::judging::{files_to_json, validate_code_payload, validate_submi
 use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
 use crate::utils::rate_limit::check_rate_limit;
-use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
+use crate::visibility::{Action, Resource, ResourceScope, Subject, VisibilityKernel};
 
 mod dispatch;
 mod filter;
@@ -334,7 +334,8 @@ pub async fn list_submissions(
     // non-`submission:view_all` caller is restricted to their own rows
     // above), so only a visibility plugin can hide a matching row. A count
     // is exact, and reported, only when none can.
-    let total = list_total(&state, &kernel, &base_select).await?;
+    // The list spans contests of any type.
+    let total = list_total(&state, &kernel, &base_select, &ResourceScope::Unknown).await?;
 
     // This list is GLOBAL - it can span several contests plus contest-less
     // submissions in one page. Each row is decided as its own
@@ -364,13 +365,15 @@ pub async fn list_submissions(
 /// The exact number of rows `select` matches, or `None` when a visibility
 /// plugin may hide some of them from this viewer (see
 /// [`VisibilityKernel::plugins_may_narrow`]). `select` must already encode
-/// the host visibility rules for the viewer.
+/// the host visibility rules for the viewer, and every row it matches must
+/// fall under `scope`.
 async fn list_total(
     state: &AppState,
     kernel: &VisibilityKernel<'_>,
     select: &Select<submission::Entity>,
+    scope: &ResourceScope,
 ) -> Result<Option<u64>, AppError> {
-    if kernel.plugins_may_narrow() {
+    if kernel.plugins_may_narrow(scope) {
         return Ok(None);
     }
     Ok(Some(select.clone().count(&state.db).await?))
@@ -966,7 +969,10 @@ pub async fn list_contest_submissions(
         );
     }
 
-    let total = list_total(&state, &kernel, &base_select).await?;
+    // Every row is in this contest, so only a querier governing its type
+    // can hide one.
+    let scope = ResourceScope::ContestType(contest_model.contest_type.clone());
+    let total = list_total(&state, &kernel, &base_select, &scope).await?;
 
     // The page reuses the kernel of the `Resource::Contest` gate above. Each
     // row is decided as its own `Resource::Submission`, which also requires

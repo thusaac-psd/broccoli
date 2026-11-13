@@ -1133,3 +1133,165 @@ async fn a_cursor_naming_a_hidden_submission_is_refused() {
         assert_eq!(res.body["code"], "VALIDATION_ERROR");
     }
 }
+
+// == Querier scope ========================================================
+// A visibility plugin that registered contest types governs only resources
+// in contests of those types: it is not consulted elsewhere, so it cannot
+// hide anything there, and a list scoped to another type gets its exact
+// total back.
+
+/// Record the fixture plugin as governing only `governed_type`, the way a
+/// replica that loaded it would, and pick the record up here.
+async fn scope_fixture_to(app: &TestApp, governed_type: &str) {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE plugin SET governs = $1 WHERE id = 'server-plugin'",
+            [serde_json::json!({ "visibility": true, "contest_types": [governed_type] }).into()],
+        ))
+        .await
+        .expect("record governs");
+    server::plugin_lifecycle::reconcile(&app.state)
+        .await
+        .expect("reconcile");
+}
+
+/// A public, active contest of `contest_type` holding one submission by
+/// `user_id`. Returns `(contest_id, submission_id)`.
+async fn typed_contest_with_submission(
+    app: &TestApp,
+    admin_token: &str,
+    contest_type: &str,
+    user_id: i32,
+) -> (i32, i32) {
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Set, Statement};
+    use server::entity::submission;
+
+    let contest_id = app
+        .create_contest(admin_token, &format!("{contest_type} contest"), true, true)
+        .await;
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE contest SET contest_type = $1 WHERE id = $2",
+            [contest_type.into(), contest_id.into()],
+        ))
+        .await
+        .expect("set contest type");
+    let problem_id = insert_public_problem(app, &format!("{contest_type} problem")).await;
+    let submission = submission::ActiveModel {
+        files: Set(serde_json::json!([
+            { "filename": "main.cpp", "content": "int main() {}" }
+        ])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(Some(contest_id)),
+        contest_type: Set(contest_type.into()),
+        status: Set(common::SubmissionStatus::Queued),
+        judge_epoch: Set(0),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert contest submission");
+    (contest_id, submission.id)
+}
+
+async fn user_id(app: &TestApp, username: &str) -> i32 {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("query user")
+        .expect("user exists")
+        .id
+}
+
+#[tokio::test]
+async fn a_scoped_querier_decides_only_its_contest_types() {
+    let app = TestApp::spawn_with_plugins().await;
+    let admin_token = app
+        .create_user_with_role("scope_admin", "pass1234", "admin")
+        .await;
+    let token = app
+        .create_authenticated_user("scope_viewer", "pass1234")
+        .await;
+    let viewer = user_id(&app, "scope_viewer").await;
+    let (governed, in_governed) =
+        typed_contest_with_submission(&app, &admin_token, "governed-type", viewer).await;
+    let (other, in_other) =
+        typed_contest_with_submission(&app, &admin_token, "other-type", viewer).await;
+    seed_kv(
+        &app,
+        "deny_resource_keys",
+        &format!("submission:{in_governed},submission:{in_other}"),
+    )
+    .await;
+    scope_fixture_to(&app, "governed-type").await;
+
+    // Its own type: the plugin is consulted, its Deny holds, and the count
+    // is withheld.
+    let res = app
+        .get_with_token(&routes::contest_submissions(governed), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["data"], serde_json::json!([]));
+    assert!(res.body["pagination"]["total"].is_null(), "{}", res.text);
+
+    // Another type: the plugin is not consulted, so its Deny for this row
+    // has no effect, and the exact total comes back.
+    let res = app
+        .get_with_token(&routes::contest_submissions(other), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let ids: Vec<i64> = res.body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![in_other as i64]);
+    assert_eq!(res.body["pagination"]["total"], 1);
+    let res = app
+        .get_with_token(&routes::submission(in_other), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .get_with_token(&routes::submission(in_governed), &token)
+        .await;
+    assert_eq!(res.status, 404, "{}", res.text);
+}
+
+#[tokio::test]
+async fn an_unscoped_querier_still_decides_every_contest_type() {
+    let app = TestApp::spawn_with_plugins().await;
+    let admin_token = app
+        .create_user_with_role("unscoped_admin", "pass1234", "admin")
+        .await;
+    let token = app
+        .create_authenticated_user("unscoped_viewer", "pass1234")
+        .await;
+    let viewer = user_id(&app, "unscoped_viewer").await;
+    let (contest, submission) =
+        typed_contest_with_submission(&app, &admin_token, "any-type", viewer).await;
+    seed_kv(
+        &app,
+        "deny_resource_keys",
+        &format!("submission:{submission}"),
+    )
+    .await;
+
+    let res = app
+        .get_with_token(&routes::contest_submissions(contest), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["data"], serde_json::json!([]));
+    assert!(res.body["pagination"]["total"].is_null(), "{}", res.text);
+}

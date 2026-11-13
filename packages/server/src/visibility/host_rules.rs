@@ -127,29 +127,35 @@ use crate::utils::soft_delete::SoftDeletable;
 
 use super::{Action, Decision, FieldMask, Resource, Subject};
 
+/// What [`host_decide`] learns about the contests of a batch's resources,
+/// for the plugin step that follows it.
+#[derive(Debug, Default)]
+pub(crate) struct HostScopes {
+    /// Input: also fetch the contest of every submission and clarification,
+    /// so `contest_types` covers each resource's contest. Set while a
+    /// visibility querier scoped to contest types is loaded; the contests
+    /// join the fetch the batch makes anyway.
+    pub resolve_contests: bool,
+    /// `submission_id -> submission.contest_id` for every `Resource::
+    /// Submission` resolved by Query 0 (itself `None` for a contest-less
+    /// submission). A `Resource::Submission`'s contest is otherwise
+    /// unknowable outside this function, and `VisibilityKernel::decide_batch`
+    /// stamps it onto each plugin `QueryResource.contest_id`.
+    pub submission_contest_ids: HashMap<i32, Option<i32>>,
+    /// `clarification_id -> clarification.contest_id` for every `Resource::
+    /// Clarification` resolved by Query C. A clarification always belongs to
+    /// exactly one contest, so the value is a plain `i32`.
+    pub clarification_contest_ids: HashMap<i32, i32>,
+    /// `contest_id -> contest_type` for every active contest the batch
+    /// fetched.
+    pub contest_types: HashMap<i32, Option<String>>,
+}
+
 /// See the module docs for the rules and the batching strategy. Returns one
-/// [`Decision`] per entry of `resources`, in the same order.
-///
-/// `submission_contest_ids` is an out-param: for every `Resource::
-/// Submission` in `resources`, this inserts `submission_id ->
-/// submission.contest_id` (which is itself `None` for a genuinely
-/// contest-less submission) once that submission has been resolved by Query
-/// 0 below. This surfaces a mapping `host_decide` already builds for its own
-/// rule 6 check, rather than resolving it a second time. The caller,
-/// `VisibilityKernel::decide_batch`, stamps it onto each plugin
-/// `QueryResource.contest_id`: a `Resource::Submission`'s contest is otherwise
-/// unknowable outside this function. Left untouched
-/// (and callers pass an empty map) on the `admin_override` early return
-/// below, since that path never resolves any submission and its decisions
-/// never reach a plugin anyway.
-///
-/// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification`: `clarification_id -> clarification.contest_id`,
-/// populated once Query C below resolves it. Unlike a submission's, a
-/// clarification's `contest_id` column is never null - every clarification
-/// belongs to exactly one contest - so this map's value is a plain `i32`,
-/// not an `Option<i32>`; a miss (key absent) still means "not resolved by
-/// this call", handled by the caller the same way as a submission miss.
+/// [`Decision`] per entry of `resources`, in the same order, and fills
+/// `scopes` (see [`HostScopes`]). The maps stay empty on the
+/// `admin_override` early return, which resolves nothing and never reaches
+/// a plugin.
 ///
 /// `action` matters only for standalone (`contest_id: None`) problem-keyed
 /// resources: it decides whether rule 9 applies (see
@@ -164,8 +170,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     subject: &Subject,
     action: Action,
     resources: &[Resource],
-    submission_contest_ids: &mut HashMap<i32, Option<i32>>,
-    clarification_contest_ids: &mut HashMap<i32, i32>,
+    scopes: &mut HostScopes,
 ) -> Result<Vec<Decision>, AppError> {
     if subject.is_admin_override() {
         return Ok(vec![Decision::Allow; resources.len()]);
@@ -194,7 +199,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|s| (s.id, s))
             .collect()
     };
-    submission_contest_ids.extend(submissions.values().map(|s| (s.id, s.contest_id)));
+    scopes
+        .submission_contest_ids
+        .extend(submissions.values().map(|s| (s.id, s.contest_id)));
 
     // Query A: problems referenced by a standalone (`contest_id: None`)
     // problem part - rule 8. Samples and attachments are parts of their
@@ -274,7 +281,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|c| (c.id, c))
             .collect()
     };
-    clarification_contest_ids.extend(clarifications.values().map(|c| (c.id, c.contest_id)));
+    scopes
+        .clarification_contest_ids
+        .extend(clarifications.values().map(|c| (c.id, c.contest_id)));
 
     // Query D: every reply of every clarification resolved above, ordered by
     // `created_at` ascending, for each clarification's latest reply: the
@@ -303,11 +312,12 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
 
     // Query 1: contests referenced by the batch - directly (`Resource::
     // Contest`), via a problem part's `contest_id`, or via a fetched
-    // submission's `contest_id` (only when that submission will actually
-    // need the peer-visibility contest check - rule 6's owner/`submission:
-    // view_all` bypasses never touch the contest at all, mirroring the
-    // source's early-return shape). Soft-delete-aware (`find_active`),
-    // mirroring `find_contest` - this is rule 7 for contests.
+    // submission's `contest_id` when that submission needs the
+    // peer-visibility contest check (rule 6's owner/`submission:view_all`
+    // bypasses never read the contest). With `scopes.resolve_contests`, every
+    // submission's and clarification's contest joins this same fetch, for
+    // the plugin step's routing; no decision reads them. Soft-delete-aware
+    // (`find_active`) - this is rule 7 for contests.
     let mut contest_ids: HashSet<i32> = resources
         .iter()
         .filter_map(|r| match r {
@@ -318,9 +328,16 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     for sub in submissions.values() {
         let needs_contest_check = !subject.has_permission(perm::SUBMISSION_VIEW_ALL)
             && subject.user_id != Some(sub.user_id);
-        if needs_contest_check && let Some(cid) = sub.contest_id {
+        if (needs_contest_check || scopes.resolve_contests)
+            && let Some(cid) = sub.contest_id
+        {
             contest_ids.insert(cid);
         }
+    }
+    // Only for the plugin step's routing: no host rule reads a
+    // clarification's contest.
+    if scopes.resolve_contests {
+        contest_ids.extend(clarifications.values().map(|c| c.contest_id));
     }
     // Rule 9's candidate contests, folded in BEFORE the fetch below - a
     // standalone problem's "which of its contests are public/started/joined"
@@ -340,6 +357,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|c| (c.id, c))
             .collect()
     };
+    scopes
+        .contest_types
+        .extend(contests.values().map(|c| (c.id, c.contest_type.clone())));
 
     // Query 2: `contest_user` membership for this subject, across every
     // contest fetched above. Fetched unconditionally (whenever the subject
@@ -821,8 +841,7 @@ mod tests {
             &Subject::admin_override(),
             Action::Read,
             &resources,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .expect("admin override must not touch the database");
@@ -847,8 +866,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -868,8 +886,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -887,8 +904,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -909,8 +925,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -932,8 +947,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -953,8 +967,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -972,8 +985,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -997,8 +1009,7 @@ mod tests {
                 contest_id: Some(7),
                 problem_id: 3,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1020,8 +1031,7 @@ mod tests {
                 contest_id: Some(7),
                 problem_id: 3,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1045,8 +1055,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1065,8 +1074,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1085,8 +1093,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1103,8 +1110,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1123,8 +1129,7 @@ mod tests {
             &subject(1, &[perm::SUBMISSION_VIEW_ALL]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1145,8 +1150,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1163,8 +1167,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(404)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1185,8 +1188,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1252,8 +1254,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1271,8 +1272,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1290,8 +1290,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1309,8 +1308,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1328,8 +1326,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1350,8 +1347,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1377,8 +1373,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1403,8 +1398,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1433,8 +1427,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1477,8 +1470,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1503,8 +1495,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1525,8 +1516,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1547,8 +1537,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1570,8 +1559,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1596,8 +1584,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1620,8 +1607,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1644,8 +1630,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1668,8 +1653,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1699,8 +1683,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1725,8 +1708,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap()
@@ -1812,8 +1794,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(999),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1835,8 +1816,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1860,8 +1840,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1887,8 +1866,7 @@ mod tests {
                 problem_id: 3,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1911,8 +1889,7 @@ mod tests {
                 problem_id: 3,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1969,8 +1946,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &resources,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
