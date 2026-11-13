@@ -12,7 +12,9 @@ use super::models::{MountSource, OperationTask};
 use super::sandbox::SandboxManager;
 use super::sandbox::isolate::IsolateSandboxManager;
 use super::sandbox::mock::MockSandboxManager;
-use super::task_cache::{DatabaseTaskCacheStore, NoopTaskCacheStore, TaskCacheStore};
+use super::task_cache::{
+    DatabaseTaskCacheStore, MemoizedTaskCacheStore, NoopTaskCacheStore, TaskCacheStore,
+};
 use crate::config::WorkerAppConfig;
 use crate::models::operation::handler::{CompileCache, OperationHandler};
 use crate::toolchain_fingerprint;
@@ -360,7 +362,9 @@ impl OperationTaskExecutor {
         {
             Ok(()) => {
                 info!("DatabaseTaskCacheStore initialized");
-                Box::new(DatabaseTaskCacheStore::new(db_for_cache))
+                Box::new(MemoizedTaskCacheStore::new(DatabaseTaskCacheStore::new(
+                    db_for_cache,
+                )))
             }
             Err(e) => {
                 warn!(error = %e, "Failed to ensure task_cache table, using NoopTaskCacheStore");

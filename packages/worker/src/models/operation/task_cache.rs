@@ -129,6 +129,65 @@ fn task_cache_put_outcome(rows_affected: u64) -> TaskCachePutOutcome {
     }
 }
 
+/// How many entries [`MemoizedTaskCacheStore`] keeps. An entry is a cache key
+/// and a few output hashes, so the memo stays well under a megabyte.
+const MEMO_ENTRIES: std::num::NonZeroUsize = std::num::NonZeroUsize::new(4096).unwrap();
+
+/// A task cache that answers repeat lookups from process memory.
+///
+/// Entries are immutable: the key covers the target, the toolchain, the argv
+/// and every input byte, and an insert never replaces a stored key. So an entry
+/// read or written once stays valid, and later lookups of its key skip the
+/// round trip to `inner`. Misses are not memoized, since another worker may
+/// store the key at any time.
+///
+/// The memo never vouches for blobs. Restoring a hit materializes each output
+/// through the file cacher, which fetches it from the blob store when the local
+/// copy is gone. When that fails too (evicted locally and deleted in the store),
+/// the step runs, and storing its fresh outputs replaces the memoized entry.
+pub struct MemoizedTaskCacheStore<S> {
+    inner: S,
+    memo: std::sync::Mutex<lru::LruCache<String, HashMap<String, String>>>,
+}
+
+impl<S: TaskCacheStore> MemoizedTaskCacheStore<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            memo: std::sync::Mutex::new(lru::LruCache::new(MEMO_ENTRIES)),
+        }
+    }
+
+    /// The memo, recovered from poisoning: every update is a single map call.
+    fn memo(&self) -> std::sync::MutexGuard<'_, lru::LruCache<String, HashMap<String, String>>> {
+        self.memo.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[async_trait]
+impl<S: TaskCacheStore> TaskCacheStore for MemoizedTaskCacheStore<S> {
+    async fn get(&self, cache_key: &str) -> Result<Option<HashMap<String, String>>, String> {
+        if let Some(outputs) = self.memo().get(cache_key) {
+            return Ok(Some(outputs.clone()));
+        }
+        let outputs = self.inner.get(cache_key).await?;
+        if let Some(outputs) = &outputs {
+            self.memo().put(cache_key.to_string(), outputs.clone());
+        }
+        Ok(outputs)
+    }
+
+    async fn put(
+        &self,
+        cache_key: &str,
+        outputs: HashMap<String, String>,
+    ) -> Result<TaskCachePutOutcome, String> {
+        let outcome = self.inner.put(cache_key, outputs.clone()).await?;
+        self.memo().put(cache_key.to_string(), outputs);
+        Ok(outcome)
+    }
+}
+
 pub struct NoopTaskCacheStore;
 
 #[async_trait]
@@ -306,6 +365,75 @@ mod tests {
         assert!(err.contains("timed out"), "{err}");
         assert!(started.elapsed() < TASK_CACHE_TIMEOUT + std::time::Duration::from_secs(5));
         locker.rollback().await.expect("rollback");
+    }
+
+    /// Answers every lookup with `entry`, counting the lookups that reach it.
+    struct CountingStore {
+        entry: Option<HashMap<String, String>>,
+        gets: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn new(entry: Option<HashMap<String, String>>) -> Self {
+            Self {
+                entry,
+                gets: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TaskCacheStore for CountingStore {
+        async fn get(&self, _cache_key: &str) -> Result<Option<HashMap<String, String>>, String> {
+            self.gets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.entry.clone())
+        }
+
+        async fn put(
+            &self,
+            _cache_key: &str,
+            _outputs: HashMap<String, String>,
+        ) -> Result<TaskCachePutOutcome, String> {
+            Ok(TaskCachePutOutcome::AlreadyExists)
+        }
+    }
+
+    fn outputs(hash: &str) -> HashMap<String, String> {
+        HashMap::from([("main".to_string(), hash.to_string())])
+    }
+
+    #[tokio::test]
+    async fn a_memoized_hit_is_answered_without_the_store() {
+        let store = MemoizedTaskCacheStore::new(CountingStore::new(Some(outputs("a"))));
+        assert_eq!(store.get("k").await.unwrap(), Some(outputs("a")));
+        assert_eq!(store.get("k").await.unwrap(), Some(outputs("a")));
+        assert_eq!(
+            store.inner.gets.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_miss_asks_the_store_every_time() {
+        let store = MemoizedTaskCacheStore::new(CountingStore::new(None));
+        assert_eq!(store.get("k").await.unwrap(), None);
+        assert_eq!(store.get("k").await.unwrap(), None);
+        assert_eq!(
+            store.inner.gets.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_entry_replaces_the_memoized_one() {
+        let store = MemoizedTaskCacheStore::new(CountingStore::new(Some(outputs("old"))));
+        assert_eq!(store.get("k").await.unwrap(), Some(outputs("old")));
+        store.put("k", outputs("fresh")).await.unwrap();
+        assert_eq!(store.get("k").await.unwrap(), Some(outputs("fresh")));
+        assert_eq!(
+            store.inner.gets.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
