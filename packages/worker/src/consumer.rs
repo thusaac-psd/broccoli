@@ -523,6 +523,21 @@ mod tests {
             group.reader().read(1).await.unwrap().remove(0)
         }
 
+        /// Commands Redis has refused for lack of memory so far: each failed
+        /// reply publish is one.
+        async fn oom_rejections(&mut self) -> u64 {
+            let stats: String = redis::cmd("INFO")
+                .arg("errorstats")
+                .query_async(&mut self.admin)
+                .await
+                .unwrap();
+            stats
+                .lines()
+                .find_map(|line| line.strip_prefix("errorstat_OOM:count="))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
         async fn replies(&mut self) -> u64 {
             redis::cmd("XLEN")
                 .arg(self.mq.topology().reply(SERVER))
@@ -596,8 +611,11 @@ mod tests {
         let _: () = config("1").query_async(&mut h.admin).await.unwrap();
 
         let run = tokio::spawn(async move { consumer.process_delivery(d).await });
-        // Let several publish attempts fail, then relieve the memory pressure.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Wait until the publish has failed (and been retried) twice, then
+        // relieve the memory pressure.
+        while h.oom_rejections().await < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(!run.is_finished(), "the publish must still be retrying");
         let _: () = config("0").query_async(&mut h.admin).await.unwrap();
 
@@ -671,19 +689,27 @@ mod tests {
         let group = h.mq.task_consumer("worker-test");
         group.ensure_groups().await.unwrap();
         h.mq.publish_task(&t, None).await.unwrap();
-        group.reader().read(1).await.unwrap();
-        let mut d = None;
+        let mut d = group.reader().read(1).await.unwrap().remove(0);
+        let mut owner = "worker-test".to_string();
+        // Each worker that takes it dies holding it.
         for n in 0..mq::MAX_DELIVERIES {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            common::test_util::age_entry(
+                &mut h.admin,
+                &d.entry.stream,
+                mq::WORKERS_GROUP,
+                &owner,
+                &d.entry.id,
+                mq::CLAIM_IDLE * 2,
+            )
+            .await;
+            owner = format!("crashed-{n}");
             d =
-                h.mq.task_consumer(&format!("crashed-{n}"))
-                    .with_claim_idle(std::time::Duration::from_millis(1))
+                h.mq.task_consumer(&owner)
                     .reclaim(1)
                     .await
                     .unwrap()
-                    .pop();
+                    .remove(0);
         }
-        let d = d.expect("reclaimed");
         assert!(d.is_poison());
 
         let settlement = h.consumer.process_delivery(d).await;

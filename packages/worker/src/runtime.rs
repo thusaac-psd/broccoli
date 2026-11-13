@@ -590,9 +590,11 @@ mod tests {
         }
 
         let processed = Arc::new(AtomicUsize::new(0));
+        let all_done = Arc::new(tokio::sync::Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let join = tokio::spawn({
             let processed = Arc::clone(&processed);
+            let all_done = Arc::clone(&all_done);
             let shutdown = Arc::clone(&shutdown);
             let mq = mq.clone();
             async move {
@@ -605,8 +607,11 @@ mod tests {
                     Duration::from_secs(5),
                     move |_d| {
                         let processed = Arc::clone(&processed);
+                        let all_done = Arc::clone(&all_done);
                         async move {
-                            processed.fetch_add(1, Ordering::Relaxed);
+                            if processed.fetch_add(1, Ordering::SeqCst) + 1 == 5 {
+                                all_done.notify_one();
+                            }
                             Settlement::Ack
                         }
                     },
@@ -615,13 +620,8 @@ mod tests {
             }
         });
 
-        for _ in 0..100 {
-            if processed.load(Ordering::Relaxed) >= 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(processed.load(Ordering::Relaxed), 5);
+        all_done.notified().await;
+        assert_eq!(processed.load(Ordering::SeqCst), 5);
 
         shutdown.store(true, Ordering::Relaxed);
         join.await.expect("consume loop joins after shutdown");
@@ -684,7 +684,7 @@ mod tests {
         let (mq, _container) = redis_mq().await;
         mq.publish_task(&task("t"), None).await.expect("publish");
         let shutdown = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(tokio::sync::Notify::new());
         let join = tokio::spawn({
             let shutdown = Arc::clone(&shutdown);
             let done = Arc::clone(&done);
@@ -700,7 +700,7 @@ mod tests {
                     move |_d| {
                         let done = Arc::clone(&done);
                         async move {
-                            done.fetch_add(1, Ordering::Relaxed);
+                            done.notify_one();
                             Settlement::Abandon
                         }
                     },
@@ -708,12 +708,7 @@ mod tests {
                 .await;
             }
         });
-        for _ in 0..100 {
-            if done.load(Ordering::Relaxed) >= 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        done.notified().await;
         shutdown.store(true, Ordering::Relaxed);
         join.await.unwrap();
 
@@ -781,18 +776,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pending.len(), 1, "the task stays pending for redelivery");
-        let _: Vec<String> = redis::cmd("XCLAIM")
-            .arg(mq.topology().shared())
-            .arg(mq::WORKERS_GROUP)
-            .arg("w")
-            .arg(0)
-            .arg(&pending[0].0)
-            .arg("IDLE")
-            .arg(mq::CLAIM_IDLE.as_millis() as u64 * 2)
-            .arg("JUSTID")
-            .query_async(&mut conn)
-            .await
-            .unwrap();
+        common::test_util::age_entry(
+            &mut conn,
+            &mq.topology().shared(),
+            mq::WORKERS_GROUP,
+            "w",
+            &pending[0].0,
+            mq::CLAIM_IDLE * 2,
+        )
+        .await;
         let reclaimed = mq.task_consumer("w2").reclaim(1).await.unwrap();
         assert_eq!(reclaimed.len(), 1);
     }

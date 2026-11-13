@@ -46,3 +46,43 @@ pub async fn restartable_redis() -> (ContainerAsync<Redis>, String) {
         .expect("start redis");
     (container, format!("redis://127.0.0.1:{port}"))
 }
+
+/// Start a stopped [`restartable_redis`] again and wait until it accepts
+/// connections (with its data loaded), as it reports in its log.
+pub async fn start_again(container: &ContainerAsync<Redis>) {
+    let ready = || async {
+        let log = container.stdout_to_vec().await.unwrap_or_default();
+        String::from_utf8_lossy(&log)
+            .matches("Ready to accept connections")
+            .count()
+    };
+    let before = ready().await;
+    container.start().await.expect("restart redis");
+    while ready().await <= before {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Make a pending stream entry look idle for `idle` without waiting, keeping
+/// its owner: `XCLAIM ... IDLE` sets the idle time a consumer group reports.
+pub async fn age_entry(
+    conn: &mut redis::aio::MultiplexedConnection,
+    stream: &str,
+    group: &str,
+    owner: &str,
+    id: &str,
+    idle: std::time::Duration,
+) {
+    let _: Vec<String> = redis::cmd("XCLAIM")
+        .arg(stream)
+        .arg(group)
+        .arg(owner)
+        .arg(0)
+        .arg(id)
+        .arg("IDLE")
+        .arg(idle.as_millis() as u64)
+        .arg("JUSTID")
+        .query_async(conn)
+        .await
+        .expect("age the entry");
+}

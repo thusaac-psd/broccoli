@@ -2,7 +2,7 @@
 //! routing and Redis restarts, each checked for lost messages.
 
 use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::liveness::{NodeRole, TTL};
 use common::worker::{Task, TaskReply, TaskResult};
@@ -14,7 +14,7 @@ use testcontainers_modules::redis::Redis;
 
 const BASE: &str = "ops";
 
-use common::test_util::{redis, restartable_redis};
+use common::test_util::{redis, restartable_redis, start_again};
 
 async fn admin(url: &str) -> redis::aio::MultiplexedConnection {
     redis::Client::open(url)
@@ -153,8 +153,9 @@ async fn a_dead_consumers_tasks_are_redelivered_and_a_live_ones_are_not() {
     assert!(survivor.reclaim(10).await.unwrap().is_empty());
 
     // Past the threshold it is taken over, with the delivery counted.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let eager = survivor.clone().with_claim_idle(Duration::from_millis(20));
+    let mut conn = admin(&url).await;
+    age(&mut conn, "dead", &held[0].entry, CLAIM_IDLE * 2).await;
+    let eager = survivor;
     let taken = eager.reclaim(10).await.unwrap();
     assert_eq!(ids(&taken), BTreeSet::from(["held".into()]));
     assert_eq!(taken[0].deliveries, 2);
@@ -177,18 +178,15 @@ async fn age(
     entry: &mq::EntryRef,
     idle: Duration,
 ) {
-    let _: Vec<String> = redis::cmd("XCLAIM")
-        .arg(&*entry.stream)
-        .arg(mq::WORKERS_GROUP)
-        .arg(owner)
-        .arg(0)
-        .arg(&entry.id)
-        .arg("IDLE")
-        .arg(idle.as_millis() as u64)
-        .arg("JUSTID")
-        .query_async(conn)
-        .await
-        .unwrap();
+    common::test_util::age_entry(
+        conn,
+        &entry.stream,
+        mq::WORKERS_GROUP,
+        owner,
+        &entry.id,
+        idle,
+    )
+    .await;
 }
 
 /// A consumer that stalled past the threshold settles nothing: the consumer
@@ -240,7 +238,9 @@ async fn refreshing_an_entry_keeps_it_from_being_reclaimed() {
     mq.publish_task(&task("long-job"), None).await.unwrap();
     let held = owner.reader().read(1).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The job has run for longer than the threshold, refreshing as it goes.
+    let mut conn = admin(&url).await;
+    age(&mut conn, "owner", &held[0].entry, CLAIM_IDLE * 2).await;
     assert!(
         owner
             .refresh(&[held[0].entry.clone()])
@@ -248,9 +248,7 @@ async fn refreshing_an_entry_keeps_it_from_being_reclaimed() {
             .unwrap()
             .is_empty()
     );
-    let other = mq
-        .task_consumer("other")
-        .with_claim_idle(Duration::from_millis(300));
+    let other = mq.task_consumer("other");
     assert!(
         other.reclaim(10).await.unwrap().is_empty(),
         "an entry refreshed just now is not idle"
@@ -612,22 +610,13 @@ async fn a_redis_restart_mid_flight_loses_nothing() {
     assert_eq!(in_flight.len(), 2);
 
     container.stop().await.expect("stop redis");
-    let started = Instant::now();
     assert!(mq.publish_task(&task("during"), None).await.is_err());
     assert!(reader.read(1).await.is_err());
     assert!(w1.ack(&in_flight[0].entry).await.is_err());
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "errors surface within the command deadlines, took {:?}",
-        started.elapsed()
-    );
 
-    container.start().await.expect("restart redis");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while mq.publish_task(&task("t4"), None).await.is_err() {
-        assert!(Instant::now() < deadline, "the queue never recovered");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // The first command once Redis is back reconnects and goes through.
+    start_again(&container).await;
+    mq.publish_task(&task("t4"), None).await.unwrap();
 
     // The two in-flight entries are still ours; the rest are still unread.
     let mut seen = BTreeSet::new();

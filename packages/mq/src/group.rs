@@ -108,7 +108,6 @@ struct Inner {
 /// One consumer of one group over a fixed set of streams. Cheap to clone.
 pub struct GroupConsumer<T> {
     inner: Arc<Inner>,
-    claim_idle: Duration,
     _payload: PhantomData<fn() -> T>,
 }
 
@@ -116,7 +115,6 @@ impl<T> Clone for GroupConsumer<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            claim_idle: self.claim_idle,
             _payload: PhantomData,
         }
     }
@@ -138,16 +136,8 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
                 consumer: consumer.to_string(),
                 dead_letter,
             }),
-            claim_idle: CLAIM_IDLE,
             _payload: PhantomData,
         }
-    }
-
-    /// Reclaim entries idle for `idle` instead of [`CLAIM_IDLE`]. Tests use a
-    /// short threshold to play a dead consumer without waiting for it.
-    pub fn with_claim_idle(mut self, idle: Duration) -> Self {
-        self.claim_idle = idle;
-        self
     }
 
     /// The streams this consumer reads, in read order.
@@ -191,8 +181,8 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
         }
     }
 
-    /// Take over up to `max` entries that have been idle for [`CLAIM_IDLE`]
-    /// (see [`Self::with_claim_idle`]), across all streams.
+    /// Take over up to `max` entries that have been idle for [`CLAIM_IDLE`],
+    /// across all streams.
     pub async fn reclaim(&self, max: usize) -> Result<Vec<Delivery<T>>, MqError> {
         let mut out = Vec::new();
         for stream in &self.inner.streams {
@@ -206,7 +196,7 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
                         .key(&**stream)
                         .arg(self.inner.group)
                         .arg(&self.inner.consumer)
-                        .arg(self.claim_idle.as_millis() as u64)
+                        .arg(CLAIM_IDLE.as_millis() as u64)
                         .arg(room)
                         .invoke_async(&mut c)
                         .await
