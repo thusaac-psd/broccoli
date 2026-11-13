@@ -113,3 +113,38 @@ async fn the_date_header_is_the_database_clock() {
         "Date {date} is not the database clock ({db_ms} ms)"
     );
 }
+
+#[tokio::test]
+async fn a_cors_preflight_carries_the_database_clock_too() {
+    let app = TestApp::spawn_with_options(SpawnOptions {
+        cors_origins: vec!["http://web.example".into()],
+        ..Default::default()
+    })
+    .await;
+    app.clock().advance(Duration::from_secs(86_400)).await;
+
+    let db_ms = app.clock().now_ms().await;
+    // The CORS layer answers a preflight itself, before any route runs.
+    let res = app
+        .client
+        .request(reqwest::Method::OPTIONS, app.url(routes::ME))
+        .header(reqwest::header::ORIGIN, "http://web.example")
+        .header("access-control-request-method", "GET")
+        .send()
+        .await
+        .expect("preflight");
+    assert!(res.status().is_success(), "{}", res.status());
+    assert!(res.headers().contains_key("access-control-allow-origin"));
+    let date = res
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .expect("a Date header");
+    let served_ms = chrono::DateTime::parse_from_rfc2822(date)
+        .expect("an HTTP-date")
+        .timestamp_millis();
+    assert!(
+        (served_ms - db_ms).abs() < 2_000,
+        "preflight Date {date} is not the database clock ({db_ms} ms)"
+    );
+}

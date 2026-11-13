@@ -339,11 +339,13 @@ pub fn openapi_json(config: &config::AppConfig) -> String {
         .expect("the OpenAPI document serializes to JSON")
 }
 
-pub fn build_router(state: AppState) -> axum::Router {
+/// The whole HTTP app. Fails on a CORS origin that is not a header value.
+pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
     let trusted_proxies =
         client_ip::parse_trusted_proxy_networks(&state.config.server.trusted_proxies);
     let observability_state = state.clone();
     let clock = state.clock.clone();
+    let state_cors = state.config.server.cors.clone();
 
     let (router, api) = routes::api_routes(&state.config, ApiDoc::openapi());
     let frontend_dist = state.config.server.frontend_dist.clone();
@@ -386,62 +388,108 @@ pub fn build_router(state: AppState) -> axum::Router {
     #[cfg(feature = "bundled-stress-test")]
     let app = app.merge(routes::downloads::router().with_state(state_for_downloads));
 
-    app.layer(axum::middleware::from_fn_with_state(
-        trusted_proxies,
-        client_ip::client_ip_source_middleware,
-    ))
-    .layer(CompressionLayer::new())
-    .layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|request: &axum::http::Request<_>| {
-                let path = request
-                    .extensions()
-                    .get::<MatchedPath>()
-                    .map(|mp| mp.as_str().to_owned())
-                    .unwrap_or_else(|| request.uri().path().to_owned());
+    let cors = cors_layer(&state_cors)?;
+    Ok(app
+        .layer(axum::middleware::from_fn_with_state(
+            trusted_proxies,
+            client_ip::client_ip_source_middleware,
+        ))
+        .layer(CompressionLayer::new())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    let path = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map(|mp| mp.as_str().to_owned())
+                        .unwrap_or_else(|| request.uri().path().to_owned());
 
-                let request_id = request_id_from_headers(request.headers());
-                let stress_run_id = stress_run_id_from_headers(request.headers());
+                    let request_id = request_id_from_headers(request.headers());
+                    let stress_run_id = stress_run_id_from_headers(request.headers());
 
-                let span = info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    path,
-                    request_id,
-                    stress_run_id = stress_run_id.as_deref().unwrap_or(""),
-                    status = tracing::field::Empty,
-                    latency_ms = tracing::field::Empty,
-                );
+                    let span = info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        path,
+                        request_id,
+                        stress_run_id = stress_run_id.as_deref().unwrap_or(""),
+                        status = tracing::field::Empty,
+                        latency_ms = tracing::field::Empty,
+                    );
 
-                if request.headers().contains_key("traceparent") {
-                    use opentelemetry_http::HeaderExtractor;
-                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    if request.headers().contains_key("traceparent") {
+                        use opentelemetry_http::HeaderExtractor;
+                        use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-                    let parent_cx = opentelemetry::global::get_text_map_propagator(|prop| {
-                        prop.extract(&HeaderExtractor(request.headers()))
-                    });
-                    let _ = span.set_parent(parent_cx);
-                }
+                        let parent_cx = opentelemetry::global::get_text_map_propagator(|prop| {
+                            prop.extract(&HeaderExtractor(request.headers()))
+                        });
+                        let _ = span.set_parent(parent_cx);
+                    }
 
-                span
-            })
-            .on_response(
-                move |response: &axum::http::Response<_>,
-                      latency: std::time::Duration,
-                      span: &tracing::Span| {
-                    span.record("status", response.status().as_u16());
-                    span.record("latency_ms", latency.as_millis() as u64);
-                },
-            ),
-    )
-    .layer(axum::middleware::from_fn_with_state(
-        observability_state,
-        observability_middleware,
-    ))
-    .layer(axum::middleware::from_fn_with_state(
-        clock,
-        date_header_middleware,
-    ))
+                    span
+                })
+                .on_response(
+                    move |response: &axum::http::Response<_>,
+                          latency: std::time::Duration,
+                          span: &tracing::Span| {
+                        span.record("status", response.status().as_u16());
+                        span.record("latency_ms", latency.as_millis() as u64);
+                    },
+                ),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            observability_state,
+            observability_middleware,
+        ))
+        // Inside the `Date` layer, so a preflight it answers itself carries the
+        // platform clock too.
+        .layer(cors)
+        // Outermost: every response, whichever layer produced it.
+        .layer(axum::middleware::from_fn_with_state(
+            clock,
+            date_header_middleware,
+        )))
+}
+
+/// CORS for a split frontend origin. `expose_headers` lists every response
+/// header the web client reads cross-origin: download filenames, rate-limit
+/// backoff, the request id for error reports and `Date` for the server clock
+/// offset.
+fn cors_layer(cors: &config::CorsConfig) -> anyhow::Result<tower_http::cors::CorsLayer> {
+    let allow_origins = cors
+        .allow_origins
+        .iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|_| anyhow::anyhow!("Invalid CORS origin: {origin}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(tower_http::cors::CorsLayer::new()
+        .allow_origin(allow_origins)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([
+            axum::http::HeaderName::from_static("content-type"),
+            axum::http::HeaderName::from_static("authorization"),
+            axum::http::HeaderName::from_static("idempotency-key"),
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderName::from_static("x-broccoli-stress-run-id"),
+        ])
+        .expose_headers([
+            axum::http::header::CONTENT_DISPOSITION,
+            axum::http::header::DATE,
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderName::from_static("x-request-id"),
+        ])
+        .allow_credentials(true)
+        .max_age(std::time::Duration::from_secs(cors.max_age)))
 }
 
 /// Stamps every response's `Date` from the platform clock, so all replicas
@@ -469,6 +517,35 @@ fn http_date(at: chrono::DateTime<chrono::Utc>) -> axum::http::HeaderValue {
 mod tests {
     use super::*;
     use axum::Json;
+
+    #[tokio::test]
+    async fn cors_exposes_the_headers_the_web_client_reads() {
+        let cors = crate::config::CorsConfig {
+            allow_origins: vec!["http://web.example".into()],
+            ..Default::default()
+        };
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(cors_layer(&cors).unwrap());
+        let res = app
+            .oneshot(
+                Request::get("/")
+                    .header(axum::http::header::ORIGIN, "http://web.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exposed = res
+            .headers()
+            .get(axum::http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for name in ["content-disposition", "date", "retry-after", "x-request-id"] {
+            assert!(exposed.contains(name), "{name} not exposed: {exposed}");
+        }
+    }
 
     #[test]
     fn http_date_is_imf_fixdate() {

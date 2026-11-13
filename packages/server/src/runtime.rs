@@ -4,11 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::http::{HeaderName, HeaderValue, Method, header};
 use common::storage::config::create_blob_store;
 use dashmap::DashMap;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
 use crate::build_router;
@@ -462,7 +460,7 @@ impl ServerRuntime {
         });
 
         let shutdown_state = state.clone();
-        let app = build_router(state).layer(cors_layer(&app_config.server.cors)?);
+        let app = build_router(state)?;
 
         let addr_str = format!("{}:{}", app_config.server.host, app_config.server.port);
         let addr: SocketAddr = addr_str
@@ -526,46 +524,6 @@ impl ServerRuntime {
     }
 }
 
-/// CORS for a split frontend origin. `expose_headers` lists every response
-/// header the web client reads cross-origin: download filenames, rate-limit
-/// backoff, the request id for error reports and `Date` for the server clock
-/// offset.
-fn cors_layer(cors: &crate::config::CorsConfig) -> anyhow::Result<CorsLayer> {
-    let allow_origins = cors
-        .allow_origins
-        .iter()
-        .map(|origin| {
-            origin
-                .parse::<HeaderValue>()
-                .with_context(|| format!("Invalid CORS origin: {}", origin))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(CorsLayer::new()
-        .allow_origin(allow_origins)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
-        .allow_headers([
-            HeaderName::from_static("content-type"),
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("idempotency-key"),
-            HeaderName::from_static("x-request-id"),
-            HeaderName::from_static("x-broccoli-stress-run-id"),
-        ])
-        .expose_headers([
-            header::CONTENT_DISPOSITION,
-            header::DATE,
-            header::RETRY_AFTER,
-            HeaderName::from_static("x-request-id"),
-        ])
-        .allow_credentials(true)
-        .max_age(Duration::from_secs(cors.max_age)))
-}
-
 /// How long shutdown waits for running plugin calls. Inside the usual 10s
 /// stop grace of container supervisors, so a normal stop is not a SIGKILL.
 const PLUGIN_CALL_DRAIN: Duration = Duration::from_secs(8);
@@ -586,42 +544,5 @@ async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str,
             "{phase}: failed to release own in-flight work; it is recovered at this \
              server's next boot or by the stuck-job detector"
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn cors_exposes_the_headers_the_web_client_reads() {
-        let cors = crate::config::CorsConfig {
-            allow_origins: vec!["http://web.example".into()],
-            ..Default::default()
-        };
-        let app = axum::Router::new()
-            .route("/", axum::routing::get(|| async { "ok" }))
-            .layer(cors_layer(&cors).unwrap());
-        let res = app
-            .oneshot(
-                Request::get("/")
-                    .header(header::ORIGIN, "http://web.example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let exposed = res
-            .headers()
-            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        for name in ["content-disposition", "date", "retry-after", "x-request-id"] {
-            assert!(exposed.contains(name), "{name} not exposed: {exposed}");
-        }
     }
 }

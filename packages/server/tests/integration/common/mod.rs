@@ -495,6 +495,8 @@ pub struct SpawnOptions {
     /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
     /// container's URL here.
     pub redis_url: Option<String>,
+    /// Cross-origin frontends the server allows (`server.cors.allow_origins`).
+    pub cors_origins: Vec<String>,
     /// Overrides `PluginConfig.plugins_dir` (default: the shared
     /// `tests/fixtures`). Used to isolate a plugin whose activation is
     /// EXPECTED to fail (e.g. an unresolved host-function import from a
@@ -587,7 +589,7 @@ impl TestApp {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 cors: CorsConfig {
-                    allow_origins: vec![],
+                    allow_origins: options.cors_origins.clone(),
                     max_age: 3600,
                 },
                 public_base_url: None,
@@ -847,7 +849,7 @@ impl TestApp {
         }
 
         let state_for_app = state.clone();
-        let app = server::build_router(state);
+        let app = server::build_router(state).expect("router");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -909,7 +911,7 @@ impl TestApp {
         .expect("the claim fiber listens");
     }
 
-    fn url(&self, path: &str) -> String {
+    pub fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
 
