@@ -1,27 +1,8 @@
-// The binary re-declares `mod models`, so the same `#[async_trait]` traits that
-// trip `double_must_use` in the library (see lib.rs) are compiled again in this
-// crate graph. Same false positive from macro output, same crate-wide suppression.
-#![allow(clippy::double_must_use)]
-
-mod config;
-mod consumer;
-mod error;
-mod fairness;
-mod heartbeat;
-mod metrics;
-mod models;
-mod runtime;
-mod sandbox_preflight;
-mod system_info;
-mod task_runner;
-mod toolchain_fingerprint;
-mod warm;
-
 use std::time::Duration;
 
 use anyhow::Context;
-use config::WorkerAppConfig;
-use runtime::WorkerRuntime;
+use worker::config::WorkerAppConfig;
+use worker::runtime::WorkerRuntime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -122,7 +103,7 @@ async fn run_healthcheck() -> anyhow::Result<()> {
         .context("Redis heartbeat check timed out")??;
     }
 
-    if crate::sandbox_preflight::uses_isolate(&config.worker.sandbox_backend) {
+    if worker::sandbox_preflight::uses_isolate(&config.worker.sandbox_backend) {
         let status = tokio::process::Command::new(&config.worker.isolate_bin)
             .arg("--version")
             .status()
@@ -138,7 +119,7 @@ async fn run_healthcheck() -> anyhow::Result<()> {
         if config.worker.enable_cgroups {
             let controllers = std::fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
                 .context("cgroup v2 controllers are not visible")?;
-            crate::sandbox_preflight::controllers_present(&controllers)
+            worker::sandbox_preflight::controllers_present(&controllers)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
     }

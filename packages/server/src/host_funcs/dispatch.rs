@@ -132,7 +132,6 @@ fn get_next_operation_result_fn(
     let result = operation_batch::next_operation_result(
         &call.plugin_id,
         &call.deps.operation_batches,
-        call.deps.metrics.as_ref(),
         &input.batch_id,
         Duration::from_millis(input.timeout_ms),
     )
@@ -154,7 +153,6 @@ fn cancel_operation_batch_fn(
         &call.plugin_id,
         &call.deps.operation_batches,
         &call.deps.operation_waiters,
-        call.deps.metrics.as_ref(),
         &input.batch_id,
     );
 

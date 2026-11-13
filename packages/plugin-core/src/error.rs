@@ -53,6 +53,15 @@ pub enum PluginError {
     /// of the user's request and should never be surfaced as a final verdict.
     #[error("Plugin '{0}' pool acquisition timed out")]
     PoolTimeout(String),
+
+    /// A call made with a deadline ([`crate::traits::CallOptions::deadline`])
+    /// reached it: either no pooled instance came free in time, or the guest
+    /// was cancelled while still running. The guest is not running anymore.
+    #[error("Call to '{func_name}' on plugin '{plugin_id}' reached its deadline")]
+    DeadlineExceeded {
+        plugin_id: String,
+        func_name: String,
+    },
 }
 
 #[derive(Debug, Error)]

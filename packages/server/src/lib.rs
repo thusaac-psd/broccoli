@@ -1,10 +1,3 @@
-// `#[async_trait]` stamps its own `#[must_use]` on each rewritten async method
-// even though the boxed future it returns is already `#[must_use]`, so clippy's
-// `double_must_use` fires on macro output we don't control. The hits are the
-// `services` async traits (`OperationTaskPublisher`, `WindowedSession`);
-// suppress crate-wide, matching common/plugin-core/worker/stress-test.
-#![allow(clippy::double_must_use)]
-
 mod client_ip;
 pub mod config;
 pub mod consumers;

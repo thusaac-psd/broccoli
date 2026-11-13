@@ -30,6 +30,14 @@ use crate::utils::text::sanitize_db_text;
 use super::find_problem_for_update;
 use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
 
+/// What an uploaded test case does when a case with its label exists.
+#[derive(Clone, Copy)]
+enum OnExistingLabel {
+    Abort,
+    Skip,
+    Overwrite,
+}
+
 #[utoipa::path(
     post,
     path = "/upload",
@@ -73,25 +81,31 @@ pub async fn upload_test_cases(
     let txn = state.db.begin().await?;
     find_problem_for_update(&txn, problem_id).await?;
 
-    let is_replace = matches!(data.strategy, UploadTestCasesMergeStrategy::Replace);
-    if is_replace {
-        delete_unjudged_test_cases(&txn, test_case::Column::ProblemId.eq(problem_id)).await?;
-    }
-
-    let mut start_pos = if is_replace {
-        0
-    } else {
-        next_test_case_position(&txn, problem_id).await?
+    // What an uploaded case does when its label already exists. `Replace`
+    // first deletes every existing case, so no label can collide.
+    let on_existing_label = match data.strategy {
+        UploadTestCasesMergeStrategy::Replace => {
+            delete_unjudged_test_cases(&txn, test_case::Column::ProblemId.eq(problem_id)).await?;
+            None
+        }
+        UploadTestCasesMergeStrategy::Abort => Some(OnExistingLabel::Abort),
+        UploadTestCasesMergeStrategy::Skip => Some(OnExistingLabel::Skip),
+        UploadTestCasesMergeStrategy::Overwrite => Some(OnExistingLabel::Overwrite),
     };
 
-    let mut existing_cases: std::collections::HashMap<String, test_case::Model> =
-        test_case::Entity::find()
-            .filter(test_case::Column::ProblemId.eq(problem_id))
-            .all(&txn)
-            .await?
-            .into_iter()
-            .map(|m| (m.label.clone(), m))
-            .collect();
+    let (mut start_pos, mut existing_cases) = if on_existing_label.is_some() {
+        let existing: std::collections::HashMap<String, test_case::Model> =
+            test_case::Entity::find()
+                .filter(test_case::Column::ProblemId.eq(problem_id))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .map(|m| (m.label.clone(), m))
+                .collect();
+        (next_test_case_position(&txn, problem_id).await?, existing)
+    } else {
+        (0, Default::default())
+    };
 
     let mut affected = Vec::with_capacity(entries.len());
     let mut created_count = 0;
@@ -104,16 +118,18 @@ pub async fn upload_test_cases(
         let input_body = prepare_test_case_body(entry.input, state.blob_store.clone()).await?;
         let output_body =
             prepare_test_case_body(entry.expected_output, state.blob_store.clone()).await?;
-        if let Some(existing) = existing_cases.remove(&entry.label) {
-            match data.strategy {
-                UploadTestCasesMergeStrategy::Abort => {
+        if let Some(on_existing) = on_existing_label
+            && let Some(existing) = existing_cases.remove(&entry.label)
+        {
+            match on_existing {
+                OnExistingLabel::Abort => {
                     return Err(AppError::Conflict(format!(
                         "Test case with label '{}' already exists",
                         entry.label
                     )));
                 }
-                UploadTestCasesMergeStrategy::Skip => continue,
-                UploadTestCasesMergeStrategy::Overwrite => {
+                OnExistingLabel::Skip => continue,
+                OnExistingLabel::Overwrite => {
                     let mut active: test_case::ActiveModel = existing.into();
                     active.input = Set(input_body.inline_text);
                     active.expected_output = Set(output_body.inline_text);
@@ -130,9 +146,6 @@ pub async fn upload_test_cases(
                     affected.push(model);
                     updated_count += 1;
                     continue;
-                }
-                UploadTestCasesMergeStrategy::Replace => {
-                    unreachable!();
                 }
             }
         }

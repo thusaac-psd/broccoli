@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 
-use super::shared::Pagination;
+use super::shared::{ListPagination, Pagination};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmissionFile {
@@ -50,8 +50,9 @@ pub struct CreateSubmissionRequest {
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SubmissionListQuery {
-    #[param(example = 1)]
-    pub page: Option<u64>,
+    /// `pagination.next_cursor` of the previous page; omit for the first page.
+    /// A cursor is valid only with the `sort_by`/`sort_order` it was issued for.
+    pub cursor: Option<String>,
     #[param(example = 20)]
     pub per_page: Option<u64>,
     #[param(example = 1)]
@@ -205,7 +206,7 @@ pub struct SubmissionListItem {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct SubmissionListResponse {
     pub data: Vec<SubmissionListItem>,
-    pub pagination: Pagination,
+    pub pagination: ListPagination,
 }
 
 #[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]

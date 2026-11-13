@@ -16,6 +16,27 @@ pub struct Pagination {
     pub total_pages: u64,
 }
 
+/// Cursor pagination of a list that a visibility plugin may narrow below what
+/// its SQL matches. Every page holds only rows the caller is shown, and
+/// `has_more`/`next_cursor` describe only such rows. A count of matching rows
+/// would disclose rows the caller is not shown, so `total` and `total_pages`
+/// are present only when the count is exact for this caller.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ListPagination {
+    #[schema(example = 20)]
+    pub per_page: u64,
+    #[schema(example = 47)]
+    pub total: Option<u64>,
+    #[schema(example = 3)]
+    pub total_pages: Option<u64>,
+    /// Whether the caller is shown a row after this page.
+    #[schema(example = true)]
+    pub has_more: bool,
+    /// Pass as `cursor` to fetch the next page; set exactly when `has_more`.
+    #[schema(example = "eyJieSI6ImNyZWF0ZWRfYXQiLCJvcmRlciI6ImRlc2MiLCJpZCI6NDJ9")]
+    pub next_cursor: Option<String>,
+}
+
 /// A validated page request: the only place an SQL `OFFSET` is derived from
 /// caller-supplied `page`/`per_page`.
 ///
@@ -35,6 +56,14 @@ impl PageWindow {
     pub const DEFAULT_PER_PAGE: u64 = 20;
     /// Largest page size list endpoints accept; larger values are clamped.
     pub const MAX_PER_PAGE: u64 = 100;
+
+    /// The page size of a cursor-paged list: `per_page` with the standard
+    /// bounds (default 20, clamped to `1..=100`).
+    pub fn page_size(per_page: Option<u64>) -> u64 {
+        per_page
+            .unwrap_or(Self::DEFAULT_PER_PAGE)
+            .clamp(1, Self::MAX_PER_PAGE)
+    }
 
     /// Window with the standard list-endpoint bounds (default 20, max 100).
     pub fn new(page: Option<u64>, per_page: Option<u64>) -> Result<Self, AppError> {

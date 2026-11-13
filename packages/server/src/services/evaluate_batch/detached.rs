@@ -79,16 +79,11 @@ impl WindowedSession for EvaluateDriver {
         let wait_plugin_id = self.caller_plugin_id.clone();
         let deps = self.deps.clone();
         tokio::spawn(async move {
-            let batches = deps.evaluate_batches.clone();
-            let registry = deps.evaluate_ops_registry.clone();
-            let metrics = deps.metrics.clone();
             // Await the verdict as a cheap future instead of holding a blocking
             // thread for the test case's whole execution.
             let result = next_evaluate_result_async(
                 &wait_plugin_id,
-                &batches,
-                metrics.as_ref(),
-                &registry,
+                &deps.evaluate_batches,
                 &wait_batch_id,
                 timeout,
             )
@@ -174,9 +169,10 @@ impl WindowedSession for EvaluateDriver {
     fn note_retry(&mut self, slot_id: i32, old_batch_id: &str) {
         let attempts = self.op_retries.entry(slot_id).or_insert(0);
         *attempts += 1;
-        // Best-effort: drop the superseded batch's registry entry so its
-        // started_at/op refs don't linger.
-        self.deps.evaluate_ops_registry.remove_batch(old_batch_id);
+        // The timed-out batch is replaced; nothing waits on it any more.
+        self.deps
+            .evaluate_batches
+            .remove(old_batch_id, Removal::Superseded);
         tracing::warn!(
             caller_plugin_id = %self.caller_plugin_id,
             session_id = %self.session_id,
@@ -303,13 +299,7 @@ async fn cancel_active_evaluate_slots(
 ) {
     for (_, batch_id) in active {
         set_evaluate_cancel_op_keys(plugin_id, deps, batch_id, None).await;
-        cancel_evaluate_batch(
-            plugin_id,
-            &deps.evaluate_batches,
-            deps.metrics.as_ref(),
-            &deps.evaluate_ops_registry,
-            batch_id,
-        );
+        cancel_evaluate_batch(plugin_id, &deps.evaluate_batches, batch_id);
     }
 }
 
@@ -331,13 +321,7 @@ async fn cancel_evaluate_test_case_ids(
 
     active.retain(|(test_case_id, batch_id)| {
         if test_case_ids.contains(test_case_id) {
-            cancel_evaluate_batch(
-                plugin_id,
-                &deps.evaluate_batches,
-                deps.metrics.as_ref(),
-                &deps.evaluate_ops_registry,
-                batch_id,
-            );
+            cancel_evaluate_batch(plugin_id, &deps.evaluate_batches, batch_id);
             false
         } else {
             true
@@ -361,12 +345,10 @@ async fn set_evaluate_cancel_op_keys(
     let op_task_ids = match test_case_ids {
         Some(test_case_ids) => {
             let ids = test_case_ids.iter().copied().collect::<Vec<_>>();
-            deps.evaluate_ops_registry
-                .operation_task_ids_for_test_cases(batch_id, &ids)
+            deps.evaluate_batches
+                .operation_task_ids_for_cases(batch_id, &ids)
         }
-        None => deps
-            .evaluate_ops_registry
-            .operation_task_ids_for_batch(batch_id),
+        None => deps.evaluate_batches.operation_task_ids(batch_id),
     };
     if op_task_ids.is_empty() {
         return;

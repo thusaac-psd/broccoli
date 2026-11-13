@@ -1,6 +1,6 @@
 //! The result-wait loop shared by operation and evaluate batches.
 //!
-//! A batch's results arrive on its flume channel while `pending_count` tracks
+//! A batch's results arrive on its channel while its pending count tracks
 //! what is still in flight. Waiting for the next result is the same loop for
 //! both batch kinds: receive one tick at a time, keep waiting while the batch is
 //! still pending and its policy allows, drain a result buffered in the
@@ -20,15 +20,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use dashmap::DashMap;
 use opentelemetry::KeyValue;
 
-use crate::registry::BatchState;
+use crate::services::batch_table::{BatchResult, BatchTable};
 
 /// What one batch kind decides about its result wait.
-pub(crate) trait WaitPolicy<T> {
-    /// The `batch.kind` metric label.
-    const KIND: &'static str;
+pub(crate) trait WaitPolicy<T, S> {
     /// The error a wait returns once every sender is gone.
     const DISCONNECTED: &'static str;
 
@@ -37,30 +34,26 @@ pub(crate) trait WaitPolicy<T> {
     fn next_tick(&self, waited: Duration) -> Option<Duration>;
 
     /// Whether an empty tick on a still-pending batch keeps waiting.
-    fn extend(&self, wait: &WaitCtx<'_, T>) -> bool;
+    fn extend(&self, wait: &WaitCtx<'_, T, S>) -> bool;
 
     /// Kind-specific bookkeeping for a delivered result (completion marks,
     /// traces, the `result` outcome metric, the receive log). Runs before the
-    /// shared drained-batch cleanup.
-    fn on_delivered(&self, wait: &WaitCtx<'_, T>, result: &T);
-
-    /// Extra cleanup once a delivered result drained and removed the batch.
-    fn on_drained(&self, _batch_id: &str) {}
+    /// drained batch is removed.
+    fn on_delivered(&self, wait: &WaitCtx<'_, T, S>, result: &T);
 }
 
 /// The batch-kind-independent state of one result wait.
-pub(crate) struct WaitCtx<'a, T> {
+pub(crate) struct WaitCtx<'a, T, S> {
     pub plugin_id: &'a str,
     pub batch_id: &'a str,
     pub metrics: Option<&'a common::metrics::Metrics>,
-    kind: &'static str,
-    batches: &'a DashMap<String, BatchState<T>>,
+    pub batches: &'a BatchTable<T, S>,
     result_rx: flume::Receiver<T>,
     pending_count: Arc<AtomicUsize>,
     started: Instant,
 }
 
-impl<T> WaitCtx<'_, T> {
+impl<T: BatchResult, S> WaitCtx<'_, T, S> {
     /// Record one wait outcome on the batch wait metrics; `extra` is appended
     /// after the shared `batch.kind`/`plugin.id`/`outcome` attributes.
     pub fn record_outcome(&self, outcome: &'static str, extra: Option<KeyValue>) {
@@ -68,7 +61,7 @@ impl<T> WaitCtx<'_, T> {
             return;
         };
         let [kind, plugin, outcome] = [
-            KeyValue::new("batch.kind", self.kind),
+            KeyValue::new("batch.kind", T::KIND),
             KeyValue::new("plugin.id", self.plugin_id.to_string()),
             KeyValue::new("outcome", outcome),
         ];
@@ -85,8 +78,8 @@ impl<T> WaitCtx<'_, T> {
 }
 
 /// One wait for a batch's next result.
-pub(crate) struct BatchWait<'a, T, P> {
-    ctx: WaitCtx<'a, T>,
+pub(crate) struct BatchWait<'a, T, S, P> {
+    ctx: WaitCtx<'a, T, S>,
     policy: P,
 }
 
@@ -97,27 +90,22 @@ enum Received<T> {
     Disconnected,
 }
 
-impl<'a, T, P: WaitPolicy<T>> BatchWait<'a, T, P> {
+impl<'a, T: BatchResult, S, P: WaitPolicy<T, S>> BatchWait<'a, T, S, P> {
     /// Look the batch up and start the wait clock.
     pub fn open(
         plugin_id: &'a str,
-        batches: &'a DashMap<String, BatchState<T>>,
-        metrics: Option<&'a common::metrics::Metrics>,
+        batches: &'a BatchTable<T, S>,
         batch_id: &'a str,
         policy: P,
     ) -> anyhow::Result<Self> {
-        let (result_rx, pending_count) = {
-            let batch = batches
-                .get(batch_id)
-                .ok_or_else(|| anyhow!("Batch not found: {}", batch_id))?;
-            (batch.result_rx.clone(), batch.pending_count.clone())
-        };
+        let (result_rx, pending_count) = batches
+            .receiver(batch_id)
+            .ok_or_else(|| anyhow!("Batch not found: {}", batch_id))?;
         Ok(Self {
             ctx: WaitCtx {
                 plugin_id,
                 batch_id,
-                metrics,
-                kind: P::KIND,
+                metrics: batches.metrics(),
                 batches,
                 result_rx,
                 pending_count,
@@ -166,6 +154,14 @@ impl<'a, T, P: WaitPolicy<T>> BatchWait<'a, T, P> {
     fn step(&self, received: Received<T>) -> Option<anyhow::Result<Option<T>>> {
         match received {
             Received::Result(result) => Some(Ok(Some(self.deliver(result)))),
+            // Removed (cancelled, superseded, reaped): nothing more will be
+            // taken from it, so the wait ends at once instead of lasting until
+            // its ceiling. The waiter's receiver clone keeps the channel open,
+            // so removal alone never disconnects it.
+            Received::Empty if !self.ctx.batches.contains(self.ctx.batch_id) => {
+                self.ctx.record_outcome("removed", None);
+                Some(Err(anyhow!(P::DISCONNECTED)))
+            }
             Received::Empty
                 if self.ctx.pending_count.load(Ordering::SeqCst) > 0
                     && self.policy.extend(&self.ctx) =>
@@ -181,7 +177,7 @@ impl<'a, T, P: WaitPolicy<T>> BatchWait<'a, T, P> {
     }
 
     /// Give up the wait, unless a result is already buffered. The batch's
-    /// producer sends each result BEFORE decrementing `pending_count`, so the
+    /// producer sends each result BEFORE decrementing the pending count, so the
     /// instant a give-up observes the batch as no longer pending (or the
     /// ceiling elapses) a completed result may ALREADY be in the channel.
     /// Returning `None` without this drain drops it, which the caller maps to
@@ -199,17 +195,7 @@ impl<'a, T, P: WaitPolicy<T>> BatchWait<'a, T, P> {
     fn deliver(&self, result: T) -> T {
         let ctx = &self.ctx;
         self.policy.on_delivered(ctx, &result);
-        if ctx.pending_count.load(Ordering::SeqCst) == 0
-            && ctx.result_rx.is_empty()
-            && ctx.batches.remove(ctx.batch_id).is_some()
-        {
-            self.policy.on_drained(ctx.batch_id);
-            if let Some(metrics) = ctx.metrics {
-                metrics
-                    .batch_active
-                    .add(-1, &[KeyValue::new("batch.kind", ctx.kind)]);
-            }
-        }
+        ctx.batches.remove_if_drained(ctx.batch_id);
         result
     }
 }
@@ -217,7 +203,10 @@ impl<'a, T, P: WaitPolicy<T>> BatchWait<'a, T, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use crate::services::batch_table::BatchSender;
+    use common::worker::TaskResult;
+
+    type Table = BatchTable<TaskResult, ()>;
 
     /// A minimal policy: fixed 10ms ticks, never past `ceiling`, extending
     /// while pending.
@@ -225,58 +214,52 @@ mod tests {
         ceiling: Duration,
     }
 
-    impl WaitPolicy<u32> for TestWait {
-        const KIND: &'static str = "test";
+    impl WaitPolicy<TaskResult, ()> for TestWait {
         const DISCONNECTED: &'static str = "test channel disconnected";
 
         fn next_tick(&self, waited: Duration) -> Option<Duration> {
             (waited < self.ceiling).then_some(Duration::from_millis(10))
         }
 
-        fn extend(&self, _wait: &WaitCtx<'_, u32>) -> bool {
+        fn extend(&self, _wait: &WaitCtx<'_, TaskResult, ()>) -> bool {
             true
         }
 
-        fn on_delivered(&self, _wait: &WaitCtx<'_, u32>, _result: &u32) {}
+        fn on_delivered(&self, _wait: &WaitCtx<'_, TaskResult, ()>, _result: &TaskResult) {}
     }
 
-    fn batch(
-        pending: usize,
-    ) -> (
-        DashMap<String, BatchState<u32>>,
-        flume::Sender<u32>,
-        Arc<AtomicUsize>,
-    ) {
-        let (tx, rx) = flume::unbounded();
-        let pending_count = Arc::new(AtomicUsize::new(pending));
-        let batches = DashMap::new();
-        batches.insert(
-            "b".to_string(),
-            BatchState {
-                result_rx: rx,
-                pending_count: pending_count.clone(),
-                created_at: Instant::now(),
-                cleanup_keys: Arc::new(Vec::new()),
-                poisoned: AtomicBool::new(false),
-            },
-        );
-        (batches, tx, pending_count)
+    fn result(n: u32) -> TaskResult {
+        TaskResult {
+            task_id: n.to_string(),
+            success: true,
+            output: serde_json::json!({}),
+            error: None,
+            task_type: None,
+            operation: None,
+            worker_id: None,
+        }
     }
 
-    fn open<'a>(
-        batches: &'a DashMap<String, BatchState<u32>>,
-        ceiling: Duration,
-    ) -> BatchWait<'a, u32, TestWait> {
-        BatchWait::open("p", batches, None, "b", TestWait { ceiling }).unwrap()
+    fn batch(keys: &[u32]) -> (Table, BatchSender<TaskResult>) {
+        let batches = Table::default();
+        let tx = batches.open("b", keys.iter().map(u32::to_string), ());
+        (batches, tx)
+    }
+
+    fn open(batches: &Table, ceiling: Duration) -> BatchWait<'_, TaskResult, (), TestWait> {
+        BatchWait::open("p", batches, "b", TestWait { ceiling }).unwrap()
+    }
+
+    fn id(result: Option<TaskResult>) -> Option<String> {
+        result.map(|r| r.task_id)
     }
 
     #[test]
     fn unknown_batch_is_an_error() {
-        let batches = DashMap::<String, BatchState<u32>>::new();
+        let batches = Table::default();
         let err = BatchWait::open(
             "p",
             &batches,
-            None,
             "nope",
             TestWait {
                 ceiling: Duration::ZERO,
@@ -289,22 +272,22 @@ mod tests {
 
     #[test]
     fn last_delivered_result_removes_the_drained_batch() {
-        let (batches, tx, _pending) = batch(0);
-        tx.send(1).unwrap();
-        tx.send(2).unwrap();
+        let (batches, tx) = batch(&[1, 2]);
+        tx.deliver(result(1));
+        tx.deliver(result(2));
 
         let wait = open(&batches, Duration::from_secs(1));
-        assert_eq!(wait.blocking().unwrap(), Some(1));
-        assert!(batches.contains_key("b"), "a buffered result remains");
+        assert_eq!(id(wait.blocking().unwrap()).as_deref(), Some("1"));
+        assert!(batches.contains("b"), "a buffered result remains");
 
         let wait = open(&batches, Duration::from_secs(1));
-        assert_eq!(wait.blocking().unwrap(), Some(2));
-        assert!(!batches.contains_key("b"), "the drained batch is removed");
+        assert_eq!(id(wait.blocking().unwrap()).as_deref(), Some("2"));
+        assert!(!batches.contains("b"), "the drained batch is removed");
     }
 
     #[test]
     fn disconnected_channel_is_the_policy_error() {
-        let (batches, tx, _pending) = batch(1);
+        let (batches, tx) = batch(&[1]);
         drop(tx);
         let err = open(&batches, Duration::from_secs(1))
             .blocking()
@@ -314,20 +297,42 @@ mod tests {
 
     #[tokio::test]
     async fn pending_batch_waits_past_empty_ticks_until_the_result_lands() {
-        let (batches, tx, pending) = batch(1);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            tx.send(7).unwrap();
-            pending.store(0, Ordering::SeqCst);
+        let (batches, tx) = batch(&[7]);
+        let wait = tokio::spawn({
+            let batches = batches.clone();
+            async move { id(open(&batches, Duration::from_secs(5)).wait().await.unwrap()) }
         });
-        let got = open(&batches, Duration::from_secs(5)).wait().await.unwrap();
-        assert_eq!(got, Some(7));
+        // Let the wait run through empty ticks before the result exists.
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        tx.deliver(result(7));
+        assert_eq!(wait.await.unwrap().as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn give_up_drains_a_result_buffered_before_the_pending_decrement() {
+        let (batches, tx) = batch(&[3]);
+        tx.deliver(result(3));
+        let wait = open(&batches, Duration::ZERO);
+        assert_eq!(id(wait.give_up()).as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn removing_a_pending_batch_ends_its_wait() {
+        let (batches, _tx) = batch(&[1]);
+        let wait = open(&batches, Duration::from_secs(3600));
+        batches.remove("b", crate::services::batch_table::Removal::Superseded);
+        assert_eq!(
+            wait.blocking().unwrap_err().to_string(),
+            "test channel disconnected"
+        );
     }
 
     #[tokio::test]
     async fn settled_batch_gives_up_after_one_empty_tick() {
-        let (batches, _tx, _pending) = batch(0);
+        let (batches, _tx) = batch(&[]);
         let got = open(&batches, Duration::from_secs(5)).wait().await.unwrap();
-        assert_eq!(got, None);
+        assert!(got.is_none());
     }
 }

@@ -232,7 +232,7 @@ impl MetricsSnapshot {
             )?,
             fanout_saturated: prometheus_counter_sum(
                 &text,
-                "broccoli_batch_evaluator_fanout_saturated_total",
+                "broccoli_evaluate_batch_fanout_saturated_total",
             )?,
         })
     }
@@ -1148,9 +1148,8 @@ broccoli_plugin_pool_contention_total_created 123
             5
         );
 
-        let err =
-            prometheus_counter_sum(metrics, "broccoli_batch_evaluator_fanout_saturated_total")
-                .unwrap_err();
+        let err = prometheus_counter_sum(metrics, "broccoli_evaluate_batch_fanout_saturated_total")
+            .unwrap_err();
         assert!(
             format!("{err}").contains("required Prometheus counter"),
             "got: {err}"
@@ -1186,8 +1185,8 @@ broccoli_plugin_pool_contention_total_created 123
                         "\
 # TYPE broccoli_plugin_pool_contention_total counter
 broccoli_plugin_pool_contention_total{{plugin_id=\"ioi\"}} {contention}
-# TYPE broccoli_batch_evaluator_fanout_saturated_total counter
-broccoli_batch_evaluator_fanout_saturated_total{{problem_type=\"batch\"}} {fanout}
+# TYPE broccoli_evaluate_batch_fanout_saturated_total counter
+broccoli_evaluate_batch_fanout_saturated_total{{problem_type=\"batch\"}} {fanout}
 "
                     ))
                 }

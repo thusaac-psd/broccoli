@@ -25,7 +25,7 @@ use worker::models::operation::cache_leader::{
     CacheLeaderElector, CacheLeaderOpts, LeaderRole, RedisCacheLeaderElector,
 };
 use worker::models::operation::file_cacher::BlobStoreFileCacher;
-use worker::models::operation::handler::OperationHandler;
+use worker::models::operation::handler::{CompileCache, OperationHandler};
 use worker::models::operation::models::{
     Environment, IOConfig, OperationTask, RunOptions, SessionFile, Step, StepCacheConfig, StepKind,
 };
@@ -300,15 +300,20 @@ async fn build_test_handler(
         RedisCacheLeaderElector::from_url(redis_url, opts_short_ttl(30))
             .expect("build redis elector"),
     );
-    OperationHandler::with_cache_leader(
+    OperationHandler::with_compile_cache(
         Box::new(sandbox),
-        Box::new(file_cacher),
-        task_cache,
-        elector,
-        Duration::from_millis(100),
-        Duration::from_secs(20),
-        // Identical fingerprint across all 3 handlers -> identical cache_key.
-        "deterministic-test-fingerprint".to_string(),
+        Arc::new(file_cacher),
+        CompileCache {
+            store: task_cache,
+            leader: elector,
+            follower_poll_interval: Duration::from_millis(100),
+            follower_max_wait: Duration::from_secs(20),
+            // Identical fingerprint across all 3 handlers -> identical cache_key.
+            toolchain_fingerprint: worker::toolchain_fingerprint::ToolchainFingerprint::Known(
+                "deterministic-test-fingerprint".to_string(),
+            )
+            .into(),
+        },
         metrics,
     )
 }

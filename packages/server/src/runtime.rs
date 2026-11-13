@@ -17,7 +17,6 @@ use crate::consumers::{consume_operation_dlq, consume_operation_results};
 use crate::dlq::run_stuck_job_detector;
 use crate::host_funcs::context::HostFunctionSystemDeps;
 use crate::manager::ServerManager;
-use crate::registry;
 use crate::serve::serve_with_shutdown;
 use crate::state::AppState;
 use crate::utils::plugin::sync_plugins;
@@ -286,59 +285,46 @@ impl ServerRuntime {
         let evaluator_registry = Arc::new(RwLock::new(HashMap::new()));
         let checker_stage_registry = Arc::new(RwLock::new(HashMap::new()));
         let language_resolver_registry = Arc::new(RwLock::new(HashMap::new()));
-        let operation_batches = Arc::new(DashMap::new());
-        let evaluate_batches = Arc::new(DashMap::new());
-        let evaluate_ops_registry =
-            crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry::default();
+        let operation_batches = crate::registry::OperationBatches::new(Some(metrics.clone()));
+        let evaluate_batches = crate::registry::EvaluateBatches::new(Some(metrics.clone()));
 
         let batch_max_age = Duration::from_secs(app_config.batch_max_age_secs);
         let reaper_mq = mq.clone();
         let operation_waiters_for_reaper = operation_waiters.clone();
-        registry::spawn_batch_reaper(
-            "operation",
-            operation_batches.clone(),
-            batch_max_age,
-            Some(metrics.clone()),
-            move |_batch_id, batch| {
-                for key in batch.cleanup_keys.iter() {
-                    operation_waiters_for_reaper.remove(key);
-
-                    if let Some(mq) = reaper_mq.clone() {
-                        let key = key.clone();
-                        tokio::spawn(async move {
-                            let envelope = common::DlqEnvelope {
-                                message_id: key.clone(),
-                                message_type: common::DlqMessageType::OperationTask,
-                                submission_id: None,
-                                payload: serde_json::json!({ "task_id": key }),
-                                error_code: common::DlqErrorCode::StuckJob,
-                                error_message: "Operation batch timed out".into(),
-                                retry_history: vec![],
-                            };
-                            if let Err(e) = mq.publish_dead_letter(&envelope).await {
-                                tracing::error!(%key, error = %e, "Failed to publish stale op to DLQ");
-                            }
-                        });
+        operation_batches.spawn_reaper(batch_max_age, move |_batch_id, correlation_ids| {
+            crate::services::operation_batch::release_waiters(
+                &operation_waiters_for_reaper,
+                correlation_ids,
+            );
+            let Some(mq) = reaper_mq.as_ref() else {
+                return;
+            };
+            for key in correlation_ids {
+                let mq = mq.clone();
+                let key = key.clone();
+                tokio::spawn(async move {
+                    let envelope = common::DlqEnvelope {
+                        message_id: key.clone(),
+                        message_type: common::DlqMessageType::OperationTask,
+                        submission_id: None,
+                        payload: serde_json::json!({ "task_id": key }),
+                        error_code: common::DlqErrorCode::StuckJob,
+                        error_message: "Operation batch timed out".into(),
+                        retry_history: vec![],
+                    };
+                    if let Err(e) = mq.publish_dead_letter(&envelope).await {
+                        tracing::error!(%key, error = %e, "Failed to publish stale op to DLQ");
                     }
-                }
-            },
-        );
-        let evaluate_ops_registry_for_reaper = evaluate_ops_registry.clone();
-        registry::spawn_batch_reaper(
-            "evaluate",
-            evaluate_batches.clone(),
-            batch_max_age,
-            Some(metrics.clone()),
-            move |batch_id, _batch| {
-                evaluate_ops_registry_for_reaper.remove_batch(batch_id);
-            },
-        );
+                });
+            }
+        });
+        evaluate_batches.spawn_reaper(batch_max_age, |_, _| {});
 
         if let Some(mq) = &mq {
             tokio::spawn(consume_operation_results(
                 mq.reply_inbox(&server_id),
                 operation_waiters.clone(),
-                evaluate_ops_registry.clone(),
+                evaluate_batches.clone(),
                 metrics.clone(),
             ));
             info!("Operation result consumer started");
@@ -359,7 +345,6 @@ impl ServerRuntime {
                 checker_stage_registry: checker_stage_registry.clone(),
                 language_resolver_registry: language_resolver_registry.clone(),
                 evaluate_batches: evaluate_batches.clone(),
-                evaluate_ops_registry: evaluate_ops_registry.clone(),
                 blob_store: blob_store.clone(),
                 hook_registry: hook_registry.clone(),
                 config: app_config.clone(),

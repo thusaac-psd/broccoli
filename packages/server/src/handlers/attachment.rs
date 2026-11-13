@@ -407,7 +407,7 @@ async fn download_attachment_in(
     // `build_blob_response` bypasses `Visible<T>`/`into_masked_json`
     // entirely (there is no `FieldMask` concept for a binary blob body). No
     // plugin currently returns `Redact` for `Resource::Attachment`, so this
-    // is a documented no-op today, not a live bug - see Task 20 Item 6.
+    // is a documented no-op today, not a live bug.
     if kernel
         .decide(Action::Download, scope.attachment(model.id))
         .await?

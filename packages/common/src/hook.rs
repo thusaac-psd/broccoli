@@ -4,6 +4,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::event::{Event, GenericEvent};
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Hook<E: Event>: Send + Sync {
     type Output: Event;
@@ -31,6 +33,8 @@ pub enum HookAction<E: Event, O: Event = E> {
 
 pub type GenericHookAction = HookAction<GenericEvent>;
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GenericHook: Send + Sync {
     type Context: Send + Sync + 'static;

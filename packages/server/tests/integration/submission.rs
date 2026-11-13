@@ -612,6 +612,48 @@ mod submission_listing {
         assert_eq!(res.body["pagination"]["total"], 5);
         assert_eq!(res.body["pagination"]["total_pages"], 3);
     }
+
+    /// Following `next_cursor` visits every submission once, newest first,
+    /// and the last page says there is nothing more.
+    #[tokio::test]
+    async fn next_cursor_walks_every_row_once_in_order() {
+        let app = TestApp::spawn().await;
+        let admin_token = app
+            .create_user_with_role("cursor_admin", "pass1234", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin_token, "Cursor Problem").await;
+        let mut created = Vec::new();
+        for _ in 0..5 {
+            created.push(
+                app.create_submission(problem_id, &admin_token, "cpp", "int main() {}")
+                    .await,
+            );
+        }
+        created.reverse();
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let url = match &cursor {
+                Some(c) => format!("{}?per_page=2&cursor={c}", routes::SUBMISSIONS),
+                None => format!("{}?per_page=2", routes::SUBMISSIONS),
+            };
+            let res = app.get_with_token(&url, &admin_token).await;
+            assert_eq!(res.status, 200, "{}", res.text);
+            let page = res.body["data"].as_array().unwrap();
+            seen.extend(page.iter().map(|s| s["id"].as_i64().unwrap() as i32));
+            let pagination = &res.body["pagination"];
+            assert_eq!(
+                pagination["has_more"],
+                pagination["next_cursor"].is_string()
+            );
+            match pagination["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_string()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, created);
+    }
 }
 
 mod submission_detail {
@@ -2719,29 +2761,18 @@ mod page_window_bounds {
         }
     }
 
-    /// `GET /submissions` answers an out-of-range `page` with a 4xx.
+    /// The submission lists answer a malformed cursor with a 400.
     #[tokio::test]
-    async fn list_submissions_rejects_overflowing_page() {
-        let app = TestApp::spawn().await;
-        let token = admin(&app).await;
-        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
-            let path = format!("{}?page={page}&per_page=2", routes::SUBMISSIONS);
-            assert_client_error(&path, status_of(&app, &path, &token).await);
-        }
-    }
-
-    /// The contest submissions list answers an out-of-range `page` with a 4xx.
-    #[tokio::test]
-    async fn list_contest_submissions_rejects_overflowing_page() {
+    async fn submission_lists_reject_a_malformed_cursor() {
         let app = TestApp::spawn().await;
         let token = admin(&app).await;
         let cid = app.create_contest(&token, "C", true, true).await;
-        for page in [OVERFLOWING_PAGE, BIGINT_OVERFLOW_PAGE] {
-            let path = format!(
-                "{}?page={page}&per_page=2",
-                routes::contest_submissions(cid)
-            );
-            assert_client_error(&path, status_of(&app, &path, &token).await);
+        for list in [
+            routes::SUBMISSIONS.to_string(),
+            routes::contest_submissions(cid),
+        ] {
+            let path = format!("{list}?cursor=not-a-cursor");
+            assert_eq!(status_of(&app, &path, &token).await, Some(400), "{path}");
         }
     }
 

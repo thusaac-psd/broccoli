@@ -15,8 +15,7 @@ use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use server::consumers::consume_operation_results;
 use server::host_funcs::context::OperationHostDeps;
-use server::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
-use server::registry::{OperationWaiter, OperationWaiters};
+use server::registry::{EvaluateBatches, OperationBatches, OperationWaiter, OperationWaiters};
 use server::services::operation_batch::{
     OperationTaskPublisher, next_operation_result, start_operation_batch,
 };
@@ -101,18 +100,18 @@ async fn a_reply_reaches_only_the_replica_that_published_the_task() {
     let waiters_b: OperationWaiters = Arc::new(DashMap::new());
     let (tx_a, rx_a) = oneshot::channel();
     let (tx_b, rx_b) = oneshot::channel();
-    waiters_a.insert("task-1".to_string(), OperationWaiter::new(tx_a));
-    waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b));
+    waiters_a.insert("task-1".to_string(), OperationWaiter::new(tx_a, None));
+    waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b, None));
     let consumer_a = tokio::spawn(consume_operation_results(
         mq.reply_inbox("replica-a"),
         Arc::clone(&waiters_a),
-        EvaluateBatchOpsRegistry::default(),
+        EvaluateBatches::default(),
         metrics.clone(),
     ));
     let consumer_b = tokio::spawn(consume_operation_results(
         mq.reply_inbox("replica-b"),
         Arc::clone(&waiters_b),
-        EvaluateBatchOpsRegistry::default(),
+        EvaluateBatches::default(),
         metrics,
     ));
 
@@ -147,14 +146,14 @@ async fn operation_result_burst_has_no_missing_waiters() {
     let _server = live_server(&url, &mq, server_id).await;
     reply_stream_ready(&url, &mq, server_id).await;
     let (metrics, registry, _metrics_provider) = init_local_metrics("broccoli-waiter-burst-test");
-    let operation_batches = Arc::new(DashMap::new());
-    let operation_waiters = Arc::new(DashMap::new());
-    let evaluate_ops_registry = EvaluateBatchOpsRegistry::default();
+    let operation_batches = OperationBatches::new(Some(metrics.clone()));
+    let operation_waiters: OperationWaiters = Arc::new(DashMap::new());
+    let evaluate_batches = EvaluateBatches::default();
 
     let consumer = tokio::spawn(consume_operation_results(
         mq.reply_inbox(server_id),
         Arc::clone(&operation_waiters),
-        evaluate_ops_registry.clone(),
+        evaluate_batches.clone(),
         metrics.clone(),
     ));
 
@@ -162,7 +161,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
     let deps = OperationHostDeps {
         plugin_manager: None,
         operation_publisher: Some(Arc::new(ImmediateResultPublisher { mq: mq.clone() })),
-        operation_batches: Arc::clone(&operation_batches),
+        operation_batches: operation_batches.clone(),
         operation_waiters: Arc::clone(&operation_waiters),
         server_id: server_id.to_string(),
         blob_store: Arc::new(
@@ -171,7 +170,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
                 .expect("blob store should initialize"),
         ),
         metrics: Some(metrics.clone()),
-        evaluate_ops_registry,
+        evaluate_batches,
         operation_batch_publish_concurrency: 128,
     };
 
@@ -188,7 +187,6 @@ async fn operation_result_burst_has_no_missing_waiters() {
         let result = next_operation_result(
             "waiter-burst-test",
             &operation_batches,
-            Some(&metrics),
             &batch_id,
             Duration::from_secs(10),
         )

@@ -19,8 +19,6 @@ const LINUX_X86_64: &[u8] = include_bytes!("../../embedded/stress-test/linux-x86
 const LINUX_AARCH64: &[u8] = include_bytes!("../../embedded/stress-test/linux-aarch64");
 const WINDOWS_X86_64: &[u8] = include_bytes!("../../embedded/stress-test/windows-x86_64.exe");
 const MACOS_UNIVERSAL: &[u8] = include_bytes!("../../embedded/stress-test/macos-universal");
-// Used by the manifest endpoint (added in a follow-up task); compiled in here so
-// the embed list lives in one place.
 const MANIFEST_JSON: &[u8] = include_bytes!("../../embedded/stress-test/manifest.json");
 
 /// Returns `(bytes, download_filename)` for a known platform identifier, or `None`.

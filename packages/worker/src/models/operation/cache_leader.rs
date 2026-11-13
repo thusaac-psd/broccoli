@@ -106,6 +106,8 @@ pub enum LeaderRole {
     Follower,
 }
 
+// `async_trait` marks each method `#[must_use]` on top of its boxed future.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CacheLeaderElector: Send + Sync {
     async fn acquire(&self, cache_key: &str) -> Result<LeaderRole, String>;

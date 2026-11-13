@@ -150,7 +150,6 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_config<C: ConnectionTrait>(
     db: &C,
     target: &ConfigTarget,

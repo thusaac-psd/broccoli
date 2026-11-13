@@ -1,15 +1,12 @@
-//! Host-side (non-plugin) reachability rules for the contest / problem /
-//! submission surface.
+//! Host-side (non-plugin) reachability rules for the contest, problem,
+//! submission and clarification surface.
 //!
-//! Rules:
+//! The rules, in the order a decision applies them:
 //!   1. `perm::CONTEST_MANAGE` short-circuits to `Allow`.
-//!   2. Contest activation window: `activate_time.is_none_or(|at| at > now)
-//!      || deactivate_time.is_some_and(|dt| dt <= now)` -> `Deny`. This
-//!      exact predicate is ported from BOTH `check_contest_access` AND
-//!      `require_contest_started` (byte-identical in the source, applied to
-//!      the same contest/`now`) - see [`window_is_closed`],
-//!      [`check_contest_access_decision`], and
-//!      [`require_contest_started_window_decision`].
+//!   2. A contest outside its activation window (its
+//!      [`ContestPhase`](crate::utils::contest::ContestPhase) is not active)
+//!      -> `Deny`; see [`BatchFacts::check_contest_access_decision`] and
+//!      [`BatchFacts::require_contest_started_window_decision`].
 //!   3. `contest.is_public` short-circuits the participant check.
 //!   4. Otherwise `contest_user` membership is required.
 //!   5. A problem not in `contest_problem` for that contest -> `Deny`.
@@ -17,58 +14,53 @@
 //!      user's submission requires a `contest_id`, a passing contest-access
 //!      check, participation, AND `contest.submissions_visible`.
 //!   7. Soft-deleted entity -> `Deny` (contests are fetched with
-//!      `find_active`, mirroring `find_contest`).
-//!   8. Standalone (non-contest) problem/sample access, ported from
-//!      `require_problem_read_access` (`utils/contest.rs:219-241`):
-//!      missing/soft-deleted problem -> `Deny`; `perm::PROBLEM_CREATE` /
-//!      `perm::PROBLEM_EDIT` -> `Allow`; `problem.is_public` -> `Allow`;
-//!      otherwise fall through to rule 9.
-//!   9. "Hidden draft reachable via a contest", ported from
-//!      `can_access_problem_via_contest` (`utils/contest.rs:142-217`): a
-//!      problem in zero contests -> `Deny` (checked BEFORE the
-//!      `contest:manage` bypass - see [`decide_standalone_problem_access`]);
+//!      `find_active`).
+//!   8. Standalone (non-contest) problem access: a missing or soft-deleted
+//!      problem -> `Deny`; `perm::PROBLEM_CREATE` / `perm::PROBLEM_EDIT` ->
+//!      `Allow`; `problem.is_public` -> `Allow`; otherwise rule 9 decides.
+//!   9. A hidden problem is reachable through its contests: a problem in
+//!      zero contests -> `Deny` (checked BEFORE the `contest:manage` bypass;
+//!      see [`BatchFacts::decide_standalone_problem_access`]);
 //!      `perm::CONTEST_MANAGE` -> `Allow`; otherwise `Allow` if the problem
-//!      is attached to a contest that is both public and "open and started"
-//!      (activation window open AND `start_time <= now`), or, failing that,
-//!      `Allow` if the subject is a participant of any contest (public or
-//!      not) attached to the problem that is "open and started".
+//!      is attached to a contest that is both public and started
+//!      ([`ContestPhase::has_started`](crate::utils::contest::ContestPhase::has_started):
+//!      active and running or ended), or, failing that, if the subject is a
+//!      participant of any started contest (public or not) attached to the
+//!      problem.
 //!      Samples and attachments are parts of their problem: a
 //!      `Resource::Sample` or `Resource::Attachment` gets exactly the
 //!      decision its problem would get under the same `contest_id` scope
 //!      (rules 1-5 with a contest, rules 8-9 without), and `attachment_id`
-//!      never enters the host decision - see [`decide_problem_or_sample`].
+//!      never enters the host decision; see
+//!      [`BatchFacts::decide_problem_or_sample`].
 //!      Rule 9 widens READ only: under `Action::Submit` a standalone
 //!      decision stops after rule 8, so a hidden problem is denied there
-//!      even when one of its contests would admit reading it - see
+//!      even when one of its contests admits reading it; see
 //!      [`standalone_reachable_via_contest`].
-//!  10. `Resource::Clarification` - see [`decide_clarification`]. A
-//!      missing clarification, or one where the
-//!      subject is neither `contest:manage`, the author, the recipient, nor
-//!      looking at a public row, -> `Deny`. A participant (admin/author/
-//!      recipient), or anyone looking at a public row, -> `Allow`.
-//!      `create_clarification`'s reachability gate is a different rule:
-//!      there is no clarification row yet to decide about, so it reuses
-//!      `Resource::Contest`/rules 1-4 (via `Action::Clarify`).
+//!  10. `Resource::Clarification`; see [`BatchFacts::decide_clarification`].
+//!      A missing clarification, or one where the subject is neither
+//!      `contest:manage`, the author, the recipient, nor looking at a public
+//!      row, -> `Deny`. A participant (admin, author or recipient) ->
+//!      `Allow`, and so is anyone looking at a public row.
+//!      Creating a clarification has no row to decide about yet, so its
+//!      reachability gate is `Resource::Contest` under `Action::Clarify`,
+//!      which rules 1-4 decide.
 //!
-//! Deliberately **not** decided here:
-//!   - `require_contest_started`'s `now < contest.start_time` check. That
+//! Outside these rules, by design:
+//!   - `require_contest_started`'s `now < contest.start_time` check. It
 //!     raises a distinct `400 VALIDATION_ERROR` business rule, not a
 //!     reachability outcome, so it has no representation in `Decision`
-//!     (`Allow` / `Redact` / `Deny`) and stays in `utils/contest.rs` for
-//!     now.
-//!   - `list_clarifications`' `replies: Vec<ClarificationReplyResponse>`
-//!     per-element filter (`clarification.rs:157-171`), which OMITS
-//!     non-public replies for a non-participant rather than blanking a
-//!     field. A `FieldMask` path can blank a field uniformly across every
-//!     array element (`mask.rs`'s `*` wildcard) but cannot drop only SOME
-//!     elements by a per-element predicate, so this stays exactly where it
-//!     already lived: in the handler's own response-building code, using
-//!     the same `is_admin`/`is_participant` values it always computed.
+//!     (`Allow` / `Redact` / `Deny`) and lives in `utils/contest.rs`.
+//!   - The per-element filter over a clarification's `replies` array, which
+//!     OMITS non-public replies for a non-participant rather than blanking a
+//!     field. A `FieldMask` path blanks a field uniformly across every array
+//!     element (`mask.rs`'s `*` wildcard) but cannot drop only SOME elements
+//!     by a per-element predicate, so the clarification handler applies it
+//!     while building the response.
 //!   - `create_clarification`'s admin/type gate, `recipient_id` forcing,
-//!     and `is_public` forcing (`clarification.rs:242-269`). These are loud
-//!     business rules (`403 PermissionDenied`), not reachability, and stay
-//!     in the handler, running strictly AFTER the new `Action::Clarify`
-//!     kernel gate.
+//!     and `is_public` forcing. These are business rules (`403
+//!     PermissionDenied`), not reachability, and run in the handler after
+//!     the `Action::Clarify` kernel gate.
 //!
 //! # Batching
 //!
@@ -91,26 +83,28 @@
 //!     fetched submission's `contest_id` (when that submission actually
 //!     needs the peer-visibility check), OR via the standalone
 //!     `contest_problem` lookup above - a standalone problem's candidate
-//!     contests must be folded into this fetch BEFORE it runs, or rule 9's
-//!     window/public/participant checks would have nothing to look up;
+//!     contests are folded into this fetch BEFORE it runs, since rule 9's
+//!     window/public/participant checks look them up;
 //!   - one query for `contest_user` membership, covering every contest
 //!     fetched above;
 //!   - one query for `contest_problem` membership, covering every
 //!     `(contest_id, problem_id)` pair referenced by problem parts that
 //!     carry a concrete `contest_id` (rule 5 - distinct from
 //!     the problem_id-only lookup above, which answers a different
-//!     question).
+//!     question);
 //!   - one query for the clarifications referenced by any `Resource::
 //!     Clarification` in the batch (rule 10) - a `Resource::Clarification`
 //!     only carries an id, so its author/recipient/is_public/contest_id
-//!     aren't in the `Resource` itself, mirroring Query 0 for submissions.
+//!     aren't in the `Resource` itself, as with submissions;
+//!   - one query for the replies of every clarification resolved above,
+//!     ordered by `created_at`, to find each one's LATEST reply's own
+//!     `is_public` flag (rule 10's `Redact` gate).
 //!
 //! Each query is skipped entirely when its target set is empty. The
-//! `contest_user` query is intentionally NOT narrowed to only the contests
-//! where `check_contest_access` would need it (i.e. it is also fetched for
-//! public contests) - rule 6's participation check is unconditional
-//! (independent of `is_public`), so narrowing the fetch to
-//! `check_contest_access`'s needs would silently break peer-submission
+//! `contest_user` query is NOT narrowed to only the contests where
+//! `check_contest_access` needs it (it is also fetched for public contests):
+//! rule 6's participation check is unconditional (independent of
+//! `is_public`), so narrowing the fetch would break peer-submission
 //! visibility on public contests.
 
 use std::collections::{HashMap, HashSet};
@@ -118,36 +112,44 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::entity::{clarification, contest, contest_problem, contest_user, problem, submission};
+use crate::entity::{
+    clarification, contest, contest_problem, contest_user, problem, submission,
+};
 use crate::error::AppError;
+use crate::utils::contest::contest_phase;
 use crate::utils::soft_delete::SoftDeletable;
 
 use super::{Action, Decision, Resource, Subject};
 
-/// See the module docs for the rule -> source mapping and the batching
-/// strategy. Returns one [`Decision`] per entry of `resources`, in the same
-/// order.
-///
-/// `submission_contest_ids` is an out-param: for every `Resource::
-/// Submission` in `resources`, this inserts `submission_id ->
-/// submission.contest_id` (which is itself `None` for a genuinely
-/// contest-less submission) once that submission has been resolved by Query
-/// 0 below. This surfaces a mapping `host_decide` already builds for its own
-/// rule 6 check, rather than resolving it a second time - see
-/// `VisibilityKernel::decide_batch` for why the caller needs it: a `Resource::Submission`'s contest is otherwise unknowable
-/// outside this function, and losing it produces a confidently wrong (not
-/// merely ambiguous) `QueryResource.contest_id` for plugins. Left untouched
-/// (and callers pass an empty map) on the `admin_override` early return
-/// below, since that path never resolves any submission and its decisions
-/// never reach a plugin anyway.
-///
-/// `clarification_contest_ids` is the analogous out-param for `Resource::
-/// Clarification`: `clarification_id -> clarification.contest_id`,
-/// populated once Query C below resolves it. Unlike a submission's, a
-/// clarification's `contest_id` column is never null - every clarification
-/// belongs to exactly one contest - so this map's value is a plain `i32`,
-/// not an `Option<i32>`; a miss (key absent) still means "not resolved by
-/// this call", handled by the caller the same way as a submission miss.
+/// What [`host_decide`] learns about the contests of a batch's resources,
+/// for the plugin step that follows it.
+#[derive(Debug, Default)]
+pub(crate) struct HostScopes {
+    /// Input: also fetch the contest of every submission and clarification,
+    /// so `contest_types` covers each resource's contest. Set while a
+    /// visibility querier scoped to contest types is loaded; the contests
+    /// join the fetch the batch makes anyway.
+    pub resolve_contests: bool,
+    /// `submission_id -> submission.contest_id` for every `Resource::
+    /// Submission` resolved by Query 0 (itself `None` for a contest-less
+    /// submission). A `Resource::Submission`'s contest is otherwise
+    /// unknowable outside this function, and `VisibilityKernel::decide_batch`
+    /// stamps it onto each plugin `QueryResource.contest_id`.
+    pub submission_contest_ids: HashMap<i32, Option<i32>>,
+    /// `clarification_id -> clarification.contest_id` for every `Resource::
+    /// Clarification` resolved by Query C. A clarification always belongs to
+    /// exactly one contest, so the value is a plain `i32`.
+    pub clarification_contest_ids: HashMap<i32, i32>,
+    /// `contest_id -> contest_type` for every active contest the batch
+    /// fetched.
+    pub contest_types: HashMap<i32, Option<String>>,
+}
+
+/// See the module docs for the rules and the batching strategy. Returns one
+/// [`Decision`] per entry of `resources`, in the same order, and fills
+/// `scopes` (see [`HostScopes`]). The maps stay empty on the
+/// `admin_override` early return, which resolves nothing and never reaches
+/// a plugin.
 ///
 /// `action` matters only for standalone (`contest_id: None`) problem-keyed
 /// resources: it decides whether rule 9 applies (see
@@ -162,8 +164,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     subject: &Subject,
     action: Action,
     resources: &[Resource],
-    submission_contest_ids: &mut HashMap<i32, Option<i32>>,
-    clarification_contest_ids: &mut HashMap<i32, i32>,
+    scopes: &mut HostScopes,
 ) -> Result<Vec<Decision>, AppError> {
     if subject.is_admin_override() {
         return Ok(vec![Decision::Allow; resources.len()]);
@@ -192,7 +193,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|s| (s.id, s))
             .collect()
     };
-    submission_contest_ids.extend(submissions.values().map(|s| (s.id, s.contest_id)));
+    scopes
+        .submission_contest_ids
+        .extend(submissions.values().map(|s| (s.id, s.contest_id)));
 
     // Query A: problems referenced by a standalone (`contest_id: None`)
     // problem part - rule 8. Samples and attachments are parts of their
@@ -223,9 +226,7 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
 
     // Query B: `contest_problem` rows keyed by `problem_id` ONLY, for the
     // same standalone problem set - rule 9's "which contests is this
-    // problem attached to at all" lookup, ported from
-    // `can_access_problem_via_contest`'s first query
-    // (`utils/contest.rs:147-153`). Distinct from Query 3 below, which
+    // problem attached to at all" lookup. Distinct from Query 3 below, which
     // answers "is this exact (contest_id, problem_id) pair a member".
     // Skipped when `action` never reaches rule 9 (`Action::Submit`): nothing
     // would read the map, and leaving it empty also keeps this batch's
@@ -274,15 +275,19 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|c| (c.id, c))
             .collect()
     };
-    clarification_contest_ids.extend(clarifications.values().map(|c| (c.id, c.contest_id)));
+    scopes
+        .clarification_contest_ids
+        .extend(clarifications.values().map(|c| (c.id, c.contest_id)));
+
 
     // Query 1: contests referenced by the batch - directly (`Resource::
     // Contest`), via a problem part's `contest_id`, or via a fetched
-    // submission's `contest_id` (only when that submission will actually
-    // need the peer-visibility contest check - rule 6's owner/`submission:
-    // view_all` bypasses never touch the contest at all, mirroring the
-    // source's early-return shape). Soft-delete-aware (`find_active`),
-    // mirroring `find_contest` - this is rule 7 for contests.
+    // submission's `contest_id` when that submission needs the
+    // peer-visibility contest check (rule 6's owner/`submission:view_all`
+    // bypasses never read the contest). With `scopes.resolve_contests`, every
+    // submission's and clarification's contest joins this same fetch, for
+    // the plugin step's routing; no decision reads them. Soft-delete-aware
+    // (`find_active`) - this is rule 7 for contests.
     let mut contest_ids: HashSet<i32> = resources
         .iter()
         .filter_map(|r| match r {
@@ -293,9 +298,16 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     for sub in submissions.values() {
         let needs_contest_check = !subject.has_permission(perm::SUBMISSION_VIEW_ALL)
             && subject.user_id != Some(sub.user_id);
-        if needs_contest_check && let Some(cid) = sub.contest_id {
+        if (needs_contest_check || scopes.resolve_contests)
+            && let Some(cid) = sub.contest_id
+        {
             contest_ids.insert(cid);
         }
+    }
+    // Only for the plugin step's routing: no host rule reads a
+    // clarification's contest.
+    if scopes.resolve_contests {
+        contest_ids.extend(clarifications.values().map(|c| c.contest_id));
     }
     // Rule 9's candidate contests, folded in BEFORE the fetch below - a
     // standalone problem's "which of its contests are public/started/joined"
@@ -315,6 +327,9 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .map(|c| (c.id, c))
             .collect()
     };
+    scopes
+        .contest_types
+        .extend(contests.values().map(|c| (c.id, c.contest_type.clone())));
 
     // Query 2: `contest_user` membership for this subject, across every
     // contest fetched above. Fetched unconditionally (whenever the subject
@@ -364,274 +379,263 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
             .collect()
     };
 
-    Ok(resources
-        .iter()
-        .map(|r| {
-            decide_one(
-                subject,
-                action,
-                now,
-                r,
-                &contests,
-                &member_of,
-                &problem_in_contest,
-                &submissions,
-                &problems,
-                &problem_contest_ids,
-                &clarifications,
-            )
-        })
-        .collect())
+    let facts = BatchFacts {
+        subject,
+        now,
+        contests,
+        member_of,
+        problem_in_contest,
+        submissions,
+        problems,
+        problem_contest_ids,
+        clarifications,
+    };
+    Ok(resources.iter().map(|r| facts.decide(action, r)).collect())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decide_one(
-    subject: &Subject,
-    action: Action,
+/// Everything the host rules read to decide one batch, fetched up front by
+/// [`host_decide`] so each per-resource decision is pure.
+struct BatchFacts<'a> {
+    subject: &'a Subject,
     now: chrono::DateTime<chrono::Utc>,
-    resource: &Resource,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    problem_in_contest: &HashSet<(i32, i32)>,
-    submissions: &HashMap<i32, submission::Model>,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-    clarifications: &HashMap<i32, clarification::Model>,
-) -> Decision {
-    match resource {
-        Resource::Contest(id) => decide_contest(subject, now, *id, contests, member_of),
-        Resource::Problem {
-            contest_id,
-            problem_id,
-        }
-        | Resource::Sample {
-            contest_id,
-            problem_id,
-        }
-        | Resource::Attachment {
-            contest_id,
-            problem_id,
-            ..
-        } => decide_problem_or_sample(
-            subject,
-            action,
-            now,
-            *contest_id,
-            *problem_id,
-            contests,
-            member_of,
-            problem_in_contest,
-            problems,
-            problem_contest_ids,
-        ),
-        Resource::Submission(id) => {
-            decide_submission(subject, now, *id, contests, member_of, submissions)
-        }
-        Resource::Clarification(id) => decide_clarification(subject, *id, clarifications),
-    }
+    /// Active (not soft-deleted) contests the batch references.
+    contests: HashMap<i32, contest::Model>,
+    /// The contests among `contests` the subject is registered in.
+    member_of: HashSet<i32>,
+    /// `(contest_id, problem_id)` links among the batch's scoped problems.
+    problem_in_contest: HashSet<(i32, i32)>,
+    submissions: HashMap<i32, submission::Model>,
+    /// Active problems the batch references outside a contest.
+    problems: HashMap<i32, problem::Model>,
+    /// The contests each of `problems` belongs to.
+    problem_contest_ids: HashMap<i32, Vec<i32>>,
+    clarifications: HashMap<i32, clarification::Model>,
 }
 
-/// Rule 2, ported byte-identically from BOTH `check_contest_access`
-/// (`utils/contest.rs:30-34`) and `require_contest_started`
-/// (`utils/contest.rs:77-81`) - the two source functions contain the exact
-/// same predicate applied to the same contest/`now`.
-fn window_is_closed(contest: &contest::Model, now: chrono::DateTime<chrono::Utc>) -> bool {
-    contest.activate_time.is_none_or(|at| at > now)
-        || contest.deactivate_time.is_some_and(|dt| dt <= now)
-}
+impl BatchFacts<'_> {
+    fn decide(&self, action: Action, resource: &Resource) -> Decision {
+        match resource {
+            Resource::Contest(id) => self.decide_contest(*id),
+            Resource::Problem {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Sample {
+                contest_id,
+                problem_id,
+            }
+            | Resource::Attachment {
+                contest_id,
+                problem_id,
+                ..
+            } => self.decide_problem_or_sample(action, *contest_id, *problem_id),
+            Resource::Submission(id) => self.decide_submission(*id),
+            Resource::Clarification(id) => self.decide_clarification(*id),
+        }
+    }
 
-/// Ported from `check_contest_access` (`utils/contest.rs:21-46`): rules 1-4.
-/// Rule 7 (soft-deleted contest) is enforced by the caller only ever
-/// looking `contest_id` up in `contests`, which is populated via
-/// `find_active`.
-fn check_contest_access_decision(
-    subject: &Subject,
-    contest: &contest::Model,
-    now: chrono::DateTime<chrono::Utc>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
+    /// Rules 1-4, as `check_contest_access` applies them.
+    /// Rule 7 (soft-deleted contest) is enforced by the caller only ever
+    /// looking `contest_id` up in `contests`, which is populated via
+    /// `find_active`.
+    fn check_contest_access_decision(&self, contest: &contest::Model) -> Decision {
+        if self.subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        if !contest_phase(contest, self.now).is_active() {
+            return Decision::Deny;
+        }
+        if contest.is_public {
+            return Decision::Allow;
+        }
+        if self.member_of.contains(&contest.id) {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
     }
-    if window_is_closed(contest, now) {
-        return Decision::Deny;
+
+    /// The `contest:manage` short-circuit and window gate of
+    /// `require_contest_started`. Its `now < contest.start_time` business
+    /// rule is not a reachability outcome; see the module docs.
+    fn require_contest_started_window_decision(&self, contest: &contest::Model) -> Decision {
+        if self.subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        if contest_phase(contest, self.now).is_active() {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
     }
-    if contest.is_public {
-        return Decision::Allow;
+
+    /// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access`
+    /// only - no `require_contest_started`).
+    fn decide_contest(&self, id: i32) -> Decision {
+        match self.contests.get(&id) {
+            // Rule 7: missing (soft-deleted, since `contests` was fetched with
+            // `find_active`) or nonexistent contest -> Deny, mirroring
+            // `find_contest`'s `NotFound`.
+            None => Decision::Deny,
+            Some(c) => self.check_contest_access_decision(c),
+        }
     }
-    if member_of.contains(&contest.id) {
-        Decision::Allow
-    } else {
+
+    /// Mirrors `list_contest_problems` / `get_contest_problem_samples`, which
+    /// both call `check_contest_access` THEN `require_contest_started` on the
+    /// same contest before checking `find_contest_problem` /
+    /// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
+    /// sequence. Used for every problem part (`Problem`, `Sample`,
+    /// `Attachment`): a sample or attachment is reachable exactly when its
+    /// problem is, under the same scope.
+    fn decide_problem_or_sample(
+        &self,
+        action: Action,
+        contest_id: Option<i32>,
+        problem_id: i32,
+    ) -> Decision {
+        let Some(cid) = contest_id else {
+            // Standalone problem/sample access - rules 8-9.
+            return self.decide_standalone_problem_access(action, problem_id);
+        };
+        let Some(c) = self.contests.get(&cid) else {
+            return Decision::Deny; // rule 7
+        };
+        if self.check_contest_access_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        if self.require_contest_started_window_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        if self.problem_in_contest.contains(&(cid, problem_id)) {
+            Decision::Allow
+        } else {
+            Decision::Deny // rule 5
+        }
+    }
+
+    /// Rules 8-9. Used for every standalone
+    /// (`contest_id: None`) problem part: `Resource::Problem`,
+    /// `Resource::Sample` and `Resource::Attachment`. Samples and attachments
+    /// are parts of their problem, so this takes only a `problem_id`, never an
+    /// `attachment_id`.
+    ///
+    /// The zero-contests check comes BEFORE the `contest:manage` bypass, so a
+    /// `contest:manage` holder without `problem:create`/`problem:edit` is
+    /// denied a hidden problem attached to no contest.
+    ///
+    /// The public-and-started check and the participant-of-a-started-contest
+    /// check share one "started" filter, so a single in-memory pass over the
+    /// problem's contests serves both: a public started contest admits
+    /// first, then membership in any started one does.
+    ///
+    /// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
+    /// can use it. For `Action::Submit` the decision ends after rule 8.
+    fn decide_standalone_problem_access(&self, action: Action, problem_id: i32) -> Decision {
+        let subject = self.subject;
+        // Missing or soft-deleted problem -> Deny (`problems` was fetched
+        // with `find_active`).
+        let Some(problem) = self.problems.get(&problem_id) else {
+            return Decision::Deny;
+        };
+        if subject.has_permission(perm::PROBLEM_CREATE)
+            || subject.has_permission(perm::PROBLEM_EDIT)
+        {
+            return Decision::Allow;
+        }
+        if problem.is_public {
+            return Decision::Allow;
+        }
+        if !standalone_reachable_via_contest(action) {
+            return Decision::Deny;
+        }
+        // `can_access_problem_via_contest`, inlined below.
+        let no_contests: Vec<i32> = Vec::new();
+        let candidate_contest_ids = self
+            .problem_contest_ids
+            .get(&problem_id)
+            .unwrap_or(&no_contests);
+        if candidate_contest_ids.is_empty() {
+            return Decision::Deny;
+        }
+        if subject.has_permission(perm::CONTEST_MANAGE) {
+            return Decision::Allow;
+        }
+        // A not-yet-started or deactivated contest must not leak a hidden
+        // problem's statement, samples or attachments here, even if it is
+        // public.
+        let started: Vec<&contest::Model> = candidate_contest_ids
+            .iter()
+            .filter_map(|cid| self.contests.get(cid))
+            .filter(|c| contest_phase(c, self.now).has_started())
+            .collect();
+        if started.iter().any(|c| c.is_public) {
+            return Decision::Allow;
+        }
+        if started.iter().any(|c| self.member_of.contains(&c.id)) {
+            return Decision::Allow;
+        }
         Decision::Deny
     }
-}
 
-/// Ported from `require_contest_started` (`utils/contest.rs:69-86`): the
-/// `contest:manage` short-circuit and window-gate portion only. The
-/// `now < contest.start_time` business-rule check in the source is
-/// intentionally NOT reproduced here - see the module docs.
-fn require_contest_started_window_decision(
-    subject: &Subject,
-    contest: &contest::Model,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Decision {
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
+    /// Rule 6, plus rule 7 via the non-owner branch's contest lookup.
+    fn decide_submission(&self, id: i32) -> Decision {
+        let subject = self.subject;
+        let Some(sub) = self.submissions.get(&id) else {
+            // No such submission.
+            return Decision::Deny;
+        };
+        if subject.has_permission(perm::SUBMISSION_VIEW_ALL) {
+            return Decision::Allow;
+        }
+        if subject.user_id == Some(sub.user_id) {
+            // Owner bypass: an owner always sees their own submission, with no
+            // contest lookup, so this stays Allow even if the parent contest
+            // has since been soft-deleted.
+            return Decision::Allow;
+        }
+        let Some(cid) = sub.contest_id else {
+            return Decision::Deny;
+        };
+        let Some(c) = self.contests.get(&cid) else {
+            return Decision::Deny; // rule 7
+        };
+        if self.check_contest_access_decision(c).is_denied() {
+            return Decision::Deny;
+        }
+        let is_participant = self.member_of.contains(&cid);
+        if !is_participant || !c.submissions_visible {
+            Decision::Deny
+        } else {
+            Decision::Allow
+        }
     }
-    if window_is_closed(contest, now) {
-        Decision::Deny
-    } else {
-        Decision::Allow
-    }
-}
 
-/// Mirrors `get_contest`'s gate (`find_contest` + `check_contest_access`
-/// only - no `require_contest_started`).
-fn decide_contest(
-    subject: &Subject,
-    now: chrono::DateTime<chrono::Utc>,
-    id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    match contests.get(&id) {
-        // Rule 7: missing (soft-deleted, since `contests` was fetched with
-        // `find_active`) or nonexistent contest -> Deny, mirroring
-        // `find_contest`'s `NotFound`.
-        None => Decision::Deny,
-        Some(c) => check_contest_access_decision(subject, c, now, member_of),
-    }
-}
+    /// Rule 10: a clarification is reachable by its author, its recipient, a
+    /// `contest:manage` holder, or anyone when the row is public. A missing
+    /// clarification -> `Deny`, as is a non-public row for anyone else.
+    ///
+    /// The per-element filter over the `replies` array is not a decision
+    /// here; see the module docs.
+    fn decide_clarification(&self, id: i32) -> Decision {
+        let subject = self.subject;
+        let Some(c) = self.clarifications.get(&id) else {
+            return Decision::Deny;
+        };
 
-/// Mirrors `list_contest_problems` / `get_contest_problem_samples`, which
-/// both call `check_contest_access` THEN `require_contest_started` on the
-/// same contest before checking `find_contest_problem` /
-/// `is_problem_in_contest` (rule 5). Both gates are applied here, in that
-/// sequence. Used for every problem part (`Problem`, `Sample`,
-/// `Attachment`): a sample or attachment is reachable exactly when its
-/// problem is, under the same scope.
-#[allow(clippy::too_many_arguments)]
-fn decide_problem_or_sample(
-    subject: &Subject,
-    action: Action,
-    now: chrono::DateTime<chrono::Utc>,
-    contest_id: Option<i32>,
-    problem_id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    problem_in_contest: &HashSet<(i32, i32)>,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-) -> Decision {
-    let Some(cid) = contest_id else {
-        // Standalone problem/sample access - rules 8-9.
-        return decide_standalone_problem_access(
-            subject,
-            action,
-            now,
-            problem_id,
-            problems,
-            problem_contest_ids,
-            contests,
-            member_of,
-        );
-    };
-    let Some(c) = contests.get(&cid) else {
-        return Decision::Deny; // rule 7
-    };
-    if check_contest_access_decision(subject, c, now, member_of).is_denied() {
-        return Decision::Deny;
-    }
-    if require_contest_started_window_decision(subject, c, now).is_denied() {
-        return Decision::Deny;
-    }
-    if problem_in_contest.contains(&(cid, problem_id)) {
-        Decision::Allow
-    } else {
-        Decision::Deny // rule 5
-    }
-}
+        // `subject.user_id.is_some() &&` guards the recipient comparison so an
+        // unauthenticated `Subject` can't spuriously match `None == None` on a
+        // row with no recipient.
+        let is_participant = subject.has_permission(perm::CONTEST_MANAGE)
+            || subject.user_id == Some(c.author_id)
+            || (subject.user_id.is_some() && c.recipient_id == subject.user_id);
 
-/// Rules 8-9. Ported from `require_problem_read_access`
-/// (`utils/contest.rs:219-241`) and `can_access_problem_via_contest`
-/// (`utils/contest.rs:142-217`). Used for every standalone
-/// (`contest_id: None`) problem part: `Resource::Problem`,
-/// `Resource::Sample` and `Resource::Attachment`. Samples and attachments
-/// are parts of their problem, so this takes only a `problem_id`, never an
-/// `attachment_id`.
-///
-/// Preserves a source asymmetry verbatim: inside
-/// `can_access_problem_via_contest`, the `contest_ids.is_empty()` check
-/// happens BEFORE the `contest:manage` bypass (`utils/contest.rs:155-161`),
-/// so a `contest:manage` holder without `problem:create`/`problem:edit` is
-/// still denied a hidden problem attached to zero contests.
-///
-/// The source runs two separate window-filtered DB queries in sequence -
-/// `has_public` (is_public AND open-and-started), then, only if that came
-/// back empty, `started_contest_ids` (open-and-started, any visibility) for
-/// the participant check. Both queries share the identical "open and
-/// started" predicate (`utils/contest.rs:172-178`'s `within_window` plus
-/// each call site's own `StartTime.lte(now)`), so this fuses them into one
-/// in-memory filter pass over `contests` - `has_public`'s candidate set is a
-/// strict subset of `started_contest_ids`'s, so filtering once and checking
-/// `is_public` first, then membership, is bit-identical to the source's two
-/// queries for every input.
-///
-/// Rule 9 runs only when [`standalone_reachable_via_contest`] says `action`
-/// can use it. For `Action::Submit` the decision ends after rule 8.
-#[allow(clippy::too_many_arguments)]
-fn decide_standalone_problem_access(
-    subject: &Subject,
-    action: Action,
-    now: chrono::DateTime<chrono::Utc>,
-    problem_id: i32,
-    problems: &HashMap<i32, problem::Model>,
-    problem_contest_ids: &HashMap<i32, Vec<i32>>,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-) -> Decision {
-    // `require_problem_read_access`: missing/soft-deleted problem -> Deny
-    // (`problems` was fetched with `find_active`, mirroring
-    // `find_active_by_id`).
-    let Some(problem) = problems.get(&problem_id) else {
-        return Decision::Deny;
-    };
-    if subject.has_permission(perm::PROBLEM_CREATE) || subject.has_permission(perm::PROBLEM_EDIT) {
-        return Decision::Allow;
+        if is_participant || c.is_public {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
     }
-    if problem.is_public {
-        return Decision::Allow;
-    }
-    if !standalone_reachable_via_contest(action) {
-        return Decision::Deny;
-    }
-    // `can_access_problem_via_contest`, inlined below.
-    let no_contests: Vec<i32> = Vec::new();
-    let candidate_contest_ids = problem_contest_ids.get(&problem_id).unwrap_or(&no_contests);
-    if candidate_contest_ids.is_empty() {
-        return Decision::Deny;
-    }
-    if subject.has_permission(perm::CONTEST_MANAGE) {
-        return Decision::Allow;
-    }
-    // "Open and started": `window_is_closed`'s negation (activation window
-    // open) AND `start_time <= now` - the extra condition
-    // `can_access_problem_via_contest` applies on top of the plain window
-    // check (`utils/contest.rs:165-171`'s comment explains why: a
-    // not-yet-started or already-deactivated contest must not leak a hidden
-    // problem's statement/samples/attachments here, even if it is public).
-    let open_and_started: Vec<&contest::Model> = candidate_contest_ids
-        .iter()
-        .filter_map(|cid| contests.get(cid))
-        .filter(|c| !window_is_closed(c, now) && c.start_time <= now)
-        .collect();
-    if open_and_started.iter().any(|c| c.is_public) {
-        return Decision::Allow;
-    }
-    if open_and_started.iter().any(|c| member_of.contains(&c.id)) {
-        return Decision::Allow;
-    }
-    Decision::Deny
 }
 
 /// Whether rule 9 ("hidden problem reachable via a contest") may admit a
@@ -661,79 +665,6 @@ fn standalone_reachable_via_contest(action: Action) -> bool {
     match action {
         Action::Submit => false,
         Action::Read | Action::Clarify | Action::Download => true,
-    }
-}
-
-/// Ported from `require_submission_visible`
-/// (`handlers/submission/filter.rs:18-51`). Rule 6, plus rule 7 via the
-/// non-owner branch's contest lookup.
-fn decide_submission(
-    subject: &Subject,
-    now: chrono::DateTime<chrono::Utc>,
-    id: i32,
-    contests: &HashMap<i32, contest::Model>,
-    member_of: &HashSet<i32>,
-    submissions: &HashMap<i32, submission::Model>,
-) -> Decision {
-    let Some(sub) = submissions.get(&id) else {
-        // No such submission (the source's raw `find_by_id` 404s the same
-        // way before `require_submission_visible` ever runs).
-        return Decision::Deny;
-    };
-    if subject.has_permission(perm::SUBMISSION_VIEW_ALL) {
-        return Decision::Allow;
-    }
-    if subject.user_id == Some(sub.user_id) {
-        // Owner bypass: the source skips the contest lookup ENTIRELY here,
-        // so this stays Allow even if the parent contest has since been
-        // soft-deleted.
-        return Decision::Allow;
-    }
-    let Some(cid) = sub.contest_id else {
-        return Decision::Deny;
-    };
-    let Some(c) = contests.get(&cid) else {
-        return Decision::Deny; // rule 7
-    };
-    if check_contest_access_decision(subject, c, now, member_of).is_denied() {
-        return Decision::Deny;
-    }
-    let is_participant = member_of.contains(&cid);
-    if !is_participant || !c.submissions_visible {
-        Decision::Deny
-    } else {
-        Decision::Allow
-    }
-}
-
-/// Rule 10: a clarification row is visible to a participant
-/// (`contest:manage`, the author, or the recipient) and, when it is public,
-/// to everyone else. A missing clarification -> `Deny`, matching the
-/// `NotFound` every handler that loads one returns on a miss.
-///
-/// The `replies: Vec<ClarificationReplyResponse>` array's own per-element
-/// filter is deliberately NOT folded in here - see the module docs'
-/// "Deliberately not ported" section.
-fn decide_clarification(
-    subject: &Subject,
-    id: i32,
-    clarifications: &HashMap<i32, clarification::Model>,
-) -> Decision {
-    let Some(c) = clarifications.get(&id) else {
-        return Decision::Deny;
-    };
-
-    // `subject.user_id.is_some() &&` guards the recipient comparison so an
-    // unauthenticated `Subject` can't spuriously match a `None == None` on a
-    // DM-less row.
-    let is_participant = subject.has_permission(perm::CONTEST_MANAGE)
-        || subject.user_id == Some(c.author_id)
-        || (subject.user_id.is_some() && c.recipient_id == subject.user_id);
-
-    if is_participant || c.is_public {
-        Decision::Allow
-    } else {
-        Decision::Deny
     }
 }
 
@@ -844,8 +775,7 @@ mod tests {
             &Subject::admin_override(),
             Action::Read,
             &resources,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .expect("admin override must not touch the database");
@@ -870,8 +800,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -891,8 +820,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -910,8 +838,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -932,8 +859,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -955,8 +881,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -976,8 +901,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -995,8 +919,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1020,8 +943,7 @@ mod tests {
                 contest_id: Some(7),
                 problem_id: 3,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1043,8 +965,7 @@ mod tests {
                 contest_id: Some(7),
                 problem_id: 3,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1068,8 +989,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1088,8 +1008,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1108,8 +1027,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1126,8 +1044,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1146,8 +1063,7 @@ mod tests {
             &subject(1, &[perm::SUBMISSION_VIEW_ALL]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1168,8 +1084,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1186,8 +1101,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(404)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1208,8 +1122,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1252,8 +1165,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1270,8 +1182,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1288,8 +1199,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1306,8 +1216,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1324,8 +1233,7 @@ mod tests {
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1342,8 +1250,7 @@ mod tests {
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1386,8 +1293,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1412,8 +1318,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1434,8 +1339,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1456,8 +1360,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1466,9 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn rule9_contest_manage_denied_when_zero_contests_despite_permission() {
-        // Preserves the source asymmetry: `contest_ids.is_empty()` is
-        // checked BEFORE the `contest:manage` bypass inside
-        // `can_access_problem_via_contest`.
+        // The zero-contests check comes BEFORE the `contest:manage` bypass.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![problem_row(1, false)]])
             .append_query_results([Vec::<contest_problem::Model>::new()])
@@ -1481,8 +1382,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1507,8 +1407,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1531,8 +1430,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1555,8 +1453,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1579,8 +1476,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1610,8 +1506,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1636,8 +1531,7 @@ mod tests {
                 contest_id: None,
                 problem_id: 1,
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap()
@@ -1723,8 +1617,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(999),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1746,8 +1639,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1771,8 +1663,7 @@ mod tests {
                 problem_id: 1,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1798,8 +1689,7 @@ mod tests {
                 problem_id: 3,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1822,8 +1712,7 @@ mod tests {
                 problem_id: 3,
                 attachment_id: uuid::Uuid::from_u128(2),
             }],
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HostScopes::default(),
         )
         .await
         .unwrap();
@@ -1857,8 +1746,7 @@ mod tests {
                 &subject(1, &[]),
                 Action::Read,
                 resources,
-                &mut HashMap::new(),
-                &mut HashMap::new(),
+                &mut HostScopes::default(),
             )
             .await
             .unwrap()

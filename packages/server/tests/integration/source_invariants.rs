@@ -5,16 +5,13 @@
 //! `block_in_place(` token appears in code under
 //! `packages/server/src/host_funcs/`. Host functions run inside
 //! `spawn_blocking` tasks, and calling `block_in_place` there re-parks a
-//! tokio worker thread, which starves the API runtime under load. The check
-//! is a static scan rather than a runtime counter
-//! (`host_fn_block_in_place_total`), because the counter only moves when a
-//! host function opts in through `record_block_in_place_regression`, so a
-//! careless call would never show up in it.
+//! tokio worker thread, which starves the API runtime under load. The scan
+//! is the guard: nothing counts `block_in_place` calls at runtime.
 //!
 //! Under a sustained wave of plugin host function calls, the process does
-//! not grow a thread storm and records no `block_in_place` or plugin call
-//! failures. This test runs for 60 seconds by default, so it is `#[ignore]`d
-//! and run by hand before a release (the `#[ignore]` reason has the command).
+//! not grow a thread storm and records no plugin call failures. This test
+//! runs for 60 seconds by default, so it is `#[ignore]`d and run by hand
+//! before a release (the `#[ignore]` reason has the command).
 //!
 //! Handler modules do not reference `crate::entity` directly. Each direct
 //! reference (an import, a module alias, an alias use or a fully qualified
@@ -65,7 +62,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// True iff the character immediately preceding the match position is
 /// part of an identifier (alphanumeric or `_`). In that case
 /// `block_in_place(` is the tail of a longer identifier such as
-/// `record_block_in_place_regression(` and is not a real toxic call.
+/// `avoid_block_in_place(` and is not a real toxic call.
 fn match_is_inside_identifier(line: &str, match_start: usize) -> bool {
     if match_start == 0 {
         return false;
@@ -189,10 +186,6 @@ async fn host_fn_stress_wave_does_not_spawn_thread_storm() {
     assert_eq!(baseline_metrics.status, 200);
     let baseline_host_fn_calls =
         prometheus_counter_sum(&baseline_metrics.text, "broccoli_host_fn_calls_total");
-    let baseline_block_in_place = prometheus_counter_sum(
-        &baseline_metrics.text,
-        "broccoli_host_fn_block_in_place_total",
-    );
     let baseline_plugin_call_failures = prometheus_counter_sum(
         &baseline_metrics.text,
         "broccoli_plugin_call_failures_total",
@@ -289,12 +282,6 @@ async fn host_fn_stress_wave_does_not_spawn_thread_storm() {
     assert!(
         host_fn_calls_delta >= completed as f64,
         "host_fn call metric did not observe the wave: before={baseline_host_fn_calls}, after={host_fn_calls}, completed={completed}"
-    );
-    let block_in_place_total =
-        prometheus_counter_sum(&metrics.text, "broccoli_host_fn_block_in_place_total");
-    assert_eq!(
-        block_in_place_total, baseline_block_in_place,
-        "host_fn block_in_place counter changed during stress wave"
     );
     let plugin_call_failures =
         prometheus_counter_sum(&metrics.text, "broccoli_plugin_call_failures_total");

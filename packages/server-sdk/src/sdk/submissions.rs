@@ -386,7 +386,7 @@ impl Submissions {
                         .submission_ids
                         .as_ref()
                         .is_none_or(|ids| ids.contains(&r.submission_id))
-                    && (!query.unpublished_only || r.withheld)
+                    && (!query.unpublished_only || r.is_withheld())
             })
             .take(query.page_size() as usize)
             .cloned()
@@ -405,7 +405,7 @@ impl Submissions {
                 key.to_owned(),
                 matching().map(|r| r.submission_id).max(),
             ),
-            pending: matching().find(|r| r.slot_held).cloned(),
+            pending: matching().find(|r| r.holds_slot()).cloned(),
         })
     }
 
@@ -469,8 +469,7 @@ mod tests {
         let host = Host::mock();
         host.submission.set_feedback(vec![SubmissionFeedbackRecord {
             submission_id: 7,
-            withheld: true,
-            slot_held: true,
+            outcome: FeedbackOutcome::Pending,
             slot_key: Some("player".into()),
             ..Default::default()
         }]);
@@ -528,7 +527,7 @@ mod tests {
             host.submission
                 .feedback(&SubmissionFeedbackQuery::default())
                 .unwrap()[0]
-                .withheld
+                .is_withheld()
         );
         let result = ReleaseResult::Override {
             verdict: Verdict::Other("Custom".into()),
@@ -553,7 +552,7 @@ mod tests {
             .feedback(&SubmissionFeedbackQuery::default())
             .unwrap()
             .remove(0);
-        assert!(!record.withheld && !record.slot_held);
+        assert_eq!(record.outcome, FeedbackOutcome::Released);
         assert_eq!(
             record.result.unwrap().verdict,
             Verdict::Other("Custom".into())
@@ -570,7 +569,7 @@ mod tests {
                 .map(|id| SubmissionFeedbackRecord {
                     submission_id: id,
                     key: "match".into(),
-                    withheld: true,
+                    outcome: FeedbackOutcome::Pending,
                     ..Default::default()
                 })
                 .collect(),

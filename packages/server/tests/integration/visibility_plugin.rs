@@ -1,16 +1,11 @@
-//! Widening-regression coverage for Task 11: replacing the submission
-//! `filter_submission_fn` mechanism with kernel decisions.
+//! Widening-regression coverage for plugin visibility decisions.
 //!
-//! Before this task, `filter_submission_via_plugin`
-//! (`packages/server/src/handlers/submission/filter.rs`) adopted a
-//! plugin-authored submission JSON wholesale after only a shape check -
-//! `Ok(out) => Ok(out.submission)`. A plugin registered against the
-//! submission's contest type could therefore alter a verdict, a score, or a
-//! displayed user id: a field mask can blank a value, but the old mechanism
-//! could also WRITE one.
+//! A visibility plugin answers with kernel decisions, never with a response
+//! body: a field mask can blank a value, but a plugin can never alter a
+//! verdict, a score, or a displayed user id.
 //!
 //! These tests drive the fixture plugin under `tests/fixtures/server-plugin`
-//! (which now registers `[[server.queries]] topic = "visibility"`, function
+//! (which registers `[[server.queries]] topic = "visibility"`, function
 //! `decide_visibility`) through real HTTP handlers and assert the host's own
 //! decision always wins:
 //!
@@ -24,7 +19,7 @@
 //!   masked fields must come back `null` - never the plugin's own content,
 //!   and never the real value either.
 //!
-//! Task 14 extends the same fixture with a `visibility_mode` KV switch (see
+//! The same fixture has a `visibility_mode` KV switch (see
 //! `tests/fixtures/server-plugin/src/lib.rs`) and adds two further groups of
 //! tests below, both driving real HTTP handlers:
 //!
@@ -46,7 +41,7 @@ use crate::common::{TestApp, routes};
 /// `tests/fixtures/server-plugin/src/lib.rs`) via the plugin's existing
 /// `kv_write` route. Generalizes [`seed_redact_submission_id`] to the mode
 /// switch and the `deny_resource_keys`/`redact_resource_keys`/
-/// `redact_resource_fields` mechanism added for Task 14.
+/// `redact_resource_fields` mechanism.
 async fn seed_kv(app: &TestApp, key: &str, value: &str) {
     let route = routes::plugin_proxy("server-plugin", &format!("kv/{key}"));
     let res = app
@@ -285,7 +280,7 @@ async fn plugin_cannot_author_a_verdict() {
     assert_eq!(res.body["status"], "Judged");
 }
 
-// == Task 14: failure injection ==========================================
+// == Failure injection ===============================================
 //
 // The fixture plugin's `decide_visibility` (`tests/fixtures/server-plugin/src/lib.rs`)
 // is switched into each of these failure modes via the `visibility_mode` KV
@@ -472,7 +467,7 @@ async fn over_limit_mask_fields_denies() {
     assert_denies_single_submission_read("over_limit_fields").await;
 }
 
-// == Task 14: a WORKING decide_visibility, through real handlers ==========
+// == A WORKING decide_visibility, through real handlers ================
 //
 // Up to this point the kernel's two headline capabilities - omitting a
 // denied resource from a list, and masking a redacted one - were proven only
@@ -925,7 +920,7 @@ async fn contest_level_gates_all_route_through_the_kernel() {
 }
 
 // ---------------------------------------------------------------------
-// Task 20 Item 6 (I5): `Decision::is_denied()` treats `Redact` as NOT
+// `Decision::is_denied()` treats `Redact` as NOT
 // denied by design (see decision.rs's `is_denied_true_only_for_deny`).
 // `get_test_case` and `download_attachment` both gate reachability with a
 // bare `.is_denied()` check on `Resource::Problem` (and, for the
@@ -1041,4 +1036,263 @@ async fn download_attachment_redact_on_attachment_resource_still_returns_full_co
         "build_blob_response bypasses Visible<T>/into_masked_json entirely - \
          the streamed bytes must be the real, unmasked content"
     );
+}
+
+// == Submission lists a plugin narrows ===================================
+// A narrowed list pages only through the rows the caller is shown, so
+// walking it reveals nothing about the rows a plugin hides: every page is
+// full until the last, `has_more` describes shown rows only, and a cursor
+// naming a hidden row is refused like a malformed one.
+
+/// A new user's token, five of their standalone submissions newest first,
+/// and the ones the plugin denies: the 2nd, 3rd and 4th, a run longer than a
+/// one-row page.
+async fn narrowed_own_submissions(app: &TestApp, username: &str) -> (String, Vec<i32>, Vec<i32>) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    let token = app.create_authenticated_user(username, "pass1234").await;
+    let owner = user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("query owner")
+        .expect("owner should exist");
+    let problem_id = insert_public_problem(app, "Narrowed List Problem").await;
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        ids.push(insert_queued_submission(app, problem_id, owner.id).await);
+    }
+    ids.reverse();
+    let hidden = ids[1..4].to_vec();
+    let keys: Vec<String> = hidden.iter().map(|id| format!("submission:{id}")).collect();
+    seed_kv(app, "deny_resource_keys", &keys.join(",")).await;
+    (token, ids, hidden)
+}
+
+#[tokio::test]
+async fn a_narrowed_list_pages_only_through_shown_rows() {
+    let app = TestApp::spawn_with_plugins().await;
+    let (token, ids, hidden) = narrowed_own_submissions(&app, "narrowed_pager").await;
+    let shown: Vec<i32> = ids
+        .iter()
+        .copied()
+        .filter(|id| !hidden.contains(id))
+        .collect();
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let url = match &cursor {
+            Some(c) => format!("{}?per_page=1&cursor={c}", routes::SUBMISSIONS),
+            None => format!("{}?per_page=1", routes::SUBMISSIONS),
+        };
+        let res = app.get_with_token(&url, &token).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        let pagination = &res.body["pagination"];
+        assert!(
+            pagination["total"].is_null(),
+            "a narrowed count is withheld"
+        );
+        let page = res.body["data"].as_array().unwrap();
+        assert_eq!(page.len(), 1, "every page is full until the last");
+        seen.push(page[0]["id"].as_i64().unwrap() as i32);
+        match pagination["next_cursor"].as_str() {
+            Some(next) => {
+                assert_eq!(pagination["has_more"], true);
+                cursor = Some(next.to_string());
+            }
+            None => {
+                assert_eq!(pagination["has_more"], false);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        seen, shown,
+        "the walk visits exactly the shown rows, in order"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_naming_a_hidden_submission_is_refused() {
+    use base64::Engine;
+
+    let app = TestApp::spawn_with_plugins().await;
+    let (token, _ids, hidden) = narrowed_own_submissions(&app, "narrowed_cursor").await;
+    let forge = |id: i32| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "by": "created_at", "order": "desc", "id": id }).to_string(),
+        )
+    };
+
+    // A hidden row and a row that does not exist answer the same way.
+    for id in [hidden[0], i32::MAX] {
+        let url = format!("{}?cursor={}", routes::SUBMISSIONS, forge(id));
+        let res = app.get_with_token(&url, &token).await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR");
+    }
+}
+
+// == Querier scope ========================================================
+// A visibility plugin that registered contest types governs only resources
+// in contests of those types: it is not consulted elsewhere, so it cannot
+// hide anything there, and a list scoped to another type gets its exact
+// total back.
+
+/// Record the fixture plugin as governing only `governed_type`, the way a
+/// replica that loaded it would, and pick the record up here.
+async fn scope_fixture_to(app: &TestApp, governed_type: &str) {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE plugin SET governs = $1 WHERE id = 'server-plugin'",
+            [serde_json::json!({ "visibility": true, "contest_types": [governed_type] }).into()],
+        ))
+        .await
+        .expect("record governs");
+    server::plugin_lifecycle::reconcile(&app.state)
+        .await
+        .expect("reconcile");
+}
+
+/// A public, active contest of `contest_type` holding one submission by
+/// `user_id`. Returns `(contest_id, submission_id)`.
+async fn typed_contest_with_submission(
+    app: &TestApp,
+    admin_token: &str,
+    contest_type: &str,
+    user_id: i32,
+) -> (i32, i32) {
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Set, Statement};
+    use server::entity::submission;
+
+    let contest_id = app
+        .create_contest(admin_token, &format!("{contest_type} contest"), true, true)
+        .await;
+    app.db
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE contest SET contest_type = $1 WHERE id = $2",
+            [contest_type.into(), contest_id.into()],
+        ))
+        .await
+        .expect("set contest type");
+    let problem_id = insert_public_problem(app, &format!("{contest_type} problem")).await;
+    let submission = submission::ActiveModel {
+        files: Set(serde_json::json!([
+            { "filename": "main.cpp", "content": "int main() {}" }
+        ])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(Some(contest_id)),
+        contest_type: Set(contest_type.into()),
+        status: Set(common::SubmissionStatus::Queued),
+        judge_epoch: Set(0),
+        created_at: Set(chrono::Utc::now()),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert contest submission");
+    (contest_id, submission.id)
+}
+
+async fn user_id(app: &TestApp, username: &str) -> i32 {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use server::entity::user;
+
+    user::Entity::find()
+        .filter(user::Column::Username.eq(username))
+        .one(&app.db)
+        .await
+        .expect("query user")
+        .expect("user exists")
+        .id
+}
+
+#[tokio::test]
+async fn a_scoped_querier_decides_only_its_contest_types() {
+    let app = TestApp::spawn_with_plugins().await;
+    let admin_token = app
+        .create_user_with_role("scope_admin", "pass1234", "admin")
+        .await;
+    let token = app
+        .create_authenticated_user("scope_viewer", "pass1234")
+        .await;
+    let viewer = user_id(&app, "scope_viewer").await;
+    let (governed, in_governed) =
+        typed_contest_with_submission(&app, &admin_token, "governed-type", viewer).await;
+    let (other, in_other) =
+        typed_contest_with_submission(&app, &admin_token, "other-type", viewer).await;
+    seed_kv(
+        &app,
+        "deny_resource_keys",
+        &format!("submission:{in_governed},submission:{in_other}"),
+    )
+    .await;
+    scope_fixture_to(&app, "governed-type").await;
+
+    // Its own type: the plugin is consulted, its Deny holds, and the count
+    // is withheld.
+    let res = app
+        .get_with_token(&routes::contest_submissions(governed), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["data"], serde_json::json!([]));
+    assert!(res.body["pagination"]["total"].is_null(), "{}", res.text);
+
+    // Another type: the plugin is not consulted, so its Deny for this row
+    // has no effect, and the exact total comes back.
+    let res = app
+        .get_with_token(&routes::contest_submissions(other), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let ids: Vec<i64> = res.body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![in_other as i64]);
+    assert_eq!(res.body["pagination"]["total"], 1);
+    let res = app
+        .get_with_token(&routes::submission(in_other), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let res = app
+        .get_with_token(&routes::submission(in_governed), &token)
+        .await;
+    assert_eq!(res.status, 404, "{}", res.text);
+}
+
+#[tokio::test]
+async fn an_unscoped_querier_still_decides_every_contest_type() {
+    let app = TestApp::spawn_with_plugins().await;
+    let admin_token = app
+        .create_user_with_role("unscoped_admin", "pass1234", "admin")
+        .await;
+    let token = app
+        .create_authenticated_user("unscoped_viewer", "pass1234")
+        .await;
+    let viewer = user_id(&app, "unscoped_viewer").await;
+    let (contest, submission) =
+        typed_contest_with_submission(&app, &admin_token, "any-type", viewer).await;
+    seed_kv(
+        &app,
+        "deny_resource_keys",
+        &format!("submission:{submission}"),
+    )
+    .await;
+
+    let res = app
+        .get_with_token(&routes::contest_submissions(contest), &token)
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(res.body["data"], serde_json::json!([]));
+    assert!(res.body["pagination"]["total"].is_null(), "{}", res.text);
 }

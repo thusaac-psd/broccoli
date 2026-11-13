@@ -95,7 +95,7 @@ async fn icpc_contest_full_lifecycle() {
         )
         .await;
     assert_eq!(list.status, 200);
-    let total = list.body["pagination"]["total"].as_u64().unwrap();
+    let total = list.body["data"].as_array().unwrap().len() as u64;
     assert!(
         total >= 4,
         "Contest should have at least 4 submissions, got {total}"
@@ -178,7 +178,7 @@ async fn ioi_contest_full_lifecycle() {
         )
         .await;
     assert_eq!(list.status, 200);
-    let total = list.body["pagination"]["total"].as_u64().unwrap();
+    let total = list.body["data"].as_array().unwrap().len() as u64;
     assert!(
         total >= 4,
         "Contest should have at least 4 submissions, got {total}"
@@ -265,7 +265,7 @@ async fn mixed_contest_with_multiple_problems_and_contestants() {
         )
         .await;
     assert_eq!(list.status, 200);
-    let total = list.body["pagination"]["total"].as_u64().unwrap();
+    let total = list.body["data"].as_array().unwrap().len() as u64;
     assert_eq!(
         total, 6,
         "Contest should have exactly 6 submissions, got {total}"
@@ -278,7 +278,7 @@ async fn mixed_contest_with_multiple_problems_and_contestants() {
         )
         .await;
     assert_eq!(p2_list.status, 200);
-    let p2_total = p2_list.body["pagination"]["total"].as_u64().unwrap();
+    let p2_total = p2_list.body["data"].as_array().unwrap().len() as u64;
     assert_eq!(
         p2_total, 2,
         "Problem B should have 2 submissions (user1 + user3), got {p2_total}"

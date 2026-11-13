@@ -16,8 +16,6 @@ import { Button, FilterDropdown } from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   BookOpen,
-  ChevronLeft,
-  ChevronRight,
   Code2,
   ListFilter,
   Loader2,
@@ -34,7 +32,9 @@ import {
   fetchAllContestSubmissions,
   fetchContestSubmissions,
 } from '@/features/submission/api/fetch-contest-submissions';
+import { useCursorPages } from '@/features/submission/hooks/use-cursor-pages';
 
+import { SubmissionListPager } from './SubmissionListPager';
 import { SubmissionsTable } from './SubmissionsTable';
 
 const PER_PAGE = 20;
@@ -72,7 +72,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       ? undefined
       : user?.id;
 
-  const page = parsePositiveInt(searchParams.get('page')) ?? 1;
+  const pages = useCursorPages();
   const appliedProblemId = parsePositiveInt(searchParams.get('problem'));
   const appliedLanguage = searchParams.get('language') ?? null;
   const appliedStatus = parseStatus(searchParams.get('status'));
@@ -95,7 +95,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
   const updateSearchParams = useCallback(
     (
       updates: {
-        page?: number;
         problem?: number | null;
         language?: string | null;
         status?: SubmissionStatusFilterValue;
@@ -103,18 +102,14 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       options?: { replace?: boolean },
     ) => {
       const next = new URLSearchParams(searchParams);
-      const nextPage = updates.page ?? page;
       const nextProblem =
         updates.problem === undefined ? appliedProblemId : updates.problem;
       const nextLanguage =
         updates.language === undefined ? appliedLanguage : updates.language;
       const nextStatus = updates.status ?? appliedStatus;
 
-      if (nextPage <= 1) {
-        next.delete('page');
-      } else {
-        next.set('page', String(nextPage));
-      }
+      // Any filter change starts the list over.
+      next.delete('cursor');
 
       if (nextProblem) {
         next.set('problem', String(nextProblem));
@@ -140,7 +135,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       appliedLanguage,
       appliedProblemId,
       appliedStatus,
-      page,
       searchParams,
       setSearchParams,
     ],
@@ -161,7 +155,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       String(appliedProblemId ?? 'all'),
       String(appliedLanguage ?? 'all'),
       appliedStatus,
-      page,
+      pages.cursor,
     ],
     enabled: !!user,
     queryFn: () =>
@@ -171,7 +165,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
         language: appliedLanguage,
         status: toSubmissionStatus(appliedStatus),
         userId: scopedUserId,
-        page,
+        cursor: pages.cursor,
         per_page: PER_PAGE,
         sort_by: 'created_at',
         sort_order: 'desc',
@@ -364,7 +358,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
     const nextProblemId =
       draftProblemId === 'all' ? null : Number(draftProblemId);
     updateSearchParams({
-      page: 1,
       problem: nextProblemId,
       language: draftLanguage === 'all' ? null : draftLanguage,
       status: draftStatus,
@@ -573,38 +566,13 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
         )}
       </div>
 
-      {/* Pagination */}
-      {pagination && pagination.total_pages > 1 && (
-        <div className="flex items-center justify-between text-sm text-muted-foreground">
-          <span className="tabular-nums">
-            {(page - 1) * PER_PAGE + 1}–
-            {Math.min(page * PER_PAGE, pagination.total)} of {pagination.total}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8"
-              disabled={page <= 1}
-              onClick={() => updateSearchParams({ page: page - 1 })}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-            <span className="px-3 text-sm tabular-nums">
-              {page} / {pagination.total_pages}
-            </span>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-8 w-8"
-              disabled={page >= pagination.total_pages}
-              onClick={() => updateSearchParams({ page: page + 1 })}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      )}
+      <SubmissionListPager
+        pagination={pagination}
+        page={pages.page}
+        hasPrevious={pages.hasPrevious}
+        onNext={pages.next}
+        onPrevious={pages.previous}
+      />
     </div>
   );
 }

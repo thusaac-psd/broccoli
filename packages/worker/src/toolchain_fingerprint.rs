@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -54,11 +55,122 @@ pub fn default_probes() -> &'static [Probe] {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn compute(probes: &[Probe]) -> String {
+/// The toolchains this worker compiles with, as far as its probes could tell.
+/// Part of every compile-cache key, so two workers share compiled artifacts
+/// only when their toolchains match.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolchainFingerprint {
+    /// Every probe either reported a version or found its toolchain absent.
+    Known(String),
+    /// A probe failed in a way that says nothing about the toolchain (it
+    /// timed out, exited non-zero, or could not be started for a reason other
+    /// than the binary being absent). No cache key built from it can be
+    /// trusted, so this worker compiles without the cache.
+    Unreliable,
+}
+
+impl ToolchainFingerprint {
+    /// The fingerprint to key the compile cache with, if it is trustworthy.
+    pub fn cache_key_part(&self) -> Option<&str> {
+        match self {
+            Self::Known(fingerprint) => Some(fingerprint),
+            Self::Unreliable => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ToolchainFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(fingerprint) => f.write_str(fingerprint),
+            Self::Unreliable => f.write_str("unreliable"),
+        }
+    }
+}
+
+/// This worker's current fingerprint. One that starts out unreliable is
+/// probed again in the background until it is known, so a transient probe
+/// failure at boot does not disable the compile cache for the life of the
+/// process. Cloning shares it.
+#[derive(Clone, Debug)]
+pub struct SharedFingerprint(Arc<RwLock<ToolchainFingerprint>>);
+
+impl From<ToolchainFingerprint> for SharedFingerprint {
+    fn from(fingerprint: ToolchainFingerprint) -> Self {
+        Self(Arc::new(RwLock::new(fingerprint)))
+    }
+}
+
+/// First and longest delay between re-probes of an unreliable fingerprint.
+const REPROBE_START: Duration = Duration::from_secs(5);
+const REPROBE_MAX: Duration = Duration::from_secs(300);
+
+impl SharedFingerprint {
+    pub fn current(&self) -> ToolchainFingerprint {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Probe `probes` now, and keep re-probing in the background while the
+    /// result is unreliable.
+    pub async fn probe(probes: &'static [Probe]) -> Self {
+        Self::probe_with(move || compute(probes)).await
+    }
+
+    async fn probe_with<F, Fut>(probe: F) -> Self
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ToolchainFingerprint> + Send,
+    {
+        let shared = Self::from(probe().await);
+        if shared.current() == ToolchainFingerprint::Unreliable {
+            warn!(
+                "Toolchain fingerprint unreliable; compile cache disabled until a re-probe succeeds"
+            );
+            let retry = shared.clone();
+            tokio::spawn(async move { retry.reprobe(probe).await });
+        }
+        shared
+    }
+
+    async fn reprobe<F, Fut>(&self, probe: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = ToolchainFingerprint>,
+    {
+        let mut delay = REPROBE_START;
+        loop {
+            tokio::time::sleep(delay).await;
+            let fingerprint = probe().await;
+            if fingerprint != ToolchainFingerprint::Unreliable {
+                info!(fingerprint = %fingerprint, "Toolchain re-probe succeeded; compile cache enabled");
+                *self.0.write().unwrap_or_else(|e| e.into_inner()) = fingerprint;
+                return;
+            }
+            delay = (delay * 2).min(REPROBE_MAX);
+            warn!(
+                retry_in_secs = delay.as_secs(),
+                "Toolchain re-probe still unreliable"
+            );
+        }
+    }
+}
+
+/// What one probe found.
+enum ProbeOutcome {
+    Version(String),
+    Absent,
+    Failed,
+}
+
+pub async fn compute(probes: &[Probe]) -> ToolchainFingerprint {
     let mut entries: Vec<(&'static str, String)> = Vec::with_capacity(probes.len());
     for probe in probes {
-        let outcome = probe_one(probe).await;
-        entries.push((probe.name, outcome));
+        let entry = match probe_one(probe).await {
+            ProbeOutcome::Version(version) => version,
+            ProbeOutcome::Absent => "absent".to_string(),
+            ProbeOutcome::Failed => return ToolchainFingerprint::Unreliable,
+        };
+        entries.push((probe.name, entry));
     }
     entries.sort_by_key(|(name, _)| *name);
 
@@ -69,10 +181,10 @@ pub async fn compute(probes: &[Probe]) -> String {
         hasher.update(output.as_bytes());
         hasher.update(b"\0");
     }
-    hex::encode(hasher.finalize())
+    ToolchainFingerprint::Known(hex::encode(hasher.finalize()))
 }
 
-async fn probe_one(probe: &Probe) -> String {
+async fn probe_one(probe: &Probe) -> ProbeOutcome {
     let mut cmd = Command::new(probe.command);
     cmd.args(probe.args);
     cmd.kill_on_drop(true);
@@ -84,35 +196,32 @@ async fn probe_one(probe: &Probe) -> String {
             combined.extend_from_slice(&output.stderr);
             let text = String::from_utf8_lossy(&combined).trim().to_string();
             info!(probe = probe.name, version = %text, "toolchain probe succeeded");
-            text
+            ProbeOutcome::Version(text)
         }
-        // KNOWN LIMITATION (low severity): a TRANSIENT probe failure (non-zero
-        // exit, spawn error, timeout below) collapses to the same stable
-        // "unavailable" token as a genuinely-absent toolchain. Because this token
-        // feeds the compile-cache key, a binary compiled on a worker whose probe
-        // transiently failed can be reused on a worker with a DIFFERENT actual
-        // toolchain whose probe also failed - a wrong-toolchain cache hit -> wrong
-        // compile output -> wrong verdict. The correct fix is to treat a probe
-        // failure as an UNRELIABLE fingerprint and have the caller skip the
-        // compile cache for that operation (a cache-contract change), not to emit
-        // a stable token here.
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             warn!(
                 probe = probe.name,
                 exit_code = output.status.code(),
                 stderr = %stderr,
-                "toolchain probe exited non-zero"
+                "toolchain probe exited non-zero; compile cache disabled"
             );
-            "unavailable".to_string()
+            ProbeOutcome::Failed
+        }
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            info!(probe = probe.name, "toolchain not installed");
+            ProbeOutcome::Absent
         }
         Ok(Err(e)) => {
-            warn!(probe = probe.name, error = %e, "toolchain probe failed to spawn");
-            "unavailable".to_string()
+            warn!(probe = probe.name, error = %e, "toolchain probe failed to spawn; compile cache disabled");
+            ProbeOutcome::Failed
         }
         Err(_) => {
-            warn!(probe = probe.name, "toolchain probe timed out");
-            "unavailable".to_string()
+            warn!(
+                probe = probe.name,
+                "toolchain probe timed out; compile cache disabled"
+            );
+            ProbeOutcome::Failed
         }
     }
 }
@@ -124,8 +233,7 @@ mod tests {
     #[tokio::test]
     async fn compute_returns_nonempty_for_empty_probe_list() {
         let fp = compute(&[]).await;
-        assert!(!fp.is_empty());
-        assert_eq!(fp.len(), 64);
+        assert_eq!(fp.cache_key_part().map(str::len), Some(64));
     }
 
     #[tokio::test]
@@ -191,19 +299,36 @@ mod tests {
         assert_ne!(compute(&p1).await, compute(&p2).await);
     }
 
-    #[tokio::test]
-    async fn compute_handles_missing_binary() {
-        let probes = [Probe {
-            name: "nonexistent",
-            command: "/path/that/does/not/exist/never-ever-binary",
-            args: &[],
-        }];
-        let fp = compute(&probes).await;
-        assert!(!fp.is_empty());
+    #[tokio::test(start_paused = true)]
+    async fn an_unreliable_fingerprint_is_reprobed_until_known() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe = {
+            let calls = calls.clone();
+            move || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        ToolchainFingerprint::Unreliable
+                    } else {
+                        ToolchainFingerprint::Known("fp".into())
+                    }
+                }
+            }
+        };
+        let shared = SharedFingerprint::probe_with(probe).await;
+        assert_eq!(shared.current(), ToolchainFingerprint::Unreliable);
+
+        // Paused time auto-advances to each sleep: 5s, then 10s.
+        while shared.current() == ToolchainFingerprint::Unreliable {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert_eq!(shared.current(), ToolchainFingerprint::Known("fp".into()));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn compute_treats_missing_binary_as_stable_unavailable() {
+    async fn missing_binaries_give_the_same_known_fingerprint() {
         let missing = [Probe {
             name: "x",
             command: "/no-such-binary-a",
@@ -214,6 +339,27 @@ mod tests {
             command: "/no-such-binary-b",
             args: &[],
         }];
-        assert_eq!(compute(&missing).await, compute(&also_missing).await);
+        let fp = compute(&missing).await;
+        assert!(fp.cache_key_part().is_some());
+        assert_eq!(fp, compute(&also_missing).await);
+    }
+
+    #[tokio::test]
+    async fn a_failing_probe_makes_the_fingerprint_unreliable() {
+        let probes = [
+            Probe {
+                name: "ok",
+                command: "/bin/echo",
+                args: &["1"],
+            },
+            Probe {
+                name: "broken",
+                command: "/bin/false",
+                args: &[],
+            },
+        ];
+        let fp = compute(&probes).await;
+        assert_eq!(fp, ToolchainFingerprint::Unreliable);
+        assert_eq!(fp.cache_key_part(), None);
     }
 }

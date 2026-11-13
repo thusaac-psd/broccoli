@@ -1,5 +1,4 @@
-use crate::host_funcs::evaluate_ops_registry::EvaluateBatchOpsRegistry;
-use crate::registry::OperationWaiters;
+use crate::registry::{EvaluateBatches, OperationWaiters};
 use common::metrics::Metrics;
 use common::worker::{TaskReply, TaskResult};
 use mq::ReplyInbox;
@@ -12,7 +11,7 @@ use tracing::{debug, error, info, warn};
 pub async fn consume_operation_results(
     mut inbox: ReplyInbox,
     waiters: OperationWaiters,
-    evaluate_ops_registry: EvaluateBatchOpsRegistry,
+    evaluate_batches: EvaluateBatches,
     metrics: Metrics,
 ) {
     info!(stream = %inbox.key(), "Starting operation result consumer");
@@ -29,7 +28,7 @@ pub async fn consume_operation_results(
             match reply {
                 Ok(reply) => {
                     crate::consumers::guard_handler("operation_result", async {
-                        handle_reply(reply, &waiters, &evaluate_ops_registry, &metrics)
+                        handle_reply(reply, &waiters, &evaluate_batches, &metrics)
                     })
                     .await;
                 }
@@ -50,19 +49,16 @@ pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
         let Some((_, waiter)) = waiters.remove(&task_id) else {
             continue;
         };
-        let tx = waiter.result_tx.lock().ok().and_then(|mut g| g.take());
-        if let Some(tx) = tx {
-            let _ = tx.send(TaskResult {
-                task_id,
-                success: false,
-                output: serde_json::json!({}),
-                error: Some(reason.to_string()),
-                task_type: None,
-                operation: None,
-                worker_id: None,
-            });
-            failed += 1;
-        }
+        let _ = waiter.result_tx.send(TaskResult {
+            task_id,
+            success: false,
+            output: serde_json::json!({}),
+            error: Some(reason.to_string()),
+            task_type: None,
+            operation: None,
+            worker_id: None,
+        });
+        failed += 1;
     }
     if failed > 0 {
         error!(failed, reason, "Failed every outstanding operation");
@@ -73,14 +69,25 @@ pub fn fail_all_waiters(waiters: &OperationWaiters, reason: &str) -> usize {
 fn handle_reply(
     reply: TaskReply,
     waiters: &OperationWaiters,
-    evaluate_ops_registry: &EvaluateBatchOpsRegistry,
+    evaluate_batches: &EvaluateBatches,
     metrics: &Metrics,
 ) {
     let started = std::time::Instant::now();
     let (reply_type, outcome, task_success) = match reply {
         TaskReply::Started { notification } => {
             let task_id = notification.task_id;
-            let outcome = if evaluate_ops_registry.mark_operation_started(&task_id) {
+            // The start is timed by this server's monotonic clock on
+            // receipt, never by the worker's clock.
+            let case = waiters
+                .get(&task_id)
+                .and_then(|waiter| waiter.evaluate_case.clone());
+            let outcome = if case.is_some_and(|case| {
+                evaluate_batches.mark_case_started(
+                    &case.batch_id,
+                    case.test_case_id,
+                    std::time::Instant::now(),
+                )
+            }) {
                 debug!(%task_id, "Operation start delivered to evaluate batch registry");
                 "started"
             } else {
@@ -94,26 +101,12 @@ fn handle_reply(
             let task_success = result.success;
             let outcome = if let Some((_, waiter)) = waiters.remove(&task_id) {
                 let elapsed = waiter.published_at.elapsed();
-                let tx = waiter
-                    .result_tx
-                    .lock()
-                    .ok()
-                    .and_then(|mut guard| guard.take());
-                let outcome = match tx {
-                    Some(tx) => match tx.send(result.clone()) {
-                        Ok(()) => {
-                            debug!(%task_id, "Operation result delivered to plugin");
-                            "delivered"
-                        }
-                        Err(_) => {
-                            error!(%task_id, "Failed to send operation result to waiter (receiver dropped)");
-                            "receiver_dropped"
-                        }
-                    },
-                    None => {
-                        error!(%task_id, "Operation result waiter sender missing");
-                        "receiver_dropped"
-                    }
+                let outcome = if waiter.result_tx.send(result.clone()).is_err() {
+                    error!(%task_id, "Failed to send operation result to waiter (receiver dropped)");
+                    "receiver_dropped"
+                } else {
+                    debug!(%task_id, "Operation result delivered to plugin");
+                    "delivered"
                 };
                 crate::services::operation_batch::record_operation_result_e2e(
                     metrics, &result, outcome, elapsed,
@@ -152,8 +145,8 @@ mod tests {
         let waiters: OperationWaiters = Arc::new(DashMap::new());
         let (tx_a, rx_a) = tokio::sync::oneshot::channel();
         let (tx_b, rx_b) = tokio::sync::oneshot::channel();
-        waiters.insert("a".into(), OperationWaiter::new(tx_a));
-        waiters.insert("b".into(), OperationWaiter::new(tx_b));
+        waiters.insert("a".into(), OperationWaiter::new(tx_a, None));
+        waiters.insert("b".into(), OperationWaiter::new(tx_b, None));
 
         assert_eq!(fail_all_waiters(&waiters, "stream lost"), 2);
         assert!(waiters.is_empty());

@@ -47,9 +47,9 @@ impl FanoutSemaphore {
     }
 
     /// Acquire one permit, awaiting if none is immediately available. Emits
-    /// `broccoli.batch_evaluator.fanout.wait.duration` for every acquire (so
+    /// `broccoli.evaluate_batch.fanout.wait.duration` for every acquire (so
     /// the full distribution is visible), and increments
-    /// `broccoli.batch_evaluator.fanout.saturated` only when the acquire
+    /// `broccoli.evaluate_batch.fanout.saturated` only when the acquire
     /// blocked beyond `SATURATION_THRESHOLD_MS`.
     pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
         let start = Instant::now();
@@ -59,11 +59,11 @@ impl FanoutSemaphore {
         if let Some(metrics) = self.metrics.as_ref() {
             let labels = [KeyValue::new("batch.kind", "evaluate")];
             metrics
-                .batch_evaluator_fanout_wait_duration
+                .evaluate_batch_fanout_wait_duration
                 .record(elapsed_ms, &labels);
             if elapsed_ms >= SATURATION_THRESHOLD_MS {
                 metrics
-                    .batch_evaluator_fanout_saturated_total
+                    .evaluate_batch_fanout_saturated_total
                     .add(1, &labels);
             }
         }

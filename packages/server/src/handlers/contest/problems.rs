@@ -192,7 +192,7 @@ pub async fn list_contest_problems(
     // decision the same as `Allow`, and this decision's contest is never
     // rendered from here, so `Redact` degenerates to `Allow`. No plugin
     // currently returns `Redact` for `Resource::Contest`, so this is a
-    // documented no-op today, not a live bug - see Task 20 Item 6.
+    // documented no-op today, not a live bug.
     if contest_visible.is_none() {
         return Err(AppError::NotFound("Contest not found".into()));
     }
@@ -204,7 +204,7 @@ pub async fn list_contest_problems(
     // rejection (a 400, not a reachability outcome), so that check is
     // re-applied here on top of the kernel's `Allow`.
     let contest_model = find_contest(&state.db, contest_id).await?;
-    require_contest_started(&auth_user, &contest_model)?;
+    require_contest_started(&auth_user, &contest_model, chrono::Utc::now())?;
 
     // A denied problem is omitted from the list, never rendered as a
     // placeholder - a placeholder would confirm it exists, the exact fact a
