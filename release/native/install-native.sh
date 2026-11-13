@@ -96,24 +96,34 @@ apt_ensure(){ # install pkgs only if missing (works against a local apt mirror)
 }
 
 # The message queue needs Redis 7 or newer (stream commands from 6.2 and 7.0);
-# Ubuntu 22.04 ships 6.0. Older Redis gets the packages.redis.io repository
-# when it is reachable; on an airgap, the mirror must carry Redis 7.
+# Ubuntu 22.04 ships 6.0.
 redis_major(){ redis-server --version 2>/dev/null | sed -n 's/.* v=\([0-9]*\)\..*/\1/p'; }
-# Order mirrors ensure_toolchain: bundled .debs matching this Ubuntu version
-# (stage-redis.sh) -> packages.redis.io (online) -> the system apt. An
-# air-gapped lab has only the bundle, so the set ships in the release.
+# Sources, in order: the bundled .debs for this Ubuntu version
+# (stage-redis.sh), then the system apt (24.04 and newer ship Redis 7, and a
+# LAN mirror may), then packages.redis.io. An air-gapped lab has only the
+# bundle, so the set ships in the release. A bundled set that does not install
+# stops the install with dpkg's own output.
 ensure_redis7(){
-  local ver debs
+  local ver debs log status
   [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
   ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
   debs="$BUNDLE/redis/$ver"
-  # 1) offline: the bundled set for this Ubuntu version, if shipped.
   if ls "$debs"/*.deb >/dev/null 2>&1; then
     echo ">> installing bundled Redis 7 for Ubuntu $ver ($debs)"
-    dpkg -i --skip-same-version "$debs"/*.deb >/dev/null 2>&1 || apt-get install -fy >/dev/null 2>&1 || true
+    log="$(mktemp)"
+    if ! dpkg -i --skip-same-version "$debs"/*.deb >"$log" 2>&1; then
+      cat "$log" >&2
+      rm -f "$log"
+      die "dpkg could not install the bundled Redis 7 set in $debs (output above)"
+    fi
+    rm -f "$log"
+    status="$(dpkg-query -W -f='${Status}' redis-server 2>/dev/null || true)"
+    [ "$status" = "install ok installed" ] \
+      || die "dpkg left redis-server as '${status:-not installed}' after installing $debs"
+    [ "$(redis_major)" -ge 7 ] 2>/dev/null \
+      || die "the bundled set in $debs installed Redis $(redis_major), not 7 or newer; restage it with ./stage-redis.sh"
+    return 0
   fi
-  [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
-  # 2) online: the system apt (24.04 and newer ship Redis 7), then the Redis repo.
   apt_ensure redis-server
   [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
   echo ">> redis-server $(redis_major) is older than 7; installing Redis 7 from packages.redis.io"
@@ -121,7 +131,8 @@ ensure_redis7(){
   if curl -fsSL https://packages.redis.io/gpg | gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg; then
     echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${VERSION_CODENAME} main" \
       > /etc/apt/sources.list.d/redis.list
-    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis || true
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis \
+      || die "installing Redis 7 from packages.redis.io failed (apt output above)"
   fi
   [ "$(redis_major)" -ge 7 ] 2>/dev/null \
     || die "Broccoli needs Redis 7 or newer, found $(redis_major). Bundle it with ./stage-redis.sh, or install Redis 7 (packages.redis.io, or a LAN mirror) and re-run."
