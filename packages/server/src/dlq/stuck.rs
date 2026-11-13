@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use common::{DlqConfig, StatusPhase};
+use common::DlqConfig;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use tracing::{error, info, warn};
 
@@ -90,9 +90,9 @@ async fn observe_old_queued_backlog(db: &DatabaseConnection) -> anyhow::Result<(
                 DbBackend::Postgres,
                 format!(
                     "SELECT COUNT(*)::bigint AS n FROM {table} \
-                     WHERE status IN {queued} \
+                     WHERE {queued} \
                        AND queued_at < NOW() - make_interval(secs => $1)",
-                    queued = StatusPhase::Queued.sql_list(),
+                    queued = crate::dispatcher::QUEUED_PREDICATE,
                 ),
                 [(QUEUED_OBSERVABILITY_THRESHOLD_SECS as f64).into()],
             ))
