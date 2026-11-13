@@ -1,6 +1,9 @@
 //! broccoli print-client. Polls servers for jobs, renders highlighted PDFs,
 //! and prints them at a station.
 
+// A print station stamps job sheets with its own local time.
+#![allow(clippy::disallowed_methods)]
+
 mod api;
 mod config;
 mod doctor;

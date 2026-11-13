@@ -1,3 +1,6 @@
+// Unique run names from this host's time.
+#![allow(clippy::disallowed_methods)]
+
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 

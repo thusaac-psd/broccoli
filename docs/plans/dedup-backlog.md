@@ -94,12 +94,3 @@ Done already (for reference on the pattern):
    loop across a sync and an async HTTP stack would need a trait heavier than
    the code it replaces. Revisit if both move to one HTTP client or one auth
    flow.
-
-3. **The wall-clock ban in `clippy.toml`** (blocked by the tool).
-   `packages/server/clippy.toml`, `packages/common/clippy.toml` and
-   `packages/worker/clippy.toml` are one file in three places: clippy reads its
-   configuration from the linted crate's directory, and a workspace-root file
-   would also ban the local clock in the CLIs and the stress test, which show
-   local time on purpose. `server`'s
-   `the_wall_clock_ban_is_the_same_in_every_crate_that_carries_it` pins the
-   three equal. Revisit if clippy gains per-crate includes.

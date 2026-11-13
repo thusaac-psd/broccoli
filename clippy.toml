@@ -1,11 +1,8 @@
 # Wall time compared with another node's wall time comes from the platform
 # clock (`common::clock::PlatformClock`, or SQL `now()`); durations come from
-# `Instant`. Reading this host's own wall clock lets nodes disagree.
-#
-# Clippy reads this file per crate: packages/server, packages/common and
-# packages/worker carry the same one, which a server test pins equal. The one
-# exception is the clock itself (common/src/clock.rs), which reads the local
-# clock to report this host's offset.
+# `Instant`. Reading this host's own wall clock lets nodes disagree. Clippy
+# finds this file from every crate below it; tools that show local time on
+# purpose allow the lint at their crate root.
 disallowed-methods = [
   { path = "chrono::Utc::now", reason = "use the platform clock (`common::clock::PlatformClock`) or SQL `now()`" },
   { path = "chrono::Local::now", reason = "use the platform clock (`common::clock::PlatformClock`) or SQL `now()`" },

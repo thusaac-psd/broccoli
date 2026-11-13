@@ -547,15 +547,6 @@ mod tests {
         }
     }
 
-    /// Clippy reads its config per crate, so the wall-clock ban is one file
-    /// in each crate that compares wall time across nodes.
-    #[test]
-    fn the_wall_clock_ban_is_the_same_in_every_crate_that_carries_it() {
-        let server = include_str!("../clippy.toml");
-        assert_eq!(server, include_str!("../../common/clippy.toml"));
-        assert_eq!(server, include_str!("../../worker/clippy.toml"));
-    }
-
     #[test]
     fn http_date_is_imf_fixdate() {
         let at = chrono::DateTime::from_timestamp(784_111_777, 0).unwrap();

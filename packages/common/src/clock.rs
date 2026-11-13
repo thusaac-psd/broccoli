@@ -24,10 +24,9 @@
 //!   set back) is followed, with a warning.
 //!
 //! Durations (deadlines, leases, backoff, metrics) stay on `Instant`: only
-//! wall time compared with another node's wall time comes from here. In the
-//! server, worker and common crates `Utc::now()` and `SystemTime::now()` are
-//! disallowed by `clippy.toml`, so a new comparison cannot quietly read the
-//! local clock.
+//! wall time compared with another node's wall time comes from here. The
+//! workspace `clippy.toml` disallows `Utc::now()` and `SystemTime::now()`, so
+//! a new comparison cannot quietly read the local clock.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
