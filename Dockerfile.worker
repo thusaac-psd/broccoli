@@ -140,6 +140,14 @@ RUN if [ "$USE_CN_MIRRORS" = "true" ]; then \
       pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
+# The installed config raises isolate's `num_boxes` from 1000 to 10000. Box ids
+# are a host-wide namespace every worker on the host shares, and one test case
+# can need a box per contestant process (a communication problem allows up to
+# 64) plus a manager and a compile box, so judging must never run out of ids.
+# Box N runs as uid `first_uid + N`, so these ids are uids 60000..69999, clear
+# of real accounts: useradd allocates below 60000, and systemd reserves
+# 61184..65519 for dynamic users, which this image never creates. Keep this in
+# step with release/native/config/isolate.conf.
 RUN isolate_repo="$ISOLATE_REPO" && \
     if [ "$USE_CN_MIRRORS" = "true" ] && [ -n "$ISOLATE_REPO_CN_MIRROR" ]; then \
       isolate_repo="$ISOLATE_REPO_CN_MIRROR"; \
@@ -151,7 +159,10 @@ RUN isolate_repo="$ISOLATE_REPO" && \
     install -m 0755 isolate-check-environment /out/isolate/usr/local/bin/isolate-check-environment && \
     install -m 0755 isolate-cg-keeper /out/isolate/usr/local/sbin/isolate-cg-keeper && \
     install -m 0644 default.cf /out/isolate/usr/local/etc/isolate && \
-    install -m 0644 default.cf /out/isolate/usr/local/share/isolate/default.cf
+    install -m 0644 default.cf /out/isolate/usr/local/share/isolate/default.cf && \
+    sed -i 's/^#\? *num_boxes *=.*/num_boxes = 10000/' \
+      /out/isolate/usr/local/etc/isolate && \
+    grep -q '^num_boxes = 10000$' /out/isolate/usr/local/etc/isolate
 
 FROM ${RUNTIME_IMAGE} AS runtime-base
 

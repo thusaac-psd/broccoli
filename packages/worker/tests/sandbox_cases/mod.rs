@@ -71,6 +71,7 @@ macro_rules! sandbox_suite {
             empty_pipe_name_fails_the_step,
             two_envs_share_a_mapped_directory,
             a_later_operation_never_sees_files_an_earlier_one_left,
+            a_many_process_operation_gets_a_box_for_every_environment,
             shared_channel_fifo_between_two_environments,
             channel_pipe_io_redirect_between_environments,
             non_channel_pipe_still_works_with_channels_present,
@@ -689,6 +690,31 @@ pub async fn two_envs_share_a_mapped_directory<B: Backend>() {
     assert_eq!(consumer.sandbox_result.exit_code, Some(0));
 
     let _ = std::fs::remove_dir_all(&shared_dir);
+}
+
+/// A communication problem runs one box per contestant process (up to 64),
+/// plus the manager and its compile box, so one operation can need far more
+/// boxes than a batch problem. Every environment must get its own box, and
+/// nothing may hand two of them the same box id: `isolate --init` on a box in
+/// use re-initialises it under the running program.
+pub async fn a_many_process_operation_gets_a_box_for_every_environment<B: Backend>() {
+    const ENVIRONMENTS: usize = 66;
+    let ids: Vec<String> = (0..ENVIRONMENTS).map(|i| format!("env-{i}")).collect();
+    let result = handler::<B>(None)
+        .execute(&operation(
+            ids.iter().map(|id| env(id)).collect(),
+            ids.iter()
+                // Each box writes its own name, then reads it back: a box
+                // re-initialised under a running step loses the file.
+                .map(|id| sh(id, id, &format!("echo {id} > mine; grep -qx {id} mine")))
+                .collect(),
+            vec![],
+        ))
+        .await
+        .unwrap();
+
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.task_results.len(), ENVIRONMENTS);
 }
 
 pub async fn a_later_operation_never_sees_files_an_earlier_one_left<B: Backend>() {

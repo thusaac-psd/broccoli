@@ -207,6 +207,30 @@ mod tests {
             .expect("the sandboxes never met")
     }
 
+    /// A plan needing more boxes than the host provides is an infrastructure
+    /// error, so the whole operation fails with `Err` and the consumer retries
+    /// it. A verdict built from half an operation's boxes would blame the
+    /// contestant for a host limit.
+    #[tokio::test]
+    async fn an_operation_needing_more_boxes_than_the_host_has_fails_the_whole_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = Arc::new(Recording::new(dir.path()));
+        let handler = handler(&sandbox)
+            .with_box_ids(super::super::BoxIds::open(dir.path().join("ids"), 1).unwrap());
+
+        let err = handler
+            .execute(&two_box_operation())
+            .await
+            .expect_err("a two-box operation on a one-box host must fail");
+
+        assert!(
+            err.to_string().contains("needs 2 sandbox boxes")
+                && err.to_string().contains("host provides 1"),
+            "{err}"
+        );
+        assert!(sandbox.log().is_empty(), "no box was created");
+    }
+
     #[tokio::test]
     async fn an_operations_sandboxes_are_created_together() {
         let dir = tempfile::tempdir().unwrap();

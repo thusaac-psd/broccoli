@@ -43,6 +43,14 @@ max_age = 3600
 id = ""
 sandbox_backend = "isolate"
 isolate_bin = "isolate"
+# Read for `num_boxes`: the box ids every worker on this host shares.
+isolate_config = "/usr/local/etc/isolate"
+# One lock file per isolate box id lives here, and every worker on the host
+# must use the SAME directory, or two of them will initialise one box under
+# each other's running programs. Unset means a directory in the process temp
+# dir, which native installs share; worker containers each have a private
+# /tmp, so point them all at one shared volume.
+# box_id_lock_dir = "/var/lib/broccoli/box-ids"
 enable_cgroups = true
 max_concurrency = 1
 fairness_unsafe_allow = false

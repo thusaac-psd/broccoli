@@ -5,7 +5,7 @@ use super::super::sandbox::{
     DirectoryOptions, DirectoryRule, ExecutionResult, RunOptions, SandboxManager, SandboxStatus,
 };
 use super::super::task_cache::TaskCacheStore;
-use super::box_id::{allocate_box_id, next_channel_seq};
+use super::box_id::{BoxIds, next_channel_seq};
 use super::metrics::{sandbox_exit_kind, sandbox_status_label, step_kind};
 use super::paths::{
     create_fifo, platform_tool_directory_rule, resolve_step_output_src, stage_step_output_file,
@@ -22,6 +22,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{Instrument, debug, error, info, instrument, warn};
+
+/// How many box ids a handler built without [`OperationHandler::with_box_ids`]
+/// shares, as in isolate's default config.
+const DEFAULT_BOX_IDS: u32 = 1000;
 
 impl OperationHandler {
     pub fn new(
@@ -51,8 +55,15 @@ impl OperationHandler {
             cache,
             metrics,
             tools_dir: None,
+            box_ids: BoxIds::in_temp_dir(DEFAULT_BOX_IDS),
             teardown: Default::default(),
         }
+    }
+
+    /// Take box ids from `box_ids` (builder style, like `with_tools_dir`).
+    pub fn with_box_ids(mut self, box_ids: Arc<BoxIds>) -> Self {
+        self.box_ids = box_ids;
+        self
     }
 
     /// The file cacher this handler materializes blobs through. Anything else
@@ -140,16 +151,18 @@ impl OperationHandler {
         operation: &OperationTask,
         environments: &mut HashMap<String, EnvironmentList>,
     ) -> Result<()> {
-        let created = join_all(operation.environments.iter().map(|env_config| async move {
-            let box_id = allocate_box_id();
-            debug!(env_id = %env_config.id, box_id = %box_id, "Initializing environment");
-            let working_dir = self.create_sandbox(box_id.as_str()).await;
-            let loaded = match &working_dir {
-                Ok(dir) => self.load_environment_files(dir, &env_config.files_in).await,
-                Err(_) => Ok(()),
-            };
-            (env_config, box_id, working_dir, loaded)
-        }))
+        let box_ids = self.box_ids.reserve(operation.environments.len()).await?;
+        let created = join_all(operation.environments.iter().zip(box_ids).map(
+            |(env_config, box_id)| async move {
+                debug!(env_id = %env_config.id, box_id = %box_id, "Initializing environment");
+                let working_dir = self.create_sandbox(box_id.as_str()).await;
+                let loaded = match &working_dir {
+                    Ok(dir) => self.load_environment_files(dir, &env_config.files_in).await,
+                    Err(_) => Ok(()),
+                };
+                (env_config, box_id, working_dir, loaded)
+            },
+        ))
         .await;
 
         let mut first_error = None;
@@ -1819,7 +1832,12 @@ mod step_execution_tests {
 
         // The mock sandbox runs a real child: exit 0 leaves the collect file behind.
         let mock = MockSandboxManager::new(base.clone());
-        let box_id = allocate_box_id();
+        let box_id = BoxIds::in_temp_dir(DEFAULT_BOX_IDS)
+            .reserve(1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
         let working_dir = mock
             .create_sandbox(Some(box_id.as_str()))
             .await

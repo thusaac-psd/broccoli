@@ -142,6 +142,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
           git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
           sudo make -C "$RUNNER_TEMP/isolate" install
+          # Box ids are a host-wide namespace the workers share, and one
+          # communication test case can need a box per contestant process, so
+          # judging must never run out. Matches Dockerfile.worker and
+          # release/native/config/isolate.conf.
+          sudo sed -i 's/^#\? *num_boxes *=.*/num_boxes = 10000/' /usr/local/etc/isolate
+          grep -q '^num_boxes = 10000$' /usr/local/etc/isolate
           sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
           sudo systemctl daemon-reload
           sudo systemctl start isolate.service
