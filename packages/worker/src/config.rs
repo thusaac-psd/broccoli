@@ -108,7 +108,10 @@ pub struct WorkerConfig {
     /// a host must therefore lock its ids in the SAME directory. Native
     /// installs share the temp dir and need nothing. Separate containers each
     /// have a private `/tmp`, so every worker container on a host must point
-    /// this at one shared volume; the shipped compose templates do.
+    /// this at one shared volume; the shipped compose templates do. Whatever
+    /// it points at must be a directory nothing unlinks under a running
+    /// worker: a lock file recreated at the same path is a new inode, whose
+    /// lock is free while the old one is still held.
     #[serde(default)]
     pub box_id_lock_dir: Option<String>,
     /// The isolate config file, read for `num_boxes`: the box ids `0..num_boxes`

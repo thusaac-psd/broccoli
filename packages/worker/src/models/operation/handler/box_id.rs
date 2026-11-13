@@ -10,7 +10,13 @@
 //!
 //! `flock` locks belong to an open file, so a second open of the same lock
 //! file, in the same process or another, cannot take a held id: the lock is
-//! the one record of which ids are live. An operation takes all its ids at
+//! the one record of which ids are live. That makes the lock directory part
+//! of the guarantee: it must be a directory nothing unlinks under a running
+//! worker, because a new lock file at the same path is a new inode and its
+//! lock would be free while the old one is still held. Reserving an id
+//! refreshes its lock file's mtime, so an age-based temp-file cleaner leaves
+//! the ids in use alone; the shipped deployment templates point workers at a
+//! persistent volume instead. An operation takes all its ids at
 //! once or none, so two workers that each hold part of what they need never
 //! wait on each other.
 
