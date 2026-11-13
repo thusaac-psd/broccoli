@@ -52,13 +52,14 @@ impl NodeRole {
 }
 
 /// How long ago a liveness key was last renewed, from its remaining TTL in
-/// milliseconds (`PTTL`). `None` for a key without a TTL (`-1`) or a missing
-/// key (`-2`): neither is a live node.
-pub fn age_from_pttl(pttl_ms: i64) -> Option<Duration> {
-    let remaining = u64::try_from(pttl_ms).ok()?;
-    Some(Duration::from_millis(
-        (TTL.as_millis() as u64).saturating_sub(remaining),
-    ))
+/// milliseconds (`PTTL`). A key without a TTL (`-1`, which only a hand-made
+/// key has) reads as just renewed. Whether a node is live is only whether its
+/// key exists; this is how long ago it was renewed.
+pub fn age_from_pttl(pttl_ms: i64) -> Duration {
+    match u64::try_from(pttl_ms) {
+        Ok(remaining) => Duration::from_millis((TTL.as_millis() as u64).saturating_sub(remaining)),
+        Err(_) => Duration::ZERO,
+    }
 }
 
 /// One live node: its id, the payload it last wrote and the age of that write.
@@ -112,7 +113,7 @@ pub async fn live_nodes<C: ConnectionLike>(
             Some(LiveNode {
                 id: key.strip_prefix(role.key_prefix())?.to_string(),
                 payload: payload?,
-                age: age_from_pttl(pttl)?,
+                age: age_from_pttl(pttl),
             })
         })
         .collect())
@@ -125,10 +126,9 @@ mod tests {
     #[test]
     fn age_is_the_ttl_already_spent() {
         let full = TTL.as_millis() as i64;
-        assert_eq!(age_from_pttl(full), Some(Duration::ZERO));
-        assert_eq!(age_from_pttl(full - 4_000), Some(Duration::from_secs(4)));
-        assert_eq!(age_from_pttl(-1), None);
-        assert_eq!(age_from_pttl(-2), None);
+        assert_eq!(age_from_pttl(full), Duration::ZERO);
+        assert_eq!(age_from_pttl(full - 4_000), Duration::from_secs(4));
+        assert_eq!(age_from_pttl(-1), Duration::ZERO);
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_nodes_lists_only_keys_that_exist_with_a_ttl() {
+    async fn live_nodes_lists_every_existing_key_of_the_role() {
         use testcontainers::runners::AsyncRunner;
         let redis = testcontainers_modules::redis::Redis::default()
             .start()
@@ -176,8 +176,9 @@ mod tests {
 
         let live = live_nodes(&mut conn, NodeRole::Worker).await.unwrap();
         let ids: Vec<&str> = live.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(ids, ["a", "b"]);
+        assert_eq!(ids, ["a", "b", "no-ttl"]);
         assert!(live[0].age < Duration::from_secs(2));
         assert!(live[1].age >= Duration::from_secs(3));
+        assert_eq!(live[2].age, Duration::ZERO);
     }
 }
