@@ -104,6 +104,11 @@ The thread-local `CallScope` that carries the token, class, deadline and depth
 is installed and restored by a guard, so a panicking guest or host function
 cannot leave a stale scope behind.
 
+Plugin SQL is parked too, so more calls can wait on the database than there are
+tokens. The plugin database pools are sized from the token count and wait for
+a connection as long as the call timeout; `PoolSizes` in
+`packages/server/src/database.rs` states the rule.
+
 ## Nested calls
 
 `checker:resolve`, `checker:interpret` and `language:resolve`

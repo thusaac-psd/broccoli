@@ -53,6 +53,8 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 携带令牌、类别、截止时间和深度的线程局部 `CallScope` 由守卫安装和恢复，因此 panic 的客体或宿主函数不会留下过期的作用域。
 
+插件 SQL 同样会挂起，因此等待数据库的调用可以多于令牌数。插件数据库连接池按令牌数确定大小，并且等待连接的时间以调用超时为限；规则见 `packages/server/src/database.rs` 中的 `PoolSizes`。
+
 ## 嵌套调用
 
 `checker:resolve`、`checker:interpret` 和 `language:resolve`（`host_funcs/checker.rs`、`host_funcs/language.rs`）通过 `CallOptions::nested()` 回调插件。

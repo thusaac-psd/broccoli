@@ -240,8 +240,11 @@ plugin execution section below); nothing in this formula needs a server setting.
 **Database connections**
 
 Pools size themselves. A server wants at most 66 connections: 16 to 40 for
-handlers (4 per CPU), up to 24 for plugin host functions (from the evaluator
-admission), and 2 of its own (the claim listener and the clock). A worker
+handlers (4 per CPU), up to 24 for plugin host functions (one per plugin CPU
+token for plugin SQL, 4 to 16, and one per two tokens for plugin writes, 2 to
+8), and 2 of its own (the claim listener and the clock). A plugin call that
+finds its pool busy waits for a connection without holding a CPU token, for at
+most `plugin.call_timeout_secs`. A worker
 holds its slots plus 2, so 3 at the default `max_concurrency` of 1.
 
 At boot a server reads `max_connections`, keeps a tenth of it (at least 10)

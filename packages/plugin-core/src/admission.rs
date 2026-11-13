@@ -208,6 +208,13 @@ impl Capacity {
         }
     }
 
+    /// `max_concurrent_calls` tokens when configured (at least
+    /// [`MIN_TOKENS`]), else [`Self::for_this_host`]. The executor's admission
+    /// and the server's plugin database pools are both sized from this.
+    pub fn for_config(max_concurrent_calls: Option<usize>) -> Self {
+        max_concurrent_calls.map_or_else(Self::for_this_host, Self::new)
+    }
+
     /// [`TOKENS_PER_CORE`] tokens per core this process may use.
     pub fn for_this_host() -> Self {
         let cores = std::thread::available_parallelism()
