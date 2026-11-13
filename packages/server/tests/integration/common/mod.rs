@@ -600,7 +600,6 @@ impl TestApp {
                     "test-{db_name}-{}",
                     DB_COUNTER.fetch_add(1, Ordering::Relaxed)
                 ),
-                expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
@@ -609,7 +608,7 @@ impl TestApp {
                 // bulk of integration tests don't have to reason about
                 // backpressure. Tests that exercise the cap call
                 // `spawn_with_options(SpawnOptions { max_queued_submissions: ... })`.
-                max_queued_submissions: 0,
+                max_queued_submissions: Some(0),
                 lease_ttl_secs: 60,
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
@@ -663,7 +662,7 @@ impl TestApp {
         };
 
         if let Some(cap) = options.max_queued_submissions {
-            app_config.server.max_queued_submissions = cap;
+            app_config.server.max_queued_submissions = Some(cap);
         }
         if options.disable_claim_fiber {
             app_config.server.claim_fiber_enabled = false;
@@ -785,6 +784,7 @@ impl TestApp {
             db: db.clone(),
             clock: clock.clone(),
             plugin_config_cache,
+            live_worker_slots: Default::default(),
             config: app_config,
             mq: None,
             redis_client,

@@ -34,6 +34,7 @@ These have no setting.
 | Worker database pool | `worker.max_concurrency` + 2 |
 | Claim loop | Notification driven, with a 1 s fallback tick and 32 rows per statement |
 | In-flight cap per server | 8 per live worker slot, at least 256 |
+| Queue cap (queued units at which new submissions get 503) | 200 per live worker slot, at least 5000 |
 | `Secure` session cookie | Set when the request arrived over HTTPS, as a trusted proxy reports it |
 | Log format | `pretty` on a terminal, JSON otherwise |
 | Server and worker IDs | From the machine ID (`install.sh` writes them) |
@@ -50,11 +51,10 @@ Leave these alone unless a measurement says otherwise.
 | `public_base_url` | from the request | Origin for links the server hands out |
 | `trusted_proxies` | none | CIDRs whose `X-Forwarded-*` headers are trusted (`install.sh` sets the gateway) |
 | `cors.allow_origins`, `cors.max_age` | none, `3600` | Cross-origin frontend |
-| `rate_limit_auth` | `false` | Per-IP limit on `/auth/login` (failed logins are always throttled per user and IP) |
-| `expects_multi_replica` | `false` | Refuse a host-derived server ID |
-| `max_queued_submissions` | `5000` | Queued rows at which new submissions get 503 |
-| `dispatcher_semaphore_enabled`, `dispatcher_concurrency`, `dispatcher_admission_queue_max` | `true`, `16`, `100` | In-process dispatch admission |
-| `dispatcher_lease_steal_enabled` | `false` | Lease refresh and steal scanning |
+| `rate_limit_auth` | `true` | Per-IP limit of 10 logins a minute on `/auth/login`; turn off only behind a NAT that shows the server one address for many contestants |
+| `max_queued_submissions` | derived | A fixed queue cap; `0` turns it off |
+| `dispatcher_semaphore_enabled`, `dispatcher_concurrency`, `dispatcher_admission_queue_max` | `true`, `16`, `1000` | In-process dispatch admission; the queue is above the in-flight floor so the in-flight cap governs |
+| `dispatcher_lease_steal_enabled` | `true` | Servers take over the in-flight work of a server that stopped renewing its leases |
 | `lease_ttl_secs`, `lease_refresh_interval_secs`, `steal_scan_interval_secs`, `steal_batch_size` | `60`, `10`, `15`, `8` | Lease recovery timing |
 | `max_dispatch_retries`, `max_system_error_retries` | `5`, `10` | Retry budgets |
 | `cancel_primitive_enabled` | `false` | Redis-backed operation cancellation |
@@ -77,8 +77,8 @@ Leave these alone unless a measurement says otherwise.
 | --- | --- | --- |
 | `auth.login_failure_limit`, `auth.login_failure_window_secs` | `10`, `60` | Failed logins per user and IP before a short throttle |
 | `bootstrap.reset_admin` | `false` | Reset the bootstrap admin on the next boot (see the runbook) |
-| `submission.max_size` | 1 MiB | Largest source upload |
-| `submission.rate_limit_per_minute` | `60` | Submissions and code runs per user per minute; `0` turns it off |
+| `submission.max_size` | 2 MiB | Largest source upload |
+| `submission.rate_limit_per_minute` | `600` | Submissions and code runs per user per minute, an abuse guard nobody typing reaches; contest attempt limits belong to the `submission-limit` and `cooldown` plugins; `0` turns it off |
 
 ### Queue (`mq.*`)
 

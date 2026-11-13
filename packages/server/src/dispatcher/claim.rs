@@ -133,6 +133,7 @@ pub async fn run_with_fallback_tick(
             async {
                 if slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
                     live_slots = live_worker_slots(&state).await;
+                    state.live_worker_slots.store(live_slots, Ordering::Relaxed);
                     slots_checked = Some(Instant::now());
                 }
                 let cap = effective_cap(live_slots);

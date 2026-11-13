@@ -45,6 +45,10 @@ pub struct AppState {
     pub clock: crate::clock::PlatformClock,
     /// `plugin_config` point reads; see [`crate::services::plugin_config_cache`].
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
+    /// Sandbox slots of the live workers, as the claim fiber last counted
+    /// them from heartbeats; sizes the queue cap without a request reading
+    /// Redis.
+    pub live_worker_slots: Arc<std::sync::atomic::AtomicU64>,
     pub config: AppConfig,
     pub mq: Option<mq::Mq>,
     pub redis_client: Option<Arc<redis::Client>>,

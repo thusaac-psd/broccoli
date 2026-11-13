@@ -103,8 +103,10 @@ pub struct ServerConfig {
     /// `client_ip`). List every proxy in the chain, and only proxies.
     #[serde(default, deserialize_with = "deserialize_string_vec")]
     pub trusted_proxies: Vec<String>,
-    /// Enables IP-based throttling on `/api/v1/auth/login`.
-    #[serde(default)]
+    /// Per-IP throttling on `/api/v1/auth/login` (10 a minute per address,
+    /// behind `trusted_proxies` the client's own). Turn off only behind a NAT
+    /// that puts many contestants on one address the server can see.
+    #[serde(default = "default_true")]
     pub rate_limit_auth: bool,
     /// Logical identity of this replica. Used to derive the per-replica
     /// operation-result queue name so multiple servers behind a load balancer
@@ -114,12 +116,11 @@ pub struct ServerConfig {
     /// a second live replica with the same ID refuses to start.
     #[serde(default)]
     pub id: String,
-    /// Multi-replica deployments require a stable explicit server ID; when
-    /// true, the host-default fallback is rejected.
-    #[serde(default)]
-    pub expects_multi_replica: bool,
-    /// Master switch for lease refresh and steal scanning. Defaults off.
-    #[serde(default)]
+    /// Lease refresh and steal scanning: another server takes over the
+    /// in-flight work of a server that stopped refreshing its leases (crashed,
+    /// partitioned). On by default; with one server it only ever finds
+    /// nothing to steal.
+    #[serde(default = "default_true")]
     pub dispatcher_lease_steal_enabled: bool,
     /// Admission-control switch for plugin-dispatch background tasks.
     #[serde(default = "default_dispatcher_semaphore_enabled")]
@@ -135,26 +136,14 @@ pub struct ServerConfig {
     /// **DB-row backpressure cap** at POST ingress.
     #[serde(default = "default_dispatcher_admission_queue_max")]
     pub dispatcher_admission_queue_max: u32,
-    /// Per-server cap on the **durable `Queued` queue depth**: queued
-    /// judgements (a queued submission counts through its judgement) and
-    /// code runs combined. When the live count is at or above this value,
-    /// POST endpoints that would insert a new `Queued` row reject with
-    /// `503 Service Unavailable` + `Retry-After` rather than enqueueing
-    /// more work (backpressure on POST).
-    ///
-    /// Multi-replica deployments share the DB, so this cap is observed
-    /// fleet-wide via `SELECT COUNT(*) WHERE status='Queued'` - not
-    /// per-replica. Each replica makes the same decision independently
-    /// without coordination.
-    ///
-    /// Default 5000. `0` disables the cap entirely (used by integration
-    /// tests that do not exercise backpressure). Tune by observing the
-    /// `Queued` p95 depth during a load test - when claim fibers can
-    /// drain `Queued` rows at a steady rate `R` rows/sec, a cap of
-    /// `R * acceptable_latency_seconds` keeps p95 POST->dispatch latency
-    /// bounded.
-    #[serde(default = "default_max_queued_submissions")]
-    pub max_queued_submissions: u32,
+    /// Cap on the **durable `Queued` queue depth** (queued judgements and
+    /// code runs, fleet-wide): at or above it, POSTs that would queue more
+    /// work get `503 QUEUE_OVERLOADED` + `Retry-After`. Unset, it is derived
+    /// from live worker capacity (see
+    /// [`crate::dispatcher::queue_depth::derived_queue_cap`]); `0` disables
+    /// the cap.
+    #[serde(default)]
+    pub max_queued_submissions: Option<u32>,
     #[serde(default = "default_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
     #[serde(default = "default_lease_refresh_interval_secs")]
@@ -268,14 +257,13 @@ impl Default for ServerConfig {
             public_base_url: None,
             frontend_dist: default_frontend_dist(),
             trusted_proxies: Vec::new(),
-            rate_limit_auth: false,
+            rate_limit_auth: true,
             id: String::new(),
-            expects_multi_replica: false,
-            dispatcher_lease_steal_enabled: false,
+            dispatcher_lease_steal_enabled: true,
             dispatcher_semaphore_enabled: default_dispatcher_semaphore_enabled(),
             dispatcher_concurrency: default_dispatcher_concurrency(),
             dispatcher_admission_queue_max: default_dispatcher_admission_queue_max(),
-            max_queued_submissions: default_max_queued_submissions(),
+            max_queued_submissions: None,
             lease_ttl_secs: default_lease_ttl_secs(),
             lease_refresh_interval_secs: default_lease_refresh_interval_secs(),
             steal_scan_interval_secs: default_steal_scan_interval_secs(),
@@ -303,6 +291,10 @@ fn default_port() -> u16 {
     3000
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_dispatcher_semaphore_enabled() -> bool {
     true
 }
@@ -311,14 +303,10 @@ fn default_dispatcher_concurrency() -> u32 {
     16
 }
 
+/// Above the claim fiber's in-flight floor (256), so the in-flight cap, which
+/// scales with the fleet, is what bounds claiming.
 fn default_dispatcher_admission_queue_max() -> u32 {
-    100
-}
-
-fn default_max_queued_submissions() -> u32 {
-    // 5000 - the durable `Queued` row depth at which POST
-    // backpressure kicks in. Set to `0` to disable.
-    5000
+    1000
 }
 
 fn default_lease_ttl_secs() -> u64 {
@@ -487,14 +475,18 @@ impl Default for SubmissionConfig {
     }
 }
 
+/// 2 MiB of source: room for a contestant's generated tables, far below
+/// anything that strains a server.
 fn default_submission_max_size() -> usize {
-    1_048_576
+    2 * 1_048_576
 }
 
-/// One submission or code run a second per user: an abuse guard, not contest
-/// policy (a contest limits attempts through its plugins).
+/// Ten submissions or code runs a second per user, sustained for a minute: an
+/// abuse guard that a person re-submitting as fast as they can type never
+/// reaches. Per-contest attempt policy belongs to plugins (`submission-limit`,
+/// `cooldown`), not here.
 fn default_submission_rate_limit_per_minute() -> u32 {
-    60
+    600
 }
 
 /// The bootstrap admin account (see `seed::ensure_bootstrap_admin`).
@@ -555,19 +547,13 @@ fn default_batch_max_age_secs() -> u64 {
 /// IDs; see [`common::node_identity::is_valid_node_id`].
 pub use common::node_identity::is_valid_node_id as is_valid_server_id;
 
-/// Resolves the effective server ID: a valid configured value, else (unless
-/// multi-replica mode demands an explicit one) the host default from
-/// [`common::node_identity::default_node_id`]. An explicit but invalid value is
-/// an error.
-pub fn resolve_server_id(
-    configured: &str,
-    expects_multi_replica: bool,
-) -> Result<String, common::node_identity::NodeIdError> {
-    common::node_identity::resolve_node_id(
-        common::liveness::NodeRole::Server,
-        configured,
-        expects_multi_replica,
-    )
+/// Resolves the effective server ID: a valid configured value, else the host
+/// default from [`common::node_identity::default_node_id`]. An explicit but
+/// invalid value is an error. A default that changes across restarts (a
+/// recreated container) is safe: lease stealing hands the old ID's in-flight
+/// work to a live server.
+pub fn resolve_server_id(configured: &str) -> Result<String, common::node_identity::NodeIdError> {
+    common::node_identity::resolve_node_id(common::liveness::NodeRole::Server, configured, false)
 }
 
 /// Auto-default for tokio's `max_blocking_threads`: 16x available CPUs,
@@ -672,18 +658,18 @@ mod tests {
 
     #[test]
     fn resolves_explicit_server_id_when_valid() {
-        assert_eq!(resolve_server_id("alpha", false).unwrap(), "alpha");
-        assert_eq!(resolve_server_id("  alpha  ", false).unwrap(), "alpha");
+        assert_eq!(resolve_server_id("alpha").unwrap(), "alpha");
+        assert_eq!(resolve_server_id("  alpha  ").unwrap(), "alpha");
     }
 
     #[test]
     fn rejects_an_invalid_explicit_id() {
-        assert!(resolve_server_id("has space", false).is_err());
+        assert!(resolve_server_id("has space").is_err());
     }
 
     #[test]
     fn resolves_empty_to_a_host_default() {
-        let resolved = resolve_server_id("", false).unwrap();
+        let resolved = resolve_server_id("").unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));
     }
@@ -692,17 +678,9 @@ mod tests {
     fn resolves_whitespace_only_to_fallback() {
         // Whitespace-only configured value should behave like empty:
         // produce a non-empty, well-formed host default.
-        let resolved = resolve_server_id("   ", false).unwrap();
+        let resolved = resolve_server_id("   ").unwrap();
         assert!(!resolved.is_empty());
         assert!(is_valid_server_id(&resolved));
-    }
-
-    #[test]
-    fn multi_replica_server_id_requires_explicit_valid_id() {
-        assert!(resolve_server_id("", true).is_err());
-        assert!(resolve_server_id("   ", true).is_err());
-        assert!(resolve_server_id("has space", true).is_err());
-        assert_eq!(resolve_server_id("server-1", true).unwrap(), "server-1");
     }
 
     #[derive(Debug, Deserialize)]
@@ -821,15 +799,15 @@ mod tests {
         assert_eq!(cfg.server.dispatcher_concurrency, 16);
         assert!(cfg.server.cors.allow_origins.is_empty());
         assert_eq!(cfg.server.cors.max_age, 3600);
-        assert_eq!(cfg.server.max_queued_submissions, 5000);
+        assert_eq!(cfg.server.max_queued_submissions, None);
         assert_eq!(
             cfg.database.url,
             "postgres://postgres:password@localhost:5432/broccoli"
         );
         assert_eq!(cfg.plugin.plugins_dir, PathBuf::from("./plugins"));
         assert!(cfg.plugin.enable_wasi);
-        assert_eq!(cfg.submission.max_size, 1_048_576);
-        assert_eq!(cfg.submission.rate_limit_per_minute, 60);
+        assert_eq!(cfg.submission.max_size, 2 * 1_048_576);
+        assert_eq!(cfg.submission.rate_limit_per_minute, 600);
         assert!(cfg.mq.enabled);
         assert_eq!(cfg.mq.url, "redis://localhost:6379");
         assert_eq!(cfg.observability.log_format, "auto");
@@ -912,7 +890,7 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.server.max_system_error_retries, 10);
         assert_eq!(cfg.submission.max_size, 42);
-        assert_eq!(cfg.submission.rate_limit_per_minute, 60);
+        assert_eq!(cfg.submission.rate_limit_per_minute, 600);
     }
 
     #[test]

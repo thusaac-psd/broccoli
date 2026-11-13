@@ -386,8 +386,8 @@ each replica's env file before starting.
 
 ## Recovering In-Flight Submissions After a Server Restart or Crash
 
-Every server re-dispatches its own unfinished work automatically, whatever
-`BROCCOLI__SERVER__DISPATCHER_LEASE_STEAL_ENABLED` is set to:
+Every server re-dispatches its own unfinished work automatically, and the
+others take over the work of one that stops:
 
 - **Graceful stop** (`docker compose stop`, a rolling restart, a redeploy): the
   server releases the submissions, rejudges and code runs it was judging as it
@@ -397,12 +397,10 @@ Every server re-dispatches its own unfinished work automatically, whatever
   `BROCCOLI__SERVER__ID` releases and re-dispatches the work its previous
   instance left behind as it boots. That work no longer counts against its
   in-flight limit.
-- **Crash without a restart**: with lease/steal enabled, the other servers steal
-  the dead server's work once its lease expires (`lease_ttl_secs`). With it
-  disabled (the release default) nothing can tell a dead server from a live one,
-  so the work waits until that server ID boots again, or until the stuck-job
-  detector fails it after `max_inflight_secs` (default 1 hour) so it can be
-  rejudged.
+- **Crash without a restart**: the other servers steal the dead server's work
+  once its lease expires (`lease_ttl_secs`, default 60 s). On a single server the
+  work waits until it boots again, or until the stuck-job detector fails it after
+  `max_inflight_secs` (default 1 hour) so it can be rejudged.
 
 When a crashed server will not come back:
 

@@ -292,14 +292,13 @@ impl E2eTestApp {
                 trusted_proxies: vec![],
                 rate_limit_auth: false,
                 id: server_id.clone(),
-                expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
                 dispatcher_admission_queue_max: 0,
                 // Disable durable Queued-depth backpressure in e2e
                 // by default; tests opt in if they need to exercise it.
-                max_queued_submissions: 0,
+                max_queued_submissions: Some(0),
                 lease_ttl_secs: 60,
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
@@ -395,6 +394,7 @@ impl E2eTestApp {
             db: db.clone(),
             clock,
             plugin_config_cache,
+            live_worker_slots: Default::default(),
             config: app_config,
             mq: Some(mq.clone()),
             redis_client: None,

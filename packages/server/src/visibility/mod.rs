@@ -710,6 +710,7 @@ mod tests {
             db,
             clock: crate::clock::PlatformClock::local_for_tests(),
             plugin_config_cache: Default::default(),
+            live_worker_slots: Default::default(),
             config: AppConfig {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
@@ -723,12 +724,11 @@ mod tests {
                     trusted_proxies: vec![],
                     rate_limit_auth: false,
                     id: String::new(),
-                    expects_multi_replica: false,
                     dispatcher_lease_steal_enabled: true,
                     dispatcher_semaphore_enabled: true,
                     dispatcher_concurrency: 1,
                     dispatcher_admission_queue_max: 0,
-                    max_queued_submissions: 0,
+                    max_queued_submissions: Some(0),
                     lease_ttl_secs: 1,
                     lease_refresh_interval_secs: 10,
                     steal_scan_interval_secs: 15,

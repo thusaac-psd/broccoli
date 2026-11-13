@@ -44,10 +44,7 @@ impl ServerRuntime {
         let telemetry_guard = common::observability::init_tracing(&app_config.observability);
         common::config::warn_unknown_keys(&app_config.unknown_keys, "BROCCOLI");
 
-        let server_id = resolve_server_id(
-            &app_config.server.id,
-            app_config.server.expects_multi_replica,
-        )?;
+        let server_id = resolve_server_id(&app_config.server.id)?;
         app_config.server.id = server_id.clone();
 
         let original_pool_max = app_config.plugin.pool_max_instances;
@@ -389,6 +386,7 @@ impl ServerRuntime {
             db: db.clone(),
             clock,
             plugin_config_cache,
+            live_worker_slots: Default::default(),
             config: app_config.clone(),
             mq: mq.clone(),
             redis_client: redis_client.clone(),
