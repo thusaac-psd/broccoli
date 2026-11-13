@@ -1218,6 +1218,21 @@ mod tests {
             .await
             .expect("plugin role must INSERT into a future table and draw a serial id");
 
+        // NEGATIVE: what boot trusts (the schema stamp and the applied
+        // migrations) is read-only to plugins.
+        for write in [
+            "DELETE FROM broccoli_schema_stamp",
+            "UPDATE broccoli_schema_stamp SET stamp = 'x'",
+            "DELETE FROM seaql_migrations",
+            "INSERT INTO seaql_migrations (version, applied_at) VALUES ('m9999_x', 0)",
+        ] {
+            let err = restricted.execute_unprepared(write).await.expect_err(write);
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{write}: {err}"
+            );
+        }
+
         // NEGATIVE: schema DDL (DROP) is still denied - non-owner.
         let drop_err = restricted
             .execute_unprepared("DROP TABLE submission")

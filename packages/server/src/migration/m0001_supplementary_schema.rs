@@ -152,11 +152,12 @@ impl MigrationTrait for Migration {
         .await?;
         // Last, so the grants cover every relation created above.
         db.execute_unprepared(PLUGIN_ROLE).await?;
-        // Plugins read everything but must not rewrite what boot trusts.
+        // Plugins read everything but must not rewrite what boot trusts: the
+        // schema stamp and the record of applied migrations.
         db.execute_unprepared(&format!(
             "DO $$ BEGIN \
                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
-                 REVOKE INSERT, UPDATE, DELETE ON {table} FROM broccoli_plugin; \
+                 REVOKE INSERT, UPDATE, DELETE ON {table}, seaql_migrations FROM broccoli_plugin; \
                END IF; \
              END $$",
             table = super::STAMP_TABLE,
