@@ -1,7 +1,7 @@
 use super::super::models::{IOConfig, IOTarget, SessionFile, Step};
 use super::super::sandbox::ExecutionResult;
 use super::metrics::{materialization_path_kind, session_file_kind};
-use super::paths::{safe_join, validate_pipe_name};
+use super::paths::{create_fifo, safe_join, validate_pipe_name};
 use super::{EnvironmentList, OperationHandler};
 use anyhow::{Context, Result, anyhow};
 use std::collections::{HashMap, HashSet};
@@ -189,23 +189,13 @@ impl OperationHandler {
                     return Ok(Some(pipe_path));
                 }
 
-                let output = tokio::process::Command::new("mkfifo")
-                    .arg(&pipe_path)
-                    .output()
-                    .await
-                    .context("Failed to execute mkfifo")?;
-
-                if !output.status.success() {
+                if let Err(e) = create_fifo(&pipe_path) {
                     if let Ok(meta) = tokio::fs::metadata(&pipe_path).await
                         && meta.file_type().is_fifo()
                     {
                         return Ok(Some(pipe_path));
                     }
-                    return Err(anyhow!(
-                        "mkfifo failed for {}: {}",
-                        pipe_path.display(),
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+                    return Err(anyhow!("mkfifo failed for {}: {e}", pipe_path.display()));
                 }
 
                 Ok(Some(pipe_path))

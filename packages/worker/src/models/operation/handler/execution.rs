@@ -8,7 +8,7 @@ use super::super::task_cache::TaskCacheStore;
 use super::box_id::{allocate_box_id, next_channel_seq};
 use super::metrics::{sandbox_exit_kind, sandbox_status_label, step_kind};
 use super::paths::{
-    platform_tool_directory_rule, resolve_step_output_src, stage_step_output_file,
+    create_fifo, platform_tool_directory_rule, resolve_step_output_src, stage_step_output_file,
     validate_pipe_name,
 };
 use super::{EnvironmentList, OperationHandler, StepMetricRecord};
@@ -276,10 +276,7 @@ impl OperationHandler {
                         );
                         continue;
                     }
-                    let _ = tokio::process::Command::new("mkfifo")
-                        .arg(&fifo_path)
-                        .output()
-                        .await;
+                    let _ = create_fifo(&fifo_path);
                     if !path_is_fifo(&fifo_path) {
                         continue;
                     }
@@ -1146,18 +1143,8 @@ fn open_channel_keepalive(fifo_path: &Path) -> Option<std::fs::File> {
 async fn create_channel_fifos(dir: &Path, channels: &[Channel]) -> Result<()> {
     for channel in channels {
         let fifo_path = dir.join(&channel.name);
-        let output = tokio::process::Command::new("mkfifo")
-            .arg(&fifo_path)
-            .output()
-            .await
-            .context("Failed to execute mkfifo for channel")?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "mkfifo failed for channel {}: {}",
-                channel.name,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        create_fifo(&fifo_path)
+            .with_context(|| format!("mkfifo failed for channel {}", channel.name))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1256,11 +1243,7 @@ mod channel_keepalive_tests {
         let dir = std::env::temp_dir().join(format!("broccoli-ka-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("sol_out");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(status.success(), "mkfifo failed");
+        create_fifo(&fifo).expect("mkfifo");
 
         let keepalive = open_channel_keepalive(&fifo).expect("keep-alive opens O_RDWR");
 
@@ -1396,11 +1379,7 @@ mod channel_keepalive_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("sol_out");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(status.success(), "mkfifo failed");
+        create_fifo(&fifo).expect("mkfifo");
         (dir, fifo)
     }
 
