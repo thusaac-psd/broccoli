@@ -400,6 +400,7 @@ mod tests {
     use async_trait::async_trait;
     use common::cancel::{RedisCancelChecker, set_cancel_batch_key, set_cancel_op_keys};
     use common::liveness::NodeRole;
+    use common::node_identity::NodeClaim;
     use common::worker::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use testcontainers::runners::AsyncRunner;
@@ -445,6 +446,7 @@ mod tests {
 
     struct Harness {
         _redis: testcontainers::ContainerAsync<Redis>,
+        _server: NodeClaim,
         url: String,
         mq: Mq,
         consumer: WorkerConsumer,
@@ -462,29 +464,24 @@ mod tests {
         let port = redis.get_host_port_ipv4(6379).await.expect("port");
         let url = format!("redis://127.0.0.1:{port}");
         let mq = Mq::connect(&url, "ops").await.expect("mq");
-        let mut admin = redis::Client::open(url.as_str())
+        let admin = redis::Client::open(url.as_str())
             .unwrap()
             .get_multiplexed_async_connection()
             .await
             .unwrap();
-        let _: () = redis::pipe()
-            .cmd("SET")
-            .arg(NodeRole::Server.key("ops", SERVER))
-            .arg("{}")
-            .arg("EX")
-            .arg(60)
-            .ignore()
-            .cmd("XADD")
-            .arg(mq.topology().reply(SERVER))
-            .arg("MAXLEN")
-            .arg(0)
-            .arg("*")
-            .arg("_")
-            .arg("")
-            .ignore()
-            .query_async(&mut admin)
-            .await
-            .unwrap();
+        // Server `SERVER` as it runs: its claim owns its reply stream, which
+        // the first renewal creates.
+        let server = NodeClaim::claim_at_boot(
+            redis::Client::open(url.as_str()).unwrap(),
+            "ops",
+            NodeRole::Server,
+            SERVER,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap()
+        .own_stream(mq.topology().reply(SERVER), mq::REPLY_STREAM_TTL, || {});
+        server.renew(serde_json::json!({})).await.unwrap();
 
         let calls = Arc::new(AtomicUsize::new(0));
         let worker = Worker::with_no_executors();
@@ -508,6 +505,7 @@ mod tests {
         });
         Harness {
             _redis: redis,
+            _server: server,
             url,
             mq,
             consumer,
