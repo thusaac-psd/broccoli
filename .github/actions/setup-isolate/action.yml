@@ -16,6 +16,14 @@ inputs:
       release/native/config/isolate.conf.
     required: false
     default: "10000"
+  first_id:
+    description: >
+      First sandbox uid and gid; box N runs as first_id + N. isolate's default,
+      60000, puts 10000 boxes over nobody (65534) and systemd's DynamicUser
+      range (61184..65519). Matches Dockerfile.worker and
+      release/native/config/isolate.conf.
+    required: false
+    default: "1900000000"
 
 runs:
   using: composite
@@ -25,14 +33,19 @@ runs:
       env:
         ISOLATE_VERSION: ${{ inputs.version }}
         ISOLATE_NUM_BOXES: ${{ inputs.num_boxes }}
+        ISOLATE_FIRST_ID: ${{ inputs.first_id }}
       run: |
         set -euo pipefail
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
         git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
         sudo make -C "$RUNNER_TEMP/isolate" install
-        sudo sed -i "s/^#\? *num_boxes *=.*/num_boxes = $ISOLATE_NUM_BOXES/" /usr/local/etc/isolate
-        grep -q "^num_boxes = $ISOLATE_NUM_BOXES$" /usr/local/etc/isolate
+        sudo sed -i -e "s/^#\? *num_boxes *=.*/num_boxes = $ISOLATE_NUM_BOXES/" \
+          -e "s/^#\? *first_uid *=.*/first_uid = $ISOLATE_FIRST_ID/" \
+          -e "s/^#\? *first_gid *=.*/first_gid = $ISOLATE_FIRST_ID/" /usr/local/etc/isolate
+        for setting in "num_boxes = $ISOLATE_NUM_BOXES" "first_uid = $ISOLATE_FIRST_ID" "first_gid = $ISOLATE_FIRST_ID"; do
+          grep -q "^$setting$" /usr/local/etc/isolate
+        done
         sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
         sudo systemctl daemon-reload
         sudo systemctl start isolate.service
