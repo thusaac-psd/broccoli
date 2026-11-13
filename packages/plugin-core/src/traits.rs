@@ -12,6 +12,27 @@ use crate::i18n::{I18nRegistry, TranslationMap};
 use crate::manifest::PluginManifest;
 use crate::registry::{PluginEntry, PluginInfo, PluginRegistry, PluginStatus};
 
+/// One call counted in `plugin_calls_in_flight` while alive.
+struct InFlight(Option<(common::metrics::Metrics, [KeyValue; 1])>);
+
+impl InFlight {
+    fn enter(metrics: Option<&common::metrics::Metrics>, plugin_id: &str) -> Self {
+        Self(metrics.map(|metrics| {
+            let attrs = [KeyValue::new("plugin.id", plugin_id.to_string())];
+            metrics.plugin_calls_in_flight.add(1, &attrs);
+            (metrics.clone(), attrs)
+        }))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some((metrics, attrs)) = &self.0 {
+            metrics.plugin_calls_in_flight.add(-1, attrs);
+        }
+    }
+}
+
 fn class_label(class: Option<CallClass>) -> &'static str {
     class.map_or("lifecycle", CallClass::as_str)
 }
@@ -136,16 +157,16 @@ pub trait PluginInvoker: Send + Sync {
         let func_name_owned = func_name.to_string();
         let parent_span = tracing::Span::current();
 
-        let in_flight_attrs = [KeyValue::new("plugin.id", plugin_id_owned.clone())];
-        if let Some(metrics) = metrics.as_ref() {
-            metrics.plugin_calls_in_flight.add(1, &in_flight_attrs);
-        }
+        // Counted until the guest returns, whether or not anyone still
+        // awaits it.
+        let in_flight = InFlight::enter(metrics.as_ref(), &plugin_id_owned);
         let runtime = tokio::runtime::Handle::current();
         let (done, result) = tokio::sync::oneshot::channel();
         self.executor().threads().run({
             let plugin_id = plugin_id_owned.clone();
             let func_name = func_name_owned.clone();
             move || {
+                let _in_flight = in_flight;
                 // Host functions bridge back into the runtime with `block_on`.
                 let _runtime = runtime.enter();
                 let _ = done.send(run_guest(
@@ -164,9 +185,6 @@ pub trait PluginInvoker: Send + Sync {
         let result = result
             .await
             .map_err(|_| PluginError::Internal("plugin guest thread panicked".into()));
-        if let Some(metrics) = metrics.as_ref() {
-            metrics.plugin_calls_in_flight.add(-1, &in_flight_attrs);
-        }
         let result = result?;
 
         let duration = start.elapsed();

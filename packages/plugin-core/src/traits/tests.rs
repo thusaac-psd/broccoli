@@ -79,6 +79,7 @@ impl Fixture {
 
 struct TestManager {
     state: PluginManagerState,
+    metrics: Option<common::metrics::Metrics>,
     host_functions: HostFunctionRegistry,
     i18n: I18nRegistry,
 }
@@ -92,6 +93,9 @@ impl PluginInvoker for TestManager {
     }
     fn executor(&self) -> &Executor {
         &self.state.executor
+    }
+    fn get_metrics(&self) -> Option<&common::metrics::Metrics> {
+        self.metrics.as_ref()
     }
 }
 
@@ -208,6 +212,10 @@ impl Harness {
     }
 
     fn with_capacity(capacity: Capacity) -> Self {
+        Self::build(capacity, None)
+    }
+
+    fn build(capacity: Capacity, metrics: Option<common::metrics::Metrics>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
         let config = PluginConfig {
@@ -229,6 +237,7 @@ impl Harness {
             });
             TestManager {
                 state: PluginManagerState::with_executor(config, executor),
+                metrics: metrics.clone(),
                 host_functions,
                 i18n: I18nRegistry::new(),
             }
@@ -513,4 +522,25 @@ async fn a_call_queued_across_a_reload_runs_on_the_new_version() {
         call.await.unwrap().unwrap();
     }
     assert_eq!(h.fixture.read(|c| c.marks.clone()), vec![2]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_request_is_counted_in_flight_until_its_guest_returns() {
+    let (metrics, registry) = common::observability::init_metrics("plugin-core-in-flight-test");
+    let h = Harness::build(Capacity::new(2), Some(metrics));
+    let in_flight = || -> f64 {
+        registry
+            .gather()
+            .iter()
+            .filter(|f| f.name() == "broccoli_plugin_calls_in_flight")
+            .flat_map(|f| f.get_metric().iter().map(|m| m.get_gauge().value()))
+            .sum()
+    };
+    let request = h.spawn("hold", CallOptions::interactive(later()));
+    until(|| h.fixture.read(|c| c.running) == 1).await;
+    request.abort();
+    let _ = request.await;
+    assert_eq!(in_flight(), 1.0, "the guest still runs");
+    h.fixture.release();
+    until(|| in_flight() == 0.0).await;
 }
