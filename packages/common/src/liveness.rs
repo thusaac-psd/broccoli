@@ -1,15 +1,17 @@
 //! Node liveness: the one definition every server and worker reads.
 //!
-//! A node is live while its liveness key `broccoli:{role}:heartbeat:{id}`
-//! exists. The node writes it with a [`TTL`] and renews it every
-//! [`RENEW_INTERVAL`] (see [`crate::node_identity`], where the same key is the
-//! node's claim on its ID), so the key expires on the Redis clock once the node
-//! stops renewing it. Nothing compares a timestamp written by one node with
+//! A node is live while its liveness key `{namespace}:heartbeat:{role}:{id}`
+//! exists. The namespace is `mq.operation_queue_name`, the prefix of every
+//! message queue key, so deployments that share a Redis under different queue
+//! names never see each other's nodes. The node writes it with a [`TTL`] and
+//! renews it every [`RENEW_INTERVAL`] (see [`crate::node_identity`], where the
+//! same key is the node's claim on its ID), so the key expires on the Redis
+//! clock once the node stops renewing it. Nothing compares a timestamp written by one node with
 //! another node's clock: a key's age is its TTL minus its remaining `PTTL`.
 //!
 //! The message queue's Lua scripts take the same key (via [`NodeRole::key`]) to
-//! route pinned tasks, drain a dead worker's private stream and drop replies
-//! for a dead server.
+//! route pinned tasks and drain a dead worker's private stream
+//! (replies do not use it: a reply stream outlives its server's liveness key).
 
 use std::time::Duration;
 
@@ -37,17 +39,14 @@ impl NodeRole {
         }
     }
 
-    /// Prefix of this role's liveness keys; the id follows it.
-    pub const fn key_prefix(self) -> &'static str {
-        match self {
-            Self::Server => "broccoli:server:heartbeat:",
-            Self::Worker => "broccoli:worker:heartbeat:",
-        }
+    /// Prefix of this role's liveness keys in `namespace`; the id follows it.
+    pub fn key_prefix(self, namespace: &str) -> String {
+        format!("{namespace}:heartbeat:{}:", self.as_str())
     }
 
-    /// The liveness key of node `id`.
-    pub fn key(self, id: &str) -> String {
-        format!("{}{id}", self.key_prefix())
+    /// The liveness key of node `id` in `namespace`.
+    pub fn key(self, namespace: &str, id: &str) -> String {
+        format!("{}{id}", self.key_prefix(namespace))
     }
 }
 
@@ -75,9 +74,11 @@ pub struct LiveNode {
 /// out.
 pub async fn live_nodes<C: ConnectionLike>(
     conn: &mut C,
+    namespace: &str,
     role: NodeRole,
 ) -> redis::RedisResult<Vec<LiveNode>> {
-    let pattern = format!("{}*", role.key_prefix());
+    let prefix = role.key_prefix(namespace);
+    let pattern = format!("{prefix}*");
     let mut keys = Vec::new();
     let mut cursor = 0_u64;
     loop {
@@ -111,7 +112,7 @@ pub async fn live_nodes<C: ConnectionLike>(
         .zip(replies)
         .filter_map(|(key, (payload, pttl))| {
             Some(LiveNode {
-                id: key.strip_prefix(role.key_prefix())?.to_string(),
+                id: key.strip_prefix(&prefix)?.to_string(),
                 payload: payload?,
                 age: age_from_pttl(pttl),
             })
@@ -133,8 +134,8 @@ mod tests {
 
     #[test]
     fn keys_carry_the_role_and_id() {
-        assert_eq!(NodeRole::Worker.key("w1"), "broccoli:worker:heartbeat:w1");
-        assert_eq!(NodeRole::Server.key("s1"), "broccoli:server:heartbeat:s1");
+        assert_eq!(NodeRole::Worker.key("ops", "w1"), "ops:heartbeat:worker:w1");
+        assert_eq!(NodeRole::Server.key("ops", "s1"), "ops:heartbeat:server:s1");
     }
 
     #[tokio::test]
@@ -149,23 +150,23 @@ mod tests {
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
         let _: () = redis::pipe()
             .cmd("SET")
-            .arg(NodeRole::Worker.key("b"))
+            .arg(NodeRole::Worker.key("ops", "b"))
             .arg("{}")
             .arg("PX")
             .arg(TTL.as_millis() as u64 - 3_000)
             .ignore()
             .cmd("SET")
-            .arg(NodeRole::Worker.key("a"))
+            .arg(NodeRole::Worker.key("ops", "a"))
             .arg("{}")
             .arg("PX")
             .arg(TTL.as_millis() as u64)
             .ignore()
             .cmd("SET")
-            .arg(NodeRole::Worker.key("no-ttl"))
+            .arg(NodeRole::Worker.key("ops", "no-ttl"))
             .arg("{}")
             .ignore()
             .cmd("SET")
-            .arg(NodeRole::Server.key("s"))
+            .arg(NodeRole::Server.key("ops", "s"))
             .arg("{}")
             .arg("PX")
             .arg(TTL.as_millis() as u64)
@@ -174,7 +175,9 @@ mod tests {
             .await
             .unwrap();
 
-        let live = live_nodes(&mut conn, NodeRole::Worker).await.unwrap();
+        let live = live_nodes(&mut conn, "ops", NodeRole::Worker)
+            .await
+            .unwrap();
         let ids: Vec<&str> = live.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "no-ttl"]);
         assert!(live[0].age < Duration::from_secs(2));

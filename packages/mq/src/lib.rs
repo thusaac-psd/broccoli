@@ -177,7 +177,7 @@ impl Mq {
                 self.conn
                     .run(|mut c| async move {
                         scripts::PUBLISH_PINNED
-                            .key(NodeRole::Worker.key(worker_id))
+                            .key(NodeRole::Worker.key(t.namespace(), worker_id))
                             .key(t.private(worker_id))
                             .key(t.shared())
                             .key(t.pinned_set())
@@ -288,7 +288,7 @@ impl Mq {
                     .conn
                     .run(|mut c| async move {
                         scripts::DRAIN_PRIVATE
-                            .key(NodeRole::Worker.key(worker_id))
+                            .key(NodeRole::Worker.key(t.namespace(), worker_id))
                             .key(t.private(worker_id))
                             .key(t.shared())
                             .key(t.pinned_set())

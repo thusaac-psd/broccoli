@@ -47,6 +47,7 @@ contain `:`, so every key below parses one way.
 | `<q>:pinned` | set of worker ids | | members removed when drained |
 | `<q>:reply:<server_id>` | stream | none | TTL of the server's liveness key |
 | `<q>:dlq` | stream | `servers` | permanent |
+| `<q>:heartbeat:<role>:<id>` | string | | liveness TTL, 15 s (see Liveness) |
 
 Every entry has one field, `p`, holding the JSON payload. An entry moved from a
 dead worker's private stream also carries `n`, the deliveries it already had.
@@ -263,13 +264,14 @@ boundary.
 ## Liveness
 
 `common::liveness` holds the only definition: a node is live while its key
-`broccoli:<role>:heartbeat:<id>` exists. The key has a 15 s TTL that the node
-renews every 3 s with a 5 s deadline per renewal, so a few slow renewals never
-expire it; it doubles as the node's ID claim. The system dashboard, the pin
-routing script and the private stream drain script all ask that one question
-of that one key. A worker's in flight tasks do not use it at all: their PEL
-idle time answers whether their owner is alive. Replies do not use it either:
-the reply stream outlives the liveness key on purpose.
+`<q>:heartbeat:<role>:<id>` exists (under the queue base name, so deployments
+sharing a Redis under different names never see each other's nodes). The key has
+a 15 s TTL that the node renews every 3 s with a 5 s deadline per renewal, so a
+few slow renewals never expire it; it doubles as the node's ID claim. The system
+dashboard, the pin routing script and the private stream drain script all ask
+that one question of that one key. A worker's in flight tasks do not use it at
+all: their PEL idle time answers whether their owner is alive. Replies do not
+use it either: the reply stream outlives the liveness key on purpose.
 
 ## Observability
 

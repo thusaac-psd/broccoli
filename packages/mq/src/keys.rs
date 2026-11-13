@@ -43,6 +43,12 @@ impl Topology {
         Self { base: base.into() }
     }
 
+    /// The base name, also the namespace of node liveness keys (see
+    /// `common::liveness`).
+    pub fn namespace(&self) -> &str {
+        &self.base
+    }
+
     /// The shared operation task stream.
     pub fn shared(&self) -> String {
         self.base.clone()

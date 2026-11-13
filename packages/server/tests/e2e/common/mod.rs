@@ -240,6 +240,7 @@ impl E2eTestApp {
         // The server's liveness key, owning its reply stream, as at boot.
         let node_heartbeat = common::node_identity::NodeClaim::claim_at_boot(
             redis::Client::open(redis_url.as_str()).expect("redis client"),
+            &operation_queue,
             common::liveness::NodeRole::Server,
             &server_id,
             serde_json::json!({}),

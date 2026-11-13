@@ -119,7 +119,7 @@ mod worker_liveness {
         };
         let _: () = conn
             .set_ex(
-                NodeRole::Worker.key(id),
+                NodeRole::Worker.key(&common::config::default_operation_queue_name(), id),
                 serde_json::to_string(&payload).unwrap(),
                 ttl,
             )

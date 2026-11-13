@@ -89,7 +89,7 @@ fn ids(deliveries: &[Delivery<Task>]) -> BTreeSet<String> {
 
 async fn set_live(conn: &mut redis::aio::MultiplexedConnection, role: NodeRole, id: &str) {
     let _: () = redis::cmd("SET")
-        .arg(role.key(id))
+        .arg(role.key(BASE, id))
         .arg("{}")
         .arg("PX")
         .arg(TTL.as_millis() as u64)
@@ -536,7 +536,7 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
         "w1 is live"
     );
     let _: () = redis::cmd("DEL")
-        .arg(NodeRole::Worker.key("w1"))
+        .arg(NodeRole::Worker.key(BASE, "w1"))
         .query_async(&mut conn)
         .await
         .unwrap();

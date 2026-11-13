@@ -431,7 +431,7 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
         cpu_count: None,
         pid: None,
     };
-    let key = NodeRole::Worker.key(worker_id);
+    let key = NodeRole::Worker.key(&common::config::default_operation_queue_name(), worker_id);
     let value = serde_json::to_string(&heartbeat).expect("serialize heartbeat");
     // Mirror the worker's writer: the key's TTL is what makes it live.
     let _: () = conn

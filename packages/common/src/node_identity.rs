@@ -263,6 +263,8 @@ struct OwnedStream {
 /// This process's claim on its node ID. See the module docs.
 pub struct NodeClaim {
     conn: Conn,
+    /// Liveness namespace (see [`crate::liveness`]).
+    namespace: String,
     role: NodeRole,
     id: String,
     key: String,
@@ -283,15 +285,17 @@ impl NodeClaim {
     /// reported as [`RenewOutcome::Lost`].
     pub async fn claim_at_boot(
         client: redis::Client,
+        namespace: &str,
         role: NodeRole,
         id: &str,
         payload: serde_json::Value,
     ) -> Result<Self, NodeClaimError> {
-        Self::claim_with_timing(client, role, id, payload, TTL, RENEW_INTERVAL).await
+        Self::claim_with_timing(client, namespace, role, id, payload, TTL, RENEW_INTERVAL).await
     }
 
     async fn claim_with_timing(
         client: redis::Client,
+        namespace: &str,
         role: NodeRole,
         id: &str,
         payload: serde_json::Value,
@@ -304,7 +308,8 @@ impl NodeClaim {
             conn: Conn::new(client, COMMAND_TIMEOUT),
             role,
             id: id.to_string(),
-            key: role.key(id),
+            key: role.key(namespace, id),
+            namespace: namespace.to_string(),
             instance: uuid::Uuid::new_v4().to_string(),
             ttl,
             owned_streams: Vec::new(),
@@ -447,7 +452,7 @@ impl NodeClaim {
     /// instance token, outside the liveness key prefix, so no reader takes
     /// it for a node.
     fn release_marker(&self) -> String {
-        format!("broccoli:released:{}", self.instance)
+        format!("{}:released:{}", self.namespace, self.instance)
     }
 
     /// Renew the claim every [`RENEW_INTERVAL`] with a fresh `payload()`
@@ -705,6 +710,7 @@ mod tests {
 
         let first = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -714,8 +720,7 @@ mod tests {
         .await
         .expect("the first claim succeeds");
         let stored: serde_json::Value =
-            serde_json::from_str(&get(&client, "broccoli:worker:heartbeat:w1").await.unwrap())
-                .unwrap();
+            serde_json::from_str(&get(&client, "ops:heartbeat:worker:w1").await.unwrap()).unwrap();
         assert_eq!(
             stored["pid"], 1,
             "the payload is stored for heartbeat readers"
@@ -730,6 +735,7 @@ mod tests {
         });
         let err = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -743,10 +749,18 @@ mod tests {
 
         // Graceful shutdown releases the claim, so a successor boots at once.
         heartbeat.shutdown().await;
-        assert!(get(&client, "broccoli:worker:heartbeat:w1").await.is_none());
-        NodeClaim::claim_with_timing(client.clone(), NodeRole::Worker, "w1", payload, ttl, tick)
-            .await
-            .expect("a released ID is free");
+        assert!(get(&client, "ops:heartbeat:worker:w1").await.is_none());
+        NodeClaim::claim_with_timing(
+            client.clone(),
+            "ops",
+            NodeRole::Worker,
+            "w1",
+            payload,
+            ttl,
+            tick,
+        )
+        .await
+        .expect("a released ID is free");
     }
 
     #[tokio::test]
@@ -759,6 +773,7 @@ mod tests {
         // A predecessor that crashed without releasing: its key just expires.
         let crashed = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Server,
             "s1",
             payload.clone(),
@@ -769,6 +784,7 @@ mod tests {
         .unwrap();
         let successor = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Server,
             "s1",
             payload.clone(),
@@ -806,6 +822,7 @@ mod tests {
         let stream_ttl = Duration::from_secs(600);
         let claim = NodeClaim::claim_at_boot(
             client.clone(),
+            "ops",
             NodeRole::Server,
             "s1",
             serde_json::json!({}),
@@ -876,6 +893,7 @@ mod tests {
         let (client, _c) = redis().await;
         let claim = NodeClaim::claim_at_boot(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w-released",
             serde_json::json!({}),
@@ -890,7 +908,7 @@ mod tests {
             RenewOutcome::Lost
         );
         assert!(
-            get(&client, "broccoli:worker:heartbeat:w-released")
+            get(&client, "ops:heartbeat:worker:w-released")
                 .await
                 .is_none()
         );
@@ -904,6 +922,7 @@ mod tests {
         let payload = serde_json::json!({});
         let owner = NodeClaim::claim_with_timing(
             client.clone(),
+            "ops",
             NodeRole::Worker,
             "w1",
             payload.clone(),
@@ -919,6 +938,7 @@ mod tests {
             role: NodeRole::Worker,
             id: owner.id.clone(),
             key: owner.key.clone(),
+            namespace: owner.namespace.clone(),
             instance: "twin".into(),
             ttl,
             owned_streams: Vec::new(),

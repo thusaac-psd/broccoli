@@ -153,6 +153,7 @@ impl WorkerRuntime {
         };
         let claim = NodeClaim::claim_at_boot(
             redis::Client::open(config.mq.url.as_str()).context("Invalid MQ URL")?,
+            &config.mq.operation_queue_name,
             NodeRole::Worker,
             &config.worker.id,
             heartbeat_config.payload(started_at, &in_flight),

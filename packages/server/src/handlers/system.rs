@@ -546,7 +546,14 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
         return Vec::new();
     };
     let nodes = match client.get_multiplexed_async_connection().await {
-        Ok(mut conn) => liveness::live_nodes(&mut conn, NodeRole::Worker).await,
+        Ok(mut conn) => {
+            liveness::live_nodes(
+                &mut conn,
+                &state.config.mq.operation_queue_name,
+                NodeRole::Worker,
+            )
+            .await
+        }
         Err(e) => Err(e),
     };
     let nodes = match nodes {

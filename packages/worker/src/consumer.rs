@@ -471,7 +471,7 @@ mod tests {
             .unwrap();
         let _: () = redis::pipe()
             .cmd("SET")
-            .arg(NodeRole::Server.key(SERVER))
+            .arg(NodeRole::Server.key("ops", SERVER))
             .arg("{}")
             .arg("EX")
             .arg(60)

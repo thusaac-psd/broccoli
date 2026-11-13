@@ -255,6 +255,7 @@ impl ServerRuntime {
                 };
                 let claim = NodeClaim::claim_at_boot(
                     client.clone(),
+                    &app_config.mq.operation_queue_name,
                     NodeRole::Server,
                     &server_id,
                     payload(),

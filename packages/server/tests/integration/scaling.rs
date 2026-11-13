@@ -43,6 +43,7 @@ async fn redis() -> (testcontainers::ContainerAsync<Redis>, String) {
 async fn live_server(url: &str, mq: &Mq, id: &str) -> NodeHeartbeat {
     NodeClaim::claim_at_boot(
         redis::Client::open(url).unwrap(),
+        mq.topology().namespace(),
         NodeRole::Server,
         id,
         serde_json::json!({}),
