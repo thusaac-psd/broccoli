@@ -118,7 +118,12 @@ async fn test_case_with_a_nul_body_is_rejected() {
     let res = app
         .post_with_token(
             &routes::test_cases(pid),
-            &json!({ "input": "1\u{0}2", "expected_output": "3", "score": 10 }),
+            &json!({
+                "input": "1\u{0}2",
+                "expected_output": "3",
+                "score": 10,
+                "is_sample": false,
+            }),
             &admin,
         )
         .await;
