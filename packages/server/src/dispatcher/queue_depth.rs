@@ -115,10 +115,10 @@ pub async fn enforce_queue_depth_admission(state: &AppState) -> Result<(), AppEr
 /// about a second, so a few hundred queued per slot is a backlog the fleet
 /// still drains within minutes; past that, refusing at the door keeps latency
 /// honest instead of growing an hour-long queue.
-const QUEUED_PER_WORKER_SLOT: u64 = 200;
+pub const QUEUED_PER_WORKER_SLOT: u64 = 200;
 
 /// The cap before any worker heartbeat is seen, and the least it ever is.
-const QUEUE_CAP_FLOOR: u64 = 5000;
+pub const QUEUE_CAP_FLOOR: u64 = 5000;
 
 /// The queue cap for `live_worker_slots` (the claim fiber's view of the
 /// fleet): [`QUEUED_PER_WORKER_SLOT`] per slot, at least [`QUEUE_CAP_FLOOR`].
