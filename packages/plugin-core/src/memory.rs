@@ -190,7 +190,7 @@ pub(crate) fn automatic_budget(root: &Path) -> u64 {
 
 /// The memory limit of this process's cgroup: v2 (`memory.max` of its
 /// cgroup, else of the nearest parent that sets one), then v1
-/// (`hierarchical_memory_limit`).
+/// (`hierarchical_memory_limit` of its memory cgroup).
 fn cgroup_limit(root: &Path) -> Option<u64> {
     let membership = std::fs::read_to_string(root.join("proc/self/cgroup")).ok()?;
     if let Some(path) = membership.lines().find_map(|l| l.strip_prefix("0::")) {
@@ -207,7 +207,7 @@ fn cgroup_limit(root: &Path) -> Option<u64> {
             }
         }
     }
-    let stat = std::fs::read_to_string(root.join("sys/fs/cgroup/memory/memory.stat")).ok()?;
+    let stat = v1_memory_stat(root, &membership)?;
     let limit = stat
         .lines()
         .find_map(|l| l.strip_prefix("hierarchical_memory_limit "))?
@@ -216,6 +216,26 @@ fn cgroup_limit(root: &Path) -> Option<u64> {
         .ok()?;
     // v1 reports "no limit" as a huge page-aligned number.
     (limit < 1 << 60).then_some(limit)
+}
+
+/// `memory.stat` of this process's v1 memory cgroup. The membership line
+/// (`<id>:<controllers>:<path>`) names the cgroup's path in the hierarchy; a
+/// container that sees only its own cgroup has it mounted at the hierarchy
+/// root instead, so the root is the fallback.
+fn v1_memory_stat(root: &Path, membership: &str) -> Option<String> {
+    let path = membership.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let (_, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+        controllers
+            .split(',')
+            .any(|c| c == "memory")
+            .then_some(path)
+    })?;
+    let mount = root.join("sys/fs/cgroup/memory");
+    let own = mount.join(path.trim_start_matches('/')).join("memory.stat");
+    std::fs::read_to_string(own)
+        .or_else(|_| std::fs::read_to_string(mount.join("memory.stat")))
+        .ok()
 }
 
 fn mem_total(root: &Path) -> Option<u64> {
@@ -271,7 +291,29 @@ mod tests {
     }
 
     #[test]
-    fn cgroup_v1_uses_the_hierarchical_limit() {
+    fn cgroup_v1_uses_the_hierarchical_limit_of_the_process_cgroup() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "proc/self/cgroup",
+            "5:cpu,cpuacct:/system.slice/server\n4:memory:/system.slice/server\n",
+        );
+        // The hierarchy root is unlimited; the process's own cgroup is not.
+        write(
+            root.path(),
+            "sys/fs/cgroup/memory/memory.stat",
+            &format!("cache 0\nhierarchical_memory_limit {}\n", u64::MAX / 2),
+        );
+        write(
+            root.path(),
+            "sys/fs/cgroup/memory/system.slice/server/memory.stat",
+            &format!("cache 0\nhierarchical_memory_limit {}\n", 2 * GIB),
+        );
+        assert_eq!(automatic_budget(root.path()), 3 * GIB / 2);
+    }
+
+    #[test]
+    fn a_v1_container_seeing_only_its_cgroup_reads_the_hierarchy_root() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "proc/self/cgroup", "4:memory:/docker/abc\n");
         write(

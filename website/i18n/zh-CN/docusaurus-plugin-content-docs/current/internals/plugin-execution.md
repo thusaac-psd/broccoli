@@ -96,7 +96,7 @@ extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 
 - 在至少 `RECYCLE_MIN_CALLS` 次调用中搬运的调用输入输出超过 `MemoryBudget::recycle_after` 字节（预算的 1/64，32 MiB 到 512 MiB）的实例会在归还时被丢弃，保温实例也不例外：其分配器的高水位会随处理的数据增长，而 extism 并不暴露实例的内存大小。
 - 重建实例只是实例化一个已缓存的模块。wasmtime 把编译好的模块保存在磁盘上的 `plugin.cache_dir` 中（`config::compile_cache_config`），因此重建只需几毫秒的反序列化，而无需编译（ICPC 插件约 300 毫秒）。同一插件的各实例不共享一个 wasmtime `Engine`：取消会推进其引擎的 epoch，这会使该引擎上的所有实例陷入 trap。
 - 预算通过弱引用持有池，因此被重载替换的池在其最后一个租约归还之前仍会被裁剪。
-- 预算为进程所在 cgroup 内存上限的 3/4（cgroup v2：`/proc/self/cgroup` 中的 `0::` 路径，然后是该 cgroup 或其最近的有上限父级的 `memory.max`；cgroup v1：`hierarchical_memory_limit`），没有上限时为 `MemTotal` 的 1/4，因为单机 compose 与其他服务共享机器。`plugin.memory_budget` 可以覆盖它。
+- 预算为进程所在 cgroup 内存上限的 3/4（cgroup v2：`/proc/self/cgroup` 中的 `0::` 路径，然后是该 cgroup 或其最近的有上限父级的 `memory.max`；cgroup v1：`/proc/self/cgroup` 所指内存 cgroup 的 `memory.stat` 中的 `hierarchical_memory_limit`，容器只能看到自身 cgroup 时取层级根的该值），没有上限时为 `MemTotal` 的 1/4，因为单机 compose 与其他服务共享机器。`plugin.memory_budget` 可以覆盖它。
 - 每个实例的线性内存保留失控上限（`memory_max`），为预算的一半且至多 1.5 GiB。
 
 `broccoli_plugin_instances_live` 和 `broccoli_plugin_calls_in_flight` 是按插件的仪表；`broccoli_plugin_admission_queued_total` 和 `broccoli_plugin_admission_wait_duration_seconds` 反映争用情况。

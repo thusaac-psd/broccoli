@@ -219,7 +219,10 @@ returned ones, most recently used first. Memory is bounded globally by
   still trimmed until its last lease returns.
 - The budget is 3/4 of the memory limit of the process's cgroup (cgroup v2:
   the `0::` path in `/proc/self/cgroup`, then `memory.max` of that cgroup or
-  its nearest limited parent; cgroup v1: `hierarchical_memory_limit`), or 1/4
+  its nearest limited parent; cgroup v1:
+  `hierarchical_memory_limit` in the `memory.stat` of the memory cgroup
+  `/proc/self/cgroup` names, or of the hierarchy root when the container sees
+  only its own cgroup), or 1/4
   of `MemTotal` without one, because the single-host compose shares the
   machine. `plugin.memory_budget` overrides it.
 - Each instance keeps a runaway cap on its linear memory (`memory_max`), half
