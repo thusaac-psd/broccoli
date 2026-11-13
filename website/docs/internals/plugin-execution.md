@@ -134,12 +134,16 @@ A call still queued at its deadline, or cancelled at it, fails with
 ## Judging fan-out
 
 The test cases a server has outstanding at workers are bounded by
-`dispatcher::fanout::Fanout`: `TEST_CASES_PER_WORKER_SLOT` (2) per live worker
-slot. `WorkerSlots` is the one record of live worker capacity, the sum of
-`max_concurrency` over the worker heartbeats (`common::liveness`), refreshed
-by one task every 15 s; the claim fiber sizes its in-flight cap from the same
-value. Until any capacity is seen, one slot per local core is assumed. Inside
-one operation batch, publishes run in a fixed window of 32.
+`dispatcher::fanout::Fanout`: this server's share of
+`TEST_CASES_PER_WORKER_SLOT` (2) per live worker slot across the fleet.
+`WorkerSlots` is the one record of live capacity: the sum of `max_concurrency`
+over the worker heartbeats and the number of live servers
+(`common::liveness::live_workers_and_server_count`, one `SCAN` over both roles
+and one pipelined read), refreshed by one task every 15 s. The claim fiber's
+in-flight cap is the same kind of share: the configured per-server floor, or
+this server's share of 8 per live worker slot when that is larger. Until any
+capacity is seen, one slot per local core is assumed. Inside one operation
+batch, publishes run in a fixed window of 32.
 
 ## Memory
 

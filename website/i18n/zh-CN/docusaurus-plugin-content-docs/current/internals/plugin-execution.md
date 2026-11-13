@@ -69,7 +69,7 @@ extism 先把调用注册到它的计时线程，然后才设置 store 的 epoch
 
 ## 评测扇出
 
-服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个。`WorkerSlots` 是存活评测机容量的唯一记录，即评测机心跳（`common::liveness`）中 `max_concurrency` 之和，由一个任务每 15 秒刷新一次；认领协程用同一个值确定其进行中上限。在看到任何容量之前，假定每个本地核心一个槽位。单个操作批次内的发布以固定的 32 个为窗口进行。
+服务器在评测机处未完成的测试点数量由 `dispatcher::fanout::Fanout` 限制：即整个集群每个存活评测机槽位 `TEST_CASES_PER_WORKER_SLOT`（2）个中本服务器所占的份额。`WorkerSlots` 是存活容量的唯一记录：评测机心跳中 `max_concurrency` 之和，以及存活服务器的数量（`common::liveness::live_workers_and_server_count`，对两种角色执行一次 `SCAN` 和一次流水线读取），由一个任务每 15 秒刷新一次。认领协程的进行中上限也是同样的份额：取配置的每服务器下限与本服务器在每个存活评测机槽位 8 个中所占份额的较大者。在看到任何容量之前，假定每个本地核心一个槽位。单个操作批次内的发布以固定的 32 个为窗口进行。
 
 ## 内存
 

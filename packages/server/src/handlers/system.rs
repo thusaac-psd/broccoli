@@ -537,6 +537,43 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
         .collect()
 }
 
+/// The live workers in `namespace` with their parsed heartbeat payloads, and
+/// the number of live servers, in the same round trips as
+/// [`read_worker_payloads`]. Empty and 0 when Redis is unavailable.
+pub(crate) async fn read_worker_payloads_and_server_count(
+    client: &redis::Client,
+    namespace: &str,
+) -> (Vec<(liveness::LiveNode, HeartbeatPayload)>, usize) {
+    let read = match client.get_multiplexed_async_connection().await {
+        Ok(mut conn) => liveness::live_workers_and_server_count(&mut conn, namespace).await,
+        Err(e) => Err(e),
+    };
+    match read {
+        Ok((nodes, servers)) => (parse_worker_payloads(nodes), servers),
+        Err(e) => {
+            warn!(error = %e, "Reading liveness keys failed");
+            (Vec::new(), 0)
+        }
+    }
+}
+
+fn parse_worker_payloads(
+    nodes: Vec<liveness::LiveNode>,
+) -> Vec<(liveness::LiveNode, HeartbeatPayload)> {
+    nodes
+        .into_iter()
+        .filter_map(
+            |node| match serde_json::from_str::<HeartbeatPayload>(&node.payload) {
+                Ok(p) => Some((node, p)),
+                Err(e) => {
+                    warn!(worker_id = %node.id, error = %e, "Unparseable worker heartbeat");
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
 /// The live workers in `namespace` with their parsed heartbeat payloads,
 /// sorted by id. Empty when Redis is unavailable.
 pub(crate) async fn read_worker_payloads(

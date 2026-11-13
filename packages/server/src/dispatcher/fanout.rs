@@ -1,16 +1,17 @@
 //! Live worker capacity, and the judging fan-out bounded by it.
 //!
-//! [`WorkerSlots`] is the one record of how many task slots the live workers
-//! have: the sum of `max_concurrency` over the worker heartbeats (see
-//! [`common::liveness`]), refreshed by one task every [`SLOTS_REFRESH`] so no
-//! request or judging path ever reads Redis for it. The claim fiber sizes its
-//! in-flight cap from it, and [`Fanout`] sizes how many test cases this
-//! server has outstanding at workers at once.
+//! [`WorkerSlots`] is the one record of the fleet's live capacity: the task
+//! slots of the live workers (the sum of `max_concurrency` over their
+//! heartbeats, see [`common::liveness`]) and how many servers share them,
+//! refreshed by one task every [`SLOTS_REFRESH`] so no request or judging
+//! path ever reads Redis for it. Each server takes its share of the fleet
+//! figures ([`WorkerSlots::share`]): the claim fiber's in-flight cap and
+//! [`Fanout`], how many test cases this server has outstanding at workers.
 //!
 //! A test case is outstanding from the moment its evaluate task starts until
 //! its verdict is delivered. [`TEST_CASES_PER_WORKER_SLOT`] of them per live
-//! slot keeps every slot fed (one running, one queued behind it) without
-//! spawning a task per test case of a whole burst at once.
+//! slot, across the fleet, keeps every slot fed (one running, one queued
+//! behind it) without spawning a task per test case of a whole burst at once.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,11 +31,13 @@ pub const TEST_CASES_PER_WORKER_SLOT: u64 = 2;
 #[derive(Default)]
 struct SlotsInner {
     slots: AtomicU64,
+    servers: AtomicU64,
     changed: Notify,
 }
 
-/// Task slots of the live workers, as last read from their heartbeats. 0
-/// until the first read, and whenever Redis is unreachable.
+/// Task slots of the live workers and the number of live servers, as last
+/// read from their heartbeats. No slots and one server until the first
+/// read, and whenever Redis is unreachable.
 #[derive(Clone, Default)]
 pub struct WorkerSlots(Arc<SlotsInner>);
 
@@ -43,10 +46,28 @@ impl WorkerSlots {
         self.0.slots.load(Ordering::Relaxed)
     }
 
-    pub fn set(&self, slots: u64) {
-        if self.0.slots.swap(slots, Ordering::Relaxed) != slots {
+    /// Live servers, at least this one.
+    pub fn servers(&self) -> u64 {
+        self.0.servers.load(Ordering::Relaxed).max(1)
+    }
+
+    pub fn set(&self, slots: u64, servers: u64) {
+        let slots_changed = self.0.slots.swap(slots, Ordering::Relaxed) != slots;
+        let servers_changed = self.0.servers.swap(servers, Ordering::Relaxed) != servers;
+        if slots_changed || servers_changed {
             self.0.changed.notify_waiters();
         }
+    }
+
+    /// This server's share of a fleet-wide figure: an even split across the
+    /// live servers, rounded up.
+    pub fn share(&self, fleet: u64) -> u64 {
+        fleet.div_ceil(self.servers())
+    }
+
+    /// Completes when the slots or the server count next change.
+    pub fn changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.0.changed.notified()
     }
 
     /// Re-read the live workers' slots from `client` every [`SLOTS_REFRESH`]
@@ -57,13 +78,16 @@ impl WorkerSlots {
             let mut interval = tokio::time::interval(SLOTS_REFRESH);
             loop {
                 interval.tick().await;
-                let workers = crate::handlers::system::read_worker_payloads(&client, &namespace);
+                let (workers, servers) =
+                    crate::handlers::system::read_worker_payloads_and_server_count(
+                        &client, &namespace,
+                    )
+                    .await;
                 let total = workers
-                    .await
                     .iter()
                     .map(|(_, p)| u64::from(p.max_concurrency.unwrap_or(1)))
                     .sum();
-                slots.set(total);
+                slots.set(total, servers as u64);
             }
         });
     }
@@ -73,8 +97,7 @@ struct FanoutInner {
     outstanding: Mutex<u64>,
     released: Notify,
     slots: WorkerSlots,
-    /// Used while no worker capacity is known: one slot per local core, the
-    /// shape of a single-host deployment.
+    /// Slots assumed while no worker capacity is known.
     floor_slots: u64,
     metrics: Option<common::metrics::Metrics>,
 }
@@ -108,13 +131,19 @@ impl Fanout {
         }))
     }
 
-    /// Outstanding test cases allowed now.
+    /// Outstanding test cases this server may have now: its share of
+    /// [`TEST_CASES_PER_WORKER_SLOT`] per live worker slot. With no worker
+    /// capacity known, one slot per local core, the shape of a single-host
+    /// deployment.
     pub fn limit(&self) -> u64 {
-        let slots = match self.0.slots.get() {
-            0 => self.0.floor_slots,
-            slots => slots,
-        };
-        slots * TEST_CASES_PER_WORKER_SLOT
+        match self.0.slots.get() {
+            0 => self.0.floor_slots * TEST_CASES_PER_WORKER_SLOT,
+            slots => self
+                .0
+                .slots
+                .share(slots * TEST_CASES_PER_WORKER_SLOT)
+                .max(1),
+        }
     }
 
     /// Wait until one more test case may be outstanding.
@@ -123,7 +152,7 @@ impl Fanout {
         let mut waited = false;
         loop {
             let released = self.0.released.notified();
-            let resized = self.0.slots.0.changed.notified();
+            let resized = self.0.slots.changed();
             tokio::pin!(released, resized);
             released.as_mut().enable();
             resized.as_mut().enable();
@@ -195,8 +224,18 @@ mod tests {
         let slots = WorkerSlots::default();
         let fanout = Fanout::with_floor(slots.clone(), 4, None);
         assert_eq!(fanout.limit(), 4 * TEST_CASES_PER_WORKER_SLOT);
-        slots.set(10);
+        slots.set(10, 1);
         assert_eq!(fanout.limit(), 10 * TEST_CASES_PER_WORKER_SLOT);
+    }
+
+    #[test]
+    fn replicas_split_the_fleet_bound() {
+        let slots = WorkerSlots::default();
+        let fanout = Fanout::with_floor(slots.clone(), 4, None);
+        slots.set(10, 3);
+        // 20 outstanding across the fleet, 7 per server rounded up.
+        assert_eq!(fanout.limit(), 7);
+        assert_eq!(slots.share(20), 7);
     }
 
     #[tokio::test]
@@ -217,7 +256,7 @@ mod tests {
         let _held: Vec<_> = futures::future::join_all((0..2).map(|_| fanout.acquire())).await;
         let waiter = parked(&fanout).await;
         assert!(!waiter.is_finished());
-        slots.set(4);
+        slots.set(4, 1);
         let _permit = waiter.await.unwrap();
         assert_eq!(fanout.outstanding(), 3);
     }
