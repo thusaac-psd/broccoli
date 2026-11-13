@@ -112,9 +112,7 @@ use std::collections::{HashMap, HashSet};
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::entity::{
-    clarification, contest, contest_problem, contest_user, problem, submission,
-};
+use crate::entity::{clarification, contest, contest_problem, contest_user, problem, submission};
 use crate::error::AppError;
 use crate::utils::contest::contest_phase;
 use crate::utils::soft_delete::SoftDeletable;
@@ -278,7 +276,6 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     scopes
         .clarification_contest_ids
         .extend(clarifications.values().map(|c| (c.id, c.contest_id)));
-
 
     // Query 1: contests referenced by the batch - directly (`Resource::
     // Contest`), via a problem part's `contest_id`, or via a fetched

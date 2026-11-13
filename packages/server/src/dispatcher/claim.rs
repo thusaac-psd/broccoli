@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use opentelemetry::KeyValue;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sea_orm::sqlx::postgres::PgListener;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::{Notify, watch};
 use tracing::{error, info, warn};
 

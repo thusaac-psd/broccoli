@@ -157,14 +157,12 @@ pub async fn start_operation_batch(
         let batch_id = batch_id.clone();
         async move {
             let (op_tx, op_rx) = tokio::sync::oneshot::channel();
-            let evaluate_case = op
-                .evaluate_batch_id
-                .clone()
-                .zip(op.test_case_id)
-                .map(|(batch_id, test_case_id)| EvaluateCaseRef {
+            let evaluate_case = op.evaluate_batch_id.clone().zip(op.test_case_id).map(
+                |(batch_id, test_case_id)| EvaluateCaseRef {
                     batch_id,
                     test_case_id,
-                });
+                },
+            );
 
             // Waiter insert must precede publish for THIS op, or a fast
             // reply could arrive before anyone is waiting for it. These
