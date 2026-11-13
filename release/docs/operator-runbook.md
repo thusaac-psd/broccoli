@@ -327,7 +327,8 @@ There are three settings, and all of them size themselves:
 | `BROCCOLI__PLUGIN__MEMORY_BUDGET`        | 3/4 of the container's memory limit, or 1/4 of the machine's memory without one |
 | `BROCCOLI__PLUGIN__CALL_TIMEOUT_SECS`    | 300                                                                             |
 
-Leave them unset unless a measurement says otherwise. A machine shared with
+Leave them unset unless a measurement says otherwise; an override goes in the
+role's env file. A machine shared with
 Postgres, Redis or a worker without a container memory limit should get an
 explicit `MEMORY_BUDGET` (for example `4GiB`).
 
@@ -349,9 +350,8 @@ CPU exhaustion: add server replicas.
 A key no binary reads (a removed one such as `POOL_MAX_INSTANCES`,
 `EVALUATOR_PARALLELISM` or `SERVER__MAX_BLOCKING_THREADS`, or a typo) still set
 in the server's config file or its process environment is ignored and named in
-one warning at boot. The compose template passes the server only the variables it lists, so
-an old value left in `.env` never reaches the server and logs nothing: delete
-it.
+one warning at boot. The whole role env file reaches the container, so an old
+value left in `.env.server` shows up in that warning: delete it.
 
 ## Multi-Replica Server Identity
 
