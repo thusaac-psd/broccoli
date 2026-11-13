@@ -84,17 +84,15 @@ impl ServerRuntime {
         )
         .await?;
         // Dedicated pool for plugin host-function DB calls, isolated from the
-        // main pool above (handlers/dispatcher/windowed-eval). Prevents
-        // connection-protocol desync from other operations corrupting clean
-        // plugin INSERTs as spurious "0x00" errors. See database.rs::init_plugin_db.
+        // main pool above (handlers/dispatcher/windowed-eval). See
+        // database.rs::init_plugin_db.
         // The RESTRICTED plugin pool must NOT reuse the privileged app login role:
         // a plugin that escapes the after-connect `SET ROLE broccoli_plugin` via
         // `RESET ROLE` would otherwise climb back to the app role (and on a pooled
         // connection that persists into the next call). `resolve_restricted_plugin_pool`
         // points it at a DBA-managed `plugin_url` or an auto-provisioned
         // `broccoli_plugin_login`, degrading to app-role auth + the SQL text guard
-        // if neither is available. It returns the fresh-connection fallback target
-        // so the 0x00 fallback authenticates the same way the pool did.
+        // if neither is available.
         // Provisioning the dedicated plugin login (CREATE ROLE, the shared
         // secret row) is boot-time DDL too, so it runs on the locked session.
         let restricted = crate::database::resolve_restricted_plugin_pool(
@@ -107,8 +105,6 @@ impl ServerRuntime {
         .await?;
         boot.release().await?;
         let plugin_db = restricted.pool;
-        let restricted_fb_url = restricted.fallback_url;
-        let restricted_fb_login = restricted.fallback_login;
         // Fail CLOSED on the degrade path: when the restricted pool could NOT be
         // put behind a least-privilege login (no operator `plugin_url`, and the
         // auto-provisioned `broccoli_plugin_login` could not be created/connected),
@@ -146,20 +142,6 @@ impl ServerRuntime {
             plugin_privileged_max_connections =
                 app_config.database.plugin_privileged_max_connections,
             "Initialized isolated plugin host-function DB pools (restricted sql + privileged writes)"
-        );
-        // URLs for the guaranteed fresh-connection fallback when pool retries are
-        // exhausted by poisoned-connection 0x00 errors. The privileged fallback
-        // (structured `host.submission.*` writes) uses the app role; the
-        // RESTRICTED fallback (raw `sql`) uses whatever auth the restricted pool
-        // ended up on, so an escape that survives the SQL text guard lands on a
-        // non-privileged role on the fallback path too, not just the pool.
-        crate::host_funcs::sql::set_plugin_db_fallback_url(
-            app_config.database.url.clone(),
-            db_session.clone(),
-        );
-        crate::host_funcs::sql::set_plugin_db_restricted_fallback(
-            restricted_fb_url,
-            restricted_fb_login,
         );
         let blob_store = create_blob_store(&app_config.storage, db.clone(), Some(metrics.clone()))
             .await

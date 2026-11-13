@@ -16,8 +16,7 @@ pub struct DatabaseConfig {
     #[serde(default = "default_database_max_connections")]
     pub max_connections: u32,
     /// Size of the RESTRICTED plugin pool (raw `host.db.*` SQL), isolated from the
-    /// main pool to avoid cross-operation connection-protocol desync (the spurious
-    /// 0x00 bug). There is a SECOND, privileged plugin pool sized by
+    /// main pool so plugin SQL cannot exhaust it. There is a SECOND, privileged plugin pool sized by
     /// `plugin_privileged_max_connections`, so total backend connections are
     /// `max_connections + plugin_max_connections + plugin_privileged_max_connections`
     /// - Postgres `max_connections` must accommodate all three.

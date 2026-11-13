@@ -3,8 +3,8 @@
 //! (`host.submission.*` and `host.code_run.*`). The guest sends structured
 //! input; the host builds every statement (see `services::judging`), fenced on
 //! the unit and its epoch. The statements run on the privileged pool, through
-//! the same NUL sanitization, argument parsing and poisoned-connection
-//! recovery as raw plugin SQL (`sql::execute_on_pool`).
+//! the same NUL sanitization, argument parsing and statement typing as raw
+//! plugin SQL (`sql::execute_on_pool`).
 
 use broccoli_server_sdk::types::{
     CodeRunResultRow, CodeRunUpdate, SubmissionUpdate, TestCaseResultRow,

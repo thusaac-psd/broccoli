@@ -39,10 +39,8 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
 
 /// The restricted, NOLOGIN Postgres role raw plugin SQL runs under. Applied per
 /// connection via `SET ROLE` on the restricted pool ([`init_plugin_db`]'s
-/// `after_connect`) and re-applied by the raw-path fresh-connection fallback in
-/// [`crate::host_funcs::sql`]. Single source of truth for those two `SET ROLE`
-/// sites so they cannot drift; the migration DDL that CREATEs/GRANTs the role
-/// keeps its own literal since that is statement text, not a role handle.
+/// `after_connect`). The migration DDL that CREATEs/GRANTs the role keeps its
+/// own literal since that is statement text, not a role handle.
 pub const PLUGIN_DB_ROLE: &str = "broccoli_plugin";
 
 /// The dedicated, least-privilege LOGIN role the RESTRICTED plugin pool
@@ -255,13 +253,9 @@ pub fn classify_restricted_auth(
     }
 }
 
-/// How the restricted plugin pool should authenticate, and the fresh-connection
-/// fallback that must match it: the pool itself, the URL it connected on, and the
-/// login override it used (`None` = app-role auth).
+/// The restricted plugin pool and how it authenticated.
 pub struct RestrictedPluginPool {
     pub pool: DatabaseConnection,
-    pub fallback_url: String,
-    pub fallback_login: Option<PluginLoginOverride>,
     /// How the pool authenticated. `AppRoleDegraded` means the caller must disable
     /// raw plugin SQL (fail closed). See [`RestrictedPluginAuth`].
     pub auth: RestrictedPluginAuth,
@@ -299,8 +293,10 @@ pub async fn resolve_restricted_plugin_pool(
     .await?;
     // An operator-configured `plugin_url` is trusted as-is; otherwise the presence
     // of a dedicated login decides engine isolation vs. an app-role degrade.
-    resolved.auth =
-        classify_restricted_auth(plugin_url.is_some(), resolved.fallback_login.is_some());
+    resolved.auth = classify_restricted_auth(
+        plugin_url.is_some(),
+        resolved.auth == RestrictedPluginAuth::DedicatedLogin,
+    );
     Ok(resolved)
 }
 
@@ -325,11 +321,9 @@ async fn connect_restricted_pool_with_fallback(
     {
         Ok(pool) => Ok(RestrictedPluginPool {
             pool,
-            fallback_url: primary_url,
             // Provisional (operator URLs are upgraded to `OperatorUrl` by the
             // caller, which alone knows whether a `plugin_url` was configured).
             auth: classify_restricted_auth(false, primary_login.is_some()),
-            fallback_login: primary_login,
         }),
         Err(e) if primary_login.is_some() => {
             tracing::warn!(
@@ -340,8 +334,6 @@ async fn connect_restricted_pool_with_fallback(
             let pool = init_plugin_db(app_url, max_connections, None, session).await?;
             Ok(RestrictedPluginPool {
                 pool,
-                fallback_url: app_url.to_string(),
-                fallback_login: None,
                 auth: RestrictedPluginAuth::AppRoleDegraded,
             })
         }
@@ -355,13 +347,9 @@ async fn connect_restricted_pool_with_fallback(
 ///
 /// 1. **Isolation** - like every plugin pool, it is SEPARATE from the main
 ///    server pool used by HTTP handlers, the dispatcher, and the
-///    windowed-evaluate driver. Under load the shared pool produces spurious
-///    server-side "invalid byte sequence ... 0x00" errors on byte-clean plugin
-///    INSERTs - connection-protocol desync inherited from OTHER operations on
-///    the same pool. Plugin
-///    host functions always run their DB call to completion (sync `block_on` on
-///    a blocking thread, never cancelled), so a pool used ONLY by them stays
-///    clean. No schema-sync/seeding here - [`BootSession`] already ran it.
+///    windowed-evaluate driver, so plugin SQL can neither exhaust the server's
+///    connections nor wait behind them. No schema-sync/seeding here -
+///    [`BootSession`] already ran it.
 ///
 /// 2. **Bounded privilege** - every connection runs `SET ROLE broccoli_plugin`
 ///    before the plugin can use it, via sqlx's per-connection `after_connect`
@@ -469,14 +457,11 @@ pub async fn connect_main_pool(
     max_connections: u32,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    // `test_before_acquire` (on by default in `PgPoolSpec`) matters here: a
-    // plugin DB host call can be cancelled mid-flight (e.g. a detached evaluate
-    // timeout aborts the Extism call while it is inside
-    // `block_on(execute_raw)`), which can return a pooled connection with unread
-    // protocol bytes. Reusing such a connection surfaces stale framing bytes
-    // (message length headers contain 0x00) as a spurious "invalid byte sequence
-    // for encoding UTF8: 0x00" on the NEXT, clean statement. The liveness check
-    // on acquire makes sqlx discard a desynced connection instead.
+    // A statement future dropped mid-flight (client disconnect, the request
+    // `TimeoutLayer`, a `select!`) leaves its connection mid-exchange. sqlx
+    // pings the connection on release, which flushes the pending bytes and
+    // drains to `ReadyForQuery`, and closes it if that surfaces an error, so
+    // the pool never hands out a connection that is out of step.
     common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
 }
 
@@ -1253,19 +1238,11 @@ mod tests {
         .expect("a refused dedicated login must degrade, not error");
 
         // Degraded to app-role auth, and the returned pool actually works.
-        assert!(
-            resolved.fallback_login.is_none(),
-            "must have downgraded to app-role auth"
-        );
         assert_eq!(
             resolved.auth,
             RestrictedPluginAuth::AppRoleDegraded,
             "a refused dedicated login must classify as the app-role degrade path so \
              the caller fails raw plugin SQL closed"
-        );
-        assert_eq!(
-            resolved.fallback_url, url,
-            "fallback must report the app URL"
         );
         resolved
             .pool
