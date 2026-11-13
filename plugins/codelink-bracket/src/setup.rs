@@ -91,9 +91,7 @@ pub fn validate_setup(setup: &Setup, seeds: &[i32]) -> Result<(), String> {
     // A problem belongs to exactly one group of one round. Tracked globally
     // (not per-round) because the visibility kernel's opponent-ranking
     // branch would otherwise grant a player `Allow` on a problem that is
-    // still their own hidden problem in a DIFFERENT match -- see the module
-    // doc comment on this file's caller in `docs/superpowers/plans/
-    // 2026-09-19-afternoon-bracket.md` (Task 3) for the full reasoning.
+    // still their own hidden problem in a DIFFERENT match.
     let mut seen_problems: HashMap<i32, ()> = HashMap::new();
     for (round_idx, round) in setup
         .rounds
@@ -201,8 +199,7 @@ struct SetupRequest {
     #[serde(default = "crate::model::default_penalty_seconds")]
     penalty_seconds: i64,
     /// Optional: a request that omits this falls back to
-    /// [`crate::model::default_escalation_grace_seconds`], same as a
-    /// persisted `Setup` document written before this field existed.
+    /// [`crate::model::default_escalation_grace_seconds`].
     #[serde(default = "crate::model::default_escalation_grace_seconds")]
     escalation_grace_seconds: i64,
     seeds: Vec<i32>,
@@ -246,7 +243,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     validate_setup(&setup, &setup.seeds).map_err(|msg| PluginHttpResponse::error(400, msg))?;
     if setup.rounds.iter().any(|r| r.start_at_ms.is_some()) {
-        let times = crate::judge::contest_times(host, contest_id)?;
+        let times = crate::clock::contest_times(host, contest_id)?;
         for round in &setup.rounds {
             if let Some(at) = round.start_at_ms
                 && (at < times.start_ms || times.end_ms.is_some_and(|end| at >= end))
@@ -268,17 +265,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             let previous: Setup = serde_json::from_str(&previous.value)?;
             validate_edit(&previous, &setup, info.phase != "before")
                 .map_err(|msg| PluginHttpResponse::error(409, msg))?;
-            setup.opened_rounds = previous.opened_rounds;
-            setup.stage_clocks = previous
-                .stage_clocks
-                .into_iter()
-                .filter(|(round, clock)| {
-                    setup
-                        .rounds
-                        .get(usize::from(round.saturating_sub(1)))
-                        .is_some_and(|config| config.start_at_ms == Some(clock.start_at_ms))
-                })
-                .collect();
+            crate::stages::carry_progress(previous, &mut setup);
         }
         let previous: Option<Setup> = snapshot
             .as_ref()
@@ -298,7 +285,7 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
             })
             .collect();
         if !changed_starts.is_empty() {
-            let now = crate::judge::now_ms(host)?;
+            let now = crate::clock::now_ms(host)?;
             if changed_starts.iter().any(|at| *at <= now) {
                 return Err(PluginHttpResponse::error(
                     400,
@@ -323,11 +310,11 @@ pub fn handle_setup(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     }
     // Also recover an interrupted opening of the most recently frozen stage.
     for round in 1..=setup.rounds.len() {
-        if setup.rounds[round - 1].start_at_ms.is_some()
+        if setup.is_scheduled(round as u8)
             || (setup.opened_rounds.max(1)..=(setup.opened_rounds + 1).min(setup.rounds.len()))
                 .contains(&round)
         {
-            crate::judge::try_open_stage(host, contest_id, round as u8)?;
+            crate::stages::try_open_stage(host, contest_id, round as u8)?;
         }
     }
 
@@ -378,7 +365,7 @@ pub fn handle_get_setup(
             PluginHttpResponse::error(403, "Editing the bracket requires contest:manage").into(),
         );
     }
-    let times = crate::judge::contest_times(host, contest_id).ok();
+    let times = crate::clock::contest_times(host, contest_id).ok();
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
@@ -392,6 +379,7 @@ pub fn handle_get_setup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{queue_bracket_contest_info, queue_bracket_contest_phase};
 
     fn valid_seeds() -> [i32; 16] {
         std::array::from_fn(|i| (i as i32) + 1)
@@ -530,17 +518,6 @@ mod tests {
         let request: SetupRequest =
             serde_json::from_value(manage_request(7).body.unwrap()).unwrap();
         assert_eq!(request.match_extra_time_seconds, 0);
-        let mut stored = serde_json::to_value(valid_setup()).unwrap();
-        stored
-            .as_object_mut()
-            .unwrap()
-            .remove("match_extra_time_seconds");
-        assert_eq!(
-            serde_json::from_value::<Setup>(stored)
-                .unwrap()
-                .match_extra_time_seconds,
-            0
-        );
     }
 
     fn valid_setup() -> Setup {
@@ -751,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_penalties_and_defaults_older_setup_documents_to_twenty_seconds() {
+    fn validates_penalties_including_zero() {
         assert_eq!(Setup::default().penalty_seconds, 20);
         let mut setup = valid_setup();
         setup.penalty_seconds = -1;
@@ -762,15 +739,6 @@ mod tests {
         );
         setup.penalty_seconds = 0;
         assert!(validate_setup(&setup, &valid_seeds()).is_ok());
-
-        let mut legacy = serde_json::to_value(&setup).unwrap();
-        legacy.as_object_mut().unwrap().remove("penalty_seconds");
-        assert_eq!(
-            serde_json::from_value::<Setup>(legacy)
-                .unwrap()
-                .penalty_seconds,
-            20
-        );
     }
 
     fn manage_request(contest_id: i32) -> PluginHttpRequest {
@@ -794,19 +762,6 @@ mod tests {
                 permissions: vec![perm::CONTEST_MANAGE.to_string()],
             }),
         }
-    }
-
-    fn queue_bracket_contest_info(host: &Host) {
-        queue_bracket_contest_phase(host, "during");
-    }
-
-    fn queue_bracket_contest_phase(host: &Host, phase: &str) {
-        host.db.queue_query_result(serde_json::json!([{
-            "contest_type": "codelink-bracket",
-            "is_public": true,
-            "is_active": true,
-            "phase": phase,
-        }]));
     }
 
     fn queue_stage_open_now(host: &Host) {
@@ -921,7 +876,7 @@ mod tests {
         // (see `handle_setup`'s doc comment), but a MATCH document only
         // exists once `create_match_if_both_slots_filled` has run for it --
         // without this, round 1 would have 16 filled slots and zero actual
-        // matches for `judge::advance`/`ordering::handle_order` to act on.
+        // matches for the state machine and `ordering::handle_order` to act on.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         queue_stage_open_now(&host);

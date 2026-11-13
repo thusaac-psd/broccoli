@@ -108,9 +108,9 @@ export function BracketMatchCard({
             won ? 'font-bold' : 'text-muted-foreground',
           )}
         >
-          {match.state === 'pending' ? '' : score}
+          {score}
         </span>
-        {match.state !== 'pending' && match.state !== 'ordering' && (
+        {match.state !== 'ordering' && (
           <div className="col-start-2 col-span-2 min-w-0 pt-1">
             <Pips match={match} playerId={id} />
           </div>

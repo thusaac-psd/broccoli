@@ -23,7 +23,6 @@ import { describeMatchPhase, type MatchStatusKind } from './lib/phase';
 import type { MatchPhase, MatchView } from './types';
 
 const PILL: Record<MatchStatusKind, string> = {
-  not_started: 'bg-muted text-muted-foreground',
   ordering: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
   preparing: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
   intermission: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',

@@ -1,6 +1,6 @@
 // Wire types for the codelink-bracket plugin's HTTP routes. Kept in
 // lockstep with the Rust source of truth:
-//   - `MatchPhase`              -- plugins/codelink-bracket/src/model.rs
+//   - `MatchPhase`              -- `PhaseName` in plugins/codelink-bracket/src/model.rs
 //   - `MatchView` (GET routes)  -- plugins/codelink-bracket/src/routes.rs
 //   - order/start/force-decide  -- plugins/codelink-bracket/src/{ordering,routes}.rs
 //
@@ -14,7 +14,6 @@
 // see that function's doc comment).
 
 export type MatchPhase =
-  | 'pending'
   | 'ordering'
   | 'preparing'
   | 'intermission'

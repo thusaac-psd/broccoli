@@ -3,7 +3,8 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::decide::{SubmissionRecord, submission_in_flight};
-use crate::model::{MatchPhase, MatchState};
+use crate::machine::MatchTimer;
+use crate::model::MatchState;
 use crate::storage;
 
 const PENALTY_VERDICTS: &[Verdict] = &[
@@ -116,17 +117,20 @@ pub fn effective_time(row: &SubmissionFeedbackRecord) -> Result<i64, SdkError> {
     }))
 }
 
-/// Called after the match CAS commits, including on duplicate callbacks. Only
-/// Pending admissions in a closed match are retired even if judging is stuck.
-/// Retired results remain withheld until judging finishes, but no longer own
-/// the contestant's admission slot. Published outcomes never transition again.
-/// Returns effective timer keys to cancel only after all post-commit work succeeds.
+/// Called after the match CAS commits, including on duplicate callbacks.
+/// Admissions still being judged are retired once the match is closed
+/// ([`crate::model::Phase::is_closed`]), even if judging is stuck: retired
+/// results remain withheld until judging finishes, but no longer own the
+/// contestant's admission slot. Published outcomes never transition again.
+/// Returns the effective-time wakeups of settled submissions, to cancel only
+/// after all post-commit work succeeds (see `MatchTimer::Effective` for the
+/// time-named ones it cannot name).
 pub fn publish(
     host: &Host,
     contest: i32,
     match_id: u8,
     m: &MatchState,
-) -> Result<Vec<String>, SdkError> {
+) -> Result<Vec<MatchTimer>, SdkError> {
     let rows = host.submission.feedback_all(&SubmissionFeedbackQuery {
         key: Some(storage::match_key(contest, match_id)),
         unpublished_only: true,
@@ -140,13 +144,12 @@ pub fn publish(
             .xiaoju
             .iter()
             .find(|g| game_scope(contest, match_id, g.index) == metadata.scope_key);
-        if let Some(game) = game.filter(|g| m.state == MatchPhase::Decided || g.decided) {
-            completed_timers.push(crate::judge::effective_timer_key(
-                contest,
-                match_id,
-                game.index,
-                row.submission_id,
-            ));
+        if let Some(game) = game.filter(|g| m.phase.is_closed() || g.decided) {
+            completed_timers.push(MatchTimer::Effective {
+                game: game.index,
+                submission_id: row.submission_id,
+                at_us: None,
+            });
         }
         let record = SubmissionRecord {
             submission_id: row.submission_id,
@@ -158,7 +161,7 @@ pub fn publish(
             status: row.status,
         };
         if submission_in_flight(&record) {
-            if m.state != MatchPhase::Decided {
+            if !m.phase.is_closed() {
                 continue;
             }
             host.submission.release_slot(record.submission_id)?;
@@ -168,8 +171,10 @@ pub fn publish(
             } else {
                 match game {
                     Some(game) if game.decided => game.winner != Some(record.user_id),
-                    _ if m.state == MatchPhase::Decided => m.winner != Some(record.user_id),
-                    _ => continue,
+                    _ => match m.winner() {
+                        Some(winner) => winner != record.user_id,
+                        None => continue,
+                    },
                 }
             };
             let release = if losing_ac {
@@ -193,10 +198,16 @@ mod tests {
 
     #[test]
     fn tiebreak_feedback_has_no_penalty_even_while_awaiting_judging() {
-        for state in [MatchPhase::Tiebreak, MatchPhase::AwaitingJudge] {
+        for phase in [
+            crate::model::Phase::Playing,
+            crate::model::Phase::AwaitingJudge {
+                blocking_submission_id: 1,
+                escalate_at_ms: 0,
+            },
+        ] {
             let host = Host::mock();
             let m = MatchState {
-                state,
+                phase,
                 group_a: vec![101, 102, 103],
                 xiaoju: vec![crate::model::XiaojuState {
                     index: 3,

@@ -179,13 +179,6 @@ The setup API accepts the same edits through the complete setup request. Use
 and its `opened_rounds` count. Bracket size can change only before the contest
 starts. During play you cannot add or remove elimination stages.
 
-Existing configured brackets are upgraded when the plugin reloads. Their
-seeding, games, scores and clocks are preserved. Opened stages keep their
-previous rule of playing all regular games. Unopened stages without an FT
-target receive the majority default and remain editable. Stages without
-`start_at_ms` retain their legacy pacing. Add schedules to unopened stages to
-use the shared ordering and preparation windows.
-
 ### Shared extra time
 
 Set **Shared extra time per match** within each stage to give its matches an allowance shared by
@@ -282,9 +275,16 @@ Staff can act from the match panel. Every action asks for confirmation first.
 
 | Control | When it appears | What it does |
 | --- | --- | --- |
-| **Start now** | A legacy unscheduled match is waiting for rankings | Starts that match within an open stage. Scheduled stages have no individual start override. |
+| **Start now** | A match in an unscheduled stage is waiting for rankings | Starts that match within an open stage. Scheduled stages have no individual start override. |
 | **Force expiry** | A game is live or waiting on judging | Checks the current game again right away, for example after a rejudge. It never ends a game before its time is up. |
 | **Award to** | A game is live, waiting on judging, or the match needs a staff decision | Gives the match to that player, who moves into the next round. This cannot be undone. |
+
+Both **Force expiry** and **Award to** use the match's `force-decide` route.
+Called without a winner, the route checks the match again at the current time
+in any phase. A match whose start time has passed starts, and a match the
+contest end has overtaken goes to staff. Awarding a match that is already
+decided returns 409. When the bracket is not set up or the match does not
+exist, the route returns 404.
 
 ### Game reminders
 

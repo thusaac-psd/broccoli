@@ -1,22 +1,27 @@
 //! 下午场 (afternoon session) bracket plugin.
 //!
-//! Implements the single-elimination bracket format described in
-//! `docs/superpowers/specs/2026-09-19-afternoon-bracket-design.md`. All
-//! bracket state, ordering, visibility and judging logic lives in this
-//! plugin; the host knows nothing about brackets, rounds, matches or 小局.
+//! Implements a single-elimination bracket in which each player ranks the
+//! opponent's problems. All bracket state, ordering, visibility and judging
+//! logic lives in this plugin; the host knows nothing about brackets, rounds,
+//! matches or 小局.
 
 pub mod bracket;
+pub mod clock;
 pub mod decide;
+pub mod executor;
 pub mod feedback;
 pub mod gate;
-pub mod judge;
-pub mod migration;
+pub mod judging;
+pub mod machine;
 pub mod model;
 pub mod ordering;
 pub mod routes;
 pub mod setup;
 pub mod stages;
 pub mod storage;
+#[cfg(test)]
+mod test_support;
+pub mod timers;
 pub mod visibility;
 
 #[cfg(target_arch = "wasm32")]
@@ -31,7 +36,6 @@ use broccoli_server_sdk::prelude::*;
 #[plugin_fn]
 pub fn init() -> FnResult<String> {
     let host = Host::new();
-    migration::run(&host)?;
     host.registry.register_contest_type_with_admission(
         "codelink-bracket",
         "handle_codelink_bracket_submission",

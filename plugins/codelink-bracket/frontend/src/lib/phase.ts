@@ -16,7 +16,6 @@ import type { MatchPhase } from '../types.ts';
  * kind rather than folded into `'playing'` -- see the module doc comment.
  */
 export type MatchStatusKind =
-  | 'not_started'
   | 'ordering'
   | 'preparing'
   | 'intermission'
@@ -35,12 +34,6 @@ export interface MatchStatusDescription {
 
 export function describeMatchPhase(phase: MatchPhase): MatchStatusDescription {
   switch (phase) {
-    case 'pending':
-      return {
-        kind: 'not_started',
-        labelKey: 'codelink-bracket.phase.pending',
-        shortKey: 'codelink-bracket.phase.short.pending',
-      };
     case 'ordering':
       return {
         kind: 'ordering',

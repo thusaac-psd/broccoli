@@ -3,8 +3,9 @@
 //!
 //! - `POST /matches/{id}/start` -- staff only, begins a match once both
 //!   players have ranked each other's problems and the round has opened.
-//! - `POST /matches/{id}/force-decide` -- staff only; see `judge.rs`'s
-//!   module doc comment for the two distinct things this does.
+//! - `POST /matches/{id}/force-decide` -- staff only: without a winner it
+//!   re-evaluates the match now ("force expiry"); with one it awards the
+//!   match, which no evidence-driven tick can do.
 //! - `GET /bracket` -- the whole bracket, visibility-filtered per viewer.
 //! - `GET /matches/{id}` -- one match, visibility-filtered per viewer.
 //!
@@ -16,22 +17,24 @@ use broccoli_server_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::bracket;
-use crate::judge;
-use crate::model::{AdjudicationReason, MatchPhase, MatchState, RoundDef, Setup};
+use crate::executor::{self, DriveError};
+use crate::machine::{Event, Rejection};
+use crate::model::{AdjudicationReason, MatchState, Phase, PhaseName, RoundDef, Setup};
 use crate::storage;
 use crate::visibility::{self, VisibilityCtx};
 
-/// Staff override: start `m` now. Matches normally start by themselves
-/// (see `bracket` and `judge::try_autostart`); this is for a match stuck on a
-/// player who never ranks. A missing ranking becomes the listed order, and
-/// the stage must already be open before staff can use this override.
-fn force_start(m: &mut MatchState) -> Result<(), &'static str> {
-    if m.state != MatchPhase::Ordering {
-        return Err("match is not awaiting start");
+/// Map a failed [`executor::drive`] to its HTTP response.
+fn drive_error(error: DriveError) -> ApiError {
+    match error {
+        DriveError::NotFound => PluginHttpResponse::error(404, "Match not found").into(),
+        DriveError::Rejected(rejection @ Rejection::AlreadyDecided) => {
+            PluginHttpResponse::error(409, rejection.to_string()).into()
+        }
+        DriveError::Rejected(rejection) => {
+            PluginHttpResponse::error(400, rejection.to_string()).into()
+        }
+        DriveError::Sdk(error) => error.into(),
     }
-    bracket::fill_missing_orders(m);
-    m.state = MatchPhase::InProgress;
-    Ok(())
 }
 
 /// Handle `POST /matches/{match_id}/start`. Staff only (`contest:manage`).
@@ -56,12 +59,8 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
     if info.phase == "after" {
         return Err(PluginHttpResponse::error(400, "The contest has ended").into());
     }
-    if setup
-        .rounds
-        .get(usize::from(current.round.saturating_sub(1)))
-        .is_some_and(|r| r.start_at_ms.is_some())
-    {
-        let now = judge::now_ms(host)?;
+    let event = if setup.is_scheduled(current.round) {
+        let now = crate::clock::now_ms(host)?;
         let ready = setup
             .stage_clocks
             .get(&current.round)
@@ -69,48 +68,32 @@ pub fn handle_start(host: &Host, req: &PluginHttpRequest) -> Result<PluginHttpRe
         if !ready {
             return Err(PluginHttpResponse::error(409, "This match follows its shared stage schedule; reschedule the unopened stage instead").into());
         }
-        judge::try_autostart(host, contest_id, match_id)?;
-        let updated = storage::load_match(host, contest_id, match_id)?.unwrap();
-        return Ok(PluginHttpResponse {
-            status: 200,
-            headers: None,
-            body: Some(serde_json::json!({"state": updated.state})),
-        });
-    }
-    if current.round > 1 {
-        let matches = storage::load_all_matches(host, contest_id)?;
-        let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0) else {
-            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
-        };
-        if judge::now_ms(host)? < stage_at {
-            return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+        Event::Tick
+    } else {
+        if current.round > 1 {
+            let matches = storage::load_all_matches(host, contest_id)?;
+            let Some(stage_at) = bracket::stage_open_at_ms(&setup, &matches, current.round, 0)
+            else {
+                return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+            };
+            if crate::clock::now_ms(host)? < stage_at {
+                return Err(PluginHttpResponse::error(409, "This stage has not opened yet").into());
+            }
         }
-    }
-
-    // Validate against a snapshot first so a rejection is a 400, not the
-    // 500 `SdkError`'s blanket `ApiError` conversion would give it.
-    let mut probe = current.clone();
-    force_start(&mut probe).map_err(|msg| PluginHttpResponse::error(400, msg))?;
-
-    let updated = storage::update_match(host, contest_id, match_id, |m| {
-        let clock = judge::clock(host, contest_id)?;
-        force_start(m).map_err(|e| SdkError::Other(e.to_string()))?;
-        judge::open_xiaoju(host, contest_id, match_id, &setup, clock, m)
-    })?;
-    // A pending start delivery rechecks stored state. Do not cancel its key:
-    // a fast concurrent game settlement may already have reused it for a break.
-
+        Event::Start
+    };
+    let updated = executor::drive(host, contest_id, match_id, event).map_err(drive_error)?;
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
-        body: Some(serde_json::json!({ "state": updated.state })),
+        body: Some(serde_json::json!({ "state": updated.phase_name() })),
     })
 }
 
 /// Wire body for `POST /matches/{match_id}/force-decide`. `winner` absent
-/// or `null` means "force expiry" (just re-run `advance` at the current
-/// real time); present means "resolve adjudication" / "award the match" --
-/// see `judge.rs`'s module doc comment for why these are different paths.
+/// or `null` means "force expiry" (re-evaluate the match at the current
+/// time); present means "award the match", which also resolves
+/// adjudication.
 #[derive(Debug, Default, Deserialize)]
 struct ForceDecideRequest {
     #[serde(default)]
@@ -135,77 +118,24 @@ pub fn handle_force_decide(
         .into());
     }
 
-    let current = storage::load_match(host, contest_id, match_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
-
     let body: ForceDecideRequest = match req.body.clone() {
         Some(v) => serde_json::from_value(v)
             .map_err(|e| PluginHttpResponse::error(400, format!("Invalid request body: {e}")))?,
         None => ForceDecideRequest::default(),
     };
-
-    match body.winner {
-        None => {
-            judge::advance(host, contest_id, match_id)?;
-        }
-        Some(winner) => {
-            // Validate against a snapshot first, same rationale as
-            // `handle_start` above: a rejection here must be a 400, not the
-            // 500 `force_decide`'s `SdkError` return type would otherwise
-            // produce via `ApiError`'s blanket conversion.
-            let mut probe = current.clone();
-            judge::apply_force_decide(&mut probe, winner, 0)
-                .map_err(|msg| PluginHttpResponse::error(400, msg))?;
-
-            // The probe above passed (the match was not yet `Decided` at
-            // that snapshot), but a concurrent force-decide can still win
-            // the race before `force_decide`'s CAS retry closure re-runs
-            // `apply_force_decide` against the freshly-reloaded state -- see
-            // `map_force_decide_error`'s doc comment.
-            judge::force_decide(host, contest_id, match_id, winner)
-                .map_err(map_force_decide_error)?;
-        }
-    }
-
-    let updated = storage::load_match(host, contest_id, match_id)?
-        .ok_or_else(|| PluginHttpResponse::error(404, "Match not found"))?;
+    let event = match body.winner {
+        None => Event::Tick,
+        Some(winner) => Event::Award { winner },
+    };
+    let updated = executor::drive(host, contest_id, match_id, event).map_err(drive_error)?;
     Ok(PluginHttpResponse {
         status: 200,
         headers: None,
         body: Some(serde_json::json!({
-            "state": updated.state,
-            "winner": updated.winner,
+            "state": updated.phase_name(),
+            "winner": updated.winner(),
         })),
     })
-}
-
-/// Map a [`judge::force_decide`] failure to the right HTTP response. That
-/// function's CAS retry closure can lose a genuine race against another
-/// concurrent force-decide (two staff clicking the same button, or a
-/// retried request): it re-validates `apply_force_decide` against the
-/// freshly-reloaded state on every retry, and returns exactly
-/// `SdkError::Other(judge::ALREADY_DECIDED_MSG)` when it discovers the match
-/// was decided out from under it. That is a benign lost race, not an
-/// internal error, so it becomes a 409 Conflict here instead of falling
-/// through to `ApiError`'s generic `SdkError` -> 500 conversion. Any OTHER
-/// `SdkError` (the bracket was never set up, a genuine storage/host
-/// failure, ...) still falls through to that generic conversion unchanged
-/// -- see this function's negative-control test below.
-///
-/// Pulled into its own function, rather than inlined as a `map_err`
-/// closure, so it can be unit tested directly against a synthetic error:
-/// the real race it exists for cannot be reproduced deterministically
-/// against `Host::mock()`'s single-threaded (`RefCell`-backed) storage, so
-/// `judge::force_decide_surfaces_the_already_decided_message_when_it_loses_a_race`
-/// (`judge.rs`) tests that `force_decide` produces this exact error, and
-/// the two tests below test that THIS function maps it correctly.
-fn map_force_decide_error(e: SdkError) -> ApiError {
-    match e {
-        SdkError::Other(ref msg) if msg == judge::ALREADY_DECIDED_MSG => {
-            ApiError::from(PluginHttpResponse::error(409, judge::ALREADY_DECIDED_MSG))
-        }
-        other => ApiError::from(other),
-    }
 }
 
 /// One match, as returned by `GET /bracket` and `GET /matches/{id}` --
@@ -242,36 +172,28 @@ struct MatchView {
     wins_to_advance: usize,
     score_a: u8,
     score_b: u8,
-    state: MatchPhase,
+    state: PhaseName,
     winner: Option<i32>,
+    /// When the match was decided, `0` until then.
     decided_at_ms: i64,
-    /// Mirrors `MatchState::awaiting_submission_id`: set while
-    /// `state == MatchPhase::AwaitingJudge`, and KEPT when that block times out
-    /// into `NeedsAdjudication` (so staff know which submission to rejudge;
-    /// `adjudication_reason` says why a match needs staff). Never
-    /// masked -- like `state` itself, this is structural, not a problem id. Lets staff reading
-    /// `GET /matches/{id}` distinguish "still solving" (`InProgress`) from
-    /// "blocked on a platform-side judge" (`AwaitingJudge`) without having
-    /// to diff two responses over time.
+    /// [`MatchState::blocking_submission_id`]: set while the match waits
+    /// for a judge, and KEPT when that wait escalates to staff, so staff
+    /// know which submission to rejudge. Never masked -- like `state`
+    /// itself, this is structural, not a problem id.
     awaiting_submission_id: Option<i32>,
-    /// Mirrors `MatchState::adjudication_reason`. Structural, never masked.
+    /// Why the match needs staff. Structural, never masked.
     adjudication_reason: Option<AdjudicationReason>,
     /// The last 小局's index, deadline and open time, taken from
     /// `MatchState::xiaoju.last()`.
     ///
     /// All three are `None` only BEFORE the first 小局 opens, while
     /// `xiaoju` is still empty. They are NOT cleared when the match is
-    /// decided: nothing in production ever removes an entry from `xiaoju`
-    /// (every `xiaoju.clear()` in this crate is `#[cfg(test)]`-only), so a
-    /// `Decided` or `NeedsAdjudication` match keeps reporting its final
-    /// 小局's now-past deadline.
-    ///
-    /// **A consumer must therefore derive "is this match still running"
-    /// from `state`, never from the presence of these fields.** An earlier
-    /// version of this comment claimed they go `None` once decided; that
-    /// was simply false, and a client that trusted it would show a live
-    /// countdown ticking against a stale deadline on a finished match. The
-    /// frontend derives from `state` for exactly this reason.
+    /// decided: games are never removed from `xiaoju`, so a `Decided` or
+    /// `NeedsAdjudication` match keeps reporting its final 小局's now-past
+    /// deadline. **A consumer must therefore derive "is this match still
+    /// running" from `state`, never from the presence of these fields**, or
+    /// it would show a live countdown ticking against a stale deadline on a
+    /// finished match.
     ///
     /// Structural, like `state` -- not a problem id, so not masked. Both
     /// players already know when their own 小局 ends, and a spectator is
@@ -374,8 +296,7 @@ fn match_view(
     can_view_all: bool,
     setup: &Setup,
 ) -> MatchView {
-    // The open 小局, if any: `None` before the first opens and after the
-    // match is decided. Read once here so the three timing fields below
+    // The latest 小局, if any. Read once here so the timing fields below
     // cannot disagree with each other.
     let current = m.xiaoju.last();
     let ctx = VisibilityCtx {
@@ -385,9 +306,9 @@ fn match_view(
         group_b: m.group_b.clone(),
         order_a: m.order_a.clone(),
         order_b: m.order_b.clone(),
-        state: m.state,
+        state: m.phase_name(),
         current_xiaoju_index: m.xiaoju.last().map(|x| x.index),
-        tiebreak_problem: round_def.tiebreak.get(m.tiebreak_index).copied(),
+        tiebreak_problem: round_def.tiebreak.get(m.tiebreak_attempt()).copied(),
     };
 
     MatchView {
@@ -401,7 +322,10 @@ fn match_view(
             .stage_clocks
             .get(&m.round)
             .map(|s| s.ordering_deadline_ms),
-        next_game_at_ms: m.next_game_at_ms,
+        next_game_at_ms: match m.phase {
+            Phase::Intermission { next_game_at_ms } => Some(next_game_at_ms),
+            _ => None,
+        },
         round: m.round,
         pos: m.pos,
         player_a: m.player_a,
@@ -424,15 +348,18 @@ fn match_view(
         wins_to_advance: round_def.win_target(),
         score_a: m.score_a,
         score_b: m.score_b,
-        state: m.state,
-        winner: m.winner,
-        decided_at_ms: m.decided_at_ms,
-        awaiting_submission_id: m.awaiting_submission_id,
-        adjudication_reason: m.adjudication_reason,
+        state: m.phase_name(),
+        winner: m.winner(),
+        decided_at_ms: m.decided_at_ms().unwrap_or(0),
+        awaiting_submission_id: m.blocking_submission_id(),
+        adjudication_reason: match m.phase {
+            Phase::NeedsAdjudication { adjudication } => Some(adjudication.reason()),
+            _ => None,
+        },
         current_xiaoju_index: current.map(|x| x.index),
         current_xiaoju_deadline_ms: current.map(|x| x.deadline_ms),
         current_xiaoju_opened_at_ms: current.map(|x| x.opened_at_ms),
-        current_game_base_deadline_ms: current.map(|x| x.base_deadline_ms()),
+        current_game_base_deadline_ms: current.map(|x| x.base_deadline_ms),
         match_extra_time_seconds: m.match_extra_time_seconds,
         extra_time_remaining_ms: m.extra_time_remaining_ms,
         games: m
@@ -450,7 +377,7 @@ fn match_view(
                     problem_b: mask(b),
                     opened_at_ms: x.opened_at_ms,
                     deadline_ms: x.deadline_ms,
-                    base_deadline_ms: x.base_deadline_ms(),
+                    base_deadline_ms: x.base_deadline_ms,
                     extra_time_used_ms: x.extra_time_used_ms,
                     winner: x.winner,
                     decided: x.decided,
@@ -471,7 +398,7 @@ fn attach_start_times(
     matches: &[(u8, MatchState)],
     views: &mut [MatchView],
 ) -> Option<i64> {
-    let times = judge::contest_times(host, contest).ok()?;
+    let times = crate::clock::contest_times(host, contest).ok()?;
     for v in views.iter_mut() {
         if let Some((_, m)) = matches.iter().find(|(id, _)| *id == v.id) {
             v.starts_at_ms = bracket::start_at_ms(setup, matches, m, times.start_ms);
@@ -574,7 +501,7 @@ pub fn handle_get_bracket(
     attach_player_names(host, &mut views);
     attach_own_feedback(host, contest_id, &setup, &matches, &mut views, viewer)?;
     let contest_end_ms = attach_start_times(host, contest_id, &setup, &matches, &mut views);
-    let server_now_ms = judge::now_ms(host).ok();
+    let server_now_ms = crate::clock::now_ms(host).ok();
     let stages = crate::stages::views(&setup, &matches, server_now_ms.unwrap_or(0));
 
     Ok(PluginHttpResponse {
@@ -625,7 +552,7 @@ pub fn handle_get_match(
         &mut view,
         viewer,
     )?;
-    if matches!(m.state, MatchPhase::Ordering | MatchPhase::Preparing) {
+    if matches!(m.phase, Phase::Ordering | Phase::Preparing) {
         let matches = storage::load_all_matches(host, contest_id)?;
         attach_start_times(host, contest_id, &setup, &matches, &mut view);
     }
@@ -656,16 +583,10 @@ fn attach_own_feedback(
         else {
             continue;
         };
-        if !matches!(
-            m.state,
-            MatchPhase::InProgress | MatchPhase::Tiebreak | MatchPhase::AwaitingJudge
-        ) {
-            continue;
-        }
         let Some(round) = setup.round_for_match(m.round, m.pos) else {
             continue;
         };
-        let Some(problem) = judge::current_problem(m, &round, viewer) else {
+        let Some(problem) = m.current_problem(&round, viewer) else {
             continue;
         };
         view.own_feedback = Some(crate::feedback::player_feedback(
@@ -682,49 +603,11 @@ fn attach_own_feedback(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{queue_bracket_contest_info, queue_now, seed, setup_two_rounds};
     use std::collections::HashMap;
 
     use super::*;
-    use crate::model::{RoundDef, Setup, XiaojuState};
-
-    fn setup_two_rounds() -> Setup {
-        Setup {
-            stage_clocks: Default::default(),
-            third_place: None,
-            seeds: (1..=16).collect(),
-            rounds: vec![
-                RoundDef {
-                    start_at_ms: None,
-                    post_order_wait_seconds: None,
-                    game_break_seconds: None,
-                    match_extra_time_seconds: None,
-                    wins_to_advance: None,
-                    group_a: vec![101, 102, 103],
-                    group_b: vec![201, 202, 203],
-                    tiebreak: vec![301, 302],
-                    xiaoju_seconds: 1_800,
-                    tiebreak_seconds: 1_800,
-                    break_before_seconds: 0,
-                },
-                RoundDef {
-                    start_at_ms: None,
-                    post_order_wait_seconds: None,
-                    game_break_seconds: None,
-                    match_extra_time_seconds: None,
-                    wins_to_advance: None,
-                    group_a: vec![401, 402, 403],
-                    group_b: vec![501, 502, 503],
-                    tiebreak: vec![601],
-                    xiaoju_seconds: 1_800,
-                    tiebreak_seconds: 1_800,
-                    break_before_seconds: 600,
-                },
-            ],
-            escalation_grace_seconds: 120,
-            penalty_seconds: crate::model::default_penalty_seconds(),
-            ..Default::default()
-        }
-    }
+    use crate::model::XiaojuState;
 
     fn match_in_ordering() -> MatchState {
         MatchState {
@@ -734,63 +617,9 @@ mod tests {
             player_b: 20,
             group_a: vec![101, 102, 103],
             group_b: vec![201, 202, 203],
-            state: MatchPhase::Ordering,
+            phase: Phase::Ordering,
             ..Default::default()
         }
-    }
-
-    fn queue_now(host: &Host, now: i64) {
-        host.db
-            .queue_query_result(serde_json::json!([{ "now_ms": now as f64 }]));
-    }
-
-    fn queue_bracket_contest_info(host: &Host) {
-        host.db.queue_query_result(serde_json::json!([{
-            "contest_type": "codelink-bracket",
-            "is_public": true,
-            "is_active": true,
-            "phase": "during",
-        }]));
-    }
-
-    fn seed(host: &Host, contest: i32, setup: &Setup, match_id: u8, m: &MatchState) {
-        host.storage
-            .set(&[(
-                storage::setup_key(contest).as_str(),
-                serde_json::to_string(setup).unwrap().as_str(),
-            )])
-            .unwrap();
-        host.storage
-            .set(&[(
-                storage::match_key(contest, match_id).as_str(),
-                serde_json::to_string(m).unwrap().as_str(),
-            )])
-            .unwrap();
-    }
-
-    // -- force_start (pure) --
-
-    #[test]
-    fn the_staff_override_starts_a_match_whose_ranking_never_came() {
-        // A player who never ranks must not stall the bracket forever: the
-        // override fills the missing order with the listed group.
-        let mut m = match_in_ordering();
-        m.order_a = Some(vec![103, 101, 102]);
-        force_start(&mut m).unwrap();
-        assert_eq!(m.state, MatchPhase::InProgress);
-        assert_eq!(m.order_b, Some(m.group_b.clone()));
-        assert_eq!(
-            m.order_a,
-            Some(vec![103, 101, 102]),
-            "a real ranking is kept"
-        );
-    }
-
-    #[test]
-    fn the_staff_override_refuses_a_match_that_is_not_waiting_to_start() {
-        let mut m = match_in_ordering();
-        m.state = MatchPhase::InProgress;
-        assert!(force_start(&mut m).is_err());
     }
 
     // -- handle_start (host wiring) --
@@ -859,8 +688,8 @@ mod tests {
         let err = handle_start(&host, &request(7, id, Some(staff_auth()))).unwrap_err();
         assert_eq!(err.into_response().status, 409);
         assert_eq!(
-            storage::load_match(&host, 7, id).unwrap().unwrap().state,
-            MatchPhase::Ordering
+            storage::load_match(&host, 7, id).unwrap().unwrap().phase,
+            Phase::Ordering
         );
     }
 
@@ -880,7 +709,7 @@ mod tests {
         assert_eq!(resp.status, 200);
 
         let reloaded = storage::load_match(&host, 7, match_id).unwrap().unwrap();
-        assert_eq!(reloaded.state, MatchPhase::InProgress);
+        assert_eq!(reloaded.phase, Phase::Playing);
         assert_eq!(reloaded.order_b, Some(reloaded.group_b));
         assert_eq!(reloaded.order_a, Some(vec![103, 101, 102]));
     }
@@ -896,18 +725,21 @@ mod tests {
         let match_id = storage::match_id_for(16, 1, 0);
         seed(&host, 7, &setup, match_id, &m);
 
-        // `handle_start` reads the clock once, inside the CAS closure.
         queue_now(&host, 1_000);
 
         let resp = handle_start(&host, &request(7, match_id, Some(staff_auth()))).unwrap();
         assert_eq!(resp.status, 200);
 
         let reloaded = storage::load_match(&host, 7, match_id).unwrap().unwrap();
-        assert_eq!(reloaded.state, MatchPhase::InProgress);
+        assert_eq!(reloaded.phase, Phase::Playing);
         assert_eq!(reloaded.xiaoju.len(), 1);
         assert_eq!(reloaded.xiaoju[0].index, 0);
-        let key = judge::xiaoju_timer_key(7, match_id, 0);
-        assert!(host.timer.is_scheduled(&key));
+        let key = crate::timers::TimerKey::Match {
+            contest: 7,
+            match_id,
+            timer: crate::machine::MatchTimer::Deadline { game: 0 },
+        };
+        assert!(host.timer.is_scheduled(&key.encode()));
     }
 
     // -- handle_force_decide (host wiring) --
@@ -918,7 +750,9 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.state = MatchPhase::NeedsAdjudication;
+        m.phase = Phase::NeedsAdjudication {
+            adjudication: crate::model::Adjudication::TiebreakExhausted,
+        };
         seed(&host, 7, &setup, 0, &m);
 
         let err = handle_force_decide(&host, &request(7, 0, Some(player_auth(10)))).unwrap_err();
@@ -931,11 +765,14 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.state = MatchPhase::NeedsAdjudication;
+        m.phase = Phase::NeedsAdjudication {
+            adjudication: crate::model::Adjudication::TiebreakExhausted,
+        };
         seed(&host, 7, &setup, 0, &m);
 
         let mut req = request(7, 0, Some(staff_auth()));
         req.body = Some(serde_json::json!({ "winner": 999 }));
+        queue_now(&host, 9_000);
         let err = handle_force_decide(&host, &req).unwrap_err();
         assert_eq!(err.into_response().status, 400);
     }
@@ -946,7 +783,9 @@ mod tests {
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.state = MatchPhase::NeedsAdjudication;
+        m.phase = Phase::NeedsAdjudication {
+            adjudication: crate::model::Adjudication::TiebreakExhausted,
+        };
         seed(&host, 7, &setup, 0, &m);
 
         let mut req = request(7, 0, Some(staff_auth()));
@@ -956,47 +795,43 @@ mod tests {
         assert_eq!(resp.status, 200);
 
         let reloaded = storage::load_match(&host, 7, 0).unwrap().unwrap();
-        assert_eq!(reloaded.state, MatchPhase::Decided);
-        assert_eq!(reloaded.winner, Some(10));
-    }
-
-    // -- map_force_decide_error (DEFECT 4 fix) --
-
-    #[test]
-    fn map_force_decide_error_turns_a_lost_race_into_409() {
-        let err = map_force_decide_error(SdkError::Other(judge::ALREADY_DECIDED_MSG.to_string()));
-        let resp = err.into_response();
         assert_eq!(
-            resp.status, 409,
-            "the losing side of a concurrent force-decide must be a 409, not a bare 500"
+            reloaded.phase,
+            Phase::Decided {
+                winner: 10,
+                decided_at_ms: 9_000_000
+            }
         );
     }
 
     #[test]
-    fn map_force_decide_error_negative_control_other_sdk_errors_still_surface_as_500() {
-        // Negative control: an SdkError with any OTHER message (a genuine
-        // internal error, e.g. the bracket was never set up) must NOT be
-        // caught by the 409 branch -- only the exact lost-race message is.
-        let err = map_force_decide_error(SdkError::Other(
-            "the bracket has not been set up yet".to_string(),
-        ));
-        let resp = err.into_response();
-        assert_eq!(
-            resp.status, 500,
-            "a genuine internal error must not be masked as a 409 conflict"
-        );
+    fn awarding_a_decided_match_again_is_a_conflict() {
+        let host = Host::mock();
+        queue_bracket_contest_info(&host);
+        let mut m = match_in_ordering();
+        m.phase = Phase::Decided {
+            winner: 10,
+            decided_at_ms: 5,
+        };
+        seed(&host, 7, &setup_two_rounds(), 0, &m);
+        let mut req = request(7, 0, Some(staff_auth()));
+        req.body = Some(serde_json::json!({ "winner": 20 }));
+        queue_now(&host, 9_000);
+        let err = handle_force_decide(&host, &req).unwrap_err();
+        assert_eq!(err.into_response().status, 409);
+        assert_eq!(storage::load_match(&host, 7, 0).unwrap().unwrap(), m);
     }
 
     #[test]
-    fn handle_force_decide_with_no_winner_falls_through_to_advance() {
+    fn handle_force_decide_with_no_winner_ticks_the_match_now() {
         // "Force expiry": a 小局 whose deadline has already passed, with no
-        // AC recorded, must be decided scoreless by the plain `advance`
-        // path -- exactly as if the timer had just fired.
+        // AC recorded, is decided scoreless exactly as if its deadline
+        // wakeup had just fired.
         let host = Host::mock();
         queue_bracket_contest_info(&host);
         let setup = setup_two_rounds();
         let mut m = match_in_ordering();
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.order_a = Some(vec![103, 101, 102]);
         m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
@@ -1025,7 +860,7 @@ mod tests {
     #[test]
     fn games_list_each_opened_game_and_mask_it_like_the_rest_of_the_view() {
         let mut m = match_in_ordering();
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.order_a = Some(vec![103, 101, 102]);
         m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![
@@ -1091,7 +926,7 @@ mod tests {
         // made. So a missing field here is not cosmetic - it silently
         // disables the countdown for a live, spectated match.
         let mut m = match_in_ordering();
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.order_a = Some(vec![103, 101, 102]);
         m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
@@ -1131,12 +966,12 @@ mod tests {
     #[test]
     fn match_view_exposes_shared_timing_without_revealing_future_problems() {
         let mut m = match_in_ordering();
-        m.state = MatchPhase::InProgress;
+        m.phase = Phase::Playing;
         m.match_extra_time_seconds = 5;
         m.extra_time_remaining_ms = 3_000;
         m.xiaoju.push(XiaojuState {
             opened_at_ms: 1_000,
-            base_deadline_ms: Some(11_000),
+            base_deadline_ms: 11_000,
             deadline_ms: 14_000,
             ..Default::default()
         });
@@ -1153,20 +988,15 @@ mod tests {
 
     #[test]
     fn match_view_still_reports_the_final_xiaoju_timing_after_the_match_is_decided() {
-        // Pins the ACTUAL contract, which is not the intuitive one. Nothing
-        // in production removes an entry from `xiaoju` -- every
-        // `xiaoju.clear()` in this crate is `#[cfg(test)]`-only -- so a
-        // decided match keeps reporting its last 小局's now-past deadline
-        // rather than going `None`.
-        //
-        // This test exists because an earlier version of the field's doc
-        // comment asserted the opposite. A client trusting that would run a
-        // live countdown against a stale deadline on a finished match. The
-        // rule for consumers is: derive "still running" from `state`, never
-        // from the presence of these fields.
+        // Games are never removed from `xiaoju`, so a decided match keeps
+        // reporting its last 小局's now-past deadline rather than going
+        // `None`. Consumers derive "still running" from `state`, never from
+        // the presence of these fields.
         let mut m = match_in_ordering();
-        m.state = MatchPhase::Decided;
-        m.winner = Some(m.player_a);
+        m.phase = Phase::Decided {
+            winner: m.player_a,
+            decided_at_ms: 70_000,
+        };
         m.order_a = Some(vec![103, 101, 102]);
         m.order_b = Some(vec![203, 201, 202]);
         m.xiaoju = vec![XiaojuState {
@@ -1181,7 +1011,7 @@ mod tests {
 
         let view = match_view(0, &m, &setup.rounds[0], Some(m.player_a), false, &setup);
 
-        assert_eq!(view.state, MatchPhase::Decided);
+        assert_eq!(view.state, PhaseName::Decided);
         assert_eq!(
             view.current_xiaoju_index,
             Some(2),
@@ -1203,7 +1033,7 @@ mod tests {
             group_b: vec![201, 202, 203],
             order_a: Some(vec![103, 101, 102]),
             order_b: Some(vec![203, 201, 202]),
-            state: MatchPhase::InProgress,
+            phase: Phase::Playing,
             xiaoju: vec![XiaojuState {
                 index: 0,
                 opened_at_ms: 0,

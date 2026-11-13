@@ -11,7 +11,6 @@
 'codelink-bracket.bracket.loadError' = 'Failed to load the bracket.'
 'codelink-bracket.bracket.empty' = 'The bracket has not been set up yet.'
 
-'codelink-bracket.phase.pending' = 'Not started'
 'codelink-bracket.phase.ordering' = 'Waiting for both players to rank problems'
 'codelink-bracket.phase.inProgress' = 'In progress'
 'codelink-bracket.phase.tiebreak' = 'Tiebreak in progress'
@@ -84,7 +83,6 @@
 'codelink-bracket.my.timeLeft' = 'Time left'
 'codelink-bracket.my.title' = 'Your match'
 'codelink-bracket.my.vs' = 'vs {name}'
-'codelink-bracket.my.waitingOpponent' = 'Your opponent is not decided yet.'
 'codelink-bracket.ordering.hint' = 'The top problem is the one they must solve first.'
 'codelink-bracket.ordering.openProblem' = 'Open problem in a new tab'
 'codelink-bracket.ordering.update' = 'Update ranking'
@@ -151,7 +149,6 @@
 'codelink-bracket.summary.finished' = 'Tournament finished'
 'codelink-bracket.summary.stage' = 'Round'
 'codelink-bracket.schedule.status' = 'Status'
-'codelink-bracket.phase.short.pending' = 'Not started'
 'codelink-bracket.phase.short.ordering' = 'Ranking'
 'codelink-bracket.phase.short.live' = 'Live'
 'codelink-bracket.phase.short.tiebreak' = 'Tiebreak'
@@ -173,7 +170,6 @@
 'codelink-bracket.confirm.rejudgeDescription' = 'The submission is judged again and the new result replaces the old one. If this game is waiting on it, the game resolves when the new result arrives.'
 'codelink-bracket.confirm.autofillTitle' = 'Replace your problem choices?'
 'codelink-bracket.confirm.autofillDescription' = "Every round is refilled from the contest's problem order. The problems you picked by hand are lost."
-'codelink-bracket.strip.waiting_opponent' = 'Waiting for your opponent'
 'codelink-bracket.strip.rank' = "Rank your opponent's problems"
 'codelink-bracket.strip.waiting_start' = 'Waiting for your opponent to rank'
 'codelink-bracket.strip.judging' = 'Waiting on the judge'
