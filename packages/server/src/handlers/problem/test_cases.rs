@@ -28,7 +28,6 @@ use crate::utils::soft_delete::find_active_child;
 use crate::utils::test_case_body::{
     prepare_test_case_body, read_test_case_body, test_case_body_preview, test_case_body_size,
 };
-use crate::utils::text::{sanitize_db_text, sanitize_db_text_opt};
 use crate::visibility::{Action, ProblemScope, Subject, VisibilityKernel};
 
 use super::{find_problem_for_update, require_problem_part_reachable};
@@ -70,7 +69,7 @@ pub async fn create_test_case(
 
     let label = match payload.label.as_deref() {
         Some(label) => {
-            let label = sanitize_db_text(label.trim());
+            let label = label.trim().to_string();
             ensure_test_case_label_available(&txn, problem_id, &label, None).await?;
             label
         }
@@ -89,10 +88,8 @@ pub async fn create_test_case(
         input_preview: Set(Some(input_body.preview)),
         expected_output_preview: Set(Some(output_body.preview)),
         score: Set(payload.score),
-        description: Set(sanitize_db_text_opt(
-            payload.description.map(|d| d.trim().to_string()),
-        )),
-        label: Set(sanitize_db_text(label)),
+        description: Set(payload.description.map(|d| d.trim().to_string())),
+        label: Set(label),
         is_sample: Set(payload.is_sample),
         position: Set(position),
         problem_id: Set(problem_id),
@@ -374,12 +371,12 @@ pub async fn update_test_case(
         active.position = Set(position);
     }
     if let Some(label) = payload.label {
-        let label = sanitize_db_text(label.trim());
+        let label = label.trim().to_string();
         ensure_test_case_label_available(&txn, problem_id, &label, Some(tc_id)).await?;
         active.label = Set(label);
     }
     match payload.description {
-        Some(Some(desc)) => active.description = Set(Some(sanitize_db_text(desc.trim()))),
+        Some(Some(desc)) => active.description = Set(Some(desc.trim().to_string())),
         Some(None) => active.description = Set(None),
         None => {}
     }

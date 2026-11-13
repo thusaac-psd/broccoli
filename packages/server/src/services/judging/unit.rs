@@ -748,8 +748,6 @@ pub(crate) async fn fail_dispatch(
     error_code: &str,
     error_message: &str,
 ) -> Result<bool, DbErr> {
-    let code = broccoli_server_sdk::types::sanitize_text_field(error_code);
-    let message = broccoli_server_sdk::types::sanitize_text_field(error_message);
     // A judgement locks its submission first, as every judgement transition
     // does; the UPDATE joins the lock so it is taken before the row's.
     let (lock, from, guard) = match unit {
@@ -780,8 +778,8 @@ pub(crate) async fn fail_dispatch(
             [
                 id.into(),
                 judge_epoch.into(),
-                code.as_ref().into(),
-                message.as_ref().into(),
+                error_code.into(),
+                error_message.into(),
             ],
         ))
         .await?

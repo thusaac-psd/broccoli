@@ -66,7 +66,6 @@ use crate::services::plugin_config::{
 use crate::state::AppState;
 use crate::utils::contest::{contest_active_condition, find_contest};
 use crate::utils::soft_delete::SoftDeletable;
-use crate::utils::text::sanitize_db_text;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 mod participants;
@@ -110,8 +109,8 @@ pub async fn create_contest(
 
     let now = chrono::Utc::now();
     let new_contest = contest::ActiveModel {
-        title: Set(sanitize_db_text(payload.title.trim())),
-        description: Set(sanitize_db_text(payload.description)),
+        title: Set(payload.title.trim().to_string()),
+        description: Set(payload.description),
         activate_time: Set(payload.activate_time.unwrap_or(None)),
         start_time: Set(payload.start_time),
         end_time: Set(payload.end_time),
@@ -374,10 +373,10 @@ pub async fn update_contest(
     let mut active: contest::ActiveModel = existing.into();
 
     if let Some(ref title) = payload.title {
-        active.title = Set(sanitize_db_text(title.trim()));
+        active.title = Set(title.trim().to_string());
     }
     if let Some(description) = payload.description {
-        active.description = Set(sanitize_db_text(description));
+        active.description = Set(description);
     }
     if let Some(activate_time) = payload.activate_time {
         active.activate_time = Set(activate_time);

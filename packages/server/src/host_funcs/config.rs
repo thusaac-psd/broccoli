@@ -7,8 +7,6 @@ use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::utils::text::sanitize_db_json;
-
 type ConfigGetUserData = (String, DatabaseConnection, PluginRegistry);
 type ConfigSetUserData = (String, DatabaseConnection);
 
@@ -193,7 +191,7 @@ fn config_set_fn(
                 scope: Set(input.scope),
                 ref_id: Set(ref_id),
                 namespace: Set(namespace),
-                config: Set(sanitize_db_json(input.config)),
+                config: Set(input.config),
                 enabled: Set(None),
                 position: Set(0),
                 updated_at: Set(Utc::now()),

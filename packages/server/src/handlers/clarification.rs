@@ -36,7 +36,6 @@ use crate::extractors::path::AppPath;
 use crate::models::clarification::*;
 use crate::state::AppState;
 use crate::utils::soft_delete::find_active_child;
-use crate::utils::text::sanitize_db_text;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
 async fn resolve_usernames(
@@ -311,7 +310,7 @@ pub async fn create_clarification(
     let new = clarification::ActiveModel {
         contest_id: Set(contest_id),
         author_id: Set(auth_user.user_id),
-        content: Set(sanitize_db_text(payload.content.trim())),
+        content: Set(payload.content.trim().to_string()),
         clarification_type: Set(payload.clarification_type.clone()),
         recipient_id: Set(recipient_id),
         is_public: Set(is_public),
@@ -426,7 +425,7 @@ pub async fn reply_clarification(
     let new_reply = clarification_reply::ActiveModel {
         clarification_id: Set(clarification_id),
         author_id: Set(auth_user.user_id),
-        content: Set(sanitize_db_text(payload.content.trim())),
+        content: Set(payload.content.trim().to_string()),
         is_public: Set(reply_public),
         created_at: Set(now),
         ..Default::default()

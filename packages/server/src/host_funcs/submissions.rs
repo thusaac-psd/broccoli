@@ -3,8 +3,8 @@
 //! (`host.submission.*` and `host.code_run.*`). The guest sends structured
 //! input; the host builds every statement (see `services::judging`), fenced on
 //! the unit and its epoch. The statements run on the privileged pool, through
-//! the same NUL sanitization, argument parsing and statement typing as raw
-//! plugin SQL (`sql::execute_on_pool`).
+//! the same argument parsing and statement typing as raw plugin SQL
+//! (`sql::execute_on_pool`).
 
 use broccoli_server_sdk::types::{
     CodeRunResultRow, CodeRunUpdate, SubmissionUpdate, TestCaseResultRow,
@@ -20,9 +20,6 @@ use crate::services::judging;
 
 /// Positional parameters of the statements built here: assigns `$1..$N`
 /// placeholders (1-based) and collects the bound JSON values.
-/// NUL bytes in bound values do not need scrubbing here - every statement is
-/// executed through `sql::execute_on_pool` / `sql::query_on_pool`, which strip
-/// NUL at the shared choke point exactly as for any other plugin statement.
 struct Params {
     args: Vec<JsonValue>,
     idx: usize,
@@ -56,8 +53,6 @@ impl Params {
 
 impl judging::SqlBindSink for Params {
     fn bind_value(&mut self, value: JsonValue) -> String {
-        // No NUL scrubbing here: every statement runs through
-        // sql::execute_on_pool, which strips NUL at the shared choke point.
         self.bind(value)
     }
 }

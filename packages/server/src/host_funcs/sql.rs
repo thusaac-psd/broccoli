@@ -271,24 +271,6 @@ impl HostDbResponse {
     }
 }
 
-fn sanitize_nul_bytes(s: String, plugin_id: &str, sql: &str) -> String {
-    if s.contains('\0') {
-        let nul_count = s.matches('\0').count();
-        let preview: String = s.chars().take(120).collect();
-        let sql_preview: String = sql.chars().take(160).collect();
-        tracing::warn!(
-            plugin_id,
-            nul_count,
-            sql = %sql_preview,
-            value_preview = %preview,
-            "Sanitized NUL bytes from plugin SQL bind value",
-        );
-        s.replace('\0', "\u{FFFD}")
-    } else {
-        s
-    }
-}
-
 /// Reduce a plugin-authored SQL string to just its top-level lexical text so the
 /// role guard tokenizes real keywords and `;` statement separators only -- never
 /// characters that live inside a string literal, quoted identifier, or comment.
@@ -635,35 +617,7 @@ fn statement_escapes_session(stmt: &str) -> bool {
     })
 }
 
-fn sanitize_sql_text(label: &str, plugin_id: &str, sql: String) -> String {
-    if sql.contains('\0') {
-        let nul_count = sql.matches('\0').count();
-        let mut nul_offsets: Vec<usize> = sql
-            .bytes()
-            .enumerate()
-            .filter(|(_, b)| *b == 0)
-            .map(|(i, _)| i)
-            .take(8)
-            .collect();
-        nul_offsets.sort_unstable();
-        let len = sql.len();
-        let preview: String = sql.chars().take(240).collect();
-        tracing::warn!(
-            plugin_id,
-            param = label,
-            nul_count,
-            len,
-            nul_offsets = ?nul_offsets,
-            preview = %preview,
-            "Sanitized NUL bytes from plugin SQL host_fn parameter",
-        );
-        sql.replace('\0', "\u{FFFD}")
-    } else {
-        sql
-    }
-}
-
-fn json_to_sea_value(v: JsonValue, plugin_id: &str, sql: &str) -> sea_orm::Value {
+fn json_to_sea_value(v: JsonValue) -> sea_orm::Value {
     match v {
         JsonValue::Null => sea_orm::Value::String(None),
         JsonValue::Bool(b) => sea_orm::Value::Bool(Some(b)),
@@ -676,86 +630,19 @@ fn json_to_sea_value(v: JsonValue, plugin_id: &str, sql: &str) -> sea_orm::Value
                 sea_orm::Value::String(Some(n.to_string()))
             }
         }
-        JsonValue::String(s) => sea_orm::Value::String(Some(sanitize_nul_bytes(s, plugin_id, sql))),
-        v => sea_orm::Value::Json(Some(Box::new(sanitize_json_nul_bytes(v, plugin_id, sql)))),
+        JsonValue::String(s) => sea_orm::Value::String(Some(s)),
+        v => sea_orm::Value::Json(Some(Box::new(v))),
     }
 }
 
-fn sanitize_json_nul_bytes(v: JsonValue, plugin_id: &str, sql: &str) -> JsonValue {
-    match v {
-        JsonValue::String(s) => JsonValue::String(sanitize_nul_bytes(s, plugin_id, sql)),
-        JsonValue::Array(values) => JsonValue::Array(
-            values
-                .into_iter()
-                .map(|value| sanitize_json_nul_bytes(value, plugin_id, sql))
-                .collect(),
-        ),
-        JsonValue::Object(map) => JsonValue::Object(
-            map.into_iter()
-                .map(|(key, value)| {
-                    (
-                        sanitize_nul_bytes(key, plugin_id, sql),
-                        sanitize_json_nul_bytes(value, plugin_id, sql),
-                    )
-                })
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-fn json_value_contains_nul(v: &JsonValue) -> bool {
-    match v {
-        JsonValue::String(s) => s.contains('\0'),
-        JsonValue::Array(a) => a.iter().any(json_value_contains_nul),
-        JsonValue::Object(o) => o
-            .iter()
-            .any(|(k, val)| k.contains('\0') || json_value_contains_nul(val)),
-        _ => false,
-    }
-}
-
-/// Final, unbypassable NUL strip on the fully-built bound values, applied at the
-/// execute choke point right before `Statement::from_sql_and_values`. PostgreSQL
-/// TEXT columns reject 0x00; this guarantees no NUL reaches libpq regardless of
-/// what any (possibly stale or future) plugin/SDK sent, independent of the
-/// earlier per-value sanitizers in `json_to_sea_value`. Returns how many values
-/// were modified so callers can surface that a NUL slipped past upstream layers.
-fn strip_nul_from_sea_values(values: &mut [sea_orm::Value], plugin_id: &str, sql: &str) -> usize {
-    let mut stripped = 0usize;
-    for value in values.iter_mut() {
-        match value {
-            sea_orm::Value::String(Some(s)) if s.contains('\0') => {
-                let cleaned = s.replace('\0', "\u{FFFD}");
-                *s = cleaned;
-                stripped += 1;
-            }
-            sea_orm::Value::Json(Some(j)) if json_value_contains_nul(j) => {
-                let cleaned = sanitize_json_nul_bytes((**j).clone(), plugin_id, sql);
-                **j = cleaned;
-                stripped += 1;
-            }
-            _ => {}
-        }
-    }
-    stripped
-}
-
-fn parse_args(
-    args_json: &str,
-    plugin_id: &str,
-    sql: &str,
-) -> Result<Vec<sea_orm::Value>, extism::Error> {
+fn parse_args(args_json: &str) -> Result<Vec<sea_orm::Value>, extism::Error> {
     if args_json.trim().is_empty() {
         return Ok(vec![]);
     }
     let json_arr: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|e| extism::Error::msg(format!("Invalid args JSON: {}", e)))?;
 
-    Ok(json_arr
-        .into_iter()
-        .map(|v| json_to_sea_value(v, plugin_id, sql))
-        .collect())
+    Ok(json_arr.into_iter().map(json_to_sea_value).collect())
 }
 
 /// The statement for plugin SQL bound with `values` from [`parse_args`].
@@ -785,19 +672,8 @@ host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: Strin
     let (plugin_id, db) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at db_execute choke point"
-        );
-    }
+    let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
     let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
@@ -818,10 +694,8 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
     let (plugin_id, db) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
@@ -893,10 +767,8 @@ host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, Transaction
     let (plugin_id, _, txn_map) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
@@ -926,19 +798,8 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, Transacti
     let (plugin_id, _, txn_map) = &*call;
 
     raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
     reject_session_escape(plugin_id, &sql)?;
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at db_execute_in choke point"
-        );
-    }
+    let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
     let exec_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_execute_in", |txn| {
@@ -1024,26 +885,14 @@ host_fn!(pub db_rollback(user_data: Arc<(String, DatabaseConnection, Transaction
 /// `HostDbResponse` JSON envelope `db_execute` produces (`{"data": <rows>}` or
 /// `{"error": <msg>}`). Shared by the capability-gated `host.submission.*` write
 /// host functions, which build the SQL server-side but must hit the DB through
-/// the same NUL sanitization, argument parsing and statement typing as raw
-/// `db_execute`.
+/// the same argument parsing and statement typing as raw `db_execute`.
 pub(super) fn execute_on_pool(
     db: &DatabaseConnection,
     plugin_id: &str,
     sql: String,
     args: String,
 ) -> Result<String, extism::Error> {
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let mut values = parse_args(&args, plugin_id, &sql)?;
-    let stripped = strip_nul_from_sea_values(&mut values, plugin_id, &sql);
-    if stripped > 0 {
-        tracing::warn!(
-            plugin_id = %plugin_id,
-            stripped,
-            sql = %sql.chars().take(120).collect::<String>(),
-            "Stripped NUL bytes from bound values at submission execute choke point"
-        );
-    }
+    let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
     let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
@@ -1069,9 +918,7 @@ pub(super) fn query_on_pool(
     sql: String,
     args: String,
 ) -> Result<String, extism::Error> {
-    let sql = sanitize_sql_text("sql", plugin_id, sql);
-    let args = sanitize_sql_text("args", plugin_id, args);
-    let values = parse_args(&args, plugin_id, &sql)?;
+    let values = parse_args(&args)?;
     let wrapped_sql = format!(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
@@ -1089,7 +936,7 @@ pub(super) fn query_on_pool(
         }
         Ok(None) => HostDbResponse::ok(serde_json::json!([])).to_json_string(),
         Err(e) => {
-            error!("Submission DB query error: {}", e);
+            error!(plugin_id, "Submission DB query error: {}", e);
             HostDbResponse::err(e.to_string()).to_json_string()
         }
     }
@@ -1279,62 +1126,6 @@ mod tests {
             msg.contains("CREATEROLE") && msg.contains("plugin_url"),
             "{msg}"
         );
-    }
-
-    #[test]
-    fn strip_nul_from_sea_values_cleans_string_and_json_and_counts() {
-        let mut values = vec![
-            sea_orm::Value::String(Some("ok\0bad".to_string())),
-            sea_orm::Value::BigInt(Some(42)),
-            sea_orm::Value::Json(Some(Box::new(serde_json::json!({"k": "a\u{0000}b"})))),
-            sea_orm::Value::String(Some("clean".to_string())),
-            sea_orm::Value::String(None),
-        ];
-
-        let stripped = strip_nul_from_sea_values(&mut values, "test-plugin", "INSERT ...");
-        assert_eq!(stripped, 2, "two values carried NUL");
-
-        match &values[0] {
-            sea_orm::Value::String(Some(s)) => {
-                assert_eq!(s.as_str(), "ok\u{FFFD}bad");
-                assert!(!s.contains('\0'));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        match &values[2] {
-            sea_orm::Value::Json(Some(j)) => {
-                assert_eq!(j["k"], "a\u{FFFD}b");
-                assert!(!json_value_contains_nul(j));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-        // Untouched value is unchanged.
-        match &values[3] {
-            sea_orm::Value::String(Some(s)) => assert_eq!(s.as_str(), "clean"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn strip_nul_no_op_when_clean() {
-        let mut values = vec![
-            sea_orm::Value::String(Some("hello".to_string())),
-            sea_orm::Value::Json(Some(Box::new(serde_json::json!(["a", "b"])))),
-        ];
-        assert_eq!(strip_nul_from_sea_values(&mut values, "p", "sql"), 0);
-    }
-
-    #[test]
-    fn parse_args_sanitizes_top_level_nul_string() {
-        let values = parse_args(r#"["ok\u0000bad"]"#, "test-plugin", "select $1").unwrap();
-
-        match &values[0] {
-            sea_orm::Value::String(Some(value)) => {
-                assert_eq!(value, "ok\u{FFFD}bad");
-                assert!(!value.contains('\0'));
-            }
-            other => panic!("unexpected value: {other:?}"),
-        }
     }
 
     /// A transaction orphaned by a trapped guest (never committed or rolled
@@ -1540,7 +1331,7 @@ mod tests {
             r#"[{"k":1}]"#,
             "[null]",
         ] {
-            let values = parse_args(args, "test-plugin", sql).unwrap();
+            let values = parse_args(args).unwrap();
             db.execute_raw(plugin_statement(sql, values))
                 .await
                 .unwrap_or_else(|e| panic!("binding {args} after an earlier type: {e}"));
@@ -1567,24 +1358,5 @@ mod tests {
             ]
             .map(|v| v.map(str::to_string))
         );
-    }
-
-    #[test]
-    fn parse_args_sanitizes_nested_json_nul_strings() {
-        let values = parse_args(
-            r#"[{"std\u0000out":"ok\u0000bad","nested":["x\u0000y"]}]"#,
-            "test-plugin",
-            "select $1",
-        )
-        .unwrap();
-
-        match &values[0] {
-            sea_orm::Value::Json(Some(value)) => {
-                assert_eq!(value["std\u{FFFD}out"], "ok\u{FFFD}bad");
-                assert_eq!(value["nested"][0], "x\u{FFFD}y");
-                assert!(!value.to_string().contains('\0'));
-            }
-            other => panic!("unexpected value: {other:?}"),
-        }
     }
 }
