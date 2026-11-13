@@ -214,3 +214,38 @@ async fn an_escaped_backslash_before_u0000_is_not_a_nul() {
     assert_eq!(res.status, 201, "{}", res.text);
     assert_eq!(res.body["content"], Value::from(content));
 }
+
+/// Machine output is not the sender's to fix: a worker dead letter whose
+/// error and payload carry NUL is stored, each NUL replaced with U+FFFD.
+#[tokio::test]
+async fn worker_dead_letter_with_nul_output_is_stored_with_replacement_characters() {
+    use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
+    use sea_orm::EntityTrait;
+    use server::dlq::DlqService;
+    use server::entity::dead_letter_message;
+
+    let app = TestApp::spawn().await;
+    let envelope = DlqEnvelope {
+        message_id: "nul-envelope".into(),
+        message_type: DlqMessageType::OperationTask,
+        submission_id: None,
+        payload: json!({ "stdout": "a\u{0}b", "k\u{0}": 1 }),
+        error_code: DlqErrorCode::DeserializationError,
+        error_message: "bad\u{0}frame".into(),
+        retry_history: vec![],
+    };
+    let stored = DlqService::new(&app.db)
+        .send_to_dlq(&envelope)
+        .await
+        .expect("dead letter stored");
+    let row = dead_letter_message::Entity::find_by_id(stored.id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.error_message, "bad\u{FFFD}frame");
+    assert_eq!(
+        row.payload,
+        json!({ "stdout": "a\u{FFFD}b", "k\u{FFFD}": 1 })
+    );
+}
