@@ -17,11 +17,11 @@
 //!   way a resuming call does. Nesting is capped at [`MAX_DEPTH`], which stops
 //!   A-calls-B-calls-A cycles and bounds the blocking-thread stack.
 //!
-//! While guest code runs, the thread carries a [`CallScope`]. A host function
+//! While guest code runs, the thread carries a call scope. A host function
 //! that blocks wraps the blocking part in [`parked`], which gives the token
 //! back for the duration and takes one back, ahead of every queued call, when
 //! it returns. A call still queued at its deadline, or cancelled at it by the
-//! deadline thread ([`crate::deadline`]), fails with
+//! deadline thread, fails with
 //! [`PluginError::Unavailable`].
 
 use std::cell::RefCell;

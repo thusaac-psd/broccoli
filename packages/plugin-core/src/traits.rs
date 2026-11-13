@@ -23,7 +23,7 @@ fn class_label(class: Option<CallClass>) -> &'static str {
 /// delegation) -- can be handed an `Arc<dyn PluginInvoker>`. That narrows their
 /// capability: an invoker cannot discover, load, unload, or reload plugins. The
 /// accessors declared here are exactly the state that
-/// [`call_raw_with`](PluginInvoker::call_raw_with) needs; the wider management surface lives on the [`PluginManager`] subtrait.
+/// [`call_raw`](PluginInvoker::call_raw) needs; the wider management surface lives on the [`PluginManager`] subtrait.
 // `async_trait` marks each method `#[must_use]` on top of its boxed future.
 #[allow(clippy::double_must_use)]
 #[async_trait]
