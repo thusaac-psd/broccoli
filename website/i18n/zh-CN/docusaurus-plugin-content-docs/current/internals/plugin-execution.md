@@ -92,7 +92,9 @@ extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 
 池（`packages/plugin-core/src/pool.rs`）按需构建实例，并按最近使用优先保留归还的实例。内存由 `MemoryBudget`（`packages/plugin-core/src/memory.rs`）全局限制：
 
 - 信号是进程的常驻集，来自 `/proc/self/statm`，在实例归还时至多每 50 毫秒读取一次。
-- 超出预算时，按最久未使用的顺序在所有插件之间丢弃空闲实例，每个插件保留 `WARM_PER_PLUGIN` 个。
+- 一旦超出预算，按最久未使用的顺序在所有插件之间丢弃空闲实例，每个插件保留 `WARM_PER_PLUGIN` 个，直到降到低水位（预算的十分之九）以下。这一间隔使在预算附近徘徊的常驻集不会在每次归还时都触发驱逐。
+- 在至少 `RECYCLE_MIN_CALLS` 次调用中搬运的调用输入输出超过 `MemoryBudget::recycle_after` 字节（预算的 1/64，32 MiB 到 512 MiB）的实例会在归还时被丢弃，保温实例也不例外：其分配器的高水位会随处理的数据增长，而 extism 并不暴露实例的内存大小。
+- 重建实例只是实例化一个已缓存的模块。wasmtime 把编译好的模块保存在磁盘上的 `plugin.cache_dir` 中（`config::compile_cache_config`），因此重建只需几毫秒的反序列化，而无需编译（ICPC 插件约 300 毫秒）。同一插件的各实例不共享一个 wasmtime `Engine`：取消会推进其引擎的 epoch，这会使该引擎上的所有实例陷入 trap。
 - 预算通过弱引用持有池，因此被重载替换的池在其最后一个租约归还之前仍会被裁剪。
 - 预算为进程所在 cgroup 内存上限的 3/4（cgroup v2：`/proc/self/cgroup` 中的 `0::` 路径，然后是该 cgroup 或其最近的有上限父级的 `memory.max`；cgroup v1：`hierarchical_memory_limit`），没有上限时为 `MemTotal` 的 1/4，因为单机 compose 与其他服务共享机器。`plugin.memory_budget` 可以覆盖它。
 - 每个实例的线性内存保留失控上限（`memory_max`），为预算的一半且至多 1.5 GiB。

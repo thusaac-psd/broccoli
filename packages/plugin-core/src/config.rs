@@ -102,6 +102,29 @@ impl PluginConfig {
     }
 }
 
+/// The wasmtime cache config that keeps compiled plugin modules under
+/// `cache_dir`, so rebuilding an instance deserializes its module instead of
+/// compiling it, wherever the process's home directory is. `None` (with the
+/// reason logged) leaves wasmtime's default location.
+pub fn compile_cache_config(cache_dir: &std::path::Path) -> Option<PathBuf> {
+    let prepare = || -> std::io::Result<PathBuf> {
+        let modules = cache_dir.join("wasmtime");
+        std::fs::create_dir_all(&modules)?;
+        let modules = modules.canonicalize()?;
+        let config = cache_dir.join("wasmtime-cache.toml");
+        let toml = format!("[cache]\ndirectory = {:?}\n", modules.display().to_string());
+        if std::fs::read_to_string(&config).ok().as_deref() != Some(toml.as_str()) {
+            std::fs::write(&config, toml)?;
+        }
+        config.canonicalize()
+    };
+    prepare()
+        .inspect_err(|e| {
+            tracing::warn!(error = %e, "Cannot keep compiled plugin modules in the plugin cache directory");
+        })
+        .ok()
+}
+
 /// A byte count: a number, or a string with an optional binary or decimal
 /// unit (`"512MiB"`, `"4G"`).
 fn deserialize_byte_size<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -178,5 +201,22 @@ mod tests {
         assert_eq!(parse(r#"{"memory_budget": "512 MiB"}"#), Some(512 << 20));
         assert_eq!(parse(r#"{"memory_budget": "2G"}"#), Some(2_000_000_000));
         assert!(serde_json::from_str::<PluginConfig>(r#"{"memory_budget": "lots"}"#).is_err());
+    }
+
+    #[test]
+    fn compiled_modules_are_cached_under_the_plugin_cache_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = compile_cache_config(&dir.path().join("cache")).expect("writable");
+        let text = std::fs::read_to_string(&config).unwrap();
+        let modules = dir.path().join("cache/wasmtime").canonicalize().unwrap();
+        assert!(
+            text.contains(&format!("{:?}", modules.display().to_string())),
+            "{text}"
+        );
+        // Idempotent: a second load finds the same file.
+        assert_eq!(
+            compile_cache_config(&dir.path().join("cache")),
+            Some(config)
+        );
     }
 }

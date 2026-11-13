@@ -220,6 +220,7 @@ impl Harness {
         let fixture = Arc::new(Fixture::default());
         let config = PluginConfig {
             plugins_dir: dir.path().to_path_buf(),
+            cache_dir: dir.path().join(".cache"),
             ..PluginConfig::default()
         };
         let executor = Executor::new(capacity, MemoryBudget::new(u64::MAX, Box::new(|| 0)));

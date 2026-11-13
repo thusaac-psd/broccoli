@@ -2,10 +2,19 @@
 //!
 //! Plugin pools build instances on demand and keep them for reuse. Memory is
 //! bounded globally rather than per pool: when the process's resident set
-//! (`/proc/self/statm`) is above the budget, idle instances are dropped least
-//! recently used first across every plugin, keeping a small warm set per
-//! plugin. Dropping an instance unmaps its linear memory, which wasmtime never
+//! (`/proc/self/statm`) rises above the budget, idle instances are dropped
+//! least recently used first across every plugin, keeping a small warm set
+//! per plugin, until it is back under a low watermark, so one check does not
+//! evict an instance per return while the resident set hovers at the budget.
+//! Dropping an instance unmaps its linear memory, which wasmtime never
 //! shrinks on its own.
+//!
+//! An instance that has moved a lot of data is dropped when it returns,
+//! warm or not ([`MemoryBudget::recycle_after`]): its allocator's high-water
+//! mark ratchets up with the data it handled, and extism does not expose an
+//! instance's memory size, so the data it moved stands in for its growth.
+//! Rebuilding costs an instantiation, not a compile: wasmtime caches the
+//! compiled module on disk.
 //!
 //! The budget is a fraction of the memory this process may use, read from
 //! local files only: the cgroup v2 limit of the process's cgroup or the
@@ -35,6 +44,12 @@ const HOST_FRACTION: (u64, u64) = (1, 4);
 const INSTANCE_MEMORY_CEILING: u64 = 1536 << 20;
 /// Least time between two resident-set checks.
 const CHECK_INTERVAL_MS: u64 = 50;
+/// Trimming stops once the resident set is back under this share of the
+/// budget.
+const LOW_WATERMARK: (u64, u64) = (9, 10);
+/// Calls an instance serves before it may be recycled, so recycling never
+/// becomes a rebuild per call.
+pub const RECYCLE_MIN_CALLS: usize = 4;
 
 /// A pool the budget may trim. Implemented by the instance pool.
 pub(crate) trait Trimmable: Send + Sync {
@@ -77,8 +92,10 @@ impl MemoryBudget {
         Self::new(limit, Box::new(resident_set_bytes))
     }
 
-    pub fn limit(&self) -> u64 {
-        self.limit
+    /// Bytes of call input and output an instance may move before it is
+    /// recycled: a 64th of the budget, between 32 MiB and 512 MiB.
+    pub fn recycle_after(&self) -> u64 {
+        (self.limit / 64).clamp(32 << 20, 512 << 20)
     }
 
     /// The per-instance linear memory cap, in 64 KiB pages.
@@ -113,12 +130,16 @@ impl MemoryBudget {
         self.trim();
     }
 
-    /// Drop idle instances, globally least recently used first, until the
-    /// resident set is within budget or only warm sets are left. Returns how
-    /// many were dropped.
+    /// Once the resident set is over the budget, drop idle instances,
+    /// globally least recently used first, until it is under the low
+    /// watermark or only warm sets are left. Returns how many were dropped.
     pub fn trim(&self) -> usize {
+        if (self.rss)() <= self.limit {
+            return 0;
+        }
+        let low = self.limit / LOW_WATERMARK.1 * LOW_WATERMARK.0;
         let mut dropped = 0;
-        while (self.rss)() > self.limit {
+        while (self.rss)() > low {
             let pools: Vec<Arc<dyn Trimmable>> = {
                 let mut pools = self.pools.lock();
                 pools.retain(|p| p.strong_count() > 0);
@@ -305,7 +326,7 @@ mod tests {
     #[test]
     fn trimming_drops_the_oldest_idle_instances_across_plugins_down_to_warm_sets() {
         let rss = Arc::new(AtomicUsize::new(1000));
-        let budget = MemoryBudget::new(650, {
+        let budget = MemoryBudget::new(700, {
             let rss = rss.clone();
             Box::new(move || rss.load(Ordering::SeqCst) as u64)
         });
@@ -321,6 +342,7 @@ mod tests {
         });
         budget.register(Arc::downgrade(&a));
         budget.register(Arc::downgrade(&b));
+        // Over 700, so trim down to the low watermark of 630:
         // 1000 -> 900 (a:0) -> 800 (b:1) -> 700 (a:2) -> 600 (b:3).
         assert_eq!(budget.trim(), 4);
         assert_eq!(a.oldest_spare(), None);
@@ -357,5 +379,33 @@ mod tests {
         drop(a);
         assert_eq!(budget.trim(), 0);
         assert!(budget.pools.lock().iter().all(|p| p.strong_count() == 0));
+    }
+
+    #[test]
+    fn under_the_budget_nothing_is_trimmed_even_above_the_low_watermark() {
+        let rss = Arc::new(AtomicUsize::new(950));
+        let budget = MemoryBudget::new(1000, {
+            let rss = rss.clone();
+            Box::new(move || rss.load(Ordering::SeqCst) as u64)
+        });
+        let a: Arc<dyn Trimmable> = Arc::new(FakePool {
+            stamps: Mutex::new(vec![0, 1, 2]),
+            rss: rss.clone(),
+            per_instance: 100,
+        });
+        budget.register(Arc::downgrade(&a));
+        assert_eq!(budget.trim(), 0);
+        rss.store(1050, Ordering::SeqCst);
+        // Over the budget: down to 900, the low watermark, in two drops.
+        assert_eq!(budget.trim(), 2);
+        assert_eq!(rss.load(Ordering::SeqCst), 850);
+    }
+
+    #[test]
+    fn the_recycle_threshold_follows_the_budget_within_bounds() {
+        let budget = |limit| MemoryBudget::new(limit, Box::new(|| 0)).recycle_after();
+        assert_eq!(budget(4 << 30), 64 << 20);
+        assert_eq!(budget(64 << 20), 32 << 20);
+        assert_eq!(budget(1 << 40), 512 << 20);
     }
 }

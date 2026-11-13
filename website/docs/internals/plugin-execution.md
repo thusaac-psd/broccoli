@@ -192,8 +192,21 @@ returned ones, most recently used first. Memory is bounded globally by
 
 - The signal is the process's resident set from `/proc/self/statm`, read at
   most every 50 ms when an instance is returned.
-- Above the budget, idle instances are dropped least recently used first
-  across every plugin, keeping `WARM_PER_PLUGIN` per plugin.
+- Once it is above the budget, idle instances are dropped least recently
+  used first across every plugin, keeping `WARM_PER_PLUGIN` per plugin, until
+  it is under the low watermark (nine tenths of the budget). The gap keeps a
+  resident set hovering at the budget from evicting on every return.
+- An instance that has moved more than `MemoryBudget::recycle_after` bytes
+  of call input and output (a 64th of the budget, 32 MiB to 512 MiB) over at
+  least `RECYCLE_MIN_CALLS` calls is dropped when it returns, the warm one
+  included: its allocator's high-water mark grows with the data it handled,
+  and extism does not expose an instance's memory size.
+- Rebuilding an instance instantiates a cached module. wasmtime keeps
+  compiled modules on disk, under `plugin.cache_dir`
+  (`config::compile_cache_config`), so a rebuild deserializes in a few
+  milliseconds instead of compiling (about 300 ms for the ICPC plugin). The
+  instances of a plugin do not share one wasmtime `Engine`: a cancel bumps
+  its engine's epoch, which would trap every instance on it.
 - The budget holds pools by weak reference, so a pool a reload replaced is
   still trimmed until its last lease returns.
 - The budget is 3/4 of the memory limit of the process's cgroup (cgroup v2:

@@ -282,10 +282,13 @@ fn run_guest(
         });
     }
 
+    let input_len = input.len() as u64;
     let watch = crate::deadline::watch(plugin.cancel_handle(), resolved.deadline);
     let outcome = plugin.call::<_, Vec<u8>>(func_name.as_str(), input);
     let cancelled = watch.fired();
     drop(watch);
+    let output_len = outcome.as_ref().map_or(0, |out| out.len() as u64);
+    plugin.note_call(input_len + output_len);
     outcome.map_err(|e| {
         if cancelled {
             unavailable()
@@ -400,15 +403,20 @@ pub trait PluginManager: PluginInvoker {
                 );
             let host_functions = self.get_host_functions().resolve(plugin_id, &permissions);
             let wasi = self.get_config().enable_wasi;
+            let compile_cache = crate::config::compile_cache_config(&self.get_config().cache_dir);
 
             let build_metrics = self.get_metrics().cloned();
             let build_plugin_id = plugin_id.to_string();
             let source: crate::pool::PluginSource = std::sync::Arc::new(move || {
                 let started = std::time::Instant::now();
-                let built = PluginBuilder::new(&manifest)
+                let builder = PluginBuilder::new(&manifest)
                     .with_wasi(wasi)
-                    .with_functions(host_functions.clone())
-                    .build();
+                    .with_functions(host_functions.clone());
+                let builder = match &compile_cache {
+                    Some(config) => builder.with_cache_config(config),
+                    None => builder,
+                };
+                let built = builder.build();
                 if let Some(metrics) = build_metrics.as_ref() {
                     let attrs = [KeyValue::new("plugin.id", build_plugin_id.clone())];
                     metrics

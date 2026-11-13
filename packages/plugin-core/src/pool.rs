@@ -28,6 +28,14 @@ struct Slot<T> {
     instance: T,
     /// The budget's clock when this instance was last returned.
     idle_since: u64,
+    usage: Usage,
+}
+
+/// What an instance has done since it was built.
+#[derive(Default, Clone, Copy)]
+struct Usage {
+    calls: usize,
+    bytes: u64,
 }
 
 struct State<T> {
@@ -107,14 +115,14 @@ impl<T: Send + 'static> InstancePool<T> {
             state.leased += 1;
             slot
         };
-        let instance = match reused {
-            Some(slot) => slot.instance,
+        let (instance, usage) = match reused {
+            Some(slot) => (slot.instance, slot.usage),
             // Built outside the lock so a slow build does not stall callers
             // returning or taking instances.
             None => match (self.shared.source)() {
                 Ok(instance) => {
                     self.shared.live_changed(1);
-                    instance
+                    (instance, Usage::default())
                 }
                 Err(e) => {
                     self.shared.state.lock().leased -= 1;
@@ -124,6 +132,7 @@ impl<T: Send + 'static> InstancePool<T> {
         };
         Ok(PoolLease {
             instance: Some(instance),
+            usage,
             shared: self.shared.clone(),
         })
     }
@@ -169,7 +178,16 @@ impl<T: Send> Trimmable for Shared<T> {
 /// An instance leased from an [`InstancePool`]; returned to the pool on drop.
 pub struct PoolLease<T = Plugin> {
     instance: Option<T>,
+    usage: Usage,
     shared: Arc<Shared<T>>,
+}
+
+impl<T> PoolLease<T> {
+    /// Record one call that moved `bytes` of input and output.
+    pub fn note_call(&mut self, bytes: u64) {
+        self.usage.calls += 1;
+        self.usage.bytes = self.usage.bytes.saturating_add(bytes);
+    }
 }
 
 impl<T> Deref for PoolLease<T> {
@@ -190,6 +208,23 @@ impl<T> Drop for PoolLease<T> {
         let Some(instance) = self.instance.take() else {
             return;
         };
+        let usage = self.usage;
+        if usage.calls >= crate::memory::RECYCLE_MIN_CALLS
+            && usage.bytes > self.shared.budget.recycle_after()
+        {
+            // Moved enough data to have grown: drop it, warm or not; the
+            // next call builds a fresh one.
+            self.shared.state.lock().leased -= 1;
+            drop(instance);
+            self.shared.live_changed(-1);
+            if let Some(metrics) = &self.shared.metrics {
+                metrics.plugin_instance_recycled_total.add(
+                    1,
+                    &[KeyValue::new("plugin.id", self.shared.plugin_id.clone())],
+                );
+            }
+            return;
+        }
         let idle_since = self.shared.budget.stamp();
         {
             let mut state = self.shared.state.lock();
@@ -197,6 +232,7 @@ impl<T> Drop for PoolLease<T> {
             state.free.push(Slot {
                 instance,
                 idle_since,
+                usage,
             });
         }
         self.shared.budget.after_return();
@@ -326,5 +362,23 @@ mod tests {
         assert_eq!(b.trim(), 1, "the old pool's spare idle instance goes");
         drop(last);
         assert_eq!(b.trim(), 0, "the old pool is gone with its last lease");
+    }
+
+    #[test]
+    fn an_instance_that_moved_too_much_data_is_recycled_even_when_warm() {
+        let b = budget(4 << 30, &Arc::new(AtomicU64::new(0)));
+        let (pool, built) = counting_pool(&b, "checker");
+        let limit = b.recycle_after();
+        for _ in 0..crate::memory::RECYCLE_MIN_CALLS - 1 {
+            let mut lease = pool.get().unwrap();
+            lease.note_call(limit);
+        }
+        assert_eq!(pool.idle(), 1, "below the call floor it is kept");
+        let mut lease = pool.get().unwrap();
+        lease.note_call(limit);
+        drop(lease);
+        assert_eq!(pool.count(), 0, "the only, warm instance was dropped");
+        let _fresh = pool.get().unwrap();
+        assert_eq!(built.load(Ordering::SeqCst), 2);
     }
 }

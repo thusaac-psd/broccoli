@@ -45,6 +45,9 @@ pub struct Metrics {
     pub plugin_instance_create_duration: Histogram<f64>,
     /// Pooled plugin instances built, by plugin.
     pub plugin_instance_created_total: Counter<u64>,
+    /// Plugin instances dropped on return after moving more data than the
+    /// memory budget allows one instance, by plugin.
+    pub plugin_instance_recycled_total: Counter<u64>,
     /// Idle plugin instances dropped to bring memory under budget, by plugin.
     pub plugin_instance_evicted_total: Counter<u64>,
 
@@ -303,6 +306,10 @@ impl Metrics {
             plugin_instance_created_total: meter
                 .u64_counter("broccoli.plugin.instance.created")
                 .with_description("Total pooled plugin instances built")
+                .build(),
+            plugin_instance_recycled_total: meter
+                .u64_counter("broccoli.plugin.instance.recycled")
+                .with_description("Plugin instances dropped on return after moving too much data")
                 .build(),
             plugin_instance_evicted_total: meter
                 .u64_counter("broccoli.plugin.instance.evicted")
