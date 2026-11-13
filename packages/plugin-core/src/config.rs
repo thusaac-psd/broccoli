@@ -38,6 +38,12 @@ pub struct PluginConfig {
     pub memory_budget: Option<u64>,
 }
 
+/// How far past the call timeout a guest's manifest timeout ends it, as a
+/// backstop to the per-call deadline. It exceeds every deadline a call can
+/// get: the call timeout, a timer's lease (the call timeout plus 30 s) and a
+/// request's deadline (under the 60 s request timeout).
+pub const TIMEOUT_BACKSTOP_MARGIN: Duration = Duration::from_secs(60);
+
 fn default_plugins_dir() -> PathBuf {
     PathBuf::from("./plugins")
 }

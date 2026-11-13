@@ -125,12 +125,22 @@ of `(Instant, CancelHandle)` for every running call and cancels a guest whose
 deadline passes. A guest parked in a host function traps when it returns to
 guest code.
 
-extism registers a call with its timer thread and only then arms the store's
-epoch deadline. A cancel handled in between bumps the epoch too early and also
-unregisters the call, so the guest runs on and every repeat of the cancel is
-ignored. The deadline thread therefore sends a call's first cancel no sooner
-than `START_GRACE` after the call was registered, and repeats it every
-`CANCEL_RETRY` until the call returns.
+extism sends `TimerAction::Start` to its timer thread and only then arms the
+store's epoch deadline (`set_epoch_deadline(1)`). A cancel handled in between
+bumps the epoch too early and also removes the call's timer entry, so the
+guest runs on and every repeat of the cancel is ignored. The deadline thread
+therefore sends a call's first cancel no sooner than `START_GRACE` after the
+call was registered, and repeats it, doubling the gap from `CANCEL_RETRY` up
+to `CANCEL_RETRY_MAX`, until the call returns; a guest still running 5 s past
+its first cancel is logged as a lost cancel. The manifest timeout, the call
+timeout plus `TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread never
+cancelled. A lost cancel has no backstop: it removes the manifest timeout's
+timer entry too. Only an extism fix that arms the epoch deadline before
+registering the call closes it.
+
+The host's long waits end at the call's deadline too:
+`get_next_evaluate_result` and `get_next_operation_result` cut the wait a
+guest asks for at `executor::current_deadline`.
 
 A call still queued at its deadline, or cancelled at it, fails with
 `PluginError::Unavailable`.

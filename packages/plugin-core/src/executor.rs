@@ -176,8 +176,9 @@ pub(crate) fn current_parent() -> Option<Parent> {
     })
 }
 
-/// The deadline of the call running on this thread, if any. Host functions
-/// that wait bound their waits by it.
+/// The deadline of the call running on this thread, if any. The host's result
+/// waits (`get_next_evaluate_result`, `get_next_operation_result`) end at it;
+/// its database waits are bounded by the statement timeout.
 pub fn current_deadline() -> Option<Instant> {
     SCOPE.with(|scope| scope.borrow().as_ref().map(|s| s.deadline))
 }

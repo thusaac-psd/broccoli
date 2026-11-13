@@ -132,7 +132,7 @@ fn get_next_evaluate_result_fn(
         &call.plugin_id,
         &deps.evaluate_batches,
         &input.batch_id,
-        Duration::from_millis(input.timeout_ms),
+        super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
     let response = serde_json::json!({ "result": result });

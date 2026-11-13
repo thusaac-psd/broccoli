@@ -16,24 +16,34 @@ use std::time::{Duration, Instant};
 use extism::CancelHandle;
 use parking_lot::{Condvar, Mutex};
 
-/// How often a cancel is repeated past the deadline. A cancel only interrupts
-/// a guest extism has already registered as running, and the call may
-/// register just after the first cancel, so the deadline thread keeps
-/// cancelling until the call returns.
+/// The first repeat of a cancel past the deadline. A cancel only interrupts a
+/// guest extism has already registered as running, and the call may register
+/// just after the first cancel, so the deadline thread keeps cancelling until
+/// the call returns, doubling the gap up to [`CANCEL_RETRY_MAX`].
 const CANCEL_RETRY: Duration = Duration::from_millis(10);
+/// The longest gap between repeated cancels.
+const CANCEL_RETRY_MAX: Duration = Duration::from_secs(1);
+/// A guest still running this long after its first cancel was most likely
+/// lost to the ordering below; it is reported once.
+const LOST_CANCEL_REPORT: Duration = Duration::from_secs(5);
 
-/// Least time between registering a call and its first cancel. extism
-/// registers a call with its timer thread and only then arms the store's
-/// epoch deadline; a cancel the timer thread handles between the two bumps
-/// the epoch before the deadline is armed and also unregisters the call, so
-/// that cancel and every repeat of it are lost and the guest runs on. The
-/// gap is a few statements; waiting this long after the call was registered
-/// puts the first cancel well past it.
+/// Least time between registering a call and its first cancel. extism sends
+/// `TimerAction::Start` to its timer thread and only then arms the store's
+/// epoch deadline (`set_epoch_deadline(1)`); a cancel the timer thread
+/// handles between the two bumps the epoch before the deadline is armed and
+/// also removes the call's timer entry, so that cancel, every repeat of it
+/// and the manifest timeout are all lost and the guest runs on. The gap is a
+/// few statements, but a thread preempted inside it widens it; waiting this
+/// long after the call was registered makes that unlikely, not impossible.
 const START_GRACE: Duration = Duration::from_millis(5);
 
 struct Entry {
     cancel: CancelHandle,
     fired: Arc<AtomicBool>,
+    /// When the deadline first fired, and the gap before the next repeat.
+    first_fire: Option<Instant>,
+    retry: Duration,
+    reported: bool,
 }
 
 #[derive(Default)]
@@ -78,12 +88,24 @@ impl Deadlines {
                 continue;
             }
             state.heap.pop();
-            if let Some(entry) = state.live.get(&id) {
+            if let Some(entry) = state.live.get_mut(&id) {
                 entry.fired.store(true, Ordering::Release);
                 // Fails only once extism's timer thread is gone, and then
                 // there is no running guest left to cancel.
                 let _ = entry.cancel.cancel();
-                state.heap.push(Reverse((now + CANCEL_RETRY, id)));
+                let first_fire = *entry.first_fire.get_or_insert(now);
+                if !entry.reported && now.duration_since(first_fire) >= LOST_CANCEL_REPORT {
+                    entry.reported = true;
+                    tracing::error!(
+                        "A plugin guest is still running {:?} past its deadline: its cancel \
+                         was lost to extism's call registration ordering. The manifest \
+                         timeout ends it only if extism still holds its timer entry.",
+                        LOST_CANCEL_REPORT
+                    );
+                }
+                let retry = entry.retry;
+                entry.retry = (retry * 2).min(CANCEL_RETRY_MAX);
+                state.heap.push(Reverse((now + retry, id)));
             }
         }
     }
@@ -111,6 +133,9 @@ pub(crate) fn watch(cancel: CancelHandle, deadline: Instant) -> DeadlineGuard {
         Entry {
             cancel,
             fired: fired.clone(),
+            first_fire: None,
+            retry: CANCEL_RETRY,
+            reported: false,
         },
     );
     let deadline = deadline.max(Instant::now() + START_GRACE);

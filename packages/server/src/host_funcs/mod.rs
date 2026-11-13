@@ -106,6 +106,16 @@ impl<C> std::ops::Deref for HostCall<C> {
     }
 }
 
+/// `wait`, cut short at the deadline of the plugin call this host function
+/// serves: a guest asking for a long result wait cannot outwait its own
+/// call.
+pub(crate) fn within_call_deadline(wait: std::time::Duration) -> std::time::Duration {
+    match plugin_core::executor::current_deadline() {
+        Some(deadline) => wait.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        None => wait,
+    }
+}
+
 /// Read a raw host fn's JSON input from guest memory at `inputs[0]`. `what`
 /// names the input in the guest-visible error.
 pub(crate) fn read_json<T: DeserializeOwned>(

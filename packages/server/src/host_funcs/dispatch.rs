@@ -133,7 +133,7 @@ fn get_next_operation_result_fn(
         &call.plugin_id,
         &call.deps.operation_batches,
         &input.batch_id,
-        Duration::from_millis(input.timeout_ms),
+        super::within_call_deadline(Duration::from_millis(input.timeout_ms)),
     )
     .map_err(|e| extism::Error::msg(e.to_string()))?;
 

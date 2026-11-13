@@ -371,10 +371,15 @@ pub trait PluginManager: PluginInvoker {
             let budget = self.executor().budget().clone();
             // A runaway trap on one instance's linear memory, so an unbounded
             // allocation fails its own call instead of exhausting the
-            // server. Far above any legitimate working set. Execution time is
-            // bounded per call by the deadline thread, not the manifest.
+            // server. Far above any legitimate working set. Each call's
+            // deadline is enforced by the deadline thread; the manifest
+            // timeout, a margin past the longest deadline any call gets, is
+            // the backstop for a guest the deadline thread never cancelled.
             let manifest = Manifest::new([Wasm::file(&wasm_path)])
-                .with_memory_max(budget.instance_memory_pages());
+                .with_memory_max(budget.instance_memory_pages())
+                .with_timeout(
+                    self.get_config().call_timeout() + crate::config::TIMEOUT_BACKSTOP_MARGIN,
+                );
             let host_functions = self.get_host_functions().resolve(plugin_id, &permissions);
             let wasi = self.get_config().enable_wasi;
 
