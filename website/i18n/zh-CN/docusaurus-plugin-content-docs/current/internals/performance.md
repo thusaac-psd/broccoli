@@ -16,7 +16,8 @@ sidebar_position: 3
 
 只测平台自身开销时使用 mock 沙箱（`worker.sandbox_backend = "mock"`）。它把提交
 程序和检查器作为普通的宿主进程运行，因此 `isolate` 的 init、cleanup、cgroup 与挂载
-都不计入结果。要测完整开销，请在能运行 `isolate` 的主机上使用 `isolate`。
+都不计入结果。要测完整开销，请在能运行 `isolate` 的主机上使用 `isolate`。沙箱本身
+在每个步骤上增加的开销另行测量，见[沙箱开销](./sandbox-overhead.md)。
 
 ## 运行一个测量点
 

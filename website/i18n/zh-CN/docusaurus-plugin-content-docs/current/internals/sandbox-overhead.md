@@ -10,7 +10,8 @@ sidebar_position: 5
 `packages/worker/tests/isolate_overhead.rs`
 完成，直接走 worker 自身的沙箱与处理代码。下表数据来自 GitHub
 `ubuntu-latest` 运行器，isolate 版本为 v2.0，cgroup 为 v2。运行器是共享虚拟机，
-请在同一次运行内比较不同形态，不要跨运行比较。
+请在同一次运行内比较不同形态，不要跨运行比较。包含服务器与数据库在内的整次提交的
+吞吐量与延迟见[评测性能](./performance.md)。
 
 | 形态                                  | n   | p50 ms | p95 ms | p99 ms |
 | ------------------------------------- | --- | ------ | ------ | ------ |

@@ -11,7 +11,8 @@ own sandbox and handler code by
 `packages/worker/tests/isolate_overhead.rs`.
 The numbers below come from a GitHub `ubuntu-latest` runner with isolate v2.0
 and cgroup v2. Runners are shared VMs, so compare shapes within one run, not
-across runs.
+across runs. Throughput and latency of whole submissions, with the server and
+database around the sandbox, are on [Judging performance](./performance.md).
 
 | shape                                 | n   | p50 ms | p95 ms | p99 ms |
 | ------------------------------------- | --- | ------ | ------ | ------ |
