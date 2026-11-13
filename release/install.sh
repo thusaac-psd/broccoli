@@ -482,8 +482,8 @@ load_connection_env_if_present() {
 
 # The shared settings that must follow the infra node on a re-run: where its
 # database, MQ and object storage are and how to log in to them, and what
-# every server must agree on. Anything else in the shared files, such as
-# BROCCOLI__AUTH__SECURE_COOKIES, is a per-node choice a re-run never reverts.
+# every server must agree on. Anything else in an env file is a per-node
+# choice a re-run never reverts.
 SHARED_FOLLOW_KEYS=(
   BROCCOLI__DATABASE__URL BROCCOLI__MQ__URL
   BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET
@@ -728,7 +728,6 @@ write_connection_env_file() {
     env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
     env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-    env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
     env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
@@ -748,7 +747,6 @@ write_server_secrets_env_file() {
     echo "# Copy this file only into server bundle directories before running"
     echo "# ./install.sh server."
     env_line BROCCOLI__AUTH__JWT_SECRET "${BROCCOLI__AUTH__JWT_SECRET:-}"
-    env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
     env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
     env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "${BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD:-}"
   } > "$file.tmp"
@@ -810,6 +808,7 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE "$ROLE"
         env_line COMPOSE_PROJECT_NAME "broccoli-$ROLE"
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
@@ -831,26 +830,18 @@ write_env_file() {
         env_line BROCCOLI__MQ__URL "$(redis_url "$redis_password" "$infra_host" "$redis_port")"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "$s3_bucket"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "$s3_endpoint"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "$s3_access"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "$s3_secret"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
         echo
         env_line BROCCOLI__AUTH__JWT_SECRET "$jwt_secret"
-        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "$admin_user"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$admin_pass"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
         env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-server-1}"
         env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-worker-1}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
-        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
-        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
-        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
-        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -875,29 +866,23 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE server
         env_line COMPOSE_PROJECT_NAME broccoli-server
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_SERVER_IMAGE "$server_image"
         env_line BROCCOLI_HTTP_BIND "${BROCCOLI_HTTP_BIND:-0.0.0.0:3000}"
         env_line BROCCOLI__SERVER__ID "${BROCCOLI__SERVER__ID:-$(node_id server)}"
         env_line BROCCOLI__SERVER__TRUSTED_PROXIES "${BROCCOLI__SERVER__TRUSTED_PROXIES:-[]}"
-        env_line BROCCOLI__SERVER__RATE_LIMIT_AUTH "${BROCCOLI__SERVER__RATE_LIMIT_AUTH:-true}"
-        env_line BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__SERVER_DATABASE_MAX_CONNECTIONS:-40}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__AUTH__JWT_SECRET "$BROCCOLI__AUTH__JWT_SECRET"
-        env_line BROCCOLI__AUTH__SECURE_COOKIES "${BROCCOLI__AUTH__SECURE_COOKIES:-false}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_USERNAME "${BROCCOLI_BOOTSTRAP_ADMIN_USERNAME:-${BROCCOLI_ADMIN_USERNAME:-admin}}"
         env_line BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD "$BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD"
-        env_line BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE "${BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE:-10000}"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -917,21 +902,18 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE worker
         env_line COMPOSE_PROJECT_NAME broccoli-worker
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line BROCCOLI_VERSION "$version"
         env_line BROCCOLI_WORKER_IMAGE "$worker_image"
         env_line BROCCOLI__WORKER__ID "${BROCCOLI__WORKER__ID:-$(node_id worker)}"
-        env_line BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS "${BROCCOLI__WORKER_DATABASE_MAX_CONNECTIONS:-5}"
         env_line BROCCOLI__DATABASE__URL "$BROCCOLI__DATABASE__URL"
         env_line BROCCOLI__MQ__URL "$BROCCOLI__MQ__URL"
         env_line BROCCOLI__STORAGE__BACKEND "$(storage_backend)"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET "${BROCCOLI__STORAGE__OBJECT_STORAGE__BUCKET:-broccoli-blobs}"
-        env_line BROCCOLI__STORAGE__OBJECT_STORAGE__REGION "${BROCCOLI__STORAGE__OBJECT_STORAGE__REGION:-us-east-1}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT "${BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY "${BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY:-}"
         env_line BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE "${BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE:-true}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FORMAT "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
-        env_line BROCCOLI__OBSERVABILITY__LOG_FILTER "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
       } > "$ENV_FILE.tmp"
       mv "$ENV_FILE.tmp" "$ENV_FILE"
       ;;
@@ -942,6 +924,7 @@ write_env_file() {
       {
         env_line BROCCOLI_ROLE gateway
         env_line COMPOSE_PROJECT_NAME broccoli-gateway
+        env_line BROCCOLI_ENV_FILE "$ENV_FILE"
         env_line CADDY_IMAGE "$caddy_image"
         env_line BROCCOLI_GATEWAY_HTTP_BIND "${BROCCOLI_GATEWAY_HTTP_BIND:-0.0.0.0:80}"
         env_line BROCCOLI_UPSTREAMS "$BROCCOLI_UPSTREAMS"

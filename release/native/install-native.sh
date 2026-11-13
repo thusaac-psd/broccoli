@@ -167,10 +167,6 @@ install_common_dirs(){
 install_infra_server(){
   local host="${BROCCOLI_INFRA_HOST:-}"
   [ -n "$host" ] || die "set BROCCOLI_INFRA_HOST=<this box's LAN IP> for infra-server"
-  case "${BROCCOLI__AUTH__SECURE_COOKIES:-false}" in
-    true|false) ;;
-    *) die "BROCCOLI__AUTH__SECURE_COOKIES must be true or false" ;;
-  esac
   require_ubuntu; install_common_dirs
   apt_ensure postgresql postgresql-client
   ensure_redis7
@@ -259,9 +255,8 @@ install_infra_server(){
       -e "s|@S3_ENDPOINT@|http://$host:8333|" \
       -e "s|@S3_ACCESS_KEY@|$s3_ak|; s|@S3_SECRET_KEY@|$s3_sk|" \
       -e "s|@JWT_SECRET@|$jwt|; s|@ADMIN_PASSWORD@|$admin_pw|" \
-      -e "s|@SECURE_COOKIES@|${BROCCOLI__AUTH__SECURE_COOKIES:-false}|" \
       -e "s|@DATA_DIR@|$DATA_DIR|; s|@SERVER_ID@|server-1|; s|@WORKER_ID@|server-1|" \
-      -e "s|@HTTP_HOST@|0.0.0.0|; s|@HTTP_PORT@|80|; s|@MAX_CONCURRENCY@|1|; s|@INFRA_HOST@|$host|" \
+      -e "s|@HTTP_HOST@|0.0.0.0|; s|@HTTP_PORT@|80|; s|@INFRA_HOST@|$host|" \
       "$BUNDLE/config/config.toml.tmpl" > "$DATA_DIR/config/config.toml"
   chown "$SVC_USER":"$SVC_USER" "$DATA_DIR/config/config.toml" "$DATA_DIR/config/seaweedfs-s3.json"
   chmod 600 "$DATA_DIR/config/config.toml"
@@ -324,9 +319,8 @@ install_worker(){
       -e "s|@S3_ACCESS_KEY@|$BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY|" \
       -e "s|@S3_SECRET_KEY@|$BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY|" \
       -e "s|@JWT_SECRET@|unused-on-worker|; s|@ADMIN_PASSWORD@|unused|" \
-      -e "s|@SECURE_COOKIES@|false|" \
       -e "s|@DATA_DIR@|$DATA_DIR|; s|@SERVER_ID@|$wid|; s|@WORKER_ID@|$wid|" \
-      -e "s|@HTTP_HOST@|127.0.0.1|; s|@HTTP_PORT@|8081|; s|@MAX_CONCURRENCY@|${BROCCOLI_MAX_CONCURRENCY:-8}|; s|@INFRA_HOST@|${BROCCOLI_INFRA_HOST:-127.0.0.1}|" \
+      -e "s|@HTTP_HOST@|127.0.0.1|; s|@HTTP_PORT@|8081|; s|@INFRA_HOST@|${BROCCOLI_INFRA_HOST:-127.0.0.1}|" \
       "$BUNDLE/config/config.toml.tmpl" > "$DATA_DIR/config/worker.toml"
   chown "$SVC_USER":"$SVC_USER" "$DATA_DIR/config/worker.toml"; chmod 600 "$DATA_DIR/config/worker.toml"
 

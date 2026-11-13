@@ -173,13 +173,16 @@ printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE
 workergen_write "$T/ag/.env.worker" "$rel/.env.worker.example" "$T/ag/cluster-secrets.env" 10.0.0.10 worker-1
 render "airgap worker" --env-file "$T/ag/.env.worker" -f docker-compose.worker.yaml.template
 
-# Every BROCCOLI__<SECTION>__<KEY> an example env file documents, including
-# commented-out optional ones, must reach the container with its value. A key
-# the template does not pass is silently dropped, which is how pool sizing
-# from .env.server.example never reached a server.
+# Every BROCCOLI__<SECTION>__<KEY> an example env file documents must reach
+# the container with its value, and so must an advanced override the
+# template never names: the role's env file is the container's env_file.
 check_passthrough() {
   local example="$1" template="$2" service="$3" envf="$T/passthrough.env"
-  sed -E 's/^#(BROCCOLI__[A-Z_]+__[A-Z_]+=)/\1/' "$rel/$example" > "$envf"
+  {
+    cat "$rel/$example"
+    echo "BROCCOLI_ENV_FILE=$envf"
+    echo "BROCCOLI__SERVER__LEASE_TTL_SECS=90"
+  } > "$envf"
   docker compose --env-file "$envf" -f "$template" config --format json 2>/dev/null \
     | python3 -c '
 import json, sys

@@ -90,8 +90,10 @@ sudo ./install-native.sh worker   # id unique to this box; BROCCOLI__WORKER__ID=
 
 This installs `isolate` (setuid + cgroup-v2 delegation via the per-boot
 `broccoli-isolate-setup` service), the **C/C++/Python toolchain**, and
-`broccoli-worker` pointed at box 1 over the LAN. `max_concurrency` defaults to 8
-(override with `BROCCOLI_MAX_CONCURRENCY`).
+`broccoli-worker` pointed at box 1 over the LAN. Each worker judges one test at
+a time: concurrent runs on one machine share its L2/L3 cache, memory bandwidth
+and SMT siblings, which makes their times unfair even with CPU pinning. Scale by
+adding worker machines; several workers on one machine share those caches too.
 
 Toolchain provisioning (`ensure_toolchain`) tries, in order: a bundled `.deb`
 set matching the box's Ubuntu version (`toolchain/<ver>/`, see live-boot below),

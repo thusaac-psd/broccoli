@@ -8,19 +8,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    # Tuned for contest-scale concurrency. The default max_connections=100 was the
-    # confirmed proximate cause of the 2026-05-07 production wedge: 3 servers x
-    # default_pool + 7 workers + DLQ + admin overhead saturated the connection slots
-    # and Postgres returned "FATAL: too many clients already".
-    #
-    # Sizing assumptions (override via env vars if your fleet is bigger):
-    #   3 servers x 50 = 150
-    #   7 workers x 5  =  35
-    #   admin/DLQ/hooks ~ 20
-    #   heartbeat refreshers (Phase 1b) ~ 10
-    #   Total client demand ~ 215; max_connections=400 leaves ~85% headroom.
-    #
-    # If you increase fleet size, raise POSTGRES_MAX_CONNECTIONS proportionally.
+    # Sized for contest-scale fleets. Pools size themselves: a server holds at
+    # most 64 connections, a worker 3. 400 fits about 5 servers and 30 workers
+    # at their peak plus admin and DLQ overhead; raise POSTGRES_MAX_CONNECTIONS
+    # for a larger fleet.
     command:
       - "postgres"
       - "-c"

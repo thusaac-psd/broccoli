@@ -37,9 +37,6 @@ services:
         condition: service_completed_successfully
     environment:
       BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
-      # Unset unless the env file sets them, so the binary's defaults apply.
-      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
-      BROCCOLI__DATABASE__TCP_KEEPALIVES:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
       BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT: http://seaweedfs:8333
 
@@ -58,9 +55,6 @@ services:
         condition: service_completed_successfully
     environment:
       BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
-      # Unset unless the env file sets them, so the binary's defaults apply.
-      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
-      BROCCOLI__DATABASE__TCP_KEEPALIVES:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
       BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT: http://seaweedfs:8333
 

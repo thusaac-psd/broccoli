@@ -140,7 +140,7 @@ resets it to the configured password, and restores the `admin` role and its
 built-in permissions, only in two cases:
 
 - no active user holds `system:admin`; this happens automatically;
-- `BROCCOLI_BOOTSTRAP_ADMIN_RESET=true` is set; use this when admin accounts
+- `BROCCOLI__BOOTSTRAP__RESET_ADMIN=true` is set; use this when admin accounts
   still exist but nobody can sign in to one.
 
 To recover, edit the server node `.env.server` and restart the server:
@@ -148,12 +148,12 @@ To recover, edit the server node `.env.server` and restart the server:
 ```bash
 BROCCOLI_BOOTSTRAP_ADMIN_USERNAME=admin
 BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD=replace-this-password
-BROCCOLI_BOOTSTRAP_ADMIN_RESET=true
+BROCCOLI__BOOTSTRAP__RESET_ADMIN=true
 docker compose --env-file .env.server -f docker-compose.server.yaml up -d --no-deps server
 ```
 
 The reset also signs the account out everywhere. After signing in, remove
-`BROCCOLI_BOOTSTRAP_ADMIN_RESET` (otherwise every restart resets the password
+`BROCCOLI__BOOTSTRAP__RESET_ADMIN` (otherwise every restart resets the password
 again) and rotate the bootstrap password.
 
 ## Built-in Role Permissions
@@ -220,82 +220,39 @@ times shown in the UI read right.
 
 ## Capacity Planning
 
-Broccoli's per-machine throughput is bounded by the worker's intra-process
-concurrency (`worker.max_concurrency`, default 1). Total fleet drain time for a
-contest:
+Each worker judges one test at a time (`worker.max_concurrency` is 1).
+Concurrent runs on one machine share its L2/L3 cache, memory bandwidth and SMT
+siblings, and `time_used` (kernel CPU accounting) inflates under that
+contention even with CPU pinning, so borderline time limits flip. Scale judging
+by adding worker machines. Several worker processes on one machine share those
+caches too, so they are no way around it. Total fleet drain time for a contest:
 
 ```
 drain_seconds = (n_submissions * n_testcases * avg_op_time_seconds)
-              / (n_machines * worker.max_concurrency)
+              / n_worker_machines
 ```
 
-For 100 submissions × 50 testcases × 5 s on 7 machines × 4 slots ≈ 30 minutes.
+For 100 submissions × 50 testcases × 0.5 s on 20 machines ≈ 2 minutes.
 
 Each server sizes its evaluator admission locally, from
 `BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM` (see the plugin pool section below).
+`setup-fairness.sh` pins the worker's sandbox to fixed CPUs and sets the CPU
+governor; it does not make concurrent runs fair.
 
-**Deployment topology**
+**Database connections**
 
-The official deployment model is **one worker process per physical machine**,
-with the worker's own `max_concurrency` knob (default 1) controlling how many
-sandbox slots run in parallel inside that single daemon.
-
-Scale the fleet by adding machines, not by running multiple worker daemons on
-the same box. Multiple processes per box would contend for CPU cache, memory
-bandwidth, and SMT siblings, and the verdict signal Broccoli currently uses
-(`time_used`, which is kernel CPU accounting) inflates under that contention, so
-borderline TLE outcomes can flip. The single-daemon model gives the operator one
-number to reason about and one place to apply core-pinning / cgroup
-configuration.
-
-Raising `max_concurrency` above 1 within a single daemon has the same fairness
-trade-off. Use the procedure below before changing it.
-
-**Raising max_concurrency safely**
-
-Default worker concurrency is `max_concurrency=1`. Leave it there unless the
-worker host has been prepared for CPU isolation.
-
-On the Linux worker host, from the bundle directory, run:
-
-```bash
-sudo ./setup-fairness.sh --max-concurrency 4 --cpus 0-3
-cat fairness.env >> .env.worker
-docker compose --env-file .env.worker -f docker-compose.worker.yaml up -d --no-deps worker
-```
-
-The script refuses to run when SMT/hyperthreading is enabled unless
-`--allow-smt` is passed. It sets CPU governors to `performance` when the host
-exposes writable governor controls, configures isolate per-box CPU assignments
-so each sandbox `box_id` writes a fixed `cpuset.cpus`, and writes the worker env
-snippet:
-
-```bash
-BROCCOLI__WORKER__MAX_CONCURRENCY=4
-BROCCOLI__WORKER__FAIRNESS_UNSAFE_ALLOW=false
-```
-
-WSL and macOS are not supported production fairness targets. Use WSL only for
-local isolate smoke tests and keep `BROCCOLI__WORKER__MAX_CONCURRENCY=1`; macOS
-cannot run the Linux cgroup setup and should also stay clamped to 1.
-
-Phase 1 only makes multi-slot judging an explicit operator opt-in. It does not
-prove verdict fairness: instruction-count instrumentation with `perf_event_open`
-is Phase 5. Treat any higher concurrency as an operational risk for borderline
-time-limit cases until Phase 5 data exists.
-
-**Sizing the database connection pool**
-
-Postgres `max_connections` must accommodate every server replica's pool, every
-worker's pool, plus heartbeat/DLQ/admin overhead. The tuned infra template
-defaults to `max_connections=400`, which fits:
+Pools size themselves. A server's three pools hold at most 64 connections
+together (16 to 40 for handlers, from 4 per CPU, plus up to 24 for plugin
+host functions, from the evaluator admission). A worker holds 3. The infra
+template's `max_connections=400` therefore fits about 5 servers and 30
+workers:
 
 ```
-3 servers × 50 + 7 workers × 5 + heartbeat refreshers + DLQ + admin
-≈ 215 client demand
+5 servers × 64 + 30 workers × 3 + heartbeats, DLQ and admin ≈ 430 at the peak
 ```
 
-Override via `POSTGRES_MAX_CONNECTIONS` in `.env.infra` if your fleet grows.
+Pools rarely fill. Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a
+larger fleet.
 
 **Sizing Redis memory**
 
