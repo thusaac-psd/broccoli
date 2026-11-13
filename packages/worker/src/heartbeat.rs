@@ -48,6 +48,9 @@ pub struct HeartbeatConfig {
     pub max_concurrency: Option<u32>,
     pub fairness_mode: String,
     pub system_info: SystemInfo,
+    /// Stamps `last_seen`, which the server and admin UI compare with their
+    /// own platform time.
+    pub clock: common::clock::PlatformClock,
 }
 
 pub struct HeartbeatHandle(NodeHeartbeat);
@@ -69,7 +72,7 @@ impl HeartbeatConfig {
         let payload = HeartbeatPayload {
             id: self.worker_id.clone(),
             started_at,
-            last_seen: Utc::now(),
+            last_seen: self.clock.now(),
             in_flight: in_flight.current(),
             max_concurrency: self.max_concurrency,
             fairness_mode: self.fairness_mode.clone(),
@@ -119,8 +122,8 @@ mod tests {
     fn payload_serializes_with_iso_timestamps() {
         let payload = HeartbeatPayload {
             id: "worker-test".into(),
-            started_at: Utc::now(),
-            last_seen: Utc::now(),
+            started_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            last_seen: chrono::DateTime::from_timestamp(1_700_000_003, 0).unwrap(),
             in_flight: 3,
             max_concurrency: Some(8),
             fairness_mode: "pinned".into(),

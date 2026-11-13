@@ -63,8 +63,8 @@ A woken fiber claims a batch, and repeats while each pass fills its batch and
 room is left. Wakes that arrive during a pass fold into one more pass, at
 least 10 ms after the last one, so a burst is claimed in batches. Every
 replica wakes on the same notification; `SKIP LOCKED` in the claim splits the
-work. `claim_poll_interval_ms` is a fallback tick for notifications lost
-while the listening connection was down; every reconnect also wakes the
+work. A one-second fallback tick covers notifications lost while the
+listening connection was down; every reconnect also wakes the
 fiber.
 
 ## The submission row is a cache

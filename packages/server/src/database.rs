@@ -463,6 +463,198 @@ pub async fn init_db_with_max_connections(
     connect_main_pool(db_url, max_connections, session).await
 }
 
+/// How many connections each of a server's three pools may hold: what this
+/// host's CPUs and the plugin evaluator admission want (64 at most together),
+/// fitted at boot to this server's share of the database's
+/// `max_connections`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSizes {
+    /// Handlers, the dispatcher and background loops.
+    pub main: u32,
+    /// Raw plugin SQL (the restricted pool).
+    pub plugin: u32,
+    /// The structured plugin write host functions (the privileged pool).
+    pub plugin_privileged: u32,
+}
+
+/// Connections a server holds outside its pools: the claim listener and the
+/// clock's sampling connection.
+pub const SERVER_UNPOOLED_CONNECTIONS: u32 = 2;
+
+/// The smallest pools a server still works with: below these, handlers queue
+/// behind the dispatcher.
+const POOL_FLOOR: PoolSizes = PoolSizes {
+    main: 8,
+    plugin: 2,
+    plugin_privileged: 1,
+};
+
+/// The other nodes sharing the database, as their liveness keys show them
+/// when this server boots.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Fleet {
+    /// Live servers other than this one.
+    pub other_servers: u32,
+    /// Connections the live workers hold together.
+    pub worker_connections: u32,
+}
+
+/// Connections the database leaves to this server: what the cluster accepts
+/// for ordinary roles, less a reserve for operators and booting nodes and the
+/// workers' share, split evenly between this server and the others.
+pub fn server_share(usable_connections: u32, fleet: Fleet) -> u32 {
+    let reserve = (usable_connections / 10).max(10);
+    usable_connections
+        .saturating_sub(reserve)
+        .saturating_sub(fleet.worker_connections)
+        / fleet.other_servers.saturating_add(1)
+}
+
+impl PoolSizes {
+    /// The pools a host with `cpus` CPUs and this evaluator admission wants.
+    pub fn derive(cpus: usize, evaluator_parallelism: usize) -> Self {
+        let clamp = |n: usize, lo: u32, hi: u32| u32::try_from(n).unwrap_or(hi).clamp(lo, hi);
+        Self {
+            main: clamp(cpus.saturating_mul(4), 16, 40),
+            plugin: clamp(evaluator_parallelism / 2, 4, 16),
+            plugin_privileged: clamp(evaluator_parallelism / 4, 2, 8),
+        }
+    }
+
+    /// Every connection a server with these pools holds at most.
+    pub fn connections(&self) -> u32 {
+        self.main + self.plugin + self.plugin_privileged + SERVER_UNPOOLED_CONNECTIONS
+    }
+
+    /// These pools, shrunk in proportion where they hold more than `share`
+    /// connections, but never below the floor. `None` when even the floor
+    /// does not fit.
+    pub fn fit(self, share: u32) -> Option<Self> {
+        if self.connections() <= share {
+            return Some(self);
+        }
+        if POOL_FLOOR.connections() > share {
+            return None;
+        }
+        // Each pool keeps its floor and gets the room above the floors in
+        // proportion to how far above its floor it wanted to be.
+        let extra = u64::from(share - POOL_FLOOR.connections());
+        let above = u64::from(self.connections() - POOL_FLOOR.connections());
+        let grow =
+            |wanted: u32, floor: u32| floor + (u64::from(wanted - floor) * extra / above) as u32;
+        let fitted = Self {
+            main: grow(self.main, POOL_FLOOR.main),
+            plugin: grow(self.plugin, POOL_FLOOR.plugin),
+            plugin_privileged: grow(self.plugin_privileged, POOL_FLOOR.plugin_privileged),
+        };
+        Some(fitted)
+    }
+
+    /// The pools for this host and `config`, fitted to what `boot` reports
+    /// the database accepts and the fleet `mq_url` shows as live.
+    pub async fn for_host(
+        config: &crate::config::AppConfig,
+        boot: &DatabaseConnection,
+        server_id: &str,
+    ) -> Result<Self, DbErr> {
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let wanted = Self::derive(
+            cpus,
+            config
+                .plugin
+                .max_concurrent_calls
+                .unwrap_or_else(|| plugin_core::admission::Capacity::for_this_host().tokens),
+        );
+        let usable = usable_connections(boot).await?;
+        let fleet = fleet_at_boot(config, server_id).await;
+        let share = server_share(usable, fleet);
+        Ok(match wanted.fit(share) {
+            Some(fitted) if fitted == wanted => wanted,
+            Some(fitted) => {
+                tracing::warn!(
+                    usable_connections = usable,
+                    other_servers = fleet.other_servers,
+                    worker_connections = fleet.worker_connections,
+                    share,
+                    ?wanted,
+                    ?fitted,
+                    "Database pools shrunk to this server's share of max_connections; \
+                     raise max_connections for full-size pools"
+                );
+                fitted
+            }
+            None => {
+                tracing::warn!(
+                    usable_connections = usable,
+                    other_servers = fleet.other_servers,
+                    worker_connections = fleet.worker_connections,
+                    share,
+                    needed = POOL_FLOOR.connections(),
+                    "The fleet does not fit max_connections: requests will wait for \
+                     connections or fail; raise max_connections"
+                );
+                POOL_FLOOR
+            }
+        })
+    }
+}
+
+/// Connections the cluster accepts for roles that are not superusers.
+async fn usable_connections(db: &DatabaseConnection) -> Result<u32, DbErr> {
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT (current_setting('max_connections')::int \
+               - current_setting('superuser_reserved_connections')::int \
+               - coalesce(nullif(current_setting('reserved_connections', true), '')::int, 0) \
+             )::bigint AS usable",
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("SHOW max_connections returned no row".into()))?;
+    let usable: i64 = row.try_get("", "usable")?;
+    Ok(u32::try_from(usable).unwrap_or(0))
+}
+
+/// The live fleet in Redis. Without Redis this server is taken to be alone.
+async fn fleet_at_boot(config: &crate::config::AppConfig, server_id: &str) -> Fleet {
+    use common::liveness::{NodeRole, live_nodes};
+    if !config.mq.enabled {
+        return Fleet::default();
+    }
+    let namespace = &config.mq.operation_queue_name;
+    let read = async {
+        let client = redis::Client::open(config.mq.url.as_str())?;
+        let mut conn = client.get_multiplexed_async_connection().await?;
+        let servers = live_nodes(&mut conn, namespace, NodeRole::Server).await?;
+        let workers = live_nodes(&mut conn, namespace, NodeRole::Worker).await?;
+        redis::RedisResult::Ok((servers, workers))
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), read).await {
+        Ok(Ok((servers, workers))) => Fleet {
+            other_servers: servers.iter().filter(|s| s.id != server_id).count() as u32,
+            worker_connections: workers
+                .iter()
+                .map(|w| {
+                    let slots =
+                        serde_json::from_str::<common::worker::HeartbeatPayload>(&w.payload)
+                            .ok()
+                            .and_then(|p| p.max_concurrency)
+                            .unwrap_or(1);
+                    common::worker::database_connections(slots)
+                })
+                .sum(),
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "Reading the live fleet failed; sizing pools as if alone");
+            Fleet::default()
+        }
+        Err(_) => {
+            tracing::warn!("Reading the live fleet timed out; sizing pools as if alone");
+            Fleet::default()
+        }
+    }
+}
+
 /// The main pool (handlers, dispatcher, background loops). No schema work.
 pub async fn connect_main_pool(
     db_url: &str,
@@ -553,15 +745,17 @@ impl BootSession {
         &self.db
     }
 
-    /// Schema sync, versioned migrations and the claim notification trigger.
+    /// Schema sync, versioned migrations, the claim notification trigger and
+    /// the plugin config version stamp.
     pub async fn migrate(&self) -> Result<(), DbErr> {
         let db = &self.db;
-        crate::migration::refuse_unknown_migrations(db).await?;
+        crate::migration::refuse_foreign_schema(db).await?;
         // Create the core tables from the entity definitions, then apply the
         // schema they cannot express (see `crate::migration`).
         db.get_schema_registry("server::entity::*").sync(db).await?;
         Migrator::up(db, None).await?;
-        crate::services::judging::install_claim_notify(db).await
+        crate::services::judging::install_claim_notify(db).await?;
+        crate::services::plugin_config_cache::install_plugin_config_epoch(db).await
     }
 
     /// Release the lock and close the session. Dropping a `BootSession`
@@ -571,6 +765,60 @@ impl BootSession {
             .execute_raw(self.lock_stmt("SELECT pg_advisory_unlock($1)"))
             .await?;
         self.db.close().await
+    }
+}
+
+#[cfg(test)]
+mod pool_size_tests {
+    use super::{Fleet, POOL_FLOOR, PoolSizes, server_share};
+
+    #[test]
+    fn pools_grow_with_the_host_and_stay_within_a_fixed_budget() {
+        let small = PoolSizes::derive(2, 2);
+        assert_eq!(
+            (small.main, small.plugin, small.plugin_privileged),
+            (16, 4, 2)
+        );
+        let large = PoolSizes::derive(128, 256);
+        assert_eq!(
+            (large.main, large.plugin, large.plugin_privileged),
+            (40, 16, 8)
+        );
+        assert_eq!(large.connections(), 66);
+    }
+
+    #[test]
+    fn the_shipped_max_connections_fits_the_documented_fleet() {
+        // 500 less the 3 superuser slots; five servers, thirty workers.
+        let fleet = Fleet {
+            other_servers: 4,
+            worker_connections: 30 * common::worker::database_connections(1),
+        };
+        let share = server_share(497, fleet);
+        let large = PoolSizes::derive(128, 256);
+        assert_eq!(large.fit(share), Some(large), "share {share}");
+    }
+
+    #[test]
+    fn pools_shrink_to_the_share_and_keep_the_floor() {
+        let wanted = PoolSizes::derive(4, 64);
+        assert_eq!(wanted.connections(), 16 + 16 + 8 + 2);
+        let fitted = wanted.fit(30).expect("above the floor");
+        assert!(fitted.connections() <= 30, "{fitted:?}");
+        assert!(fitted.main >= POOL_FLOOR.main && fitted.plugin >= POOL_FLOOR.plugin);
+        assert_eq!(wanted.fit(POOL_FLOOR.connections() - 1), None);
+        let tight = wanted
+            .fit(POOL_FLOOR.connections())
+            .expect("exactly the floor");
+        assert_eq!(tight.connections(), POOL_FLOOR.connections());
+    }
+
+    #[test]
+    fn a_four_core_server_alone_on_a_default_postgres_keeps_full_pools() {
+        // Stock Postgres: 100 connections, 3 for superusers.
+        let wanted = PoolSizes::derive(4, 4);
+        let share = server_share(97, Fleet::default());
+        assert_eq!(wanted.fit(share), Some(wanted), "share {share}");
     }
 }
 
@@ -628,6 +876,15 @@ mod tests {
         (container, url)
     }
 
+    #[tokio::test]
+    async fn the_usable_connections_leave_out_the_superuser_slots() {
+        let (_pg, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("boot session");
+        // Stock Postgres: 100 connections, 3 for superusers.
+        assert_eq!(usable_connections(boot.conn()).await.unwrap(), 97);
+        boot.release().await.unwrap();
+    }
+
     /// The server's boot sequence as `ServerRuntime::build` runs it.
     async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
         let boot = BootSession::acquire(url).await?;
@@ -640,30 +897,6 @@ mod tests {
         };
         crate::seed::ensure_bootstrap_admin(boot.conn(), &bootstrap).await?;
         boot.release().await
-    }
-
-    /// The boot-time skew check reads both shared clocks for real; on one host
-    /// they agree with ours, so it passes even with a strict bound.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn clock_skew_check_reads_postgres_and_redis() {
-        use testcontainers::runners::AsyncRunner;
-        let (_pg, url) = fresh_postgres().await;
-        let redis = common::test_util::redis_image()
-            .start()
-            .await
-            .expect("start redis");
-        let port = redis.get_host_port_ipv4(6379).await.expect("redis port");
-        let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
-        let db = connect_main_pool(&url, 1, &test_session())
-            .await
-            .expect("pool");
-        let strict = common::clock::ClockConfig {
-            warn_skew_ms: 1_000,
-            max_skew_ms: 1_000,
-        };
-        common::clock::check_clock_skew(&db, Some(&client), &strict)
-            .await
-            .expect("same-host clocks agree");
     }
 
     /// The boot session is unbounded even when the role carries a default
@@ -774,6 +1007,42 @@ mod tests {
             .try_get::<i64>("", "n")
             .unwrap();
         assert_eq!(tables, 1, "only seaql_migrations exists; sync never ran");
+        boot.release().await.expect("release");
+    }
+
+    /// A database migrated by this build's migration names but a different
+    /// schema (a column default sync cannot add, say) is refused before
+    /// anything changes, as is one from before schemas were stamped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_refuses_a_database_whose_schema_stamp_differs() {
+        let (_c, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.migrate().await.expect("first boot");
+        let stamp_table = crate::migration::STAMP_TABLE;
+        boot.conn()
+            .execute_unprepared(&format!(
+                "UPDATE {stamp_table} SET stamp = 'from-another-build'"
+            ))
+            .await
+            .expect("restamp");
+        let msg = boot
+            .migrate()
+            .await
+            .expect_err("a foreign stamp must refuse boot")
+            .to_string();
+        assert!(msg.contains("from-another-build"), "{msg}");
+        assert!(msg.contains("empty database"), "{msg}");
+
+        boot.conn()
+            .execute_unprepared(&format!("DROP TABLE {stamp_table}"))
+            .await
+            .expect("unstamp");
+        let msg = boot
+            .migrate()
+            .await
+            .expect_err("no stamp must refuse boot")
+            .to_string();
+        assert!(msg.contains("no schema stamp"), "{msg}");
         boot.release().await.expect("release");
     }
 
@@ -954,6 +1223,21 @@ mod tests {
             .execute_unprepared("INSERT INTO seqtest (v) VALUES (1)")
             .await
             .expect("plugin role must INSERT into a future table and draw a serial id");
+
+        // NEGATIVE: what boot trusts (the schema stamp and the applied
+        // migrations) is read-only to plugins.
+        for write in [
+            "DELETE FROM broccoli_schema_stamp",
+            "UPDATE broccoli_schema_stamp SET stamp = 'x'",
+            "DELETE FROM seaql_migrations",
+            "INSERT INTO seaql_migrations (version, applied_at) VALUES ('m9999_x', 0)",
+        ] {
+            let err = restricted.execute_unprepared(write).await.expect_err(write);
+            assert!(
+                err.to_string().contains("permission denied"),
+                "{write}: {err}"
+            );
+        }
 
         // NEGATIVE: schema DDL (DROP) is still denied - non-owner.
         let drop_err = restricted

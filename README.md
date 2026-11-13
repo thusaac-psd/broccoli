@@ -112,22 +112,16 @@ just check-all           # The CI checks for Rust and JS, plugins included
 
 ## Configuration
 
-Copy `config/config.example.toml` to `config/config.toml`. The main sections:
+Copy `config/config.example.toml` to `config/config.toml`. It holds only what a
+node cannot derive: the database, Redis and object storage URLs, and the
+secrets. Pool sizes, the claim loop, cookie security and log format derive from
+the machine and the request; everything else has a default.
+[release/docs/configuration-reference.md](release/docs/configuration-reference.md)
+lists the advanced overrides.
 
-| Section           | Purpose                                                 |
-| ----------------- | ------------------------------------------------------- |
-| `[server]`        | Host, port, CORS origins, trusted proxies               |
-| `[database]`      | PostgreSQL connection URL                               |
-| `[auth]`          | JWT secret and cookie settings                          |
-| `[bootstrap]`     | First admin account created on startup; recovery reset  |
-| `[mq]`            | Redis URL, queue names, dead-letter retry policy        |
-| `[storage]`       | Backend (`database`, `filesystem`, or `object_storage`) |
-| `[worker]`        | Sandbox backend and cgroups toggle                      |
-| `[plugin]`        | Plugins directory and WASI toggle                       |
-| `[observability]` | Tracing and OTLP export                                 |
-
-Any value can be overridden by an environment variable with the `BROCCOLI__`
-prefix, for example `BROCCOLI__DATABASE__URL`.
+Any value can be set by an environment variable with the `BROCCOLI__` prefix,
+for example `BROCCOLI__DATABASE__URL`. A key the binary does not read is logged
+as a warning at boot.
 
 ## Plugins
 

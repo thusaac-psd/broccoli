@@ -205,7 +205,7 @@ pub async fn list_contest_problems(
     // rejection (a 400, not a reachability outcome), so that check is
     // re-applied here on top of the kernel's `Allow`.
     let contest_model = find_contest(&state.db, contest_id).await?;
-    require_contest_started(&auth_user, &contest_model, chrono::Utc::now())?;
+    require_contest_started(&auth_user, &contest_model, state.clock.now())?;
 
     // A denied problem is omitted from the list, never rendered as a
     // placeholder - a placeholder would confirm it exists, the exact fact a

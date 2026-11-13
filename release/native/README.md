@@ -24,15 +24,17 @@ installed `/usr/local/bin/{weed,isolate}`, built plugin `.wasm` under
 
 ```bash
 cd release/native
-# optional but recommended for live-boot/airgapped workers: pre-stage the
-# C/C++/Python toolchain as offline .debs (needs Docker + internet, once):
+# for an air-gapped lab, pre-stage the C/C++/Python toolchain and Redis 7 as
+# offline .debs (needs Docker + internet, once):
 ./stage-toolchain.sh               # -> toolchain/{20.04,22.04,24.04}/*.deb
+./stage-redis.sh                   # -> redis/{20.04,22.04,24.04}/*.deb
 ./build-native-bundle.sh v1        # -> broccoli-native-v1.tar.gz (+ .sha256)
 ```
 
 The bundle contains the binaries, the `.wasm` judge plugins, the server web UI,
 `weed` + `isolate`, the systemd unit + config templates, the export/import
-tooling, `stage-toolchain.sh`, and any pre-staged `toolchain/` `.deb` sets.
+tooling, `stage-toolchain.sh`, `stage-redis.sh`, and any pre-staged
+`toolchain/` and `redis/` `.deb` sets.
 ~700 MB (binaries carry line-table debug info for backtraces).
 
 > **testlib.h / special judges** ride inside each problem's `checker_source` in
@@ -45,11 +47,12 @@ Extract to the same directory on each (`tar xzf broccoli-native-v1.tar.gz`).
 
 ## (C) Deploy — offline, on the LAN
 
-Lab boxes are Ubuntu 22.04. Postgres/Redis install via apt; point apt at a local
-mirror or pre-install `postgresql redis-server build-essential` if fully airgapped.
-Broccoli needs Redis 7 or newer, and Ubuntu 22.04 ships 6.0: the installer adds
-the packages.redis.io repository when it can reach it, and otherwise the mirror
-must carry Redis 7.
+Lab boxes are Ubuntu 22.04. Broccoli needs Redis 7, which 22.04's archive does
+not carry (it ships 6.0), so the bundle ships the Redis 7 `.deb` set staged by
+`./stage-redis.sh` and the installer `dpkg -i`s it with no network. Online, it
+falls back to the packages.redis.io repository, then the system apt (24.04 and
+newer ship Redis 7). Postgres comes from apt: point it at a LAN mirror or
+pre-install `postgresql` on a fully air-gapped box.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 
@@ -90,8 +93,10 @@ sudo ./install-native.sh worker   # id unique to this box; BROCCOLI__WORKER__ID=
 
 This installs `isolate` (setuid + cgroup-v2 delegation via the per-boot
 `broccoli-isolate-setup` service), the **C/C++/Python toolchain**, and
-`broccoli-worker` pointed at box 1 over the LAN. `max_concurrency` defaults to 8
-(override with `BROCCOLI_MAX_CONCURRENCY`).
+`broccoli-worker` pointed at box 1 over the LAN. Each worker judges one test at
+a time: concurrent runs on one machine share its L2/L3 cache, memory bandwidth
+and SMT siblings, which makes their times unfair even with CPU pinning. Scale by
+adding worker machines; several workers on one machine share those caches too.
 
 Toolchain provisioning (`ensure_toolchain`) tries, in order: a bundled `.deb`
 set matching the box's Ubuntu version (`toolchain/<ver>/`, see live-boot below),

@@ -96,10 +96,34 @@ apt_ensure(){ # install pkgs only if missing (works against a local apt mirror)
 }
 
 # The message queue needs Redis 7 or newer (stream commands from 6.2 and 7.0);
-# Ubuntu 22.04 ships 6.0. Older Redis gets the packages.redis.io repository
-# when it is reachable; on an airgap, the mirror must carry Redis 7.
+# Ubuntu 22.04 ships 6.0.
 redis_major(){ redis-server --version 2>/dev/null | sed -n 's/.* v=\([0-9]*\)\..*/\1/p'; }
+# Sources, in order: the bundled .debs for this Ubuntu version
+# (stage-redis.sh), then the system apt (24.04 and newer ship Redis 7, and a
+# LAN mirror may), then packages.redis.io. An air-gapped lab has only the
+# bundle, so the set ships in the release. A bundled set that does not install
+# stops the install with dpkg's own output.
 ensure_redis7(){
+  local ver debs log status
+  [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
+  ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
+  debs="$BUNDLE/redis/$ver"
+  if ls "$debs"/*.deb >/dev/null 2>&1; then
+    echo ">> installing bundled Redis 7 for Ubuntu $ver ($debs)"
+    log="$(mktemp)"
+    if ! dpkg -i --skip-same-version "$debs"/*.deb >"$log" 2>&1; then
+      cat "$log" >&2
+      rm -f "$log"
+      die "dpkg could not install the bundled Redis 7 set in $debs (output above)"
+    fi
+    rm -f "$log"
+    status="$(dpkg-query -W -f='${Status}' redis-server 2>/dev/null || true)"
+    [ "$status" = "install ok installed" ] \
+      || die "dpkg left redis-server as '${status:-not installed}' after installing $debs"
+    [ "$(redis_major)" -ge 7 ] 2>/dev/null \
+      || die "the bundled set in $debs installed Redis $(redis_major), not 7 or newer; restage it with ./stage-redis.sh"
+    return 0
+  fi
   apt_ensure redis-server
   [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
   echo ">> redis-server $(redis_major) is older than 7; installing Redis 7 from packages.redis.io"
@@ -107,10 +131,11 @@ ensure_redis7(){
   if curl -fsSL https://packages.redis.io/gpg | gpg --dearmor --yes -o /usr/share/keyrings/redis-archive-keyring.gpg; then
     echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb ${VERSION_CODENAME} main" \
       > /etc/apt/sources.list.d/redis.list
-    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis || true
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis \
+      || die "installing Redis 7 from packages.redis.io failed (apt output above)"
   fi
   [ "$(redis_major)" -ge 7 ] 2>/dev/null \
-    || die "Broccoli needs Redis 7 or newer, found $(redis_major). Install Redis 7 (packages.redis.io, or a mirror carrying it) and re-run."
+    || die "Broccoli needs Redis 7 or newer, found $(redis_major). Bundle it with ./stage-redis.sh, or install Redis 7 (packages.redis.io, or a LAN mirror) and re-run."
 }
 
 # Provision the worker's C/C++/Python toolchain for offline / live-boot boxes.
@@ -167,10 +192,6 @@ install_common_dirs(){
 install_infra_server(){
   local host="${BROCCOLI_INFRA_HOST:-}"
   [ -n "$host" ] || die "set BROCCOLI_INFRA_HOST=<this box's LAN IP> for infra-server"
-  case "${BROCCOLI__AUTH__SECURE_COOKIES:-false}" in
-    true|false) ;;
-    *) die "BROCCOLI__AUTH__SECURE_COOKIES must be true or false" ;;
-  esac
   require_ubuntu; install_common_dirs
   apt_ensure postgresql postgresql-client
   ensure_redis7
@@ -216,6 +237,11 @@ install_infra_server(){
   pghba="$(dirname "$pgconf")/pg_hba.conf"
   subnet="${BROCCOLI_LAN_CIDR:-${host%.*}.0/24}"
   grep -q "^listen_addresses *= *'\*'" "$pgconf" || sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$pgconf"
+  # The stock 100 connections fit one server and a handful of workers; 500
+  # fits this server and a lab of workers (docs/operator-runbook.md). A
+  # higher value an operator set stays.
+  [ "$(sudo -u postgres psql -tAc "SHOW max_connections")" -ge 500 ] \
+    || sudo -u postgres psql -c "ALTER SYSTEM SET max_connections = 500"
   # Replace the rule on every run, so a new LAN (rehearsal -> venue) is let in.
   sed -i '/# broccoli-lan$/d' "$pghba"
   echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
@@ -259,9 +285,8 @@ install_infra_server(){
       -e "s|@S3_ENDPOINT@|http://$host:8333|" \
       -e "s|@S3_ACCESS_KEY@|$s3_ak|; s|@S3_SECRET_KEY@|$s3_sk|" \
       -e "s|@JWT_SECRET@|$jwt|; s|@ADMIN_PASSWORD@|$admin_pw|" \
-      -e "s|@SECURE_COOKIES@|${BROCCOLI__AUTH__SECURE_COOKIES:-false}|" \
       -e "s|@DATA_DIR@|$DATA_DIR|; s|@SERVER_ID@|server-1|; s|@WORKER_ID@|server-1|" \
-      -e "s|@HTTP_HOST@|0.0.0.0|; s|@HTTP_PORT@|80|; s|@MAX_CONCURRENCY@|1|; s|@INFRA_HOST@|$host|" \
+      -e "s|@HTTP_HOST@|0.0.0.0|; s|@HTTP_PORT@|80|; s|@INFRA_HOST@|$host|" \
       "$BUNDLE/config/config.toml.tmpl" > "$DATA_DIR/config/config.toml"
   chown "$SVC_USER":"$SVC_USER" "$DATA_DIR/config/config.toml" "$DATA_DIR/config/seaweedfs-s3.json"
   chmod 600 "$DATA_DIR/config/config.toml"
@@ -324,9 +349,8 @@ install_worker(){
       -e "s|@S3_ACCESS_KEY@|$BROCCOLI__STORAGE__OBJECT_STORAGE__ACCESS_KEY|" \
       -e "s|@S3_SECRET_KEY@|$BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY|" \
       -e "s|@JWT_SECRET@|unused-on-worker|; s|@ADMIN_PASSWORD@|unused|" \
-      -e "s|@SECURE_COOKIES@|false|" \
       -e "s|@DATA_DIR@|$DATA_DIR|; s|@SERVER_ID@|$wid|; s|@WORKER_ID@|$wid|" \
-      -e "s|@HTTP_HOST@|127.0.0.1|; s|@HTTP_PORT@|8081|; s|@MAX_CONCURRENCY@|${BROCCOLI_MAX_CONCURRENCY:-8}|; s|@INFRA_HOST@|${BROCCOLI_INFRA_HOST:-127.0.0.1}|" \
+      -e "s|@HTTP_HOST@|127.0.0.1|; s|@HTTP_PORT@|8081|; s|@INFRA_HOST@|${BROCCOLI_INFRA_HOST:-127.0.0.1}|" \
       "$BUNDLE/config/config.toml.tmpl" > "$DATA_DIR/config/worker.toml"
   chown "$SVC_USER":"$SVC_USER" "$DATA_DIR/config/worker.toml"; chmod 600 "$DATA_DIR/config/worker.toml"
 

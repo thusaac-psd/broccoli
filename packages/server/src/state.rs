@@ -41,6 +41,10 @@ impl RegistryState {
 pub struct AppState {
     pub plugins: Arc<dyn PluginManager>,
     pub db: DatabaseConnection,
+    /// The platform wall clock (the database's); see [`crate::clock`].
+    pub clock: crate::clock::PlatformClock,
+    /// `plugin_config` point reads; see [`crate::services::plugin_config_cache`].
+    pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     pub config: AppConfig,
     pub mq: Option<mq::Mq>,
     pub redis_client: Option<Arc<redis::Client>>,

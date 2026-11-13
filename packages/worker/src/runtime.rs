@@ -115,8 +115,6 @@ impl WorkerRuntime {
 
         spawn_metrics_server(prometheus_registry, config.worker.metrics_addr.clone());
 
-        check_clock_skew(&config).await?;
-
         let mq = Mq::connect(&config.mq.url, &config.mq.operation_queue_name)
             .await
             .context("Failed to initialize MQ")?;
@@ -143,14 +141,21 @@ impl WorkerRuntime {
             pid = system_info.pid,
             "Detected system info for heartbeat"
         );
+        // The worker stamps wall time that servers compare with theirs
+        // (heartbeats, retry history, warm progress), so it keeps the same
+        // database clock they do.
+        let clock = common::clock::PlatformClock::connect(&config.database.url)
+            .await
+            .context("Failed to read the database clock")?;
         let in_flight = InFlightCounter::new();
-        let started_at = chrono::Utc::now();
+        let started_at = clock.now();
         let heartbeat_config = HeartbeatConfig {
             worker_id: config.worker.id.clone(),
             sandbox_backend: config.worker.sandbox_backend.clone(),
             max_concurrency: Some(capacity.max_concurrency as u32),
             fairness_mode: capacity.fairness_mode.as_str().into(),
             system_info,
+            clock: clock.clone(),
         };
         let claim = NodeClaim::claim_at_boot(
             redis::Client::open(config.mq.url.as_str()).context("Invalid MQ URL")?,
@@ -179,7 +184,7 @@ impl WorkerRuntime {
         // Pre-warm subscriber: listens for contest cache-warm jobs and fills the
         // local file cache ahead of the opening burst. Independent of judging,
         // but warms through the executor's own cacher.
-        let warm_handle = crate::warm::spawn(&config, operation.file_cacher());
+        let warm_handle = crate::warm::spawn(&config, operation.file_cacher(), clock.clone());
 
         let operation: Arc<dyn Executor> = Arc::new(operation);
         let worker = Arc::new(Worker::new([("operation".to_string(), operation)]));
@@ -201,6 +206,7 @@ impl WorkerRuntime {
             cancel_checker,
             metrics,
             worker_id: config.worker.id.clone(),
+            clock,
         });
 
         Ok(Self {
@@ -247,26 +253,6 @@ impl WorkerRuntime {
         info!("Worker stopped");
         Ok(())
     }
-}
-
-/// Compare this worker's clock with Postgres and Redis (see `common::clock`)
-/// on a short-lived connection; the worker keeps no shared pool of its own.
-async fn check_clock_skew(config: &WorkerAppConfig) -> anyhow::Result<()> {
-    let db = common::db::connect(
-        &config.database.url,
-        &common::db::PgPoolSpec::new(1, 0),
-        &config.database.session(),
-    )
-    .await
-    .context("Failed to connect to the database for the clock skew check")?;
-    let redis = if config.mq.enabled {
-        Some(redis::Client::open(config.mq.url.as_str()).context("Invalid mq.url")?)
-    } else {
-        None
-    };
-    let result = common::clock::check_clock_skew(&db, redis.as_ref(), &config.clock).await;
-    let _ = db.close().await;
-    result
 }
 
 /// The entries this worker holds, read but not yet settled. They are

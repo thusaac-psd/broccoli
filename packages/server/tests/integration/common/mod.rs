@@ -412,6 +412,11 @@ pub struct TestApp {
     /// This app's own plugin cache (`plugin.cache_dir`): replicas never
     /// share one.
     pub plugin_cache: tempfile::TempDir,
+    /// The platform clock of every replica on this database, resynced when
+    /// the test moves the database clock.
+    platform_clocks: Arc<std::sync::Mutex<Vec<server::clock::PlatformClock>>>,
+    /// Whether this app loaded the plugins; its replicas do the same.
+    load_plugins: bool,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -497,6 +502,8 @@ pub struct SpawnOptions {
     /// (mirroring `scaling.rs`), writes a heartbeat key, and passes the
     /// container's URL here.
     pub redis_url: Option<String>,
+    /// Cross-origin frontends the server allows (`server.cors.allow_origins`).
+    pub cors_origins: Vec<String>,
     /// Overrides `PluginConfig.plugins_dir` (default: the shared
     /// `tests/fixtures`). Used to isolate a plugin whose activation is
     /// EXPECTED to fail (e.g. an unresolved host-function import from a
@@ -516,13 +523,17 @@ pub struct SpawnOptions {
     pub shared_db: Option<String>,
     /// Sets `plugin.uploads_enabled = false`.
     pub plugin_uploads_disabled: bool,
+    /// Submissions and code runs per user per minute; `None` keeps the
+    /// fixture default (no limit tested).
+    pub rate_limit_per_minute: Option<u32>,
 }
 
 impl TestApp {
     /// This test's database clock, which the test advances instead of
     /// sleeping.
     pub fn clock(&self) -> DbClock {
-        DbClock::new(&self.db)
+        let replicas = self.platform_clocks.lock().unwrap().clone();
+        DbClock::new(&self.db).following(replicas)
     }
 
     pub async fn spawn() -> Self {
@@ -545,7 +556,14 @@ impl TestApp {
     /// registry, dispatcher state and HTTP listener.
     pub async fn spawn_replica(&self, mut options: SpawnOptions) -> Self {
         options.shared_db = Some(self.db_name.clone());
-        Self::spawn_internal(true, options).await
+        let mut replica = Self::spawn_internal(self.load_plugins, options).await;
+        let clocks = self.platform_clocks.clone();
+        clocks
+            .lock()
+            .unwrap()
+            .extend(replica.platform_clocks.lock().unwrap().drain(..));
+        replica.platform_clocks = clocks;
+        replica
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
@@ -578,7 +596,7 @@ impl TestApp {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 cors: CorsConfig {
-                    allow_origins: vec![],
+                    allow_origins: options.cors_origins.clone(),
                     max_age: 3600,
                 },
                 public_base_url: None,
@@ -591,7 +609,6 @@ impl TestApp {
                     "test-{db_name}-{}",
                     DB_COUNTER.fetch_add(1, Ordering::Relaxed)
                 ),
-                expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
@@ -600,7 +617,7 @@ impl TestApp {
                 // bulk of integration tests don't have to reason about
                 // backpressure. Tests that exercise the cap call
                 // `spawn_with_options(SpawnOptions { max_queued_submissions: ... })`.
-                max_queued_submissions: 0,
+                max_queued_submissions: Some(0),
                 lease_ttl_secs: 60,
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
@@ -612,24 +629,17 @@ impl TestApp {
                 // tests that rely on the `Queued`-on-POST flow see the
                 // row transition all the way to dispatch.
                 claim_fiber_enabled: true,
-                claim_poll_interval_ms: 100,
-                claim_batch_size: 32,
-                max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
-                max_connections: 2,
-                plugin_max_connections: 1,
-                plugin_privileged_max_connections: 1,
                 plugin_url: None,
                 ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "test-secret-for-integration-tests".to_string(),
-                secure_cookies: false,
                 login_failure_limit: 0,
                 login_failure_window_secs: 60,
             },
@@ -639,7 +649,12 @@ impl TestApp {
                 uploads_enabled: !options.plugin_uploads_disabled,
                 ..Default::default()
             },
-            submission: SubmissionConfig::default(),
+            submission: SubmissionConfig {
+                rate_limit_per_minute: options
+                    .rate_limit_per_minute
+                    .unwrap_or_else(|| SubmissionConfig::default().rate_limit_per_minute),
+                ..SubmissionConfig::default()
+            },
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
                 enabled: false,
@@ -648,12 +663,11 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
-            clock: Default::default(),
-            removed_keys_set: Vec::new(),
+            unknown_keys: Vec::new(),
         };
 
         if let Some(cap) = options.max_queued_submissions {
-            app_config.server.max_queued_submissions = cap;
+            app_config.server.max_queued_submissions = Some(cap);
         }
         if options.disable_claim_fiber {
             app_config.server.claim_fiber_enabled = false;
@@ -671,6 +685,8 @@ impl TestApp {
         let (test_metrics, test_prom_registry) =
             common::observability::init_metrics("broccoli-test");
 
+        let plugin_config_cache =
+            server::services::plugin_config_cache::PluginConfigCache::default();
         let server_plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
@@ -694,6 +710,7 @@ impl TestApp {
                 metrics: Some(test_metrics.clone()),
                 redis_client: None,
                 worker_slots: Default::default(),
+                plugin_config_cache: plugin_config_cache.clone(),
             },
             Some(test_metrics.clone()),
         )
@@ -765,9 +782,14 @@ impl TestApp {
             .as_ref()
             .map(|url| Arc::new(redis::Client::open(url.clone()).expect("valid redis url")));
 
+        let clock = server::clock::PlatformClock::connect(&db_url)
+            .await
+            .expect("read the database clock");
         let state = AppState {
             plugins,
             db: db.clone(),
+            clock: clock.clone(),
+            plugin_config_cache,
             config: app_config,
             mq: None,
             redis_client,
@@ -831,7 +853,7 @@ impl TestApp {
         }
 
         let state_for_app = state.clone();
-        let app = server::build_router(state);
+        let app = server::build_router(state).expect("router");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -861,10 +883,39 @@ impl TestApp {
             plugin_cache,
             server_handle: Some(server_handle),
             dispatcher,
+            platform_clocks: Arc::new(std::sync::Mutex::new(vec![clock])),
+            load_plugins,
         }
     }
 
-    fn url(&self, path: &str) -> String {
+    /// Waits until a session of this app's database is listening for claim
+    /// notifications.
+    pub async fn wait_until_claim_listening(&self) {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        let sql = format!(
+            "SELECT COUNT(*)::bigint AS n FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%{}%'",
+            server::services::judging::CLAIM_CHANNEL
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let row = self
+                    .db
+                    .query_one_raw(Statement::from_string(DbBackend::Postgres, sql.clone()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if row.try_get::<i64>("", "n").unwrap() > 0 {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the claim fiber listens");
+    }
+
+    pub fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
 

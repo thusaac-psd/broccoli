@@ -172,6 +172,7 @@ host_fn!(pub timer_cancel(user_data: Arc<(String, DatabaseConnection)>; input: S
 });
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
     use testcontainers::ContainerAsync;

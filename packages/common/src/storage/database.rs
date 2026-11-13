@@ -1,11 +1,9 @@
 use std::io::Cursor;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use sea_orm::entity::prelude::*;
-use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, EntityTrait, QuerySelect, Schema, Set, Statement,
+    ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QuerySelect, Schema, Statement,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -115,20 +113,14 @@ impl BlobStore for DatabaseBlobStore {
         let size = i64::try_from(total_bytes)
             .map_err(|_| StorageError::Backend(format!("blob size overflow: {total_bytes}")))?;
 
-        let model = blob_data::ActiveModel {
-            content_hash: Set(hash_hex),
-            data: Set(buf),
-            size: Set(size),
-            created_at: Set(Utc::now()),
-        };
-
-        blob_data::Entity::insert(model)
-            .on_conflict(
-                OnConflict::column(blob_data::Column::ContentHash)
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .exec_without_returning(&self.db)
+        // `created_at` is the database clock, the platform's wall time.
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO blob_data (content_hash, data, size, created_at) \
+                 VALUES ($1, $2, $3, now()) ON CONFLICT (content_hash) DO NOTHING",
+                [hash_hex.into(), buf.into(), size.into()],
+            ))
             .await
             .map_err(|e| StorageError::Backend(format!("put_stream failed: {e}")))?;
 

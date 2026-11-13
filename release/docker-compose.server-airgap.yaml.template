@@ -6,10 +6,9 @@
 services:
   server:
     environment:
-      # Gateway terminates TLS: mark session cookies Secure so they never travel
-      # over the plaintext gateway->server hop or a host-local :3000.
-      BROCCOLI__AUTH__SECURE_COOKIES: "true"
-      # X-Forwarded-For is trusted only from the gateway, so login limits see
+      # The gateway terminates TLS and says so in X-Forwarded-Proto, which
+      # makes the session cookie Secure. X-Forwarded-* is trusted only from
+      # the gateway, so login limits see
       # each contestant's own address and nobody else can forge one. install.sh
       # sets this to the gateway's fixed edge address when the gateway shares this host,
       # or to BROCCOLI_GATEWAY_HOSTS for a gateway on its own host. Never a

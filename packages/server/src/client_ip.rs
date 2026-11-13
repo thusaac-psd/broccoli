@@ -47,6 +47,33 @@ impl ClientIp {
     }
 }
 
+/// How many `X-Forwarded-For` hops, counted from the right, the walk in
+/// [`client_ip_source_middleware`] took to reach the client. Set only when the
+/// peer is a trusted proxy; the other `X-Forwarded-*` lists are read at the
+/// same hop, so they describe the connection the client IP describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForwardedHop(pub usize);
+
+impl ForwardedHop {
+    /// The entry of the forwarded list `name` (all header lines, in order) at
+    /// this hop. A proxy that sets the header instead of appending to it
+    /// leaves a shorter list; its leftmost entry, written by a trusted proxy,
+    /// is then the nearest to the client.
+    pub fn value(self, headers: &HeaderMap, name: &str) -> Option<String> {
+        let entries: Vec<&str> = headers
+            .get_all(name)
+            .iter()
+            .flat_map(|value| value.to_str().unwrap_or("").split(','))
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        let from_right = self.0.max(1).min(entries.len());
+        entries
+            .get(entries.len().checked_sub(from_right)?)
+            .map(|entry| entry.to_string())
+    }
+}
+
 impl<S> FromRequestParts<S> for ClientIp
 where
     S: Send + Sync,
@@ -76,31 +103,36 @@ fn is_trusted(ip: &IpAddr, trusted_proxies: &[IpNet]) -> bool {
 /// first untrusted hop is the client. If a hop cannot be parsed, the walk stops
 /// at the last address it could vouch for (a trusted proxy), never at an entry
 /// further left, which the client may have written. If every hop is trusted,
-/// the leftmost one is the best answer.
+/// the leftmost one is the best answer. Also returns how many hops the walk
+/// took (0 when the peer is the client).
 fn resolve_client_ip(
     headers: &HeaderMap,
     peer: Option<IpAddr>,
     trusted_proxies: &[IpNet],
-) -> Option<IpAddr> {
-    let mut client = peer?;
+) -> (Option<IpAddr>, usize) {
+    let Some(mut client) = peer else {
+        return (None, 0);
+    };
     if !is_trusted(&client, trusted_proxies) {
-        return Some(client);
+        return (Some(client), 0);
     }
     let lines: Vec<&str> = headers
         .get_all(X_FORWARDED_FOR)
         .iter()
         .map(|value| value.to_str().unwrap_or(""))
         .collect();
+    let mut hops = 0;
     for hop in lines.iter().rev().flat_map(|line| line.rsplit(',')) {
         let Some(ip) = parse_hop(hop) else {
             break;
         };
         client = ip;
+        hops += 1;
         if !is_trusted(&ip, trusted_proxies) {
             break;
         }
     }
-    Some(client)
+    (Some(client), hops)
 }
 
 /// Parse one `X-Forwarded-For` hop. Besides a bare address, accept the
@@ -156,13 +188,16 @@ pub async fn client_ip_source_middleware(
     next: Next,
 ) -> Response {
     let peer = peer_ip(request.extensions());
-    let client = resolve_client_ip(request.headers(), peer, &trusted_proxies);
+    let (client, hops) = resolve_client_ip(request.headers(), peer, &trusted_proxies);
     let source = select_client_ip_source(&request, &trusted_proxies);
     if source == ClientIpSource::ConnectInfo && request.headers().contains_key(X_FORWARDED_FOR) {
         warn_once_if_untrusted_private_proxy(peer);
     }
     request.extensions_mut().insert(source);
     request.extensions_mut().insert(ClientIp(client));
+    if hops > 0 {
+        request.extensions_mut().insert(ForwardedHop(hops));
+    }
     next.run(request).await
 }
 
@@ -297,7 +332,7 @@ mod tests {
     const PROXY: &str = "10.0.0.4";
 
     fn resolve(lines: &[&str], trusted: &[&str]) -> Option<IpAddr> {
-        resolve_client_ip(&headers(lines), Some(ip(PROXY)), &nets(trusted))
+        resolve_client_ip(&headers(lines), Some(ip(PROXY)), &nets(trusted)).0
     }
 
     #[test]
@@ -307,7 +342,7 @@ mod tests {
             Some(ip("198.51.100.9")),
             &nets(&["10.0.0.0/8"]),
         );
-        assert_eq!(resolved, Some(ip("198.51.100.9")));
+        assert_eq!(resolved, (Some(ip("198.51.100.9")), 0));
         assert_eq!(resolve(&["203.0.113.10"], &[]), Some(ip(PROXY)));
     }
 
@@ -331,6 +366,55 @@ mod tests {
         assert_eq!(
             resolve(&["6.6.6.6, 198.51.100.5", "10.0.0.7"], &["10.0.0.0/8"]),
             Some(ip("198.51.100.5"))
+        );
+    }
+
+    #[test]
+    fn the_forwarded_proto_is_read_at_the_client_hop() {
+        let trusted = nets(&["10.0.0.0/8"]);
+        let walk = |xff: &str| resolve_client_ip(&headers(&[xff]), Some(ip(PROXY)), &trusted).1;
+        let with_proto = |proto: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-proto", proto.parse().unwrap());
+            h
+        };
+        // client -> edge (10.0.0.7) -> gateway: the client is two hops in, and
+        // a value the client wrote further left is never read.
+        let hops = walk("6.6.6.6, 198.51.100.5, 10.0.0.7");
+        assert_eq!(hops, 2);
+        let proto = with_proto("http, https, http");
+        assert_eq!(
+            ForwardedHop(hops)
+                .value(&proto, "x-forwarded-proto")
+                .as_deref(),
+            Some("https")
+        );
+        // One gateway that sets the header: its value describes the client.
+        let hops = walk("6.6.6.6, 198.51.100.5");
+        assert_eq!(hops, 1);
+        assert_eq!(
+            ForwardedHop(hops)
+                .value(&with_proto("https"), "x-forwarded-proto")
+                .as_deref(),
+            Some("https")
+        );
+        // A client that adds its own header behind one appending gateway.
+        assert_eq!(
+            ForwardedHop(1)
+                .value(&with_proto("https, http"), "x-forwarded-proto")
+                .as_deref(),
+            Some("http")
+        );
+        // Proxies that set rather than append leave a shorter list.
+        assert_eq!(
+            ForwardedHop(3)
+                .value(&with_proto("https"), "x-forwarded-proto")
+                .as_deref(),
+            Some("https")
+        );
+        assert_eq!(
+            ForwardedHop(1).value(&HeaderMap::new(), "x-forwarded-proto"),
+            None
         );
     }
 

@@ -297,14 +297,13 @@ impl E2eTestApp {
                 trusted_proxies: vec![],
                 rate_limit_auth: false,
                 id: server_id.clone(),
-                expects_multi_replica: false,
                 dispatcher_lease_steal_enabled: false,
                 dispatcher_semaphore_enabled: false,
                 dispatcher_concurrency: 1,
                 dispatcher_admission_queue_max: 0,
                 // Disable durable Queued-depth backpressure in e2e
                 // by default; tests opt in if they need to exercise it.
-                max_queued_submissions: 0,
+                max_queued_submissions: Some(0),
                 lease_ttl_secs: 60,
                 lease_refresh_interval_secs: 10,
                 steal_scan_interval_secs: 15,
@@ -313,24 +312,17 @@ impl E2eTestApp {
                 max_system_error_retries: 50,
                 cancel_primitive_enabled: false,
                 claim_fiber_enabled: true,
-                claim_poll_interval_ms: 100,
-                claim_batch_size: 32,
-                max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
-                max_connections: db_max_connections,
-                plugin_max_connections: 1,
-                plugin_privileged_max_connections: 1,
                 plugin_url: None,
                 ..Default::default()
             },
             auth: AuthConfig {
                 jwt_secret: "e2e-test-jwt-secret".to_string(),
-                secure_cookies: false,
                 login_failure_limit: 0,
                 login_failure_window_secs: 60,
             },
@@ -350,8 +342,7 @@ impl E2eTestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
-            clock: Default::default(),
-            removed_keys_set: Vec::new(),
+            unknown_keys: Vec::new(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -364,6 +355,8 @@ impl E2eTestApp {
         let evaluate_batches = EvaluateBatches::default();
         let hook_registry = server::hooks::new_shared_registry();
 
+        let plugin_config_cache =
+            server::services::plugin_config_cache::PluginConfigCache::default();
         let plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
@@ -387,6 +380,7 @@ impl E2eTestApp {
                 metrics: None,
                 redis_client: None,
                 worker_slots: Default::default(),
+                plugin_config_cache: plugin_config_cache.clone(),
             },
             None,
         )
@@ -395,9 +389,14 @@ impl E2eTestApp {
         let (e2e_metrics, e2e_prom_registry) =
             common::observability::init_metrics("broccoli-e2e-test");
 
+        let clock = server::clock::PlatformClock::connect(&db_url)
+            .await
+            .expect("read the database clock");
         let state = AppState {
             plugins,
             db: db.clone(),
+            clock,
+            plugin_config_cache,
             config: app_config,
             mq: Some(mq.clone()),
             redis_client: None,
@@ -452,9 +451,6 @@ impl E2eTestApp {
             claim_handle_opt = Some(tokio::spawn(server::dispatcher::claim::run(
                 state.clone(),
                 server_id.clone(),
-                state.config.server.claim_poll_interval_ms,
-                state.config.server.claim_batch_size,
-                state.config.server.max_in_flight_submissions,
                 claim_cancel_rx,
             )));
 
@@ -545,7 +541,7 @@ impl E2eTestApp {
             );
         }
 
-        let app = server::build_router(state);
+        let app = server::build_router(state).expect("router");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("Failed to bind to random port");

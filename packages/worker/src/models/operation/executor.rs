@@ -301,7 +301,7 @@ impl OperationTaskExecutor {
         let database_config = &config.database;
         let db = match common::db::connect(
             &database_config.url,
-            &common::db::PgPoolSpec::new(database_config.max_connections, 1),
+            &common::db::PgPoolSpec::new(config.database_pool_size(), 1),
             &database_config.session(),
         )
         .await
@@ -518,15 +518,8 @@ mod platform_tool_validation_tests {
 
     #[test]
     fn rejects_platform_tool_job_when_tool_is_missing_from_tools_dir() {
-        let dir = std::env::temp_dir().join(format!(
-            "broccoli-tools-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let executor = executor_with_tools_dir(Some(dir.clone()));
         let operation = operation_with_steps(vec![step_with_mounts(
             "check",
@@ -537,20 +530,12 @@ mod platform_tool_validation_tests {
             .validate_platform_tools(&operation)
             .expect_err("job requiring an absent tool must be rejected up front");
         assert!(err.to_string().contains("broccoli-compare"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn accepts_platform_tool_job_when_tool_is_present() {
-        let dir = std::env::temp_dir().join(format!(
-            "broccoli-tools-test-present-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::write(dir.join("broccoli-compare"), b"#!/bin/sh\n").unwrap();
         let executor = executor_with_tools_dir(Some(dir.clone()));
         let operation = operation_with_steps(vec![step_with_mounts(
@@ -561,7 +546,6 @@ mod platform_tool_validation_tests {
         executor
             .validate_platform_tools(&operation)
             .expect("resolvable platform tool must pass validation");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

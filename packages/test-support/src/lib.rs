@@ -77,7 +77,14 @@ pub async fn shared_pg_port() -> u16 {
         .get_or_init(|| async {
             let container = Postgres::default()
                 .with_tag("17-alpine")
-                .with_cmd(["postgres", "-c", "max_connections=500"])
+                // pg_stat_statements lets a test count the SQL a flow runs.
+                .with_cmd([
+                    "postgres",
+                    "-c",
+                    "max_connections=500",
+                    "-c",
+                    "shared_preload_libraries=pg_stat_statements",
+                ])
                 .start()
                 .await
                 .expect("Failed to start PostgreSQL container");
@@ -306,64 +313,45 @@ GRANT SELECT ON broccoli_test_clock.state TO PUBLIC;
 /// The clock of one test database, which a test moves forward instead of
 /// sleeping.
 ///
-/// Time comparisons in this codebase run in SQL against the database clock:
-/// timer due-ness (`dispatcher::plugin_timer`), the timer host functions, a
-/// plugin's own time queries and the server's own SQL. In a test database
-/// every unqualified `now()`, `transaction_timestamp()`,
+/// In a test database every unqualified `now()`, `transaction_timestamp()`,
 /// `statement_timestamp()` and `clock_timestamp()` reads real time plus this
-/// clock's offset, so [`DbClock::advance`] moves all of them at once.
+/// clock's offset. Servers keep wall time by the database clock
+/// (`server::clock::PlatformClock`), so [`DbClock::advance`] moves SQL time
+/// and, through [`DbClock::following`], the handlers' time with it: a
+/// contest starts or ends for SQL and for every replica at the same instant.
 ///
-/// What the clock does not move: column defaults and `CURRENT_TIMESTAMP`, and
-/// every time the server reads from its own process clock (`Utc::now()`).
-/// That includes the handlers' contest-time checks (whether a contest has
-/// started or ended, `submission.created_at`). After an advance, SQL and the
-/// handlers disagree by the offset, a split production never has. A test may
-/// therefore only rely on SQL time once it has advanced. `advance` refuses to
-/// move past a contest's start or end, where that split would change what a
-/// handler decides; a test that crosses one and depends only on SQL time says
-/// so with [`DbClock::advance_across_contest_boundary`].
+/// What the clock does not move: column defaults written as
+/// `CURRENT_TIMESTAMP`.
 #[derive(Clone)]
 pub struct DbClock {
     db: DatabaseConnection,
+    servers: Vec<server::clock::PlatformClock>,
 }
 
 impl DbClock {
     pub fn new(db: &DatabaseConnection) -> Self {
-        Self { db: db.clone() }
+        Self {
+            db: db.clone(),
+            servers: Vec::new(),
+        }
     }
 
-    /// Moves the database clock forward by `by`. Panics if that would pass a
-    /// contest's start or end time (see the type docs).
+    /// Also resync these servers' platform clocks on every advance.
+    pub fn following(mut self, servers: Vec<server::clock::PlatformClock>) -> Self {
+        self.servers = servers;
+        self
+    }
+
+    /// Moves the database clock, and the servers following it, forward by
+    /// `by`.
     pub async fn advance(&self, by: Duration) {
-        let micros = Self::micros(by);
-        let crossed = self
-            .db
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT count(*) AS n FROM contest WHERE deleted_at IS NULL \
-                 AND (start_time > now() AND start_time <= now() + make_interval(secs => $1 / 1000000.0) \
-                  OR end_time > now() AND end_time <= now() + make_interval(secs => $1 / 1000000.0))",
-                [micros.into()],
-            ))
-            .await
-            .expect("check contest boundaries")
-            .expect("one row")
-            .try_get::<i64>("", "n")
-            .expect("n column");
-        assert_eq!(
-            crossed, 0,
-            "advancing the test clock by {by:?} passes a contest's start or end time, \
-             where handlers (process clock) and SQL (test clock) would disagree; use \
-             advance_across_contest_boundary if the test depends only on SQL time"
-        );
-        self.shift(micros).await;
-    }
-
-    /// Like [`DbClock::advance`], for a test that passes a contest boundary and
-    /// depends only on SQL time (the plugin and the timer dispatcher), never on
-    /// a handler's contest-time check.
-    pub async fn advance_across_contest_boundary(&self, by: Duration) {
         self.shift(Self::micros(by)).await;
+        for server in &self.servers {
+            server
+                .sync()
+                .await
+                .expect("resync a server's platform clock");
+        }
     }
 
     fn micros(by: Duration) -> i64 {

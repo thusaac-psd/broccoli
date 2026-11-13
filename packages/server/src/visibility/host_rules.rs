@@ -128,6 +128,9 @@ pub(crate) struct HostScopes {
     /// visibility querier scoped to contest types is loaded; the contests
     /// join the fetch the batch makes anyway.
     pub resolve_contests: bool,
+    /// Input: submissions the caller already read, which Query 0 does not
+    /// fetch again.
+    pub known_submissions: HashMap<i32, submission::Model>,
     /// `submission_id -> submission.contest_id` for every `Resource::
     /// Submission` resolved by Query 0 (itself `None` for a contest-less
     /// submission). A `Resource::Submission`'s contest is otherwise
@@ -159,6 +162,7 @@ pub(crate) struct HostScopes {
 /// consulted.
 pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
     db: &C,
+    now: chrono::DateTime<chrono::Utc>,
     subject: &Subject,
     action: Action,
     resources: &[Resource],
@@ -168,29 +172,31 @@ pub(crate) async fn host_decide<C: sea_orm::ConnectionTrait>(
         return Ok(vec![Decision::Allow; resources.len()]);
     }
 
-    let now = chrono::Utc::now();
-
     // Query 0: submissions referenced by the batch. Needed up front - a
     // `Resource::Submission` only carries an id, so its owner/contest_id
     // have to be resolved before Query 1 knows which contests it needs.
-    let submission_ids: Vec<i32> = resources
-        .iter()
-        .filter_map(|r| match r {
-            Resource::Submission(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let submissions: HashMap<i32, submission::Model> = if submission_ids.is_empty() {
-        HashMap::new()
-    } else {
-        submission::Entity::find()
-            .filter(submission::Column::Id.is_in(submission_ids))
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|s| (s.id, s))
-            .collect()
-    };
+    let mut submissions: HashMap<i32, submission::Model> = HashMap::new();
+    let mut submission_ids: Vec<i32> = Vec::new();
+    for r in resources {
+        if let Resource::Submission(id) = r {
+            match scopes.known_submissions.get(id) {
+                Some(known) => {
+                    submissions.insert(*id, known.clone());
+                }
+                None => submission_ids.push(*id),
+            }
+        }
+    }
+    if !submission_ids.is_empty() {
+        submissions.extend(
+            submission::Entity::find()
+                .filter(submission::Column::Id.is_in(submission_ids))
+                .all(db)
+                .await?
+                .into_iter()
+                .map(|s| (s.id, s)),
+        );
+    }
     scopes
         .submission_contest_ids
         .extend(submissions.values().map(|s| (s.id, s.contest_id)));
@@ -667,6 +673,11 @@ fn standalone_reachable_via_contest(action: Action) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The instant every fixture and decision in these tests is relative to.
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_900_000_000, 0).expect("valid instant")
+    }
+
     use common::SubmissionStatus;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
@@ -690,7 +701,7 @@ mod tests {
         deactivate_hours: Option<i64>,
         submissions_visible: bool,
     ) -> contest::Model {
-        let now = chrono::Utc::now();
+        let now = now();
         contest::Model {
             id,
             title: "Contest".into(),
@@ -714,7 +725,7 @@ mod tests {
         contest_user::Model {
             contest_id,
             user_id,
-            registered_at: chrono::Utc::now(),
+            registered_at: now(),
         }
     }
 
@@ -728,7 +739,7 @@ mod tests {
     }
 
     fn submission_row(id: i32, user_id: i32, contest_id: Option<i32>) -> submission::Model {
-        let now = chrono::Utc::now();
+        let now = now();
         submission::Model {
             id,
             files: serde_json::json!({}),
@@ -770,6 +781,7 @@ mod tests {
         ];
         let decisions = host_decide(
             &db,
+            now(),
             &Subject::admin_override(),
             Action::Read,
             &resources,
@@ -795,6 +807,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -815,6 +828,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -833,6 +847,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -854,6 +869,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -876,6 +892,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -896,6 +913,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -914,6 +932,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -935,6 +954,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -957,6 +977,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Sample {
@@ -984,6 +1005,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1003,6 +1025,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1022,6 +1045,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1039,6 +1063,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1058,6 +1083,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::SUBMISSION_VIEW_ALL]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1079,6 +1105,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(5)],
@@ -1096,6 +1123,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Submission(404)],
@@ -1117,6 +1145,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Contest(7)],
@@ -1136,7 +1165,7 @@ mod tests {
         recipient_id: Option<i32>,
         is_public: bool,
     ) -> clarification::Model {
-        let now = chrono::Utc::now();
+        let now = now();
         clarification::Model {
             id,
             contest_id,
@@ -1160,6 +1189,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1177,6 +1207,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1194,6 +1225,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1211,6 +1243,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1228,6 +1261,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1245,6 +1279,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Clarification(3)],
@@ -1258,7 +1293,7 @@ mod tests {
     // -- rules 8-9: standalone problem/sample access, and Resource::Attachment --
 
     fn problem_row(id: i32, is_public: bool) -> problem::Model {
-        let now = chrono::Utc::now();
+        let now = now();
         problem::Model {
             id,
             title: "Standalone".into(),
@@ -1285,6 +1320,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -1310,6 +1346,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Sample {
@@ -1331,6 +1368,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::PROBLEM_EDIT]),
             Action::Read,
             &[Resource::Problem {
@@ -1352,6 +1390,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::PROBLEM_EDIT]),
             Action::Read,
             &[Resource::Problem {
@@ -1374,6 +1413,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Problem {
@@ -1399,6 +1439,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[perm::CONTEST_MANAGE]),
             Action::Read,
             &[Resource::Problem {
@@ -1422,6 +1463,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -1445,6 +1487,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -1468,6 +1511,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -1491,13 +1535,14 @@ mod tests {
             .append_query_results([vec![problem_row(1, false)]])
             .append_query_results([vec![contest_problem_row(7, 1)]])
             .append_query_results([vec![contest::Model {
-                start_time: chrono::Utc::now() + chrono::Duration::hours(1),
+                start_time: now() + chrono::Duration::hours(1),
                 ..contest_row(7, true, Some(-1), None, true)
             }]])
             .append_query_results([Vec::<contest_user::Model>::new()])
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Problem {
@@ -1523,6 +1568,7 @@ mod tests {
     ) -> Vec<Decision> {
         host_decide(
             db,
+            now(),
             subject,
             Action::Submit,
             &[Resource::Problem {
@@ -1608,6 +1654,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
@@ -1630,6 +1677,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
@@ -1654,6 +1702,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Read,
             &[Resource::Attachment {
@@ -1680,6 +1729,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Download,
             &[Resource::Attachment {
@@ -1703,6 +1753,7 @@ mod tests {
             .into_connection();
         let decisions = host_decide(
             &db,
+            now(),
             &subject(1, &[]),
             Action::Download,
             &[Resource::Attachment {
@@ -1741,6 +1792,7 @@ mod tests {
                 .into_connection();
             host_decide(
                 &db,
+                now(),
                 &subject(1, &[]),
                 Action::Read,
                 resources,

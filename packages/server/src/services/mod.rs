@@ -7,6 +7,7 @@ pub mod evaluate_batch;
 pub mod judging;
 pub mod operation_batch;
 pub mod plugin_config;
+pub mod plugin_config_cache;
 pub mod plugin_storage;
 pub mod privileges;
 pub mod submission_dispatch;

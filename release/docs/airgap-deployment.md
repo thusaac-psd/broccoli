@@ -305,10 +305,10 @@ This:
    contestant on the LAN can reach it and bypass TLS — HTTPS on 443 is the sole
    entrypoint. Host-local `curl http://127.0.0.1:3000/...` still works for
    operator troubleshooting. The server override
-   (`docker-compose.server-airgap.yaml.template`) runs the server with
-   `SECURE_COOKIES=true`, and the server trusts `X-Forwarded-For` only from the
-   gateway, so auth rate limiting sees each contestant's real IP rather than the
-   gateway's. The gateway and the server share a small `edge` network
+   (`docker-compose.server-airgap.yaml.template`) makes the server trust
+   `X-Forwarded-*` only from the gateway, so login limits see each
+   contestant's real IP rather than the gateway's, and the session cookie is
+   `Secure` because the gateway forwards the `https` scheme. The gateway and the server share a small `edge` network
    (`BROCCOLI_EDGE_SUBNET`, default `172.31.250.0/28`) that holds nothing else.
    The gateway sits at a fixed address on it (`BROCCOLI_GATEWAY_EDGE_IP`,
    default `172.31.250.2`, outside the `BROCCOLI_EDGE_RANGE` Docker hands out),

@@ -23,7 +23,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 install_dry() {
   # A fixed infra address, so the render never depends on `hostname -I`.
   BROCCOLI_INFRA_HOST="${BROCCOLI_INFRA_HOST:-10.0.0.10}" \
-  BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 BROCCOLI_NONINTERACTIVE=1 \
+  BROCCOLI_DRY_RUN=1 BROCCOLI_NONINTERACTIVE=1 \
     ./install.sh "$@" </dev/null >"$T/install.log" 2>&1 \
     || { cat "$T/install.log"; fail "install.sh $* dry run"; }
 }
@@ -70,12 +70,28 @@ single_env() {
 [ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
   || fail "single-host database URL: $(single_env server BROCCOLI__DATABASE__URL)"
 [ "$(single_env worker BROCCOLI__MQ__URL)" = 'redis://:r%25d@redis:6379' ] || fail "single-host MQ URL"
-# The clock-skew escape hatch reaches both single-host binaries.
-printf 'BROCCOLI__CLOCK__MAX_SKEW_MS=0\n' >> .env.single-host
-for svc in server worker; do
-  [ "$(single_env "$svc" BROCCOLI__CLOCK__MAX_SKEW_MS)" = 0 ] || fail "single-host $svc ignores BROCCOLI__CLOCK__MAX_SKEW_MS"
+# The host's secrets stay out of the containers that do not need them, and a
+# role's own override file still reaches it.
+echo 'BROCCOLI__WORKER__MAX_CONCURRENCY=2' > .env.single-host.worker
+single_json() {
+  docker compose --env-file .env.single-host -f "$1" config --format json 2>/dev/null
+}
+for t in docker-compose.single-host.object-storage.yaml.template docker-compose.single-host.yaml.template; do
+  single_json "$t" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"]
+worker, server = env["worker"]["environment"], env["server"]["environment"]
+leaked = [k for k in worker if k in (
+    "BROCCOLI__AUTH__JWT_SECRET", "BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD",
+    "BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD")]
+leaked += [k for k in server if k in ("POSTGRES_PASSWORD", "REDIS_PASSWORD")]
+if leaked:
+    sys.exit("secrets reach a container that does not read them: " + ", ".join(leaked))
+if worker.get("BROCCOLI__WORKER__MAX_CONCURRENCY") != "2":
+    sys.exit("the worker override file does not reach the worker")
+' || fail "$t hands secrets to the wrong container"
 done
-sed -i '/^BROCCOLI__CLOCK__MAX_SKEW_MS=/d' .env.single-host
+rm .env.single-host.worker
 # An env file from before these URLs existed gets them on a re-run.
 sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
 install_dry single-host
@@ -179,13 +195,16 @@ printf 'POSTGRES_PASSWORD=p\nREDIS_PASSWORD=r\nBROCCOLI__STORAGE__OBJECT_STORAGE
 workergen_write "$T/ag/.env.worker" "$rel/.env.worker.example" "$T/ag/cluster-secrets.env" 10.0.0.10 worker-1
 render "airgap worker" --env-file "$T/ag/.env.worker" -f docker-compose.worker.yaml.template
 
-# Every BROCCOLI__<SECTION>__<KEY> an example env file documents, including
-# commented-out optional ones, must reach the container with its value. A key
-# the template does not pass is silently dropped, which is how pool sizing
-# from .env.server.example never reached a server.
+# Every BROCCOLI__<SECTION>__<KEY> an example env file documents must reach
+# the container with its value, and so must an advanced override the
+# template never names: the role's env file is the container's env_file.
 check_passthrough() {
   local example="$1" template="$2" service="$3" envf="$T/passthrough.env"
-  sed -E 's/^#(BROCCOLI__[A-Z_]+__[A-Z_]+=)/\1/' "$rel/$example" > "$envf"
+  {
+    cat "$rel/$example"
+    echo "BROCCOLI_ENV_FILE=$envf"
+    echo "BROCCOLI__SERVER__LEASE_TTL_SECS=90"
+  } > "$envf"
   docker compose --env-file "$envf" -f "$template" config --format json 2>/dev/null \
     | python3 -c '
 import json, sys

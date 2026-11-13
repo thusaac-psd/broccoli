@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::clock::PlatformClock;
 use common::warm::{
     WARM_CHANNEL, WARM_KEY_TTL_SECS, WarmJob, WarmProgress, WarmState, warm_job_key,
     warm_progress_key,
@@ -55,24 +56,33 @@ const KEEPALIVE: Keepalive = Keepalive {
 /// `_cleanup_handle`: this is an independent background helper, so shutdown
 /// drains the consume loop and heartbeat and lets this detached task die on
 /// process exit.
-pub fn spawn(config: &WorkerAppConfig, cacher: Arc<dyn FileCacher>) -> JoinHandle<()> {
+pub fn spawn(
+    config: &WorkerAppConfig,
+    cacher: Arc<dyn FileCacher>,
+    clock: PlatformClock,
+) -> JoinHandle<()> {
     let redis_url = config.mq.url.clone();
     let worker_id = config.worker.id.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(&redis_url, &worker_id, cacher.as_ref()).await {
+        if let Err(e) = run(&redis_url, &worker_id, cacher.as_ref(), &clock).await {
             warn!(error = %e, "Pre-warm subscriber disabled");
         }
     })
 }
 
-async fn run(redis_url: &str, worker_id: &str, cacher: &dyn FileCacher) -> anyhow::Result<()> {
+async fn run(
+    redis_url: &str,
+    worker_id: &str,
+    cacher: &dyn FileCacher,
+    clock: &PlatformClock,
+) -> anyhow::Result<()> {
     // An invalid URL is a configuration error that no retry fixes.
     let client = redis::Client::open(redis_url)?;
 
     info!(worker_id = %worker_id, channel = %WARM_CHANNEL, "Pre-warm subscriber started");
 
     loop {
-        if let Err(e) = subscribe_and_serve(&client, worker_id, cacher, KEEPALIVE).await {
+        if let Err(e) = subscribe_and_serve(&client, worker_id, cacher, clock, KEEPALIVE).await {
             warn!(error = %e, "Pre-warm subscription dropped; retrying");
         }
         tokio::time::sleep(RESUBSCRIBE_DELAY).await;
@@ -83,6 +93,7 @@ async fn subscribe_and_serve(
     client: &redis::Client,
     worker_id: &str,
     cacher: &dyn FileCacher,
+    clock: &PlatformClock,
     keepalive: Keepalive,
 ) -> anyhow::Result<()> {
     let mut pubsub = client.get_async_pubsub().await?;
@@ -111,7 +122,7 @@ async fn subscribe_and_serve(
                 continue;
             }
         };
-        if let Err(e) = handle_job(&mut cmd, worker_id, cacher, &job_id).await {
+        if let Err(e) = handle_job(&mut cmd, worker_id, cacher, clock, &job_id).await {
             warn!(error = %e, job_id = %job_id, "Warm job failed");
         }
     }
@@ -121,6 +132,7 @@ async fn handle_job(
     cmd: &mut MultiplexedConnection,
     worker_id: &str,
     cacher: &dyn FileCacher,
+    clock: &PlatformClock,
     job_id: &str,
 ) -> anyhow::Result<()> {
     let raw: Option<String> = cmd.get(warm_job_key(job_id)).await?;
@@ -134,7 +146,7 @@ async fn handle_job(
     info!(worker_id = %worker_id, job_id = %job_id, total, "Pre-warm started");
     write_progress(
         cmd,
-        &progress(&job, worker_id, 0, 0, WarmState::Warming, None),
+        &progress(clock, &job, worker_id, 0, 0, WarmState::Warming, None),
     )
     .await;
 
@@ -161,6 +173,7 @@ async fn handle_job(
             write_progress(
                 cmd,
                 &progress(
+                    clock,
                     &job,
                     worker_id,
                     warmed,
@@ -180,7 +193,15 @@ async fn handle_job(
     };
     write_progress(
         cmd,
-        &progress(&job, worker_id, warmed, fetched_bytes, state, last_error),
+        &progress(
+            clock,
+            &job,
+            worker_id,
+            warmed,
+            fetched_bytes,
+            state,
+            last_error,
+        ),
     )
     .await;
     info!(worker_id = %worker_id, job_id = %job_id, warmed, total, ?state, "Pre-warm finished");
@@ -188,6 +209,7 @@ async fn handle_job(
 }
 
 fn progress(
+    clock: &PlatformClock,
     job: &WarmJob,
     worker_id: &str,
     warmed: u32,
@@ -203,7 +225,7 @@ fn progress(
         fetched_bytes,
         state,
         error,
-        updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        updated_at_unix_ms: clock.now().timestamp_millis(),
     }
 }
 
@@ -247,7 +269,16 @@ mod tests {
         };
         let serve = tokio::spawn({
             let client = client.clone();
-            async move { subscribe_and_serve(&client, "w", &NoopFileCacher, keepalive).await }
+            async move {
+                subscribe_and_serve(
+                    &client,
+                    "w",
+                    &NoopFileCacher,
+                    &PlatformClock::local_for_tests(),
+                    keepalive,
+                )
+                .await
+            }
         });
 
         // Healthy and idle: keepalive pings succeed, the subscription stays up.

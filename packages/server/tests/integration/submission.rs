@@ -1,4 +1,4 @@
-use crate::common::{TestApp, routes};
+use crate::common::{SpawnOptions, TestApp, routes};
 use broccoli_server_sdk::permissions as perm;
 use serde_json::json;
 
@@ -347,7 +347,11 @@ mod rate_limiting {
 
     #[tokio::test]
     async fn returns_429_when_rate_limit_exceeded() {
-        let app = TestApp::spawn().await;
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(10),
+            ..Default::default()
+        })
+        .await;
         let admin_token = app
             .create_user_with_role("admin1", "pass1234", "admin")
             .await;
@@ -373,7 +377,11 @@ mod rate_limiting {
 
     #[tokio::test]
     async fn rate_limit_is_per_user() {
-        let app = TestApp::spawn().await;
+        let app = TestApp::spawn_with_options(SpawnOptions {
+            rate_limit_per_minute: Some(10),
+            ..Default::default()
+        })
+        .await;
         let admin_token = app
             .create_user_with_role("admin1", "pass1234", "admin")
             .await;
@@ -2226,10 +2234,9 @@ mod claim_fiber {
             .as_i64()
             .expect("submission id should be i64") as i32;
 
-        // 5s budget is generous: the test fixture sets
-        // `claim_poll_interval_ms=100`, so a healthy fiber promotes
-        // within ~200ms. If the fiber is broken or never started this
-        // assertion fails fast.
+        // 5s budget is generous: the insert's claim notification wakes a
+        // healthy fiber at once. If the fiber is broken or never started
+        // this assertion fails fast.
         let final_status = poll_until_not_queued(&app, submission_id, Duration::from_secs(5)).await;
         assert_ne!(
             final_status, "Queued",

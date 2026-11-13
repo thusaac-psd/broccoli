@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
 use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
@@ -93,11 +92,9 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
         &self,
         envelope: &DlqEnvelope,
     ) -> Result<dead_letter_message::Model, DbErr> {
-        let first_failed_at = envelope
-            .retry_history
-            .first()
-            .map(|r| r.timestamp)
-            .unwrap_or_else(Utc::now);
+        // Without a retry history the first failure is now; the database
+        // stamps it, like `created_at`.
+        let first_failed_at = envelope.retry_history.first().map(|r| r.timestamp);
 
         let model = dead_letter_message::ActiveModel {
             message_id: Set(envelope.message_id.clone()),
@@ -108,8 +105,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             error_code: Set(envelope.error_code.to_string()),
             retry_count: Set(envelope.retry_history.len() as i32),
             retry_history: Set(serde_json::to_value(&envelope.retry_history).unwrap_or_default()),
-            first_failed_at: Set(first_failed_at),
-            created_at: Set(Utc::now()),
+            first_failed_at: first_failed_at.map_or(sea_orm::NotSet, Set),
             resolved: Set(false),
             resolved_at: Set(None),
             resolved_by: Set(None),
@@ -299,7 +295,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedAt,
-                sea_orm::sea_query::Expr::value(Utc::now()),
+                sea_orm::sea_query::Expr::cust("now()"),
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedBy,
@@ -379,7 +375,7 @@ impl<'a, C: ConnectionTrait> DlqService<'a, C> {
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedAt,
-                sea_orm::sea_query::Expr::value(Utc::now()),
+                sea_orm::sea_query::Expr::cust("now()"),
             )
             .col_expr(
                 dead_letter_message::Column::ResolvedBy,

@@ -3,7 +3,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use common::SubmissionStatus;
 use sea_orm::*;
 use tracing::instrument;
@@ -161,6 +160,7 @@ pub async fn run_code(
     validate_run_code(&payload, state.config.submission.max_size)?;
     check_rate_limit(
         &state.db,
+        state.clock.now(),
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -211,7 +211,7 @@ pub async fn run_code(
         serde_json::to_value(&payload.custom_test_cases).unwrap_or(serde_json::Value::Null),
     );
 
-    let now = Utc::now();
+    let now = state.clock.now();
     let language = payload.language.trim().to_string();
     let new_code_run = code_run::ActiveModel {
         files: Set(files_to_json(&payload.files)),
@@ -271,6 +271,7 @@ pub async fn run_contest_code(
     validate_run_code(&payload, state.config.submission.max_size)?;
     check_rate_limit(
         &state.db,
+        state.clock.now(),
         auth_user.user_id,
         state.config.submission.rate_limit_per_minute,
     )
@@ -292,7 +293,7 @@ pub async fn run_contest_code(
         ));
     }
 
-    let now = Utc::now();
+    let now = state.clock.now();
     require_contest_running(&auth_user, &contest_model, now)?;
     require_contest_participant(&state.db, &auth_user, &contest_model).await?;
 

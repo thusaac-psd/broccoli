@@ -1,15 +1,20 @@
 use crate::entity::plugin_config;
-use chrono::Utc;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
 use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::services::plugin_config_cache::PluginConfigCache;
 use crate::utils::text::sanitize_db_json;
 
-type ConfigGetUserData = (String, DatabaseConnection, PluginRegistry);
-type ConfigSetUserData = (String, DatabaseConnection);
+type ConfigGetUserData = (
+    String,
+    DatabaseConnection,
+    PluginRegistry,
+    PluginConfigCache,
+);
+type ConfigSetUserData = (String, DatabaseConnection, PluginConfigCache);
 
 const VALID_SCOPES: &[&str] = &["problem", "contest_problem", "contest", "plugin"];
 
@@ -94,23 +99,28 @@ pub fn create_config_get_function(
     plugin_id: String,
     db: DatabaseConnection,
     registry: PluginRegistry,
+    cache: PluginConfigCache,
 ) -> Function {
     super::host_function(
         "config_get",
         [ValType::I64],
         [ValType::I64],
-        super::host_data((plugin_id, db, registry)),
+        super::host_data((plugin_id, db, registry, cache)),
         super::Waits::Blocks,
         config_get_fn,
     )
 }
 
-pub fn create_config_set_function(plugin_id: String, db: DatabaseConnection) -> Function {
+pub fn create_config_set_function(
+    plugin_id: String,
+    db: DatabaseConnection,
+    cache: PluginConfigCache,
+) -> Function {
     super::host_function(
         "config_set",
         [ValType::I64],
         [],
-        super::host_data((plugin_id, db)),
+        super::host_data((plugin_id, db, cache)),
         super::Waits::Blocks,
         config_set_fn,
     )
@@ -124,7 +134,7 @@ fn config_get_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigGetInput = super::read_json(plugin, inputs, "config_get input")?;
     let call = super::HostCall::enter(&user_data, "config_get")?;
-    let (plugin_id, db, registry) = &*call;
+    let (plugin_id, db, registry, cache) = &*call;
 
     let raw_namespace = input.namespace.clone();
 
@@ -139,16 +149,12 @@ fn config_get_fn(
     validate_config_input(&input.scope, &ref_id, &namespace)?;
 
     let result = tokio::runtime::Handle::current()
-        .block_on(async {
-            plugin_config::Entity::find_by_id((input.scope, ref_id, namespace))
-                .one(db)
-                .await
-        })
+        .block_on(async { cache.get(db, &input.scope, &ref_id, &namespace).await })
         .map_err(|e| extism::Error::msg(format!("DB error in config_get: {}", e)))?;
 
     let output_value = match result {
         Some(row) => {
-            serde_json::json!({ "config": row.config, "is_default": false, "enabled": row.enabled })
+            serde_json::json!({ "config": &row.config, "is_default": false, "enabled": row.enabled })
         }
         None => {
             let defaults = registry
@@ -176,7 +182,7 @@ fn config_set_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
     let call = super::HostCall::enter(&user_data, "config_set")?;
-    let (plugin_id, db) = &*call;
+    let (plugin_id, db, cache) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -188,6 +194,7 @@ fn config_set_fn(
     let namespace = resolve_namespace(&input.scope, plugin_id, &input.namespace);
     validate_config_input(&input.scope, &ref_id, &namespace)?;
 
+    let key = (input.scope.clone(), ref_id.clone(), namespace.clone());
     tokio::runtime::Handle::current()
         .block_on(async {
             let active = plugin_config::ActiveModel {
@@ -197,7 +204,7 @@ fn config_set_fn(
                 config: Set(sanitize_db_json(input.config)),
                 enabled: Set(None),
                 position: Set(0),
-                updated_at: Set(Utc::now()),
+                updated_at: sea_orm::NotSet,
             };
 
             plugin_config::Entity::insert(active)
@@ -219,6 +226,8 @@ fn config_set_fn(
             Ok::<_, sea_orm::DbErr>(())
         })
         .map_err(|e| extism::Error::msg(format!("DB error in config_set: {}", e)))?;
+    // The plugin may read its write back before the change notification.
+    cache.forget(&key.0, &key.1, &key.2);
 
     Ok(())
 }

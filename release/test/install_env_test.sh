@@ -14,24 +14,22 @@ printf 'name = "codelink-bracket"\n' > plugins-available/codelink-bracket/plugin
 fail() { echo "FAIL: $*"; exit 1; }
 # shellcheck source=../lib/env.sh
 . ./lib/env.sh
-run() { BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
+run() { BROCCOLI_DRY_RUN=1 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
 
-BROCCOLI__AUTH__SECURE_COOKIES=true \
-BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=cn-north-1 \
 BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE=false \
   BROCCOLI_INFRA_HOST=10.0.0.10 run infra || fail "infra dry run"
-for f in .env.infra server-secrets.env; do
-  grep -qx "BROCCOLI__AUTH__SECURE_COOKIES='true'" "$f" || fail "$f ignored SECURE_COOKIES"
-done
 for f in .env.infra connection.env; do
-  grep -qx "BROCCOLI__STORAGE__OBJECT_STORAGE__REGION='cn-north-1'" "$f" || fail "$f ignored REGION"
   grep -qx "BROCCOLI__STORAGE__OBJECT_STORAGE__PATH_STYLE='false'" "$f" || fail "$f ignored PATH_STYLE"
+done
+# Generated env files hold only what a node needs: no line restates a default.
+for f in .env.infra connection.env server-secrets.env; do
+  ! grep -q 'MAX_CONNECTIONS\|RATE_LIMIT\|LOG_FORMAT\|SECURE_COOKIES' "$f" || fail "$f restates a default"
 done
 grep -qx "COMPOSE_PROJECT_NAME='broccoli-infra'" .env.infra || fail "infra has no project name"
 
 BROCCOLI_PLUGINS="codelink-bracket" run server || fail "server dry run"
 grep -qx "COMPOSE_PROJECT_NAME='broccoli-server'" .env.server || fail "server has no project name"
-grep -qx "BROCCOLI__AUTH__SECURE_COOKIES='true'" .env.server || fail "server lost SECURE_COOKIES"
+grep -qx "BROCCOLI_ENV_FILE='.env.server'" .env.server || fail "server env file does not name itself for env_file"
 [ -f plugins/codelink-bracket/plugin.toml ] || fail "BROCCOLI_PLUGINS did not enable codelink-bracket"
 
 # Re-running a role after infra moved (rehearsal -> venue) keeps the env file
@@ -45,12 +43,11 @@ run server || fail "server re-run"
 [ "$(env_get .env.server BROCCOLI__AUTH__JWT_SECRET)" = 'rotated-jwt-secret-rotated-jwt-secret' ] \
   || fail "server re-run kept the old JWT secret"
 [ "$(env_get .env.server BROCCOLI__SERVER__ID)" = "$server_id" ] || fail "server re-run changed its own id"
-# Only what must follow the infra node is refreshed: a per-server choice such
-# as Secure cookies behind a TLS gateway survives a re-run.
-env_set server-secrets.env BROCCOLI__AUTH__SECURE_COOKIES false
-env_set .env.server BROCCOLI__AUTH__SECURE_COOKIES true
-run server || fail "server re-run with its own cookie policy"
-[ "$(env_get .env.server BROCCOLI__AUTH__SECURE_COOKIES)" = true ] || fail "a re-run reverted the server's SECURE_COOKIES"
+# Only what must follow the infra node is refreshed: an advanced override the
+# operator added to this server's env file survives a re-run.
+env_set .env.server BROCCOLI__SERVER__LEASE_TTL_SECS 90
+run server || fail "server re-run with its own override"
+[ "$(env_get .env.server BROCCOLI__SERVER__LEASE_TTL_SECS)" = 90 ] || fail "a re-run reverted the server's own override"
 # A value the operator passes for this run wins over the shared file, on a
 # re-run and on a first run alike.
 BROCCOLI__DATABASE__URL='postgres://postgres:pw@10.7.7.7:5432/broccoli' run server || fail "server re-run with an operator URL"
@@ -68,7 +65,7 @@ BROCCOLI_GATEWAY_HOSTS='10.0.0.5 10.0.0.6' run server || fail "server run with g
 [ "$(env_get .env.server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["10.0.0.5/32","10.0.0.6/32"]' ] \
   || fail "server does not trust exactly the gateways"
 if BROCCOLI_GATEWAY_HOSTS='10.0.0.5;rm' run server; then fail "a malformed gateway address was accepted"; fi
-BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 \
   ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run"
 grep -q "BROCCOLI_GATEWAY_HOSTS='.*' ./install.sh server" "$T/gateway.log" \
   || fail "gateway install does not say how to trust it on the servers"
@@ -76,7 +73,7 @@ grep -q 'runs on this machine' "$T/gateway.log" && fail "a LAN upstream was take
 # A server on the gateway's own host sees the gateway by its bridge address,
 # so the LAN address printed would not match; say so.
 rm -f .env.gateway
-BROCCOLI_UPSTREAMS='127.0.0.1:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+BROCCOLI_UPSTREAMS='127.0.0.1:3000' BROCCOLI_DRY_RUN=1 \
   ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run with a local upstream"
 grep -q 'runs on this machine' "$T/gateway.log" || fail "no warning about a server on the gateway host"
 
@@ -126,7 +123,7 @@ printf '#!/bin/sh\n[ "$1" = -I ] && printf "%%s\\n" "$FAKE_ADDRS"\n' > fakebin/h
 chmod +x fakebin/hostname
 cd addr
 if FAKE_ADDRS="" PATH="$T/fakebin:$PATH" run infra; then fail "infra install guessed 127.0.0.1"; fi
-FAKE_ADDRS="192.168.1.5 10.0.0.7" PATH="$T/fakebin:$PATH" BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+FAKE_ADDRS="192.168.1.5 10.0.0.7" PATH="$T/fakebin:$PATH" BROCCOLI_DRY_RUN=1 \
   ./install.sh infra </dev/null >"$T/addr.log" 2>&1 || fail "infra dry run with two addresses"
 grep -q 'several addresses (192.168.1.5 10.0.0.7)' "$T/addr.log" || fail "no warning about the guessed infra address"
 [ "$(env_get connection.env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = 'http://192.168.1.5:8333' ] \

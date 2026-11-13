@@ -1,5 +1,4 @@
 use axum::{Json, http::StatusCode};
-use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set,
     sea_query::OnConflict,
@@ -159,7 +158,6 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
     enabled: Option<bool>,
     position: i32,
 ) -> Result<Json<PluginConfigResponse>, AppError> {
-    let now = Utc::now();
     let namespace_str = target.stored_namespace(plugin_id, namespace);
     let config = sanitize_db_json(config);
 
@@ -170,10 +168,10 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
         config: Set(config.clone()),
         enabled: Set(enabled),
         position: Set(position),
-        updated_at: Set(now),
+        updated_at: sea_orm::NotSet,
     };
 
-    plugin_config::Entity::insert(active)
+    let row = plugin_config::Entity::insert(active)
         .on_conflict(
             OnConflict::columns([
                 plugin_config::Column::Scope,
@@ -188,7 +186,7 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
             ])
             .to_owned(),
         )
-        .exec(db)
+        .exec_with_returning(db)
         .await?;
 
     Ok(Json(PluginConfigResponse {
@@ -197,7 +195,7 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
         config,
         enabled,
         position,
-        updated_at: Some(now),
+        updated_at: Some(row.updated_at),
         json_schema: None,
         description: None,
     }))

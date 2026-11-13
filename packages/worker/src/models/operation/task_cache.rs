@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use chrono::Utc;
-use sea_orm::sea_query::OnConflict;
-use sea_orm::{EntityTrait, Set};
+use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 
 // `async_trait` marks each method `#[must_use]` on top of its boxed future.
 #[allow(clippy::double_must_use)]
@@ -95,25 +93,20 @@ impl TaskCacheStore for DatabaseTaskCacheStore {
         let outputs_json = serde_json::to_value(&outputs)
             .map_err(|e| format!("Failed to serialize outputs: {e}"))?;
 
-        let model = task_cache::ActiveModel {
-            cache_key: Set(cache_key.to_string()),
-            outputs: Set(outputs_json),
-            created_at: Set(Utc::now()),
-        };
-
         bounded("task_cache insert", async {
-            let result = task_cache::Entity::insert(model)
-                .on_conflict(
-                    OnConflict::column(task_cache::Column::CacheKey)
-                        .do_nothing()
-                        .to_owned(),
-                )
-                .exec_without_returning(&self.db)
+            // `created_at` is the database clock, the platform's wall time.
+            let result = self
+                .db
+                .execute_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "INSERT INTO task_cache (cache_key, outputs, created_at) \
+                     VALUES ($1, $2, now()) ON CONFLICT (cache_key) DO NOTHING",
+                    [cache_key.into(), outputs_json.into()],
+                ))
                 .await;
 
             match result {
-                Ok(rows_affected) => Ok(task_cache_put_outcome(rows_affected)),
-                Err(sea_orm::DbErr::RecordNotInserted) => Ok(TaskCachePutOutcome::AlreadyExists),
+                Ok(done) => Ok(task_cache_put_outcome(done.rows_affected())),
                 Err(e) => Err(format!("task_cache insert failed: {e}")),
             }
         })

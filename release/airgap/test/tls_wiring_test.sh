@@ -28,9 +28,8 @@ grep -q 'BROCCOLI_TLS_KEY'  "$inst" || { echo "FAIL: install.sh does not export 
 # Caddyfile keeps Caddy-native placeholders (never pre-rendered).
 grep -qF 'tls {$TLS_CERT} {$TLS_KEY}' "$cf" || { echo "FAIL: Caddyfile lost its Caddy {\$VAR} tls placeholders"; exit 1; }
 # --- M-A: gateway-bypass hardening -------------------------------------------
-# server override marks cookies Secure behind the gateway.
-grep -Eq 'BROCCOLI__AUTH__SECURE_COOKIES:[[:space:]]*"true"' "$srv" \
-  || { echo "FAIL: server-airgap override does not force SECURE_COOKIES=true"; exit 1; }
+# Cookies are Secure behind the gateway because it is a trusted proxy that
+# forwards the https scheme, not by a setting: Caddy sends X-Forwarded-Proto.
 # trusted proxies set (non-empty) so XFF yields real client IPs, not the gateway.
 grep -q 'BROCCOLI__SERVER__TRUSTED_PROXIES' "$srv" \
   || { echo "FAIL: server-airgap override does not set TRUSTED_PROXIES"; exit 1; }
@@ -75,8 +74,6 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     sip="$(grep -B2 'target: 3000' "$tmp/merged.yaml" | grep 'host_ip:' | tr -d '[:space:]' | tail -1)"
     [ "$sip" = "host_ip:127.0.0.1" ] \
       || { echo "FAIL: server :3000 not loopback-bound; shell export must beat --env-file (got '${sip:-none}')"; exit 1; }
-    grep -Eq 'SECURE_COOKIES: .true.' "$tmp/merged.yaml" \
-      || { echo "FAIL: merged server missing SECURE_COOKIES=true"; exit 1; }
     # The gateway is only on the edge network, which the server also joins.
     python3 - "$tmp/merged.yaml" <<'PY' || { echo "FAIL: gateway and server do not share only the edge network"; exit 1; }
 import sys, re
@@ -93,7 +90,7 @@ PY
     BROCCOLI_UPSTREAMS='10.0.0.21:3000 10.0.0.22:3000' \
       docker compose -f "$rel/docker-compose.gateway-airgap.yaml.template" config -q \
       || { echo "FAIL: gateway-airgap template does not run on a host of its own"; exit 1; }
-    echo "PASS: merged server publishes :3000 on 127.0.0.1 (export beats --env-file), cookies Secure"
+    echo "PASS: merged server publishes :3000 on 127.0.0.1 (export beats --env-file)"
   else
     # docker is present and every interpolation var is supplied, so a config
     # failure means OUR override is broken — fail loudly, never mask it as SKIP.

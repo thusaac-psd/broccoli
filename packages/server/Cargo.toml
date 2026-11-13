@@ -82,9 +82,12 @@ tower_governor = { version = "0.8", default-features = false, features = ["axum"
 [features]
 default = []
 bundled-stress-test = []
+# Hooks only tests call (a clock resync, a claim loop with another fallback
+# tick). Enabled by test-support, never by a release build.
+test-hooks = ["common/test-hooks"]
 
 [dev-dependencies]
-common = { workspace = true, features = ["test-util"] }
+common = { workspace = true, features = ["test-util", "test-hooks"] }
 reqwest = { version = "0.12", features = ["cookies", "json", "multipart"] }
 sea-orm = { workspace = true, features = ["mock"] }
 worker = { path = "../worker", features = ["test-support"] }

@@ -11,8 +11,8 @@
 //! The natural backpressure signal is therefore **the live count of
 //! queued dispatch units**: `submission_judgement` and `code_run` rows
 //! in `status='Queued'` (a queued submission is counted through its
-//! current judgement). When that depth exceeds
-//! `server.max_queued_submissions`, accepting more work would only
+//! current judgement). When that depth exceeds the cap (derived from live
+//! worker capacity, see [`derived_queue_cap`]), accepting more work would only
 //! grow the buffer between ingress and dispatch - degrading p95
 //! POST->Pending latency without changing throughput. Better to shed
 //! load at the door with `503 Service Unavailable` + `Retry-After`.
@@ -33,8 +33,7 @@ use crate::state::AppState;
 /// is full.
 ///
 /// A full queue drains as fast as in-flight room frees up, and the
-/// claim fiber's fallback tick (`server.claim_poll_interval_ms`, 1s by
-/// default) bounds how long freed room can go unnoticed; 2s is one tick
+/// claim fiber's 1 s fallback tick bounds how long freed room can go unnoticed; 2s is one tick
 /// plus a small buffer so a retried request is likely to land after room
 /// was taken. Hard-coded rather than configurable to match the existing
 /// `permits::RETRY_AFTER_SECS = 1` convention; a knob would just invite
@@ -84,7 +83,11 @@ where
 /// `AppError::Overloaded` (status 503, code `QUEUE_OVERLOADED`)
 /// carries the `Retry-After` hint the same way `RateLimited` does.
 pub async fn enforce_queue_depth_admission(state: &AppState) -> Result<(), AppError> {
-    let cap = state.config.server.max_queued_submissions;
+    let cap = state
+        .config
+        .server
+        .max_queued_submissions
+        .unwrap_or_else(|| derived_queue_cap(state.worker_slots.get()));
     if cap == 0 {
         return Ok(());
     }
@@ -102,6 +105,24 @@ pub async fn enforce_queue_depth_admission(state: &AppState) -> Result<(), AppEr
     Ok(())
 }
 
+/// Queued units allowed per live worker slot. A slot judges a test case in
+/// about a second, so a few hundred queued per slot is a backlog the fleet
+/// still drains within minutes; past that, refusing at the door keeps latency
+/// honest instead of growing an hour-long queue.
+pub const QUEUED_PER_WORKER_SLOT: u64 = 200;
+
+/// The cap before any worker heartbeat is seen, and the least it ever is.
+pub const QUEUE_CAP_FLOOR: u64 = 5000;
+
+/// The fleet-wide queue cap for `live_worker_slots` (see
+/// [`crate::dispatcher::fanout::WorkerSlots`]): [`QUEUED_PER_WORKER_SLOT`]
+/// per slot, at least [`QUEUE_CAP_FLOOR`]. The queued depth it bounds is
+/// counted across the fleet, so every server applies the same cap.
+pub fn derived_queue_cap(live_worker_slots: u64) -> u32 {
+    let scaled = live_worker_slots.saturating_mul(QUEUED_PER_WORKER_SLOT);
+    u32::try_from(scaled.max(QUEUE_CAP_FLOOR)).unwrap_or(u32::MAX)
+}
+
 /// `RETRY_AFTER_SECS` is part of the API contract - clients
 /// implementing exponential backoff over Retry-After expect a
 /// positive integer. A 0 would tell them to retry immediately,
@@ -111,3 +132,15 @@ const _: () = assert!(
     RETRY_AFTER_SECS > 0,
     "Retry-After must be > 0 so clients actually back off"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_queue_cap_grows_with_live_workers_above_a_floor() {
+        assert_eq!(derived_queue_cap(0), 5000);
+        assert_eq!(derived_queue_cap(10), 5000);
+        assert_eq!(derived_queue_cap(100), 20_000);
+    }
+}

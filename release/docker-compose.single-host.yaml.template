@@ -13,6 +13,11 @@ services:
     extends:
       file: docker-compose.server.yaml.template
       service: server
+    # The single-host env file holds every secret of the host, so each
+    # container reads only its own overrides.
+    env_file: !override
+      - path: .env.single-host.server
+        required: false
     depends_on:
       db:
         condition: service_healthy
@@ -20,18 +25,17 @@ services:
         condition: service_healthy
     environment:
       BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
-      # Unset unless the env file sets them, so the binary's defaults apply.
-      # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
-      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
-      BROCCOLI__DATABASE__TCP_KEEPALIVES:
-      BROCCOLI__CLOCK__WARN_SKEW_MS:
-      BROCCOLI__CLOCK__MAX_SKEW_MS:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
 
   worker:
     extends:
       file: docker-compose.worker.yaml.template
       service: worker
+    # The single-host env file holds every secret of the host, so each
+    # container reads only its own overrides.
+    env_file: !override
+      - path: .env.single-host.worker
+        required: false
     depends_on:
       db:
         condition: service_healthy
@@ -39,12 +43,6 @@ services:
         condition: service_healthy
     environment:
       BROCCOLI__DATABASE__URL: "${BROCCOLI_LOCAL_DATABASE_URL:?install.sh single-host writes the in-container database URL}"
-      # Unset unless the env file sets them, so the binary's defaults apply.
-      # BROCCOLI__CLOCK__MAX_SKEW_MS=0 lets a node with a skewed clock boot.
-      BROCCOLI__DATABASE__STATEMENT_TIMEOUT_SECS:
-      BROCCOLI__DATABASE__TCP_KEEPALIVES:
-      BROCCOLI__CLOCK__WARN_SKEW_MS:
-      BROCCOLI__CLOCK__MAX_SKEW_MS:
       BROCCOLI__MQ__URL: "${BROCCOLI_LOCAL_MQ_URL:?install.sh single-host writes the in-container MQ URL}"
 
 volumes:

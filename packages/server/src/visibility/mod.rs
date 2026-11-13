@@ -142,6 +142,8 @@ pub struct VisibilityKernel<'a> {
     state: &'a AppState,
     subject: Subject,
     memo: tokio::sync::Mutex<HashMap<(Action, Resource), Decision>>,
+    /// Submission rows the caller already read; see [`Self::know_submission`].
+    known_submissions: std::sync::Mutex<HashMap<i32, crate::entity::submission::Model>>,
 }
 
 impl<'a> VisibilityKernel<'a> {
@@ -152,7 +154,17 @@ impl<'a> VisibilityKernel<'a> {
             state,
             subject,
             memo: tokio::sync::Mutex::new(HashMap::new()),
+            known_submissions: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Hand the kernel a submission row this request already read, so
+    /// deciding on `Resource::Submission(sub.id)` does not read it again.
+    pub fn know_submission(&self, sub: crate::entity::submission::Model) {
+        self.known_submissions
+            .lock()
+            .expect("known submissions lock")
+            .insert(sub.id, sub);
     }
 
     /// Single-resource convenience wrapper over [`Self::decide_batch`].
@@ -236,10 +248,22 @@ impl<'a> VisibilityKernel<'a> {
             let mut scopes = HostScopes {
                 resolve_contests: !self.subject.is_admin_override()
                     && plugin_query::scoped_querier_loaded(self.state),
+                known_submissions: self
+                    .known_submissions
+                    .lock()
+                    .expect("known submissions lock")
+                    .clone(),
                 ..HostScopes::default()
             };
-            let host_decisions =
-                host_decide(&self.state.db, &self.subject, action, &misses, &mut scopes).await?;
+            let host_decisions = host_decide(
+                &self.state.db,
+                self.state.clock.now(),
+                &self.subject,
+                action,
+                &misses,
+                &mut scopes,
+            )
+            .await?;
             // Compiled out in release, and that is safe — `host_decide`
             // (`host_rules.rs`) builds its return value as
             // `resources.iter().map(...).collect()`, a `.map()` over its own
@@ -438,6 +462,7 @@ impl<'a> VisibilityKernel<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -645,6 +670,8 @@ mod tests {
         AppState {
             plugins,
             db,
+            clock: crate::clock::PlatformClock::local_for_tests(),
+            plugin_config_cache: Default::default(),
             config: AppConfig {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
@@ -658,12 +685,11 @@ mod tests {
                     trusted_proxies: vec![],
                     rate_limit_auth: false,
                     id: String::new(),
-                    expects_multi_replica: false,
                     dispatcher_lease_steal_enabled: true,
                     dispatcher_semaphore_enabled: true,
                     dispatcher_concurrency: 1,
                     dispatcher_admission_queue_max: 0,
-                    max_queued_submissions: 0,
+                    max_queued_submissions: Some(0),
                     lease_ttl_secs: 1,
                     lease_refresh_interval_secs: 10,
                     steal_scan_interval_secs: 15,
@@ -672,24 +698,17 @@ mod tests {
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
                     claim_fiber_enabled: false,
-                    claim_poll_interval_ms: 1000,
-                    claim_batch_size: 32,
-                    max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
                 database: DatabaseConfig {
                     url: "mock://visibility-kernel-test".to_string(),
-                    max_connections: 1,
-                    plugin_max_connections: 1,
-                    plugin_privileged_max_connections: 1,
                     plugin_url: None,
                     ..Default::default()
                 },
                 auth: AuthConfig {
                     jwt_secret: "test-secret".to_string(),
-                    secure_cookies: false,
                     login_failure_limit: 0,
                     login_failure_window_secs: 60,
                 },
@@ -703,8 +722,7 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
-                clock: Default::default(),
-                removed_keys_set: Vec::new(),
+                unknown_keys: Vec::new(),
             },
             mq: None,
             redis_client: None,
