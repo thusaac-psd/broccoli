@@ -58,9 +58,12 @@ target/release/broccoli-stress-test perf \
 
 ## 运行矩阵
 
-脚本要求 Postgres 与 Redis 已在运行，并且评测插件（`icpc`、`ioi`、
-`batch-evaluator`、`standard-checkers`、`standard-languages`）已构建到
-`--plugins-dir` 中：
+脚本要求 Postgres 与 Redis 已在运行，并且插件已用
+`./scripts/build-plugins.sh` 构建。脚本把评测插件（`icpc`、`ioi`、
+`batch-evaluator`、`standard-checkers`、`standard-languages`）从
+`--plugins-source` 复制到 `<out-dir>/plugins`，并让每个服务器指向该目录，
+因此其他插件不会参与运行。已启用但未构建的插件可能失败即拒绝：带可见性查询的
+插件会对每次比赛提交返回 404。`--plugins` 可修改该列表。
 
 ```bash
 docker run -d --name bpg -p 127.0.0.1:5433:5432 \

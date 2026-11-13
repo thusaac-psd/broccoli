@@ -65,9 +65,13 @@ setup error.
 
 ## Run the matrix
 
-The script expects Postgres and Redis to be running already, and the judging
-plugins (`icpc`, `ioi`, `batch-evaluator`, `standard-checkers`,
-`standard-languages`) built into `--plugins-dir`:
+The script expects Postgres and Redis to be running already, and the plugins
+built with `./scripts/build-plugins.sh`. It copies the judging plugins (`icpc`,
+`ioi`, `batch-evaluator`, `standard-checkers`, `standard-languages`) from
+`--plugins-source` into `<out-dir>/plugins` and points every server there, so no
+other plugin takes part in the run. An enabled plugin that is not built can
+fail closed: one with a visibility query answers 404 to every contest submit.
+`--plugins` changes the list.
 
 ```bash
 docker run -d --name bpg -p 127.0.0.1:5433:5432 \

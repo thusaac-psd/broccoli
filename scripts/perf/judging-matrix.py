@@ -24,16 +24,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import statistics
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+# The plugins a judged ICPC or IOI batch submission passes through.
+JUDGING_PLUGINS = ("icpc", "ioi", "batch-evaluator", "standard-checkers", "standard-languages")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,7 +47,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--db-admin-url", default="postgres://postgres:broccoli_pg_secret@127.0.0.1:5433/postgres",
                    help="used to recreate the database when --fresh-db is set")
     p.add_argument("--redis-url", default="redis://127.0.0.1:6379")
-    p.add_argument("--plugins-dir", default=str(ROOT / "plugins"))
+    p.add_argument("--plugins-source", default=str(ROOT / "plugins"),
+                   help="directory holding the built plugins the run copies from")
+    p.add_argument("--plugins", default=",".join(JUDGING_PLUGINS),
+                   help="plugins the servers load; any other enabled plugin stays out of the run")
     p.add_argument("--topologies", default="1x1")
     p.add_argument("--test-cases", default="1")
     p.add_argument("--concurrency", default="1")
@@ -115,6 +122,29 @@ def wait_http(url: str, timeout: float = 120.0) -> None:
     raise RuntimeError(f"timed out waiting for {url}")
 
 
+def stage_plugins(source: Path, names: list[str], dest: Path) -> Path:
+    """Copy the named built plugins into a fresh `dest` and return it.
+
+    The servers load every plugin in their plugins directory. A plugin outside
+    the judging path changes what is measured, and one that is enabled but not
+    built can fail closed on every request it guards, so the run loads only
+    the named plugins.
+    """
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    for name in names:
+        src = source / name
+        manifest = src / "plugin.toml"
+        if not manifest.is_file():
+            sys.exit(f"no plugin manifest at {manifest}")
+        entry = tomllib.loads(manifest.read_text()).get("server", {}).get("entry")
+        if entry and not (src / entry).is_file():
+            sys.exit(f"plugin {name} is not built ({src / entry} is missing); run ./scripts/build-plugins.sh")
+        shutil.copytree(src, dest / name, ignore=shutil.ignore_patterns("target", "node_modules"))
+    return dest
+
+
 def psql(url: str, sql: str) -> None:
     subprocess.run(["psql", url, "-v", "ON_ERROR_STOP=1", "-qc", sql], check=True)
 
@@ -151,7 +181,7 @@ class Topology:
                 # Keep the per-submit rate-limit queries on the path, but never trip it.
                 "BROCCOLI__SUBMISSION__RATE_LIMIT_PER_MINUTE": "100000000",
                 "BROCCOLI__SERVER__MAX_QUEUED_SUBMISSIONS": "0",
-                "BROCCOLI__PLUGIN__PLUGINS_DIR": self.a.plugins_dir,
+                "BROCCOLI__PLUGIN__PLUGINS_DIR": str(self.a.plugins_dir),
             })
             env.update(kv(self.a.server_env))
             self._spawn(f"server-{i}", [f"{self.a.bin_dir}/server"], env)
@@ -307,6 +337,8 @@ def main() -> int:
         "args": vars(a),
     }
     (out / "environment.json").write_text(json.dumps(hw, indent=2))
+    a.plugins_dir = stage_plugins(Path(a.plugins_source), [n for n in a.plugins.split(",") if n],
+                                  out.resolve() / "plugins")
     rows = []
     for topo_s in a.topologies.split(","):
         s, w = (int(x) for x in topo_s.lower().split("x"))
