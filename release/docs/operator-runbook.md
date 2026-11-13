@@ -394,7 +394,9 @@ explicit `MEMORY_BUDGET` (for example `4GiB`).
 **When it is busy.** A request whose plugin cannot answer before the request's
 deadline gets `503 PLUGIN_UNAVAILABLE` with `Retry-After`; the web client shows
 it as a temporary state and retries. It is never shown as a missing page or an
-empty list. Judging waits instead: a judging call queues until a token is free.
+empty list. Judging queues longer: a judging call waits for a token up to
+`CALL_TIMEOUT_SECS`, and one still waiting then ends the judgement in a system
+error that the server rejudges.
 
 **What to watch.** `broccoli_plugin_admission_queued_total` counts calls that
 found no free token, `broccoli_plugin_admission_wait_duration_seconds` how long
@@ -404,9 +406,12 @@ current load per plugin, and `broccoli_plugin_instance_evicted_total` how often
 the memory budget dropped instances. Sustained queueing with every token busy is
 CPU exhaustion: add server replicas.
 
-Configuration still setting a removed key (`POOL_MAX_INSTANCES`,
-`EVALUATOR_PARALLELISM`, `SERVER__MAX_BLOCKING_THREADS` and others) logs a
-warning at boot naming each one; the keys are ignored.
+A removed key (`POOL_MAX_INSTANCES`, `EVALUATOR_PARALLELISM`,
+`SERVER__MAX_BLOCKING_THREADS` and others) still set in the server's config file
+or its process environment logs a warning at boot naming each one; the keys are
+ignored. The compose template passes the server only the variables it lists, so
+an old value left in `.env` never reaches the server and logs nothing: delete
+it.
 
 ## Multi-Replica Server Identity
 
