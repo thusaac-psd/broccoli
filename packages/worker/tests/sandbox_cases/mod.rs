@@ -15,7 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use worker::models::operation::executor::OperationTaskExecutor;
 use worker::models::operation::file_cacher::UnavailableFileCacher;
 use worker::models::operation::handler::OperationHandler;
@@ -88,12 +87,10 @@ static DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// A fresh, not yet created, temp path unique to this process and call.
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     let counter = DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    // Random, so a rerun that reuses the pid never meets an old directory.
+    let nonce = rand::random::<u64>();
     std::env::temp_dir().join(format!(
-        "broccoli-{prefix}-{}-{counter}-{ts}",
+        "broccoli-{prefix}-{}-{counter}-{nonce}",
         std::process::id()
     ))
 }

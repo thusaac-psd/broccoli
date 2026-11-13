@@ -136,8 +136,8 @@ mod tests {
     async fn set_heartbeat(url: &str, worker_id: &str, hostname: Option<String>) {
         let payload = serde_json::to_value(common::worker::HeartbeatPayload {
             id: worker_id.to_string(),
-            started_at: chrono::Utc::now(),
-            last_seen: chrono::Utc::now(),
+            started_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            last_seen: chrono::DateTime::from_timestamp(1_700_000_003, 0).unwrap(),
             in_flight: 0,
             max_concurrency: None,
             fairness_mode: "unknown".into(),

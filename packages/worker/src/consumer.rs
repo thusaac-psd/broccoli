@@ -37,6 +37,7 @@ pub struct WorkerConsumer {
     metrics: Metrics,
     worker_id: String,
     publish_retry: PublishRetry,
+    clock: common::clock::PlatformClock,
 }
 
 pub struct WorkerConsumerDeps {
@@ -47,6 +48,8 @@ pub struct WorkerConsumerDeps {
     pub cancel_checker: Option<Arc<RedisCancelChecker>>,
     pub metrics: Metrics,
     pub worker_id: String,
+    /// Stamps the retry history the server files with a dead letter.
+    pub clock: common::clock::PlatformClock,
 }
 
 impl WorkerConsumer {
@@ -60,6 +63,7 @@ impl WorkerConsumer {
             metrics: deps.metrics,
             worker_id: deps.worker_id,
             publish_retry: PublishRetry::default(),
+            clock: deps.clock,
         }
     }
 
@@ -232,11 +236,11 @@ impl WorkerConsumer {
                 }
                 Err(e) => {
                     let error_str = e.to_string();
-                    let decision = self
-                        .retry_tracker
-                        .lock()
-                        .await
-                        .record_failure(&task_id, &error_str);
+                    let decision = self.retry_tracker.lock().await.record_failure(
+                        &task_id,
+                        &error_str,
+                        self.clock.now(),
+                    );
 
                     match decision {
                         RetryDecision::Retry { attempt, .. } => {
@@ -499,6 +503,7 @@ mod tests {
             )),
             metrics,
             worker_id: "worker-test".into(),
+            clock: common::clock::PlatformClock::local_for_tests(),
         });
         Harness {
             _redis: redis,

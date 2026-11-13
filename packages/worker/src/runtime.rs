@@ -141,14 +141,21 @@ impl WorkerRuntime {
             pid = system_info.pid,
             "Detected system info for heartbeat"
         );
+        // The worker stamps wall time that servers compare with theirs
+        // (heartbeats, retry history, warm progress), so it keeps the same
+        // database clock they do.
+        let clock = common::clock::PlatformClock::connect(&config.database.url)
+            .await
+            .context("Failed to read the database clock")?;
         let in_flight = InFlightCounter::new();
-        let started_at = chrono::Utc::now();
+        let started_at = clock.now();
         let heartbeat_config = HeartbeatConfig {
             worker_id: config.worker.id.clone(),
             sandbox_backend: config.worker.sandbox_backend.clone(),
             max_concurrency: Some(capacity.max_concurrency as u32),
             fairness_mode: capacity.fairness_mode.as_str().into(),
             system_info,
+            clock: clock.clone(),
         };
         let claim = NodeClaim::claim_at_boot(
             redis::Client::open(config.mq.url.as_str()).context("Invalid MQ URL")?,
@@ -177,7 +184,7 @@ impl WorkerRuntime {
         // Pre-warm subscriber: listens for contest cache-warm jobs and fills the
         // local file cache ahead of the opening burst. Independent of judging,
         // but warms through the executor's own cacher.
-        let warm_handle = crate::warm::spawn(&config, operation.file_cacher());
+        let warm_handle = crate::warm::spawn(&config, operation.file_cacher(), clock.clone());
 
         let operation: Arc<dyn Executor> = Arc::new(operation);
         let worker = Arc::new(Worker::new([("operation".to_string(), operation)]));
@@ -199,6 +206,7 @@ impl WorkerRuntime {
             cancel_checker,
             metrics,
             worker_id: config.worker.id.clone(),
+            clock,
         });
 
         Ok(Self {
