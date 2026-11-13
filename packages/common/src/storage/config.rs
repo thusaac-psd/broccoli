@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sea_orm::DatabaseConnection;
+use crate::db::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;

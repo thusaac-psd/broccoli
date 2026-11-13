@@ -29,7 +29,7 @@ pub struct ServerRuntime {
     addr: SocketAddr,
     dispatcher: crate::dispatcher::Dispatcher,
     /// To release this server's in-flight work after the dispatcher stops.
-    db: sea_orm::DatabaseConnection,
+    db: common::db::DatabaseConnection,
     server_id: String,
     /// For shutdown: refusing and draining plugin calls, stopping the plugin
     /// lifecycle before its replica row is retired.
@@ -546,7 +546,7 @@ const PLUGIN_CALL_DRAIN: Duration = Duration::from_secs(8);
 
 /// Requeue every in-flight unit this server owns so the fleet dispatches it
 /// again (see [`crate::services::judging::release_leases`]).
-async fn release_own_inflight(db: &sea_orm::DatabaseConnection, server_id: &str, phase: &str) {
+async fn release_own_inflight(db: &common::db::DatabaseConnection, server_id: &str, phase: &str) {
     match crate::services::judging::release_leases(db, server_id).await {
         Ok(counts) => info!(
             server_id,

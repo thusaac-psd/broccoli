@@ -445,6 +445,7 @@ mod tests {
 
     use broccoli_server_sdk::types::{VisibilityQueryInput, VisibilityQueryOutput, WireDecision};
     use common::SubmissionStatus;
+    use common::db::DatabaseConnection;
     use common::storage::filesystem::FilesystemBlobStore;
     use plugin_core::config::PluginConfig;
     use plugin_core::error::PluginError;
@@ -455,7 +456,7 @@ mod tests {
     };
     use plugin_core::registry::{PluginEntry, PluginRegistry, PluginStatus};
     use plugin_core::traits::{PluginInvoker, PluginManager};
-    use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     use super::plugin_query::PanicPluginManager;
     use super::*;
@@ -658,7 +659,11 @@ mod tests {
     /// Mirrors `plugin_query::tests::test_app_state` (private to that
     /// module), parameterized on `db` since these tests - unlike
     /// `plugin_query`'s - actually drive `host_decide` through it.
-    async fn test_app_state(plugins: Arc<dyn PluginManager>, db: DatabaseConnection) -> AppState {
+    async fn test_app_state(
+        plugins: Arc<dyn PluginManager>,
+        db: sea_orm::DatabaseConnection,
+    ) -> AppState {
+        let db = DatabaseConnection::from(db);
         let blob_dir = tempfile::tempdir().expect("create blob tempdir");
         let blob_store = Arc::new(
             FilesystemBlobStore::new(blob_dir.path().join("blobs"), 1024 * 1024)

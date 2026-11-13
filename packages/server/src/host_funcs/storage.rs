@@ -1,11 +1,12 @@
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use extism::host_fn;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, Set,
-    Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set, Statement,
+    TransactionTrait,
 };
 use serde::Deserialize;
 use serde_json::Value;

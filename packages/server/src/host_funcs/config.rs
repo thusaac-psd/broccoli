@@ -1,8 +1,9 @@
 use crate::entity::plugin_config;
 use chrono::Utc;
+use common::db::DatabaseConnection;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
-use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
+use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
 use std::sync::Arc;
 

@@ -3,6 +3,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
+use common::db::DatabaseConnection;
 use sea_orm::*;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;

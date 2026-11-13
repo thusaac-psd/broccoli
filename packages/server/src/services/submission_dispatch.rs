@@ -4,6 +4,7 @@ use broccoli_server_sdk::types::{
     SourceFile, TestCaseBodyRef, TestCaseRow,
 };
 use common::SubmissionDlqErrorCode;
+use common::db::DatabaseConnection;
 use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use sea_orm::prelude::Expr;
 use sea_orm::*;

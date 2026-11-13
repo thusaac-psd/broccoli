@@ -13,9 +13,10 @@
 //! hardware without NTP): set `clock.max_skew_ms = 0`
 //! (`BROCCOLI__CLOCK__MAX_SKEW_MS=0`). The warning is still logged.
 
+use crate::db::DatabaseConnection;
 use std::time::{Duration, Instant};
 
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::{Deserialize, Serialize};
 
 /// `[clock]` section shared by the server and the worker.

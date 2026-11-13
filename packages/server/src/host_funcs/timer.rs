@@ -1,9 +1,9 @@
+use common::db::DatabaseConnection;
 use std::sync::Arc;
 
 use extism::host_fn;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, PaginatorTrait,
-    QueryFilter, Statement,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, Statement,
 };
 use serde::Deserialize;
 use tracing::error;

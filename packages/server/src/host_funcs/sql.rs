@@ -1,12 +1,10 @@
+use common::db::{DatabaseConnection, DatabaseTransaction};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use extism::host_fn;
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
-    TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tracing::error;
@@ -1365,7 +1363,7 @@ mod tests {
         opt.max_connections(1)
             .min_connections(1)
             .sqlx_logging(false);
-        let db = Database::connect(opt).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(opt).await.expect("connect").into();
 
         let txn = db.begin().await.expect("begin orphan txn");
         let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
@@ -1413,7 +1411,7 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = Database::connect(url).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(url).await.expect("connect").into();
 
         let txn = db.begin().await.expect("begin");
         let mut map: HashMap<String, Arc<PluginTransaction>> = HashMap::new();
@@ -1462,7 +1460,7 @@ mod tests {
             .await
             .expect("postgres host port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-        let db = Database::connect(url).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(url).await.expect("connect").into();
 
         let txn_map: TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
         for (id, owner) in [("slow", "plugin-a"), ("fast", "plugin-b")] {
@@ -1528,7 +1526,7 @@ mod tests {
         opt.max_connections(1)
             .min_connections(1)
             .sqlx_logging(false);
-        let db = Database::connect(opt).await.expect("connect");
+        let db: DatabaseConnection = Database::connect(opt).await.expect("connect").into();
         db.execute_unprepared("CREATE TABLE kv (v text)")
             .await
             .expect("create");

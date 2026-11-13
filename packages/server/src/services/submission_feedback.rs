@@ -9,9 +9,10 @@ use broccoli_server_sdk::types::{
     SubmissionSlotObservation, SubmissionSlotToken,
 };
 use chrono::{DateTime, Utc};
+use common::db::DatabaseConnection;
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
-    QuerySelect, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QuerySelect, Set, Statement,
+    TransactionTrait,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;

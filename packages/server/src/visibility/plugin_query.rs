@@ -1134,7 +1134,9 @@ mod tests {
     /// existing precedent for this in the crate) so field drift between the
     /// two is easy to spot in review.
     async fn test_app_state(plugins: Arc<dyn PluginManager>) -> AppState {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
+            .into_connection()
+            .into();
         let blob_dir = tempfile::tempdir().expect("create blob tempdir");
         let blob_store = Arc::new(
             FilesystemBlobStore::new(blob_dir.path().join("blobs"), 1024 * 1024)

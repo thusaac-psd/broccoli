@@ -1,3 +1,4 @@
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,8 +14,8 @@ use plugin_core::registry::PluginRegistry;
 use plugin_core::traits::{PluginInvoker, PluginManager};
 use reqwest::Client;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
-    QueryFilter, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter, Set,
+    TransactionTrait,
 };
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -557,9 +558,11 @@ impl TestApp {
         opts.max_connections(2)
             .min_connections(0)
             .idle_timeout(std::time::Duration::from_secs(2));
-        let db = Database::connect(opts)
-            .await
-            .expect("Failed to connect to test database");
+        let db = DatabaseConnection::from(
+            Database::connect(opts)
+                .await
+                .expect("Failed to connect to test database"),
+        );
 
         let blob_store = create_blob_store(&BlobStoreConfig::default(), db.clone(), None)
             .await

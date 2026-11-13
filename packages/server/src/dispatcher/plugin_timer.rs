@@ -30,14 +30,15 @@
 //! guest still running when the lease ends, and hands the rows it did not
 //! reach back unclaimed, with their attempt refunded.
 
+use common::db::DatabaseConnection;
 use std::time::Duration as StdDuration;
 
 use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
 use plugin_core::traits::CallOptions;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
-    FromQueryResult, QueryFilter, Statement,
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    Statement,
 };
 use serde::Serialize;
 use tokio::sync::watch;

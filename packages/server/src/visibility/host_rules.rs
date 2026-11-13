@@ -1518,7 +1518,7 @@ mod tests {
     // the `unwrap()`. --
 
     async fn decide_standalone_submit(
-        db: &sea_orm::DatabaseConnection,
+        db: &common::db::DatabaseConnection,
         subject: &Subject,
     ) -> Vec<Decision> {
         host_decide(
@@ -1541,9 +1541,10 @@ mod tests {
         // this problem reaches it through rule 9 (see
         // `rule9_hidden_problem_in_private_started_contest_allows_participant`).
         // Submit never looks at contests, so no contest data is queued here.
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![problem_row(1, false)]])
-            .into_connection();
+            .into_connection()
+            .into();
         assert_eq!(
             decide_standalone_submit(&db, &subject(1, &[])).await,
             vec![Decision::Deny]
@@ -1555,9 +1556,10 @@ mod tests {
         // Rule 9's `contest:manage` bypass is a READ widening too. Staff who
         // need to submit to a hidden problem use the contest route or hold
         // `problem:create`/`problem:edit` (rule 8).
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![problem_row(1, false)]])
-            .into_connection();
+            .into_connection()
+            .into();
         assert_eq!(
             decide_standalone_submit(&db, &subject(1, &[perm::CONTEST_MANAGE])).await,
             vec![Decision::Deny]
@@ -1566,9 +1568,10 @@ mod tests {
 
     #[tokio::test]
     async fn submit_public_standalone_problem_allows() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![problem_row(1, true)]])
-            .into_connection();
+            .into_connection()
+            .into();
         assert_eq!(
             decide_standalone_submit(&db, &subject(1, &[])).await,
             vec![Decision::Allow]
@@ -1577,9 +1580,10 @@ mod tests {
 
     #[tokio::test]
     async fn submit_hidden_standalone_problem_allows_problem_editor() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![problem_row(1, false)]])
-            .into_connection();
+            .into_connection()
+            .into();
         assert_eq!(
             decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
             vec![Decision::Allow]
@@ -1588,9 +1592,10 @@ mod tests {
 
     #[tokio::test]
     async fn submit_missing_standalone_problem_denies_even_for_editor() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
+        let db: common::db::DatabaseConnection = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<problem::Model>::new()])
-            .into_connection();
+            .into_connection()
+            .into();
         assert_eq!(
             decide_standalone_submit(&db, &subject(1, &[perm::PROBLEM_EDIT])).await,
             vec![Decision::Deny]

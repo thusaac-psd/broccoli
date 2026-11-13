@@ -3,7 +3,8 @@
 //! first; the migrator then runs each step once, recorded in
 //! `seaql_migrations` (see [`crate::database::BootSession::migrate`]).
 
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use common::db::DatabaseConnection;
+use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::prelude::*;
 
 mod m0001_supplementary_schema;

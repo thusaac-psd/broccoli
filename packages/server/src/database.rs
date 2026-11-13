@@ -1,5 +1,6 @@
+use common::db::DatabaseConnection;
 use common::db::{PgPoolSpec, PgSession};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
+use sea_orm::{ConnectionTrait, DbErr};
 use sea_orm_migration::MigratorTrait;
 
 use crate::migration::Migrator;
@@ -544,8 +545,12 @@ impl BootSession {
         crate::migration::refuse_unknown_migrations(db).await?;
         // Create the core tables from the entity definitions, then apply the
         // schema they cannot express (see `crate::migration`).
-        db.get_schema_registry("server::entity::*").sync(db).await?;
-        Migrator::up(db, None).await?;
+        let schema = db.as_sea_orm();
+        schema
+            .get_schema_registry("server::entity::*")
+            .sync(schema)
+            .await?;
+        Migrator::up(schema, None).await?;
         crate::services::judging::install_claim_notify(db).await
     }
 
@@ -611,6 +616,60 @@ mod tests {
         let port = container.get_host_port_ipv4(5432).await.expect("port");
         let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
         (container, url)
+    }
+
+    /// Text holding NUL binds through the server's pool and its transactions
+    /// into TEXT and JSONB columns, stored with U+FFFD in place of each NUL,
+    /// where Postgres would reject the raw value with 22021 or 22P05.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nul_text_binds_through_the_pool_and_its_transactions() {
+        use sea_orm::{DbBackend, Statement, TransactionTrait};
+
+        let (_c, url) = fresh_postgres().await;
+        let db = connect_main_pool(&url, 2, &test_session())
+            .await
+            .expect("pool");
+        db.execute_unprepared("CREATE TABLE nul_probe (t text, j jsonb)")
+            .await
+            .expect("create");
+        let insert = || {
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO nul_probe (t, j) VALUES ($1, $2)",
+                [
+                    "a\u{0}b".into(),
+                    serde_json::json!({ "k\u{0}": ["x\u{0}"] }).into(),
+                ],
+            )
+        };
+        db.execute_raw(insert()).await.expect("pool insert");
+        let txn = db.begin().await.expect("begin");
+        txn.execute_raw(insert()).await.expect("transaction insert");
+        txn.execute_unprepared("INSERT INTO nul_probe (t) VALUES ('c\u{0}d')")
+            .await
+            .expect("unprepared insert");
+        txn.commit().await.expect("commit");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT t, j FROM nul_probe ORDER BY ctid",
+            ))
+            .await
+            .expect("select");
+        let stored: Vec<(String, Option<serde_json::Value>)> = rows
+            .iter()
+            .map(|row| (row.try_get("", "t").unwrap(), row.try_get("", "j").unwrap()))
+            .collect();
+        let json = serde_json::json!({ "k\u{FFFD}": ["x\u{FFFD}"] });
+        assert_eq!(
+            stored,
+            [
+                ("a\u{FFFD}b".to_string(), Some(json.clone())),
+                ("a\u{FFFD}b".to_string(), Some(json)),
+                ("c\u{FFFD}d".to_string(), None),
+            ]
+        );
     }
 
     /// Drive `fut` for at most `polls` polls, yielding between them, then drop

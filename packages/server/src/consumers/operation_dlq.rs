@@ -1,8 +1,9 @@
+use common::db::DatabaseConnection;
 use std::time::{Duration, Instant};
 
 use common::DlqEnvelope;
 use mq::{Delivery, GroupConsumer};
-use sea_orm::{DatabaseConnection, TransactionTrait};
+use sea_orm::TransactionTrait;
 use tracing::{error, info, warn};
 
 use crate::dlq::DlqService;

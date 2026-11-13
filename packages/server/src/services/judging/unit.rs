@@ -1,10 +1,11 @@
 //! Transitions of a dispatch unit (a judgement or a code run): claim, lease
 //! refresh, requeue, exhaust and dispatch failure.
 
+use common::db::{DatabaseConnection, DatabaseTransaction};
 use common::{DlqErrorCode, StatusPhase, SubmissionDlqErrorCode, SubmissionStatus};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    EntityTrait, QueryFilter, Statement, TransactionTrait, Value,
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryFilter, Statement,
+    TransactionTrait, Value,
 };
 
 use super::RetryBudget;

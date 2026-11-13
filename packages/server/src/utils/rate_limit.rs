@@ -1,3 +1,4 @@
+use common::db::DatabaseConnection;
 use std::cmp;
 
 use chrono::{Duration, Utc};

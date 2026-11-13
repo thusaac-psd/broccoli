@@ -29,7 +29,7 @@ const CODE_RUN_DISPATCH_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 /// dispatch's epoch, logging a failure of the write itself: the run then
 /// stays in flight until a detector requeues it.
 async fn mark_code_run_error_or_log(
-    db: &sea_orm::DatabaseConnection,
+    db: &common::db::DatabaseConnection,
     code_run_id: i32,
     code: &str,
     message: &str,

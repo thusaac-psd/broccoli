@@ -12,8 +12,8 @@ use broccoli_server_sdk::types::{
 };
 use std::sync::Arc;
 
+use common::db::DatabaseConnection;
 use extism::host_fn;
-use sea_orm::DatabaseConnection;
 use serde_json::{Value as JsonValue, json};
 
 use crate::services::judging;
