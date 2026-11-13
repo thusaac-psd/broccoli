@@ -1482,6 +1482,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
         .post_with_token(&setup_route, &body, &fx.staff_token)
         .await;
     assert_eq!(saved.status, 200, "{}", saved.text);
+    advance_clock_to_ms(&fx.app, first_at + 100).await;
     crate::codelink_bracket::poll_match(
         &fx.app,
         contest_id,
@@ -1532,6 +1533,7 @@ async fn scheduled_stages_require_rescheduling_and_feed_both_final_matches_throu
         .post_with_token(&setup_route, &body, &fx.staff_token)
         .await;
     assert_eq!(saved.status, 200, "{}", saved.text);
+    advance_clock_to_ms(&fx.app, rescheduled_at + 100).await;
     for (id, a, b, kind) in [
         (2, seeds[0], seeds[2], "final"),
         (3, seeds[1], seeds[3], "third_place"),

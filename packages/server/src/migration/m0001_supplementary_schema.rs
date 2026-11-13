@@ -55,6 +55,19 @@ const SCHEMA: &[&str] = &[
     r#"CREATE INDEX contest_problem_problem_id_idx ON contest_problem (problem_id)"#,
     // The dispatcher's due-scan reads only unclaimed timers.
     r#"CREATE INDEX plugin_timer_due_idx ON plugin_timer (fire_at) WHERE claimed_at IS NULL"#,
+    // The queued rows, oldest first: the claim scans and the queue-depth
+    // counts read them through these, and each index stays as small as the
+    // queue. The predicate is `dispatcher::QUEUED_PREDICATE`, which every
+    // queued scan uses inline so the planner can match it. A judgement's
+    // claim order puts live work before deferred rejudges.
+    r#"CREATE INDEX idx_submission_judgement_claim
+        ON submission_judgement (is_current DESC, created_at) WHERE status = 'Queued'"#,
+    r#"CREATE INDEX idx_code_run_claim ON code_run (created_at) WHERE status = 'Queued'"#,
+    r#"CREATE INDEX idx_submission_queued ON submission (created_at) WHERE status = 'Queued'"#,
+    // A replica's in-flight code runs, counted for its claim budget. A
+    // judgement's in-flight count uses its entity's `status` index.
+    r#"CREATE INDEX idx_code_run_in_flight ON code_run (owner_server_id)
+        WHERE status IN ('Pending', 'Compiling', 'Running')"#,
     // Curated, PII-free projection of `user` for plugin reads.
     r#"CREATE VIEW plugin_user_public AS
         SELECT id, username FROM "user" WHERE deleted_at IS NULL"#,
@@ -139,5 +152,42 @@ impl MigrationTrait for Migration {
         Err(DbErr::Migration(
             "the baseline schema is not reversible".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common::StatusPhase;
+
+    use super::SCHEMA;
+
+    fn statement(index: &str) -> &'static str {
+        SCHEMA
+            .iter()
+            .find(|stmt| stmt.split_whitespace().nth(2) == Some(index))
+            .unwrap_or_else(|| panic!("{index} is not in the schema"))
+    }
+
+    #[test]
+    fn queued_indexes_use_the_queued_predicate() {
+        for index in [
+            "idx_submission_judgement_claim",
+            "idx_code_run_claim",
+            "idx_submission_queued",
+        ] {
+            assert!(
+                statement(index)
+                    .ends_with(&format!("WHERE {}", crate::dispatcher::QUEUED_PREDICATE)),
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_flight_index_covers_the_in_flight_statuses() {
+        assert!(statement("idx_code_run_in_flight").ends_with(&format!(
+            "WHERE status IN {}",
+            StatusPhase::InFlight.sql_list()
+        )));
     }
 }

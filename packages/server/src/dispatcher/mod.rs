@@ -16,12 +16,13 @@ use crate::state::AppState;
 
 /// The `status = 'Queued'` predicate as an inline SQL literal.
 ///
-/// The partial `idx_<table>_queued` indexes (migration
-/// `m0014_queued_partial_indexes`) are only usable when the planner can prove
-/// the query's predicate implies the index's, which a bound `$n` parameter
-/// does not allow once Postgres switches a prepared statement to its generic
-/// plan. Every scan over the `Queued` rows therefore filters with this literal
-/// instead of a bound status value.
+/// The partial indexes over the `Queued` rows (`idx_submission_judgement_claim`,
+/// `idx_code_run_claim`, `idx_submission_queued`, created by the supplementary
+/// schema migration) are only usable when the planner can prove the query's
+/// predicate implies the index's, which a bound `$n` parameter does not allow
+/// once Postgres switches a prepared statement to its generic plan. Every scan
+/// over the `Queued` rows therefore filters with this literal instead of a
+/// bound status value.
 pub(crate) const QUEUED_PREDICATE: &str = "status = 'Queued'";
 
 /// [`QUEUED_PREDICATE`] as a SeaORM filter.
