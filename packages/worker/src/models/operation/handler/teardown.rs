@@ -5,6 +5,17 @@
 //! operation instead of delaying both. The next operation on the handler waits
 //! for every pending removal before it creates a sandbox, so no step ever runs
 //! beside a removal, and a box id stays reserved until its box is gone.
+//!
+//! Boxes are never reused across operations, not even across test cases of one
+//! submission. `isolate --init` gives every operation an empty box and a fresh
+//! cgroup. A reused box would keep the files the previous test case's program
+//! wrote, which could carry answers from one case to the next, and its cgroup,
+//! whose CPU time, memory peak and OOM-kill count are cumulative since
+//! `--init`, so one case's OOM kill would mark every later case memory-killed.
+//! Clearing all of that is what `--cleanup` and `--init` do. Boxes initialised
+//! ahead of time do not pay off either: initialising one while a step runs
+//! would put process spawns and cgroup setup beside a timed run, and between
+//! operations the next one waits for that work anyway.
 
 use super::super::sandbox::SandboxManager;
 use super::EnvironmentList;
