@@ -968,6 +968,28 @@ fn parse_args(
         .collect())
 }
 
+/// The statement for plugin SQL bound with `values` from [`parse_args`].
+///
+/// sqlx keeps one prepared statement per SQL text on each connection, typed by
+/// the parameters of its first execution, and later executions bind their
+/// values in binary against those types. A plugin's JSON arguments change type
+/// between calls of the same SQL (a number, then a string, then null), and an
+/// int8 bound against a statement prepared for text reaches Postgres as text
+/// bytes holding 0x00. The statement text therefore names its parameter types,
+/// so each type signature prepares its own statement.
+fn plugin_statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
+    let sql = if values.is_empty() {
+        sql.to_string()
+    } else {
+        let types: Vec<String> = values
+            .iter()
+            .map(|value| format!("{:?}", value.array_type()))
+            .collect();
+        format!("/* {} */ {sql}", types.join(","))
+    };
+    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+}
+
 host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute")?;
     let (plugin_id, db) = &*call;
@@ -986,7 +1008,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: Strin
             "Stripped NUL bytes from bound values at db_execute choke point"
         );
     }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, values);
+    let stmt = plugin_statement(&sql, values);
 
     let mut exec_result = tokio::runtime::Handle::current().block_on(async {
         db.execute_raw(stmt.clone()).await
@@ -1042,7 +1064,7 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
     let mut query_result = tokio::runtime::Handle::current().block_on(async {
         db.query_one_raw(stmt.clone()).await
@@ -1146,7 +1168,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, Transaction
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
     let query_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_query_in", |txn| {
         tokio::runtime::Handle::current().block_on(txn.query_one_raw(stmt))
@@ -1184,7 +1206,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, Transacti
             "Stripped NUL bytes from bound values at db_execute_in choke point"
         );
     }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
+    let stmt = plugin_statement(&sql, values);
 
     let exec_result = with_owned_txn(txn_map, &txn_id, plugin_id, "db_execute_in", |txn| {
         tokio::runtime::Handle::current().block_on(txn.execute_raw(stmt))
@@ -1291,7 +1313,7 @@ pub(super) fn execute_on_pool(
             "Stripped NUL bytes from bound values at submission execute choke point"
         );
     }
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, values);
+    let stmt = plugin_statement(&sql, values);
 
     let mut exec_result =
         tokio::runtime::Handle::current().block_on(async { db.execute_raw(stmt.clone()).await });
@@ -1345,7 +1367,7 @@ pub(super) fn query_on_pool(
         "SELECT COALESCE(json_agg(t), '[]'::json) AS json_data FROM ({}) AS t",
         sql
     );
-    let stmt = Statement::from_sql_and_values(DbBackend::Postgres, wrapped_sql, values);
+    let stmt = plugin_statement(&wrapped_sql, values);
 
     let mut query_result =
         tokio::runtime::Handle::current().block_on(async { db.query_one_raw(stmt.clone()).await });
@@ -1944,6 +1966,72 @@ mod tests {
             "a statement in another transaction waited {fast_elapsed:?} behind the slow one"
         );
         slow.await.expect("slow statement task");
+    }
+
+    /// One plugin statement bound with values of every JSON type in turn, on
+    /// one connection: each execution binds its own types, whatever an earlier
+    /// execution of the same SQL on that connection bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_statement_binds_each_json_type_on_one_connection() {
+        use testcontainers::ImageExt;
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        let container = Postgres::default()
+            .with_tag("17-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres host port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+        let mut opt = ConnectOptions::new(url);
+        opt.max_connections(1)
+            .min_connections(1)
+            .sqlx_logging(false);
+        let db = Database::connect(opt).await.expect("connect");
+        db.execute_unprepared("CREATE TABLE kv (v text)")
+            .await
+            .expect("create");
+
+        let sql = "INSERT INTO kv (v) VALUES ($1)";
+        for args in [
+            r#"["a"]"#,
+            "[42]",
+            "[false]",
+            "[1.5]",
+            r#"[{"k":1}]"#,
+            "[null]",
+        ] {
+            let values = parse_args(args, "test-plugin", sql).unwrap();
+            db.execute_raw(plugin_statement(sql, values))
+                .await
+                .unwrap_or_else(|e| panic!("binding {args} after an earlier type: {e}"));
+        }
+        let stored: Vec<Option<String>> = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT v FROM kv ORDER BY ctid",
+            ))
+            .await
+            .expect("select")
+            .iter()
+            .map(|row| row.try_get("", "v").unwrap())
+            .collect();
+        assert_eq!(
+            stored,
+            [
+                Some("a"),
+                Some("42"),
+                Some("false"),
+                Some("1.5"),
+                Some(r#"{"k": 1}"#),
+                None
+            ]
+            .map(|v| v.map(str::to_string))
+        );
     }
 
     #[test]

@@ -44,10 +44,9 @@ impl Params {
     }
 
     fn bind_optional_int(&mut self, value: Option<i32>) -> String {
-        // JSON null is bound as text by sql::parse_args. Keep non-null values
-        // text too: sqlx caches parameter types by SQL, so switching a cached
-        // text parameter to binary integer encoding produces a UTF8 0x00 error.
-        format!("{}::int", self.bind(json!(value.map(|v| v.to_string()))))
+        // JSON null binds as text (sql::parse_args), so the cast types the
+        // parameter for an integer column either way.
+        format!("{}::int", self.bind(json!(value)))
     }
 
     fn into_args(self) -> Vec<JsonValue> {
