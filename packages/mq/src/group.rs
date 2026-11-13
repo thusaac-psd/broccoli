@@ -222,6 +222,47 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
         Ok(out)
     }
 
+    /// Take back up to `max` of this consumer's own pending entries that are
+    /// not in `tracked`: those it held before a restart, or whose read reply
+    /// was lost with a dropped connection. Each counts as a delivery.
+    pub async fn adopt_own(
+        &self,
+        max: usize,
+        tracked: &[EntryRef],
+    ) -> Result<Vec<Delivery<T>>, MqError> {
+        let mut out = Vec::new();
+        for stream in &self.inner.streams {
+            let room = max.saturating_sub(out.len());
+            if room == 0 {
+                break;
+            }
+            let ids: Vec<&str> = tracked
+                .iter()
+                .filter(|e| e.stream == *stream)
+                .map(|e| e.id.as_str())
+                .collect();
+            let ids = &ids;
+            let reply: (RedisTime, Vec<ReclaimedEntry>) = self
+                .run_or_regroup(|mut c| async move {
+                    scripts::ADOPT
+                        .key(&**stream)
+                        .arg(self.inner.group)
+                        .arg(&self.inner.consumer)
+                        .arg(room)
+                        .arg(ids)
+                        .invoke_async(&mut c)
+                        .await
+                })
+                .await?
+                .unwrap_or_default();
+            let now_ms = redis_time_ms(&reply.0);
+            for (id, deliveries, fields) in reply.1 {
+                out.push(decode(stream, id, deliveries, &pairs(fields), now_ms));
+            }
+        }
+        Ok(out)
+    }
+
     /// Reset the idle time of `held` entries this consumer still owns. Returns
     /// the entries another consumer has taken over.
     pub async fn refresh(&self, held: &[EntryRef]) -> Result<Vec<EntryRef>, MqError> {

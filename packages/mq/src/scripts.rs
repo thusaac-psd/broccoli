@@ -67,6 +67,39 @@ return {now, out}
     )
 });
 
+/// Take back this consumer's own pending entries that it no longer tracks:
+/// those it held before it restarted, or whose read reply it lost to a
+/// dropped connection. Entries listed in `ARGV[4..]` are tracked and skipped.
+///
+/// KEYS: stream. ARGV: group, consumer, count, tracked ids...
+/// Returns `{time, entries}` like [`RECLAIM`].
+pub(crate) static ADOPT: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r#"
+local now = redis.call('TIME')
+local tracked = {}
+for i = 4, #ARGV do
+  tracked[ARGV[i]] = true
+end
+local out = {}
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], '-', '+', ARGV[3] + #ARGV - 3, ARGV[2])
+for _, p in ipairs(pending) do
+  if #out >= tonumber(ARGV[3]) then
+    break
+  end
+  if not tracked[p[1]] then
+    local claimed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, p[1])
+    local entry = claimed[1]
+    if entry and entry[2] then
+      table.insert(out, {entry[1], p[4] + 1, entry[2]})
+    end
+  end
+end
+return {now, out}
+"#,
+    )
+});
+
 /// Reset the idle time of entries this consumer still owns, without counting
 /// a delivery. Entries another consumer took are left alone and returned.
 ///

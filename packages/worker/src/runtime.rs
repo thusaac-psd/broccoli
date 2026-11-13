@@ -306,7 +306,9 @@ impl Drop for HeldGuard {
 /// The worker's consume loop, extracted from [`WorkerRuntime::run`] so it can
 /// be driven directly in tests.
 ///
-/// It reads from the worker's private and shared streams with one blocking
+/// It starts by taking back the entries it held before a restart, and does
+/// so again after a failed read, whose reply may have delivered entries that
+/// never arrived. It reads from the worker's private and shared streams with one blocking
 /// read for as many tasks as it has free slots, and every
 /// [`mq::REFRESH_INTERVAL`] reclaims tasks other workers abandoned and drains
 /// dead workers' private streams. Entries it reads beyond its free slots wait
@@ -336,6 +338,7 @@ async fn run_consume_loop<F, Fut>(
     let mut reader = tasks.reader();
     let mut buffer: VecDeque<Delivery<Task>> = VecDeque::new();
     let mut next_reclaim = Instant::now();
+    let mut adopt = true;
 
     while !shutdown.load(Ordering::Relaxed) {
         let permit = tokio::select! {
@@ -350,7 +353,12 @@ async fn run_consume_loop<F, Fut>(
         if buffer.is_empty() {
             // Room for the permit just taken plus every other free one.
             let room = permits.available_permits() + 1;
-            let fetched = if Instant::now() >= next_reclaim {
+            let fetched = if adopt {
+                // Entries this worker owns but does not track: held before
+                // a restart, or read by a request whose reply was lost.
+                adopt = false;
+                tasks.adopt_own(room, &held.snapshot()).await
+            } else if Instant::now() >= next_reclaim {
                 next_reclaim = Instant::now() + mq::REFRESH_INTERVAL;
                 if let Err(e) = mq.drain_dead_private_streams().await {
                     warn!(error = %e, "Draining dead workers' private streams failed");
@@ -368,6 +376,7 @@ async fn run_consume_loop<F, Fut>(
                 }
                 Err(e) => {
                     warn!(error = %e, "Operation consume error; backing off");
+                    adopt = true;
                     drop(permit);
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -624,6 +633,50 @@ mod tests {
             (0, 0),
             "acknowledged tasks are gone"
         );
+    }
+
+    /// A worker that restarts takes back what it held before at once,
+    /// without waiting out the claim threshold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restarted_worker_takes_back_its_own_pending_tasks() {
+        let (mq, _container) = redis_mq().await;
+        let before_crash = mq.task_consumer("w");
+        before_crash.ensure_groups().await.unwrap();
+        mq.publish_task(&task("held-at-crash"), None).await.unwrap();
+        assert_eq!(before_crash.reader().read(1).await.unwrap().len(), 1);
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<u32>();
+        let seen_tx = Arc::new(StdMutex::new(Some(seen_tx)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let join = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            let mq = mq.clone();
+            async move {
+                run_consume_loop(
+                    mq.clone(),
+                    mq.task_consumer("w"),
+                    1,
+                    InFlightCounter::new(),
+                    shutdown,
+                    Duration::from_secs(5),
+                    move |d| {
+                        let seen_tx = Arc::clone(&seen_tx);
+                        async move {
+                            if let Some(tx) = seen_tx.lock().unwrap().take() {
+                                let _ = tx.send(d.deliveries);
+                            }
+                            Settlement::Ack
+                        }
+                    },
+                )
+                .await;
+            }
+        });
+        assert_eq!(seen_rx.await.unwrap(), 2, "taken back as a second delivery");
+        shutdown.store(true, Ordering::Relaxed);
+        join.await.unwrap();
+        let depths = mq.depths(&[mq.topology().shared()]).await.unwrap();
+        assert_eq!((depths[0].unread, depths[0].pending), (0, 0));
     }
 
     /// An abandoned task stays pending under this worker, to be reclaimed.
