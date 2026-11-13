@@ -55,19 +55,22 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
     let one_call = single.elapsed();
 
     let baseline_threads = threads();
-    let ok = Arc::new(AtomicUsize::new(0));
-    let busy = Arc::new(AtomicUsize::new(0));
-    let other = Arc::new(AtomicUsize::new(0));
+    // Shed under overload: a call runs (200), gives up queued at its deadline
+    // (503), or the request's own 60s timeout fires first (408). A hard 500
+    // never happens.
+    let ran = Arc::new(AtomicUsize::new(0));
+    let shed = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
     let flood_started = Instant::now();
     let flood: Vec<_> = (0..calls)
         .map(|_| {
             let (app, route) = (app.clone(), route.clone());
-            let (ok, busy, other) = (ok.clone(), busy.clone(), other.clone());
+            let (ran, shed, failed) = (ran.clone(), shed.clone(), failed.clone());
             tokio::spawn(async move {
                 match app.get_without_token(&route).await.status {
-                    200 => ok.fetch_add(1, Ordering::Relaxed),
-                    503 => busy.fetch_add(1, Ordering::Relaxed),
-                    _ => other.fetch_add(1, Ordering::Relaxed),
+                    200 => ran.fetch_add(1, Ordering::Relaxed),
+                    503 | 408 => shed.fetch_add(1, Ordering::Relaxed),
+                    _ => failed.fetch_add(1, Ordering::Relaxed),
                 };
             })
         })
@@ -76,7 +79,7 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
     let admission = app.state.plugins.executor().admission().clone();
     let tokens = admission.capacity().tokens;
     while admission.queued(CallClass::Interactive) + tokens < calls
-        && ok.load(Ordering::Relaxed) + busy.load(Ordering::Relaxed) == 0
+        && ran.load(Ordering::Relaxed) + shed.load(Ordering::Relaxed) == 0
     {
         tokio::task::yield_now().await;
     }
@@ -105,10 +108,10 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
 
     println!(
         "flood: calls={calls} burn={burn}M one_call={one_call:?} drained_in={drained:?} \
-         ok={} busy_503={} other={}",
-        ok.load(Ordering::Relaxed),
-        busy.load(Ordering::Relaxed),
-        other.load(Ordering::Relaxed),
+         ran={} shed_503_408={} failed={}",
+        ran.load(Ordering::Relaxed),
+        shed.load(Ordering::Relaxed),
+        failed.load(Ordering::Relaxed),
     );
     println!(
         "threads: before={baseline_threads} flood_queued={peak_threads} while_measuring={during}"
@@ -120,5 +123,9 @@ async fn a_slow_plugin_flood_leaves_login_and_reads_responsive() {
         percentile(&mut reads, 0.5),
         percentile(&mut reads, 0.99),
     );
-    assert_eq!(other.load(Ordering::Relaxed), 0, "a flood call failed hard");
+    assert_eq!(
+        failed.load(Ordering::Relaxed),
+        0,
+        "a flood call failed hard (not 200/503/408)"
+    );
 }
