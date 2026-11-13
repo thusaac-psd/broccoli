@@ -77,7 +77,14 @@ pub async fn shared_pg_port() -> u16 {
         .get_or_init(|| async {
             let container = Postgres::default()
                 .with_tag("17-alpine")
-                .with_cmd(["postgres", "-c", "max_connections=500"])
+                // pg_stat_statements lets a test count the SQL a flow runs.
+                .with_cmd([
+                    "postgres",
+                    "-c",
+                    "max_connections=500",
+                    "-c",
+                    "shared_preload_libraries=pg_stat_statements",
+                ])
                 .start()
                 .await
                 .expect("Failed to start PostgreSQL container");
