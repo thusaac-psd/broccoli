@@ -141,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn live_nodes_lists_every_existing_key_of_the_role() {
         use testcontainers::runners::AsyncRunner;
-        let redis = testcontainers_modules::redis::Redis::default()
+        let redis = crate::test_util::redis_image()
             .start()
             .await
             .expect("start redis");

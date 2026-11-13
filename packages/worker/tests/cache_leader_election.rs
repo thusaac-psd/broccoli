@@ -35,7 +35,7 @@ use worker::models::operation::sandbox::mock::MockSandboxManager;
 use worker::models::operation::task_cache::{DatabaseTaskCacheStore, TaskCacheStore};
 
 async fn redis_url() -> (String, testcontainers::ContainerAsync<Redis>) {
-    let container = Redis::default()
+    let container = common::test_util::redis_image()
         .start()
         .await
         .expect("failed to start Redis container");

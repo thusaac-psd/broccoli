@@ -7,6 +7,8 @@ edition = "2024"
 default = []
 sea-orm = ["dep:sea-orm"]
 object-storage = ["dep:rust-s3", "dep:tokio-util", "dep:futures"]
+# A real Redis for tests (`common::test_util`).
+test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
 libc = "0.2"
@@ -39,6 +41,8 @@ sha2.workspace = true
 uuid.workspace = true
 redis.workspace = true
 hostname = "0.4"
+testcontainers = { version = "0.23", optional = true }
+testcontainers-modules = { version = "0.11", features = ["redis"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

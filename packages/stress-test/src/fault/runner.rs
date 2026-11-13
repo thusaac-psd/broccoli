@@ -7,7 +7,6 @@
 //! transcript JSON, and exit non-zero on failure.
 
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
 
 use crate::cli::{
     BurstArgs, CancelStormArgs, FaultArgs, FaultScenario, KillServerRecoveryArgs,
@@ -43,7 +42,7 @@ async fn run_rolling_worker_restart(args: &RollingWorkerRestartArgs) -> anyhow::
         Some(url) => (url, None),
         None => {
             tracing::info!("no --redis-url provided; starting ephemeral Redis testcontainer");
-            let container = Redis::default().start().await?;
+            let container = common::test_util::redis_image().start().await?;
             let port = container.get_host_port_ipv4(6379).await?;
             (format!("redis://127.0.0.1:{port}"), Some(container))
         }
@@ -82,7 +81,7 @@ async fn run_cancel_storm(args: &CancelStormArgs) -> anyhow::Result<u8> {
         Some(url) => (url, None),
         None => {
             tracing::info!("no --redis-url provided; starting ephemeral Redis testcontainer");
-            let container = Redis::default().start().await?;
+            let container = common::test_util::redis_image().start().await?;
             let port = container.get_host_port_ipv4(6379).await?;
             (format!("redis://127.0.0.1:{port}"), Some(container))
         }

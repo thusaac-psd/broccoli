@@ -40,6 +40,7 @@ local-ip-address = "0.6"
 libc = "0.2"
 
 [dev-dependencies]
+common = { workspace = true, features = ["test-util"] }
 hdrhistogram = { workspace = true }
 serial_test = "3"
 tempfile = "3"

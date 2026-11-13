@@ -150,7 +150,6 @@ async fn run_healthcheck() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     async fn set_heartbeat(url: &str, worker_id: &str, hostname: Option<String>) {
         let payload = serde_json::to_value(common::worker::HeartbeatPayload {
@@ -184,7 +183,10 @@ mod tests {
 
     #[tokio::test]
     async fn healthcheck_requires_this_workers_live_heartbeat() {
-        let container = Redis::default().start().await.expect("start redis");
+        let container = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
         let port = container.get_host_port_ipv4(6379).await.unwrap();
         let url = format!("redis://127.0.0.1:{port}");
         let local = hostname::get().ok().and_then(|h| h.into_string().ok());

@@ -32,7 +32,6 @@ use redis::AsyncCommands;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use server::entity::{problem, submission, submission_judgement, user};
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
 
 use crate::common::{SpawnOptions, TestApp, routes};
 
@@ -442,7 +441,7 @@ async fn seed_live_worker_heartbeat(redis_url: &str, worker_id: &str) {
 
 #[tokio::test]
 async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
-    let redis = Redis::default()
+    let redis = common::test_util::redis_image()
         .start()
         .await
         .expect("failed to start Redis container");

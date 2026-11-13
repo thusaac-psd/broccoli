@@ -20,15 +20,13 @@ use server::registry::{OperationWaiter, OperationWaiters};
 use server::services::operation_batch::{
     OperationTaskPublisher, next_operation_result, start_operation_batch,
 };
-use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::redis::Redis;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 async fn redis() -> (testcontainers::ContainerAsync<Redis>, String) {
-    let redis = Redis::default()
-        .with_tag("7-alpine")
+    let redis = common::test_util::redis_image()
         .start()
         .await
         .expect("failed to start Redis container");

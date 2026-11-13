@@ -402,7 +402,6 @@ mod tests {
     use common::liveness::NodeRole;
     use common::worker::Executor;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use testcontainers::ImageExt;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
@@ -456,8 +455,7 @@ mod tests {
     /// A worker consumer against a fresh Redis in which server `SERVER` is
     /// live and has its reply stream.
     async fn harness() -> Harness {
-        let redis = Redis::default()
-            .with_tag("7-alpine")
+        let redis = common::test_util::redis_image()
             .start()
             .await
             .expect("redis");

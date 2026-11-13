@@ -28,7 +28,7 @@ futures = { workspace = true }
 
 # fault::* dependencies (merged from packages/fault-harness/).
 async-trait = { workspace = true }
-common = { workspace = true }
+common = { workspace = true, features = ["test-util"] }
 redis = { workspace = true }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid"] }
 testcontainers = "0.23"

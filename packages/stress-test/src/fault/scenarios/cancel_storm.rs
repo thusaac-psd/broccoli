@@ -344,12 +344,11 @@ fn phase_fields(p: &PhaseTotals) -> Vec<(String, serde_json::Value)> {
 mod tests {
     use super::*;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     #[tokio::test]
     #[ignore = "requires Docker to start a Redis testcontainer"]
     async fn cancel_storm_validates_hit_miss_and_toggle() {
-        let redis = Redis::default()
+        let redis = common::test_util::redis_image()
             .start()
             .await
             .expect("failed to start Redis container");

@@ -686,7 +686,10 @@ mod tests {
     }
 
     async fn redis() -> (redis::Client, testcontainers::ContainerAsync<Redis>) {
-        let container = Redis::default().start().await.expect("redis");
+        let container = crate::test_util::redis_image()
+            .start()
+            .await
+            .expect("redis");
         let port = container.get_host_port_ipv4(6379).await.expect("port");
         let client = redis::Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
         (client, container)

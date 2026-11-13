@@ -8,45 +8,13 @@ use common::liveness::{NodeRole, TTL};
 use common::worker::{Task, TaskReply, TaskResult};
 use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
 use mq::{CLAIM_IDLE, Delivery, MAX_DELIVERIES, Mq, ReplyOutcome, Route, Settled};
-use testcontainers::core::ContainerPort;
+use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, ImageExt};
 use testcontainers_modules::redis::Redis;
 
 const BASE: &str = "ops";
 
-async fn redis() -> (ContainerAsync<Redis>, String) {
-    let container = Redis::default()
-        .with_tag("7-alpine")
-        .start()
-        .await
-        .expect("start redis");
-    let port = container.get_host_port_ipv4(6379).await.expect("port");
-    (container, format!("redis://127.0.0.1:{port}"))
-}
-
-/// Redis on a fixed host port, so a restarted container keeps its URL.
-async fn redis_on_fixed_port() -> (ContainerAsync<Redis>, String) {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let container = Redis::default()
-        .with_tag("7-alpine")
-        .with_mapped_port(port, ContainerPort::Tcp(6379))
-        .with_cmd([
-            "redis-server",
-            "--appendonly",
-            "yes",
-            "--appendfsync",
-            "always",
-        ])
-        .start()
-        .await
-        .expect("start redis");
-    (container, format!("redis://127.0.0.1:{port}"))
-}
+use common::test_util::{redis, restartable_redis};
 
 async fn admin(url: &str) -> redis::aio::MultiplexedConnection {
     redis::Client::open(url)
@@ -630,7 +598,7 @@ async fn requeued_entries_go_back_to_their_stream() {
 /// neither lost nor duplicated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_redis_restart_mid_flight_loses_nothing() {
-    let (container, url) = redis_on_fixed_port().await;
+    let (container, url) = restartable_redis().await;
     let mq = Mq::connect(&url, BASE).await.unwrap();
     let w1 = mq.task_consumer("w1");
     w1.ensure_groups().await.unwrap();

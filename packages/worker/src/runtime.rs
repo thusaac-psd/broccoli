@@ -518,7 +518,6 @@ async fn drain_in_flight(in_flight: &InFlightCounter, timeout: Duration) {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use testcontainers::ImageExt;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::redis::Redis;
 
@@ -535,8 +534,7 @@ mod tests {
     }
 
     async fn redis_mq() -> (Mq, testcontainers::ContainerAsync<Redis>) {
-        let container = Redis::default()
-            .with_tag("7-alpine")
+        let container = common::test_util::redis_image()
             .start()
             .await
             .expect("start redis");
@@ -822,21 +820,8 @@ mod tests {
     /// the finished task is acknowledged once Redis is back.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_settle_is_retried_until_it_lands() {
-        use testcontainers::core::ContainerPort;
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let container = Redis::default()
-            .with_tag("7-alpine")
-            .with_mapped_port(port, ContainerPort::Tcp(6379))
-            .start()
-            .await
-            .expect("start redis");
-        let mq = Mq::connect(&format!("redis://127.0.0.1:{port}"), "ops")
-            .await
-            .unwrap();
+        let (container, url) = common::test_util::restartable_redis().await;
+        let mq = Mq::connect(&url, "ops").await.unwrap();
         let tasks = mq.task_consumer("w");
         tasks.ensure_groups().await.unwrap();
         mq.publish_task(&task("done"), None).await.unwrap();

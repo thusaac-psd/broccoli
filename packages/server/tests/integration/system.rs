@@ -96,7 +96,6 @@ mod worker_liveness {
     use common::worker::HeartbeatPayload;
     use redis::AsyncCommands;
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     async fn write_heartbeat(conn: &mut redis::aio::MultiplexedConnection, id: &str, ttl: u64) {
         // The worker's clock is an hour behind the server's.
@@ -129,7 +128,10 @@ mod worker_liveness {
 
     #[tokio::test]
     async fn a_fresh_heartbeat_is_live_whatever_the_worker_clock_says() {
-        let redis = Redis::default().start().await.expect("start redis");
+        let redis = common::test_util::redis_image()
+            .start()
+            .await
+            .expect("start redis");
         let port = redis.get_host_port_ipv4(6379).await.unwrap();
         let url = format!("redis://127.0.0.1:{port}");
         let mut conn = redis::Client::open(url.as_str())
