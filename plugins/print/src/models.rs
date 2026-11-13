@@ -2,25 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod status {
-    pub const PENDING_APPROVAL: &str = "pending_approval";
-    pub const PENDING: &str = "pending";
-    pub const CLAIMED: &str = "claimed";
-    pub const PRINTING: &str = "printing";
-    pub const DONE: &str = "done";
-    pub const FAILED: &str = "failed";
-    pub const CANCELED: &str = "canceled";
-
-    /// Statuses a station may report back.
-    pub const STATION_SETTABLE: &[&str] = &[PRINTING, DONE, FAILED];
-
-    pub fn is_valid(s: &str) -> bool {
-        matches!(
-            s,
-            PENDING_APPROVAL | PENDING | CLAIMED | PRINTING | DONE | FAILED | CANCELED
-        )
-    }
-}
+use crate::lifecycle::{JobStatus, StationReport};
 
 // Mirror the client's default rendering so the server max_pages guard predicts
 // the real page count. The client still enforces its own hard limit.
@@ -77,9 +59,9 @@ pub struct ArbitraryJobRequest {
     pub source: String,
 }
 
+/// A station's check-in. The station's name comes from its credential.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HeartbeatRequest {
-    pub station: String,
     #[serde(default)]
     pub printers: Vec<String>,
     #[serde(default)]
@@ -90,16 +72,16 @@ pub struct HeartbeatRequest {
     pub queue_seen: Option<i32>,
 }
 
+/// The claiming station comes from its credential.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimRequest {
-    pub station: String,
     #[serde(default)]
     pub printer: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatusRequest {
-    pub status: String,
+    pub status: StationReport,
     #[serde(default)]
     pub pages: Option<i32>,
     #[serde(default)]
@@ -122,7 +104,7 @@ pub struct JobRow {
     pub pages: Option<i32>,
     pub location: Option<String>,
     pub target_printer: Option<String>,
-    pub status: String,
+    pub status: JobStatus,
     pub claimed_by: Option<String>,
     pub claimed_printer: Option<String>,
     pub error: Option<String>,
@@ -195,14 +177,5 @@ mod tests {
         assert_eq!(problem_letter(25), "Z");
         assert_eq!(problem_letter(26), "AA");
         assert_eq!(problem_letter(27), "AB");
-    }
-
-    #[test]
-    fn status_validation() {
-        assert!(status::is_valid(status::PENDING));
-        assert!(status::is_valid(status::DONE));
-        assert!(!status::is_valid("bogus"));
-        assert!(status::STATION_SETTABLE.contains(&status::PRINTING));
-        assert!(!status::STATION_SETTABLE.contains(&status::PENDING));
     }
 }

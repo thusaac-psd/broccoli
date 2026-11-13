@@ -176,7 +176,10 @@ pub async fn create_submission(
         None => problem.default_contest_type.clone(),
     };
 
+    let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
+        attempt_id: attempt_id.to_string(),
+        attempt_timeout_ms: dispatch::ATTEMPT_TIMEOUT.as_millis() as u64,
         user_id: auth_user.user_id,
         problem_id,
         contest_id: None,
@@ -193,7 +196,6 @@ pub async fn create_submission(
     .await?;
     dispatch_before_submission_hooks(&state, &hook_event, Some(&enabled_plugins), None).await?;
 
-    let now = Utc::now();
     let language = payload.language.trim().to_string();
     let new_submission = submission::ActiveModel {
         files: Set(files_to_json(&payload.files)),
@@ -202,7 +204,7 @@ pub async fn create_submission(
         problem_id: Set(problem_id),
         contest_id: Set(None),
         contest_type: Set(contest_type),
-        created_at: Set(now),
+        attempt_id: Set(Some(attempt_id)),
         ..Default::default()
     };
 
@@ -769,7 +771,10 @@ pub async fn create_contest_submission(
     let admission_owner = handler
         .submission_admission
         .then_some(handler.plugin_id.as_str());
+    let attempt_id = uuid::Uuid::new_v4();
     let hook_event = BeforeSubmissionEvent {
+        attempt_id: attempt_id.to_string(),
+        attempt_timeout_ms: dispatch::ATTEMPT_TIMEOUT.as_millis() as u64,
         user_id: auth_user.user_id,
         problem_id,
         contest_id: Some(contest_id),
@@ -793,7 +798,7 @@ pub async fn create_contest_submission(
         problem_id: Set(problem_id),
         contest_id: Set(Some(contest_id)),
         contest_type: Set(contest_type),
-        created_at: Set(now),
+        attempt_id: Set(Some(attempt_id)),
         ..Default::default()
     };
 

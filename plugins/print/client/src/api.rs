@@ -11,13 +11,10 @@ use crate::config::ServerCfg;
 
 const BASE_PATH: &str = "/api/v1/p/print/api/plugins/print";
 
-// `contest_id` and `location` are part of the contract but unused for now.
+/// A claimable job, with the fields the station renders and routes by.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Job {
     pub id: i64,
-    #[serde(default)]
-    pub contest_id: Option<i64>,
     #[serde(default)]
     pub username: String,
     #[serde(default)]
@@ -30,8 +27,6 @@ pub struct Job {
     pub filename: String,
     #[serde(default)]
     pub source: String,
-    #[serde(default)]
-    pub location: Option<String>,
     #[serde(default)]
     pub target_printer: Option<String>,
     #[serde(default)]
@@ -77,15 +72,14 @@ impl ServerClient {
         format!("{}{path}", self.base)
     }
 
+    /// The server names this station after the credential in `auth`.
     pub fn heartbeat(
         &self,
-        station: &str,
         printers: &[String],
         location: Option<&str>,
         queue_seen: i64,
     ) -> Result<()> {
         let body = json!({
-            "station": station,
             "printers": printers,
             "location": location,
             "version": env!("CARGO_PKG_VERSION"),
@@ -114,8 +108,8 @@ impl ServerClient {
     }
 
     /// A 409 means another station won the claim.
-    pub fn claim(&self, id: i64, station: &str, printer: &str) -> Result<ClaimOutcome> {
-        let body = json!({ "station": station, "printer": printer });
+    pub fn claim(&self, id: i64, printer: &str) -> Result<ClaimOutcome> {
+        let body = json!({ "printer": printer });
         match self
             .agent
             .post(&self.url(&format!("/stations/jobs/{id}/claim")))

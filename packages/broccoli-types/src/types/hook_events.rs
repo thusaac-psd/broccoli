@@ -9,6 +9,15 @@ pub trait HookEvent: Serialize + for<'de> Deserialize<'de> {
 /// request that will be inserted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeforeSubmissionEvent {
+    /// Unique to this submission attempt. The submission the attempt creates
+    /// stores it in `submission.attempt_id`, so a hook can tell whether what it
+    /// reserved at admission has become a committed submission. An attempt
+    /// rejected by a hook, or whose insert fails, leaves no row with it.
+    pub attempt_id: String,
+    /// How long, from this dispatch, the attempt can stay unresolved. The host
+    /// inserts no submission for it afterwards, so a hook may release what it
+    /// reserved for an attempt once this has passed.
+    pub attempt_timeout_ms: u64,
     pub user_id: i32,
     pub problem_id: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +68,8 @@ mod tests {
     #[test]
     fn before_submission_event_serializes_and_deserializes_with_all_fields() {
         let event = BeforeSubmissionEvent {
+            attempt_id: "attempt-1".into(),
+            attempt_timeout_ms: 60_000,
             user_id: 5,
             problem_id: 12,
             contest_id: Some(3),
@@ -77,6 +88,8 @@ mod tests {
     #[test]
     fn before_submission_event_omits_contest_id_when_none() {
         let event = BeforeSubmissionEvent {
+            attempt_id: "attempt-1".into(),
+            attempt_timeout_ms: 60_000,
             user_id: 1,
             problem_id: 2,
             contest_id: None,

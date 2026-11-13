@@ -1,4 +1,5 @@
-//! Idempotent schema bootstrap so the plugin needs no separate migration step.
+//! Schema bootstrap run by `init` on every replica, so the plugin needs no
+//! separate migration step.
 
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::error::SdkError;
@@ -44,8 +45,5 @@ const STATEMENTS: &[&str] = &[
 ];
 
 pub fn create_tables(host: &Host) -> Result<(), SdkError> {
-    for stmt in STATEMENTS {
-        host.db.execute(stmt)?;
-    }
-    Ok(())
+    host.db.ensure_schema("print", STATEMENTS)
 }

@@ -20,6 +20,12 @@ pub struct Model {
     #[sea_orm(default_value = "ioi")]
     pub contest_type: String,
 
+    /// The `attempt_id` of the `before_submission` event that admitted this
+    /// submission. Hooks that reserve something per attempt look it up to see
+    /// whether the attempt has committed.
+    #[sea_orm(unique, nullable)]
+    pub attempt_id: Option<Uuid>,
+
     pub status: SubmissionStatus,
     #[sea_orm(column_type = "Text", nullable)]
     pub verdict: Option<Verdict>,
@@ -67,6 +73,9 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub system_error_retries: i32,
 
+    /// Stamped by the database clock on insert, so plugins compare it with
+    /// `NOW()` on one clock.
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
     pub judged_at: Option<DateTimeUtc>,
 }

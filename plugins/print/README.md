@@ -47,13 +47,15 @@ In the contest's admin config, open **Printing**:
   rejected at submit time.
 - **Header banner**: optional text shown on every printout (e.g. the contest
   name).
-- **Station tokens**: opaque secrets that authorize print stations. Add one per
-  deployment (or per contest). A station presents it as
-  `Authorization: PrintStation <token>`.
+- **Print stations**: one entry per station, a name and an opaque token. A
+  station presents its token as `Authorization: PrintStation <token>`, and the
+  server records its claims, heartbeats and reports under that entry's name, so
+  give every station its own token.
 
-A **plugin-scoped** (global) station token authorizes a station for every
-contest on the deployment; a **contest-scoped** token is limited to that
-contest.
+A **plugin-scoped** (global) station serves every contest on the deployment; a
+**contest-scoped** station is limited to that contest. The queue shows a station
+qualified by where it is configured, `global/<name>` or `contest-<id>/<name>`,
+so a contest's station can never act as a global one of the same name.
 
 ## Run a print station
 
@@ -122,7 +124,25 @@ emoji) print as a missing-glyph box rather than vanishing.
 
 ## Job lifecycle
 
-`pending_approval` → `pending` → `claimed` → `printing` → `done` / `failed`.
-Staff can **approve**, **reprint** (re-queue), or **cancel** from the dashboard.
-Concurrent stations are serialized by an atomic SQL claim, so a job is never
-printed twice.
+`pending_approval` → `pending` → `claimed` → `printing` → `done` / `failed`, and
+`canceled` from any state before `done`. The moves are:
+
+| Move     | Who                    | From                                    | To         |
+| -------- | ---------------------- | --------------------------------------- | ---------- |
+| approve  | staff                  | `pending_approval`                      | `pending`  |
+| cancel   | staff                  | any state except `done` / `canceled`    | `canceled` |
+| reprint  | staff                  | `done`, `failed`                        | `pending`  |
+| pin      | staff                  | `pending`, `done`, `failed`             | `pending`  |
+| claim    | any station            | `pending`, or a claim older than 10 min | `claimed`  |
+| printing | the station holding it | `claimed`                               | `printing` |
+| done     | the station holding it | `claimed`, `printing`                   | `done`     |
+| failed   | the station holding it | `claimed`, `printing`                   | `failed`   |
+
+A move from any other state answers 409. Concurrent stations are serialized by
+an atomic SQL claim, so a job is never printed twice. A station that crashes
+while holding a job loses it after the 10-minute claim lease: another station
+may then claim it, after which the first station's reports are refused. Until
+that happens, the holding station may still report however late. The client
+reports `printing` before it prints and does not print a job whose `printing`
+report is refused. Requeueing and claiming clear the previous run's claim, page
+count and error.

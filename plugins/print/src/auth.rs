@@ -4,12 +4,18 @@
 use broccoli_server_sdk::Host;
 use broccoli_server_sdk::prelude::*;
 
-use crate::config;
+use crate::config::{self, StationCredential};
 
 const SCHEME: &str = "PrintStation ";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// An authenticated station. `name` comes from the credential that matched,
+/// never from the request, so a station can only act as itself. It is
+/// qualified by the config scope that lists the credential (`global/<name>` or
+/// `contest-<id>/<name>`), so a contest's stations can never take the
+/// identity of a deployment-wide station or another contest's.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StationAuth {
+    pub name: String,
     /// None grants every contest. Some(id) restricts to one contest.
     pub contest_filter: Option<i32>,
 }
@@ -36,24 +42,28 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Never short-circuits, so the matching position stays unobservable.
-fn token_in(token: &str, allowed: &[String]) -> bool {
-    let mut found = false;
-    for t in allowed {
-        found |= constant_time_eq(t.as_bytes(), token.as_bytes());
+/// The station whose token matches. Compares against every credential without
+/// short-circuiting, so the matching position stays unobservable.
+fn station_for<'a>(token: &str, stations: &'a [StationCredential]) -> Option<&'a str> {
+    let mut found = None;
+    for s in stations {
+        if constant_time_eq(s.token.as_bytes(), token.as_bytes()) && found.is_none() {
+            found = Some(s.name.as_str());
+        }
     }
     found
 }
 
-/// A global token passes outright. Otherwise the request must name a
-/// `contest_id` whose tokens include the presented one.
+/// A global credential passes outright. Otherwise the request must name a
+/// `contest_id` whose credentials include the presented token.
 pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<StationAuth, ApiError> {
     let token = extract_token(req)
         .ok_or_else(|| PluginHttpResponse::error(401, "Missing print-station token"))?;
 
     let global = config::load_global_config(host);
-    if token_in(&token, &global.station_tokens) {
+    if let Some(name) = station_for(&token, &global.stations) {
         return Ok(StationAuth {
+            name: format!("global/{name}"),
             contest_filter: None,
         });
     }
@@ -64,8 +74,9 @@ pub fn authenticate_station(host: &Host, req: &PluginHttpRequest) -> Result<Stat
         .and_then(|s| s.parse::<i32>().ok())
     {
         let contest = config::load_contest_config(host, contest_id);
-        if token_in(&token, &contest.station_tokens) {
+        if let Some(name) = station_for(&token, &contest.stations) {
             return Ok(StationAuth {
+                name: format!("contest-{contest_id}/{name}"),
                 contest_filter: Some(contest_id),
             });
         }
@@ -119,11 +130,12 @@ mod tests {
             "plugin",
             "",
             config::NAMESPACE,
-            json!({ "station_tokens": ["G"] }),
+            json!({ "stations": [{ "name": "hall", "token": "G" }] }),
         );
         let req = req_with_auth(Some("PrintStation G"), None);
         let auth = authenticate_station(&host, &req).unwrap();
         assert_eq!(auth.contest_filter, None);
+        assert_eq!(auth.name, "global/hall");
     }
 
     #[test]
@@ -133,11 +145,12 @@ mod tests {
             "contest",
             "7",
             config::NAMESPACE,
-            json!({ "station_tokens": ["C7"] }),
+            json!({ "stations": [{ "name": "room-7", "token": "C7" }] }),
         );
         let req = req_with_auth(Some("PrintStation C7"), Some("7"));
         let auth = authenticate_station(&host, &req).unwrap();
         assert_eq!(auth.contest_filter, Some(7));
+        assert_eq!(auth.name, "contest-7/room-7");
     }
 
     #[test]
@@ -149,12 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn token_in_finds_match_anywhere_in_list() {
-        let allowed = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        assert!(token_in("a", &allowed));
-        assert!(token_in("c", &allowed));
-        assert!(!token_in("d", &allowed));
-        assert!(!token_in("", &allowed));
+    fn each_token_identifies_its_own_station() {
+        let stations = ["a", "b", "c"]
+            .map(|n| StationCredential {
+                name: format!("station-{n}"),
+                token: n.to_string(),
+            })
+            .to_vec();
+        assert_eq!(station_for("a", &stations), Some("station-a"));
+        assert_eq!(station_for("c", &stations), Some("station-c"));
+        assert_eq!(station_for("d", &stations), None);
+        assert_eq!(station_for("", &stations), None);
     }
 
     #[test]
@@ -164,7 +182,7 @@ mod tests {
             "plugin",
             "",
             config::NAMESPACE,
-            json!({ "station_tokens": ["G"] }),
+            json!({ "stations": [{ "name": "hall", "token": "G" }] }),
         );
         let req = req_with_auth(Some("PrintStation nope"), Some("7"));
         let err = authenticate_station(&host, &req).unwrap_err();
@@ -177,5 +195,18 @@ mod tests {
         let req = req_with_auth(None, None);
         let err = authenticate_station(&host, &req).unwrap_err();
         assert_eq!(err.into_response().status, 401);
+    }
+
+    #[test]
+    fn a_contest_station_never_shares_a_global_station_identity() {
+        let host = Host::mock();
+        let hall = |token: &str| json!({ "stations": [{ "name": "hall", "token": token }] });
+        host.config.seed("plugin", "", config::NAMESPACE, hall("G"));
+        host.config
+            .seed("contest", "7", config::NAMESPACE, hall("C7"));
+        let global = authenticate_station(&host, &req_with_auth(Some("PrintStation G"), None));
+        let contest =
+            authenticate_station(&host, &req_with_auth(Some("PrintStation C7"), Some("7")));
+        assert_ne!(global.unwrap().name, contest.unwrap().name);
     }
 }

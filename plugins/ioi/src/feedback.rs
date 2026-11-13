@@ -46,16 +46,10 @@ pub(crate) fn viewer_has_token_feedback_for_submission(
 
 // -- Submission visibility decisions -------------------------------------
 //
-// Replaces the old `filter_submission_for_viewer` host-fn hook, which handed
-// the host a plugin-authored submission JSON blob after only a shape check --
-// a plugin could alter a verdict, a score, or otherwise author content by
-// WRITING into it. A field mask can only blank a value, never author one:
-// `subtask_scores`/`total_only` used to WRITE `verdict: "Skipped"` and
-// `score: 0.0` into every element of `test_case_results`. The mask below
-// NULLS those two fields instead; the IOI frontend renders a null verdict /
-// null score exactly like the old `"Skipped"` / `0.0` did (see
-// `IoiSubmissionResult.tsx`). Equivalence is defined at the rendered level,
-// not the wire level.
+// Visibility is a field mask, which can only blank a value, never author one.
+// At the `subtask_scores`/`total_only` levels the mask nulls `verdict` and
+// `score` in every element of `test_case_results`; the IOI frontend renders a
+// null verdict / null score as a skipped case (see `IoiSubmissionResult.tsx`).
 //
 // Invoked by the host's visibility kernel (`[[server.queries]] topic =
 // "visibility"`) for every resource in a query batch, for EVERY plugin
@@ -70,14 +64,11 @@ pub(crate) fn viewer_has_token_feedback_for_submission(
 // Allow), IOI narrows even the OWNER's own view by `feedback_level` -- a
 // contestant does not automatically see their own per-test-case results
 // while the configured level withholds them. A spent per-submission token
-// overrides this and unlocks Allow for that one submission, mirroring the
-// old `apply_feedback_filter`'s tokened-owner bypass.
+// overrides this and unlocks Allow for that one submission.
 
-/// Field mask covering every per-test-case field the old
-/// `redact_submission_for_level` used to blank/overwrite for
-/// `subtask_scores`/`total_only`. `verdict`/`score` are now NULLED (never
-/// authored as `"Skipped"`/`0.0`); the frontend restores the equivalent
-/// rendering. Uses the `*` wildcard (Task 18 grammar) to reach every element
+/// Field mask covering every per-test-case field withheld at
+/// `subtask_scores`/`total_only`: nine fields, `verdict`/`score` among them,
+/// all nulled. Uses the `*` wildcard to reach every element
 /// of `result.test_case_results` with one path per field, rather than one
 /// path per test case.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -95,8 +86,8 @@ fn per_test_case_mask_fields() -> Vec<String> {
     ]
 }
 
-/// Field mask covering every field the old `redact_submission_for_level`
-/// blanked for `FeedbackLevel::None`, unioned across every host DTO shape it
+/// Field mask covering every field withheld at `FeedbackLevel::None`, unioned
+/// across every host DTO shape it
 /// can apply to: list items carry verdict/score/time_used/memory_used at the
 /// top level and have no `result` key at all; detail responses nest the same
 /// four fields, plus compile_output/error_message/test_case_results, under
@@ -109,8 +100,7 @@ fn per_test_case_mask_fields() -> Vec<String> {
 /// anything -- so one union list is safe for all three shapes: whichever
 /// shape the host happens to be rendering, only the paths that actually
 /// exist in THAT shape are blanked. Blanking the whole
-/// `result.test_case_results` array produces `[]`, the same empty array the
-/// old code hand-wrote.
+/// `result.test_case_results` array produces `[]`.
 #[cfg(any(target_arch = "wasm32", test))]
 fn none_level_mask_fields() -> Vec<String> {
     vec![
@@ -131,9 +121,7 @@ fn none_level_mask_fields() -> Vec<String> {
 
 /// The mask for a given `FeedbackLevel`. `Full` blanks nothing, so it is
 /// `Allow` -- the identity decision, not a `Redact` with an empty field list.
-/// `SubtaskScores` and `TotalOnly` are byte-identical, exactly like the old
-/// `redact_submission_for_level`'s `FeedbackLevel::SubtaskScores |
-/// FeedbackLevel::TotalOnly` arm: the distinction between the two levels is
+/// `SubtaskScores` and `TotalOnly` are byte-identical: the distinction between the two levels is
 /// enforced by IOI's own `/subtask-scores` route (`api::
 /// handle_submission_subtask_scores`), not by this generic submission-DTO
 /// mask.
@@ -176,22 +164,13 @@ pub(crate) fn decide_visibility_decisions(
     // Admin / view-all / organiser bypass, for the whole batch at once -- it
     // does not depend on any individual resource.
     //
-    // `CONTEST_MANAGE` is checked here alongside the pre-existing
-    // `SUBMISSION_VIEW_ALL` check. This is a deliberate BEHAVIOUR CHANGE,
-    // not a regression fix: `git show 3dde5d42:plugins/ioi/src/feedback.rs`
-    // confirms the pre-kernel `apply_feedback_filter`'s "Admin / view-all
-    // bypass" also checked only `SUBMISSION_VIEW_ALL`, so the kernel
-    // migration ported this inconsistency verbatim rather than introducing
-    // it. It contradicted `can_view_privileged_submission_feedback` (top of
-    // this file) and `api.rs`'s scoreboard ranking, which DO check
-    // `CONTEST_MANAGE` so organisers see full data, and mirrors the same
-    // Task 17 fix already applied to ICPC's scoreboard-freeze decision. A
-    // viewer holding `contest:manage` without `submission:view_all` -- a
-    // plausible problem-setter or judge role -- was wrongly redacted here;
-    // see
+    // Both `SUBMISSION_VIEW_ALL` and `CONTEST_MANAGE` bypass, matching
+    // `can_view_privileged_submission_feedback` (top of this file), `api.rs`'s
+    // scoreboard ranking and ICPC's scoreboard-freeze decision: an organiser
+    // holding `contest:manage` without `submission:view_all` (a problem-setter
+    // or judge role) sees full data. See
     // `ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judgement`
-    // in `packages/server/tests/e2e/plugins/ioi.rs` for the viewer that
-    // isolates this branch from the `SUBMISSION_VIEW_ALL` one.
+    // in `packages/server/tests/e2e/plugins/ioi.rs`.
     //
     // Note: this bypass does not change host-level reachability.
     // `decide_submission` (host rule) does not bypass on `CONTEST_MANAGE`,
@@ -243,19 +222,17 @@ pub(crate) fn decide_visibility_decisions(
     // filtered in the WHERE clause) so a submission belonging to a non-IOI
     // contest can be told apart from a genuine contest/submission data
     // mismatch: the former must Allow (this plugin has no opinion on
-    // non-IOI contests), the latter fails hidden like the old per-submission
-    // query's "contest row missing" branch did.
+    // non-IOI contests), the latter fails hidden.
     let mut p = Params::new();
     let placeholders: Vec<String> = submission_ids.iter().map(|id| p.bind(*id)).collect();
     let sql = format!(
         "SELECT s.id AS submission_id, s.user_id, c.contest_type, \
-                CASE WHEN NOW() < c.start_time THEN 'before' \
-                     WHEN NOW() > c.end_time THEN 'after' \
-                     ELSE 'during' END AS phase \
+                {phase} AS phase \
          FROM submission s \
          JOIN contest c ON c.id = s.contest_id \
          WHERE s.id IN ({})",
-        placeholders.join(",")
+        placeholders.join(","),
+        phase = broccoli_server_sdk::contest::phase_sql("c"),
     );
     let rows: Vec<SubmissionVisibilityRow> = host.db.query_with_args(&sql, &p.into_args())?;
     let rows_by_id: HashMap<i32, SubmissionVisibilityRow> =
@@ -342,8 +319,7 @@ pub(crate) fn decide_visibility_decisions(
                 return mask_for_level(config.feedback_level);
             }
 
-            // Peer: scoreboard-integrity gate (mirrors the old filter's
-            // rationale). When the full scoreboard is not visible to a
+            // Peer: scoreboard-integrity gate. When the full scoreboard is not visible to a
             // non-owner in this phase -- e.g. the default `admins_only`
             // during the live contest -- a peer must not read another
             // contestant's verdict/score/per-test-case results through the
@@ -365,10 +341,7 @@ mod visibility_tests {
     use super::*;
 
     #[test]
-    fn per_test_case_mask_covers_every_field_the_old_code_wrote_or_blanked() {
-        // Old `redact_submission_for_level`'s SubtaskScores/TotalOnly arm:
-        // verdict + score (overwritten with "Skipped"/0.0, now nulled) and
-        // seven more fields (nulled then, nulled now).
+    fn per_test_case_mask_covers_every_withheld_per_test_case_field() {
         let fields = per_test_case_mask_fields();
         for f in [
             "result.test_case_results.*.verdict",
@@ -383,7 +356,7 @@ mod visibility_tests {
         ] {
             assert!(fields.contains(&f.to_string()), "missing field {f}");
         }
-        assert_eq!(fields.len(), 9, "no extra fields beyond the old write set");
+        assert_eq!(fields.len(), 9, "no fields beyond the withheld set");
     }
 
     #[test]
@@ -422,10 +395,9 @@ mod visibility_tests {
 
     #[test]
     fn mask_for_subtask_scores_and_total_only_are_byte_identical() {
-        // Mirrors the old code's `FeedbackLevel::SubtaskScores |
-        // FeedbackLevel::TotalOnly` single match arm: the two levels produce
-        // exactly the same submission-DTO redaction; the difference between
-        // them lives entirely in the plugin's own `/subtask-scores` route.
+        // The two levels produce exactly the same submission-DTO redaction;
+        // the difference between them lives entirely in the plugin's own
+        // `/subtask-scores` route.
         let a = mask_for_level(FeedbackLevel::SubtaskScores);
         let b = mask_for_level(FeedbackLevel::TotalOnly);
         match (a, b) {
@@ -592,8 +564,7 @@ mod visibility_tests {
 
     #[test]
     fn decide_visibility_fails_hidden_on_contest_submission_mismatch() {
-        // No row at all for the submission id: the old code's "contest row
-        // missing -- fail hidden rather than leak" branch.
+        // No row at all for the submission id: fail hidden rather than leak.
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([]));
 
@@ -621,17 +592,11 @@ mod visibility_tests {
     #[test]
     fn decide_visibility_fails_hidden_even_for_a_viewer_who_would_be_the_owner_when_the_row_is_missing()
      {
-        // Deliberate, safe-direction ordering deviation from the old code
-        // (mirrors ICPC's `decide_visibility`): the old
-        // `filter_submission_for_viewer` was handed the submission's own
-        // JSON (already carrying its `user_id`) and checked ownership FIRST.
-        // `decide_visibility` is handed only a resource id and has no
-        // `user_id` to compare until AFTER the batched query returns a row.
-        // When the query returns no row at all, there is nothing to compare
-        // the viewer against, so the missing-row fail-hidden branch runs
-        // unconditionally -- even for a viewer who would in fact be the
-        // submission's owner if a row existed. This can only over-hide
-        // (Redact), never leak (Allow).
+        // `decide_visibility` is handed only a resource id, so it has no
+        // `user_id` to compare until the batched query returns a row. With no
+        // row there is nothing to compare the viewer against, and the
+        // missing-row branch fails hidden even for a viewer who would be the
+        // owner. This can only over-hide (Redact), never leak (Allow).
         let host = Host::mock();
         host.db.queue_query_result(serde_json::json!([]));
 
@@ -770,7 +735,7 @@ mod visibility_tests {
         host.storage
             .set(&[(
                 "tokens:10:2",
-                &serde_json::json!({ "used": 1, "tokened_submission_ids": [7] }).to_string(),
+                &serde_json::json!({ "tokened_submission_ids": [7] }).to_string(),
             )])
             .unwrap();
 
@@ -794,7 +759,7 @@ mod visibility_tests {
         host.storage
             .set(&[(
                 "tokens:10:2",
-                &serde_json::json!({ "used": 1, "tokened_submission_ids": [999] }).to_string(),
+                &serde_json::json!({ "tokened_submission_ids": [999] }).to_string(),
             )])
             .unwrap();
 

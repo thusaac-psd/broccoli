@@ -775,6 +775,8 @@ mod tests {
     #[tokio::test]
     async fn admission_effects_can_only_be_created_or_changed_by_the_contest_owner() {
         let event = broccoli_server_sdk::types::BeforeSubmissionEvent {
+            attempt_id: "attempt-1".into(),
+            attempt_timeout_ms: 60_000,
             user_id: 1,
             problem_id: 2,
             contest_id: Some(3),

@@ -42,10 +42,10 @@ use serde::de::DeserializeOwned;
 use crate::Host;
 use crate::error::SdkError;
 use crate::types::{
-    DetachedEvaluateCallbackEvent, DetachedEvaluateCallbackInput, DetachedEvaluateCallbackOutput,
-    OnSubmissionInput, SourceFile, StartEvaluateBatchInput, StartEvaluateCaseInput,
-    TestCaseBodyRef, TestCaseResultRow, TestCaseRow, TestCaseVerdict, Verdict,
-    default_evaluation_result_timeout_ms, sanitize_result_text_field,
+    DetachedEvaluateCallbackAction, DetachedEvaluateCallbackEvent, DetachedEvaluateCallbackInput,
+    DetachedEvaluateCallbackOutput, OnSubmissionInput, SourceFile, StartEvaluateBatchInput,
+    StartEvaluateCaseInput, TestCaseBodyRef, TestCaseResultRow, TestCaseRow, TestCaseVerdict,
+    Verdict, default_evaluation_result_timeout_ms, sanitize_result_text_field,
 };
 
 /// Message stamped on cases skipped because an earlier case short-circuited
@@ -186,6 +186,16 @@ pub trait ContestJudge: Serialize + DeserializeOwned + Sized {
         outcome.score
     }
 
+    /// Present results to [`Self::next_step`] in scoring-case order. A result
+    /// that arrives while an earlier case is still running is held, unrecorded,
+    /// until every earlier case has been decided, so the policy sees exactly
+    /// the sequence a window of one would deliver while the host runs a wider
+    /// window. A policy that stops at the first failure in order sets this to
+    /// judge speculatively without changing its verdicts: a case after the
+    /// stopping point is filled like any unjudged case, whatever it returned.
+    /// A compile error is never held, since it decides the whole batch.
+    const IN_ORDER: bool = false;
+
     /// Decide how the batch proceeds after the driver records `progress.last`.
     fn next_step(&mut self, progress: &JudgeProgress<'_>) -> JudgeStep;
 
@@ -202,6 +212,9 @@ pub struct DetachedEval<J: ContestJudge> {
     scoring_cases: Vec<ScoringCase>,
     outcomes: Vec<CaseOutcome>,
     recorded_ids: HashSet<i32>,
+    /// Results held back by [`ContestJudge::IN_ORDER`] until the cases before
+    /// them are decided. At most one window's worth.
+    held: Vec<TestCaseVerdict>,
     marked_running: bool,
     policy: J,
 }
@@ -255,6 +268,7 @@ impl<J: ContestJudge> DetachedEval<J> {
             scoring_cases: scoring_cases.iter().map(ScoringCase::from).collect(),
             outcomes: Vec::new(),
             recorded_ids: HashSet::new(),
+            held: Vec::new(),
             marked_running: false,
             policy,
         };
@@ -325,7 +339,18 @@ impl<J: ContestJudge> DetachedEval<J> {
         // a case the policy cancelled, delivered after we recorded it Skipped) is
         // ignored, never double-inserted. Keep refilling while cases remain so an
         // unrelated pending subtask is never stranded.
-        if self.recorded_ids.contains(&result.test_case_id) {
+        let duplicate = self.recorded_ids.contains(&result.test_case_id)
+            || self
+                .held
+                .iter()
+                .any(|h| h.test_case_id == result.test_case_id);
+        let ahead = J::IN_ORDER
+            && result.verdict != Verdict::CompileError
+            && self.next_undecided() != Some(result.test_case_id);
+        if duplicate || ahead {
+            if !duplicate {
+                self.held.push(result.clone());
+            }
             let refill = self.any_unrecorded();
             return Ok(
                 DetachedEvaluateCallbackOutput::continue_with(serde_json::to_value(&*self)?)
@@ -333,6 +358,46 @@ impl<J: ContestJudge> DetachedEval<J> {
             );
         }
 
+        let mut out = self.decide(host, result)?;
+        let mut cancels = std::mem::take(&mut out.cancel_test_case_ids);
+        while out.action == DetachedEvaluateCallbackAction::Continue {
+            let Some(next) = self.take_next_held() else {
+                break;
+            };
+            out = self.decide(host, &next)?;
+            cancels.append(&mut out.cancel_test_case_ids);
+        }
+        if out.action == DetachedEvaluateCallbackAction::Continue {
+            out.cancel_test_case_ids = cancels;
+        }
+        out.state = serde_json::to_value(&*self)?;
+        Ok(out)
+    }
+
+    /// The first scoring case, in order, with no recorded outcome.
+    fn next_undecided(&self) -> Option<i32> {
+        self.scoring_cases
+            .iter()
+            .map(|tc| tc.id)
+            .find(|id| !self.recorded_ids.contains(id))
+    }
+
+    /// Remove and return the held result for the next undecided case, dropping
+    /// held results for cases decided meanwhile (cancelled by the policy).
+    fn take_next_held(&mut self) -> Option<TestCaseVerdict> {
+        self.held
+            .retain(|h| !self.recorded_ids.contains(&h.test_case_id));
+        let next = self.next_undecided()?;
+        let index = self.held.iter().position(|h| h.test_case_id == next)?;
+        Some(self.held.remove(index))
+    }
+
+    /// Record `result` and apply the policy's decision on it.
+    fn decide(
+        &mut self,
+        host: &Host,
+        result: &TestCaseVerdict,
+    ) -> Result<DetachedEvaluateCallbackOutput, SdkError> {
         let outcome = self.policy.score(result);
 
         // Compile error short-circuits the entire batch before the submission is

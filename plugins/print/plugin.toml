@@ -92,8 +92,8 @@ handler = "api_station_status"
 
 # -- Configuration --
 # Contest scope: per-contest printing behaviour. Plugin scope: deployment-wide
-# station tokens (a single token authorizes a station for every contest on the
-# deployment). Tokens may also be added per-contest for finer-grained access.
+# stations (a station listed here serves every contest on the deployment).
+# Stations may also be listed per contest for finer-grained access.
 [config.print]
 description = "Code printing settings"
 scopes = ["contest", "plugin"]
@@ -125,12 +125,25 @@ title = "Header banner text"
 description = "Optional text shown in the printout header (e.g. the contest name)."
 default = ""
 
-[config.print.properties.station_tokens]
+[config.print.properties.stations]
 type = "array"
-title = "Station tokens"
-description = "Opaque secrets that authorize print stations. Stations send 'Authorization: PrintStation <token>'."
-items = { type = "string" }
+title = "Print stations"
+description = "Each entry authorizes one print station. The station sends 'Authorization: PrintStation <token>' and is known by its name in the queue."
 default = []
+
+[config.print.properties.stations.items]
+type = "object"
+
+[config.print.properties.stations.items.properties.name]
+type = "string"
+title = "Station name"
+min_length = 1
+
+[config.print.properties.stations.items.properties.token]
+type = "string"
+title = "Token"
+description = "Opaque secret, unique per station."
+min_length = 1
 
 # -- Web UI --
 [web]
