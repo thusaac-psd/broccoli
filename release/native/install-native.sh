@@ -99,7 +99,21 @@ apt_ensure(){ # install pkgs only if missing (works against a local apt mirror)
 # Ubuntu 22.04 ships 6.0. Older Redis gets the packages.redis.io repository
 # when it is reachable; on an airgap, the mirror must carry Redis 7.
 redis_major(){ redis-server --version 2>/dev/null | sed -n 's/.* v=\([0-9]*\)\..*/\1/p'; }
+# Order mirrors ensure_toolchain: bundled .debs matching this Ubuntu version
+# (stage-redis.sh) -> packages.redis.io (online) -> the system apt. An
+# air-gapped lab has only the bundle, so the set ships in the release.
 ensure_redis7(){
+  local ver debs
+  [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
+  ver="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
+  debs="$BUNDLE/redis/$ver"
+  # 1) offline: the bundled set for this Ubuntu version, if shipped.
+  if ls "$debs"/*.deb >/dev/null 2>&1; then
+    echo ">> installing bundled Redis 7 for Ubuntu $ver ($debs)"
+    dpkg -i --skip-same-version "$debs"/*.deb >/dev/null 2>&1 || apt-get install -fy >/dev/null 2>&1 || true
+  fi
+  [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
+  # 2) online: the system apt (24.04 and newer ship Redis 7), then the Redis repo.
   apt_ensure redis-server
   [ "$(redis_major)" -ge 7 ] 2>/dev/null && return 0
   echo ">> redis-server $(redis_major) is older than 7; installing Redis 7 from packages.redis.io"
@@ -110,7 +124,7 @@ ensure_redis7(){
     apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis || true
   fi
   [ "$(redis_major)" -ge 7 ] 2>/dev/null \
-    || die "Broccoli needs Redis 7 or newer, found $(redis_major). Install Redis 7 (packages.redis.io, or a mirror carrying it) and re-run."
+    || die "Broccoli needs Redis 7 or newer, found $(redis_major). Bundle it with ./stage-redis.sh, or install Redis 7 (packages.redis.io, or a LAN mirror) and re-run."
 }
 
 # Provision the worker's C/C++/Python toolchain for offline / live-boot boxes.
