@@ -241,18 +241,28 @@ governor; it does not make concurrent runs fair.
 
 **Database connections**
 
-Pools size themselves. A server's three pools hold at most 64 connections
-together (16 to 40 for handlers, from 4 per CPU, plus up to 24 for plugin
-host functions, from the evaluator admission). A worker holds 3. The infra
-template's `max_connections=400` therefore fits about 5 servers and 30
-workers:
+Pools size themselves. A server wants at most 66 connections: 16 to 40 for
+handlers (4 per CPU), up to 24 for plugin host functions (from the evaluator
+admission), and 2 of its own (the claim listener and the clock). A worker
+holds its slots plus 2, so 3 at the default `max_concurrency` of 1.
+
+At boot a server reads `max_connections`, keeps a tenth of it (at least 10)
+for operators and booting nodes, subtracts what the live workers hold, and
+splits the rest evenly with the other live servers. Its pools shrink to that
+share when they want more, never below 13 connections in all, and the server
+logs a warning naming the numbers. A server fits the fleet live when it
+boots: after adding nodes against a database with no room to spare, restart
+the servers so they fit again.
+
+The infra template's `max_connections=500` fits 5 servers and 30 workers at
+full size:
 
 ```
-5 servers × 64 + 30 workers × 3 + heartbeats, DLQ and admin ≈ 430 at the peak
+500 - 3 superuser slots - 49 reserve = 448 ≥ 5 servers × 66 + 30 workers × 3 = 420
 ```
 
-Pools rarely fill. Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a
-larger fleet.
+Raise `POSTGRES_MAX_CONNECTIONS` in `.env.infra` for a larger fleet. The
+native installer sets 500 too, and the development `docker-compose.yaml` 200.
 
 **Sizing Redis memory**
 

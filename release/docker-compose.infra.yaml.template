@@ -8,14 +8,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    # Sized for contest-scale fleets. Pools size themselves: a server holds at
-    # most 64 connections, a worker 3. 400 fits about 5 servers and 30 workers
-    # at their peak plus admin and DLQ overhead; raise POSTGRES_MAX_CONNECTIONS
-    # for a larger fleet.
+    # Sized for contest-scale fleets. A server holds at most 66 connections, a
+    # worker 3, and each server fits its pools to its share at boot. 500 fits
+    # 5 servers and 30 workers at their peak with a tenth kept for operators;
+    # raise POSTGRES_MAX_CONNECTIONS for a larger fleet.
     command:
       - "postgres"
       - "-c"
-      - "max_connections=${POSTGRES_MAX_CONNECTIONS:-400}"
+      - "max_connections=${POSTGRES_MAX_CONNECTIONS:-500}"
       - "-c"
       - "shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}"
       - "-c"

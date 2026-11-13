@@ -226,6 +226,11 @@ install_infra_server(){
   pghba="$(dirname "$pgconf")/pg_hba.conf"
   subnet="${BROCCOLI_LAN_CIDR:-${host%.*}.0/24}"
   grep -q "^listen_addresses *= *'\*'" "$pgconf" || sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$pgconf"
+  # The stock 100 connections fit one server and a handful of workers; 500
+  # fits this server and a lab of workers (docs/operator-runbook.md). A
+  # higher value an operator set stays.
+  [ "$(sudo -u postgres psql -tAc "SHOW max_connections")" -ge 500 ] \
+    || sudo -u postgres psql -c "ALTER SYSTEM SET max_connections = 500"
   # Replace the rule on every run, so a new LAN (rehearsal -> venue) is let in.
   sed -i '/# broccoli-lan$/d' "$pghba"
   echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"

@@ -75,7 +75,8 @@ impl ServerRuntime {
         crate::seed::seed_role_permissions(boot.conn()).await?;
         crate::seed::ensure_bootstrap_admin(boot.conn(), &app_config.bootstrap).await?;
 
-        let pools = crate::database::PoolSizes::for_host(&app_config);
+        let pools =
+            crate::database::PoolSizes::for_host(&app_config, boot.conn(), &server_id).await?;
         info!(?pools, "Database pool sizes");
         let db =
             crate::database::connect_main_pool(&app_config.database.url, pools.main, &db_session)

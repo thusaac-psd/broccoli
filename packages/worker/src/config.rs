@@ -222,10 +222,9 @@ pub struct WorkerAppConfig {
 }
 
 impl WorkerAppConfig {
-    /// Connections the worker's database pool may hold: one per sandbox slot
-    /// plus two for the task cache and heartbeats.
+    /// Connections the worker's database pool may hold.
     pub fn database_pool_size(&self) -> u32 {
-        self.worker.max_concurrency.saturating_add(2)
+        common::worker::database_connections(self.worker.max_concurrency)
     }
 
     pub fn load() -> Result<Self, ConfigError> {

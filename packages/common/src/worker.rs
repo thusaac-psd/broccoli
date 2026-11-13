@@ -91,6 +91,12 @@ pub trait Executor: Send + Sync {
     async fn execute(&self, task: Task) -> Result<TaskResult>;
 }
 
+/// Database connections a worker with `max_concurrency` sandbox slots holds:
+/// one per slot plus two for the task cache and heartbeats.
+pub fn database_connections(max_concurrency: u32) -> u32 {
+    max_concurrency.saturating_add(2)
+}
+
 #[cfg(test)]
 mod reply_tests {
     use super::{TaskReply, TaskResult, TaskStartedNotification};

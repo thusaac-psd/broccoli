@@ -34,7 +34,7 @@ These have no setting.
 | What | How |
 | --- | --- |
 | Wall time (contest phases, token expiry, rate limits, `Date`) | The database clock, sampled every 30 to 60 s |
-| Server database pools | Handlers: 4 per CPU, 16 to 40. Plugin SQL: half the evaluator admission, 4 to 16. Plugin writes: a quarter, 2 to 8 |
+| Server database pools | Handlers: 4 per CPU, 16 to 40. Plugin SQL: half the evaluator admission, 4 to 16. Plugin writes: a quarter, 2 to 8. Shrunk at boot to the server's share of `max_connections` (see Database connections in the runbook) |
 | Worker database pool | `worker.max_concurrency` + 2 |
 | Claim loop | Notification driven, with a 1 s fallback tick and 32 rows per statement |
 | In-flight cap per server | 8 per live worker slot, at least 256 |
