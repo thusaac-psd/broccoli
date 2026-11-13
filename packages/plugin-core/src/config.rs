@@ -102,16 +102,23 @@ impl PluginConfig {
     }
 }
 
-/// The wasmtime cache config that keeps compiled plugin modules under
-/// `cache_dir`, so rebuilding an instance deserializes its module instead of
-/// compiling it, wherever the process's home directory is. `None` (with the
-/// reason logged) leaves wasmtime's default location.
+/// The one entry of `cache_dir` that is not an unpacked archive: compiled
+/// plugin modules and their wasmtime cache config. Whatever cleans the
+/// archive cache keeps this entry.
+pub const COMPILED_MODULES_ENTRY: &str = ".compiled";
+
+/// The wasmtime cache config that keeps compiled plugin modules in
+/// `cache_dir`/[`COMPILED_MODULES_ENTRY`], so rebuilding an instance
+/// deserializes its module instead of compiling it, wherever the process's
+/// home directory is. `None` (with the reason logged) leaves wasmtime's
+/// default location.
 pub fn compile_cache_config(cache_dir: &std::path::Path) -> Option<PathBuf> {
     let prepare = || -> std::io::Result<PathBuf> {
-        let modules = cache_dir.join("wasmtime");
+        let entry = cache_dir.join(COMPILED_MODULES_ENTRY);
+        let modules = entry.join("modules");
         std::fs::create_dir_all(&modules)?;
         let modules = modules.canonicalize()?;
-        let config = cache_dir.join("wasmtime-cache.toml");
+        let config = entry.join("wasmtime-cache.toml");
         let toml = format!("[cache]\ndirectory = {:?}\n", modules.display().to_string());
         if std::fs::read_to_string(&config).ok().as_deref() != Some(toml.as_str()) {
             std::fs::write(&config, toml)?;
@@ -208,7 +215,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = compile_cache_config(&dir.path().join("cache")).expect("writable");
         let text = std::fs::read_to_string(&config).unwrap();
-        let modules = dir.path().join("cache/wasmtime").canonicalize().unwrap();
+        let modules = dir
+            .path()
+            .join("cache")
+            .join(COMPILED_MODULES_ENTRY)
+            .join("modules")
+            .canonicalize()
+            .unwrap();
         assert!(
             text.contains(&format!("{:?}", modules.display().to_string())),
             "{text}"

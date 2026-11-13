@@ -88,10 +88,12 @@ async fn row(app: &TestApp, plugin_id: &str) -> Option<plugin_entity::Model> {
         .unwrap()
 }
 
+/// The unpacked archives in `app`'s plugin cache.
 fn cache_entries(app: &TestApp) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(app.plugin_cache.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != plugin_core::config::COMPILED_MODULES_ENTRY)
         .collect();
     names.sort();
     names
@@ -672,6 +674,13 @@ async fn removing_an_upload_with_no_bundled_copy_removes_the_plugin_everywhere()
     plugin_lifecycle::reconcile(&b.state).await.unwrap();
     assert_eq!(status(&b, UPLOAD_ONLY), None, "B unloads and forgets it");
     assert!(cache_entries(&b).is_empty(), "{:?}", cache_entries(&b));
+    assert!(
+        b.plugin_cache
+            .path()
+            .join(plugin_core::config::COMPILED_MODULES_ENTRY)
+            .is_dir(),
+        "cleaning the cache keeps the compiled modules"
+    );
     let res = b.get_with_token(routes::ADMIN_PLUGINS, &token).await;
     assert!(
         !res.body

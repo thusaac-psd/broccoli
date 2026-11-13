@@ -221,8 +221,11 @@ pub async fn evict(state: &AppState, source: &PluginSource) {
 }
 
 /// Delete every cache entry whose archive is not in `keep`: neither
-/// published for any plugin nor loaded on this server. Best-effort.
-pub async fn retain(state: &AppState, keep: HashSet<String>) {
+/// published for any plugin nor loaded on this server. The compiled-module
+/// entry ([`plugin_core::config::COMPILED_MODULES_ENTRY`]) always stays.
+/// Best-effort.
+pub async fn retain(state: &AppState, mut keep: HashSet<String>) {
+    keep.insert(plugin_core::config::COMPILED_MODULES_ENTRY.to_string());
     let cache_dir = state.config.plugin.cache_dir.clone();
     let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let entries = match std::fs::read_dir(&cache_dir) {
