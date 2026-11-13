@@ -732,7 +732,10 @@ impl OperationHandler {
         };
 
         let success = exec_result.exit_code == Some(0);
-        let collected_outputs = match self.collect_output(&env.working_dir, &step.collect).await {
+        let collected_outputs = match self
+            .collect_output(&env.working_dir, step, &exec_result)
+            .await
+        {
             Ok(outputs) => outputs,
             Err(e) => {
                 // The step already ran to a clean exit; the failure here is

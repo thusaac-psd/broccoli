@@ -10,6 +10,7 @@
 
 #![allow(dead_code)]
 
+use common::storage::filesystem::FilesystemBlobStore;
 use common::worker::{Executor, Task, TaskResult};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use worker::models::operation::executor::OperationTaskExecutor;
-use worker::models::operation::file_cacher::UnavailableFileCacher;
+use worker::models::operation::file_cacher::{BlobStoreFileCacher, UnavailableFileCacher};
 use worker::models::operation::handler::OperationHandler;
 use worker::models::operation::models::{
     Channel, Environment, IOConfig, IOTarget, MountSource, MountSpec, OperationResult,
@@ -61,6 +62,9 @@ macro_rules! sandbox_suite {
             echo_succeeds,
             nonzero_exit_fails_the_step,
             large_stdout_is_returned_as_capped_preview,
+            a_collected_redirect_that_fits_inline_is_not_uploaded,
+            a_collected_redirect_too_large_to_inline_is_uploaded,
+            a_collected_redirect_the_inline_text_rewrites_is_uploaded,
             blob_input_fails_when_blob_storage_is_unavailable,
             platform_tool_mount_executes_tool_inside_box,
             platform_tool_mount_without_configured_tools_dir_fails_the_step,
@@ -324,6 +328,75 @@ pub async fn large_stdout_is_returned_as_capped_preview<B: Backend>() {
             .sandbox_result
             .stdout
             .contains("... (truncated)")
+    );
+}
+
+/// Run `operation` on a handler whose blob store is a fresh local directory.
+async fn run_with_blob_store<B: Backend>(operation: OperationTask) -> OperationResult {
+    let dir = unique_temp_dir("collect-blobs");
+    let store = Arc::new(
+        FilesystemBlobStore::new(dir.join("blobs"), 10 * 1024 * 1024)
+            .await
+            .unwrap(),
+    );
+    let file_cacher = BlobStoreFileCacher::new(store, dir.join("cache"), 10 * 1024 * 1024, None)
+        .await
+        .unwrap();
+    let (metrics, _registry) = common::observability::init_metrics("broccoli-worker-test");
+    let result = OperationHandler::new(
+        B::manager(),
+        Box::new(file_cacher),
+        Box::new(NoopTaskCacheStore),
+        ToolchainFingerprint::Known(String::new()),
+        metrics,
+    )
+    .execute(&operation)
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// A step writing `command`'s stderr to `stderr.txt` and collecting it.
+fn collected_stderr(command: &str) -> OperationTask {
+    let mut step = multi_process(sh("step-1", "env-1", command));
+    step.io.stderr = file("stderr.txt");
+    step.collect = vec!["stderr.txt".to_string()];
+    operation(vec![env("env-1")], vec![step], vec![])
+}
+
+pub async fn a_collected_redirect_that_fits_inline_is_not_uploaded<B: Backend>() {
+    let result = run_with_blob_store::<B>(collected_stderr("printf 'small diagnostics' >&2")).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert_eq!(step.sandbox_result.stderr, "small diagnostics");
+    assert!(step.collected_outputs.is_empty(), "{step:?}");
+}
+
+pub async fn a_collected_redirect_too_large_to_inline_is_uploaded<B: Backend>() {
+    let command = "awk 'BEGIN { for (i = 0; i < 70000; i++) printf \"e\" > \"/dev/stderr\" }'";
+    let result = run_with_blob_store::<B>(collected_stderr(command)).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert!(step.sandbox_result.stderr.ends_with("... (truncated)"));
+    assert!(
+        step.collected_outputs.contains_key("stderr.txt"),
+        "{step:?}"
+    );
+}
+
+pub async fn a_collected_redirect_the_inline_text_rewrites_is_uploaded<B: Backend>() {
+    // The inline text replaces NUL, so it does not hold this file's bytes.
+    let result = run_with_blob_store::<B>(collected_stderr("printf 'a\\000b' >&2")).await;
+
+    let step = &result.task_results["step-1"];
+    assert!(step.success, "{step:?}");
+    assert_eq!(step.sandbox_result.stderr, "a\u{FFFD}b");
+    assert!(
+        step.collected_outputs.contains_key("stderr.txt"),
+        "{step:?}"
     );
 }
 
