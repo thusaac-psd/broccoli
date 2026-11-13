@@ -628,6 +628,80 @@ mod tests {
         (container, url)
     }
 
+    /// Drive `fut` for at most `polls` polls, yielding between them, then drop
+    /// it wherever it stopped.
+    async fn abandon_after<F: std::future::Future>(fut: F, polls: u64) {
+        let mut fut = std::pin::pin!(fut);
+        for _ in 0..polls {
+            if futures::poll!(fut.as_mut()).is_ready() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Statements dropped at arbitrary points (before the write, mid-flush,
+    /// mid-response, mid-row-stream, and before a server-side 22021 arrives)
+    /// never leave a pooled connection out of step: every statement that runs
+    /// to completion afterwards gets exactly its own result, never an earlier
+    /// statement's rows or error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_statements_never_leave_a_pooled_connection_out_of_step() {
+        use sea_orm::{DbBackend, Statement};
+
+        let (_c, url) = fresh_postgres().await;
+        let db = connect_main_pool(&url, 4, &test_session())
+            .await
+            .expect("pool");
+        let victims = [
+            // Fails on the server with 22021 "invalid byte sequence for
+            // encoding \"UTF8\": 0x00" after the client has gone.
+            "SELECT pg_sleep(0.001), convert_from('\\x610062'::bytea, 'UTF8')",
+            "SELECT pg_sleep(0.002), $1::text",
+            "SELECT repeat($1, 2000) FROM generate_series(1, 300)",
+        ];
+        let workers: Vec<_> = (0..16u64)
+            .map(|worker| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let mut seed = worker.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                    for i in 0..150u64 {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        let sql = victims[(seed % 3) as usize];
+                        let values: Vec<sea_orm::Value> = if sql.contains("$1") {
+                            vec!["x".into()]
+                        } else {
+                            vec![]
+                        };
+                        let victim =
+                            Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
+                        abandon_after(db.query_all_raw(victim), (seed >> 8) % 16).await;
+
+                        let token = format!("{worker}-{i}");
+                        let row = db
+                            .query_one_raw(Statement::from_sql_and_values(
+                                DbBackend::Postgres,
+                                "SELECT $1::text AS v, $2::bigint AS n",
+                                [token.clone().into(), (i as i64).into()],
+                            ))
+                            .await
+                            .unwrap_or_else(|e| {
+                                panic!("clean statement after a cancelled one failed: {e}")
+                            })
+                            .expect("one row");
+                        assert_eq!(row.try_get::<String>("", "v").unwrap(), token);
+                        assert_eq!(row.try_get::<i64>("", "n").unwrap(), i as i64);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.await.expect("worker");
+        }
+    }
+
     /// The server's boot sequence as `ServerRuntime::build` runs it.
     async fn boot_like_the_server(url: &str) -> Result<(), DbErr> {
         let boot = BootSession::acquire(url).await?;
