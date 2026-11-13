@@ -50,6 +50,22 @@ impl Leftovers {
     }
 }
 
+/// Removals a [`Teardown::settle`] took and has not seen finish. A finished
+/// removal is popped in the same poll that returns it, so only unfinished ones
+/// are ever put back.
+struct Unsettled<'a> {
+    teardown: &'a Teardown,
+    removals: Vec<JoinHandle<()>>,
+}
+
+impl Drop for Unsettled<'_> {
+    fn drop(&mut self) {
+        if !self.removals.is_empty() {
+            self.teardown.pending().append(&mut self.removals);
+        }
+    }
+}
+
 /// Removals running in the background.
 #[derive(Default)]
 pub(super) struct Teardown {
@@ -67,13 +83,19 @@ impl Teardown {
         self.pending().push(removal);
     }
 
-    /// Wait until every removal started so far has finished.
+    /// Wait until every removal started so far has finished. Dropping the
+    /// wait midway puts the removals it had not seen finish back, so the next
+    /// wait still covers them.
     pub(super) async fn settle(&self) {
-        let pending = std::mem::take(&mut *self.pending());
-        for removal in pending {
+        let mut unsettled = Unsettled {
+            teardown: self,
+            removals: std::mem::take(&mut *self.pending()),
+        };
+        while let Some(removal) = unsettled.removals.last_mut() {
             if let Err(e) = removal.await {
                 error!(error = %e, "Sandbox removal task failed");
             }
+            unsettled.removals.pop();
         }
     }
 
@@ -283,8 +305,19 @@ mod tests {
             "the next operation creates nothing while a removal is pending"
         );
 
+        // A caller that gives up on the next operation mid-wait must not
+        // take the pending removal with it.
+        drop(next);
+        let mut retried = Box::pin(handler.execute(&operation));
+        assert!(futures::poll!(retried.as_mut()).is_pending());
+        assert_eq!(
+            sandbox.log(),
+            ["create", "create"],
+            "a dropped wait leaves the removal pending for the next operation"
+        );
+
         sandbox.removals.add_permits(4);
-        assert!(next.await.unwrap().success);
+        assert!(retried.await.unwrap().success);
         handler.teardown.settle().await;
         assert_eq!(
             sandbox.log(),
