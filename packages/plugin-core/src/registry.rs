@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
 use crate::manifest::{PluginManifest, parse_manifest, resolve_schema_includes};
-use crate::pool::RecyclingPool;
+use crate::pool::InstancePool;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum PluginStatus {
@@ -32,7 +32,7 @@ pub struct PluginEntry {
     pub root_dir: PathBuf,
     pub manifest: PluginManifest,
     pub status: PluginStatus,
-    pub runtime: Option<RecyclingPool>,
+    pub runtime: Option<InstancePool>,
     pub router: Router<RouteMatchInfo>,
 }
 

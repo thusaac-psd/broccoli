@@ -307,15 +307,11 @@ impl E2eTestApp {
                 max_dispatch_retries: 5,
                 max_system_error_retries: 50,
                 cancel_primitive_enabled: false,
-                max_blocking_threads: None,
-                evaluate_batch_fanout_concurrency: 64,
-                operation_batch_publish_concurrency: 32,
                 claim_fiber_enabled: true,
                 claim_poll_interval_ms: 100,
                 claim_batch_size: 32,
                 max_in_flight_submissions: 256,
                 plugin_timer_tick_interval_secs: 1,
-                plugin_timer_lease_secs: server::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                 plugin_timer_batch: 64,
                 plugin_timer_max_attempts: 5,
             },
@@ -349,6 +345,7 @@ impl E2eTestApp {
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
             clock: Default::default(),
+            removed_keys_set: Vec::new(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -383,6 +380,7 @@ impl E2eTestApp {
                 config: app_config.clone(),
                 metrics: None,
                 redis_client: None,
+                worker_slots: Default::default(),
             },
             None,
         )
@@ -411,6 +409,7 @@ impl E2eTestApp {
             metrics: e2e_metrics.clone(),
             prometheus_registry: e2e_prom_registry,
             dispatcher_permits: server::dispatcher::permits::DispatcherSemaphore::default(),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(server::utils::login_throttle::LoginThrottle::new(
                 0,

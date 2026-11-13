@@ -307,7 +307,7 @@ impl<'a> VisibilityKernel<'a> {
                         &target_contest_ids,
                         &target_scopes,
                     )
-                    .await;
+                    .await?;
                     // Compiled out in release, and that is safe —
                     // `query_plugins` (`plugin_query.rs`) always returns
                     // exactly `resources.len()` decisions: the empty-batch,
@@ -614,11 +614,16 @@ mod tests {
             &self.config
         }
 
+        fn executor(&self) -> &plugin_core::executor::Executor {
+            plugin_core::executor::Executor::shared_for_tests()
+        }
+
         async fn call_raw(
             &self,
             _plugin_id: &str,
             _func_name: &str,
             input: Vec<u8>,
+            _options: plugin_core::executor::CallOptions,
         ) -> Result<Vec<u8>, PluginError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let parsed: VisibilityQueryInput = serde_json::from_slice(&input)
@@ -709,15 +714,11 @@ mod tests {
                     max_dispatch_retries: 5,
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
-                    max_blocking_threads: None,
-                    evaluate_batch_fanout_concurrency: 64,
-                    operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -746,6 +747,7 @@ mod tests {
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
                 clock: Default::default(),
+                removed_keys_set: Vec::new(),
             },
             mq: None,
             redis_client: None,
@@ -763,6 +765,7 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
@@ -1364,6 +1367,108 @@ mod tests {
         assert!(
             result.is_none(),
             "a denied resource must be None so callers 404 instead of rendering a placeholder"
+        );
+    }
+
+    /// A visibility plugin that cannot answer before its deadline: every
+    /// call is [`PluginError::Unavailable`].
+    struct BusyPluginManager {
+        registry: PluginRegistry,
+        config: PluginConfig,
+        host_functions: HostFunctionRegistry,
+        i18n: I18nRegistry,
+    }
+
+    #[async_trait::async_trait]
+    impl PluginInvoker for BusyPluginManager {
+        fn get_registry(&self) -> &PluginRegistry {
+            &self.registry
+        }
+
+        fn get_config(&self) -> &PluginConfig {
+            &self.config
+        }
+
+        fn executor(&self) -> &plugin_core::executor::Executor {
+            plugin_core::executor::Executor::shared_for_tests()
+        }
+
+        async fn call_raw(
+            &self,
+            plugin_id: &str,
+            func_name: &str,
+            _input: Vec<u8>,
+            _options: plugin_core::executor::CallOptions,
+        ) -> Result<Vec<u8>, PluginError> {
+            Err(PluginError::Unavailable {
+                plugin_id: plugin_id.to_string(),
+                func_name: func_name.to_string(),
+            })
+        }
+    }
+
+    impl PluginManager for BusyPluginManager {
+        fn get_host_functions(&self) -> &HostFunctionRegistry {
+            &self.host_functions
+        }
+        fn get_i18n_registry(&self) -> &I18nRegistry {
+            &self.i18n
+        }
+        fn resolve(&self, _manifest: &PluginManifest) -> Option<(String, Vec<String>)> {
+            None
+        }
+    }
+
+    async fn busy_kernel_state(contests: Vec<crate::entity::contest::Model>) -> AppState {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([contests])
+            .append_query_results([Vec::<contest_user::Model>::new()])
+            .into_connection();
+        let plugins: Arc<dyn PluginManager> = Arc::new(BusyPluginManager {
+            registry: registry_with_visibility_plugin("vis-plugin"),
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+        });
+        test_app_state(plugins, db).await
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_plugin_fails_a_single_read_instead_of_hiding_it() {
+        let _guard = crate::metrics_test_lock();
+        let state = busy_kernel_state(vec![contest_row(2, true, Some(-1), None, true)]).await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+        let result = kernel
+            .fetch_visible(
+                Action::Read,
+                Resource::Contest(2),
+                ScoredEntity { id: 2, score: None },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "a busy plugin is a 503, not a 404: {:?}",
+            result.map(|v| v.is_some())
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_plugin_fails_a_list_instead_of_emptying_it() {
+        let _guard = crate::metrics_test_lock();
+        let state = busy_kernel_state(vec![
+            contest_row(2, true, Some(-1), None, true),
+            contest_row(3, true, Some(-1), None, true),
+        ])
+        .await;
+        let kernel = VisibilityKernel::new(&state, subject(1));
+        let result = kernel
+            .decide_batch(Action::Read, &[Resource::Contest(2), Resource::Contest(3)])
+            .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "a busy plugin is a 503, not an all-Deny page: {result:?}"
         );
     }
 }

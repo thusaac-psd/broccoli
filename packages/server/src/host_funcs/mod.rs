@@ -21,7 +21,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Semaphore;
 use tracing::Span;
 use tracing::span::EnteredSpan;
 
@@ -65,9 +64,16 @@ pub(crate) fn host_data<C>(ctx: C) -> UserData<Arc<C>> {
 /// An in-flight host fn call: the snapshot of its context plus the entered
 /// `host_fn` span, which closes when the guard is dropped at the end of the
 /// body. Derefs to the context.
+///
+/// The calling plugin call is parked for the guard's life: it gives its CPU
+/// token back while the body blocks on the database, the queue, a result
+/// wait or a nested plugin call, and takes one back ahead of every queued
+/// call when the guard drops (see [`plugin_core::executor::parked`]).
 #[must_use = "dropping the guard closes the host_fn span"]
 pub(crate) struct HostCall<C> {
     ctx: Arc<C>,
+    // Dropped first: the call resumes while the span is still open.
+    _parked: plugin_core::executor::Parked,
     _span: EnteredSpan,
 }
 
@@ -84,7 +90,11 @@ impl<C: HostFnContext> HostCall<C> {
             .map_err(|_| extism::Error::msg("Lock poisoned"))?
             .clone();
         let span = host_fn_span(host_fn, ctx.plugin_id()).entered();
-        Ok(Self { ctx, _span: span })
+        Ok(Self {
+            ctx,
+            _parked: plugin_core::executor::Parked::enter(),
+            _span: span,
+        })
     }
 }
 
@@ -460,26 +470,16 @@ fn register_registry_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctio
     });
 }
 
-/// `evaluator:evaluate` and `operations:dispatch`, which share the server's
-/// evaluator and fan-out concurrency limits.
+/// `evaluator:evaluate` and `operations:dispatch`. Test cases outstanding
+/// at workers are bounded by the live worker slots ([`Fanout`]).
+///
+/// [`Fanout`]: crate::dispatcher::fanout::Fanout
 fn register_evaluation_functions(hr: &mut HostFunctionRegistry, deps: &HostFunctionDeps) {
-    // Cap concurrent evaluator plugin calls per server. Default = number of cores,
-    // but on hosts with spare RAM and a high-fan-out workload (many test cases
-    // per submission fanned out as parallel tokio tasks), this should be
-    // bumped well above core count via `BROCCOLI__PLUGIN__EVALUATOR_PARALLELISM`.
-    let evaluator_parallelism = deps.system.config.plugin.resolve_evaluator_parallelism();
-    let fanout_concurrency = deps.system.config.server.evaluate_batch_fanout_concurrency as usize;
-    tracing::info!(
-        evaluator_parallelism,
-        fanout_concurrency,
-        "evaluator and fan-out semaphores configured"
-    );
-    let evaluator_slots = Arc::new(Semaphore::new(evaluator_parallelism));
-    let fanout_slots = crate::dispatcher::fanout::FanoutSemaphore::new(
-        fanout_concurrency,
+    let fanout = crate::dispatcher::fanout::Fanout::new(
+        deps.system.worker_slots.clone(),
         deps.system.metrics.clone(),
     );
-    let eval_deps = deps.evaluate_deps(evaluator_slots, fanout_slots);
+    let eval_deps = deps.evaluate_deps(fanout);
     hr.register_many("evaluator:evaluate", move |plugin_id| {
         evaluate::create_evaluate_functions(plugin_id.to_string(), eval_deps.clone())
     });

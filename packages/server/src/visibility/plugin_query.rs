@@ -1,12 +1,16 @@
 //! Batched plugin visibility query - the point where an UNTRUSTED plugin
 //! response enters the host's access-control decision.
 //!
-//! [`query_plugins`] is **infallible by design**: it returns `Vec<Decision>`,
-//! never a `Result`. Every failure mode - a poisoned plugin-registry lock, a
-//! plugin timeout/trap/pool-acquire failure, non-JSON or unparseable output,
-//! a `decisions` vector whose length doesn't match the resource batch (in
-//! EITHER direction), or an unrecognized decision variant - collapses to
-//! `Decision::Deny` for every resource in the batch. This mirrors the host's
+//! [`query_plugins`] fails in exactly one way: a querier that could not answer
+//! before the request's deadline ([`PluginError::Unavailable`]) is
+//! [`AppError::PluginUnavailable`], a 503 the client retries. That is load on
+//! this server, never a decision, so it never turns into `Deny` (which would
+//! show an empty page, a 404 or a rejected cursor). Every other failure mode -
+//! a poisoned plugin-registry lock, a plugin trap, non-JSON or unparseable
+//! output, a `decisions` vector whose length doesn't match the resource batch
+//! (in EITHER direction), or an unrecognized decision variant - is the
+//! plugin's answer gone wrong and collapses to `Decision::Deny` for every
+//! resource in the batch. This mirrors the host's
 //! established fail-closed hook stance, already pinned by
 //! `plugin_core::hook`'s `non_json_output_fails_closed_reject` and
 //! `empty_output_fails_closed_reject` tests: a failed visibility query must
@@ -32,9 +36,10 @@ use broccoli_server_sdk::types::{
     QueryContext, QueryResource, QuerySubject, VisibilityQueryInput, VisibilityQueryOutput,
     WireDecision,
 };
+use plugin_core::error::PluginError;
 use plugin_core::registry::PluginStatus;
-use plugin_core::traits::PluginInvokerExt;
 
+use crate::error::AppError;
 use crate::state::AppState;
 
 use super::{Action, Decision, FieldMask, Resource, Subject};
@@ -505,9 +510,9 @@ pub(crate) async fn query_plugins(
     resources: &[Resource],
     resource_contest_ids: &[Option<i32>],
     resource_scopes: &[ResourceScope],
-) -> Vec<Decision> {
+) -> Result<Vec<Decision>, AppError> {
     if resources.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // M4: compiled out in release, and that is safe for the same reason as
     // `meet_positionally`'s — this has one call site
@@ -531,10 +536,10 @@ pub(crate) async fn query_plugins(
 
     let (queriers, blind) = match visibility_queriers(state) {
         Ok(found) => found,
-        Err(()) => return vec![Decision::Deny; resources.len()],
+        Err(()) => return Ok(vec![Decision::Deny; resources.len()]),
     };
     let blind = match blind {
-        Blind::Everything => return vec![Decision::Deny; resources.len()],
+        Blind::Everything => return Ok(vec![Decision::Deny; resources.len()]),
         Blind::Nothing => None,
         Blind::ContestTypes(types) => {
             Some(blind_decisions(state, &types, resources, resource_contest_ids).await)
@@ -542,7 +547,7 @@ pub(crate) async fn query_plugins(
     };
 
     if queriers.is_empty() {
-        return blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]);
+        return Ok(blind.unwrap_or_else(|| vec![Decision::Allow; resources.len()]));
     }
 
     let query_resources: Vec<QueryResource> = resources
@@ -577,13 +582,25 @@ pub(crate) async fn query_plugins(
                 .map(|&i| query_resources[i].clone())
                 .collect(),
         };
-        let call_result: Result<VisibilityQueryOutput, _> = state
-            .plugins
-            .call(&querier.plugin_id, &querier.function, &input)
-            .await;
+        let call_result = match serde_json::to_vec(&input) {
+            Ok(input) => {
+                state
+                    .plugins
+                    .call_raw(
+                        &querier.plugin_id,
+                        &querier.function,
+                        input,
+                        crate::interactive_call(),
+                    )
+                    .await
+            }
+            Err(e) => Err(PluginError::from(e)),
+        }
+        .and_then(|bytes| Ok(serde_json::from_slice::<VisibilityQueryOutput>(&bytes)?));
 
         let output = match call_result {
             Ok(out) => Ok(out),
+            Err(e @ PluginError::Unavailable { .. }) => return Err(e.into()),
             Err(e) => {
                 tracing::error!(
                     plugin_id = %querier.plugin_id,
@@ -603,7 +620,7 @@ pub(crate) async fn query_plugins(
         combined = meet_positionally(combined, full);
     }
 
-    enforce_mask_cap_post_union(combined)
+    Ok(enforce_mask_cap_post_union(combined))
 }
 
 /// Reapply `MAX_MASK_FIELDS` to every `Redact` decision AFTER folding all
@@ -944,11 +961,16 @@ mod tests {
             &self.config
         }
 
+        fn executor(&self) -> &plugin_core::executor::Executor {
+            plugin_core::executor::Executor::shared_for_tests()
+        }
+
         async fn call_raw(
             &self,
             plugin_id: &str,
             func_name: &str,
             _input: Vec<u8>,
+            _options: plugin_core::executor::CallOptions,
         ) -> Result<Vec<u8>, PluginError> {
             panic!(
                 "query_plugins must not call plugin '{plugin_id}'::{func_name} here \
@@ -1047,6 +1069,7 @@ mod tests {
     enum CannedResponse {
         Ok(Vec<u8>),
         Trap,
+        Unavailable,
     }
 
     struct CannedPluginManager {
@@ -1071,11 +1094,16 @@ mod tests {
             &self.config
         }
 
+        fn executor(&self) -> &plugin_core::executor::Executor {
+            plugin_core::executor::Executor::shared_for_tests()
+        }
+
         async fn call_raw(
             &self,
             plugin_id: &str,
             func_name: &str,
             _input: Vec<u8>,
+            _options: plugin_core::executor::CallOptions,
         ) -> Result<Vec<u8>, PluginError> {
             match self.responses.get(plugin_id) {
                 Some(CannedResponse::Ok(bytes)) => Ok(bytes.clone()),
@@ -1083,6 +1111,10 @@ mod tests {
                     plugin_id: plugin_id.to_string(),
                     func_name: func_name.to_string(),
                     message: "deliberate test trap".to_string(),
+                }),
+                Some(CannedResponse::Unavailable) => Err(PluginError::Unavailable {
+                    plugin_id: plugin_id.to_string(),
+                    func_name: func_name.to_string(),
                 }),
                 None => panic!(
                     "CannedPluginManager has no canned response configured for \
@@ -1185,15 +1217,11 @@ mod tests {
                     max_dispatch_retries: 5,
                     max_system_error_retries: 50,
                     cancel_primitive_enabled: false,
-                    max_blocking_threads: None,
-                    evaluate_batch_fanout_concurrency: 64,
-                    operation_batch_publish_concurrency: 32,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
                     max_in_flight_submissions: 256,
                     plugin_timer_tick_interval_secs: 1,
-                    plugin_timer_lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
                     plugin_timer_batch: 64,
                     plugin_timer_max_attempts: 5,
                 },
@@ -1222,6 +1250,7 @@ mod tests {
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
                 clock: Default::default(),
+                removed_keys_set: Vec::new(),
             },
             mq: None,
             redis_client: None,
@@ -1239,6 +1268,7 @@ mod tests {
             metrics,
             prometheus_registry,
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
+            worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
@@ -1269,7 +1299,9 @@ mod tests {
         // A registered visibility querier exists, so if query_plugins reached
         // for the plugin host at all here, PanicPluginManager would panic and
         // fail this test - the assertion below only runs if it did not.
-        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[], &[]).await;
+        let result = query_plugins(&state, &subject, Action::Read, None, &[], &[], &[])
+            .await
+            .expect("plugins answered");
 
         assert_eq!(result, Vec::<Decision>::new());
     }
@@ -1304,7 +1336,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
@@ -1340,6 +1373,7 @@ mod tests {
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
+        .expect("plugins answered")
     }
 
     /// A plugin that DECLARES a `topic = "visibility"` query but is disabled
@@ -1409,7 +1443,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(result, vec![Decision::Deny, Decision::Deny]);
     }
@@ -1453,7 +1488,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1505,7 +1541,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1576,7 +1613,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1637,7 +1675,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         match &result[0] {
             Decision::Redact(mask) => assert_eq!(
@@ -1696,7 +1735,8 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
@@ -1746,13 +1786,53 @@ mod tests {
             &resource_contest_ids,
             &vec![ResourceScope::Unknown; resources.len()],
         )
-        .await;
+        .await
+        .expect("plugins answered");
 
         assert_eq!(
             result,
             vec![Decision::Deny],
             "one plugin trapping must deny the whole batch even though the \
              other two allowed - the third querier's response cannot rescue it"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unavailable_querier_is_a_retryable_error_not_a_deny() {
+        let _guard = crate::metrics_test_lock();
+
+        let registry = registry_with_order(&["plugin-allow", "plugin-busy"]);
+        let mut responses = HashMap::new();
+        responses.insert(
+            "plugin-allow".to_string(),
+            CannedResponse::Ok(canned_output(vec![WireDecision::Allow {}])),
+        );
+        responses.insert("plugin-busy".to_string(), CannedResponse::Unavailable);
+        let plugins: Arc<dyn PluginManager> = Arc::new(CannedPluginManager {
+            registry,
+            config: PluginConfig::default(),
+            host_functions: HostFunctionRegistry::new(),
+            i18n: I18nRegistry::new(),
+            responses,
+        });
+
+        let state = test_app_state(plugins).await;
+        let subject = Subject::anonymous();
+        let resources = vec![Resource::Contest(1)];
+        let result = query_plugins(
+            &state,
+            &subject,
+            Action::Read,
+            Some(1),
+            &resources,
+            &[Some(1)],
+            &[ResourceScope::Unknown],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "{result:?}"
         );
     }
 }

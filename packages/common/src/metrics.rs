@@ -29,23 +29,20 @@ pub struct Metrics {
     pub dlq_messages_total: Counter<u64>,
 
     pub plugin_call_duration: Histogram<f64>,
-    pub plugin_instance_acquire_duration: Histogram<f64>,
-    pub plugin_instance_acquire_failures: Counter<u64>,
-    pub plugin_pool_contention_total: Counter<u64>,
-    pub plugin_evaluator_semaphore_wait_duration: Histogram<f64>,
+    /// Time a top-level plugin call waited for a CPU token, by class and
+    /// whether it was admitted or reached its deadline first.
+    pub plugin_admission_wait_duration: Histogram<f64>,
     pub plugin_call_failures: Counter<u64>,
-    /// Count of pooled plugin instances recycled (dropped + rebuilt) to reclaim
-    /// grown WASM linear memory. A healthy rate is low and steady; a rate
-    /// approaching the call rate means `instance_reclaim_bytes` is set too low.
-    pub plugin_instance_recycled_total: Counter<u64>,
+    /// Plugin calls in progress (queued calls excluded), by plugin.
+    pub plugin_calls_in_flight: UpDownCounter<i64>,
+    /// Plugin instances alive, leased or idle, by plugin.
+    pub plugin_instances_live: UpDownCounter<i64>,
     /// Wall time to build one pooled plugin instance (engine + module
     /// compile + instantiate). Paid on pool growth and on every recycle.
     pub plugin_instance_create_duration: Histogram<f64>,
-    /// Pooled plugin instances built, by plugin. Live pool size is this
-    /// minus `plugin_instance_recycled_total` (a recycle rebuilds one) minus
-    /// `plugin_instance_evicted_total`.
+    /// Pooled plugin instances built, by plugin.
     pub plugin_instance_created_total: Counter<u64>,
-    /// Pooled plugin instances dropped after sitting idle, by plugin.
+    /// Idle plugin instances dropped to bring memory under budget, by plugin.
     pub plugin_instance_evicted_total: Counter<u64>,
 
     pub host_fn_duration: Histogram<f64>,
@@ -270,32 +267,19 @@ impl Metrics {
                 .with_description("Duration of WASM plugin calls")
                 .with_boundaries(PLUGIN_BUCKETS_SECONDS.to_vec())
                 .build(),
-            plugin_instance_acquire_duration: meter
-                .f64_histogram("broccoli.plugin.instance.acquire.duration")
+            plugin_admission_wait_duration: meter
+                .f64_histogram("broccoli.plugin.admission.wait.duration")
                 .with_unit("s")
-                .with_description("Duration spent acquiring a WASM plugin runtime instance")
+                .with_description("Time a plugin call waited for a CPU token")
                 .with_boundaries(PLUGIN_BUCKETS_SECONDS.to_vec())
                 .build(),
-            plugin_instance_acquire_failures: meter
-                .u64_counter("broccoli.plugin.instance.acquire.failures")
-                .with_description(
-                    "Total number of failed WASM plugin runtime instance acquisitions",
-                )
+            plugin_calls_in_flight: meter
+                .i64_up_down_counter("broccoli.plugin.calls.in_flight")
+                .with_description("Plugin calls in progress")
                 .build(),
-            plugin_pool_contention_total: meter
-                .u64_counter("broccoli.plugin.pool.contention")
-                .with_description(
-                    "Total number of slow WASM plugin runtime instance acquisitions by latency bucket",
-                )
-                .build(),
-            plugin_evaluator_semaphore_wait_duration: meter
-                .f64_histogram("broccoli.plugin.evaluator.semaphore.wait.duration")
-                .with_unit("s")
-                .with_description(
-                    "Duration spent waiting for the server-wide evaluator semaphore before \
-                     invoking an evaluator plugin",
-                )
-                .with_boundaries(PLUGIN_BUCKETS_SECONDS.to_vec())
+            plugin_instances_live: meter
+                .i64_up_down_counter("broccoli.plugin.instances.live")
+                .with_description("Plugin instances alive, leased or idle")
                 .build(),
             plugin_call_failures: meter
                 .u64_counter("broccoli.plugin.call.failures")
@@ -315,13 +299,7 @@ impl Metrics {
                 .build(),
             plugin_instance_evicted_total: meter
                 .u64_counter("broccoli.plugin.instance.evicted")
-                .with_description("Total pooled plugin instances dropped after sitting idle")
-                .build(),
-            plugin_instance_recycled_total: meter
-                .u64_counter("broccoli.plugin.instance.recycled")
-                .with_description(
-                    "Total pooled plugin instances recycled to reclaim WASM linear memory",
-                )
+                .with_description("Total idle plugin instances dropped to bring memory under budget")
                 .build(),
 
             host_fn_duration: meter

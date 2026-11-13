@@ -33,8 +33,8 @@
 use std::time::Duration as StdDuration;
 
 use plugin_core::error::PluginError;
+use plugin_core::executor::CallOptions;
 use plugin_core::registry::PluginStatus;
-use plugin_core::traits::CallOptions;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait,
     FromQueryResult, QueryFilter, Statement,
@@ -46,9 +46,14 @@ use tracing::{error, info, warn};
 use crate::entity::plugin_timer;
 use crate::state::AppState;
 
-/// Config for the plugin-timer delivery loop. Defaults: 1s tick, 330s claim
-/// lease, 64-row batch, 5 delivery attempts before a timer is dropped, and the
-/// default plugin call timeout as the call budget.
+/// How much longer a timer's claim lease runs than one delivery may: room for
+/// the delivery to wait for admission before its guest starts.
+pub const LEASE_MARGIN: StdDuration = StdDuration::from_secs(30);
+
+/// Config for the plugin-timer delivery loop. Defaults: 1s tick, 64-row
+/// batch, 5 delivery attempts before a timer is dropped, the default plugin
+/// call timeout as the call budget, and a claim lease [`LEASE_MARGIN`] longer
+/// than that.
 #[derive(Debug, Clone, Copy)]
 pub struct TimerConfig {
     pub tick_interval_secs: u64,
@@ -65,15 +70,25 @@ impl Default for TimerConfig {
     fn default() -> Self {
         Self {
             tick_interval_secs: 1,
-            lease_secs: crate::config::DEFAULT_PLUGIN_TIMER_LEASE_SECS,
             batch: 64,
             max_attempts: 5,
-            call_budget: plugin_core::config::PluginConfig::default().call_timeout(),
+            ..Self::for_call_budget(plugin_core::config::PluginConfig::default().call_timeout())
         }
     }
 }
 
 impl TimerConfig {
+    /// A config whose lease fits one delivery of `call_budget`.
+    pub fn for_call_budget(call_budget: StdDuration) -> Self {
+        Self {
+            tick_interval_secs: 1,
+            lease_secs: (call_budget + LEASE_MARGIN).as_secs() as i64,
+            batch: 64,
+            max_attempts: 5,
+            call_budget,
+        }
+    }
+
     fn lease(&self) -> StdDuration {
         StdDuration::from_secs(self.lease_secs.max(0) as u64)
     }
@@ -468,11 +483,11 @@ async fn deliver(
 
     match state
         .plugins
-        .call_raw_with(
+        .call_raw(
             &row.plugin_id,
             &function,
             input_bytes,
-            CallOptions::until(lease_ends),
+            CallOptions::background(lease_ends),
         )
         .await
     {
@@ -480,7 +495,7 @@ async fn deliver(
             delete_timer(&state.db, row).await;
             Delivery::Done
         }
-        Err(PluginError::DeadlineExceeded { .. }) => Delivery::LeaseEnded,
+        Err(PluginError::Unavailable { .. }) => Delivery::LeaseEnded,
         Err(e) => {
             warn!(
                 plugin_id = %row.plugin_id,

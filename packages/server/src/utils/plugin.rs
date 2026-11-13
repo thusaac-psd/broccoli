@@ -40,7 +40,10 @@ pub async fn call_plugin_init(
     plugins: &dyn PluginManager,
     plugin_id: &str,
 ) -> Result<(), PluginError> {
-    match plugins.call_raw(plugin_id, "init", vec![]).await {
+    let options = plugin_core::executor::CallOptions::lifecycle(
+        std::time::Instant::now() + plugins.get_config().call_timeout(),
+    );
+    match plugins.call_raw(plugin_id, "init", vec![], options).await {
         Ok(_) => {
             tracing::info!("Plugin '{}' init() complete", plugin_id);
             Ok(())

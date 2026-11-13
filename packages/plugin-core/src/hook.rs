@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 pub use broccoli_types::manifest::{HookMode, HookScope};
 
-use crate::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
+use crate::error::PluginError;
+use crate::executor::CallOptions;
 use crate::traits::PluginManager;
 
 pub const PLUGIN_RUNTIME_ERROR_CODE: &str = "__BROCCOLI_PLUGIN_RUNTIME_ERROR";
@@ -150,7 +151,9 @@ impl<M: PluginManager + ?Sized> PluginHook<M> {
 
 #[async_trait]
 impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHook<M> {
-    type Context = ();
+    /// The dispatch site's class and deadline: the same hook serves request
+    /// paths and background notifications.
+    type Context = CallOptions;
 
     fn id(&self) -> &str {
         &self.plugin_id
@@ -160,11 +163,13 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
         &self.topics
     }
 
-    async fn on_event(&self, _ctx: (), event: &GenericEvent) -> Result<GenericHookAction> {
-        // Serialize the payload once outside the retry loop. A serialization
-        // failure here is a genuine error (not transient backpressure), so we
-        // fail-closed with Reject - matching the prior `call::<_, _>` path
-        // which would have surfaced this as `PluginError::Serialization`.
+    async fn on_event(
+        &self,
+        options: CallOptions,
+        event: &GenericEvent,
+    ) -> Result<GenericHookAction> {
+        // A payload that does not serialize fails closed like any other
+        // hook that cannot produce a trustworthy answer.
         let input_bytes = match serde_json::to_vec(&event.payload) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -181,19 +186,10 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
             }
         };
 
-        // Pool timeouts are transient backpressure: every WASM instance is
-        // busy but a free slot will appear shortly. Retrying transparently
-        // here matches the synchronous evaluator path and prevents a
-        // fail-closed Reject (HTTP 500) for what is purely a server-side
-        // overload signal.
-        let call_result = call_raw_with_pool_retry(
-            self.plugin_manager.as_ref(),
-            &self.plugin_id,
-            &self.function_name,
-            input_bytes,
-            PoolRetryPolicy::default(),
-        )
-        .await;
+        let call_result = self
+            .plugin_manager
+            .call_raw(&self.plugin_id, &self.function_name, input_bytes, options)
+            .await;
 
         match call_result {
             Ok(output_bytes) => Ok(interpret_hook_output(
@@ -202,6 +198,9 @@ impl<M: PluginManager + Send + Sync + ?Sized + 'static> GenericHook for PluginHo
                 &self.plugin_id,
                 &self.function_name,
             )),
+            // Not an answer from the plugin: the caller turns it into "try
+            // again", never into a decision.
+            Err(e @ PluginError::Unavailable { .. }) => Err(e.into()),
             Err(e) => {
                 tracing::error!(
                     plugin_id = %self.plugin_id,

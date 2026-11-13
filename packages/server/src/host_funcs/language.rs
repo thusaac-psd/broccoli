@@ -77,7 +77,12 @@ fn resolve_language_fn(
     let output_bytes = tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
-                .call_raw(&handler.plugin_id, &handler.function_name, input_bytes)
+                .call_raw(
+                    &handler.plugin_id,
+                    &handler.function_name,
+                    input_bytes,
+                    plugin_core::executor::CallOptions::nested(),
+                )
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("Language resolver plugin error: {}", e)))?;

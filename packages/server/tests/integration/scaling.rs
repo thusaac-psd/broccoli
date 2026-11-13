@@ -171,7 +171,6 @@ async fn operation_result_burst_has_no_missing_waiters() {
         ),
         metrics: Some(metrics.clone()),
         evaluate_batches,
-        operation_batch_publish_concurrency: 128,
     };
 
     let batch_id = start_operation_batch(

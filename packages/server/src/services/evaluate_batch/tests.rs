@@ -170,45 +170,6 @@ fn dispatch_guard_with_nothing_pending_delivers_nothing() {
 }
 
 #[test]
-fn evaluator_semaphore_wait_metric_records_success_and_closed_outcomes() {
-    let _guard = crate::metrics_test_lock();
-    let (metrics, registry) =
-        common::observability::init_metrics("broccoli-evaluator-semaphore-test");
-
-    record_evaluator_semaphore_wait(
-        Some(&metrics),
-        "evaluator",
-        "evaluate",
-        "ioi",
-        "success",
-        Duration::from_millis(3),
-    );
-    record_evaluator_semaphore_wait(
-        Some(&metrics),
-        "evaluator",
-        "evaluate",
-        "ioi",
-        "closed",
-        Duration::from_millis(4),
-    );
-
-    let families = registry.gather();
-    let wait_duration = families
-        .iter()
-        .find(|family| family.name() == "broccoli_plugin_evaluator_semaphore_wait_duration_seconds")
-        .expect("evaluator semaphore wait duration should be exported");
-    for outcome in ["success", "closed"] {
-        assert!(
-            wait_duration.get_metric().iter().any(|metric| metric
-                .get_label()
-                .iter()
-                .any(|label| label.name() == "outcome" && label.value() == outcome)),
-            "evaluator semaphore wait should include outcome={outcome}"
-        );
-    }
-}
-
-#[test]
 fn callback_path_tags_operation_tasks_with_evaluate_context() {
     let mut ops = vec![OperationTask {
         environments: vec![],

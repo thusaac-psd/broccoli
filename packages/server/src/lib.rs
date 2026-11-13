@@ -328,6 +328,38 @@ fn spa_fallback_service(
 /// Upper bound on handling one API request.
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+tokio::task_local! {
+    /// When the request being handled times out.
+    static REQUEST_DEADLINE: std::time::Instant;
+}
+
+/// When the request this task is handling times out: the deadline of every
+/// interactive plugin call it makes. Outside a request (a test driving a
+/// handler's logic directly) a full request timeout from now.
+pub(crate) fn request_deadline() -> std::time::Instant {
+    REQUEST_DEADLINE
+        .try_with(|deadline| *deadline)
+        .unwrap_or_else(|_| std::time::Instant::now() + REQUEST_TIMEOUT)
+}
+
+/// Options for an interactive plugin call made by the current request.
+pub(crate) fn interactive_call() -> plugin_core::executor::CallOptions {
+    plugin_core::executor::CallOptions::interactive(request_deadline())
+}
+
+/// Records the request's deadline for [`request_deadline`].
+async fn with_request_deadline(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    REQUEST_DEADLINE
+        .scope(
+            std::time::Instant::now() + REQUEST_TIMEOUT,
+            next.run(request),
+        )
+        .await
+}
+
 /// The server's OpenAPI document as pretty-printed JSON: what
 /// `/api-docs/openapi.json` serves, and what `packages/web-sdk`'s `schema.ts`
 /// is generated from.
@@ -348,10 +380,12 @@ pub fn build_router(state: AppState) -> axum::Router {
     // The timeout sits INSIDE the idempotency middleware so a timed-out
     // handler surfaces as a 408 the middleware settles (as outcome unknown),
     // rather than cancelling the middleware with its key still pending.
-    let router = router.layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        REQUEST_TIMEOUT,
-    ));
+    let router = router
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .layer(axum::middleware::from_fn(with_request_deadline));
     let router = router.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         middleware::idempotency_middleware,

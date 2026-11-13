@@ -514,15 +514,37 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
     let Some(client) = state.redis_client.as_ref() else {
         return Vec::new();
     };
+    read_worker_payloads(client, &state.config.mq.operation_queue_name)
+        .await
+        .into_iter()
+        .map(|(node, p)| WorkerInfo {
+            id: node.id,
+            started_at: p.started_at,
+            last_seen: p.last_seen,
+            seconds_since_last_seen: node.age.as_secs(),
+            in_flight: p.in_flight,
+            max_concurrency: p.max_concurrency,
+            fairness_mode: p.fairness_mode,
+            sandbox_backend: p.sandbox_backend,
+            version: p.version,
+            hostname: p.hostname,
+            ip_addresses: p.ip_addresses,
+            os: p.os,
+            arch: p.arch,
+            cpu_count: p.cpu_count,
+            pid: p.pid,
+        })
+        .collect()
+}
+
+/// The live workers in `namespace` with their parsed heartbeat payloads,
+/// sorted by id. Empty when Redis is unavailable.
+pub(crate) async fn read_worker_payloads(
+    client: &redis::Client,
+    namespace: &str,
+) -> Vec<(liveness::LiveNode, HeartbeatPayload)> {
     let nodes = match client.get_multiplexed_async_connection().await {
-        Ok(mut conn) => {
-            liveness::live_nodes(
-                &mut conn,
-                &state.config.mq.operation_queue_name,
-                NodeRole::Worker,
-            )
-            .await
-        }
+        Ok(mut conn) => liveness::live_nodes(&mut conn, namespace, NodeRole::Worker).await,
         Err(e) => Err(e),
     };
     let nodes = match nodes {
@@ -534,32 +556,15 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
     };
     nodes
         .into_iter()
-        .filter_map(|node| {
-            let p = match serde_json::from_str::<HeartbeatPayload>(&node.payload) {
-                Ok(p) => p,
+        .filter_map(
+            |node| match serde_json::from_str::<HeartbeatPayload>(&node.payload) {
+                Ok(p) => Some((node, p)),
                 Err(e) => {
                     warn!(worker_id = %node.id, error = %e, "Unparseable worker heartbeat");
-                    return None;
+                    None
                 }
-            };
-            Some(WorkerInfo {
-                id: node.id,
-                started_at: p.started_at,
-                last_seen: p.last_seen,
-                seconds_since_last_seen: node.age.as_secs(),
-                in_flight: p.in_flight,
-                max_concurrency: p.max_concurrency,
-                fairness_mode: p.fairness_mode,
-                sandbox_backend: p.sandbox_backend,
-                version: p.version,
-                hostname: p.hostname,
-                ip_addresses: p.ip_addresses,
-                os: p.os,
-                arch: p.arch,
-                cpu_count: p.cpu_count,
-                pid: p.pid,
-            })
-        })
+            },
+        )
         .collect()
 }
 

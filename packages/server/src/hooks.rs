@@ -6,6 +6,9 @@ use broccoli_server_sdk::types::HookEvent;
 use common::event::GenericEvent;
 use common::hook::{GenericHook, HookAction};
 use lru::LruCache;
+use plugin_core::admission::CallClass;
+use plugin_core::error::PluginError;
+use plugin_core::executor::CallOptions;
 use plugin_core::hook::{HookMode, HookScope, PLUGIN_RUNTIME_ERROR_CODE, PluginHook};
 use plugin_core::traits::PluginManager;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
@@ -21,11 +24,31 @@ use crate::host_funcs::config::extract_plugin_id;
 
 const MAX_CHAIN_DEPTH: u8 = 3;
 
+/// Longest one hook call may run before its guest is cancelled.
+const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Options for one hook call made now by a dispatch of `class`: an
+/// interactive hook also ends with its request.
+fn hook_call(class: CallClass) -> CallOptions {
+    let deadline = std::time::Instant::now() + HOOK_TIMEOUT;
+    match class {
+        CallClass::Interactive => CallOptions::interactive(deadline.min(crate::request_deadline())),
+        CallClass::Background => CallOptions::background(deadline),
+    }
+}
+
+fn is_unavailable(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<PluginError>(),
+        Some(PluginError::Unavailable { .. })
+    )
+}
+
 struct HookEntry {
     plugin_id: String,
     scope: HookScope,
     mode: HookMode,
-    hook: Arc<dyn GenericHook<Context = ()>>,
+    hook: Arc<dyn GenericHook<Context = CallOptions>>,
 }
 
 pub struct ServerHookRegistry {
@@ -321,11 +344,14 @@ fn parse_reject_detail(reason: &str) -> (String, String, u16, Option<serde_json:
     }
 }
 
+/// Run `topic`'s hooks as `class` work: a request path dispatches
+/// interactive hooks, everything else background ones.
 pub async fn dispatch_hooks(
     topic: &str,
     event_payload: serde_json::Value,
     enabled_plugins: Option<&ResourceEnablements>,
     hook_registry: &SharedHookRegistry,
+    class: CallClass,
 ) -> Result<HookOutcome, AppError> {
     dispatch_hooks_inner(
         topic,
@@ -334,18 +360,9 @@ pub async fn dispatch_hooks(
         hook_registry,
         0,
         None,
+        class,
     )
     .await
-}
-
-pub async fn dispatch_hooks_typed<E: HookEvent>(
-    event: &E,
-    enabled_plugins: Option<&ResourceEnablements>,
-    hook_registry: &SharedHookRegistry,
-) -> Result<HookOutcome, AppError> {
-    let payload = serde_json::to_value(event)
-        .map_err(|e| AppError::Internal(format!("Failed to serialize hook event: {e}")))?;
-    dispatch_hooks(E::TOPIC, payload, enabled_plugins, hook_registry).await
 }
 
 /// Admission effects are reserved to the registered contest owner. Other
@@ -366,6 +383,7 @@ pub(crate) async fn dispatch_submission_hooks(
         hook_registry,
         0,
         admission_owner,
+        CallClass::Interactive,
     )
     .await
 }
@@ -392,6 +410,7 @@ pub fn dispatch_hooks_background(
             event_payload,
             enabled_plugins.as_ref(),
             &hook_registry,
+            CallClass::Background,
         )
         .await
         {
@@ -443,6 +462,7 @@ async fn dispatch_hooks_inner(
     hook_registry: &SharedHookRegistry,
     depth: u8,
     admission_owner: Option<&str>,
+    class: CallClass,
 ) -> Result<HookOutcome, AppError> {
     if depth >= MAX_CHAIN_DEPTH {
         tracing::warn!(
@@ -458,7 +478,7 @@ async fn dispatch_hooks_inner(
         position: i32,
         is_global: bool,
         mode: HookMode,
-        hook: Arc<dyn GenericHook<Context = ()>>,
+        hook: Arc<dyn GenericHook<Context = CallOptions>>,
     }
 
     let mut dispatch_list: Vec<DispatchEntry> = {
@@ -515,20 +535,17 @@ async fn dispatch_hooks_inner(
 
         match entry.mode {
             HookMode::Blocking => {
-                let hook_timeout = std::time::Duration::from_secs(30);
-                let action = match tokio::time::timeout(
-                    hook_timeout,
-                    entry.hook.on_event((), &generic_event),
-                )
-                .await
-                {
-                    Ok(result) => result.map_err(|e| {
+                // The deadline cancels the guest; a hook that could not
+                // answer in time is "try again", never a decision.
+                let action = match entry.hook.on_event(hook_call(class), &generic_event).await {
+                    Ok(action) => action,
+                    Err(e) if is_unavailable(&e) => {
+                        tracing::warn!(topic, plugin_id = %entry.plugin_id, "Hook unavailable: {e}");
+                        return Err(AppError::PluginUnavailable);
+                    }
+                    Err(e) => {
                         tracing::error!(topic, "Hook execution error: {e}");
-                        AppError::Internal(format!("Hook execution failed: {e}"))
-                    })?,
-                    Err(_) => {
-                        tracing::error!(topic, "Hook execution timed out (30s)");
-                        return Err(AppError::Internal("Hook execution timed out".into()));
+                        return Err(AppError::Internal(format!("Hook execution failed: {e}")));
                     }
                 };
 
@@ -606,6 +623,7 @@ async fn dispatch_hooks_inner(
                                 hook_registry,
                                 depth + 1,
                                 admission_owner,
+                                class,
                             ))
                             .await?;
                             if let HookOutcome::Rejected { .. } | HookOutcome::Stopped = result {
@@ -616,43 +634,26 @@ async fn dispatch_hooks_inner(
                     }
                 }
             }
-            HookMode::Notify => {
-                let notify_result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    entry.hook.on_event((), &generic_event),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => {
-                        tracing::warn!(topic, "Notify hook timed out (30s), skipping");
-                        continue;
+            HookMode::Notify => match entry.hook.on_event(hook_call(class), &generic_event).await {
+                Ok(action) => match &action {
+                    HookAction::Pass => {}
+                    HookAction::Reject(reason) => {
+                        tracing::debug!(topic, "Notify hook returned Reject (ignored): {reason}",);
                     }
-                };
-                match notify_result {
-                    Ok(action) => match &action {
-                        HookAction::Pass => {}
-                        HookAction::Reject(reason) => {
-                            tracing::debug!(
-                                topic,
-                                "Notify hook returned Reject (ignored): {reason}",
-                            );
-                        }
-                        HookAction::Stop => {
-                            tracing::debug!(topic, "Notify hook returned Stop (ignored)");
-                        }
-                        HookAction::Modified(_) => {
-                            tracing::debug!(topic, "Notify hook returned Modified (ignored)");
-                        }
-                        HookAction::Chain(_) => {
-                            tracing::debug!(topic, "Notify hook returned Chain (ignored)");
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(topic, "Notify hook error (ignored): {e}");
+                    HookAction::Stop => {
+                        tracing::debug!(topic, "Notify hook returned Stop (ignored)");
                     }
+                    HookAction::Modified(_) => {
+                        tracing::debug!(topic, "Notify hook returned Modified (ignored)");
+                    }
+                    HookAction::Chain(_) => {
+                        tracing::debug!(topic, "Notify hook returned Chain (ignored)");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(topic, "Notify hook error (ignored): {e}");
                 }
-            }
+            },
         }
     }
 
@@ -691,7 +692,7 @@ mod tests {
 
     #[async_trait]
     impl GenericHook for MockHook {
-        type Context = ();
+        type Context = CallOptions;
 
         fn id(&self) -> &str {
             &self.id
@@ -703,7 +704,7 @@ mod tests {
 
         async fn on_event(
             &self,
-            _ctx: (),
+            _ctx: CallOptions,
             _event: &GenericEvent,
         ) -> anyhow::Result<GenericHookAction> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -724,7 +725,7 @@ mod tests {
 
     #[async_trait]
     impl GenericHook for FailingHook {
-        type Context = ();
+        type Context = CallOptions;
 
         fn id(&self) -> &str {
             &self.id
@@ -736,7 +737,7 @@ mod tests {
 
         async fn on_event(
             &self,
-            _ctx: (),
+            _ctx: CallOptions,
             _event: &GenericEvent,
         ) -> anyhow::Result<GenericHookAction> {
             Err(anyhow::anyhow!("WASM crash"))
@@ -745,7 +746,7 @@ mod tests {
 
     fn register_direct(
         registry: &mut ServerHookRegistry,
-        hook: Arc<dyn GenericHook<Context = ()>>,
+        hook: Arc<dyn GenericHook<Context = CallOptions>>,
         scope: HookScope,
         mode: HookMode,
     ) {
@@ -769,7 +770,7 @@ mod tests {
         topic: &str,
         payload: serde_json::Value,
     ) -> Result<HookOutcome, AppError> {
-        dispatch_hooks(topic, payload, None, registry).await
+        dispatch_hooks(topic, payload, None, registry, CallClass::Background).await
     }
 
     #[tokio::test]
@@ -1273,9 +1274,15 @@ mod tests {
 
         let mut enabled = HashMap::new();
         enabled.insert("cooldown".to_string(), 0);
-        let result = dispatch_hooks("test", serde_json::json!({}), Some(&enabled), &registry)
-            .await
-            .unwrap();
+        let result = dispatch_hooks(
+            "test",
+            serde_json::json!({}),
+            Some(&enabled),
+            &registry,
+            CallClass::Background,
+        )
+        .await
+        .unwrap();
         assert!(matches!(result, HookOutcome::Stopped));
         assert_eq!(hook.calls(), 1);
     }
@@ -1291,9 +1298,15 @@ mod tests {
             HookMode::Blocking,
         );
 
-        let result = dispatch_hooks("test", serde_json::json!({}), None, &registry)
-            .await
-            .unwrap();
+        let result = dispatch_hooks(
+            "test",
+            serde_json::json!({}),
+            None,
+            &registry,
+            CallClass::Background,
+        )
+        .await
+        .unwrap();
         assert!(matches!(result, HookOutcome::Allowed(_)));
         assert_eq!(hook.calls(), 0);
     }
@@ -1338,9 +1351,15 @@ mod tests {
 
         let mut enabled = HashMap::new();
         enabled.insert("other-plugin".to_string(), 0);
-        let result = dispatch_hooks("test", serde_json::json!({}), Some(&enabled), &registry)
-            .await
-            .unwrap();
+        let result = dispatch_hooks(
+            "test",
+            serde_json::json!({}),
+            Some(&enabled),
+            &registry,
+            CallClass::Background,
+        )
+        .await
+        .unwrap();
         assert!(matches!(result, HookOutcome::Allowed(_)));
         assert_eq!(hook.calls(), 0);
     }
@@ -1370,5 +1389,88 @@ mod tests {
             result.is_err(),
             "Plugin runtime error should return Err(Internal), not Ok(Rejected)"
         );
+    }
+
+    /// A hook whose plugin cannot answer before its deadline.
+    struct BusyHook {
+        topics: Vec<String>,
+    }
+
+    #[async_trait]
+    impl GenericHook for BusyHook {
+        type Context = CallOptions;
+
+        fn id(&self) -> &str {
+            "busy"
+        }
+
+        fn topics(&self) -> &[String] {
+            &self.topics
+        }
+
+        async fn on_event(
+            &self,
+            _ctx: CallOptions,
+            _event: &GenericEvent,
+        ) -> anyhow::Result<GenericHookAction> {
+            Err(PluginError::Unavailable {
+                plugin_id: "busy".into(),
+                func_name: "gate".into(),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_blocking_hook_is_a_503_not_a_rejection() {
+        let registry = new_shared_registry();
+        registry.write().await.hooks.insert(
+            "test".into(),
+            vec![HookEntry {
+                plugin_id: "busy".into(),
+                scope: HookScope::Global,
+                mode: HookMode::Blocking,
+                hook: Arc::new(BusyHook {
+                    topics: vec!["test".into()],
+                }),
+            }],
+        );
+        let result = dispatch_hooks(
+            "test",
+            serde_json::json!({}),
+            None,
+            &registry,
+            CallClass::Interactive,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::PluginUnavailable)),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_notify_hook_is_skipped() {
+        let registry = new_shared_registry();
+        registry.write().await.hooks.insert(
+            "test".into(),
+            vec![HookEntry {
+                plugin_id: "busy".into(),
+                scope: HookScope::Global,
+                mode: HookMode::Notify,
+                hook: Arc::new(BusyHook {
+                    topics: vec!["test".into()],
+                }),
+            }],
+        );
+        let result = dispatch_hooks(
+            "test",
+            serde_json::json!({}),
+            None,
+            &registry,
+            CallClass::Background,
+        )
+        .await;
+        assert!(matches!(result, Ok(HookOutcome::Allowed(_))), "{result:?}");
     }
 }

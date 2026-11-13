@@ -106,11 +106,6 @@ pub async fn run(
         cancel.clone(),
     ));
 
-    // Live worker slots, refreshed every `SLOTS_REFRESH` from heartbeats
-    // (a Redis SCAN, too costly to repeat every pass). Sizes the in-flight
-    // cap so it scales with the cluster; see [`effective_cap`].
-    let mut live_slots: u64 = 0;
-    let mut slots_checked: Option<Instant> = None;
     let mut last_pass: Option<Instant> = None;
 
     loop {
@@ -133,11 +128,9 @@ pub async fn run(
             "dispatcher.claim",
             common::deadline::BACKGROUND_STEP,
             async {
-                if max_in_flight > 0 && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
-                    live_slots = live_worker_slots(&state).await;
-                    slots_checked = Some(Instant::now());
-                }
-                let cap = effective_cap(max_in_flight, live_slots);
+                // Sized from the live worker slots so the cap scales with
+                // the cluster; see [`effective_cap`].
+                let cap = effective_cap(max_in_flight, state.worker_slots.get());
                 loop {
                     match claim_once(&state, &server_id, batch_size, cap).await {
                         Ok(pass) => {
@@ -377,9 +370,6 @@ fn reserve_slots(state: &AppState, n: u32) -> Vec<DispatcherReservation> {
     slots
 }
 
-/// How often the claim loop re-reads live worker capacity.
-const SLOTS_REFRESH: Duration = Duration::from_secs(15);
-
 /// In-flight submissions allowed per live worker slot. A submission keeps at
 /// most a few operations in flight, so more than one per busy slot adds no
 /// throughput; 8 leaves ample slack for claim latency and callbacks, so the
@@ -395,16 +385,6 @@ fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
     }
     let scaled = live_worker_slots.saturating_mul(IN_FLIGHT_PER_WORKER_SLOT);
     u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
-}
-
-/// Sum of `max_concurrency` over live workers. 0 when Redis is unavailable,
-/// which leaves the configured floor.
-async fn live_worker_slots(state: &AppState) -> u64 {
-    crate::handlers::system::read_workers(state)
-        .await
-        .iter()
-        .map(|w| u64::from(w.max_concurrency.unwrap_or(1)))
-        .sum()
 }
 
 /// Rows to claim this tick: the batch size, but never past the server's

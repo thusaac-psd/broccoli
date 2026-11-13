@@ -96,7 +96,12 @@ fn checker_stage_call(
     tokio::runtime::Handle::current()
         .block_on(async {
             ctx.plugin_manager
-                .call_raw(&handler.plugin_id, &function_name, request_bytes)
+                .call_raw(
+                    &handler.plugin_id,
+                    &function_name,
+                    request_bytes,
+                    plugin_core::executor::CallOptions::nested(),
+                )
                 .await
         })
         .map_err(|e| extism::Error::msg(format!("Checker stage plugin error: {e}")))

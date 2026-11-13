@@ -42,26 +42,18 @@ pub struct ServerRuntime {
 impl ServerRuntime {
     pub async fn build(mut app_config: AppConfig) -> anyhow::Result<Self> {
         let telemetry_guard = common::observability::init_tracing(&app_config.observability);
+        if !app_config.removed_keys_set.is_empty() {
+            warn!(
+                keys = ?app_config.removed_keys_set,
+                "Configuration sets keys that no longer exist; they are ignored. Remove them."
+            );
+        }
 
         let server_id = resolve_server_id(
             &app_config.server.id,
             app_config.server.expects_multi_replica,
         )?;
         app_config.server.id = server_id.clone();
-
-        let original_pool_max = app_config.plugin.pool_max_instances;
-        if app_config.plugin.normalize_for_safe_pool_sizing() {
-            let evaluator_parallelism = app_config.plugin.resolve_evaluator_parallelism();
-            warn!(
-                configured_pool_max_instances = original_pool_max,
-                evaluator_parallelism,
-                effective_pool_max_instances = app_config.plugin.pool_max_instances,
-                "pool_max_instances < evaluator_parallelism; raising pool size to match. \
-                 This prevents pool-acquire queueing from inflating the evaluator semaphore \
-                 (and outright deadlock for self-checking plugins). Set \
-                 BROCCOLI__PLUGIN__POOL_MAX_INSTANCES explicitly to silence this warning."
-            );
-        }
 
         info!(server_id = %server_id, "Resolved server identity");
 
@@ -332,6 +324,11 @@ impl ServerRuntime {
 
         let hook_registry = crate::hooks::new_shared_registry();
 
+        let worker_slots = crate::dispatcher::fanout::WorkerSlots::default();
+        if let Some(client) = &redis_client {
+            worker_slots.spawn_refresh(client.clone(), app_config.mq.operation_queue_name.clone());
+        }
+
         let manager = ServerManager::new(
             app_config.plugin.clone(),
             HostFunctionSystemDeps {
@@ -350,6 +347,7 @@ impl ServerRuntime {
                 config: app_config.clone(),
                 metrics: Some(metrics.clone()),
                 redis_client: redis_client.clone(),
+                worker_slots: worker_slots.clone(),
             },
             Some(metrics.clone()),
         )
@@ -397,6 +395,7 @@ impl ServerRuntime {
             metrics,
             prometheus_registry,
             dispatcher_permits,
+            worker_slots,
             plugin_lifecycle: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
@@ -405,23 +404,6 @@ impl ServerRuntime {
         };
 
         crate::handlers::system::spawn_queue_depth_sampler(state.clone(), Duration::from_secs(5));
-
-        if let Some(idle_for) = app_config.plugin.pool_idle_timeout() {
-            let plugins = state.plugins.clone();
-            tokio::spawn(async move {
-                // Sweeping at a fraction of the timeout bounds how long past
-                // it an idle instance can linger.
-                let mut interval =
-                    tokio::time::interval((idle_for / 4).max(Duration::from_secs(1)));
-                loop {
-                    interval.tick().await;
-                    let plugins = plugins.clone();
-                    let _ =
-                        tokio::task::spawn_blocking(move || plugins.evict_idle_instances(idle_for))
-                            .await;
-                }
-            });
-        }
 
         {
             let detector_state = state.clone();
