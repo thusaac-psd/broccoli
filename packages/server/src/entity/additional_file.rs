@@ -8,16 +8,13 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
 
-    /// `(problem_id, language, path)` is unique. Declared on the entity because
-    /// the per-boot schema `sync()` drops every unique index whose column set
-    /// no entity declares an index on.
-    #[sea_orm(unique_key = "problem_lang_path")]
+    #[sea_orm(unique_key = "problem_language_path")]
     pub problem_id: i32,
 
-    #[sea_orm(unique_key = "problem_lang_path")]
+    #[sea_orm(unique_key = "problem_language_path")]
     pub language: String,
 
-    #[sea_orm(column_type = "Text", unique_key = "problem_lang_path")]
+    #[sea_orm(column_type = "Text", unique_key = "problem_language_path")]
     pub path: String,
 
     pub content_hash: String,

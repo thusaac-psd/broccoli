@@ -49,12 +49,3 @@ all keyed on it. Everything below lives in
   submission, at the dispatched epoch, still unfinalized. A deferred rejudge
   finishes its own judgement while an immediate one runs beside it. Only the
   current judgement updates the submission's cached verdict.
-
-## Upgrading
-
-Upgrade all server replicas together. A replica that predates
-`max_judge_epoch` bumps epochs as `judge_epoch + 1` without touching the
-allocator, so while old and new replicas run side by side two judgements can
-end up with the same epoch. Migration `m0012_max_judge_epoch` adds the column
-and backfills only the submissions that hold a judgement above their own
-epoch.

@@ -1113,8 +1113,6 @@ mod tests {
                     max_blocking_threads: None,
                     batch_evaluator_fanout_concurrency: 64,
                     operation_batch_publish_concurrency: 32,
-                    healthz_listen: None,
-                    healthz_worker_threads: 2,
                     claim_fiber_enabled: false,
                     claim_poll_interval_ms: 1000,
                     claim_batch_size: 32,
@@ -1206,9 +1204,11 @@ mod deferred_steal_db_tests {
         judge_epoch: i32,
     ) -> i32 {
         let now = chrono::Utc::now();
+        // A test may seed several submissions; each gets its own user.
+        let username = format!("steal-test-user-{}", uuid::Uuid::new_v4());
         let u = user::ActiveModel {
-            username: Set("steal-test-user".to_string()),
-            display_name: Set("steal-test-user".to_string()),
+            username: Set(username.clone()),
+            display_name: Set(username),
             password: Set("x".to_string()),
             created_at: Set(now),
             ..Default::default()
@@ -1397,7 +1397,7 @@ mod deferred_steal_db_tests {
         // the pre-bump epoch.
         test_case_result::ActiveModel {
             submission_id: Set(sub_id),
-            judgement_id: Set(Some(jid)),
+            judgement_id: Set(jid),
             judge_epoch: Set(0),
             verdict: Set(common::Verdict::Accepted),
             score: Set(1.0),

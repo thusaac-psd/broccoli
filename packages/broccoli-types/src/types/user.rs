@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Stable account identity with an optional human-readable name for legacy data.
+/// Stable account identity with an optional human-readable name.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UserIdentity {
     pub user_id: i32,
@@ -26,7 +26,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn labels_prefer_display_names_and_keep_legacy_accounts_readable() {
+    fn labels_prefer_display_names_and_fall_back_to_the_username() {
         for (display_name, expected) in [
             (json!("  选手甲  "), "选手甲"),
             (json!(null), "oj_01"),
@@ -40,8 +40,8 @@ mod tests {
             assert_eq!(user.display_label(), expected);
             assert_eq!(user.username, "oj_01");
         }
-        let legacy: UserIdentity =
+        let unnamed: UserIdentity =
             serde_json::from_value(json!({"user_id": 1, "username": "oj_01"})).unwrap();
-        assert_eq!(legacy.display_label(), "oj_01");
+        assert_eq!(unnamed.display_label(), "oj_01");
     }
 }

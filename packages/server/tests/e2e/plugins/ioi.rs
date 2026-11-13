@@ -220,7 +220,7 @@ async fn ioi_feedback_filter_redacts_judgement_history() {
     .expect("insert judged judgement");
     test_case_result::ActiveModel {
         submission_id: Set(submission.id),
-        judgement_id: Set(Some(judgement.id)),
+        judgement_id: Set(judgement.id),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),
@@ -349,7 +349,7 @@ async fn ioi_feedback_organiser_without_submission_view_all_sees_unredacted_judg
         .expect("judgement should exist");
     test_case_result::ActiveModel {
         submission_id: Set(sub_id),
-        judgement_id: Set(Some(judgement_model.id)),
+        judgement_id: Set(judgement_model.id),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),
@@ -513,7 +513,7 @@ async fn ioi_feedback_filter_subtask_scores_redacts_per_test_case_verdict() {
     .expect("insert judged judgement");
     test_case_result::ActiveModel {
         submission_id: Set(submission.id),
-        judgement_id: Set(Some(judgement.id)),
+        judgement_id: Set(judgement.id),
         test_case_id: Set(None),
         run_index: Set(None),
         verdict: Set(Verdict::Accepted),

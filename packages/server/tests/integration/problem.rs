@@ -1575,10 +1575,6 @@ mod test_case_deletion {
 
     #[tokio::test]
     async fn delete_is_blocked_by_test_case_results() {
-        use common::{SubmissionStatus, Verdict};
-        use sea_orm::{ActiveModelTrait, Set};
-        use server::entity::{submission, test_case_result};
-
         let app = TestApp::spawn().await;
         let token = app
             .create_user_with_role("admin_del_blocked", "password123", "admin")
@@ -1587,44 +1583,7 @@ mod test_case_deletion {
         let pid = app.create_problem(&token, "Test Problem").await;
         let tc_id = app.create_test_case(pid, &token).await;
 
-        let me = app.get_with_token(routes::ME, &token).await;
-        let user_id = me.id();
-
-        let now = chrono::Utc::now();
-
-        let files = serde_json::json!([{"filename": "main.rs", "content": "fn main() {}"}]);
-        let sub = submission::ActiveModel {
-            files: Set(files),
-            language: Set("rust".into()),
-            status: Set(SubmissionStatus::Judged),
-            verdict: Set(Some(Verdict::Accepted)),
-            score: Set(Some(100.0)),
-            time_used: Set(Some(50)),
-            memory_used: Set(Some(1024)),
-            user_id: Set(user_id),
-            problem_id: Set(pid),
-            created_at: Set(now),
-            judged_at: Set(Some(now)),
-            ..Default::default()
-        };
-        let sub_model = sub
-            .insert(&app.db)
-            .await
-            .expect("Failed to insert submission");
-
-        let tcr = test_case_result::ActiveModel {
-            submission_id: Set(sub_model.id),
-            test_case_id: Set(Some(tc_id)),
-            verdict: Set(Verdict::Accepted),
-            score: Set(10.0),
-            time_used: Set(Some(50)),
-            memory_used: Set(Some(1024)),
-            created_at: Set(now),
-            ..Default::default()
-        };
-        tcr.insert(&app.db)
-            .await
-            .expect("Failed to insert test case result");
+        insert_judged_result(&app, &token, pid, tc_id).await;
 
         let res = app
             .delete_with_token(&routes::test_case(pid, tc_id), &token)
@@ -2431,10 +2390,6 @@ mod bulk_delete_test_cases {
 
     #[tokio::test]
     async fn returns_conflict_when_test_cases_have_results() {
-        use common::{SubmissionStatus, Verdict};
-        use sea_orm::{ActiveModelTrait, Set};
-        use server::entity::{submission, test_case_result};
-
         let app = TestApp::spawn().await;
         let token = app
             .create_user_with_role("admin_bulk6", "password123", "admin")
@@ -2444,38 +2399,7 @@ mod bulk_delete_test_cases {
         let tc1 = app.create_test_case(pid, &token).await;
         let tc2 = app.create_test_case(pid, &token).await;
 
-        let me = app.get_with_token(routes::ME, &token).await;
-        let user_id = me.id();
-        let now = chrono::Utc::now();
-
-        let files = serde_json::json!([{"filename": "main.rs", "content": "fn main() {}"}]);
-        let sub = submission::ActiveModel {
-            files: Set(files),
-            language: Set("rust".into()),
-            status: Set(SubmissionStatus::Judged),
-            verdict: Set(Some(Verdict::Accepted)),
-            score: Set(Some(100.0)),
-            time_used: Set(Some(50)),
-            memory_used: Set(Some(1024)),
-            user_id: Set(user_id),
-            problem_id: Set(pid),
-            created_at: Set(now),
-            judged_at: Set(Some(now)),
-            ..Default::default()
-        };
-        let sub_model = sub.insert(&app.db).await.expect("insert submission");
-
-        let tcr = test_case_result::ActiveModel {
-            submission_id: Set(sub_model.id),
-            test_case_id: Set(Some(tc1)),
-            verdict: Set(Verdict::Accepted),
-            score: Set(10.0),
-            time_used: Set(Some(50)),
-            memory_used: Set(Some(1024)),
-            created_at: Set(now),
-            ..Default::default()
-        };
-        tcr.insert(&app.db).await.expect("insert test case result");
+        insert_judged_result(&app, &token, pid, tc1).await;
 
         let res = app
             .delete_with_body_and_token(
@@ -2677,7 +2601,7 @@ mod problem_contest_access {
 async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) {
     use common::{SubmissionStatus, Verdict};
     use sea_orm::{ActiveModelTrait, Set};
-    use server::entity::{submission, test_case_result};
+    use server::entity::{submission, submission_judgement, test_case_result};
 
     let user_id = app.get_with_token(routes::ME, token).await.id();
     let now = chrono::Utc::now();
@@ -2696,8 +2620,24 @@ async fn insert_judged_result(app: &TestApp, token: &str, pid: i32, tc_id: i32) 
     .insert(&app.db)
     .await
     .expect("insert submission");
+    let judgement = submission_judgement::ActiveModel {
+        submission_id: Set(sub.id),
+        version: Set(1),
+        is_current: Set(true),
+        is_finalized: Set(true),
+        status: Set(SubmissionStatus::Judged),
+        verdict: Set(Some(Verdict::Accepted)),
+        score: Set(Some(100.0)),
+        created_at: Set(now),
+        finalized_at: Set(Some(now)),
+        ..Default::default()
+    }
+    .insert(&app.db)
+    .await
+    .expect("insert judgement");
     test_case_result::ActiveModel {
         submission_id: Set(sub.id),
+        judgement_id: Set(judgement.id),
         test_case_id: Set(Some(tc_id)),
         verdict: Set(Verdict::Accepted),
         score: Set(10.0),

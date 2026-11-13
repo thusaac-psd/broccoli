@@ -15,7 +15,6 @@ pub mod entity;
 pub mod error;
 pub mod extractors;
 pub mod handlers;
-pub mod healthz_runtime;
 pub mod hooks;
 pub mod host_funcs;
 pub mod manager;
@@ -127,7 +126,7 @@ impl Modify for SecurityAddon {
     }
 }
 
-pub(crate) async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     use prometheus::Encoder;
 
     let encoder = prometheus::TextEncoder::new();
@@ -374,13 +373,6 @@ pub fn build_router(state: AppState) -> axum::Router {
 
     // `/livez` is the shallow liveness probe for load balancers (no dependency
     // calls); `/healthz` is the deep readiness check (DB + Redis).
-    // `/metrics`, `/livez` and `/healthz` are also served on a dedicated tokio runtime
-    // + listener when `server.healthz_listen` is configured - see
-    // `healthz_runtime`. Operators are encouraged to point load-balancer
-    // probes and Prometheus scrapes at the dedicated listener so main-runtime
-    // saturation (submission bursts, scheduler thrash) does not stall
-    // liveness signals. The endpoints remain on the main router unchanged so
-    // legacy probe configurations keep working.
     let app = axum::Router::new()
         .nest("/api", router.fallback(api_not_found))
         .route("/metrics", axum::routing::get(metrics_handler))

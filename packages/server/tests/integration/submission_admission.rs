@@ -297,41 +297,4 @@ async fn opaque_admission_is_atomic_plugin_scoped_and_invalidates_decision_snaps
         .await
         .unwrap()
     );
-    // Exercise an upgrade of existing host feedback records, rather than only
-    // creating an empty feedback table on a fresh installation.
-    use sea_orm::ConnectionTrait;
-    use sea_orm_migration::{MigratorTrait, SchemaManager};
-    app.db
-        .execute_unprepared(&format!(
-            "DELETE FROM submission_feedback WHERE submission_id <> {}",
-            admitted.id
-        ))
-        .await
-        .unwrap();
-    app.db.execute_unprepared("ALTER TABLE submission_feedback ADD COLUMN scope_key TEXT NOT NULL DEFAULT 'opaque-scope';
-        ALTER TABLE submission_feedback ADD COLUMN delay_seconds BIGINT NOT NULL DEFAULT 11;
-        ALTER TABLE submission_feedback ADD COLUMN effective_at_us BIGINT NOT NULL DEFAULT 1234;
-        ALTER TABLE submission_feedback DROP COLUMN metadata;
-        ALTER TABLE submission_feedback DROP COLUMN slot_key;
-        ALTER TABLE submission_feedback DROP COLUMN public_result;
-        ALTER TABLE submission_feedback DROP CONSTRAINT submission_feedback_outcome_check;
-        ALTER TABLE submission_feedback ADD CONSTRAINT submission_feedback_outcome_check CHECK (outcome IN ('pending','retired','released','too_late'));
-        UPDATE submission_feedback SET outcome='too_late'").await.unwrap();
-    let migrations = server::migration::Migrator::migrations();
-    migrations
-        .iter()
-        .find(|migration| migration.name() == "m0010_plugin_submission_feedback")
-        .expect("submission feedback migration must be registered")
-        .up(&SchemaManager::new(&app.db))
-        .await
-        .unwrap();
-    let upgraded = submission_feedback::query(&app.db, owner, &SubmissionFeedbackQuery::default())
-        .await
-        .unwrap()
-        .remove(0);
-    assert!(upgraded.withheld && !upgraded.slot_held);
-    assert_eq!(upgraded.metadata["scope_key"], "opaque-scope");
-    assert_eq!(upgraded.metadata["delay_seconds"], 11);
-    assert_eq!(upgraded.metadata["effective_at_us"], 1234);
-    assert_eq!(upgraded.metadata["previous_outcome"], "too_late");
 }

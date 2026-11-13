@@ -423,7 +423,7 @@ pub struct TaskExecutionResult {
 
 /// Normalized sandbox termination status, mapped once at the worker sandbox
 /// boundary from backend-specific signals (e.g. isolate's `meta` status codes).
-/// Consumers should match on this instead of the raw [`ExecutionResult::status`]
+/// Consumers match on this instead of the raw [`ExecutionResult::status`]
 /// string, which is retained for diagnostics only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -438,8 +438,7 @@ pub enum SandboxStatus {
     NonZeroExit,
     /// The sandbox itself failed internally (isolate `XX`).
     InternalError,
-    /// No status was recorded (step never ran, or an older result without the
-    /// typed field). Callers should fall back to the raw status string.
+    /// No status was recorded: the step never ran.
     #[default]
     Unknown,
 }
@@ -477,12 +476,11 @@ pub struct ExecutionResult {
     #[serde(default)]
     pub cg_oom_killed: bool,
     /// Raw backend status string (isolate `meta` code), kept for diagnostics.
-    /// Match on [`ExecutionResult::status_kind`] for control flow instead.
+    /// Match on [`ExecutionResult::sandbox_status`] for control flow instead.
     #[serde(default)]
     pub status: String,
-    /// Normalized sandbox status, mapped once at the sandbox backend. Older
-    /// results omit it (defaults to [`SandboxStatus::Unknown`]); use
-    /// [`ExecutionResult::status_kind`] to read it with a raw-string fallback.
+    /// Normalized sandbox status, mapped once at the sandbox backend;
+    /// [`SandboxStatus::Unknown`] for a step that never ran.
     #[serde(default)]
     pub sandbox_status: SandboxStatus,
     #[serde(default)]
@@ -491,18 +489,6 @@ pub struct ExecutionResult {
     pub stdout: String,
     #[serde(default)]
     pub stderr: String,
-}
-
-impl ExecutionResult {
-    /// The normalized sandbox status. Returns the typed `sandbox_status` when the
-    /// backend set it, and otherwise derives it from the raw `status` string so
-    /// results produced before the field existed still classify correctly.
-    pub fn status_kind(&self) -> SandboxStatus {
-        match self.sandbox_status {
-            SandboxStatus::Unknown => SandboxStatus::from_isolate(&self.status),
-            known => known,
-        }
-    }
 }
 
 impl Default for ExecutionResult {
@@ -551,29 +537,9 @@ mod tests {
     }
 
     #[test]
-    fn status_kind_prefers_typed_field_then_falls_back() {
-        // Typed field set: used verbatim, ignoring the raw string.
-        let typed = ExecutionResult {
-            status: "TO".into(),
-            sandbox_status: SandboxStatus::NonZeroExit,
-            ..Default::default()
-        };
-        assert_eq!(typed.status_kind(), SandboxStatus::NonZeroExit);
-
-        // Typed field unset (Unknown): derive from the raw string so results
-        // produced before `sandbox_status` existed still classify.
-        let legacy = ExecutionResult {
-            status: "TO".into(),
-            ..Default::default()
-        };
-        assert_eq!(legacy.sandbox_status, SandboxStatus::Unknown);
-        assert_eq!(legacy.status_kind(), SandboxStatus::TimedOut);
-    }
-
-    #[test]
-    fn step_kind_defaults_to_generic_for_legacy_payloads() {
+    fn step_kind_defaults_to_generic_when_omitted() {
         let step: Step = serde_json::from_value(serde_json::json!({
-            "id": "legacy",
+            "id": "plain",
             "env_ref": "sandbox",
             "argv": ["echo", "ok"],
             "conf": {},
@@ -686,9 +652,9 @@ mod tests {
     }
 
     #[test]
-    fn step_mounts_defaults_to_empty_for_legacy_payloads() {
+    fn step_mounts_defaults_to_empty_when_omitted() {
         let step: Step = serde_json::from_value(serde_json::json!({
-            "id": "legacy",
+            "id": "plain",
             "env_ref": "sandbox",
             "argv": ["echo", "ok"],
             "conf": {},

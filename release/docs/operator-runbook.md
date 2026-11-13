@@ -40,6 +40,20 @@ curl -fsS http://127.0.0.1:${BROCCOLI_GATEWAY_HTTP_BIND##*:}/healthz
 docker compose --env-file .env.gateway -f docker-compose.gateway.yaml logs --tail=200 gateway
 ```
 
+### Health probes and metrics
+
+Each server answers `/livez` (the process is up), `/healthz` (it can also reach
+Postgres and Redis) and `/metrics` on its main HTTP port. These share the
+runtime that serves API requests and judging, so a server saturated by a
+submission burst can answer a probe slowly and fail it even though it is still
+working. The gateway probes `/livez` every 5 s with a 2 s timeout and ejects a
+server after 2 misses (`health_interval`, `health_timeout` and `health_fails` in
+`examples/Caddyfile.gateway`, and in `airgap/caddy/Caddyfile.airgap` for an
+airgap install). If servers are ejected under load while their logs show them
+still serving, raise `health_timeout` or `health_fails` there and restart the
+gateway. A Prometheus scrape of `/metrics` can likewise time out under load;
+give it a scrape timeout of a few seconds.
+
 ## Restart
 
 Restart one role at a time:

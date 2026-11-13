@@ -10,11 +10,8 @@ pub struct Model {
     pub id: i32,
 
     pub submission_id: i32,
-    /// Versioned-judgement FK. Nullable during the rolling migration; the
-    /// `seed::backfill_submission_judgements` step populates it for every
-    /// pre-existing row by attaching them to a synthetic v1 judgement.
-    /// New rows written by plugins always set this.
-    pub judgement_id: Option<i32>,
+    /// The judgement this result belongs to.
+    pub judgement_id: i32,
     #[sea_orm(default_value = 0)]
     pub judge_epoch: i32,
     pub test_case_id: Option<i32>,

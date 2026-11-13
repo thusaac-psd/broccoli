@@ -50,8 +50,8 @@ fn should_recover_directly(lease_steal_enabled: bool, judgement_is_current: Opti
 }
 
 /// True when an owned row's immutable `leased_at` dispatch anchor is older than
-/// the in-flight cap. NULL-safe on both sides: a row with no anchor (legacy /
-/// pre-dispatch) or a disabled cap (`None`) never trips. This is the branch that
+/// the in-flight cap. NULL-safe on both sides: a row with no anchor (not yet
+/// dispatched) or a disabled cap (`None`) never trips. This is the branch that
 /// recovers a silently-wedged worker whose lease a live server keeps refreshing,
 /// so `lease_heartbeat_at` alone never goes stale.
 pub(super) fn inflight_capped(
