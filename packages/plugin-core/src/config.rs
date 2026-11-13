@@ -115,9 +115,10 @@ pub const COMPILED_MODULES_ENTRY: &str = ".compiled";
 pub fn compile_cache_config(cache_dir: &std::path::Path) -> Option<PathBuf> {
     let prepare = || -> std::io::Result<PathBuf> {
         let entry = cache_dir.join(COMPILED_MODULES_ENTRY);
-        let modules = entry.join("modules");
-        std::fs::create_dir_all(&modules)?;
-        let modules = modules.canonicalize()?;
+        // wasmtime keeps its modules in a `modules/` directory of its own
+        // under this one.
+        std::fs::create_dir_all(&entry)?;
+        let modules = entry.canonicalize()?;
         let config = entry.join("wasmtime-cache.toml");
         let toml = format!("[cache]\ndirectory = {:?}\n", modules.display().to_string());
         if std::fs::read_to_string(&config).ok().as_deref() != Some(toml.as_str()) {
@@ -219,7 +220,6 @@ mod tests {
             .path()
             .join("cache")
             .join(COMPILED_MODULES_ENTRY)
-            .join("modules")
             .canonicalize()
             .unwrap();
         assert!(
