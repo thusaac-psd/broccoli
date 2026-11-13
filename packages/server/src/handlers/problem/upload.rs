@@ -25,7 +25,7 @@ use crate::upload_limits::{
 };
 use crate::utils::filename::{is_sample_directory, split_dir_filename};
 use crate::utils::test_case_body::prepare_test_case_body;
-use crate::utils::text::sanitize_db_text;
+use crate::utils::text::reject_nul;
 
 use super::find_problem_for_update;
 use super::test_cases::{delete_unjudged_test_cases, next_test_case_position, tc_to_list_item};
@@ -139,7 +139,7 @@ pub async fn upload_test_cases(
                     active.expected_output_size = Set(Some(output_body.size));
                     active.input_preview = Set(Some(input_body.preview));
                     active.expected_output_preview = Set(Some(output_body.preview));
-                    active.label = Set(sanitize_db_text(entry.label));
+                    active.label = Set(entry.label);
                     active.score = Set(score);
                     active.is_sample = Set(entry.is_sample);
                     let model = active.update(&txn).await?;
@@ -160,7 +160,7 @@ pub async fn upload_test_cases(
             input_preview: Set(Some(input_body.preview)),
             expected_output_preview: Set(Some(output_body.preview)),
             score: Set(score),
-            label: Set(sanitize_db_text(entry.label)),
+            label: Set(entry.label),
             description: Set(None),
             is_sample: Set(entry.is_sample),
             position: Set(start_pos),
@@ -354,11 +354,11 @@ fn parse_zip_test_cases(
 
         let content = String::from_utf8(buf)
             .map_err(|_| AppError::Validation(format!("File '{name}' is not valid UTF-8")))?;
-        let content = sanitize_db_text(content);
+        reject_nul(&format!("File '{name}'"), &content)?;
 
         match role {
             ZipEntryRole::Input(label) => {
-                let key = sanitize_db_text(label);
+                let key = label.to_string();
                 validate_label(&key)?;
                 if in_files.contains_key(&key) {
                     return Err(AppError::Validation(format!(
@@ -368,7 +368,7 @@ fn parse_zip_test_cases(
                 in_files.insert(key, (content, is_sample));
             }
             ZipEntryRole::Output(label) => {
-                let key = sanitize_db_text(label);
+                let key = label.to_string();
                 validate_label(&key)?;
                 if ans_files.contains_key(&key) {
                     return Err(AppError::Validation(format!(

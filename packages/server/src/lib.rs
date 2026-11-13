@@ -356,6 +356,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         state.clone(),
         middleware::idempotency_middleware,
     ));
+    let router = router.layer(axum::middleware::from_fn(middleware::reject_nul_in_uri));
 
     #[cfg(feature = "bundled-stress-test")]
     let state_for_downloads = state.clone();
