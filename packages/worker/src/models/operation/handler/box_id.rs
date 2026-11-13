@@ -63,6 +63,11 @@ pub struct BoxIds {
     count: u32,
     wait: Duration,
     freed: Notify,
+    /// Where the next scan starts: the lowest id this process freed since its
+    /// last reservation, or the id after that reservation. Ids this process
+    /// cycles through are found first, without trying the ids other workers
+    /// hold; the scan still wraps over every id.
+    hint: AtomicU32,
 }
 
 impl BoxIds {
@@ -97,6 +102,7 @@ impl BoxIds {
             count,
             wait,
             freed: Notify::new(),
+            hint: AtomicU32::new(0),
         }))
     }
 
@@ -140,10 +146,11 @@ impl BoxIds {
         }
     }
 
-    /// Take the `n` lowest free ids, or none.
+    /// Take `n` free ids, the first ones found from the hint on, or none.
     fn try_reserve(self: &Arc<Self>, n: usize) -> Result<Option<Vec<BoxId>>, BoxIdError> {
         let mut locked = Vec::with_capacity(n);
-        for id in 0..self.count {
+        let start = self.hint.load(Ordering::Relaxed) % self.count.max(1);
+        for id in (start..self.count).chain(0..start) {
             if locked.len() == n {
                 break;
             }
@@ -160,6 +167,9 @@ impl BoxIds {
             // which would only find the same shortage.
             return Ok(None);
         }
+        if let Some((last, _)) = locked.last() {
+            self.hint.store(last + 1, Ordering::Relaxed);
+        }
         Ok(Some(
             locked
                 .into_iter()
@@ -167,6 +177,7 @@ impl BoxIds {
                     // A lock file in use is never stale to a temp-dir cleaner.
                     let _ = file.set_modified(std::time::SystemTime::now());
                     BoxId {
+                        number: id,
                         id: id.to_string(),
                         _lock: file,
                         ids: self.clone(),
@@ -203,6 +214,7 @@ fn try_lock(file: &File) -> std::io::Result<()> {
 /// A box id held for one environment. Dropping it releases the id.
 #[derive(Debug)]
 pub(super) struct BoxId {
+    number: u32,
     id: String,
     /// The locked lock file; closing it releases the id.
     _lock: File,
@@ -223,6 +235,7 @@ impl std::fmt::Display for BoxId {
 
 impl Drop for BoxId {
     fn drop(&mut self) {
+        self.ids.hint.fetch_min(self.number, Ordering::Relaxed);
         // The lock file closes after this body; a woken waiter that looks
         // before then simply looks again on its next poll.
         self.ids.freed.notify_waiters();
@@ -339,6 +352,38 @@ mod tests {
         assert_eq!(waiting.await.unwrap(), [0, 1]);
     }
 
+    #[tokio::test]
+    async fn a_worker_reuses_the_ids_it_freed_before_trying_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = BoxIds::open(dir.path(), 100).unwrap();
+        let ids = BoxIds::open(dir.path(), 100).unwrap();
+        let mine = ids.reserve(2).await.unwrap();
+        assert_eq!(ids_of(&mine), [0, 1]);
+        let theirs = other.reserve(5).await.unwrap();
+        assert_eq!(ids_of(&theirs), [2, 3, 4, 5, 6]);
+
+        drop(mine);
+        assert_eq!(ids_of(&ids.reserve(2).await.unwrap()), [0, 1]);
+        drop(theirs);
+    }
+
+    #[tokio::test]
+    async fn the_scan_wraps_to_free_ids_below_the_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = BoxIds::open(dir.path(), 5).unwrap();
+        let other = BoxIds::open(dir.path(), 5).unwrap();
+        let theirs = other.reserve(2).await.unwrap();
+        let mine = ids.reserve(2).await.unwrap();
+        assert_eq!(ids_of(&mine), [2, 3]);
+        let last = other.reserve(1).await.unwrap();
+        assert_eq!(ids_of(&last), [4]);
+
+        // The other worker frees ids below this one's hint (4, now held).
+        drop(theirs);
+        assert_eq!(ids_of(&ids.reserve(2).await.unwrap()), [0, 1]);
+        drop((mine, last));
+    }
+
     #[test]
     fn an_unusable_lock_dir_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -414,7 +459,10 @@ mod tests {
 
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
-        let after_exit = rt.block_on(ids.reserve(3)).unwrap();
+        // A fresh worker scans from id 0, so it finds the exited one's ids.
+        let fresh = BoxIds::open(dir.path(), 10).unwrap();
+        let after_exit = rt.block_on(fresh.reserve(3)).unwrap();
         assert_eq!(ids_of(&after_exit), [0, 1, 2]);
+        drop(while_alive);
     }
 }
