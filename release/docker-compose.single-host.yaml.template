@@ -13,6 +13,11 @@ services:
     extends:
       file: docker-compose.server.yaml.template
       service: server
+    # The single-host env file holds every secret of the host, so each
+    # container reads only its own overrides.
+    env_file: !override
+      - path: .env.single-host.server
+        required: false
     depends_on:
       db:
         condition: service_healthy
@@ -26,6 +31,11 @@ services:
     extends:
       file: docker-compose.worker.yaml.template
       service: worker
+    # The single-host env file holds every secret of the host, so each
+    # container reads only its own overrides.
+    env_file: !override
+      - path: .env.single-host.worker
+        required: false
     depends_on:
       db:
         condition: service_healthy

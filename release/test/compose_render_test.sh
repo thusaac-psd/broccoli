@@ -70,6 +70,28 @@ single_env() {
 [ "$(single_env server BROCCOLI__DATABASE__URL)" = 'postgres://postgres:p%40ss%20%231%2Fx@db:5432/broccoli' ] \
   || fail "single-host database URL: $(single_env server BROCCOLI__DATABASE__URL)"
 [ "$(single_env worker BROCCOLI__MQ__URL)" = 'redis://:r%25d@redis:6379' ] || fail "single-host MQ URL"
+# The host's secrets stay out of the containers that do not need them, and a
+# role's own override file still reaches it.
+echo 'BROCCOLI__WORKER__MAX_CONCURRENCY=2' > .env.single-host.worker
+single_json() {
+  docker compose --env-file .env.single-host -f "$1" config --format json 2>/dev/null
+}
+for t in docker-compose.single-host.object-storage.yaml.template docker-compose.single-host.yaml.template; do
+  single_json "$t" | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"]
+worker, server = env["worker"]["environment"], env["server"]["environment"]
+leaked = [k for k in worker if k in (
+    "BROCCOLI__AUTH__JWT_SECRET", "BROCCOLI__BOOTSTRAP__ADMIN_PASSWORD",
+    "BROCCOLI_BOOTSTRAP_ADMIN_PASSWORD", "POSTGRES_PASSWORD", "REDIS_PASSWORD")]
+leaked += [k for k in server if k in ("POSTGRES_PASSWORD", "REDIS_PASSWORD")]
+if leaked:
+    sys.exit("secrets reach a container that does not read them: " + ", ".join(leaked))
+if worker.get("BROCCOLI__WORKER__MAX_CONCURRENCY") != "2":
+    sys.exit("the worker override file does not reach the worker")
+' || fail "$t hands secrets to the wrong container"
+done
+rm .env.single-host.worker
 # An env file from before these URLs existed gets them on a re-run.
 sed -i '/^BROCCOLI_LOCAL_/d' .env.single-host
 install_dry single-host

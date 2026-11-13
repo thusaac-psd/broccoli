@@ -8,7 +8,10 @@ the machine and the request, or has a default that suits a contest.
 Every setting reads from `config/config.toml` as `section.key` or from the
 environment as `BROCCOLI__SECTION__KEY`. In a Compose deployment, add an
 override to the role's env file (`.env.server`, `.env.worker`, ...) and
-restart the role: the whole env file reaches the container. A key the binary
+restart the role: the whole env file reaches the container. A single-host
+install keeps every secret in `.env.single-host`, which no container gets whole;
+its overrides go in `.env.single-host.server` and `.env.single-host.worker`.
+A key the binary
 does not read, for example one that has been removed or is misspelled, is
 logged at boot as `Ignoring an unknown configuration key` and has no effect.
 
