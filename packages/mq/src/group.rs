@@ -277,8 +277,10 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
                 continue;
             }
             let ids = &ids;
-            let gone: Vec<String> = self
-                .run_or_regroup(|mut c| async move {
+            let refreshed = self
+                .inner
+                .conn
+                .run(|mut c| async move {
                     scripts::REFRESH
                         .key(&**stream)
                         .arg(self.inner.group)
@@ -287,8 +289,15 @@ impl<T: DeserializeOwned> GroupConsumer<T> {
                         .invoke_async(&mut c)
                         .await
                 })
-                .await?
-                .unwrap_or_else(|| ids.iter().map(|id| id.to_string()).collect());
+                .await;
+            // A missing group (the stream was drained or lost) means every
+            // entry is gone. Recreating it here would leave behind a stream
+            // nothing drains.
+            let gone: Vec<String> = match refreshed {
+                Ok(gone) => gone,
+                Err(e) if has_code(&e, "NOGROUP") => ids.iter().map(|id| id.to_string()).collect(),
+                Err(e) => return Err(e.into()),
+            };
             lost.extend(gone.into_iter().map(|id| EntryRef {
                 stream: Arc::clone(stream),
                 id,

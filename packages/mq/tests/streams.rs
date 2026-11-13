@@ -555,6 +555,25 @@ async fn pinned_tasks_follow_their_worker_and_move_to_the_shared_stream_when_it_
         [("p0".into(), 2), ("p1".into(), 1)],
         "the taken task keeps its delivery; w1's shared entry waits for a reclaim"
     );
+    // w1 comes back and refreshes what it held: it lost it, and its private
+    // stream is not recreated outside the pinned set.
+    let private_entry = taken
+        .iter()
+        .find(|d| d.payload.as_ref().unwrap().id == "p0")
+        .unwrap()
+        .entry
+        .clone();
+    let lost = w1.refresh(&[private_entry]).await.unwrap();
+    assert_eq!(lost.len(), 1);
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(mq.topology().private("w1"))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        !exists,
+        "a refresh never recreates a drained private stream"
+    );
     let pinned: Vec<String> = redis::cmd("SMEMBERS")
         .arg(mq.topology().pinned_set())
         .query_async(&mut conn)
