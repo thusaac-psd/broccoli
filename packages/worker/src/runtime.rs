@@ -24,6 +24,10 @@ use crate::models::operation::OperationTaskExecutor;
 use crate::models::worker::Worker;
 use crate::system_info::{SystemInfo, is_wsl};
 
+/// How long a graceful shutdown waits for the last sandbox removals. One
+/// `isolate --cleanup` takes milliseconds; the bound only caps a wedged one.
+const SANDBOX_REMOVAL_BOUND: Duration = Duration::from_secs(10);
+
 pub struct WorkerRuntime {
     config: WorkerAppConfig,
     mq: Mq,
@@ -33,6 +37,8 @@ pub struct WorkerRuntime {
     capacity: WorkerCapacity,
     _cleanup_handle: tokio::task::JoinHandle<()>,
     _warm_handle: tokio::task::JoinHandle<()>,
+    /// The operation executor, for removing its last sandboxes at shutdown.
+    operation: Arc<OperationTaskExecutor>,
 }
 
 impl WorkerRuntime {
@@ -181,8 +187,9 @@ impl WorkerRuntime {
         // but warms through the executor's own cacher.
         let warm_handle = crate::warm::spawn(&config, operation.file_cacher());
 
-        let operation: Arc<dyn Executor> = Arc::new(operation);
-        let worker = Arc::new(Worker::new([("operation".to_string(), operation)]));
+        let operation = Arc::new(operation);
+        let executor: Arc<dyn Executor> = operation.clone();
+        let worker = Arc::new(Worker::new([("operation".to_string(), executor)]));
 
         let dlq_config = config.mq.dlq.clone();
         let retry_tracker = Arc::new(Mutex::new(RetryTracker::new(dlq_config.max_retries)));
@@ -212,6 +219,7 @@ impl WorkerRuntime {
             capacity,
             _cleanup_handle: cleanup_handle,
             _warm_handle: warm_handle,
+            operation,
         })
     }
 
@@ -243,6 +251,11 @@ impl WorkerRuntime {
         )
         .await;
 
+        // Removals run after each result is published; let the last ones
+        // finish so the worker leaves no boxes behind.
+        self.operation
+            .finish_sandbox_removals(SANDBOX_REMOVAL_BOUND)
+            .await;
         self.heartbeat.shutdown().await;
         info!("Worker stopped");
         Ok(())

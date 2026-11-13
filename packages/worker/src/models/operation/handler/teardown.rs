@@ -254,6 +254,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finishing_removals_leaves_no_sandbox_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = Arc::new(Recording::new(dir.path()));
+        let handler = handler(&sandbox);
+
+        assert!(handler.execute(&two_box_operation()).await.unwrap().success);
+        handler
+            .finish_sandbox_removals(Duration::from_secs(60))
+            .await;
+        assert_eq!(sandbox.log(), ["create", "create", "removed", "removed"]);
+    }
+
+    #[tokio::test]
     async fn an_operations_sandboxes_are_created_together() {
         let dir = tempfile::tempdir().unwrap();
         let sandbox = Arc::new(Recording {

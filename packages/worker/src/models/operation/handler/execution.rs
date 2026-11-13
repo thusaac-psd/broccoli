@@ -66,6 +66,19 @@ impl OperationHandler {
         self
     }
 
+    /// Wait, at most `bound`, for the sandbox removals of finished
+    /// operations. A graceful shutdown calls this after the last operation, so
+    /// the boxes are gone before the worker exits; a removal still running at
+    /// the bound is left to the next `--init` of its box.
+    pub async fn finish_sandbox_removals(&self, bound: Duration) {
+        if tokio::time::timeout(bound, self.teardown.settle())
+            .await
+            .is_err()
+        {
+            warn!(?bound, "Sandbox removals still running at shutdown");
+        }
+    }
+
     /// The file cacher this handler materializes blobs through. Anything else
     /// writing the same cache directory must use it too, so the directory has
     /// one size cap.

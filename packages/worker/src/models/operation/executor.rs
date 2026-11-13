@@ -119,6 +119,11 @@ impl OperationTaskExecutor {
         })
     }
 
+    /// Wait, at most `bound`, for the sandbox removals of finished operations.
+    pub async fn finish_sandbox_removals(&self, bound: Duration) {
+        self.operation_executor.finish_sandbox_removals(bound).await;
+    }
+
     /// The file cacher jobs materialize blobs through, for the pre-warm
     /// subscriber to fill the same cache.
     pub fn file_cacher(&self) -> Arc<dyn FileCacher> {
