@@ -1,11 +1,11 @@
-//! The platform clock: the one wall clock every server replica agrees on.
+//! The platform clock: the one wall clock every server and worker agrees on.
 //!
 //! Contest phases, access-token expiry, rate-limit windows, the HTTP `Date`
-//! header and every timestamp a server writes are compared with times
-//! stamped on other nodes. Reading each replica's own wall clock would let
-//! replicas disagree by however far their clocks have drifted, which in a lab
-//! without NTP is seconds to minutes. So the platform's wall clock is the
-//! database's: every server measures its offset to Postgres
+//! header and every timestamp a node writes are compared with times stamped
+//! on other nodes. Reading each node's own wall clock would let nodes
+//! disagree by however far their clocks have drifted, which in a lab without
+//! NTP is seconds to minutes. So the platform's wall clock is the
+//! database's: every node measures its offset to Postgres
 //! `clock_timestamp()` and serves time as its own monotonic clock plus that
 //! offset.
 //!
@@ -25,8 +25,9 @@
 //!
 //! Durations (deadlines, leases, backoff, metrics) stay on `Instant`: only
 //! wall time compared with another node's wall time comes from here. In the
-//! server crate `Utc::now()` and `SystemTime::now()` are disallowed by
-//! `clippy.toml`, so a new comparison cannot quietly read the local clock.
+//! server, worker and common crates `Utc::now()` and `SystemTime::now()` are
+//! disallowed by `clippy.toml`, so a new comparison cannot quietly read the
+//! local clock.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -304,8 +305,8 @@ impl PlatformClock {
 
     /// A clock anchored to this host's wall clock with no database, for unit
     /// tests that build an `AppState` without one.
-    #[cfg(test)]
-    pub(crate) fn local_for_tests() -> Self {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn local_for_tests() -> Self {
         #[allow(clippy::disallowed_methods)]
         let db_us = Utc::now().timestamp_micros();
         let inner = Inner::new(None);

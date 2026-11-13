@@ -1,4 +1,6 @@
 pub mod cancel;
+#[cfg(feature = "sea-orm")]
+pub mod clock;
 pub mod config;
 #[cfg(feature = "sea-orm")]
 pub mod db;

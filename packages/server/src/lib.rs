@@ -1,5 +1,5 @@
 mod client_ip;
-pub mod clock;
+pub use common::clock;
 pub mod config;
 pub mod consumers;
 pub mod database;
