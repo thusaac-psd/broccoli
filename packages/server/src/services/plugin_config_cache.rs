@@ -1,89 +1,115 @@
 //! Per-server cache of `plugin_config` point reads (the `config:read` host
 //! function and the evaluator's checker config), kept correct across replicas
-//! by a database-side version stamp.
+//! by a database-side change counter.
 //!
-//! A statement trigger on `plugin_config` bumps the one-row
-//! `plugin_config_epoch` in the transaction that changes it, and announces the
-//! new version on the claim channel. Every server learns the current version
-//! without an extra statement:
+//! The counter is the sequence `plugin_config_epoch`. A deferred constraint
+//! trigger on `plugin_config` advances it once per changed row as the writing
+//! transaction commits, and announces [`CHANGED`] on the claim channel. A
+//! sequence takes no row lock, so concurrent config writers never serialise or
+//! deadlock on it, and a statement that changes no rows fires no trigger.
 //!
-//! - the notification, which every claim fiber already listens for;
-//! - the claim pass's in-flight count, which reads the version too. A unit is
-//!   claimed only by a pass that started after its submission committed, so a
-//!   config change committed before a submission is visible to its judging on
-//!   every replica, even if the notification is late.
+//! Every server learns of changes without an extra statement:
 //!
-//! A cache miss reads the row together with the version in one statement, the
-//! same one round trip it always cost. An entry serves hits only while the
-//! version it was read at is the newest one known.
+//! - the notification, which every claim fiber already listens for. Delivery
+//!   on one listening session follows commit order, so the config change is
+//!   seen before the queued-submission wake of any submission committed after
+//!   it;
+//! - the claim statement itself, which returns the counter with every unit it
+//!   claims. A unit can only be claimed after its submission committed, so a
+//!   config change committed before a submission is seen before that
+//!   submission is judged on every replica, whether or not its notification
+//!   arrived;
+//! - a (re)connect of the listening session, during which notifications may
+//!   have been lost.
+//!
+//! Any of these that reports a change clears the cache. An entry is valid only
+//! for the cache generation it was read in, so a read racing a clear is never
+//! served afterwards.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement};
 
 use crate::entity::plugin_config;
 
-/// Payload prefix of a config-change notification on the claim channel.
-pub const CHANGED_PREFIX: &str = "config:";
+/// Payload of a config-change notification on the claim channel.
+pub const CHANGED: &str = "config";
+
+/// The sequence counting committed `plugin_config` changes. SQL that reads it
+/// (the claim statement) selects `last_value` from it.
+pub const EPOCH_SEQUENCE: &str = "plugin_config_epoch";
 
 type Key = (String, String, String);
 
-/// One cached read: the version it was read at and the row, if any.
-type Entry = (i64, Option<Arc<plugin_config::Model>>);
+/// One cached read: the generation it was read in and the row, if any.
+type Entry = (u64, Option<Arc<plugin_config::Model>>);
 
 /// See the module docs. Cheap to clone; clones share entries.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct PluginConfigCache {
     inner: Arc<Inner>,
 }
 
-#[derive(Default)]
 struct Inner {
     /// Every read goes to the database: a server whose claim fiber is off
     /// hears of no changes.
     bypass: bool,
-    /// The newest `plugin_config_epoch.version` this server has seen.
+    /// The counter value last reported by the database. Any other value means
+    /// a change.
     epoch: AtomicI64,
+    /// Bumped on every clear; entries from an older generation never hit.
+    generation: AtomicU64,
     entries: DashMap<Key, Entry>,
 }
 
+impl Default for PluginConfigCache {
+    fn default() -> Self {
+        Self::with_bypass(false)
+    }
+}
+
 impl PluginConfigCache {
-    /// A cache that stores nothing, for a server that does not listen for
-    /// changes.
-    pub fn uncached() -> Self {
+    fn with_bypass(bypass: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
-                bypass: true,
-                ..Inner::default()
+                bypass,
+                epoch: AtomicI64::new(i64::MIN),
+                generation: AtomicU64::new(0),
+                entries: DashMap::new(),
             }),
         }
     }
 
-    /// Record that the database is at `version` or later. Entries read at an
-    /// older version stop serving hits.
-    pub fn observe(&self, version: i64) {
-        let previous = self.inner.epoch.fetch_max(version, Ordering::AcqRel);
-        if version > previous {
-            self.inner
-                .entries
-                .retain(|_, (read_at, _)| *read_at >= version);
+    /// A cache that stores nothing, for a server that does not listen for
+    /// changes.
+    pub fn uncached() -> Self {
+        Self::with_bypass(true)
+    }
+
+    /// Forget every entry.
+    pub fn clear(&self) {
+        self.inner.generation.fetch_add(1, Ordering::AcqRel);
+        self.inner.entries.clear();
+    }
+
+    /// The database reports the change counter at `epoch`. Any value other
+    /// than the last one reported (higher, or lower after a restore) clears
+    /// the cache.
+    pub fn observe_epoch(&self, epoch: i64) {
+        if self.inner.epoch.swap(epoch, Ordering::AcqRel) != epoch {
+            self.clear();
         }
     }
 
-    /// Parse a claim-channel payload; true when it was a config change.
+    /// Handle a claim-channel payload; true when it was a config change.
     pub fn observe_notification(&self, payload: &str) -> bool {
-        match payload
-            .strip_prefix(CHANGED_PREFIX)
-            .and_then(|v| v.parse().ok())
-        {
-            Some(version) => {
-                self.observe(version);
-                true
-            }
-            None => false,
+        let changed = payload == CHANGED;
+        if changed {
+            self.clear();
         }
+        changed
     }
 
     /// Drop one entry, for a writer on this server that reads its own write
@@ -104,35 +130,34 @@ impl PluginConfigCache {
         namespace: &str,
     ) -> Result<Option<Arc<plugin_config::Model>>, DbErr> {
         let key = (scope.to_owned(), ref_id.to_owned(), namespace.to_owned());
-        let epoch = self.inner.epoch.load(Ordering::Acquire);
+        let generation = self.inner.generation.load(Ordering::Acquire);
         if !self.inner.bypass
             && let Some(entry) = self.inner.entries.get(&key)
-            && entry.0 == epoch
+            && entry.0 == generation
         {
             return Ok(entry.1.clone());
         }
 
-        let row = db
+        let json: Option<serde_json::Value> = db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT e.version, to_jsonb(c) AS row FROM plugin_config_epoch e \
-                 LEFT JOIN plugin_config c ON c.scope = $1 AND c.ref_id = $2 AND c.namespace = $3",
+                "SELECT to_jsonb(c) AS row FROM plugin_config c \
+                 WHERE c.scope = $1 AND c.ref_id = $2 AND c.namespace = $3",
                 [scope.into(), ref_id.into(), namespace.into()],
             ))
             .await?
-            .ok_or_else(|| DbErr::RecordNotFound("plugin_config_epoch".into()))?;
-        let version: i64 = row.try_get("", "version")?;
-        let json: Option<serde_json::Value> = row.try_get("", "row")?;
+            .map(|row| row.try_get("", "row"))
+            .transpose()?;
         let model = json
             .map(serde_json::from_value::<plugin_config::Model>)
             .transpose()
             .map_err(|e| DbErr::Custom(format!("malformed plugin_config row: {e}")))?
             .map(Arc::new);
 
-        self.observe(version);
-        // A newer version seen meanwhile means this read may be stale already.
-        if !self.inner.bypass && self.inner.epoch.load(Ordering::Acquire) == version {
-            self.inner.entries.insert(key, (version, model.clone()));
+        if !self.inner.bypass {
+            // Tagged with the generation the read started in: a clear that
+            // raced the read makes it miss from then on.
+            self.inner.entries.insert(key, (generation, model.clone()));
         }
         Ok(model)
     }
@@ -140,41 +165,65 @@ impl PluginConfigCache {
 
 const FUNCTION: &str = "broccoli_plugin_config_changed";
 
-/// Creates the version row and the trigger that bumps it. Boot runs this under
-/// the boot lock, after the schema exists. The function is `SECURITY DEFINER`
-/// so a write under the plugin role can bump a row that role cannot write.
+/// Creates the change counter and its triggers. Boot runs this under the boot
+/// lock, after the schema exists.
+///
+/// The row trigger is a deferred constraint trigger, so the counter advances
+/// as the writing transaction commits rather than when it first writes: a
+/// reader can only see it advance once the change is about to be visible.
+/// `TRUNCATE` fires no row trigger, so a statement trigger covers it. The
+/// function is `SECURITY DEFINER` so a write under the plugin role can advance
+/// a sequence that role has no privileges on.
 pub async fn install_plugin_config_epoch<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     let channel = crate::services::judging::CLAIM_CHANNEL;
-    db.execute_unprepared(
-        "CREATE TABLE IF NOT EXISTS plugin_config_epoch (version bigint NOT NULL); \
-         INSERT INTO plugin_config_epoch SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM plugin_config_epoch)",
-    )
+    db.execute_unprepared(&format!(
+        "CREATE SEQUENCE IF NOT EXISTS {EPOCH_SEQUENCE}; \
+         SELECT nextval('{EPOCH_SEQUENCE}') WHERE NOT (SELECT is_called FROM {EPOCH_SEQUENCE}); \
+         DO $$ BEGIN \
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
+             REVOKE ALL ON SEQUENCE {EPOCH_SEQUENCE} FROM broccoli_plugin; \
+           END IF; \
+         END $$"
+    ))
     .await?;
     db.execute_unprepared(&format!(
         "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger LANGUAGE plpgsql \
          SECURITY DEFINER SET search_path = public AS $$ \
-         DECLARE v bigint; \
          BEGIN \
-           UPDATE plugin_config_epoch SET version = version + 1 RETURNING version INTO v; \
-           PERFORM pg_notify('{channel}', '{CHANGED_PREFIX}' || v); \
+           PERFORM nextval('{EPOCH_SEQUENCE}'); \
+           PERFORM pg_notify('{channel}', '{CHANGED}'); \
            RETURN NULL; \
          END $$"
     ))
     .await?;
-    let exists = db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT 1 FROM pg_trigger WHERE tgname = $1",
-            [FUNCTION.into()],
-        ))
-        .await?
-        .is_some();
-    if !exists {
-        db.execute_unprepared(&format!(
-            "CREATE TRIGGER {FUNCTION} AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE \
-             ON plugin_config FOR EACH STATEMENT EXECUTE FUNCTION {FUNCTION}()"
-        ))
-        .await?;
+    for (name, ddl) in [
+        (
+            FUNCTION.to_string(),
+            format!(
+                "CREATE CONSTRAINT TRIGGER {FUNCTION} AFTER INSERT OR UPDATE OR DELETE \
+                 ON plugin_config DEFERRABLE INITIALLY DEFERRED \
+                 FOR EACH ROW EXECUTE FUNCTION {FUNCTION}()"
+            ),
+        ),
+        (
+            format!("{FUNCTION}_truncate"),
+            format!(
+                "CREATE TRIGGER {FUNCTION}_truncate AFTER TRUNCATE ON plugin_config \
+                 FOR EACH STATEMENT EXECUTE FUNCTION {FUNCTION}()"
+            ),
+        ),
+    ] {
+        let exists = db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM pg_trigger WHERE tgname = $1",
+                [name.into()],
+            ))
+            .await?
+            .is_some();
+        if !exists {
+            db.execute_unprepared(&ddl).await?;
+        }
     }
     Ok(())
 }
@@ -183,34 +232,49 @@ pub async fn install_plugin_config_epoch<C: ConnectionTrait>(db: &C) -> Result<(
 mod tests {
     use super::*;
 
-    fn entry(cache: &PluginConfigCache, version: i64) {
-        cache
-            .inner
-            .entries
-            .insert(("plugin".into(), "p".into(), "ns".into()), (version, None));
+    fn entry(cache: &PluginConfigCache) {
+        let generation = cache.inner.generation.load(Ordering::Acquire);
+        cache.inner.entries.insert(
+            ("plugin".into(), "p".into(), "ns".into()),
+            (generation, None),
+        );
     }
 
     #[test]
-    fn a_newer_version_evicts_entries_read_before_it() {
+    fn any_change_of_the_counter_clears_the_cache_even_a_step_back() {
         let cache = PluginConfigCache::default();
-        cache.observe(3);
-        entry(&cache, 3);
-        cache.observe(3);
+        cache.observe_epoch(3);
+        entry(&cache);
+        cache.observe_epoch(3);
         assert_eq!(cache.inner.entries.len(), 1);
-        cache.observe(4);
+        cache.observe_epoch(4);
         assert!(cache.inner.entries.is_empty());
+        entry(&cache);
+        cache.observe_epoch(1);
+        assert!(
+            cache.inner.entries.is_empty(),
+            "a restored counter still invalidates"
+        );
     }
 
     #[test]
-    fn an_old_or_foreign_notification_changes_nothing() {
+    fn only_a_config_notification_clears_the_cache() {
         let cache = PluginConfigCache::default();
-        cache.observe(5);
-        entry(&cache, 5);
-        assert!(cache.observe_notification("config:4"));
+        entry(&cache);
         assert!(!cache.observe_notification("queued"));
         assert!(!cache.observe_notification("freed:server-1"));
         assert_eq!(cache.inner.entries.len(), 1);
-        assert!(cache.observe_notification("config:6"));
+        assert!(cache.observe_notification(CHANGED));
         assert!(cache.inner.entries.is_empty());
+    }
+
+    #[test]
+    fn an_entry_from_before_a_clear_never_hits() {
+        let cache = PluginConfigCache::default();
+        entry(&cache);
+        cache.inner.generation.fetch_add(1, Ordering::AcqRel);
+        let key = ("plugin".to_string(), "p".to_string(), "ns".to_string());
+        let stale = cache.inner.entries.get(&key).expect("still stored");
+        assert_ne!(stale.0, cache.inner.generation.load(Ordering::Acquire));
     }
 }

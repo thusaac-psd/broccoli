@@ -289,7 +289,7 @@ pub struct PassStart {
     /// Units (judgements and code runs) the server owns that are in flight:
     /// what the claim fiber's in-flight cap counts.
     pub in_flight: u64,
-    /// `plugin_config_epoch.version`; see
+    /// The `plugin_config` change counter; see
     /// [`crate::services::plugin_config_cache`].
     pub plugin_config_epoch: i64,
 }
@@ -308,7 +308,7 @@ pub async fn pass_start(db: &DatabaseConnection, server_id: &str) -> Result<Pass
             DbBackend::Postgres,
             format!(
                 "SELECT ({} + {})::bigint AS n, \
-                 (SELECT version FROM plugin_config_epoch) AS epoch",
+                 (SELECT last_value FROM plugin_config_epoch) AS epoch",
                 count(Unit::Judgement),
                 count(Unit::CodeRun)
             ),

@@ -79,3 +79,85 @@ async fn a_deleted_row_stops_being_served() {
         .expect("claim pass");
     assert_eq!(cached_value(&a).await, None);
 }
+
+async fn epoch(db: &sea_orm::DatabaseConnection) -> i64 {
+    use sea_orm::{DbBackend, Statement};
+    db.query_one_raw(Statement::from_string(
+        DbBackend::Postgres,
+        "SELECT last_value FROM plugin_config_epoch",
+    ))
+    .await
+    .expect("read the counter")
+    .expect("one row")
+    .try_get("", "last_value")
+    .expect("last_value")
+}
+
+#[tokio::test]
+async fn the_counter_advances_when_a_change_commits_and_not_before() {
+    use sea_orm::TransactionTrait;
+    let app = TestApp::spawn().await;
+    let before = epoch(&app.db).await;
+    let txn = app.db.begin().await.expect("begin");
+    txn.execute_unprepared(
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
+         VALUES ('plugin', 'cache-probe', 'settings', '{}', 0)",
+    )
+    .await
+    .expect("write");
+    assert_eq!(epoch(&app.db).await, before, "advanced before the commit");
+    txn.commit().await.expect("commit");
+    assert!(
+        epoch(&app.db).await > before,
+        "a committed change advances it"
+    );
+}
+
+#[tokio::test]
+async fn a_statement_that_changes_no_rows_leaves_the_counter_alone() {
+    let app = TestApp::spawn().await;
+    let before = epoch(&app.db).await;
+    app.db
+        .execute_unprepared("DELETE FROM plugin_config WHERE ref_id = 'no-such-row'")
+        .await
+        .expect("delete nothing");
+    assert_eq!(epoch(&app.db).await, before);
+}
+
+#[tokio::test]
+async fn the_plugin_role_cannot_move_the_counter() {
+    use sea_orm::TransactionTrait;
+    let app = TestApp::spawn().await;
+    for stmt in [
+        "SELECT setval('plugin_config_epoch', 1)",
+        "SELECT nextval('plugin_config_epoch')",
+    ] {
+        let txn = app.db.begin().await.expect("begin");
+        txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+            .await
+            .expect("become the plugin role");
+        let err = txn
+            .execute_unprepared(stmt)
+            .await
+            .expect_err("the plugin role must be refused");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "{stmt}: {err}"
+        );
+        txn.rollback().await.expect("rollback");
+    }
+    // A plugin's own config write still advances it, through the trigger.
+    let before = epoch(&app.db).await;
+    let txn = app.db.begin().await.expect("begin");
+    txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+        .await
+        .unwrap();
+    txn.execute_unprepared(
+        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
+         VALUES ('plugin', 'cache-probe', 'by-plugin', '{}', 0)",
+    )
+    .await
+    .expect("a plugin may write plugin_config");
+    txn.commit().await.expect("commit");
+    assert!(epoch(&app.db).await > before);
+}

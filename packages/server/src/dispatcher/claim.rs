@@ -210,10 +210,13 @@ async fn listen_session(
 ) -> Result<Infallible, sea_orm::sqlx::Error> {
     let mut listener = PgListener::connect(url).await?;
     listener.listen(judging::CLAIM_CHANNEL).await?;
+    // Config changes may have gone unannounced while nobody listened.
+    config_cache.clear();
     wake.notify_one();
     loop {
         let Some(notification) = listener.try_recv().await? else {
             // Reconnected after a lost connection.
+            config_cache.clear();
             wake.notify_one();
             continue;
         };
@@ -288,7 +291,9 @@ pub async fn claim_once(
     max_in_flight: u32,
 ) -> anyhow::Result<ClaimPass> {
     let start = judging::pass_start(&state.db, server_id).await?;
-    state.plugin_config_cache.observe(start.plugin_config_epoch);
+    state
+        .plugin_config_cache
+        .observe_epoch(start.plugin_config_epoch);
     let in_flight = start.in_flight;
     // The contest types this replica can judge right now; see
     // `dispatcher::prefer_local_handler`.
