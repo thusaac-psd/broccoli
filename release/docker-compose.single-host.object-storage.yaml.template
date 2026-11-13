@@ -75,5 +75,6 @@ volumes:
   redis_data:
   seaweed_data:
   server_data:
+  plugin_cache:
   worker_data:
   worker_box_slots:

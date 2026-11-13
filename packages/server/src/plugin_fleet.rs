@@ -21,6 +21,7 @@ use utoipa::ToSchema;
 
 use crate::entity::plugin as plugin_entity;
 use crate::entity::plugin_replica;
+use crate::plugin_distribution::{PluginSource, PluginSourceKind};
 
 /// A replica's row counts as live while it was touched within this window.
 /// Replicas touch at least every [`TOUCH_INTERVAL`], so a live one is never
@@ -124,8 +125,14 @@ pub async fn retire(db: &DatabaseConnection, server_id: &str) -> Result<(), DbEr
 
 /// Desired state plus every live replica's report.
 pub struct FleetView {
-    desired: HashMap<String, (bool, i64)>,
+    desired: HashMap<String, DesiredRow>,
     replicas: Vec<LiveReplica>,
+}
+
+struct DesiredRow {
+    enabled: bool,
+    generation: i64,
+    source: PluginSource,
 }
 
 struct LiveReplica {
@@ -139,7 +146,14 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
         .all(db)
         .await?
         .into_iter()
-        .map(|p| (p.id, (p.is_enabled, p.generation)))
+        .map(|p| {
+            let row = DesiredRow {
+                enabled: p.is_enabled,
+                generation: p.generation,
+                source: PluginSource::of(p.archive_hash.as_deref()),
+            };
+            (p.id, row)
+        })
         .collect();
     let rows = plugin_replica::Entity::find()
         .from_raw_sql(Statement::from_sql_and_values(
@@ -162,6 +176,18 @@ pub async fn read(db: &DatabaseConnection) -> Result<FleetView, DbErr> {
         })
         .collect();
     Ok(FleetView { desired, replicas })
+}
+
+/// The source the fleet runs a plugin from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct PluginSourceResponse {
+    pub kind: PluginSourceKind,
+    /// Content hash of the uploaded archive, when `kind` is `upload`.
+    #[schema(example = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")]
+    pub archive_hash: Option<String>,
+    /// Whether the serving replica's bundle has a copy of the plugin: what
+    /// removing the upload falls back to.
+    pub bundled: bool,
 }
 
 /// Fleet-wide state of one plugin.
@@ -218,13 +244,28 @@ impl FleetView {
 
     /// Whether `plugin_id` is enabled in the desired state.
     pub fn is_enabled(&self, plugin_id: &str) -> bool {
-        self.desired
+        self.desired.get(plugin_id).is_some_and(|row| row.enabled)
+    }
+
+    /// Where the fleet takes `plugin_id`'s files from. `bundled` is whether
+    /// the serving replica's bundle has a copy.
+    pub fn source(&self, plugin_id: &str, bundled: bool) -> PluginSourceResponse {
+        let source = self
+            .desired
             .get(plugin_id)
-            .is_some_and(|(enabled, _)| *enabled)
+            .map_or(PluginSource::Bundle, |row| row.source.clone());
+        PluginSourceResponse {
+            kind: source.kind(),
+            archive_hash: source.archive_hash().map(str::to_string),
+            bundled,
+        }
     }
 
     pub fn plugin(&self, plugin_id: &str) -> PluginFleetResponse {
-        let (enabled, generation) = self.desired.get(plugin_id).copied().unwrap_or((false, 0));
+        let (enabled, generation) = self
+            .desired
+            .get(plugin_id)
+            .map_or((false, 0), |row| (row.enabled, row.generation));
         let replicas: Vec<PluginReplicaResponse> = self
             .replicas
             .iter()

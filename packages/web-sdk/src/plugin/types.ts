@@ -21,6 +21,11 @@ export type PluginDetail = components['schemas']['PluginDetailResponse'];
 export type PluginFullDetail =
   components['schemas']['PluginFullDetailResponse'];
 export type PluginStatus = components['schemas']['PluginStatusResponse'];
+export type PluginSource = components['schemas']['PluginSourceResponse'];
+export type PluginArchiveSummary =
+  components['schemas']['PluginArchiveSummary'];
+/** What removing a plugin's upload does: the `expect` the server checks. */
+export type UploadRemoval = components['schemas']['UploadRemoval'];
 
 export interface ComponentBundle {
   [key: string]: ElementType;

@@ -2,7 +2,7 @@ import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
-import type { PluginDetail } from '@broccoli/web-sdk/plugin';
+import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
 import {
   Button,
@@ -12,7 +12,7 @@ import {
   Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, Loader2, Puzzle, RefreshCw } from 'lucide-react';
+import { AlertCircle, Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -21,6 +21,7 @@ import { PageLayout } from '@/components/PageLayout';
 import { Unauthorized } from '@/components/Unauthorized';
 import { PluginCard } from '@/features/plugin/components/PluginCard';
 import { PluginDetailDialog } from '@/features/plugin/components/PluginDetailDialog';
+import { PluginUploadDialog } from '@/features/plugin/components/PluginUploadDialog';
 
 export default function PluginsPage() {
   const { t } = useTranslation();
@@ -34,6 +35,8 @@ export default function PluginsPage() {
     () => new Set(),
   );
   const [isReloadingAll, setIsReloadingAll] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [removingUploadId, setRemovingUploadId] = useState<string | null>(null);
   const detailPluginId = searchParams.get('plugin');
   const { unloadPlugin, reloadPlugin, reloadAllPlugins } = usePluginRegistry();
 
@@ -70,6 +73,16 @@ export default function PluginsPage() {
       query.state.data?.some((p) => p.fleet.state === 'pending') ? 3000 : false,
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins');
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const { data: uploadPolicy } = useQuery({
+    queryKey: ['admin-plugin-upload-policy'],
+    enabled: canManagePlugins,
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/admin/plugins/upload');
       if (error) throw error;
       return data;
     },
@@ -161,6 +174,51 @@ export default function PluginsPage() {
     }
   }, [apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
 
+  const handlePublished = useCallback(
+    async (pluginId: string) => {
+      invalidatePluginQueries();
+      // Pick up the new version's web bundle, if it has one.
+      await reloadPlugin(pluginId);
+    },
+    [invalidatePluginQueries, reloadPlugin],
+  );
+
+  const handleRemoveUpload = useCallback(
+    async (pluginId: string, expect: UploadRemoval) => {
+      setRemovingUploadId(pluginId);
+      try {
+        const { data, error } = await apiClient.DELETE(
+          '/admin/plugins/{id}/upload',
+          { params: { path: { id: pluginId }, query: { expect } } },
+        );
+        if (error || !data) {
+          toast.error(
+            getErrorMessage(error, t('plugins.detail.removeUploadError')),
+          );
+        } else {
+          toast.success(data.message);
+          if (data.outcome === 'removed') {
+            unloadPlugin(pluginId);
+            setDetailPluginId(null);
+          } else {
+            await reloadPlugin(pluginId);
+          }
+        }
+        invalidatePluginQueries();
+      } finally {
+        setRemovingUploadId(null);
+      }
+    },
+    [
+      apiClient,
+      invalidatePluginQueries,
+      reloadPlugin,
+      setDetailPluginId,
+      t,
+      unloadPlugin,
+    ],
+  );
+
   if (!canManagePlugins) {
     return <Unauthorized />;
   }
@@ -172,19 +230,35 @@ export default function PluginsPage() {
       title={t('plugins.title')}
       subtitle={t('plugins.subtitle')}
       actions={
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleReloadAll}
-          disabled={isReloadingAll || isLoading}
-        >
-          {isReloadingAll ? (
-            <Loader2 className="h-4 w-4 animate-spin mr-2" />
-          ) : (
-            <RefreshCw className="h-4 w-4 mr-2" />
-          )}
-          {t('plugins.reloadAll')}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setUploadOpen(true)}
+            disabled={!uploadPolicy?.enabled}
+            title={
+              uploadPolicy && !uploadPolicy.enabled
+                ? t('plugins.upload.disabled')
+                : undefined
+            }
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            {t('plugins.upload.button')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleReloadAll}
+            disabled={isReloadingAll || isLoading}
+          >
+            {isReloadingAll ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : (
+              <RefreshCw className="h-4 w-4 mr-2" />
+            )}
+            {t('plugins.reloadAll')}
+          </Button>
+        </div>
       }
     >
       {isLoading && (
@@ -242,11 +316,18 @@ export default function PluginsPage() {
         open={!!detailPluginId}
         onRetry={handleReload}
         retrying={!!detailPluginId && reloadingIds.has(detailPluginId)}
+        onRemoveUpload={handleRemoveUpload}
+        removingUpload={!!detailPluginId && removingUploadId === detailPluginId}
         onOpenChange={(open) => {
           if (!open) {
             setDetailPluginId(null);
           }
         }}
+      />
+      <PluginUploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        onPublished={handlePublished}
       />
     </PageLayout>
   );

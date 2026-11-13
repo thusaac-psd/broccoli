@@ -35,7 +35,6 @@ services:
       BROCCOLI__OBSERVABILITY__LOG_FORMAT: "${BROCCOLI__OBSERVABILITY__LOG_FORMAT:-json}"
       BROCCOLI__OBSERVABILITY__LOG_FILTER: "${BROCCOLI__OBSERVABILITY__LOG_FILTER:-info}"
     volumes:
-      - ./plugins:/plugins:ro
       # NOTE: do NOT bind-mount the host's /usr/local/etc/isolate here. isolate's
       # default config lives at that path as a single FILE (not a directory), and
       # the worker image already bakes a correct one. A host bind makes Docker

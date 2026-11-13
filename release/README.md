@@ -99,18 +99,28 @@ or on a running install:
 ```
 
 Run `./enable-plugin.sh` with no arguments to list the optional plugins. Enable
-a plugin on every server and worker node first, then select **Reload All** once:
-it reaches every server replica within a few seconds, not only the one that
-served the click. A replica that is missing an enabled plugin, or failed to load
-one, keeps retrying and reports `"plugins": "degraded"` in `/healthz`; the admin
-Plugins page shows which server and why.
+a plugin on every server node first, then select **Reload All** once: it reaches
+every server replica within a few seconds, not only the one that served the
+click. A replica that is missing an enabled plugin, or failed to load one, keeps
+retrying and reports `"plugins": "degraded"` in `/healthz`; the admin Plugins
+page shows which server and why.
 
-Uploading a plugin archive from the admin Plugins page does not work with these
-templates, by design: servers and workers mount `./plugins` read-only. An upload
-would reach only the one server that handled it, never the workers or the other
-servers, and a read-only mount means a stolen admin session cannot install code
-on contest machines. Ship plugins in the bundle's `plugins/` or
-`plugins-available/` directory on every node instead.
+To install or update a plugin without touching the nodes, select **Upload
+plugin** on the admin Plugins page and choose a `.tar.gz` archive with one
+top-level folder named after the plugin id. The page shows the version and the
+host permissions the plugin requests before you publish. The archive is stored
+in the shared blob storage and every server loads it within a few seconds, from
+its own writable `plugin_cache` volume; the bundle's `./plugins` stays
+read-only. An uploaded version takes precedence over a bundled copy of the same
+plugin, and the Plugins page shows each plugin's source. **Remove upload** in a
+plugin's details returns every server to the bundled version, or removes the
+plugin when there is none. Workers run no plugin code, so uploads never need to
+reach them.
+
+For locked-down venues, set `BROCCOLI__PLUGIN__UPLOADS_ENABLED=false` in every
+server's `.env`: uploads are refused, and a server refuses to run a previously
+uploaded version, so only bundled plugin code runs. See
+`docs/operator-runbook.md` for the details.
 
 For server redundancy, install a gateway node with:
 

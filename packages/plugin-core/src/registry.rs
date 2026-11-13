@@ -6,7 +6,7 @@ use matchit::Router;
 use serde::Serialize;
 
 use crate::error::{AssetError, PluginError};
-use crate::manifest::{PluginManifest, resolve_schema_includes};
+use crate::manifest::{PluginManifest, parse_manifest, resolve_schema_includes};
 use crate::pool::RecyclingPool;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -126,8 +126,7 @@ impl PluginEntry {
         let toml_content = std::fs::read_to_string(&toml_path)
             .map_err(|e| PluginError::LoadFailed(format!("Failed to read manifest: {}", e)))?;
 
-        let mut manifest: PluginManifest = toml::from_str(&toml_content)
-            .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))?;
+        let mut manifest = parse_manifest(&toml_content)?;
 
         resolve_schema_includes(&mut manifest, plugin_dir)?;
 
