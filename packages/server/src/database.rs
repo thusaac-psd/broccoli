@@ -588,7 +588,7 @@ impl BootSession {
     /// the plugin config version stamp.
     pub async fn migrate(&self) -> Result<(), DbErr> {
         let db = &self.db;
-        crate::migration::refuse_unknown_migrations(db).await?;
+        crate::migration::refuse_foreign_schema(db).await?;
         // Create the core tables from the entity definitions, then apply the
         // schema they cannot express (see `crate::migration`).
         db.get_schema_registry("server::entity::*").sync(db).await?;
@@ -803,6 +803,42 @@ mod tests {
             .try_get::<i64>("", "n")
             .unwrap();
         assert_eq!(tables, 1, "only seaql_migrations exists; sync never ran");
+        boot.release().await.expect("release");
+    }
+
+    /// A database migrated by this build's migration names but a different
+    /// schema (a column default sync cannot add, say) is refused before
+    /// anything changes, as is one from before schemas were stamped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_refuses_a_database_whose_schema_stamp_differs() {
+        let (_c, url) = fresh_postgres().await;
+        let boot = BootSession::acquire(&url).await.expect("acquire");
+        boot.migrate().await.expect("first boot");
+        let stamp_table = crate::migration::STAMP_TABLE;
+        boot.conn()
+            .execute_unprepared(&format!(
+                "UPDATE {stamp_table} SET stamp = 'from-another-build'"
+            ))
+            .await
+            .expect("restamp");
+        let msg = boot
+            .migrate()
+            .await
+            .expect_err("a foreign stamp must refuse boot")
+            .to_string();
+        assert!(msg.contains("from-another-build"), "{msg}");
+        assert!(msg.contains("empty database"), "{msg}");
+
+        boot.conn()
+            .execute_unprepared(&format!("DROP TABLE {stamp_table}"))
+            .await
+            .expect("unstamp");
+        let msg = boot
+            .migrate()
+            .await
+            .expect_err("no stamp must refuse boot")
+            .to_string();
+        assert!(msg.contains("no schema stamp"), "{msg}");
         boot.release().await.expect("release");
     }
 

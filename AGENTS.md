@@ -171,6 +171,10 @@ binaries warn about every key they do not read.
   API contracts.
 - Prefer permission helpers instead of checking roles directly.
 - Think about transaction boundaries before editing write paths.
+- The server only boots on an empty database or one this build created:
+  `build.rs` stamps the schema sources (entities, migrations, boot-time trigger
+  DDL) and boot refuses any other stamp. Keep schema DDL in those files so the
+  stamp covers it.
 - When changing plugin execution behavior, check both manifest-level permissions
   and host-side registration/resolution.
 

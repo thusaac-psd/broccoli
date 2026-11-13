@@ -143,8 +143,25 @@ impl MigrationTrait for Migration {
         for stmt in SCHEMA {
             db.execute_unprepared(stmt).await?;
         }
+        db.execute_unprepared(&format!(
+            "CREATE TABLE {table} (stamp text NOT NULL); \
+             INSERT INTO {table} VALUES ('{stamp}')",
+            table = super::STAMP_TABLE,
+            stamp = super::SCHEMA_STAMP,
+        ))
+        .await?;
         // Last, so the grants cover every relation created above.
         db.execute_unprepared(PLUGIN_ROLE).await?;
+        // Plugins read everything but must not rewrite what boot trusts.
+        db.execute_unprepared(&format!(
+            "DO $$ BEGIN \
+               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
+                 REVOKE INSERT, UPDATE, DELETE ON {table} FROM broccoli_plugin; \
+               END IF; \
+             END $$",
+            table = super::STAMP_TABLE,
+        ))
+        .await?;
         Ok(())
     }
 
