@@ -947,7 +947,12 @@ async fn a_nested_plugin_call_is_admitted_while_shutdown_drains() {
             let _outer = gate.enter().expect("admitted before close");
             let _in_call = ThreadInCall::enter();
             gate.close();
-            tokio::runtime::Handle::current().block_on(plugins.call_raw(PLUGIN, "reflect", input()))
+            tokio::runtime::Handle::current().block_on(plugins.call_raw(
+                PLUGIN,
+                "reflect",
+                input(),
+                plugins.get_config().background_call(),
+            ))
         }
     })
     .await
@@ -957,6 +962,13 @@ async fn a_nested_plugin_call_is_admitted_while_shutdown_drains() {
         "the nested call must not be refused: {nested:?}"
     );
 
-    let fresh = plugins.call_raw(PLUGIN, "reflect", input()).await;
+    let fresh = plugins
+        .call_raw(
+            PLUGIN,
+            "reflect",
+            input(),
+            plugins.get_config().background_call(),
+        )
+        .await;
     assert!(matches!(fresh, Err(PluginError::ShuttingDown)), "{fresh:?}");
 }

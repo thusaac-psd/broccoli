@@ -48,20 +48,48 @@ pub enum PluginError {
     #[error("Server is shutting down; plugin call refused")]
     ShuttingDown,
 
-    /// Distinct variant for "instance pool acquisition timed out" so callers can
-    /// retry with backoff. Plugin pool contention is *not* a permanent failure
-    /// of the user's request and should never be surfaced as a final verdict.
-    #[error("Plugin '{0}' pool acquisition timed out")]
-    PoolTimeout(String),
-
-    /// A call made with a deadline ([`crate::traits::CallOptions::deadline`])
-    /// reached it: either no pooled instance came free in time, or the guest
-    /// was cancelled while still running. The guest is not running anymore.
-    #[error("Call to '{func_name}' on plugin '{plugin_id}' reached its deadline")]
-    DeadlineExceeded {
+    /// The call could not run to completion before its deadline: it was
+    /// still queued for admission, or the guest was cancelled at the
+    /// deadline. A statement about load on this server, never about the
+    /// work the call was asked to do: callers answer it as "try again" and
+    /// never as a decision.
+    #[error("Plugin '{plugin_id}' could not finish '{func_name}' before its deadline")]
+    Unavailable {
         plugin_id: String,
         func_name: String,
     },
+
+    /// No instance of the plugin could be built for this call (out of memory,
+    /// the module file gone). Not an answer from the plugin.
+    #[error("Plugin '{plugin_id}' could not start an instance: {message}")]
+    InstanceBuild { plugin_id: String, message: String },
+
+    /// A host function called back into a plugin deeper than
+    /// [`crate::executor::MAX_DEPTH`] allows.
+    #[error(
+        "Call to '{func_name}' on plugin '{plugin_id}' nests deeper than {max_depth} plugin calls"
+    )]
+    NestingTooDeep {
+        plugin_id: String,
+        func_name: String,
+        max_depth: u8,
+    },
+}
+
+impl PluginError {
+    /// Whether this says the plugin cannot answer right now rather than
+    /// anything about the request: the call reached its deadline, the server
+    /// is draining, the plugin is between loads, or no instance could be
+    /// built. Callers answer these as "try again", never as a decision.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(
+            self,
+            PluginError::Unavailable { .. }
+                | PluginError::ShuttingDown
+                | PluginError::NotLoaded(_)
+                | PluginError::InstanceBuild { .. }
+        )
+    }
 }
 
 #[derive(Debug, Error)]

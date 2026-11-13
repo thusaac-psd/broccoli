@@ -106,11 +106,6 @@ pub async fn run(
         cancel.clone(),
     ));
 
-    // Live worker slots, refreshed every `SLOTS_REFRESH` from heartbeats
-    // (a Redis SCAN, too costly to repeat every pass). Sizes the in-flight
-    // cap so it scales with the cluster; see [`effective_cap`].
-    let mut live_slots: u64 = 0;
-    let mut slots_checked: Option<Instant> = None;
     let mut last_pass: Option<Instant> = None;
 
     loop {
@@ -133,11 +128,9 @@ pub async fn run(
             "dispatcher.claim",
             common::deadline::BACKGROUND_STEP,
             async {
-                if max_in_flight > 0 && slots_checked.is_none_or(|t| t.elapsed() >= SLOTS_REFRESH) {
-                    live_slots = live_worker_slots(&state).await;
-                    slots_checked = Some(Instant::now());
-                }
-                let cap = effective_cap(max_in_flight, live_slots);
+                // Sized from the live worker slots so the cap scales with
+                // the cluster; see [`effective_cap`].
+                let cap = in_flight_cap(max_in_flight, &state.worker_slots);
                 loop {
                     match claim_once(&state, &server_id, batch_size, cap).await {
                         Ok(pass) => {
@@ -377,34 +370,32 @@ fn reserve_slots(state: &AppState, n: u32) -> Vec<DispatcherReservation> {
     slots
 }
 
-/// How often the claim loop re-reads live worker capacity.
-const SLOTS_REFRESH: Duration = Duration::from_secs(15);
-
 /// In-flight submissions allowed per live worker slot. A submission keeps at
 /// most a few operations in flight, so more than one per busy slot adds no
 /// throughput; 8 leaves ample slack for claim latency and callbacks, so the
 /// cap can never become the bottleneck before the workers do.
 const IN_FLIGHT_PER_WORKER_SLOT: u64 = 8;
 
-/// The in-flight cap in force: the configured value is a floor that scales up
-/// with the cluster's live worker slots, so a large deployment is never
-/// throttled by a default nobody tuned. `configured == 0` disables the cap.
-fn effective_cap(configured: u32, live_worker_slots: u64) -> u32 {
+/// The in-flight cap in force on this server: the configured value is a
+/// per-server floor that scales up with this server's share of the fleet's
+/// live worker slots, so a large deployment is never throttled by a default
+/// nobody tuned, and N replicas together take no more than the fleet's
+/// workers can serve. `configured == 0` disables the cap.
+pub(crate) fn in_flight_cap(
+    configured: u32,
+    slots: &crate::dispatcher::fanout::WorkerSlots,
+) -> u32 {
+    effective_cap(configured, slots.get(), slots.servers())
+}
+
+fn effective_cap(configured: u32, live_worker_slots: u64, live_servers: u64) -> u32 {
     if configured == 0 {
         return 0;
     }
-    let scaled = live_worker_slots.saturating_mul(IN_FLIGHT_PER_WORKER_SLOT);
+    let scaled = live_worker_slots
+        .saturating_mul(IN_FLIGHT_PER_WORKER_SLOT)
+        .div_ceil(live_servers.max(1));
     u32::try_from(std::cmp::max(scaled, u64::from(configured))).unwrap_or(u32::MAX)
-}
-
-/// Sum of `max_concurrency` over live workers. 0 when Redis is unavailable,
-/// which leaves the configured floor.
-async fn live_worker_slots(state: &AppState) -> u64 {
-    crate::handlers::system::read_workers(state)
-        .await
-        .iter()
-        .map(|w| u64::from(w.max_concurrency.unwrap_or(1)))
-        .sum()
 }
 
 /// Rows to claim this tick: the batch size, but never past the server's
@@ -535,14 +526,22 @@ mod tests {
     #[test]
     fn the_cap_grows_with_live_worker_capacity_and_never_below_the_floor() {
         // Small cluster (4 workers x 1 slot): the configured floor applies.
-        assert_eq!(effective_cap(256, 4), 256);
+        assert_eq!(effective_cap(256, 4, 1), 256);
         // No heartbeat data: still the floor.
-        assert_eq!(effective_cap(256, 0), 256);
+        assert_eq!(effective_cap(256, 0, 1), 256);
         // Large cluster (100 workers x 8 slots): scales past the floor, so an
         // untuned default cannot throttle it.
-        assert_eq!(effective_cap(256, 800), 6_400);
+        assert_eq!(effective_cap(256, 800, 1), 6_400);
         // Disabled stays disabled.
-        assert_eq!(effective_cap(0, 800), 0);
+        assert_eq!(effective_cap(0, 800, 1), 0);
+    }
+
+    #[test]
+    fn replicas_split_the_fleet_in_flight_cap() {
+        // Four servers share 800 slots: 1600 each, not 6400 each.
+        assert_eq!(effective_cap(256, 800, 4), 1_600);
+        // The floor is per server.
+        assert_eq!(effective_cap(256, 40, 4), 256);
     }
 
     #[test]

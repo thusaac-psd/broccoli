@@ -214,44 +214,6 @@ pub struct ServerConfig {
     /// off so worker-side cancellation checks can soak independently.
     #[serde(default)]
     pub cancel_primitive_enabled: bool,
-    /// Hard cap on the tokio runtime's blocking-thread pool. When unset, the
-    /// effective value auto-scales to `available_parallelism * 16`, clamped to
-    /// `[512, 8192]`. The blocking pool is consumed by plugin `spawn_blocking`
-    /// calls (one thread held per concurrent plugin call) and `tokio::fs::*`
-    /// operations. Override down on memory-constrained hosts (each thread
-    /// reserves ~2MB of stack) or up when `plugin.evaluator_parallelism` is
-    /// dialed well above CPU count.
-    #[serde(default)]
-    pub max_blocking_threads: Option<usize>,
-    /// Per-server cap on concurrent live evaluator-batch test-case dispatch
-    /// tasks. Unbounded, `start_evaluate_batch` would spawn one tokio task per
-    /// test case; a 1000-submission burst with ICPC's 20 testcases/submission
-    /// would then put 20,000 simultaneous tasks in contention on the inner
-    /// plugin-pool semaphore. This bounds the
-    /// **spawn** itself: the dispatcher acquires a permit before spawning the
-    /// per-test-case task and holds it for the task's lifetime.
-    ///
-    /// Default 64. Relationship to `plugin.evaluator_parallelism`: this is the
-    /// outer bound on live test-case tasks server-wide; `evaluator_parallelism`
-    /// is the inner bound on concurrent plugin-pool acquisitions. Configure so
-    /// that `evaluate_batch_fanout_concurrency >= evaluator_parallelism`,
-    /// otherwise the inner pool is never fully utilized.
-    #[serde(default = "default_evaluate_batch_fanout_concurrency")]
-    pub evaluate_batch_fanout_concurrency: u32,
-    /// Per-batch cap on concurrent in-flight `mq.publish` + blob-externalize
-    /// operations inside `start_operation_batch`. Awaiting each publish
-    /// sequentially would serialize a 1000-op batch with 5ms publishes to ~5s
-    /// of wall time before the first worker could pick up a task. With
-    /// `buffer_unordered(N)` the same batch takes
-    /// roughly `total_publish_ms / N` plus MQ-broker throughput limits.
-    ///
-    /// Default 32. Trade-off: higher values reduce dispatch latency but
-    /// multiply concurrent load on Redis (each publish is one `XADD`, or one
-    /// routing script for a pinned task). Tune down on a constrained MQ
-    /// host; tune up when broker is over-provisioned and submission bursts
-    /// dominate latency.
-    #[serde(default = "default_operation_batch_publish_concurrency")]
-    pub operation_batch_publish_concurrency: u32,
     /// Master switch for the claim fiber. When `true` (default), the
     /// per-server claim fiber claims `Queued` judgements and code runs,
     /// moves them to `Pending` and dispatches them; it is the only path
@@ -292,14 +254,6 @@ pub struct ServerConfig {
     /// submission judging, not plugin timers.
     #[serde(default = "default_plugin_timer_tick_interval_secs")]
     pub plugin_timer_tick_interval_secs: u64,
-    /// Claim lease (seconds) for a plugin timer row: how long a claiming
-    /// replica has to deliver before another replica may reclaim it. Default
-    /// 330s. Mirrors `lease_ttl_secs`'s crash-recovery role for submissions.
-    /// A delivery is cancelled when its lease ends, so the lease must exceed
-    /// `plugin.call_timeout_secs`; [`AppConfig::load`] rejects one that does
-    /// not.
-    #[serde(default = "default_plugin_timer_lease_secs")]
-    pub plugin_timer_lease_secs: i64,
     /// Bounded batch size for one plugin-timer claim tick. Default 64.
     #[serde(default = "default_plugin_timer_batch")]
     pub plugin_timer_batch: u64,
@@ -338,15 +292,11 @@ impl Default for ServerConfig {
             max_dispatch_retries: default_max_dispatch_retries(),
             max_system_error_retries: default_max_system_error_retries(),
             cancel_primitive_enabled: false,
-            max_blocking_threads: None,
-            evaluate_batch_fanout_concurrency: default_evaluate_batch_fanout_concurrency(),
-            operation_batch_publish_concurrency: default_operation_batch_publish_concurrency(),
             claim_fiber_enabled: default_claim_fiber_enabled(),
             claim_poll_interval_ms: default_claim_poll_interval_ms(),
             claim_batch_size: default_claim_batch_size(),
             max_in_flight_submissions: default_max_in_flight_submissions(),
             plugin_timer_tick_interval_secs: default_plugin_timer_tick_interval_secs(),
-            plugin_timer_lease_secs: default_plugin_timer_lease_secs(),
             plugin_timer_batch: default_plugin_timer_batch(),
             plugin_timer_max_attempts: default_plugin_timer_max_attempts(),
         }
@@ -406,14 +356,6 @@ fn default_max_system_error_retries() -> u32 {
     10
 }
 
-fn default_evaluate_batch_fanout_concurrency() -> u32 {
-    64
-}
-
-fn default_operation_batch_publish_concurrency() -> u32 {
-    32
-}
-
 fn default_claim_fiber_enabled() -> bool {
     true
 }
@@ -432,14 +374,6 @@ fn default_max_in_flight_submissions() -> u32 {
 
 fn default_plugin_timer_tick_interval_secs() -> u64 {
     1
-}
-
-/// Default [`ServerConfig::plugin_timer_lease_secs`]: the default plugin call
-/// timeout plus 30s for waiting on a pooled instance.
-pub const DEFAULT_PLUGIN_TIMER_LEASE_SECS: i64 = 330;
-
-fn default_plugin_timer_lease_secs() -> i64 {
-    DEFAULT_PLUGIN_TIMER_LEASE_SECS
 }
 
 fn default_plugin_timer_batch() -> u64 {
@@ -618,6 +552,9 @@ pub struct AppConfig {
     /// Boot-time clock skew bounds against Postgres and Redis.
     #[serde(default)]
     pub clock: common::clock::ClockConfig,
+    /// The [`REMOVED_KEYS`] this configuration still sets.
+    #[serde(skip)]
+    pub removed_keys_set: Vec<String>,
 }
 
 fn default_batch_max_age_secs() -> u64 {
@@ -641,29 +578,6 @@ pub fn resolve_server_id(
         configured,
         expects_multi_replica,
     )
-}
-
-/// Auto-default for tokio's `max_blocking_threads`: 16x available CPUs,
-/// clamped to `[512, 8192]`. The 16x multiplier gives roughly 8x headroom
-/// over the realistic peak (`evaluator_parallelism * 2` for plugin +
-/// fs/db). The floor matches tokio's historical default so very small boxes
-/// keep a sane minimum, and the ceiling keeps worst-case stack budget at
-/// ~16GB on enormous hosts.
-pub fn auto_max_blocking_threads() -> usize {
-    let par = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    (par * 16).clamp(512, 8192)
-}
-
-impl ServerConfig {
-    /// Resolves the effective `max_blocking_threads` value for the tokio
-    /// runtime: user-supplied value wins verbatim (no clamping); otherwise
-    /// derived via [`auto_max_blocking_threads`].
-    pub fn effective_max_blocking_threads(&self) -> usize {
-        self.max_blocking_threads
-            .unwrap_or_else(auto_max_blocking_threads)
-    }
 }
 
 /// Below this length the HS256 signing key is weak enough to brute-force, and a
@@ -700,25 +614,38 @@ impl AppConfig {
             )
             .build()?;
 
-        let config: Self = s.try_deserialize()?;
-        config.validate()?;
+        let removed_keys_set = removed_keys(&s);
+        let mut config: Self = s.try_deserialize()?;
+        config.removed_keys_set = removed_keys_set;
         Ok(config)
     }
-
-    /// Reject settings that cannot work together.
-    fn validate(&self) -> Result<(), ConfigError> {
-        let lease = self.server.plugin_timer_lease_secs;
-        let call_timeout = self.plugin.call_timeout().as_secs();
-        if lease <= 0 || (lease as u64) <= call_timeout {
-            return Err(ConfigError::Message(format!(
-                "server.plugin_timer_lease_secs ({lease}) must exceed \
-                 plugin.call_timeout_secs ({call_timeout}): a timer delivery is \
-                 cancelled when its lease ends"
-            )));
-        }
-        Ok(())
-    }
 }
+
+/// The [`REMOVED_KEYS`] `config` sets, from any source.
+fn removed_keys(config: &Config) -> Vec<String> {
+    REMOVED_KEYS
+        .iter()
+        .filter(|key| config.get::<config::Value>(key).is_ok())
+        .map(|key| key.to_string())
+        .collect()
+}
+
+/// Keys that no longer exist. Configuration has no `deny_unknown_fields`, so
+/// one still set in a file or the environment would be ignored without a
+/// word; boot warns about each instead.
+pub const REMOVED_KEYS: &[&str] = &[
+    "plugin.pool_max_instances",
+    "plugin.pool_acquire_timeout_secs",
+    "plugin.evaluator_parallelism",
+    "plugin.instance_reclaim_bytes",
+    "plugin.instance_min_calls_before_recycle",
+    "plugin.pool_idle_timeout_secs",
+    "plugin.max_instance_memory_pages",
+    "server.evaluate_batch_fanout_concurrency",
+    "server.operation_batch_publish_concurrency",
+    "server.plugin_timer_lease_secs",
+    "server.max_blocking_threads",
+];
 
 #[cfg(test)]
 mod tests {
@@ -800,50 +727,6 @@ mod tests {
         assert_eq!(probe.trusted_proxies, vec!["10.0.0.0/8", "192.168.0.0/16"]);
     }
 
-    fn server_config_fixture(max_blocking_threads: Option<usize>) -> ServerConfig {
-        ServerConfig {
-            max_blocking_threads,
-            ..ServerConfig::default()
-        }
-    }
-
-    #[test]
-    fn auto_max_blocking_threads_stays_within_clamp_bounds() {
-        let resolved = auto_max_blocking_threads();
-        assert!(
-            (512..=8192).contains(&resolved),
-            "auto-resolved value {resolved} outside [512, 8192]"
-        );
-    }
-
-    #[test]
-    fn effective_max_blocking_threads_honors_explicit_value() {
-        let cfg = server_config_fixture(Some(2048));
-        assert_eq!(cfg.effective_max_blocking_threads(), 2048);
-    }
-
-    #[test]
-    fn effective_max_blocking_threads_bypasses_clamp_for_explicit_override() {
-        // Operators with very memory-constrained hosts must be able to set a
-        // value below the auto-default floor. Confirm 100 is honored verbatim
-        // rather than silently bumped to 512.
-        let cfg = server_config_fixture(Some(100));
-        assert_eq!(cfg.effective_max_blocking_threads(), 100);
-
-        // Symmetric: explicit values above the auto-default ceiling also pass
-        // through unchanged.
-        let cfg = server_config_fixture(Some(16_384));
-        assert_eq!(cfg.effective_max_blocking_threads(), 16_384);
-    }
-
-    #[test]
-    fn effective_max_blocking_threads_falls_back_to_auto_default() {
-        let cfg = server_config_fixture(None);
-        let resolved = cfg.effective_max_blocking_threads();
-        assert_eq!(resolved, auto_max_blocking_threads());
-        assert!((512..=8192).contains(&resolved));
-    }
-
     #[test]
     fn weak_jwt_secret_is_flagged_below_the_recommended_minimum() {
         let cfg = |secret: &str| -> AppConfig {
@@ -903,41 +786,28 @@ mod tests {
         assert!(cfg.bootstrap.admin_username.is_empty());
     }
 
-    fn config_with(overrides: &[(&str, i64)]) -> AppConfig {
-        let mut builder = Config::builder()
+    #[test]
+    fn removed_keys_still_set_are_reported_and_ignored() {
+        let built = Config::builder()
             .set_override("auth.jwt_secret", "test-secret")
+            .unwrap()
+            .set_override("plugin.pool_max_instances", 64)
+            .unwrap()
+            .set_override("server.evaluate_batch_fanout_concurrency", 8)
+            .unwrap()
+            .set_override("plugin.call_timeout_secs", 60)
+            .unwrap()
+            .build()
             .unwrap();
-        for (key, value) in overrides {
-            builder = builder.set_override(*key, *value).unwrap();
-        }
-        builder.build().unwrap().try_deserialize().unwrap()
-    }
-
-    #[test]
-    fn default_timer_lease_exceeds_the_default_call_timeout() {
-        config_with(&[])
-            .validate()
-            .expect("defaults are consistent");
-    }
-
-    #[test]
-    fn a_timer_lease_not_above_the_call_timeout_is_rejected() {
-        for lease in [0, 60, 300] {
-            let cfg = config_with(&[
-                ("server.plugin_timer_lease_secs", lease),
-                ("plugin.call_timeout_secs", 300),
-            ]);
-            let err = cfg
-                .validate()
-                .expect_err("lease must exceed the call timeout");
-            assert!(err.to_string().contains("plugin_timer_lease_secs"), "{err}");
-        }
-        config_with(&[
-            ("server.plugin_timer_lease_secs", 61),
-            ("plugin.call_timeout_secs", 60),
-        ])
-        .validate()
-        .expect("a lease above the call timeout is accepted");
+        assert_eq!(
+            removed_keys(&built),
+            vec![
+                "plugin.pool_max_instances".to_string(),
+                "server.evaluate_batch_fanout_concurrency".to_string(),
+            ]
+        );
+        let cfg: AppConfig = built.try_deserialize().unwrap();
+        assert_eq!(cfg.plugin.call_timeout_secs, 60);
     }
 
     /// A partially-populated table must still fill its remaining keys from

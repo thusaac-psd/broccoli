@@ -78,11 +78,11 @@ fn burst_fault_args_parse_fanout_metrics_guards() {
         "20",
         "--metrics-url",
         "http://localhost:3000/metrics",
-        "--baseline-plugin-pool-contention-delta",
+        "--baseline-plugin-admission-queued-delta",
         "200",
-        "--max-plugin-pool-contention-baseline-ratio",
+        "--max-plugin-admission-queued-baseline-ratio",
         "0.1",
-        "--max-plugin-pool-contention-delta",
+        "--max-plugin-admission-queued-delta",
         "15",
         "--require-fanout-saturation",
     ])
@@ -100,9 +100,9 @@ fn burst_fault_args_parse_fanout_metrics_guards() {
         args.metrics_url.as_deref(),
         Some("http://localhost:3000/metrics")
     );
-    assert_eq!(args.baseline_plugin_pool_contention_delta, Some(200));
-    assert_eq!(args.max_plugin_pool_contention_baseline_ratio, 0.1);
-    assert_eq!(args.max_plugin_pool_contention_delta, 15);
+    assert_eq!(args.baseline_plugin_admission_queued_delta, Some(200));
+    assert_eq!(args.max_plugin_admission_queued_baseline_ratio, 0.1);
+    assert_eq!(args.max_plugin_admission_queued_delta, 15);
     assert!(args.require_fanout_saturation);
 }
 

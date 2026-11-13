@@ -122,32 +122,36 @@ pub fn create_registry_functions(
     });
 
     vec![
-        Function::new(
+        super::host_function(
             "register_contest_type",
             [ValType::I64],
             [],
             user_data.clone(),
+            super::Waits::Returns,
             register_contest_type_fn,
         ),
-        Function::new(
+        super::host_function(
             "register_evaluator",
             [ValType::I64],
             [],
             user_data.clone(),
+            super::Waits::Returns,
             register_evaluator_fn,
         ),
-        Function::new(
+        super::host_function(
             "register_checker_resolver",
             [ValType::I64],
             [],
             user_data.clone(),
+            super::Waits::Returns,
             register_checker_resolver_fn,
         ),
-        Function::new(
+        super::host_function(
             "register_language_resolver",
             [ValType::I64],
             [],
             user_data,
+            super::Waits::Returns,
             register_language_resolver_fn,
         ),
     ]

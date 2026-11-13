@@ -14,7 +14,6 @@ use broccoli_server_sdk::types::{
 };
 use common::storage::{BlobStore, ContentHash};
 use opentelemetry::KeyValue;
-use plugin_core::retry::{PoolRetryPolicy, call_raw_with_pool_retry};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -54,30 +53,6 @@ pub use cases::EvaluateCases;
 pub use detached::*;
 pub use dispatch::*;
 pub use result_wait::*;
-
-fn record_evaluator_semaphore_wait(
-    metrics: Option<&common::metrics::Metrics>,
-    evaluator_plugin_id: &str,
-    evaluator_function: &str,
-    problem_type: &str,
-    outcome: &'static str,
-    elapsed: Duration,
-) {
-    let Some(metrics) = metrics else {
-        return;
-    };
-
-    metrics.plugin_evaluator_semaphore_wait_duration.record(
-        elapsed.as_secs_f64(),
-        &[
-            KeyValue::new("batch.kind", "evaluate"),
-            KeyValue::new("evaluator.plugin.id", evaluator_plugin_id.to_string()),
-            KeyValue::new("evaluator.function", evaluator_function.to_string()),
-            KeyValue::new("problem.type", problem_type.to_string()),
-            KeyValue::new("outcome", outcome),
-        ],
-    );
-}
 
 /// Whether a test-case body is cheap enough to keep a clone of for the whole
 /// submission (so a timed-out op can be re-dispatched). Blob/Missing carry only

@@ -279,15 +279,15 @@ async fn call_detached_evaluate_callback(
 ) -> anyhow::Result<DetachedEvaluateCallbackOutput> {
     let input_bytes = serde_json::to_vec(&input)
         .with_context(|| "Failed to serialize detached evaluate callback input")?;
-    let output_bytes = call_raw_with_pool_retry(
-        plugin_manager,
-        plugin_id,
-        callback_fn,
-        input_bytes,
-        PoolRetryPolicy::default(),
-    )
-    .await
-    .with_context(|| "Detached evaluate callback failed")?;
+    let output_bytes = plugin_manager
+        .call_raw(
+            plugin_id,
+            callback_fn,
+            input_bytes,
+            plugin_manager.get_config().background_call(),
+        )
+        .await
+        .with_context(|| "Detached evaluate callback failed")?;
     serde_json::from_slice::<DetachedEvaluateCallbackOutput>(&output_bytes)
         .with_context(|| "Failed to deserialize detached evaluate callback output")
 }

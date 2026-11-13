@@ -95,21 +95,23 @@ pub fn create_config_get_function(
     db: DatabaseConnection,
     registry: PluginRegistry,
 ) -> Function {
-    Function::new(
+    super::host_function(
         "config_get",
         [ValType::I64],
         [ValType::I64],
         super::host_data((plugin_id, db, registry)),
+        super::Waits::Blocks,
         config_get_fn,
     )
 }
 
 pub fn create_config_set_function(plugin_id: String, db: DatabaseConnection) -> Function {
-    Function::new(
+    super::host_function(
         "config_set",
         [ValType::I64],
         [],
         super::host_data((plugin_id, db)),
+        super::Waits::Blocks,
         config_set_fn,
     )
 }

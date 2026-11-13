@@ -45,13 +45,13 @@ fn stress_test_passes_against_real_server() {
 
 #[test]
 #[ignore = "needs a running stack with /metrics and a no-semaphore baseline: STRESS_TEST_E2E_URL=<url> cargo test -p stress-test --test e2e_real -- --ignored"]
-fn burst_1000_submissions_keeps_plugin_pool_contention_below_baseline() {
+fn burst_1000_submissions_keeps_plugin_admission_queued_below_baseline() {
     let url = require_env("STRESS_TEST_E2E_URL");
     let username =
         std::env::var("STRESS_TEST_E2E_USERNAME").unwrap_or_else(|_| "admin".to_string());
     let password = require_env("STRESS_TEST_E2E_PASSWORD");
     let metrics_url = require_env("STRESS_TEST_E2E_METRICS_URL");
-    let baseline = require_env("STRESS_TEST_E2E_BASELINE_PLUGIN_POOL_CONTENTION_DELTA");
+    let baseline = require_env("STRESS_TEST_E2E_BASELINE_PLUGIN_ADMISSION_QUEUED_DELTA");
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX_EPOCH")
@@ -79,9 +79,9 @@ fn burst_1000_submissions_keeps_plugin_pool_contention_below_baseline() {
             "20",
             "--metrics-url",
             &metrics_url,
-            "--baseline-plugin-pool-contention-delta",
+            "--baseline-plugin-admission-queued-delta",
             &baseline,
-            "--max-plugin-pool-contention-baseline-ratio",
+            "--max-plugin-admission-queued-baseline-ratio",
             "0.2",
             "--require-fanout-saturation",
             "--out",
@@ -99,7 +99,7 @@ fn burst_1000_submissions_keeps_plugin_pool_contention_below_baseline() {
         output.status.code()
     );
     assert!(
-        transcript.contains("plugin_pool_contention_total delta"),
+        transcript.contains("plugin_admission_queued_total delta"),
         "burst transcript should include the contention assertion:\n{transcript}"
     );
     assert!(

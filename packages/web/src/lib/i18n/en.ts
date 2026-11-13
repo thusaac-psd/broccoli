@@ -1096,6 +1096,8 @@ export const en: Record<string, string> = {
   'common.loadFailed':
     'Could not load this. Check your connection and try again.',
   'common.retry': 'Retry',
+  'common.temporarilyUnavailable':
+    'The server is busy right now. Retrying shortly.',
   'common.version': 'v{version}',
   'common.close': 'Close',
   'confirm.confirm': 'Confirm',
