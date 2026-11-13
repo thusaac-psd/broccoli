@@ -87,7 +87,7 @@ pub fn record_mq_consume(
     metrics.mq_consume_messages_total.add(1, &attrs);
 }
 
-pub fn spawn_metrics_server(registry: prometheus::Registry) {
+pub fn spawn_metrics_server(registry: prometheus::Registry, addr: String) {
     tokio::spawn(async move {
         let app = axum::Router::new().route(
             "/metrics",
@@ -111,7 +111,7 @@ pub fn spawn_metrics_server(registry: prometheus::Registry) {
             }),
         );
 
-        let addr = "0.0.0.0:9091";
+        let addr = addr.as_str();
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 info!(addr, "Worker metrics endpoint listening");

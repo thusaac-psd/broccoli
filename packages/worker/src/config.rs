@@ -117,6 +117,14 @@ pub struct WorkerConfig {
     /// shared volume). Native installs, which share `/tmp`, need nothing.
     #[serde(default)]
     pub box_slot_lock_dir: Option<String>,
+    /// Address the Prometheus `/metrics` endpoint binds. Give each worker on
+    /// one host its own port so every one of them can be scraped.
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9091".into()
 }
 
 /// Empty means "derive one for this host" (see
@@ -172,6 +180,7 @@ impl Default for WorkerConfig {
             cache_follower_poll_interval_ms: default_cache_follower_poll_interval_ms(),
             cache_follower_max_wait_secs: default_cache_follower_max_wait_secs(),
             tools: ToolsConfig::default(),
+            metrics_addr: default_metrics_addr(),
             box_slot_lock_dir: None,
         }
     }
