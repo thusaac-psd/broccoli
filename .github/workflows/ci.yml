@@ -5,9 +5,17 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # release.yml runs this same workflow on the tagged commit before it
+  # publishes anything.
+  workflow_call:
 
+permissions:
+  contents: read
+
+# A fixed prefix, not `github.workflow`: when release.yml calls this workflow,
+# `github.workflow` names the caller, and sharing its group would deadlock.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
@@ -24,19 +32,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          components: rustfmt, clippy
-          targets: wasm32-wasip1
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: package.json
           cache: pnpm
 
       - name: Check formatting
@@ -44,18 +52,14 @@ jobs:
 
       # `plugins` is excluded from the root workspace (wasm32 targets, own
       # `[workspace]` pins), so `cargo fmt --all --check` above never looks at
-      # plugin crates. This iterates over them separately; see the script for
-      # why a script beats a hardcoded crate list here.
+      # plugin crates. The script discovers and checks them.
       - name: Check plugin formatting
         run: ./scripts/fmt-plugins.sh
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # Same exclusion problem as formatting: `cargo clippy --workspace`
-      # above never looks at plugin crates, so their lint findings never ran
-      # in CI. See the script for why a script beats a hardcoded crate list
-      # here.
+      # `cargo clippy --workspace` above does not reach plugin crates either.
       - name: Clippy plugins
         run: ./scripts/clippy-plugins.sh
 
@@ -74,15 +78,24 @@ jobs:
       - name: Build plugin WASM artefacts
         run: ./scripts/build-plugins.sh
 
+      # The web SDK's API types are generated from the server's OpenAPI
+      # document; regenerating them must not change the committed file.
+      - name: OpenAPI client is current
+        env:
+          # The document does not depend on the secret; the config needs one.
+          BROCCOLI__AUTH__JWT_SECRET: openapi
+        run: |
+          cargo run -p server --locked -- --openapi > "$RUNNER_TEMP/openapi.json"
+          node packages/web-sdk/scripts/generate-api.mjs "$RUNNER_TEMP/openapi.json"
+          git diff --exit-code -- packages/web-sdk/src/api/schema.ts
+
       - name: Test
         timeout-minutes: 45
         env:
           E2E_SANDBOX_BACKEND: mock
         run: cargo test --workspace --locked -- --test-threads=4
 
-      # Same exclusion problem as formatting: `cargo test --workspace` never
-      # touches plugin crates, so their tests (including the ICPC
-      # submission-freeze mask and IOI feedback mask tests) never ran in CI.
+      # `cargo test --workspace` does not reach plugin crates either.
       - name: Test plugins
         run: ./scripts/test-plugins.sh
 
@@ -91,13 +104,71 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
-      # `plugins` is excluded from the root workspace, so the step above never
-      # documents a plugin crate -- the same gap already closed for fmt,
-      # clippy and tests. A broken intra-doc link in a plugin went undetected
-      # by every other gate until this one existed. See the script for why it
-      # discovers crates rather than listing them.
+      # `cargo doc --workspace` does not reach plugin crates either.
       - name: Documentation (plugins)
         run: ./scripts/doc-plugins.sh
+
+  # The suites that judge real programs: the worker's isolate suite and the
+  # server e2e tests marked `#[ignore]` for needing isolate. isolate is built
+  # and installed the way the worker image builds it, and its own systemd unit
+  # (isolate-cg-keeper) delegates the cgroup v2 subtree it sandboxes in. The
+  # runner image ships the C++, Python and Java toolchains the tests compile
+  # with.
+  sandbox:
+    name: Sandbox (isolate)
+    runs-on: ubuntu-latest
+    env:
+      ISOLATE_VERSION: v2.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: sandbox
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install isolate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libsystemd-dev
+          git clone --depth 1 --branch "$ISOLATE_VERSION" https://github.com/ioi/isolate.git "$RUNNER_TEMP/isolate"
+          sudo make -C "$RUNNER_TEMP/isolate" install
+          sudo install -m 0644 "$RUNNER_TEMP"/isolate/systemd/isolate.service "$RUNNER_TEMP"/isolate/systemd/isolate.slice /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemctl start isolate.service
+          isolate --version
+          isolate-check-environment || true
+
+      - name: Build plugin WASM artefacts
+        run: ./scripts/build-plugins.sh
+
+      # Judging mounts broccoli-compare into the box as a platform tool.
+      - name: Build platform tools
+        run: |
+          cargo build -p broccoli-compare --locked --release
+          mkdir -p "$RUNNER_TEMP/tools"
+          cp target/release/broccoli-compare "$RUNNER_TEMP/tools/"
+          echo "BROCCOLI_WORKER_TOOLS_DIR=$RUNNER_TEMP/tools" >> "$GITHUB_ENV"
+
+      # One test at a time: isolate box ids are a host-wide resource.
+      - name: Worker isolate suite
+        timeout-minutes: 20
+        run: cargo test -p worker --locked --test worker_isolate_sandbox -- --ignored --test-threads=1
+
+      - name: Server e2e on isolate
+        timeout-minutes: 40
+        env:
+          E2E_SANDBOX_BACKEND: isolate
+        run: cargo test -p server --locked --test e2e -- --ignored --test-threads=1
 
   frontend:
     name: Frontend
@@ -105,11 +176,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: package.json
           cache: pnpm
 
       - name: Install dependencies
@@ -124,16 +195,10 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # Runs every workspace package's `typecheck` script: the web app and
+      # each plugin frontend (`pnpm build` transpiles without type checking).
       - name: Type check
         run: pnpm typecheck
-
-      # `pnpm typecheck` above only runs `pnpm --filter @broccoli/web
-      # typecheck`; no plugin frontend is type-checked by anything else
-      # (`pnpm build` in those packages transpiles via tsdown/vite without a
-      # full type-check). See the script for why a script beats a hardcoded
-      # package list here.
-      - name: Type check plugin frontends
-        run: ./scripts/typecheck-plugin-frontends.sh
 
       - name: Check formatting
         run: pnpm format:check
@@ -157,11 +222,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
+      # Installs the toolchain rust-toolchain.toml pins, with its components
+      # and targets. Every cargo command in the repository, plugin builds
+      # included, resolves to it.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-bundled-feature
 

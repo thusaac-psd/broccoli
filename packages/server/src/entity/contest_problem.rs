@@ -10,9 +10,9 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub problem_id: i32,
     #[sea_orm(belongs_to, from = "contest_id", to = "id")]
-    pub contest: Option<super::contest::Entity>,
+    pub contest: HasOne<super::contest::Entity>,
     #[sea_orm(belongs_to, from = "problem_id", to = "id")]
-    pub problem: Option<super::problem::Entity>,
+    pub problem: HasOne<super::problem::Entity>,
 
     pub label: String,
 

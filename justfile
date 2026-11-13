@@ -18,11 +18,11 @@ build-profiling-crate crate *args:
 # Run baseline Rust workspace tests.
 # This excludes root plugins (they are intentionally not workspace members) and
 # the stress-test harness. Use test-plugins/test-stress for those opt-in suites.
-test:
+test: build-plugins
     cargo test --workspace --exclude stress-test
 
 # Run every Rust workspace test, including the stress-test harness
-test-workspace-all:
+test-workspace-all: build-plugins
     cargo test --workspace
 
 # Test a single crate (e.g., just test-crate plugin-core)
@@ -33,19 +33,15 @@ test-crate crate:
 test-plugin path:
     cargo test --manifest-path {{path}}/Cargo.toml
 
-# Test all root plugin crates explicitly; root plugins stay out of Cargo workspace
+# Test every plugin crate (they stay out of the Cargo workspace)
 test-plugins:
-    cargo test --manifest-path plugins/batch-evaluator/Cargo.toml
-    cargo test --manifest-path plugins/codelink-bracket/Cargo.toml
-    cargo test --manifest-path plugins/codelink-qualifier/Cargo.toml
-    cargo test --manifest-path plugins/communication-evaluator/Cargo.toml
-    cargo test --manifest-path plugins/cooldown/Cargo.toml
-    cargo test --manifest-path plugins/icpc/Cargo.toml
-    cargo test --manifest-path plugins/ioi/Cargo.toml
-    cargo test --manifest-path plugins/print/Cargo.toml
-    cargo test --manifest-path plugins/standard-checkers/Cargo.toml
-    cargo test --manifest-path plugins/standard-languages/Cargo.toml
-    cargo test --manifest-path plugins/submission-limit/Cargo.toml
+    ./scripts/test-plugins.sh
+
+# Run the isolate suites as the sandbox CI job does (needs isolate and cgroup v2)
+test-sandbox: build-plugins
+    cargo build -p broccoli-compare
+    cargo test -p worker --test worker_isolate_sandbox -- --ignored --test-threads=1
+    E2E_SANDBOX_BACKEND=isolate BROCCOLI_WORKER_TOOLS_DIR={{justfile_directory()}}/target/debug cargo test -p server --test e2e -- --ignored --test-threads=1
 
 # Run server tests that require opt-in bundled-stress-test feature
 test-server-bundled-downloads:
@@ -55,9 +51,14 @@ test-server-bundled-downloads:
 test-stress:
     cargo test -p stress-test
 
-# Run clippy on all workspace crates
+# Run clippy on all workspace crates, as CI does
 clippy:
-    cargo clippy --workspace
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+
+# Run clippy on every plugin crate and on the server SDK's guest surface
+clippy-plugins:
+    ./scripts/clippy-plugins.sh
+    ./scripts/clippy-server-sdk-guest.sh
 
 # Run the backend server
 server:
@@ -71,9 +72,10 @@ worker:
 install:
     pnpm install
 
-# Generate API client from OpenAPI spec
-gen-api url="http://127.0.0.1:3000/api-docs/openapi.json":
-    node packages/web-sdk/scripts/generate-api.mjs {{url}}
+# Generate the web SDK's API types from the server's OpenAPI document
+gen-api:
+    BROCCOLI__AUTH__JWT_SECRET="${BROCCOLI__AUTH__JWT_SECRET:-openapi}" cargo run -p server -- --openapi > target/openapi.json
+    node packages/web-sdk/scripts/generate-api.mjs target/openapi.json
 
 # Build all JS packages (sdk before web)
 build-js:
@@ -107,33 +109,9 @@ format:
 format-check:
     pnpm format:check
 
-# Build all WASM plugins (debug)
-build-plugins *args:
-    cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-bracket {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-qualifier {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/icpc {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/ioi {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/print {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-checkers {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-languages {{args}}
-    cargo run -p broccoli-dev-cli -- plugin build plugins/submission-limit {{args}}
-
-# Build all WASM plugins (release)
-build-plugins-release:
-    cargo run -p broccoli-dev-cli -- plugin build plugins/batch-evaluator --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-bracket --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/codelink-qualifier --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/communication-evaluator --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/cooldown --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/icpc --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/ioi --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/print --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-checkers --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/standard-languages --install --release
-    cargo run -p broccoli-dev-cli -- plugin build plugins/submission-limit --install --release
+# Build every plugin and server test fixture plugin (WASM and frontends)
+build-plugins:
+    ./scripts/build-plugins.sh
 
 # Build a single WASM plugin (e.g., just build-plugin plugins/standard-checkers)
 build-plugin path *args:
@@ -183,8 +161,8 @@ publish-cli-dry:
 publish-cli:
     cargo publish -p broccoli-dev-cli
 
-# Run baseline checks (clippy + baseline Rust tests + JS lint + format check)
-check-all: clippy test lint-js format-check
+# Run the checks CI runs on Rust and JS code, plugins included
+check-all: clippy clippy-plugins test test-plugins lint-js format-check
 
 # ---------------------------------------------------------------------------
 # Docker E2E testing (full stack with real isolate sandbox)
@@ -203,7 +181,7 @@ e2e-docker-test *args:
     E2E_SERVER_URL=http://127.0.0.1:3000 E2E_DATABASE_URL=postgres://postgres:password@127.0.0.1:5433/broccoli cargo test -p server --test e2e -- --test-threads=8 {{args}}
 
 # Run E2E tests in-process (testcontainers mode, no Docker stack needed)
-e2e-local *args:
+e2e-local *args: build-plugins
     E2E_SANDBOX_BACKEND=mock cargo test -p server --test e2e -- --test-threads=4 {{args}}
 
 # Full E2E cycle: build images, start stack, run tests, tear down
@@ -240,4 +218,4 @@ stress-test-all: stress-test-linux-x86_64 stress-test-linux-aarch64
 
 # Run portability harness (requires prebuilt musl binaries; Linux only)
 stress-test-portability:
-    STRESS_TEST_PORTABILITY=1 cargo test -p stress-test --test portability
+    STRESS_TEST_PORTABILITY=1 cargo test -p stress-test --test portability -- --ignored

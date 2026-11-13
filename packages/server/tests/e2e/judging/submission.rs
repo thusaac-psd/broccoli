@@ -1,23 +1,11 @@
 use serde_json::json;
 
-use crate::common::E2eTestApp;
-
-fn skip_with_mock_sandbox() -> bool {
-    if std::env::var("E2E_SERVER_URL").is_ok() {
-        return false;
-    }
-    if std::env::var("E2E_SANDBOX_BACKEND").is_ok_and(|v| v.eq_ignore_ascii_case("mock")) {
-        panic!("submission sandbox test requires a non-mock sandbox");
-    }
-    false
-}
+use crate::common::{E2eTestApp, require_real_sandbox};
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn submission_reaches_terminal_state() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -41,11 +29,9 @@ async fn submission_reaches_terminal_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn submission_has_test_case_results_when_judged() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -80,11 +66,9 @@ async fn submission_has_test_case_results_when_judged() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn submission_status_transitions_observed() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -130,11 +114,9 @@ async fn submission_status_transitions_observed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn contest_submission_reaches_terminal_state() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -273,11 +255,9 @@ async fn bulk_rejudge_resets_multiple_submissions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn multiple_test_cases_all_get_results() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app
@@ -327,11 +307,9 @@ async fn multiple_test_cases_all_get_results() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires a non-mock judge sandbox and C++ toolchain"]
+#[ignore = "judges real programs in isolate; the sandbox CI job runs it (see common::require_real_sandbox)"]
 async fn submission_judges_blob_backed_testcase_input_and_expected_output() {
-    if skip_with_mock_sandbox() {
-        return;
-    }
+    require_real_sandbox();
 
     let app = E2eTestApp::spawn().await;
     let admin = app

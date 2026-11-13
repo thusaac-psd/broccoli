@@ -10,7 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub permission: String,
     #[sea_orm(belongs_to, from = "role", to = "name")]
-    pub role_ref: Option<super::role::Entity>,
+    pub role_ref: HasOne<super::role::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

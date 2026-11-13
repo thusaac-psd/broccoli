@@ -134,7 +134,7 @@ default = []
 
 # -- Web UI --
 [web]
-root = "web/dist"
+root = "frontend/dist"
 entry = "index.js"
 css = ["styles.css"]
 

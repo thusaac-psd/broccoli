@@ -38,29 +38,57 @@ static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 pub use test_support::TestResponse;
 use test_support::{close_database_pool, create_test_database, shared_redis_port};
 
+/// Whether the in-process worker judges with the mock sandbox:
+/// `E2E_SANDBOX_BACKEND=mock`, or no backend named on a non-Linux host. Any
+/// other value selects isolate.
+fn mock_sandbox() -> bool {
+    match std::env::var("E2E_SANDBOX_BACKEND") {
+        Ok(backend) => backend.eq_ignore_ascii_case("mock"),
+        Err(_) => !cfg!(target_os = "linux"),
+    }
+}
+
+/// Fails the test unless submissions are judged in a real sandbox: a running
+/// stack (`E2E_SERVER_URL`), or the in-process worker on isolate. Every test
+/// that compiles and runs real programs calls this first, so a misconfigured
+/// run fails instead of passing vacuously. These tests are `#[ignore]`d and run
+/// in the `sandbox` CI job; locally, install isolate and run
+/// `E2E_SANDBOX_BACKEND=isolate cargo test -p server --test e2e -- --ignored`.
+pub fn require_real_sandbox() {
+    if std::env::var("E2E_SERVER_URL").is_ok() {
+        return;
+    }
+    assert!(
+        !mock_sandbox(),
+        "this test judges real programs; set E2E_SANDBOX_BACKEND=isolate"
+    );
+    assert!(
+        std::process::Command::new("isolate")
+            .arg("--version")
+            .status()
+            .is_ok_and(|status| status.success()),
+        "E2E_SANDBOX_BACKEND selects isolate, but `isolate --version` fails"
+    );
+}
+
 fn create_sandbox_manager()
 -> Box<dyn worker::models::operation::sandbox::SandboxManager + Send + Sync> {
-    let backend = std::env::var("E2E_SANDBOX_BACKEND").unwrap_or_else(|_| {
-        if cfg!(target_os = "linux") {
-            "isolate".into()
-        } else {
-            "mock".into()
-        }
-    });
-
-    match backend.as_str() {
-        "mock" => Box::new(MockSandboxManager::default()),
-        _ => Box::new(IsolateSandboxManager::new("isolate".into(), true)),
+    if mock_sandbox() {
+        Box::new(MockSandboxManager::default())
+    } else {
+        Box::new(IsolateSandboxManager::new("isolate".into(), true))
     }
 }
 
 fn plugins_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("plugins")
+    test_support::require_built_plugins(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("plugins"),
+    )
 }
 
 /// Worker platform-tools dir (`broccoli-compare`, ...) for real-sandbox judging.
@@ -70,14 +98,7 @@ fn plugins_dir() -> PathBuf {
 /// deployment path when present. `None` for mock-sandbox runs, which never
 /// resolve a platform tool.
 fn worker_tools_dir() -> Option<PathBuf> {
-    let backend = std::env::var("E2E_SANDBOX_BACKEND").unwrap_or_else(|_| {
-        if cfg!(target_os = "linux") {
-            "isolate".into()
-        } else {
-            "mock".into()
-        }
-    });
-    if backend.eq_ignore_ascii_case("mock") {
+    if mock_sandbox() {
         return None;
     }
     if let Ok(dir) = std::env::var("BROCCOLI_WORKER_TOOLS_DIR") {

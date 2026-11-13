@@ -18,8 +18,14 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
+    /// `(submission_id, version)` is unique, and `indexed` keeps the partial
+    /// unique index `idx_submission_judgement_one_current`. Both are declared
+    /// on the entity because the per-boot schema `sync()` drops every unique
+    /// index whose column set no entity declares an index on.
+    #[sea_orm(indexed, unique_key = "submission_version")]
     pub submission_id: i32,
     /// 1-based per-submission ordinal. Holes are not allowed.
+    #[sea_orm(unique_key = "submission_version")]
     pub version: i32,
     /// Exactly one current judgement per submission, enforced by the
     /// partial unique index `idx_submission_judgement_one_current`.
@@ -72,7 +78,7 @@ pub struct Model {
     #[sea_orm(belongs_to, from = "submission_id", to = "id")]
     pub submission: HasOne<super::submission::Entity>,
     #[sea_orm(belongs_to, from = "triggered_by_user_id", to = "id")]
-    pub triggered_by: Option<super::user::Entity>,
+    pub triggered_by: HasOne<super::user::Entity>,
     #[sea_orm(has_many)]
     pub test_case_results: HasMany<super::test_case_result::Entity>,
 }

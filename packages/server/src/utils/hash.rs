@@ -3,13 +3,14 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 
 static DUMMY_HASH: OnceLock<String> = OnceLock::new();
 
 pub fn hash_password(password: &str) -> Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    let salt = SaltString::encode_b64(&rand::random::<[u8; argon2::RECOMMENDED_SALT_LEN]>())
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let argon2 = Argon2::default();
 
     let password_hash = argon2

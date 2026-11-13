@@ -13,8 +13,8 @@
 //!
 //! Under a sustained wave of plugin host function calls, the process does
 //! not grow a thread storm and records no `block_in_place` or plugin call
-//! failures. This test is `#[ignore]`d because it runs for 60 seconds by
-//! default; run it explicitly before a release.
+//! failures. This test runs for 60 seconds by default, so it is `#[ignore]`d
+//! and run by hand before a release (the `#[ignore]` reason has the command).
 //!
 //! Handler modules do not reference `crate::entity` directly. Each direct
 //! reference (an import, a module alias, an alias use or a fully qualified
@@ -168,7 +168,7 @@ fn host_funcs_must_not_use_tokio_block_in_place() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "60s runtime stress wave; run explicitly before a release"]
+#[ignore = "60 s pre-release stress wave: cargo test -p server --test integration host_fn_stress_wave -- --ignored"]
 async fn host_fn_stress_wave_does_not_spawn_thread_storm() {
     let duration = env_duration_secs("BROCCOLI_STRESS_WAVE_SECS", 60);
     let concurrency = env_usize("BROCCOLI_STRESS_WAVE_CONCURRENCY", 48);

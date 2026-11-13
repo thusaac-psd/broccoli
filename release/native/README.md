@@ -69,11 +69,11 @@ writes `connection.env` for the workers. The server auto-creates its schema and
 loads the plugins on first boot.
 
 Then load the problems (exported from the authoring server with
-`contest/export-problems.sh`):
+`contest/export-problems.sh`). The import reads the bundle's `connection.env`:
 
 ```bash
 cd contest
-sudo ./import-problems.sh ../../broccoli-problems-*.tar.gz --config /data/broccoli/config/config.toml
+sudo ./import-problems.sh ../../broccoli-problems-*.tar.gz
 ```
 
 ### Boxes 2..N — workers
@@ -167,7 +167,7 @@ problem list, submit one solution, confirm a worker judges it.
 
 ## Notes / limitations
 - **Plugin web UIs**: the bundle ships every judge `.wasm` (judging works) plus
-  the **print** plugin's staff web UI (`plugins/print/web/dist/` — print queue
+  the **print** plugin's staff web UI (`plugins/print/frontend/dist/` — print queue
   panel + print buttons) and its backend `.wasm`. The other plugins' optional
   config-UI panels are only included if their frontends were built. Building any
   plugin frontend requires building `packages/web-sdk` first (it emits

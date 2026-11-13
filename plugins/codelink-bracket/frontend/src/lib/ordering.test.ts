@@ -1,6 +1,6 @@
 // Pure-logic test for `isPermutationOf`/`canSubmitOrder` (see `ordering.ts`),
 // following the `node --experimental-strip-types --test` convention used by
-// packages/web/src/**/*.test.ts and plugins/print/web/src/lib/*.test.ts: no
+// packages/web/src/**/*.test.ts and plugins/print/frontend/src/lib/*.test.ts: no
 // bundler/DOM needed since the functions under test are pure.
 //
 // This suite exists to lock in the UI-side half of the permutation

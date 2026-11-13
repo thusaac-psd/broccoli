@@ -72,7 +72,7 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
 
     let web_root = match kind {
         ScaffoldKind::Frontend => "dist".to_string(),
-        ScaffoldKind::Full => "web/dist".to_string(),
+        ScaffoldKind::Full => "frontend/dist".to_string(),
         ScaffoldKind::Backend => String::new(),
     };
 
@@ -96,11 +96,11 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
 
     if matches!(kind, ScaffoldKind::Frontend | ScaffoldKind::Full) {
         let fe_root = match kind {
-            ScaffoldKind::Full => output_dir.join("web"),
+            ScaffoldKind::Full => output_dir.join("frontend"),
             _ => output_dir.clone(),
         };
         let prefix = match kind {
-            ScaffoldKind::Full => "web/",
+            ScaffoldKind::Full => "frontend/",
             _ => "",
         };
         write_frontend_files(&fe_root, &vars, prefix, &mut created_files)?;
@@ -166,12 +166,18 @@ fn write_plugin_toml(dir: &Path, vars: &TemplateVars, kind: ScaffoldKind) -> Res
 }
 
 fn write_backend_files(dir: &Path, vars: &TemplateVars, files: &mut Vec<String>) -> Result<()> {
-    let templates: &[(&str, &str)] = &[
+    let mut templates: Vec<(&str, &str)> = vec![
         ("Cargo.toml", TMPL_CARGO_TOML),
-        ("rust-toolchain.toml", TMPL_RUST_TOOLCHAIN),
         ("src/lib.rs", TMPL_LIB_RS),
         (".gitignore", TMPL_GITIGNORE),
     ];
+    // rustup resolves `rust-toolchain.toml` upward from the build directory, so
+    // a plugin created inside a project that pins a toolchain (the Broccoli
+    // repository does) builds with that pin. Only a standalone plugin gets
+    // its own file.
+    if !inherits_toolchain(dir) {
+        templates.push(("rust-toolchain.toml", TMPL_RUST_TOOLCHAIN));
+    }
 
     for (rel_path, template) in templates {
         write_template(template, &dir.join(rel_path), vars)?;
@@ -179,6 +185,16 @@ fn write_backend_files(dir: &Path, vars: &TemplateVars, files: &mut Vec<String>)
     }
 
     Ok(())
+}
+
+/// Whether a directory above `dir` pins a Rust toolchain that rustup applies
+/// to builds in `dir`.
+fn inherits_toolchain(dir: &Path) -> bool {
+    dir.canonicalize().is_ok_and(|dir| {
+        dir.ancestors()
+            .skip(1)
+            .any(|a| a.join("rust-toolchain.toml").is_file() || a.join("rust-toolchain").is_file())
+    })
 }
 
 fn write_frontend_files(
@@ -257,10 +273,38 @@ fn print_summary(name: &str, kind: ScaffoldKind, dir: &Path, files: &[String]) {
 
     if kind == ScaffoldKind::Full {
         println!(
-            "     cd {}/web && pnpm install && pnpm build",
+            "     cd {}/frontend && pnpm install && pnpm build",
             dir.display()
         );
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("broccoli-dev-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("plugins/demo")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_plugin_inside_a_pinned_project_inherits_its_toolchain() {
+        let root = scratch_dir("pinned");
+        std::fs::write(root.join("rust-toolchain.toml"), "[toolchain]\n").unwrap();
+        assert!(inherits_toolchain(&root.join("plugins/demo")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_standalone_plugin_pins_its_own_toolchain() {
+        let root = scratch_dir("standalone");
+        assert!(!inherits_toolchain(&root.join("plugins/demo")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

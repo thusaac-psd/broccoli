@@ -77,16 +77,12 @@ impl ObjectStorageBlobStore {
             bucket.set_path_style();
         }
 
-        // rust-s3 0.37's tokio backend builds its reqwest client with NO request
-        // timeout (the default 60s field is honoured only by the blocking/hyper
-        // backends). Without this, a half-open or stalled SeaweedFS connection
-        // hangs the op's future forever, pinning a worker task and leaking a
-        // pooled connection - they accumulate and stall the judge under load.
-        // with_request_timeout rebuilds the reqwest client WITH a per-request
-        // timeout and preserves path_style (so we set path_style first).
-        let bucket = bucket
-            .with_request_timeout(std::time::Duration::from_secs(S3_REQUEST_TIMEOUT_SECS))
-            .map_err(|e| StorageError::Backend(format!("failed to set request timeout: {e}")))?;
+        // Every request carries this timeout, so a half-open or stalled
+        // SeaweedFS connection fails the op instead of hanging its future
+        // forever, pinning a worker task and a pooled connection.
+        bucket.set_request_timeout(Some(std::time::Duration::from_secs(
+            S3_REQUEST_TIMEOUT_SECS,
+        )));
 
         let temp_dir = config.temp_dir.unwrap_or_else(std::env::temp_dir);
 
@@ -352,13 +348,12 @@ impl BlobStore for ObjectStorageBlobStore {
     async fn get_stream(&self, hash: &ContentHash) -> Result<BoxReader, StorageError> {
         let key = Self::object_key(hash);
 
-        // NOTE: rust-s3 0.37's streaming `get_object_stream` returns an
-        // `AsyncRead` adapter that TRUNCATES chunked-transfer responses from
-        // SeaweedFS - it signals EOF after the first chunk, so a 17 KB object
-        // is read back as ~12 KB of garbage-hashing bytes. Instead we stream
-        // the object ourselves via explicit byte ranges: each ranged GET has a
-        // definite Content-Length and reassembles losslessly, while memory
-        // stays bounded to a single window regardless of blob size.
+        // The object streams as explicit byte ranges rather than through
+        // rust-s3's `get_object_stream`, whose `AsyncRead` adapter can end a
+        // chunked-transfer response from SeaweedFS after its first chunk. Each
+        // ranged GET has a definite Content-Length and reassembles losslessly,
+        // while memory stays bounded to a single window regardless of blob
+        // size.
         //
         // A HEAD up front gives us the AUTHORITATIVE total length (so the loop
         // terminates against a real total, not a fragile "short read == EOF"
@@ -494,6 +489,93 @@ impl BlobStore for ObjectStorageBlobStore {
     }
 }
 
+/// A throwaway SeaweedFS S3 gateway for tests that exercise real object
+/// storage. Needs Docker.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use s3::creds::Credentials;
+    use s3::{Bucket, Region};
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+
+    use super::{ObjectStorageBlobStore, ObjectStorageConfig};
+
+    const ACCESS_KEY: &str = "ak";
+    const SECRET_KEY: &str = "sk";
+    const REGION: &str = "us-east-1";
+    const S3_CONFIG: &str = r#"{"identities":[{"name":"t","credentials":[{"accessKey":"ak","secretKey":"sk"}],"actions":["Admin","Read","Write","List"]}]}"#;
+
+    /// A running SeaweedFS container; it stops when dropped.
+    pub struct Seaweedfs {
+        _container: ContainerAsync<GenericImage>,
+        endpoint: String,
+    }
+
+    impl Seaweedfs {
+        pub async fn start() -> Self {
+            let container = GenericImage::new("chrislusf/seaweedfs", "4.15")
+                .with_exposed_port(8333.tcp())
+                .with_wait_for(WaitFor::message_on_stderr("Start Seaweed S3 API Server"))
+                .with_copy_to("/etc/s3.json", S3_CONFIG.as_bytes().to_vec())
+                .with_cmd(["server", "-s3", "-s3.config=/etc/s3.json", "-dir=/data"])
+                .start()
+                .await
+                .expect("start seaweedfs");
+            let port = container.get_host_port_ipv4(8333).await.expect("port");
+            Self {
+                _container: container,
+                endpoint: format!("http://127.0.0.1:{port}"),
+            }
+        }
+
+        /// Creates `bucket`. The filer behind the S3 gateway can lag the
+        /// gateway's "started" log line, so creation is retried until it
+        /// succeeds.
+        pub async fn create_bucket(&self, bucket: &str) {
+            let region = Region::Custom {
+                region: REGION.into(),
+                endpoint: self.endpoint.clone(),
+            };
+            let creds =
+                Credentials::new(Some(ACCESS_KEY), Some(SECRET_KEY), None, None, None).unwrap();
+            for _ in 0..20 {
+                if let Ok(resp) = Bucket::create_with_path_style(
+                    bucket,
+                    region.clone(),
+                    creds.clone(),
+                    s3::BucketConfiguration::default(),
+                )
+                .await
+                    && resp.success()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            panic!("could not create bucket {bucket}");
+        }
+
+        /// A blob store on `bucket`, which need not exist.
+        pub fn store(&self, bucket: &str) -> ObjectStorageBlobStore {
+            ObjectStorageBlobStore::new(
+                ObjectStorageConfig {
+                    bucket: bucket.to_string(),
+                    region: REGION.into(),
+                    endpoint: Some(self.endpoint.clone()),
+                    access_key: Some(ACCESS_KEY.into()),
+                    secret_key: Some(SECRET_KEY.into()),
+                    path_style: true,
+                    max_size: 1 << 20,
+                    temp_dir: None,
+                },
+                None,
+            )
+            .expect("store")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,68 +629,14 @@ mod tests {
     /// object as absent.
     #[tokio::test]
     async fn verify_bucket_against_seaweedfs() {
-        use testcontainers::core::{IntoContainerPort, WaitFor};
-        use testcontainers::runners::AsyncRunner;
-        use testcontainers::{GenericImage, ImageExt};
+        let seaweedfs = testing::Seaweedfs::start().await;
 
-        const S3_CONFIG: &str = r#"{"identities":[{"name":"t","credentials":[{"accessKey":"ak","secretKey":"sk"}],"actions":["Admin","Read","Write","List"]}]}"#;
-        let container = GenericImage::new("chrislusf/seaweedfs", "4.15")
-            .with_exposed_port(8333.tcp())
-            .with_wait_for(WaitFor::message_on_stderr("Start Seaweed S3 API Server"))
-            .with_copy_to("/etc/s3.json", S3_CONFIG.as_bytes().to_vec())
-            .with_cmd(["server", "-s3", "-s3.config=/etc/s3.json", "-dir=/data"])
-            .start()
-            .await
-            .expect("start seaweedfs");
-        let port = container.get_host_port_ipv4(8333).await.expect("port");
-        let endpoint = format!("http://127.0.0.1:{port}");
-        let store = |bucket: &str| {
-            ObjectStorageBlobStore::new(
-                ObjectStorageConfig {
-                    bucket: bucket.to_string(),
-                    region: "us-east-1".into(),
-                    endpoint: Some(endpoint.clone()),
-                    access_key: Some("ak".into()),
-                    secret_key: Some("sk".into()),
-                    path_style: true,
-                    max_size: 1 << 20,
-                    temp_dir: None,
-                },
-                None,
-            )
-            .expect("store")
-        };
-
-        let missing = store("no-such-bucket");
+        let missing = seaweedfs.store("no-such-bucket");
         let err = missing.verify_bucket().await.expect_err("missing bucket");
         assert!(err.to_string().contains("does not exist"), "{err}");
 
-        // The filer behind the S3 gateway can lag the "started" log line; give
-        // bucket creation a few tries.
-        let region = Region::Custom {
-            region: "us-east-1".into(),
-            endpoint: endpoint.clone(),
-        };
-        let creds = Credentials::new(Some("ak"), Some("sk"), None, None, None).unwrap();
-        let mut created = false;
-        for _ in 0..20 {
-            if let Ok(resp) = Bucket::create_with_path_style(
-                "broccoli-blobs",
-                region.clone(),
-                creds.clone(),
-                s3::BucketConfiguration::default(),
-            )
-            .await
-                && resp.success()
-            {
-                created = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-        assert!(created, "create bucket");
-
-        let present = store("broccoli-blobs");
+        seaweedfs.create_bucket("broccoli-blobs").await;
+        let present = seaweedfs.store("broccoli-blobs");
         present.verify_bucket().await.expect("existing bucket");
 
         let absent = ContentHash::from_bytes([7u8; 32]);

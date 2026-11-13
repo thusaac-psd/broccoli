@@ -1,8 +1,9 @@
 //! Operation execution on the real isolate sandbox: the shared cases in
-//! `sandbox_cases`, plus isolate-only probes. Every test is `#[ignore]`d (run
-//! them with `cargo test -p worker --test worker_isolate_sandbox -- --ignored`
-//! on a host with isolate installed) and `#[serial]`, since isolate box ids are
-//! a host-wide resource.
+//! `sandbox_cases`, plus isolate-only probes. Every test is `#[ignore]`d,
+//! because it needs isolate installed with cgroup v2 delegation; the `sandbox`
+//! CI job runs them with
+//! `cargo test -p worker --test worker_isolate_sandbox -- --ignored`. They are
+//! `#[serial]` because isolate box ids are a host-wide resource.
 
 mod sandbox_cases;
 
@@ -42,28 +43,21 @@ impl Backend for Isolate {
 sandbox_suite!(
     Isolate;
     all: [
-        #[ignore = "requires Linux isolate sandbox installed and configured"],
+        #[ignore = "needs isolate; the sandbox CI job runs it (see the module docs)"],
         #[serial],
     ];
-    cpp: [],
 );
 
-// Task 3 - live boot self-test: an over-limit allocation inside isolate MUST
-// surface as `cg-oom-killed` so the batch evaluator can render MemoryLimitExceeded
-// instead of a silent RuntimeError. Unlike the other tests here (which use
-// `IsolateSandboxManager::default()`, cgroups OFF), this constructs the manager
-// with cgroups ENABLED, since `cg-oom-killed` is only emitted under `--cg`. If
-// isolate + cgroup v2 delegation exist the probe must report `Ok`; otherwise the
-// test self-skips. A present-but-non-`Ok` outcome is a real environment defect,
-// not a reason to weaken the assertion.
+// The boot self-test: an over-limit allocation inside isolate surfaces as
+// `cg-oom-killed`, so the batch evaluator renders MemoryLimitExceeded instead of
+// a silent RuntimeError. Unlike the other tests here (which use
+// `IsolateSandboxManager::default()`, cgroups off), this enables cgroups, since
+// isolate reports `cg-oom-killed` only under `--cg`.
 #[tokio::test]
-#[ignore = "requires Linux isolate sandbox with cgroup v2 memory delegation"]
+#[ignore = "needs isolate with cgroup v2 delegation; the sandbox CI job runs it"]
 #[serial]
 async fn boot_probe_reports_oom_when_cgroups_enabled() {
-    if !isolate_available() {
-        eprintln!("skipping: isolate not available");
-        return;
-    }
+    assert!(isolate_available(), "isolate is not available");
     let mgr = IsolateSandboxManager::new(isolate_bin(), true);
     let outcome = worker::sandbox_preflight::probe_isolate_oom(&mgr).await;
     assert!(
