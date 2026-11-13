@@ -776,7 +776,7 @@ impl TestApp {
             .as_ref()
             .map(|url| Arc::new(redis::Client::open(url.clone()).expect("valid redis url")));
 
-        let clock = server::clock::PlatformClock::connect(&db)
+        let clock = server::clock::PlatformClock::connect(&db_url)
             .await
             .expect("read the database clock");
         let state = AppState {

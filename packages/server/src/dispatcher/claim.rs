@@ -77,12 +77,22 @@ const LISTEN_RETRY_MAX: Duration = Duration::from_secs(30);
 /// claim speed rather than one batch per tick. Replicas all wake on the same
 /// notification; `SKIP LOCKED` in the claim splits the work between them.
 pub async fn run(state: AppState, server_id: String, cancel: watch::Receiver<bool>) {
-    run_with_fallback_tick(state, server_id, FALLBACK_TICK, cancel).await
+    claim_loop(state, server_id, FALLBACK_TICK, cancel).await
 }
 
 /// [`run`] with another fallback tick, so a test can show that notifications
 /// alone drive claims.
+#[cfg(any(test, feature = "test-hooks"))]
 pub async fn run_with_fallback_tick(
+    state: AppState,
+    server_id: String,
+    fallback_tick: Duration,
+    cancel: watch::Receiver<bool>,
+) {
+    claim_loop(state, server_id, fallback_tick, cancel).await
+}
+
+async fn claim_loop(
     state: AppState,
     server_id: String,
     fallback_tick: Duration,

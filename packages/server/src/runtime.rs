@@ -200,7 +200,7 @@ impl ServerRuntime {
             None
         };
 
-        let clock = crate::clock::PlatformClock::connect(&db)
+        let clock = crate::clock::PlatformClock::connect(&app_config.database.url)
             .await
             .context("Failed to read the database clock")?;
 

@@ -9,12 +9,15 @@
 //! `clock_timestamp()` and serves time as its own monotonic clock plus that
 //! offset.
 //!
-//! - Reading the clock never touches the network: [`PlatformClock::now`] is
-//!   an `Instant` read and an atomic.
-//! - A background task resamples every 30 to 60 s. Of the recent samples the
-//!   one with the smallest error bound wins: half its round trip plus the
-//!   drift the two oscillators may have accumulated since it was taken. A
-//!   sample delayed by a busy pool therefore never displaces a tight one.
+//! - Reading the clock never touches the network or writes shared memory:
+//!   [`PlatformClock::now`] is an `Instant` read and a seqlock read of the
+//!   anchor.
+//! - Samples go over a connection of their own, never the busy main pool,
+//!   and are timed from the moment the query is sent, so a saturated pool
+//!   cannot skew them. Every 30 to 60 s a short burst is taken and the
+//!   tightest kept; of the recent samples the one with the smallest error
+//!   bound wins (half its round trip plus the drift the two oscillators may
+//!   have accumulated since).
 //! - The clock never runs backwards. A resample that lands behind time
 //!   already handed out holds the clock still until it catches up; only a
 //!   step of more than [`MAX_HOLD`] (the database host's clock itself was
@@ -26,12 +29,12 @@
 //! `clippy.toml`, so a new comparison cannot quietly read the local clock.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::sqlx::{Connection, PgConnection};
 
 /// Resampling period bounds; each wait is drawn uniformly between them so
 /// replicas do not sample in lockstep.
@@ -41,7 +44,7 @@ const RESAMPLE_MAX: Duration = Duration::from_secs(60);
 /// Samples kept for choosing the best one: about five minutes of history.
 const WINDOW: usize = 8;
 
-/// Samples taken back to back by [`PlatformClock::sync`]; the tightest wins.
+/// Samples taken back to back on every (re)sample; the tightest is kept.
 const BURST: usize = 3;
 
 /// Assumed worst-case relative drift of this host's monotonic clock against
@@ -55,8 +58,15 @@ pub const MAX_HOLD: Duration = Duration::from_secs(1);
 /// Local wall clock offsets above this are logged as a warning at boot.
 const WARN_LOCAL_SKEW: Duration = Duration::from_secs(1);
 
-/// Bound on one sample, so a stalled pool cannot stall a resample forever.
+/// After a small step back the clock holds at the latest time handed out plus
+/// this, so a reader that was mid-read during the switch cannot have been
+/// handed more.
+const HOLD_MARGIN_US: i64 = 100;
+
+/// Bound on one sample, so a stalled connection cannot stall a resample.
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(3);
+
+const CLOCK_QUERY: &str = "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint";
 
 /// One reading of the database clock against this process's monotonic clock.
 #[derive(Debug, Clone, Copy)]
@@ -75,12 +85,6 @@ impl Sample {
         let age_us = now.saturating_duration_since(self.at).as_micros() as i64;
         self.half_rtt_us + age_us * DRIFT_PPM / 1_000_000
     }
-
-    #[cfg(test)]
-    fn db_time_at(&self, now: Instant) -> i64 {
-        let elapsed = now.saturating_duration_since(self.at).as_micros() as i64;
-        self.db_us + elapsed
-    }
 }
 
 /// Picks the sample to serve time from: the smallest error bound at `now`.
@@ -88,16 +92,66 @@ fn best(samples: &VecDeque<Sample>, now: Instant) -> Option<Sample> {
     samples.iter().copied().min_by_key(|s| s.error_us(now))
 }
 
+/// The anchor `now()` reads: platform time is
+/// `max(monotonic + offset, hold)`. Written only under the samples lock, read
+/// lock-free as a seqlock, so an adopt is seen whole or not at all.
+struct Anchor {
+    seq: AtomicU64,
+    /// Database time minus `base`-relative monotonic time, in microseconds.
+    offset_us: AtomicI64,
+    /// Time handed out before the last step back, held until the new offset
+    /// passes it; `i64::MIN` when there is nothing to hold.
+    hold_us: AtomicI64,
+}
+
+impl Anchor {
+    /// The offset and hold, consistent with each other, and the monotonic
+    /// time read between them.
+    fn read(&self, mono_us: impl Fn() -> i64) -> (i64, i64, i64) {
+        loop {
+            let before = self.seq.load(Ordering::SeqCst);
+            if before % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let offset = self.offset_us.load(Ordering::SeqCst);
+            let hold = self.hold_us.load(Ordering::SeqCst);
+            let mono = mono_us();
+            if self.seq.load(Ordering::SeqCst) == before {
+                return (offset, hold, mono);
+            }
+        }
+    }
+
+    /// Publishes the offset and hold `next` computes from the current ones
+    /// and the monotonic time read once readers are locked out. Callers
+    /// serialise on the samples lock.
+    fn update(&self, mono_us: impl Fn() -> i64, next: impl FnOnce(i64, i64, i64) -> (i64, i64)) {
+        let seq = self.seq.load(Ordering::SeqCst);
+        self.seq.store(seq + 1, Ordering::SeqCst);
+        // Every reader that returns the old values read its monotonic time
+        // before this point.
+        let mono = mono_us();
+        let (offset, hold) = next(
+            self.offset_us.load(Ordering::SeqCst),
+            self.hold_us.load(Ordering::SeqCst),
+            mono,
+        );
+        self.offset_us.store(offset, Ordering::SeqCst);
+        self.hold_us.store(hold, Ordering::SeqCst);
+        self.seq.store(seq + 2, Ordering::SeqCst);
+    }
+}
+
 struct Inner {
-    db: DatabaseConnection,
+    /// Where samples come from; `None` for a clock that never resamples.
+    url: Option<String>,
+    /// The dedicated sampling connection, opened on first use and after a
+    /// failure.
+    conn: tokio::sync::Mutex<Option<PgConnection>>,
     /// Fixed reference for turning `Instant`s into integers.
     base: Instant,
-    /// Database time minus `base`-relative monotonic time, in microseconds,
-    /// from the sample chosen last. `now()` is one load and one add.
-    offset_us: AtomicI64,
-    /// The latest time handed out, in epoch microseconds; `now()` never
-    /// returns less.
-    floor_us: AtomicI64,
+    anchor: Anchor,
     samples: Mutex<VecDeque<Sample>>,
 }
 
@@ -107,27 +161,33 @@ impl Inner {
     }
 
     fn now_us(&self) -> i64 {
-        let estimate = self.mono_us(Instant::now()) + self.offset_us.load(Ordering::Acquire);
-        let previous = self.floor_us.fetch_max(estimate, Ordering::AcqRel);
-        previous.max(estimate)
+        let (offset, hold, mono) = self.anchor.read(|| self.mono_us(Instant::now()));
+        (mono + offset).max(hold)
     }
 
-    /// Serve time from `sample` from now on.
+    /// Serve time from `sample` from now on. Callers hold the samples lock.
     fn adopt(&self, sample: Sample) {
         let offset = sample.db_us - self.mono_us(sample.at);
-        let estimate = self.mono_us(Instant::now()) + offset;
-        let behind_us = self
-            .floor_us
-            .load(Ordering::Acquire)
-            .saturating_sub(estimate);
-        if behind_us > MAX_HOLD.as_micros() as i64 {
-            tracing::warn!(
-                behind_ms = behind_us as f64 / 1000.0,
-                "The database clock was set back; the platform clock follows it"
-            );
-            self.floor_us.store(estimate, Ordering::Release);
-        }
-        self.offset_us.store(offset, Ordering::Release);
+        self.anchor.update(
+            || self.mono_us(Instant::now()),
+            |old_offset, old_hold, mono| {
+                // The latest time any reader can have been handed, with a
+                // margin for a reader whose view of the lock-out lags.
+                let handed_out = (mono + old_offset + HOLD_MARGIN_US).max(old_hold);
+                let behind_us = handed_out.saturating_sub(mono + offset);
+                if behind_us == 0 {
+                    (offset, i64::MIN)
+                } else if behind_us > MAX_HOLD.as_micros() as i64 {
+                    tracing::warn!(
+                        behind_ms = behind_us as f64 / 1000.0,
+                        "The database clock was set back; the platform clock follows it"
+                    );
+                    (offset, i64::MIN)
+                } else {
+                    (offset, handed_out)
+                }
+            },
+        );
     }
 
     /// Add `sample` to the window and serve time from the best one.
@@ -149,6 +209,57 @@ impl Inner {
         samples.push_back(sample);
         self.adopt(sample);
     }
+
+    /// [`BURST`] samples back to back on the sampling connection; the
+    /// tightest, and its offset from this host's wall clock.
+    async fn take_burst(&self) -> anyhow::Result<(Sample, i64)> {
+        let url = self
+            .url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("this clock has no database to sample"))?;
+        let mut conn = self.conn.lock().await;
+        let result = async {
+            if conn.is_none() {
+                *conn = Some(PgConnection::connect(url).await?);
+            }
+            let c = conn.as_mut().expect("connected above");
+            let mut best: Option<(Sample, i64)> = None;
+            for _ in 0..BURST {
+                let taken = take_sample(c).await?;
+                if best.is_none_or(|(b, _)| taken.0.half_rtt_us < b.half_rtt_us) {
+                    best = Some(taken);
+                }
+            }
+            anyhow::Ok(best.expect("BURST is at least one"))
+        }
+        .await;
+        if result.is_err() {
+            // Reconnect next time; the connection may be broken.
+            *conn = None;
+        }
+        result
+    }
+}
+
+/// One timed read of the database clock on an open connection. Also returns
+/// `database - local wall clock`, for the boot warning.
+async fn take_sample(conn: &mut PgConnection) -> anyhow::Result<(Sample, i64)> {
+    #[allow(clippy::disallowed_methods)] // The one place the local wall clock is read.
+    let local_before = Utc::now();
+    let started = Instant::now();
+    let read = sea_orm::sqlx::query_scalar::<_, i64>(CLOCK_QUERY).fetch_one(&mut *conn);
+    let db_us = tokio::time::timeout(SAMPLE_TIMEOUT, read)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out reading the database clock"))??;
+    let rtt = started.elapsed();
+    let half_rtt_us = rtt.as_micros() as i64 / 2;
+    let sample = Sample {
+        at: started + rtt / 2,
+        db_us,
+        half_rtt_us,
+    };
+    let local_offset_us = db_us - (local_before.timestamp_micros() + half_rtt_us);
+    Ok((sample, local_offset_us))
 }
 
 /// The database-anchored wall clock. Cheap to clone; clones share samples.
@@ -166,12 +277,14 @@ impl std::fmt::Debug for PlatformClock {
 }
 
 impl PlatformClock {
-    /// Measure the database clock and build the platform clock on it, with a
-    /// background task that keeps resampling for as long as a clone lives.
-    /// Logs a warning when this host's own wall clock is off by more than a
-    /// second: nothing in the platform depends on it, but log timestamps do.
-    pub async fn connect(db: &DatabaseConnection) -> anyhow::Result<Self> {
-        let (sample, local_offset_us) = take_burst(db).await?;
+    /// Measure the database clock at `database_url` on a connection of its
+    /// own and build the platform clock on it, with a background task that
+    /// keeps resampling for as long as a clone lives. Logs a warning when this
+    /// host's own wall clock is off by more than a second: nothing in the
+    /// platform depends on it, but log timestamps do.
+    pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
+        let inner = Inner::new(Some(database_url.to_owned()));
+        let (sample, local_offset_us) = inner.take_burst().await?;
         let skew = Duration::from_micros(local_offset_us.unsigned_abs());
         if skew > WARN_LOCAL_SKEW {
             tracing::warn!(
@@ -181,23 +294,12 @@ impl PlatformClock {
                  timestamps are off by that much"
             );
         }
-        let clock = Self::from_sample(db.clone(), sample);
+        inner.reset(sample);
+        let clock = Self {
+            inner: Arc::new(inner),
+        };
         spawn_resampler(Arc::downgrade(&clock.inner));
         Ok(clock)
-    }
-
-    fn from_sample(db: DatabaseConnection, sample: Sample) -> Self {
-        let inner = Inner {
-            db,
-            base: sample.at,
-            offset_us: AtomicI64::new(0),
-            floor_us: AtomicI64::new(i64::MIN),
-            samples: Mutex::new(VecDeque::new()),
-        };
-        inner.reset(sample);
-        Self {
-            inner: Arc::new(inner),
-        }
     }
 
     /// A clock anchored to this host's wall clock with no database, for unit
@@ -206,14 +308,15 @@ impl PlatformClock {
     pub(crate) fn local_for_tests() -> Self {
         #[allow(clippy::disallowed_methods)]
         let db_us = Utc::now().timestamp_micros();
-        Self::from_sample(
-            DatabaseConnection::default(),
-            Sample {
-                at: Instant::now(),
-                db_us,
-                half_rtt_us: 0,
-            },
-        )
+        let inner = Inner::new(None);
+        inner.reset(Sample {
+            at: Instant::now(),
+            db_us,
+            half_rtt_us: 0,
+        });
+        Self {
+            inner: Arc::new(inner),
+        }
     }
 
     /// The platform's current wall time.
@@ -223,17 +326,33 @@ impl PlatformClock {
     }
 
     /// Take a fresh burst of samples, discarding older ones, and serve time
-    /// from it at once. The background task samples on its own; this is for
-    /// a caller that just moved the database clock (the test clock).
+    /// from it at once, for a test that just moved the database clock.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub async fn sync(&self) -> anyhow::Result<()> {
-        let (sample, _) = take_burst(&self.inner.db).await?;
+        let (sample, _) = self.inner.take_burst().await?;
         self.inner.reset(sample);
         Ok(())
     }
 }
 
+impl Inner {
+    fn new(url: Option<String>) -> Self {
+        Self {
+            url,
+            conn: tokio::sync::Mutex::new(None),
+            base: Instant::now(),
+            anchor: Anchor {
+                seq: AtomicU64::new(0),
+                offset_us: AtomicI64::new(0),
+                hold_us: AtomicI64::new(i64::MIN),
+            },
+            samples: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
 /// Resample every 30 to 60 s while any clone of the clock lives. A failed
-/// sample is logged and the clock keeps extrapolating from the ones it has.
+/// burst is logged and the clock keeps extrapolating from the samples it has.
 fn spawn_resampler(clock: Weak<Inner>) {
     tokio::spawn(async move {
         loop {
@@ -242,7 +361,7 @@ fn spawn_resampler(clock: Weak<Inner>) {
             let Some(inner) = clock.upgrade() else {
                 return;
             };
-            match take_sample(&inner.db).await {
+            match inner.take_burst().await {
                 Ok((sample, _)) => inner.record(sample),
                 Err(e) => {
                     tracing::warn!(error = %e, "Platform clock: could not sample the database clock")
@@ -250,44 +369,6 @@ fn spawn_resampler(clock: Weak<Inner>) {
             }
         }
     });
-}
-
-/// [`BURST`] samples back to back; the tightest, and its local wall offset.
-async fn take_burst(db: &DatabaseConnection) -> anyhow::Result<(Sample, i64)> {
-    let mut best: Option<(Sample, i64)> = None;
-    for _ in 0..BURST {
-        let taken = take_sample(db).await?;
-        if best.is_none_or(|(b, _)| taken.0.half_rtt_us < b.half_rtt_us) {
-            best = Some(taken);
-        }
-    }
-    Ok(best.expect("BURST is at least one"))
-}
-
-/// One timed read of the database clock. Also returns `database - local wall
-/// clock`, for the boot warning.
-async fn take_sample(db: &DatabaseConnection) -> anyhow::Result<(Sample, i64)> {
-    #[allow(clippy::disallowed_methods)] // The one place the local wall clock is read.
-    let local_before = Utc::now();
-    let started = Instant::now();
-    let read = db.query_one_raw(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint AS us",
-    ));
-    let row = tokio::time::timeout(SAMPLE_TIMEOUT, read)
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out reading the database clock"))??
-        .ok_or_else(|| anyhow::anyhow!("database clock query returned no row"))?;
-    let db_us: i64 = row.try_get("", "us")?;
-    let rtt = started.elapsed();
-    let half_rtt_us = rtt.as_micros() as i64 / 2;
-    let sample = Sample {
-        at: started + rtt / 2,
-        db_us,
-        half_rtt_us,
-    };
-    let local_offset_us = db_us - (local_before.timestamp_micros() + half_rtt_us);
-    Ok((sample, local_offset_us))
 }
 
 #[cfg(test)]
@@ -328,46 +409,66 @@ mod tests {
         );
     }
 
-    fn clock_at(db_us: i64) -> (PlatformClock, Instant) {
+    fn clock_at(db_us: i64) -> (Inner, Instant) {
+        let inner = Inner::new(None);
         let t = Instant::now();
-        let clock = PlatformClock::from_sample(DatabaseConnection::default(), sample(t, db_us, 0));
-        (clock, t)
+        inner.reset(sample(t, db_us, 0));
+        (inner, t)
     }
 
     #[test]
     fn a_small_step_back_holds_the_clock_still_instead_of_reversing_it() {
         let (clock, t) = clock_at(10_000_000_000);
-        let before = clock.now();
-        clock.inner.reset(sample(t, 10_000_000_000 - 500_000, 0));
-        assert!(clock.now() >= before);
-        assert!(clock.now() - before < chrono::Duration::milliseconds(100));
+        let before = clock.now_us();
+        clock.reset(sample(t, 10_000_000_000 - 500_000, 0));
+        let after = clock.now_us();
+        assert!(after >= before);
+        assert!(after - before < 100_000);
     }
 
     #[test]
     fn a_step_back_beyond_the_hold_limit_is_followed() {
         let (clock, t) = clock_at(10_000_000_000);
-        let before = clock.now();
-        clock.inner.reset(sample(t, 10_000_000_000 - 60_000_000, 0));
-        let after = clock.now();
-        assert!(
-            before - after > chrono::Duration::seconds(59),
-            "{before} -> {after}"
-        );
+        let before = clock.now_us();
+        clock.reset(sample(t, 10_000_000_000 - 60_000_000, 0));
+        assert!(before - clock.now_us() > 59_000_000);
     }
 
     #[test]
     fn a_forward_correction_takes_effect_at_once() {
         let (clock, t) = clock_at(10_000_000_000);
-        clock
-            .inner
-            .reset(sample(t, 10_000_000_000 + 3_600_000_000, 0));
-        assert!(clock.now().timestamp() >= 10_000 + 3_600);
+        clock.reset(sample(t, 10_000_000_000 + 3_600_000_000, 0));
+        assert!(clock.now_us() >= 10_000_000_000 + 3_600_000_000);
     }
 
+    /// Readers racing a stream of small steps back never see time reverse
+    /// within one thread: an adopt is seen whole, never offset without hold.
     #[test]
-    fn a_sample_extrapolates_by_monotonic_time() {
-        let t = Instant::now();
-        let s = sample(t, 1_000_000, 0);
-        assert_eq!(s.db_time_at(t + Duration::from_millis(1500)), 2_500_000);
+    fn concurrent_readers_never_see_time_reverse_across_adopts() {
+        let (clock, t) = clock_at(10_000_000_000);
+        let clock = Arc::new(clock);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (clock, stop) = (clock.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut last = i64::MIN;
+                    while !stop.load(Ordering::Relaxed) {
+                        let now = clock.now_us();
+                        assert!(now >= last, "time went back: {last} -> {now}");
+                        last = now;
+                    }
+                })
+            })
+            .collect();
+        for step in 1..=50_000 {
+            // Alternately 0.5 s behind and back on time: each adopt holds.
+            let behind = if step % 2 == 0 { 500_000 } else { 0 };
+            clock.reset(sample(t, 10_000_000_000 - behind, 0));
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            r.join().expect("reader saw time reverse");
+        }
     }
 }

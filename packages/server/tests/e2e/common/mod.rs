@@ -386,7 +386,7 @@ impl E2eTestApp {
         let (e2e_metrics, e2e_prom_registry) =
             common::observability::init_metrics("broccoli-e2e-test");
 
-        let clock = server::clock::PlatformClock::connect(&db)
+        let clock = server::clock::PlatformClock::connect(&db_url)
             .await
             .expect("read the database clock");
         let state = AppState {
