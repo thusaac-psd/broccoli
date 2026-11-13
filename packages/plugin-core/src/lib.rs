@@ -13,4 +13,5 @@ pub mod manifest;
 pub mod memory;
 pub mod pool;
 pub mod registry;
+pub mod threads;
 pub mod traits;

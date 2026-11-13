@@ -24,14 +24,28 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 | `Interactive` | 可见性查询、请求钩子、插件 HTTP 路由 | `ceil(C/2)` |
 | `Background` | 评测、操作、分离回调、定时器、后台钩子 | `floor(C/2)` |
 
-- 一个类别可以借用另一个类别空闲的令牌。两个类别都在等待时释放的令牌交给低于其份额的类别，因此在洪峰下任何一方都不会饿死另一方。
-- 交互调用还受已准入调用数上限的约束（每个令牌 `INTERACTIVE_ADMITTED_PER_TOKEN` 个），因为每个已准入的调用即使在挂起时也占用一个阻塞线程。数据库变慢导致所有交互调用变慢时，多出的调用在队列中等待，不占用任何资源。
-- 排队的等待者是一个异步 future。丢弃它（例如客户端已离开）即离开队列。
-- 生命周期调用（`init`、`CallOptions::lifecycle`）跳过准入：它们从不被丢弃，也从不排在任何类别之后。
+- 一个类别可以借用另一个类别空闲的令牌。两个类别都在等待时释放的令牌交给低于其份额的类别，并在该类别内优先交给恢复的调用，因此在洪峰下任何一方都不会饿死另一方。
+- 排队的等待者是一个不占用线程的异步 future。丢弃它（例如客户端已离开）即离开队列。
 
-类别是必填参数。`CallOptions` 没有默认值，trait 也没有便捷的 `call`；每个调用点都要选择 `interactive`、`background`、`lifecycle` 或 `nested`。钩子的类别来自分发点（`hooks::dispatch_hooks`），因为同一个 `PluginHook` 既服务 `before_submission` 请求路径，也服务后台通知。
+每个已准入的调用在返回之前都占用一个客体线程，无论是否挂起，因此每种 `CallKind` 都有自己的已准入调用上限：
+
+| 种类 | 调用 | 上限 |
+|---|---|---|
+| `Request` | 交互调用 | 每个令牌 `REQUESTS_PER_TOKEN`（8）个 |
+| `Judging` | `on_submission`、`on_code_run` | 本服务器的进行中上限 |
+| `Work` | 评测器、分离回调、定时器 | 本服务器的扇出上限 + `C` |
+| `Hook` | 后台钩子 | `C` |
+| `Lifecycle` | `init`，不需要令牌 | `LIFECYCLE_CAP`（4） |
+
+各种类相互独立，因此一种类达到上限时不会阻挡另一种：为等待结果而挂起的比赛调用占满评测上限，而产生这些结果的评测器调用所在的工作上限不受影响。服务器使评测和工作上限始终等于其当前份额（`dispatcher::fanout::spawn_admission_sizing`）。
+
+种类是必填参数。`CallOptions` 没有默认值，trait 也没有便捷的 `call`；每个调用点都要选择 `interactive`、`judging`、`background`、`background_hook`、`lifecycle` 或 `nested`。钩子的种类来自分发点（`hooks::dispatch_hooks`），因为同一个 `PluginHook` 既服务 `before_submission` 请求路径，也服务后台通知。
 
 池的查找发生在准入之后，因此跨越一次重载而排队的调用会在新版本上运行。
+
+## 客体线程
+
+客体从不在 tokio 的阻塞线程池上运行。它们运行在 `plugin_core::threads::GuestThreads` 上：它把任务交给空闲线程或新启动一个线程，从不排队。它也不需要排队：使用中的线程至多为每个已准入调用一个，再加上该调用的嵌套调用一个（`Caps::threads`，即各上限之和的两倍），因此调用从不在等待线程时持有令牌，线程数是各显式上限之和。空闲线程在 30 秒后退出。
 
 ## 挂起
 
@@ -43,9 +57,9 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 `checker:resolve`、`checker:interpret` 和 `language:resolve`（`host_funcs/checker.rs`、`host_funcs/language.rs`）通过 `CallOptions::nested()` 回调插件。
 
-- 它们运行在第二个阻塞线程上。内联运行会在 `block_on` 中嵌套 `block_on` 并 panic。
+- 它们运行在第二个客体线程上。内联运行会在 `block_on` 中嵌套 `block_on` 并 panic。
 - 它们跳过准入。父调用挂起在该宿主函数中，因此嵌套调用像恢复的调用那样取得令牌，继承父调用的类别，并取父调用截止时间与自身调用超时中较早者。
-- 深度上限为 `MAX_DEPTH`（2）。这阻止了 A 调 B 再调 A 的循环，并限制阻塞线程链的栈深。
+- 深度上限为 `MAX_DEPTH`（2）。这阻止了 A 调 B 再调 A 的循环，并使每个已准入调用至多有一个嵌套调用，即线程预算为它保留的第二个线程。
 - 同一实例永不重入：每次调用租用自己的实例，因此对同一插件的嵌套调用会得到第二个 store。
 
 ## 截止时间
@@ -89,4 +103,4 @@ Argon2 运行在自己的线程上（`utils/hash.rs`），每个核心一个，�
 
 ## 设置
 
-`plugin.max_concurrent_calls`、`plugin.memory_budget` 和 `plugin.call_timeout_secs` 是仅有的调节项；前两项自动确定。定时器租约为调用超时加 `LEASE_MARGIN`（30 秒），阻塞线程池为每核心 16 个线程并限制在 `[512, 8192]` 内。曾用于调节池和扇出的键列在 `config::REMOVED_KEYS` 中；启动时会对仍被设置的键发出警告。
+`plugin.max_concurrent_calls`、`plugin.memory_budget` 和 `plugin.call_timeout_secs` 是仅有的调节项；前两项自动确定。定时器租约为调用超时加 `LEASE_MARGIN`（30 秒）。曾用于调节池和扇出的键列在 `config::REMOVED_KEYS` 中；启动时会对仍被设置的键发出警告。

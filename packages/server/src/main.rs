@@ -40,11 +40,8 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let max_blocking_threads = server::config::max_blocking_threads();
-
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .max_blocking_threads(max_blocking_threads)
         .thread_name("broccoli-server")
         .build()
         .context("Failed to build tokio runtime")?;

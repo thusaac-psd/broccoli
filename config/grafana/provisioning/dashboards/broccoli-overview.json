@@ -212,8 +212,8 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (le, plugin_class, outcome) (rate(broccoli_plugin_admission_wait_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{plugin_class}} {{outcome}}",
+          "expr": "histogram_quantile(0.99, sum by (le, plugin_kind, outcome) (rate(broccoli_plugin_admission_wait_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{plugin_kind}} {{outcome}}",
           "refId": "A"
         }
       ],
@@ -226,8 +226,8 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (plugin_class) (rate(broccoli_plugin_admission_queued_total[5m])) * 60",
-          "legendFormat": "{{plugin_class}}",
+          "expr": "sum by (plugin_kind) (rate(broccoli_plugin_admission_queued_total[5m])) * 60",
+          "legendFormat": "{{plugin_kind}}",
           "refId": "A"
         }
       ],

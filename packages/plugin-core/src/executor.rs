@@ -3,19 +3,21 @@
 //! Every call names how it is admitted ([`CallOptions`]) and ends by a
 //! deadline:
 //!
-//! - A top-level call of a [`CallClass`] waits, holding nothing but a queue
-//!   entry, for a CPU token ([`crate::admission`]). Only then does it get a
-//!   blocking thread and look up the plugin's pool, so a call queued across a
-//!   reload runs on the new version.
-//! - A lifecycle call (plugin `init`) skips admission: it is never shed and
-//!   never queues behind either class.
+//! - A top-level call of a [`CallKind`] waits, holding nothing but a queue
+//!   entry, until its kind has room and a CPU token is free
+//!   ([`crate::admission`]). Only then does it get a guest thread
+//!   ([`crate::threads`]) and look up the plugin's pool, so a call queued
+//!   across a reload runs on the new version.
+//! - A lifecycle call (plugin `init`) needs room under its own small cap but
+//!   no token: it is never shed and never queues behind either class.
 //! - A nested call (a host function calling back into a plugin) skips
-//!   admission too, inheriting its parent's class and the earlier of both
+//!   admission, inheriting its parent's class and the earlier of both
 //!   deadlines. Its parent is parked in that host function, holding no token;
-//!   the nested call runs on a second blocking thread (host functions
+//!   the nested call runs on a second guest thread (host functions
 //!   `block_on`, which cannot nest on one thread) and takes a token back the
 //!   way a resuming call does. Nesting is capped at [`MAX_DEPTH`], which stops
-//!   A-calls-B-calls-A cycles and bounds the blocking-thread stack.
+//!   A-calls-B-calls-A cycles and gives every admitted call at most one
+//!   nested call, the second thread the thread budget reserves for it.
 //!
 //! While guest code runs, the thread carries a call scope. A host function
 //! that blocks wraps the blocking part in [`parked`], which gives the token
@@ -27,7 +29,7 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use crate::admission::{Admission, CallClass, Capacity, Token};
+use crate::admission::{Admission, CallClass, CallKind, Capacity, Token};
 use crate::error::PluginError;
 use crate::memory::MemoryBudget;
 
@@ -37,40 +39,50 @@ pub const MAX_DEPTH: u8 = 2;
 /// How a call is admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admit {
-    Class(CallClass, Instant),
-    Lifecycle(Instant),
+    Kind(CallKind, Instant),
     Nested,
 }
 
 /// How one call is admitted and when it must end. There is no default: every
-/// call site states its class and deadline, or that it is nested.
+/// call site states its kind and deadline, or that it is nested.
 #[derive(Debug, Clone, Copy)]
 pub struct CallOptions {
     admit: Admit,
 }
 
 impl CallOptions {
-    /// A top-level call of `class` that must end by `deadline`.
-    pub fn new(class: CallClass, deadline: Instant) -> Self {
+    /// A top-level call of `kind` that must end by `deadline`.
+    pub fn new(kind: CallKind, deadline: Instant) -> Self {
         Self {
-            admit: Admit::Class(class, deadline),
+            admit: Admit::Kind(kind, deadline),
         }
     }
 
+    /// A request path call: visibility, request hooks, plugin routes.
     pub fn interactive(deadline: Instant) -> Self {
-        Self::new(CallClass::Interactive, deadline)
+        Self::new(CallKind::Request, deadline)
     }
 
+    /// A contest call that waits in host functions for its judgement.
+    pub fn judging(deadline: Instant) -> Self {
+        Self::new(CallKind::Judging, deadline)
+    }
+
+    /// A background call that waits on no other plugin call: evaluators,
+    /// detached callbacks, timers.
     pub fn background(deadline: Instant) -> Self {
-        Self::new(CallClass::Background, deadline)
+        Self::new(CallKind::Work, deadline)
     }
 
-    /// A plugin lifecycle call (its `init`): admitted at once, whatever the
+    /// A hook dispatched off the request path.
+    pub fn background_hook(deadline: Instant) -> Self {
+        Self::new(CallKind::Hook, deadline)
+    }
+
+    /// A plugin lifecycle call (its `init`): needs no token, whatever the
     /// load.
     pub fn lifecycle(deadline: Instant) -> Self {
-        Self {
-            admit: Admit::Lifecycle(deadline),
-        }
+        Self::new(CallKind::Lifecycle, deadline)
     }
 
     /// A call from inside a host function of a running call: inherits that
@@ -85,6 +97,7 @@ impl CallOptions {
 /// The admission and memory state every call of one server shares.
 pub struct Executor {
     admission: Admission,
+    threads: crate::threads::GuestThreads,
     budget: std::sync::Arc<MemoryBudget>,
 }
 
@@ -92,8 +105,14 @@ impl Executor {
     pub fn new(capacity: Capacity, budget: std::sync::Arc<MemoryBudget>) -> Self {
         Self {
             admission: Admission::new(capacity),
+            threads: Default::default(),
             budget,
         }
+    }
+
+    /// The threads guests run on.
+    pub fn threads(&self) -> &crate::threads::GuestThreads {
+        &self.threads
     }
 
     /// Sized from this host: `max_concurrent_calls` tokens (or the automatic
@@ -261,15 +280,9 @@ pub(crate) fn resolve(
     func_name: &str,
 ) -> Result<Resolved, PluginError> {
     match options.admit {
-        Admit::Class(class, deadline) => Ok(Resolved {
-            queue: Some(class),
-            class: Some(class),
-            deadline,
-            depth: 1,
-        }),
-        Admit::Lifecycle(deadline) => Ok(Resolved {
-            queue: None,
-            class: None,
+        Admit::Kind(kind, deadline) => Ok(Resolved {
+            queue: Some(kind),
+            class: kind.class(),
             deadline,
             depth: 1,
         }),
@@ -298,8 +311,8 @@ pub(crate) fn resolve(
 
 #[derive(Clone, Copy)]
 pub(crate) struct Resolved {
-    /// The class to queue in for admission; `None` skips admission.
-    pub queue: Option<CallClass>,
+    /// The kind to admit as; `None` (a nested call) skips admission.
+    pub queue: Option<CallKind>,
     /// The class guest code runs as, for parking and resuming; `None` for a
     /// lifecycle call, which never holds a token.
     pub class: Option<CallClass>,

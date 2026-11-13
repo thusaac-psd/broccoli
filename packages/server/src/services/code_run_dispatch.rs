@@ -207,7 +207,7 @@ pub(crate) async fn dispatch_code_run_to_plugin(state: AppState, code_run: code_
     );
     tokio::spawn(async move {
         async move {
-            let options = plugins.get_config().background_call();
+            let options = plugins.get_config().judging_call();
             let result = plugins
                 .call_raw(&plugin_id, &function_name, input_bytes, options)
                 .await;

@@ -544,7 +544,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     &plugin_id,
                     &function_name,
                     input_bytes,
-                    plugins.get_config().background_call(),
+                    plugins.get_config().judging_call(),
                 )
                 .await;
 

@@ -88,6 +88,12 @@ impl PluginConfig {
     pub fn background_call(&self) -> crate::executor::CallOptions {
         crate::executor::CallOptions::background(std::time::Instant::now() + self.call_timeout())
     }
+
+    /// Options for a contest call (`on_submission`, `on_code_run`) starting
+    /// now, bounded by the call timeout.
+    pub fn judging_call(&self) -> crate::executor::CallOptions {
+        crate::executor::CallOptions::judging(std::time::Instant::now() + self.call_timeout())
+    }
 }
 
 /// A byte count: a number, or a string with an optional binary or decimal

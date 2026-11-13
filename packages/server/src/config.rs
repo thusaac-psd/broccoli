@@ -580,20 +580,6 @@ pub fn resolve_server_id(
     )
 }
 
-/// Size of the tokio blocking-thread pool: 16 threads per available core,
-/// within `[512, 8192]`. Plugin calls take a blocking thread only once
-/// admitted, so the pool holds the running guests (two per core), the
-/// interactive calls parked in host functions (capped by admission), the
-/// contest calls parked for their judgements (capped by the in-flight
-/// submission cap) and file I/O. The ceiling bounds the stack reserved on
-/// very large hosts.
-pub fn max_blocking_threads() -> usize {
-    let par = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    (par * 16).clamp(512, 8192)
-}
-
 /// Below this length the HS256 signing key is weak enough to brute-force, and a
 /// forged token is full account + permission takeover. Not enforced with a hard
 /// error -- that could block a restart mid-contest -- only warned at startup,
@@ -739,11 +725,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(probe.trusted_proxies, vec!["10.0.0.0/8", "192.168.0.0/16"]);
-    }
-
-    #[test]
-    fn the_blocking_pool_stays_within_its_bounds() {
-        assert!((512..=8192).contains(&max_blocking_threads()));
     }
 
     #[test]

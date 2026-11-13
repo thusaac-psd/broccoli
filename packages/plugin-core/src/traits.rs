@@ -79,9 +79,9 @@ pub trait PluginInvoker: Send + Sync {
         // queued call holds no thread, and one queued across a reload runs on
         // the new version.
         let admitted = match resolved.queue {
-            Some(class) => {
+            Some(kind) => {
                 let waited = std::time::Instant::now();
-                let outcome = admission.admit(class, resolved.deadline).await;
+                let outcome = admission.admit(kind, resolved.deadline).await;
                 if let Some(metrics) = self.get_metrics() {
                     if outcome
                         .as_ref()
@@ -89,12 +89,12 @@ pub trait PluginInvoker: Send + Sync {
                     {
                         metrics
                             .plugin_admission_queued_total
-                            .add(1, &[KeyValue::new("plugin.class", class.as_str())]);
+                            .add(1, &[KeyValue::new("plugin.kind", kind.as_str())]);
                     }
                     metrics.plugin_admission_wait_duration.record(
                         waited.elapsed().as_secs_f64(),
                         &[
-                            KeyValue::new("plugin.class", class.as_str()),
+                            KeyValue::new("plugin.kind", kind.as_str()),
                             KeyValue::new(
                                 "outcome",
                                 if outcome.is_ok() {
@@ -140,74 +140,30 @@ pub trait PluginInvoker: Send + Sync {
         if let Some(metrics) = metrics.as_ref() {
             metrics.plugin_calls_in_flight.add(1, &in_flight_attrs);
         }
-        let result = tokio::task::spawn_blocking({
+        let runtime = tokio::runtime::Handle::current();
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.executor().threads().run({
             let plugin_id = plugin_id_owned.clone();
             let func_name = func_name_owned.clone();
             move || {
-                // Held until the guest returns, even if the awaiting task is
-                // cancelled: the blocking call keeps running regardless.
-                let _guard = guard;
-                // Nested host-to-plugin calls from this thread are admitted.
-                let _in_call = crate::call_gate::ThreadInCall::enter();
-                let _span_guard = parent_span.enter();
-                let (admitted, token) = match admitted {
-                    Some((admitted, token)) => (Some(admitted), Some(token)),
-                    // A nested call takes its token back the way a parked
-                    // call resumes; a lifecycle call runs without one.
-                    None => (
-                        None,
-                        resolved
-                            .class
-                            .and_then(|class| admission.resume(class, resolved.deadline)),
-                    ),
-                };
-                let _admitted = admitted;
-                let _scope = ScopeGuard::enter(NewScope {
-                    admission: Some(admission),
-                    class: resolved.class,
-                    deadline: resolved.deadline,
-                    depth: resolved.depth,
-                    token,
-                });
-
-                let unavailable = || PluginError::Unavailable {
-                    plugin_id: plugin_id.clone(),
-                    func_name: func_name.clone(),
-                };
-                if std::time::Instant::now() >= resolved.deadline {
-                    return Err(unavailable());
-                }
-                let mut plugin = pool.get().map_err(|e| {
-                    PluginError::Internal(format!(
-                        "Failed to build an instance of plugin '{plugin_id}': {e}"
-                    ))
-                })?;
-                if !plugin.function_exists(&func_name) {
-                    return Err(PluginError::FunctionNotFound {
-                        plugin_id: plugin_id.clone(),
-                        func_name: func_name.clone(),
-                    });
-                }
-
-                let watch = crate::deadline::watch(plugin.cancel_handle(), resolved.deadline);
-                let outcome = plugin.call::<_, Vec<u8>>(func_name.as_str(), input);
-                let cancelled = watch.fired();
-                drop(watch);
-                outcome.map_err(|e| {
-                    if cancelled {
-                        unavailable()
-                    } else {
-                        PluginError::ExecutionFailed {
-                            plugin_id: plugin_id.clone(),
-                            func_name: func_name.clone(),
-                            message: e.to_string(),
-                        }
-                    }
-                })
+                // Host functions bridge back into the runtime with `block_on`.
+                let _runtime = runtime.enter();
+                let _ = done.send(run_guest(
+                    guard,
+                    parent_span,
+                    admitted,
+                    admission,
+                    resolved,
+                    pool,
+                    plugin_id,
+                    func_name,
+                    input,
+                ));
             }
-        })
-        .await
-        .map_err(|e| PluginError::Internal(format!("plugin task join failed: {e}")));
+        });
+        let result = result
+            .await
+            .map_err(|_| PluginError::Internal("plugin guest thread panicked".into()));
         if let Some(metrics) = metrics.as_ref() {
             metrics.plugin_calls_in_flight.add(-1, &in_flight_attrs);
         }
@@ -245,6 +201,84 @@ pub trait PluginInvoker: Send + Sync {
 
         result
     }
+}
+
+/// The part of a call that runs on its guest thread: take the token (or
+/// resume one for a nested call), install the call scope, lease an instance
+/// and run the guest under its deadline. Everything held here, the call gate
+/// guard and the admission included, lives until the guest returns, even if
+/// the awaiting task is cancelled.
+#[allow(clippy::too_many_arguments)]
+fn run_guest(
+    guard: Option<crate::call_gate::CallGuard>,
+    parent_span: tracing::Span,
+    admitted: Option<(crate::admission::Admitted, Option<crate::admission::Token>)>,
+    admission: crate::admission::Admission,
+    resolved: crate::executor::Resolved,
+    pool: crate::pool::InstancePool,
+    plugin_id: String,
+    func_name: String,
+    input: Vec<u8>,
+) -> Result<Vec<u8>, PluginError> {
+    let _guard = guard;
+    // Nested host-to-plugin calls from this thread are admitted.
+    let _in_call = crate::call_gate::ThreadInCall::enter();
+    let _span_guard = parent_span.enter();
+    let (admitted, token) = match admitted {
+        // A lifecycle call runs without a token.
+        Some((admitted, token)) => (Some(admitted), token),
+        // A nested call takes its token back the way a parked call
+        // resumes.
+        None => (
+            None,
+            resolved
+                .class
+                .and_then(|class| admission.resume(class, resolved.deadline)),
+        ),
+    };
+    let _admitted = admitted;
+    let _scope = ScopeGuard::enter(NewScope {
+        admission: Some(admission),
+        class: resolved.class,
+        deadline: resolved.deadline,
+        depth: resolved.depth,
+        token,
+    });
+
+    let unavailable = || PluginError::Unavailable {
+        plugin_id: plugin_id.clone(),
+        func_name: func_name.clone(),
+    };
+    if std::time::Instant::now() >= resolved.deadline {
+        return Err(unavailable());
+    }
+    let mut plugin = pool.get().map_err(|e| {
+        PluginError::Internal(format!(
+            "Failed to build an instance of plugin '{plugin_id}': {e}"
+        ))
+    })?;
+    if !plugin.function_exists(&func_name) {
+        return Err(PluginError::FunctionNotFound {
+            plugin_id: plugin_id.clone(),
+            func_name: func_name.clone(),
+        });
+    }
+
+    let watch = crate::deadline::watch(plugin.cancel_handle(), resolved.deadline);
+    let outcome = plugin.call::<_, Vec<u8>>(func_name.as_str(), input);
+    let cancelled = watch.fired();
+    drop(watch);
+    outcome.map_err(|e| {
+        if cancelled {
+            unavailable()
+        } else {
+            PluginError::ExecutionFailed {
+                plugin_id: plugin_id.clone(),
+                func_name: func_name.clone(),
+                message: e.to_string(),
+            }
+        }
+    })
 }
 
 /// Full plugin-management surface: discovery, the load / unload lifecycle,

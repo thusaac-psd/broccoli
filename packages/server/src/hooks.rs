@@ -33,7 +33,7 @@ fn hook_call(class: CallClass) -> CallOptions {
     let deadline = std::time::Instant::now() + HOOK_TIMEOUT;
     match class {
         CallClass::Interactive => CallOptions::interactive(deadline.min(crate::request_deadline())),
-        CallClass::Background => CallOptions::background(deadline),
+        CallClass::Background => CallOptions::background_hook(deadline),
     }
 }
 

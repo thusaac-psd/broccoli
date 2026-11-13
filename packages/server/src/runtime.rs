@@ -352,6 +352,13 @@ impl ServerRuntime {
             Some(metrics.clone()),
         )
         .context("Failed to initialize plugin manager")?;
+        crate::dispatcher::fanout::spawn_admission_sizing(
+            worker_slots.clone(),
+            plugin_core::traits::PluginInvoker::executor(manager.as_ref())
+                .admission()
+                .clone(),
+            app_config.server.max_in_flight_submissions,
+        );
 
         {
             let cleanup_db = db.clone();

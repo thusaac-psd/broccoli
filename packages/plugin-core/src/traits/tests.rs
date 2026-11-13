@@ -24,6 +24,8 @@ fn guest(version: i64) -> String {
         (import "extism:host/user" "park" (func $park (param i64) (result i64)))
         (import "extism:host/user" "nest" (func $nest (param i64) (result i64)))
         (import "extism:host/user" "mark" (func $mark (param i64) (result i64)))
+        (import "extism:host/user" "await_child" (func $await_child (param i64) (result i64)))
+        (func (export "parent") (result i32) (drop (call $await_child (i64.const 0))) (i32.const 0))
         (func (export "hold") (result i32) (drop (call $hold (i64.const 0))) (i32.const 0))
         (func (export "park") (result i32) (drop (call $park (i64.const 0))) (i32.const 0))
         (func (export "nest") (result i32) (drop (call $nest (i64.const 0))) (i32.const 0))
@@ -172,6 +174,23 @@ fn nest(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
     })
 }
 
+/// A contest call waiting for its verdicts: parks and waits for a separate
+/// top-level background call, as `on_submission` waits for the evaluator
+/// calls it started.
+fn await_child(ctx: &Ctx, _: i64) -> Result<(), extism::Error> {
+    let manager = ctx.1.upgrade().expect("manager alive");
+    crate::executor::parked(|| {
+        tokio::runtime::Handle::current().block_on(manager.call_raw(
+            PLUGIN,
+            "mark",
+            vec![],
+            CallOptions::background(later()),
+        ))
+    })
+    .map(|_| ())
+    .map_err(|e| extism::Error::msg(e.to_string()))
+}
+
 fn mark(ctx: &Ctx, version: i64) -> Result<(), extism::Error> {
     ctx.0.update(|c| c.marks.push(version));
     Ok(())
@@ -185,16 +204,17 @@ struct Harness {
 
 impl Harness {
     fn new(tokens: usize) -> Self {
+        Self::with_capacity(Capacity::new(tokens))
+    }
+
+    fn with_capacity(capacity: Capacity) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let fixture = Arc::new(Fixture::default());
         let config = PluginConfig {
             plugins_dir: dir.path().to_path_buf(),
             ..PluginConfig::default()
         };
-        let executor = Executor::new(
-            Capacity::new(tokens),
-            MemoryBudget::new(u64::MAX, Box::new(|| 0)),
-        );
+        let executor = Executor::new(capacity, MemoryBudget::new(u64::MAX, Box::new(|| 0)));
         let manager = Arc::new_cyclic(|weak: &Weak<TestManager>| {
             let mut host_functions = HostFunctionRegistry::new();
             let ctx: Ctx = (fixture.clone(), weak.clone());
@@ -204,6 +224,7 @@ impl Harness {
                     host_fn("park", ctx.clone(), park),
                     host_fn("nest", ctx.clone(), nest),
                     host_fn("mark", ctx.clone(), mark),
+                    host_fn("await_child", ctx.clone(), await_child),
                 ]
             });
             TestManager {
@@ -297,7 +318,7 @@ async fn a_call_parked_in_a_host_wait_holds_no_token() {
     // judgement: far more than the tokens, all parked at once.
     let h = Harness::new(4);
     let calls: Vec<_> = (0..16)
-        .map(|_| h.spawn("park", CallOptions::background(later())))
+        .map(|_| h.spawn("park", CallOptions::judging(later())))
         .collect();
     until(|| h.fixture.read(|c| c.parked) == 16).await;
     assert_eq!(h.admission().running(CallClass::Background), 0);
@@ -307,42 +328,42 @@ async fn a_call_parked_in_a_host_wait_holds_no_token() {
     }
 }
 
-/// Threads named `name` in this process: the threads of one runtime, so
-/// tests running beside this one do not count.
-fn threads_named(name: &str) -> usize {
-    std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
-        .filter(|comm| comm.trim() == name)
-        .count()
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn threads_stay_bounded_under_a_slow_plugin_flood() {
+    let h = Harness::new(4);
+    let calls: Vec<_> = (0..500)
+        .map(|_| h.spawn("hold", CallOptions::interactive(later())))
+        .collect();
+    until(|| {
+        h.fixture.read(|c| c.running) == 4 && h.admission().queued(CallClass::Interactive) == 496
+    })
+    .await;
+    // One guest thread per running guest; the 496 queued calls hold none.
+    assert_eq!(h.manager.executor().threads().live(), 4);
+    h.fixture.release();
+    for call in calls {
+        call.await.unwrap().unwrap();
+    }
 }
 
-#[test]
-fn threads_stay_bounded_under_a_slow_plugin_flood() {
-    const NAME: &str = "flood-probe";
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name(NAME)
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let h = Harness::new(4);
-        let mut calls: Vec<_> = (0..4)
-            .map(|_| h.spawn("hold", CallOptions::interactive(later())))
-            .collect();
-        until(|| h.fixture.read(|c| c.running) == 4).await;
-        let running_only = threads_named(NAME);
-        calls.extend((0..496).map(|_| h.spawn("hold", CallOptions::interactive(later()))));
-        until(|| h.admission().queued(CallClass::Interactive) == 496).await;
-        // The 496 queued calls hold no thread.
-        assert_eq!(threads_named(NAME), running_only);
-        assert_eq!(h.fixture.read(|c| c.running), 4);
-        h.fixture.release();
-        for call in calls {
-            call.await.unwrap().unwrap();
-        }
-    });
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contest_calls_at_their_cap_waiting_on_child_calls_all_complete() {
+    // Two tokens, three contest calls admitted at once, a small work cap:
+    // the shape of a server whose in-flight cap is full of contest calls
+    // parked for their verdicts.
+    let capacity = Capacity::new(2)
+        .with_cap(crate::admission::CallKind::Judging, 3)
+        .with_cap(crate::admission::CallKind::Work, 2);
+    let threads = capacity.caps.threads();
+    let h = Harness::with_capacity(capacity);
+    let parents: Vec<_> = (0..9)
+        .map(|_| h.spawn("parent", CallOptions::judging(later())))
+        .collect();
+    for parent in parents {
+        parent.await.unwrap().unwrap();
+    }
+    assert_eq!(h.fixture.read(|c| c.marks.len()), 9, "every child ran");
+    assert!(h.manager.executor().threads().live() <= threads);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -93,6 +93,49 @@ impl WorkerSlots {
     }
 }
 
+/// Outstanding test cases a server may have: its share of
+/// [`TEST_CASES_PER_WORKER_SLOT`] per live worker slot. With no worker
+/// capacity known, `floor_slots` slots, one per local core in production:
+/// the shape of a single-host deployment.
+pub fn fan_out_limit(slots: &WorkerSlots, floor_slots: u64) -> u64 {
+    match slots.get() {
+        0 => floor_slots * TEST_CASES_PER_WORKER_SLOT,
+        live => slots.share(live * TEST_CASES_PER_WORKER_SLOT).max(1),
+    }
+}
+
+/// Slots assumed while no worker capacity is known: one per local core.
+pub fn local_floor_slots() -> u64 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u64)
+        .unwrap_or(1)
+}
+
+/// Keep the executor's judging and work caps at this server's in-flight cap
+/// and fan-out bound as the fleet changes (see
+/// [`plugin_core::admission::Admission::set_background_caps`]).
+pub fn spawn_admission_sizing(
+    slots: WorkerSlots,
+    admission: plugin_core::admission::Admission,
+    configured_in_flight: u32,
+) {
+    let size = move |slots: &WorkerSlots| {
+        let in_flight = match crate::dispatcher::claim::in_flight_cap(configured_in_flight, slots) {
+            0 => plugin_core::admission::DEFAULT_JUDGING_CAP,
+            cap => cap as usize,
+        };
+        let fan_out = fan_out_limit(slots, local_floor_slots()) as usize;
+        admission.set_background_caps(in_flight, fan_out);
+    };
+    size(&slots);
+    tokio::spawn(async move {
+        loop {
+            slots.changed().await;
+            size(&slots);
+        }
+    });
+}
+
 struct FanoutInner {
     outstanding: Mutex<u64>,
     released: Notify,
@@ -111,10 +154,7 @@ pub struct FanoutPermit(Arc<FanoutInner>);
 
 impl Fanout {
     pub fn new(slots: WorkerSlots, metrics: Option<common::metrics::Metrics>) -> Self {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get() as u64)
-            .unwrap_or(1);
-        Self::with_floor(slots, cores, metrics)
+        Self::with_floor(slots, local_floor_slots(), metrics)
     }
 
     fn with_floor(
@@ -131,19 +171,10 @@ impl Fanout {
         }))
     }
 
-    /// Outstanding test cases this server may have now: its share of
-    /// [`TEST_CASES_PER_WORKER_SLOT`] per live worker slot. With no worker
-    /// capacity known, one slot per local core, the shape of a single-host
-    /// deployment.
+    /// Outstanding test cases this server may have now; see
+    /// [`fan_out_limit`].
     pub fn limit(&self) -> u64 {
-        match self.0.slots.get() {
-            0 => self.0.floor_slots * TEST_CASES_PER_WORKER_SLOT,
-            slots => self
-                .0
-                .slots
-                .share(slots * TEST_CASES_PER_WORKER_SLOT)
-                .max(1),
-        }
+        fan_out_limit(&self.0.slots, self.0.floor_slots)
     }
 
     /// Wait until one more test case may be outstanding.
