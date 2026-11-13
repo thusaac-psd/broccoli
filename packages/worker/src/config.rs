@@ -221,9 +221,6 @@ pub struct WorkerAppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub observability: common::config::ObservabilityConfig,
-    /// Boot-time clock skew bounds against Postgres and Redis.
-    #[serde(default)]
-    pub clock: common::clock::ClockConfig,
 }
 
 impl WorkerAppConfig {

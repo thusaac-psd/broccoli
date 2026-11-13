@@ -304,7 +304,7 @@ pub async fn claim_once(
         let claimed =
             judging::claim_judgements(&state.db, server_id, judgement_room, &contest_types).await?;
         claimed_judgements = claimed.len() as u32;
-        record_judgement_claim_transitions(state, &claimed, Utc::now()).await;
+        record_judgement_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
             info!(
                 server_id,
@@ -333,7 +333,7 @@ pub async fn claim_once(
         let claimed =
             judging::claim_code_runs(&state.db, server_id, code_run_room, &contest_types).await?;
         claimed_code_runs = claimed.len() as u32;
-        record_code_run_claim_transitions(state, &claimed, Utc::now()).await;
+        record_code_run_claim_transitions(state, &claimed, state.clock.now()).await;
         if !claimed.is_empty() {
             info!(
                 server_id,
@@ -494,6 +494,7 @@ async fn record_judgement_claim_transitions(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
 

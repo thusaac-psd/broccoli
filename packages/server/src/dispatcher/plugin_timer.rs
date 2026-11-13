@@ -495,6 +495,7 @@ async fn deliver(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use super::*;
     use chrono::{DateTime, Duration, Utc};

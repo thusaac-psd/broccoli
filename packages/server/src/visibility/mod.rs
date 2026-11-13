@@ -238,8 +238,15 @@ impl<'a> VisibilityKernel<'a> {
                     && plugin_query::scoped_querier_loaded(self.state),
                 ..HostScopes::default()
             };
-            let host_decisions =
-                host_decide(&self.state.db, &self.subject, action, &misses, &mut scopes).await?;
+            let host_decisions = host_decide(
+                &self.state.db,
+                self.state.clock.now(),
+                &self.subject,
+                action,
+                &misses,
+                &mut scopes,
+            )
+            .await?;
             // Compiled out in release, and that is safe — `host_decide`
             // (`host_rules.rs`) builds its return value as
             // `resources.iter().map(...).collect()`, a `.map()` over its own
@@ -438,6 +445,7 @@ impl<'a> VisibilityKernel<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -683,6 +691,7 @@ mod tests {
         AppState {
             plugins,
             db,
+            clock: crate::clock::PlatformClock::local_for_tests(),
             config: AppConfig {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
@@ -745,7 +754,6 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
-                clock: Default::default(),
             },
             mq: None,
             redis_client: None,

@@ -348,7 +348,6 @@ impl E2eTestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
-            clock: Default::default(),
         };
 
         let contest_type_registry: ContestTypeRegistry = Arc::new(RwLock::new(HashMap::new()));
@@ -391,9 +390,13 @@ impl E2eTestApp {
         let (e2e_metrics, e2e_prom_registry) =
             common::observability::init_metrics("broccoli-e2e-test");
 
+        let clock = server::clock::PlatformClock::connect(&db)
+            .await
+            .expect("read the database clock");
         let state = AppState {
             plugins,
             db: db.clone(),
+            clock,
             config: app_config,
             mq: Some(mq.clone()),
             redis_client: None,

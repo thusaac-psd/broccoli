@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use common::SubmissionStatus;
 use common::storage::BlobStore;
 use sea_orm::prelude::Expr;
@@ -363,12 +363,14 @@ async fn load_result_page(
 pub(super) async fn build_submission_response(
     db: &DatabaseConnection,
     blob_store: &dyn BlobStore,
+    now: DateTime<Utc>,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
 ) -> Result<SubmissionResponse, AppError> {
     build_submission_response_with_cases(
         db,
         blob_store,
+        now,
         sub,
         visibility,
         &SubmissionResultQuery::default(),
@@ -379,6 +381,7 @@ pub(super) async fn build_submission_response(
 pub(super) async fn build_submission_response_with_cases(
     db: &DatabaseConnection,
     blob_store: &dyn BlobStore,
+    now: DateTime<Utc>,
     sub: submission::Model,
     visibility: Option<VisibilityContext>,
     query: &SubmissionResultQuery,
@@ -411,7 +414,7 @@ pub(super) async fn build_submission_response_with_cases(
     let show_source_code = has_view_all || is_owner;
 
     let show_compile_output =
-        has_view_all || is_owner || compile_output_public(contest_model.as_ref(), Utc::now());
+        has_view_all || is_owner || compile_output_public(contest_model.as_ref(), now);
 
     let is_running = sub.status == SubmissionStatus::Running;
     let show_results = sub.status.is_terminal() || is_running;

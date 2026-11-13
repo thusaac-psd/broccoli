@@ -1,5 +1,4 @@
 use crate::entity::plugin_config;
-use chrono::Utc;
 use extism::{Function, UserData, Val, ValType};
 use plugin_core::registry::PluginRegistry;
 use sea_orm::{DatabaseConnection, EntityTrait, Set, sea_query::OnConflict};
@@ -195,7 +194,7 @@ fn config_set_fn(
                 config: Set(sanitize_db_json(input.config)),
                 enabled: Set(None),
                 position: Set(0),
-                updated_at: Set(Utc::now()),
+                updated_at: sea_orm::NotSet,
             };
 
             plugin_config::Entity::insert(active)

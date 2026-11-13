@@ -14,7 +14,7 @@ printf 'name = "codelink-bracket"\n' > plugins-available/codelink-bracket/plugin
 fail() { echo "FAIL: $*"; exit 1; }
 # shellcheck source=../lib/env.sh
 . ./lib/env.sh
-run() { BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
+run() { BROCCOLI_DRY_RUN=1 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
 
 BROCCOLI__AUTH__SECURE_COOKIES=true \
 BROCCOLI__STORAGE__OBJECT_STORAGE__REGION=cn-north-1 \
@@ -68,7 +68,7 @@ BROCCOLI_GATEWAY_HOSTS='10.0.0.5 10.0.0.6' run server || fail "server run with g
 [ "$(env_get .env.server BROCCOLI__SERVER__TRUSTED_PROXIES)" = '["10.0.0.5/32","10.0.0.6/32"]' ] \
   || fail "server does not trust exactly the gateways"
 if BROCCOLI_GATEWAY_HOSTS='10.0.0.5;rm' run server; then fail "a malformed gateway address was accepted"; fi
-BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+BROCCOLI_UPSTREAMS='10.0.0.21:3000' BROCCOLI_DRY_RUN=1 \
   ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run"
 grep -q "BROCCOLI_GATEWAY_HOSTS='.*' ./install.sh server" "$T/gateway.log" \
   || fail "gateway install does not say how to trust it on the servers"
@@ -76,7 +76,7 @@ grep -q 'runs on this machine' "$T/gateway.log" && fail "a LAN upstream was take
 # A server on the gateway's own host sees the gateway by its bridge address,
 # so the LAN address printed would not match; say so.
 rm -f .env.gateway
-BROCCOLI_UPSTREAMS='127.0.0.1:3000' BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+BROCCOLI_UPSTREAMS='127.0.0.1:3000' BROCCOLI_DRY_RUN=1 \
   ./install.sh gateway </dev/null >"$T/gateway.log" 2>&1 || fail "gateway dry run with a local upstream"
 grep -q 'runs on this machine' "$T/gateway.log" || fail "no warning about a server on the gateway host"
 
@@ -126,7 +126,7 @@ printf '#!/bin/sh\n[ "$1" = -I ] && printf "%%s\\n" "$FAKE_ADDRS"\n' > fakebin/h
 chmod +x fakebin/hostname
 cd addr
 if FAKE_ADDRS="" PATH="$T/fakebin:$PATH" run infra; then fail "infra install guessed 127.0.0.1"; fi
-FAKE_ADDRS="192.168.1.5 10.0.0.7" PATH="$T/fakebin:$PATH" BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+FAKE_ADDRS="192.168.1.5 10.0.0.7" PATH="$T/fakebin:$PATH" BROCCOLI_DRY_RUN=1 \
   ./install.sh infra </dev/null >"$T/addr.log" 2>&1 || fail "infra dry run with two addresses"
 grep -q 'several addresses (192.168.1.5 10.0.0.7)' "$T/addr.log" || fail "no warning about the guessed infra address"
 [ "$(env_get connection.env BROCCOLI__STORAGE__OBJECT_STORAGE__ENDPOINT)" = 'http://192.168.1.5:8333' ] \

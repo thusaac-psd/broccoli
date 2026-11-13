@@ -43,7 +43,7 @@ id_on() { BROCCOLI_MACHINE_ID_FILE="$T/machine-a" BROCCOLI_SYS_NET_DIR="$T/$1" n
 
 cp -r "$rel/." "$T/bundle"
 cd "$T/bundle"
-run() { BROCCOLI_MACHINE_ID_FILE="$T/machine-a" BROCCOLI_DRY_RUN=1 BROCCOLI_SKIP_TIME_CHECK=1 \
+run() { BROCCOLI_MACHINE_ID_FILE="$T/machine-a" BROCCOLI_DRY_RUN=1 \
   BROCCOLI_INFRA_HOST=10.0.0.10 ./install.sh "$@" </dev/null >/dev/null 2>&1; }
 run infra || fail "infra dry run"
 run worker || fail "worker dry run"

@@ -405,6 +405,11 @@ pub struct TestApp {
     /// This app's own plugin cache (`plugin.cache_dir`): replicas never
     /// share one.
     pub plugin_cache: tempfile::TempDir,
+    /// The platform clock of every replica on this database, resynced when
+    /// the test moves the database clock.
+    platform_clocks: Arc<std::sync::Mutex<Vec<server::clock::PlatformClock>>>,
+    /// Whether this app loaded the plugins; its replicas do the same.
+    load_plugins: bool,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     dispatcher: Option<server::dispatcher::Dispatcher>,
 }
@@ -515,7 +520,8 @@ impl TestApp {
     /// This test's database clock, which the test advances instead of
     /// sleeping.
     pub fn clock(&self) -> DbClock {
-        DbClock::new(&self.db)
+        let replicas = self.platform_clocks.lock().unwrap().clone();
+        DbClock::new(&self.db).following(replicas)
     }
 
     pub async fn spawn() -> Self {
@@ -538,7 +544,14 @@ impl TestApp {
     /// registry, dispatcher state and HTTP listener.
     pub async fn spawn_replica(&self, mut options: SpawnOptions) -> Self {
         options.shared_db = Some(self.db_name.clone());
-        Self::spawn_internal(true, options).await
+        let mut replica = Self::spawn_internal(self.load_plugins, options).await;
+        let clocks = self.platform_clocks.clone();
+        clocks
+            .lock()
+            .unwrap()
+            .extend(replica.platform_clocks.lock().unwrap().drain(..));
+        replica.platform_clocks = clocks;
+        replica
     }
 
     async fn spawn_internal(load_plugins: bool, options: SpawnOptions) -> Self {
@@ -645,7 +658,6 @@ impl TestApp {
             observability: common::config::ObservabilityConfig::default(),
             batch_max_age_secs: 600,
             bootstrap: BootstrapConfig::default(),
-            clock: Default::default(),
         };
 
         if let Some(cap) = options.max_queued_submissions {
@@ -760,9 +772,13 @@ impl TestApp {
             .as_ref()
             .map(|url| Arc::new(redis::Client::open(url.clone()).expect("valid redis url")));
 
+        let clock = server::clock::PlatformClock::connect(&db)
+            .await
+            .expect("read the database clock");
         let state = AppState {
             plugins,
             db: db.clone(),
+            clock: clock.clone(),
             config: app_config,
             mq: None,
             redis_client,
@@ -855,6 +871,8 @@ impl TestApp {
             plugin_cache,
             server_handle: Some(server_handle),
             dispatcher,
+            platform_clocks: Arc::new(std::sync::Mutex::new(vec![clock])),
+            load_plugins,
         }
     }
 

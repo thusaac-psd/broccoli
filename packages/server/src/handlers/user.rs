@@ -3,7 +3,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
-use chrono::Utc;
 use sea_orm::sea_query::LockType;
 use sea_orm::*;
 use tracing::instrument;
@@ -243,7 +242,7 @@ pub async fn delete_user(
         .all(&txn)
         .await?;
 
-    let now = Utc::now();
+    let now = state.clock.now();
 
     if !contest_ids.is_empty() {
         let contests = contest::Entity::find_active()

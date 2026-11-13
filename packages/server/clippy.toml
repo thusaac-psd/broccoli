@@ -1,0 +1,8 @@
+# Wall time compared with another node's wall time comes from the platform
+# clock (`server::clock::PlatformClock`, or SQL `now()`); durations come from
+# `Instant`. Reading this host's own wall clock lets replicas disagree.
+disallowed-methods = [
+  { path = "chrono::Utc::now", reason = "use the platform clock (`AppState::clock`) or SQL `now()`" },
+  { path = "chrono::Local::now", reason = "use the platform clock (`AppState::clock`) or SQL `now()`" },
+  { path = "std::time::SystemTime::now", reason = "use the platform clock for wall time or `Instant` for durations" },
+]

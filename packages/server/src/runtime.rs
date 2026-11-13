@@ -206,7 +206,9 @@ impl ServerRuntime {
             None
         };
 
-        common::clock::check_clock_skew(&db, redis_client.as_deref(), &app_config.clock).await?;
+        let clock = crate::clock::PlatformClock::connect(&db)
+            .await
+            .context("Failed to read the database clock")?;
 
         // Claim the server ID before consuming this replica's reply stream or
         // recovering leases under it: a second live replica with the same ID
@@ -218,9 +220,10 @@ impl ServerRuntime {
         let operation_waiters: crate::registry::OperationWaiters = Arc::new(DashMap::new());
         let node_heartbeat = match redis_client.as_deref() {
             Some(client) => {
-                let started_at = chrono::Utc::now();
+                let started_at = clock.now();
                 let payload = {
                     let server_id = server_id.clone();
+                    let clock = clock.clone();
                     let hostname = hostname::get()
                         .ok()
                         .map(|h| h.to_string_lossy().into_owned());
@@ -228,7 +231,7 @@ impl ServerRuntime {
                         serde_json::json!({
                             "id": server_id,
                             "started_at": started_at,
-                            "last_seen": chrono::Utc::now(),
+                            "last_seen": clock.now(),
                             "version": env!("CARGO_PKG_VERSION"),
                             "hostname": hostname,
                             "pid": std::process::id(),
@@ -380,6 +383,7 @@ impl ServerRuntime {
         let state = AppState {
             plugins: manager,
             db: db.clone(),
+            clock,
             config: app_config.clone(),
             mq: mq.clone(),
             redis_client: redis_client.clone(),

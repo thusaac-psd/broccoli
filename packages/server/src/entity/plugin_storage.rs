@@ -18,6 +18,7 @@ pub struct Model {
     #[sea_orm(default_value = 0)]
     pub revision: i64,
 
+    #[sea_orm(default_expr = "Expr::current_timestamp()")]
     pub created_at: DateTimeUtc,
 }
 

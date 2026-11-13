@@ -99,13 +99,12 @@ BROCCOLI__STORAGE__OBJECT_STORAGE__SECRET_KEY='...' \
 docker compose -f docker-compose.worker.yaml ps
 ```
 
-Every server and worker compares its clock with Postgres and Redis at boot. It
-logs a warning above 1 s of skew and refuses to start above 5 s, because
-cross-node timestamps (MQ visibility, heartbeats, leases) break under larger
-skew. Point every node at the same NTP source (for example chrony on the infra
-node, serving the LAN). The bounds are `BROCCOLI__CLOCK__WARN_SKEW_MS` and
-`BROCCOLI__CLOCK__MAX_SKEW_MS`; setting the latter to `0` lets a node start
-regardless (the warning is still logged).
+Node clocks do not need to agree. Servers keep wall time by the database clock:
+each one measures its offset to Postgres every 30 to 60 s and serves contest
+phases, token expiry, rate limits and the HTTP `Date` header from it. The queue
+measures idle times and TTLs on the Redis clock, and workers compare no wall
+clocks at all. A server whose own clock is more than a second off logs a warning
+at boot, because its log timestamps are off by that much.
 
 Every database connection sends a 60 s `statement_timeout` and server-side TCP
 keepalives as startup options. A PgBouncer in front of Postgres rejects those

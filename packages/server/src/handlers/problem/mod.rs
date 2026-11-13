@@ -90,7 +90,7 @@ pub async fn create_problem(
     )
     .await?;
 
-    let now = chrono::Utc::now();
+    let now = state.clock.now();
     let submission_format_json = submission_format
         .map(|sf| sanitize_db_json(serde_json::to_value(sf).unwrap_or(serde_json::Value::Null)));
     let new_problem = problem::ActiveModel {
@@ -273,7 +273,7 @@ pub(crate) async fn require_problem_part_reachable(
             return Err(AppError::NotFound(not_found.into()));
         }
         let contest = find_contest(&state.db, contest_id).await?;
-        require_contest_started(auth_user, &contest, chrono::Utc::now())?;
+        require_contest_started(auth_user, &contest, state.clock.now())?;
     }
     if kernel.decide(action, scope.problem()).await?.is_denied() {
         return Err(AppError::NotFound(not_found.into()));
@@ -427,7 +427,7 @@ pub async fn update_problem(
         }
         None => {}
     }
-    active.updated_at = Set(chrono::Utc::now());
+    active.updated_at = Set(state.clock.now());
 
     let model = active.update(&txn).await?;
     txn.commit().await?;
@@ -487,7 +487,7 @@ pub async fn delete_problem(
     }
 
     let mut active: problem::ActiveModel = problem.into();
-    active.deleted_at = Set(Some(chrono::Utc::now()));
+    active.deleted_at = Set(Some(state.clock.now()));
     active.update(&txn).await?;
 
     delete_config_by_target(&txn, &ConfigTarget::problem(id)).await?;

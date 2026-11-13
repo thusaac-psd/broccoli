@@ -1159,6 +1159,7 @@ mod tests {
         AppState {
             plugins,
             db,
+            clock: crate::clock::PlatformClock::local_for_tests(),
             config: AppConfig {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
@@ -1221,7 +1222,6 @@ mod tests {
                 observability: common::config::ObservabilityConfig::default(),
                 batch_max_age_secs: 600,
                 bootstrap: BootstrapConfig::default(),
-                clock: Default::default(),
             },
             mq: None,
             redis_client: None,

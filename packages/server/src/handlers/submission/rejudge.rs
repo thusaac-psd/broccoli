@@ -103,8 +103,14 @@ pub async fn apply_submission_judgement(
     .await;
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response =
-        build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let response = build_submission_response(
+        &state.db,
+        &*state.blob_store,
+        state.clock.now(),
+        updated,
+        visibility,
+    )
+    .await?;
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
@@ -261,8 +267,14 @@ pub async fn rejudge_submission(
     txn.commit().await?;
 
     let visibility = Some(VisibilityContext::from_auth_user(&auth_user));
-    let response =
-        build_submission_response(&state.db, &*state.blob_store, updated, visibility).await?;
+    let response = build_submission_response(
+        &state.db,
+        &*state.blob_store,
+        state.clock.now(),
+        updated,
+        visibility,
+    )
+    .await?;
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
     Ok(Json(response))
@@ -536,8 +548,14 @@ pub async fn admin_fan_out_submission(
 
     let mut responses = Vec::with_capacity(models.len());
     for model in models {
-        let response =
-            build_submission_response(&state.db, &*state.blob_store, model, visibility).await?;
+        let response = build_submission_response(
+            &state.db,
+            &*state.blob_store,
+            state.clock.now(),
+            model,
+            visibility,
+        )
+        .await?;
         let response = apply_filter_to_response_after_mutation(&kernel, response).await?;
         responses.push(response);
     }

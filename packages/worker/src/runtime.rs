@@ -115,8 +115,6 @@ impl WorkerRuntime {
 
         spawn_metrics_server(prometheus_registry);
 
-        check_clock_skew(&config).await?;
-
         let mq = Mq::connect(&config.mq.url, &config.mq.operation_queue_name)
             .await
             .context("Failed to initialize MQ")?;
@@ -247,26 +245,6 @@ impl WorkerRuntime {
         info!("Worker stopped");
         Ok(())
     }
-}
-
-/// Compare this worker's clock with Postgres and Redis (see `common::clock`)
-/// on a short-lived connection; the worker keeps no shared pool of its own.
-async fn check_clock_skew(config: &WorkerAppConfig) -> anyhow::Result<()> {
-    let db = common::db::connect(
-        &config.database.url,
-        &common::db::PgPoolSpec::new(1, 0),
-        &config.database.session(),
-    )
-    .await
-    .context("Failed to connect to the database for the clock skew check")?;
-    let redis = if config.mq.enabled {
-        Some(redis::Client::open(config.mq.url.as_str()).context("Invalid mq.url")?)
-    } else {
-        None
-    };
-    let result = common::clock::check_clock_skew(&db, redis.as_ref(), &config.clock).await;
-    let _ = db.close().await;
-    result
 }
 
 /// The entries this worker holds, read but not yet settled. They are

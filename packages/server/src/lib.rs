@@ -1,4 +1,5 @@
 mod client_ip;
+pub mod clock;
 pub mod config;
 pub mod consumers;
 pub mod database;
@@ -27,6 +28,7 @@ pub mod serve;
 pub mod services;
 pub mod state;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Fixtures are stamped with real time.
 mod test_support;
 pub mod upload_limits;
 pub mod utils;
@@ -341,6 +343,7 @@ pub fn build_router(state: AppState) -> axum::Router {
     let trusted_proxies =
         client_ip::parse_trusted_proxy_networks(&state.config.server.trusted_proxies);
     let observability_state = state.clone();
+    let clock = state.clock.clone();
 
     let (router, api) = routes::api_routes(&state.config, ApiDoc::openapi());
     let frontend_dist = state.config.server.frontend_dist.clone();
@@ -435,12 +438,43 @@ pub fn build_router(state: AppState) -> axum::Router {
         observability_state,
         observability_middleware,
     ))
+    .layer(axum::middleware::from_fn_with_state(
+        clock,
+        date_header_middleware,
+    ))
+}
+
+/// Stamps every response's `Date` from the platform clock, so all replicas
+/// tell clients the same time (the web client derives its server clock from
+/// it). Hyper only adds its own, from this host's clock, when none is set.
+async fn date_header_middleware(
+    axum::extract::State(clock): axum::extract::State<clock::PlatformClock>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(axum::http::header::DATE, http_date(clock.now()));
+    response
+}
+
+/// `at` as an HTTP-date (RFC 9110 IMF-fixdate).
+fn http_date(at: chrono::DateTime<chrono::Utc>) -> axum::http::HeaderValue {
+    let text = at.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    axum::http::HeaderValue::from_str(&text).expect("an HTTP-date is a valid header value")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::Json;
+
+    #[test]
+    fn http_date_is_imf_fixdate() {
+        let at = chrono::DateTime::from_timestamp(784_111_777, 0).unwrap();
+        assert_eq!(http_date(at), "Sun, 06 Nov 1994 08:49:37 GMT");
+    }
     use axum::body::Body;
     use axum::http::{Method, Request};
     use axum::routing::get;

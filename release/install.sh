@@ -594,68 +594,6 @@ review_env_file_interactive() {
   done
 }
 
-check_clock_sync() {
-  local sync remote_date offset_abs offset
-  case "${BROCCOLI_SKIP_TIME_CHECK:-false}" in
-    1|true|yes) return 0 ;;
-  esac
-
-  echo "checking system clock (local UTC: $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date))"
-
-  if command -v timedatectl >/dev/null 2>&1; then
-    sync="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
-    case "$sync" in
-      yes) echo "time sync: timedatectl reports synchronized" ;;
-      no) echo "warning: timedatectl reports NTP is not synchronized" >&2 ;;
-      *) echo "time sync: timedatectl is present but did not report NTP status" >&2 ;;
-    esac
-  elif command -v chronyc >/dev/null 2>&1; then
-    if chronyc tracking >/dev/null 2>&1; then
-      echo "time sync: chrony is responding"
-    else
-      echo "warning: chrony is installed but not reporting healthy tracking" >&2
-    fi
-  elif command -v systemsetup >/dev/null 2>&1; then
-    sync="$(systemsetup -getusingnetworktime 2>/dev/null || true)"
-    case "$sync" in
-      *On*) echo "time sync: macOS network time is enabled" ;;
-      *Off*) echo "warning: macOS network time is disabled" >&2 ;;
-      *) echo "time sync: macOS network time status was unavailable" >&2 ;;
-    esac
-  else
-    echo "time sync: no timedatectl/chrony check available; continuing" >&2
-  fi
-  echo "time sync: every server and worker must agree within about a second; offline, serve time from the infra node (docs/operator-runbook.md, Time Sync on an Offline LAN)"
-
-  if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
-    echo "warning: WSL detected. Make sure the Windows host clock is synchronized before judging." >&2
-  fi
-
-  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    remote_date="$(curl -fsSI --http1.1 --max-time 3 https://www.cloudflare.com 2>/dev/null | awk 'tolower($1)=="date:" {sub(/^Date:[[:space:]]*/,""); print; exit}' || true)"
-    if [ -n "$remote_date" ]; then
-      offset="$(REMOTE_HTTP_DATE="$remote_date" python3 - <<'PY' 2>/dev/null || true
-import datetime, email.utils, os, time
-dt = email.utils.parsedate_to_datetime(os.environ["REMOTE_HTTP_DATE"])
-if dt.tzinfo is None:
-    dt = dt.replace(tzinfo=datetime.timezone.utc)
-print(int(time.time() - dt.timestamp()))
-PY
-)"
-      if [ -n "$offset" ]; then
-        offset_abs="${offset#-}"
-        if [ "$offset_abs" -gt 5 ]; then
-          echo "warning: local clock differs from HTTPS Date header by about ${offset}s" >&2
-        else
-          echo "time sync: HTTPS Date offset is about ${offset}s"
-        fi
-      fi
-    else
-      echo "time sync: HTTPS Date check unavailable" >&2
-    fi
-  fi
-}
-
 # health_url BIND: the /healthz URL of a port published on BIND, reached from
 # this host (a wildcard bind is reached on loopback).
 health_url() {
@@ -1160,7 +1098,6 @@ case "$ROLE" in
   server|worker|single-host) enable_requested_plugins "$ROOT" ;;
 esac
 
-check_clock_sync
 
 if [ "$ROLE" = "gateway" ]; then
   print_gateway_trust_hint

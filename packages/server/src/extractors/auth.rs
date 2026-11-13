@@ -43,7 +43,7 @@ impl AuthUser {
 
 /// Decode and verify the `Bearer` access token from the request into its
 /// claims. Shared by [`AuthUser`] (stateless) and [`FreshAuthUser`].
-fn bearer_claims(parts: &Parts, secret: &str) -> Result<jwt::Claims, AppError> {
+fn bearer_claims(parts: &Parts, state: &AppState) -> Result<jwt::Claims, AppError> {
     let auth_header = parts
         .headers
         .get("Authorization")
@@ -52,7 +52,8 @@ fn bearer_claims(parts: &Parts, secret: &str) -> Result<jwt::Claims, AppError> {
     let token = auth_header
         .strip_prefix("Bearer ")
         .ok_or(AppError::TokenInvalid)?;
-    jwt::verify(token, secret).map_err(|_| AppError::TokenInvalid)
+    jwt::verify(token, &state.config.auth.jwt_secret, state.clock.now())
+        .map_err(|_| AppError::TokenInvalid)
 }
 
 impl From<jwt::Claims> for AuthUser {
@@ -75,7 +76,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
-        let claims = bearer_claims(parts, &app_state.config.auth.jwt_secret)?;
+        let claims = bearer_claims(parts, &app_state)?;
         Ok(AuthUser::from(claims))
     }
 }
@@ -104,7 +105,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
-        let claims = bearer_claims(parts, &app_state.config.auth.jwt_secret)?;
+        let claims = bearer_claims(parts, &app_state)?;
 
         // One indexed read of the active user's credential-change stamp. A
         // missing row means the user was soft-deleted/deactivated -> reject.

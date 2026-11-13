@@ -66,8 +66,8 @@ fn resolve_optional_auth_user(
         Some(t) => t,
         None => return Ok(None),
     };
-    let claims =
-        jwt::verify(token, &state.config.auth.jwt_secret).map_err(|_| AppError::TokenInvalid)?;
+    let claims = jwt::verify(token, &state.config.auth.jwt_secret, state.clock.now())
+        .map_err(|_| AppError::TokenInvalid)?;
 
     Ok(Some((
         AuthUser {

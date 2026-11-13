@@ -62,13 +62,9 @@ The server installer imports both files. The worker installer imports only
 image, then shows a review screen. Choose `e` at the review prompt to edit the
 generated `.env.<role>` before any containers start.
 
-Before starting containers, the installer also checks the machine clock with the
-available platform time service (`timedatectl`, `chrony`, or macOS network time)
-and compares against an HTTPS `Date` header when `curl` and `python3` are
-available. The check only warns, so keep it on offline too. What matters on a
-venue LAN is that all nodes agree with each other: serve time from the infra
-node with chrony, as in
-[docs/operator-runbook.md](docs/operator-runbook.md#time-sync-on-an-offline-lan).
+Nodes do not need synchronized clocks: servers keep time by the database clock
+(see
+[docs/operator-runbook.md](docs/operator-runbook.md#time-on-an-offline-lan)).
 
 To install multiple roles from the same extracted bundle directory on one host,
 pass them in order:

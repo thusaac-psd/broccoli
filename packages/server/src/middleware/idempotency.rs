@@ -257,7 +257,8 @@ pub async fn idempotency_middleware(
 fn extract_user_id(request: &Request<Body>, state: &AppState) -> Option<i32> {
     let auth_header = request.headers().get("Authorization")?.to_str().ok()?;
     let token = auth_header.strip_prefix("Bearer ")?;
-    let claims = crate::utils::jwt::verify(token, &state.config.auth.jwt_secret).ok()?;
+    let claims =
+        crate::utils::jwt::verify(token, &state.config.auth.jwt_secret, state.clock.now()).ok()?;
     Some(claims.uid)
 }
 

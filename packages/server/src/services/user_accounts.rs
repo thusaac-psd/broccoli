@@ -76,7 +76,6 @@ pub async fn insert_account<C: ConnectionTrait>(
         username: Set(account.username.clone()),
         display_name: Set(account.display_name.clone()),
         password: Set(account.password_hash.clone()),
-        created_at: Set(chrono::Utc::now()),
         ..Default::default()
     }
     .insert(db)
