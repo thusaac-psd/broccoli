@@ -70,6 +70,7 @@ macro_rules! sandbox_suite {
             platform_tool_mount_without_configured_tools_dir_fails_the_step,
             empty_pipe_name_fails_the_step,
             two_envs_share_a_mapped_directory,
+            a_later_operation_never_sees_files_an_earlier_one_left,
             shared_channel_fifo_between_two_environments,
             channel_pipe_io_redirect_between_environments,
             non_channel_pipe_still_works_with_channels_present,
@@ -688,6 +689,32 @@ pub async fn two_envs_share_a_mapped_directory<B: Backend>() {
     assert_eq!(consumer.sandbox_result.exit_code, Some(0));
 
     let _ = std::fs::remove_dir_all(&shared_dir);
+}
+
+pub async fn a_later_operation_never_sees_files_an_earlier_one_left<B: Backend>() {
+    // One handler, so the second operation gets the box ids the first freed.
+    let handler = handler::<B>(None);
+    let two_boxes = |command: &str| {
+        operation(
+            vec![env("solution"), env("checker")],
+            vec![
+                sh("solution", "solution", command),
+                sh("checker", "checker", command),
+            ],
+            vec![],
+        )
+    };
+
+    let first = handler
+        .execute(&two_boxes("echo answer > leftover"))
+        .await
+        .unwrap();
+    assert!(first.success, "{first:?}");
+    let second = handler
+        .execute(&two_boxes("test ! -e leftover"))
+        .await
+        .unwrap();
+    assert!(second.success, "a box kept a file: {second:?}");
 }
 
 pub async fn shared_channel_fifo_between_two_environments<B: Backend>() {

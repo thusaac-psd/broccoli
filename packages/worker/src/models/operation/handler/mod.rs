@@ -18,7 +18,7 @@ mod teardown;
 use crate::toolchain_fingerprint::{SharedFingerprint, ToolchainFingerprint};
 
 pub struct OperationHandler {
-    sandbox_manager: Box<dyn SandboxManager + Send + Sync>,
+    sandbox_manager: Arc<dyn SandboxManager + Send + Sync>,
     file_cacher: Arc<dyn FileCacher>,
     cache: CompileCache,
     metrics: common::metrics::Metrics,
@@ -26,6 +26,8 @@ pub struct OperationHandler {
     /// `MountSource::PlatformTool { name }` resolves to `<tools_dir>/<name>`.
     /// `None` until configured via [`OperationHandler::with_tools_dir`].
     tools_dir: Option<PathBuf>,
+    /// Removals of earlier operations' sandboxes still running.
+    teardown: teardown::Teardown,
 }
 
 /// How a handler shares cacheable step outputs (compiles) with other

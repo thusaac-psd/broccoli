@@ -46,11 +46,12 @@ impl OperationHandler {
         metrics: common::metrics::Metrics,
     ) -> Self {
         Self {
-            sandbox_manager,
+            sandbox_manager: Arc::from(sandbox_manager),
             file_cacher,
             cache,
             metrics,
             tools_dir: None,
+            teardown: Default::default(),
         }
     }
 
@@ -76,6 +77,11 @@ impl OperationHandler {
             operation.tasks.len()
         );
 
+        // Sandboxes still being removed after the previous operation must be
+        // gone before this one creates its own, so no step runs beside a
+        // removal and no box id is reused while its box is still dirty.
+        self.teardown.settle().await;
+
         // Run every stage under a panic guard so the sandbox + channels
         // removal below ALWAYS runs, and runs once. Each stage records what it
         // created in `environments` / `channels_dir` as it goes, so a stage
@@ -96,7 +102,14 @@ impl OperationHandler {
             environments,
             channels_dir,
         };
-        leftovers.remove(&*self.sandbox_manager).await;
+        // The removal runs in the background, off the result's path; the
+        // next operation waits for it (see `teardown`). A panic is re-raised
+        // only after its removal.
+        if outcome.is_ok() {
+            self.teardown.defer(self.sandbox_manager.clone(), leftovers);
+        } else {
+            leftovers.remove(&*self.sandbox_manager).await;
+        }
 
         let (task_results, global_success) = match outcome {
             Ok(result) => result?,

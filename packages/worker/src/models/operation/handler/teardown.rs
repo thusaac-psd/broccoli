@@ -1,10 +1,18 @@
 //! Removing an operation's sandboxes and shared channels directory.
+//!
+//! The handler returns an operation's result before its sandboxes are removed,
+//! so the removal overlaps publishing that result and receiving the next
+//! operation instead of delaying both. The next operation on the handler waits
+//! for every pending removal before it creates a sandbox, so no step ever runs
+//! beside a removal, and a box id stays reserved until its box is gone.
 
 use super::super::sandbox::SandboxManager;
 use super::EnvironmentList;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::task::JoinHandle;
 use tracing::error;
 
 /// What an operation leaves behind for removal.
@@ -31,6 +39,40 @@ impl Leftovers {
     }
 }
 
+/// Removals running in the background.
+#[derive(Default)]
+pub(super) struct Teardown {
+    pending: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Teardown {
+    /// Start removing `leftovers` in the background.
+    pub(super) fn defer(
+        &self,
+        sandbox_manager: Arc<dyn SandboxManager + Send + Sync>,
+        leftovers: Leftovers,
+    ) {
+        let removal = tokio::spawn(async move { leftovers.remove(&*sandbox_manager).await });
+        self.pending().push(removal);
+    }
+
+    /// Wait until every removal started so far has finished.
+    pub(super) async fn settle(&self) {
+        let pending = std::mem::take(&mut *self.pending());
+        for removal in pending {
+            if let Err(e) = removal.await {
+                error!(error = %e, "Sandbox removal task failed");
+            }
+        }
+    }
+
+    /// The pending removals, recovered from poisoning: every update is a
+    /// single push or take.
+    fn pending(&self) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::OperationHandler;
@@ -47,15 +89,17 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tokio::sync::Barrier;
+    use tokio::sync::{Barrier, Semaphore};
 
     /// A mock sandbox that logs creations and finished removals. Barriers make
-    /// creations or removals wait for each other.
+    /// creations or removals wait for each other; `removals` holds removals
+    /// back until the test hands out permits.
     struct Recording {
         inner: MockSandboxManager,
         log: Mutex<Vec<&'static str>>,
         create_barrier: Option<Barrier>,
         remove_barrier: Option<Barrier>,
+        removals: Semaphore,
     }
 
     impl Recording {
@@ -65,6 +109,7 @@ mod tests {
                 log: Mutex::new(Vec::new()),
                 create_barrier: None,
                 remove_barrier: None,
+                removals: Semaphore::new(Semaphore::MAX_PERMITS),
             }
         }
 
@@ -84,6 +129,7 @@ mod tests {
         }
 
         async fn remove_sandbox(&self, id: &str) -> Result<(), SandboxError> {
+            self.removals.acquire().await.unwrap().forget();
             if let Some(barrier) = &self.remove_barrier {
                 barrier.wait().await;
             }
@@ -163,6 +209,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.success, "{result:?}");
+        handler.teardown.settle().await;
     }
 
     #[tokio::test]
@@ -174,10 +221,41 @@ mod tests {
         });
         let handler = handler(&sandbox);
 
-        let result = bounded(handler.execute(&two_box_operation()))
-            .await
-            .unwrap();
-        assert!(result.success, "{result:?}");
+        assert!(handler.execute(&two_box_operation()).await.unwrap().success);
+        bounded(handler.teardown.settle()).await;
         assert_eq!(sandbox.log(), ["create", "create", "removed", "removed"]);
+    }
+
+    #[tokio::test]
+    async fn the_result_returns_first_and_the_next_operation_waits_for_the_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox = Arc::new(Recording {
+            removals: Semaphore::new(0),
+            ..Recording::new(dir.path())
+        });
+        let handler = handler(&sandbox);
+        let operation = two_box_operation();
+
+        // The removal is held back, so the result returning proves it is
+        // not on the result's path.
+        assert!(handler.execute(&operation).await.unwrap().success);
+
+        let mut next = Box::pin(handler.execute(&operation));
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        assert_eq!(
+            sandbox.log(),
+            ["create", "create"],
+            "the next operation creates nothing while a removal is pending"
+        );
+
+        sandbox.removals.add_permits(4);
+        assert!(next.await.unwrap().success);
+        handler.teardown.settle().await;
+        assert_eq!(
+            sandbox.log(),
+            [
+                "create", "create", "removed", "removed", "create", "create", "removed", "removed"
+            ]
+        );
     }
 }
