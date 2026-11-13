@@ -3,7 +3,8 @@
 //! land on a different server replica. Every expiry and poll-interval
 //! comparison uses the DB clock.
 
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
+use common::db::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
 use crate::error::AppError;
 use crate::services::auth_tokens::issue_access_token;

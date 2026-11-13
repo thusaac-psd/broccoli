@@ -8,7 +8,6 @@ use crate::entity::plugin_config;
 use crate::error::AppError;
 use crate::host_funcs::config::{resolve_namespace, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, config_key};
-use crate::utils::text::sanitize_db_json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigScope {
@@ -159,7 +158,6 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
     position: i32,
 ) -> Result<Json<PluginConfigResponse>, AppError> {
     let namespace_str = target.stored_namespace(plugin_id, namespace);
-    let config = sanitize_db_json(config);
 
     let active = plugin_config::ActiveModel {
         scope: Set(target.scope().as_str().to_string()),

@@ -14,7 +14,7 @@ use crate::utils::judging::files_log_summary;
 /// dispatch's epoch, logging a failure of the write itself: the run then
 /// stays in flight until a detector requeues it.
 async fn mark_code_run_error_or_log(
-    db: &sea_orm::DatabaseConnection,
+    db: &common::db::DatabaseConnection,
     code_run_id: i32,
     code: &str,
     message: &str,

@@ -1,3 +1,5 @@
+use common::db::DatabaseConnection;
+
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::*;
 

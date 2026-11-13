@@ -13,10 +13,10 @@ pub mod submissions;
 pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
+use common::db::DatabaseConnection;
 use extism::ValType::I64;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
 use plugin_core::host::HostFunctionRegistry;
-use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;

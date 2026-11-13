@@ -1,5 +1,6 @@
+use common::db::DatabaseConnection;
 use common::db::{PgPoolSpec, PgSession};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr};
+use sea_orm::{ConnectionTrait, DbErr};
 use sea_orm_migration::MigratorTrait;
 
 use crate::migration::Migrator;
@@ -39,10 +40,8 @@ pub async fn init_db(db_url: &str) -> Result<DatabaseConnection, DbErr> {
 
 /// The restricted, NOLOGIN Postgres role raw plugin SQL runs under. Applied per
 /// connection via `SET ROLE` on the restricted pool ([`init_plugin_db`]'s
-/// `after_connect`) and re-applied by the raw-path fresh-connection fallback in
-/// [`crate::host_funcs::sql`]. Single source of truth for those two `SET ROLE`
-/// sites so they cannot drift; the migration DDL that CREATEs/GRANTs the role
-/// keeps its own literal since that is statement text, not a role handle.
+/// `after_connect`). The migration DDL that CREATEs/GRANTs the role keeps its
+/// own literal since that is statement text, not a role handle.
 pub const PLUGIN_DB_ROLE: &str = "broccoli_plugin";
 
 /// The dedicated, least-privilege LOGIN role the RESTRICTED plugin pool
@@ -255,13 +254,9 @@ pub fn classify_restricted_auth(
     }
 }
 
-/// How the restricted plugin pool should authenticate, and the fresh-connection
-/// fallback that must match it: the pool itself, the URL it connected on, and the
-/// login override it used (`None` = app-role auth).
+/// The restricted plugin pool and how it authenticated.
 pub struct RestrictedPluginPool {
     pub pool: DatabaseConnection,
-    pub fallback_url: String,
-    pub fallback_login: Option<PluginLoginOverride>,
     /// How the pool authenticated. `AppRoleDegraded` means the caller must disable
     /// raw plugin SQL (fail closed). See [`RestrictedPluginAuth`].
     pub auth: RestrictedPluginAuth,
@@ -299,8 +294,10 @@ pub async fn resolve_restricted_plugin_pool(
     .await?;
     // An operator-configured `plugin_url` is trusted as-is; otherwise the presence
     // of a dedicated login decides engine isolation vs. an app-role degrade.
-    resolved.auth =
-        classify_restricted_auth(plugin_url.is_some(), resolved.fallback_login.is_some());
+    resolved.auth = classify_restricted_auth(
+        plugin_url.is_some(),
+        resolved.auth == RestrictedPluginAuth::DedicatedLogin,
+    );
     Ok(resolved)
 }
 
@@ -325,11 +322,9 @@ async fn connect_restricted_pool_with_fallback(
     {
         Ok(pool) => Ok(RestrictedPluginPool {
             pool,
-            fallback_url: primary_url,
             // Provisional (operator URLs are upgraded to `OperatorUrl` by the
             // caller, which alone knows whether a `plugin_url` was configured).
             auth: classify_restricted_auth(false, primary_login.is_some()),
-            fallback_login: primary_login,
         }),
         Err(e) if primary_login.is_some() => {
             tracing::warn!(
@@ -340,8 +335,6 @@ async fn connect_restricted_pool_with_fallback(
             let pool = init_plugin_db(app_url, max_connections, None, session).await?;
             Ok(RestrictedPluginPool {
                 pool,
-                fallback_url: app_url.to_string(),
-                fallback_login: None,
                 auth: RestrictedPluginAuth::AppRoleDegraded,
             })
         }
@@ -355,13 +348,9 @@ async fn connect_restricted_pool_with_fallback(
 ///
 /// 1. **Isolation** - like every plugin pool, it is SEPARATE from the main
 ///    server pool used by HTTP handlers, the dispatcher, and the
-///    windowed-evaluate driver. Under load the shared pool produces spurious
-///    server-side "invalid byte sequence ... 0x00" errors on byte-clean plugin
-///    INSERTs - connection-protocol desync inherited from OTHER operations on
-///    the same pool. Plugin
-///    host functions always run their DB call to completion (sync `block_on` on
-///    a blocking thread, never cancelled), so a pool used ONLY by them stays
-///    clean. No schema-sync/seeding here - [`BootSession`] already ran it.
+///    windowed-evaluate driver, so plugin SQL can neither exhaust the server's
+///    connections nor wait behind them. No schema-sync/seeding here -
+///    [`BootSession`] already ran it.
 ///
 /// 2. **Bounded privilege** - every connection runs `SET ROLE broccoli_plugin`
 ///    before the plugin can use it, via sqlx's per-connection `after_connect`
@@ -661,14 +650,11 @@ pub async fn connect_main_pool(
     max_connections: u32,
     session: &PgSession,
 ) -> Result<DatabaseConnection, DbErr> {
-    // `test_before_acquire` (on by default in `PgPoolSpec`) matters here: a
-    // plugin DB host call can be cancelled mid-flight (e.g. a detached evaluate
-    // timeout aborts the Extism call while it is inside
-    // `block_on(execute_raw)`), which can return a pooled connection with unread
-    // protocol bytes. Reusing such a connection surfaces stale framing bytes
-    // (message length headers contain 0x00) as a spurious "invalid byte sequence
-    // for encoding UTF8: 0x00" on the NEXT, clean statement. The liveness check
-    // on acquire makes sqlx discard a desynced connection instead.
+    // A statement future dropped mid-flight (client disconnect, the request
+    // `TimeoutLayer`, a `select!`) leaves its connection mid-exchange. sqlx
+    // pings the connection on release, which flushes the pending bytes and
+    // drains to `ReadyForQuery`, and closes it if that surfaces an error, so
+    // the pool never hands out a connection that is out of step.
     common::db::connect(db_url, &PgPoolSpec::new(max_connections, 5), session).await
 }
 
@@ -752,8 +738,12 @@ impl BootSession {
         crate::migration::refuse_foreign_schema(db).await?;
         // Create the core tables from the entity definitions, then apply the
         // schema they cannot express (see `crate::migration`).
-        db.get_schema_registry("server::entity::*").sync(db).await?;
-        Migrator::up(db, None).await?;
+        let schema = db.as_sea_orm();
+        schema
+            .get_schema_registry("server::entity::*")
+            .sync(schema)
+            .await?;
+        Migrator::up(schema, None).await?;
         crate::services::judging::install_claim_notify(db).await?;
         crate::services::plugin_config_cache::install_plugin_config_epoch(db).await
     }
@@ -883,6 +873,134 @@ mod tests {
         // Stock Postgres: 100 connections, 3 for superusers.
         assert_eq!(usable_connections(boot.conn()).await.unwrap(), 97);
         boot.release().await.unwrap();
+    }
+
+    /// Text holding NUL binds through the server's pool and its transactions
+    /// into TEXT and JSONB columns, stored with U+FFFD in place of each NUL,
+    /// where Postgres would reject the raw value with 22021 or 22P05.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nul_text_binds_through_the_pool_and_its_transactions() {
+        use sea_orm::{DbBackend, Statement, TransactionTrait};
+
+        let (_c, url) = fresh_postgres().await;
+        let db = connect_main_pool(&url, 2, &test_session())
+            .await
+            .expect("pool");
+        db.execute_unprepared("CREATE TABLE nul_probe (t text, j jsonb)")
+            .await
+            .expect("create");
+        let insert = || {
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO nul_probe (t, j) VALUES ($1, $2)",
+                [
+                    "a\u{0}b".into(),
+                    serde_json::json!({ "k\u{0}": ["x\u{0}"] }).into(),
+                ],
+            )
+        };
+        db.execute_raw(insert()).await.expect("pool insert");
+        let txn = db.begin().await.expect("begin");
+        txn.execute_raw(insert()).await.expect("transaction insert");
+        txn.execute_unprepared("INSERT INTO nul_probe (t) VALUES ('c\u{0}d')")
+            .await
+            .expect("unprepared insert");
+        txn.commit().await.expect("commit");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT t, j FROM nul_probe ORDER BY ctid",
+            ))
+            .await
+            .expect("select");
+        let stored: Vec<(String, Option<serde_json::Value>)> = rows
+            .iter()
+            .map(|row| (row.try_get("", "t").unwrap(), row.try_get("", "j").unwrap()))
+            .collect();
+        let json = serde_json::json!({ "k\u{FFFD}": ["x\u{FFFD}"] });
+        assert_eq!(
+            stored,
+            [
+                ("a\u{FFFD}b".to_string(), Some(json.clone())),
+                ("a\u{FFFD}b".to_string(), Some(json)),
+                ("c\u{FFFD}d".to_string(), None),
+            ]
+        );
+    }
+
+    /// Drive `fut` for at most `polls` polls, yielding between them, then drop
+    /// it wherever it stopped.
+    async fn abandon_after<F: std::future::Future>(fut: F, polls: u64) {
+        let mut fut = std::pin::pin!(fut);
+        for _ in 0..polls {
+            if futures::poll!(fut.as_mut()).is_ready() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Statements dropped at arbitrary points (before the write, mid-flush,
+    /// mid-response, mid-row-stream, and before a server-side 22021 arrives)
+    /// never leave a pooled connection out of step: every statement that runs
+    /// to completion afterwards gets exactly its own result, never an earlier
+    /// statement's rows or error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_statements_never_leave_a_pooled_connection_out_of_step() {
+        use sea_orm::{DbBackend, Statement};
+
+        let (_c, url) = fresh_postgres().await;
+        let db = connect_main_pool(&url, 4, &test_session())
+            .await
+            .expect("pool");
+        let victims = [
+            // Fails on the server with 22021 "invalid byte sequence for
+            // encoding \"UTF8\": 0x00" after the client has gone.
+            "SELECT pg_sleep(0.001), convert_from('\\x610062'::bytea, 'UTF8')",
+            "SELECT pg_sleep(0.002), $1::text",
+            "SELECT repeat($1, 2000) FROM generate_series(1, 300)",
+        ];
+        let workers: Vec<_> = (0..16u64)
+            .map(|worker| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let mut seed = worker.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                    for i in 0..150u64 {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        let sql = victims[(seed % 3) as usize];
+                        let values: Vec<sea_orm::Value> = if sql.contains("$1") {
+                            vec!["x".into()]
+                        } else {
+                            vec![]
+                        };
+                        let victim =
+                            Statement::from_sql_and_values(DbBackend::Postgres, sql, values);
+                        abandon_after(db.query_all_raw(victim), (seed >> 8) % 16).await;
+
+                        let token = format!("{worker}-{i}");
+                        let row = db
+                            .query_one_raw(Statement::from_sql_and_values(
+                                DbBackend::Postgres,
+                                "SELECT $1::text AS v, $2::bigint AS n",
+                                [token.clone().into(), (i as i64).into()],
+                            ))
+                            .await
+                            .unwrap_or_else(|e| {
+                                panic!("clean statement after a cancelled one failed: {e}")
+                            })
+                            .expect("one row");
+                        assert_eq!(row.try_get::<String>("", "v").unwrap(), token);
+                        assert_eq!(row.try_get::<i64>("", "n").unwrap(), i as i64);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.await.expect("worker");
+        }
     }
 
     /// The server's boot sequence as `ServerRuntime::build` runs it.
@@ -1463,19 +1581,11 @@ mod tests {
         .expect("a refused dedicated login must degrade, not error");
 
         // Degraded to app-role auth, and the returned pool actually works.
-        assert!(
-            resolved.fallback_login.is_none(),
-            "must have downgraded to app-role auth"
-        );
         assert_eq!(
             resolved.auth,
             RestrictedPluginAuth::AppRoleDegraded,
             "a refused dedicated login must classify as the app-role degrade path so \
              the caller fails raw plugin SQL closed"
-        );
-        assert_eq!(
-            resolved.fallback_url, url,
-            "fallback must report the app URL"
         );
         resolved
             .pool

@@ -1,9 +1,10 @@
+use common::db::DatabaseConnection;
 use std::collections::HashMap;
 
 use common::{DlqEnvelope, DlqErrorCode, DlqMessageType};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, sea_query::LockType,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, sea_query::LockType,
 };
 
 use crate::entity::dead_letter_message;

@@ -12,10 +12,11 @@
 //! into a [`PluginFleetResponse`] per plugin: two small queries per request,
 //! no fan-out to the replicas themselves.
 
+use common::db::DatabaseConnection;
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, Statement};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 

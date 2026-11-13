@@ -1,7 +1,8 @@
 //! Shared fixtures for the crate's unit tests.
 
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set};
+use common::db::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, ConnectionTrait, Set};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 

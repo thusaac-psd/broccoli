@@ -38,15 +38,15 @@ async fn bounded<T>(
 }
 
 pub struct DatabaseTaskCacheStore {
-    db: sea_orm::DatabaseConnection,
+    db: common::db::DatabaseConnection,
 }
 
 impl DatabaseTaskCacheStore {
-    pub fn new(db: sea_orm::DatabaseConnection) -> Self {
+    pub fn new(db: common::db::DatabaseConnection) -> Self {
         Self { db }
     }
 
-    pub async fn ensure_table(db: &sea_orm::DatabaseConnection) -> Result<(), String> {
+    pub async fn ensure_table(db: &common::db::DatabaseConnection) -> Result<(), String> {
         use sea_orm::{ConnectionTrait, Schema};
         let backend = db.get_database_backend();
         let schema = Schema::new(backend);

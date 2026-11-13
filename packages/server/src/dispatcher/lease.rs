@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use sea_orm::DatabaseConnection;
+use common::db::DatabaseConnection;
 use tokio::sync::watch;
 use tracing::{error, info};
 

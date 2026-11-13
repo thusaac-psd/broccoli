@@ -3,6 +3,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use broccoli_server_sdk::permissions as perm;
+use common::db::DatabaseTransaction;
 use sea_orm::prelude::Expr;
 use sea_orm::sea_query::{Func, LikeExpr};
 use sea_orm::*;
@@ -32,7 +33,6 @@ use crate::utils::contest::{find_contest, require_contest_started};
 use crate::utils::problem::find_problem;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::test_case_body::test_case_body_size;
-use crate::utils::text::{sanitize_db_json, sanitize_db_text};
 use crate::visibility::{Action, ProblemScope, Resource, Subject, VisibilityKernel};
 
 mod checker_source;
@@ -91,11 +91,11 @@ pub async fn create_problem(
     .await?;
 
     let now = state.clock.now();
-    let submission_format_json = submission_format
-        .map(|sf| sanitize_db_json(serde_json::to_value(sf).unwrap_or(serde_json::Value::Null)));
+    let submission_format_json =
+        submission_format.map(|sf| serde_json::to_value(sf).unwrap_or(serde_json::Value::Null));
     let new_problem = problem::ActiveModel {
-        title: Set(sanitize_db_text(payload.title.trim())),
-        content: Set(sanitize_db_text(payload.content)),
+        title: Set(payload.title.trim().to_string()),
+        content: Set(payload.content),
         time_limit: Set(payload.time_limit),
         memory_limit: Set(payload.memory_limit),
         problem_type: Set(problem_type),
@@ -391,10 +391,10 @@ pub async fn update_problem(
     let mut active: problem::ActiveModel = existing.into();
 
     if let Some(ref title) = payload.title {
-        active.title = Set(sanitize_db_text(title.trim()));
+        active.title = Set(title.trim().to_string());
     }
     if let Some(content) = payload.content {
-        active.content = Set(sanitize_db_text(content));
+        active.content = Set(content);
     }
     if let Some(tl) = payload.time_limit {
         active.time_limit = Set(tl);
@@ -419,9 +419,9 @@ pub async fn update_problem(
     }
     match submission_format {
         Some(Some(sf)) => {
-            active.submission_format = Set(Some(sanitize_db_json(
+            active.submission_format = Set(Some(
                 serde_json::to_value(sf).unwrap_or(serde_json::Value::Null),
-            )));
+            ));
         }
         Some(None) => {
             active.submission_format = Set(None);

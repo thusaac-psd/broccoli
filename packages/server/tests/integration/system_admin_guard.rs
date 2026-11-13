@@ -92,9 +92,11 @@ async fn race_behind_admin_lock(
     first: impl Future<Output = TestResponse>,
     second: impl Future<Output = TestResponse>,
 ) -> [TestResponse; 2] {
-    let blocker_db = Database::connect(&app.state.config.database.url)
-        .await
-        .unwrap();
+    let blocker_db = common::db::DatabaseConnection::from(
+        Database::connect(&app.state.config.database.url)
+            .await
+            .unwrap(),
+    );
     let blocker = blocker_db.begin().await.unwrap();
     // The lock belongs to `blocker`'s transaction; the rollback below frees it.
     SystemAdminLock::acquire(&blocker).await.unwrap();

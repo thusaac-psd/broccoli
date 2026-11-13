@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::sql::HostDbResponse;
 use broccoli_server_sdk::types::{SubmissionFeedbackAction, SubmissionFeedbackQuery};
+use common::db::DatabaseConnection;
 use extism::host_fn;
-use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 
 host_fn!(pub submission_feedback_query(user_data: Arc<(String, DatabaseConnection)>; input: String) -> String {

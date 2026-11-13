@@ -1,10 +1,11 @@
+use common::db::DatabaseConnection;
 use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde::Serialize;
 use tokio::time::timeout;
 use tracing::{instrument, warn};

@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use sea_orm::sqlx::ConnectOptions as _;
 use sea_orm::sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sea_orm::{DatabaseConnection, DbErr, RuntimeErr, SqlxPostgresConnector};
+use sea_orm::{DbErr, RuntimeErr, SqlxPostgresConnector};
+
+mod handle;
+pub use handle::{DatabaseConnection, DatabaseTransaction};
 
 /// Default server-side `statement_timeout`. Matches the HTTP `TimeoutLayer`: a
 /// handler's statement cannot usefully outlive the request that issued it.
@@ -186,7 +189,7 @@ impl PgPoolSpec {
     }
 }
 
-/// Open a pool with `spec` and `session` and wrap it for sea-orm.
+/// Open a pool with `spec` and `session` behind a [`DatabaseConnection`].
 pub async fn connect(
     url: &str,
     spec: &PgPoolSpec,
@@ -196,7 +199,7 @@ pub async fn connect(
 }
 
 /// Open a pool from pre-built options (for pools that add an `after_connect`
-/// hook or override credentials) and wrap it for sea-orm.
+/// hook or override credentials) behind a [`DatabaseConnection`].
 pub async fn connect_with(
     pool_options: PgPoolOptions,
     connect_options: PgConnectOptions,
@@ -205,7 +208,7 @@ pub async fn connect_with(
         .connect_with(connect_options)
         .await
         .map_err(sqlx_err)?;
-    Ok(SqlxPostgresConnector::from_sqlx_postgres_pool(pool))
+    Ok(SqlxPostgresConnector::from_sqlx_postgres_pool(pool).into())
 }
 
 fn sqlx_err(e: sea_orm::sqlx::Error) -> DbErr {
