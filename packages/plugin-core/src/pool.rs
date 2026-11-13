@@ -138,13 +138,15 @@ impl<T: Send + 'static> InstancePool<T> {
     }
 
     /// Instances the pool owns, leased or idle.
-    pub fn count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
         let state = self.shared.state.lock();
         state.free.len() + state.leased
     }
 
     /// Idle instances.
-    pub fn idle(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn idle(&self) -> usize {
         self.shared.state.lock().free.len()
     }
 }

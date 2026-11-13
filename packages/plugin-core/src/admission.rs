@@ -348,7 +348,8 @@ impl Admission {
     }
 
     /// Top-level calls of `kind` queued now.
-    pub fn queued_kind(&self, kind: CallKind) -> usize {
+    #[cfg(test)]
+    pub(crate) fn queued_kind(&self, kind: CallKind) -> usize {
         self.0.lock().queued[kind.index()].len()
     }
 
