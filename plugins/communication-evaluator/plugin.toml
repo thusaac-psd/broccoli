@@ -48,6 +48,7 @@ default = "cpp"
 type = "array"
 title = "Manager Source Files"
 description = "Manager source files to compile. The first entry is the primary source used for language resolution. Each entry needs a filename and the SHA-256 content hash of the file in the blob store."
+default = []
 
 [config.communication.properties.manager_sources.items]
 type = "object"
@@ -105,6 +106,16 @@ min = 1.0
 step = 0.5
 precision = 1
 
+[config.sandbox.properties.compile_extra_time_s]
+type = "number"
+title = "Compile Extra Time"
+description = "Additional compile grace time in seconds after the CPU limit"
+default = 0.0
+min = 0.0
+step = 0.5
+precision = 1
+unit = "s"
+
 [config.sandbox.properties.compile_memory_limit_kb]
 type = "integer"
 title = "Compile Memory Limit"
@@ -118,6 +129,32 @@ type = "integer"
 title = "Compile Process Limit"
 default = 32
 min = 1
+
+[config.sandbox.properties.compile_open_files_limit]
+type = "integer"
+title = "Compile Open Files Limit"
+description = "Maximum open file descriptors during compilation"
+default = 256
+min = 16
+
+[config.sandbox.properties.compile_file_size_limit_kb]
+type = "integer"
+title = "Compile File Size Limit"
+description = "Maximum output file size during compilation in KB"
+default = 524288
+min = 1024
+step = 1024
+unit = "KB"
+
+[config.sandbox.properties.exec_extra_time_s]
+type = "number"
+title = "Exec Extra Time"
+description = "Additional execution grace time in seconds after the CPU limit"
+default = 0.0
+min = 0.0
+step = 0.5
+precision = 1
+unit = "s"
 
 [config.sandbox.properties.exec_wall_time_multiplier]
 type = "number"
@@ -133,6 +170,22 @@ type = "integer"
 title = "Exec Process Limit"
 default = 1
 min = 1
+
+[config.sandbox.properties.exec_open_files_limit]
+type = "integer"
+title = "Exec Open Files Limit"
+description = "Maximum open file descriptors during execution"
+default = 64
+min = 4
+
+[config.sandbox.properties.exec_file_size_limit_kb]
+type = "integer"
+title = "Exec File Size Limit"
+description = "Maximum output file size during execution in KB"
+default = 65536
+min = 64
+step = 1024
+unit = "KB"
 
 [config.sandbox.properties.result_timeout_ms]
 type = "integer"

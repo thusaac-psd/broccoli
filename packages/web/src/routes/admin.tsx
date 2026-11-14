@@ -109,11 +109,7 @@ export default function OverviewPage() {
             ) : (
               <div className="space-y-3">
                 {contests.map((contest) => {
-                  const status = getContestStatus(
-                    contest.start_time,
-                    contest.end_time,
-                    t,
-                  );
+                  const status = getContestStatus(contest, t);
                   return (
                     <div
                       key={contest.id}

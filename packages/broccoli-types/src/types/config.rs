@@ -2,12 +2,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SdkError;
 
+/// One stored config as the host hands it to a plugin: the stored value with
+/// every default its schema declares filled in, so it deserializes into the
+/// plugin's config type without defaults of the plugin's own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigResult {
     pub config: serde_json::Value,
+    /// Nothing is stored: `config` is the schema's defaults.
     #[serde(default)]
     pub is_default: bool,
     pub enabled: Option<bool>,
+}
+
+impl ConfigResult {
+    /// The config as the plugin's config type. A config that does not
+    /// deserialize is an error, never a silent fallback to some default.
+    pub fn parse<T: serde::de::DeserializeOwned>(&self) -> Result<T, SdkError> {
+        parse(&self.config)
+    }
+}
+
+fn parse<T: serde::de::DeserializeOwned>(config: &serde_json::Value) -> Result<T, SdkError> {
+    T::deserialize(config).map_err(|e| {
+        SdkError::Serialization(format!(
+            "config does not match the plugin's config type: {e}"
+        ))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,8 +73,8 @@ pub struct EffectiveConfig {
 }
 
 impl EffectiveConfig {
+    /// See [`ConfigResult::parse`].
     pub fn parse_config<T: serde::de::DeserializeOwned>(&self) -> Result<T, SdkError> {
-        serde_json::from_value(self.config.clone())
-            .map_err(|e| SdkError::Serialization(e.to_string()))
+        parse(&self.config)
     }
 }

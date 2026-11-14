@@ -376,7 +376,7 @@ mod role_management {
         let grant_res = app
             .post_with_token(
                 &routes::role_permissions(test_role),
-                &json!({"permission": "experimental:feature"}),
+                &json!({"permission": "problem:create"}),
                 &admin_token,
             )
             .await;
@@ -386,11 +386,11 @@ mod role_management {
             .get_with_token(&routes::role_permissions(test_role), &admin_token)
             .await;
         let perms = list_res.body.as_array().unwrap();
-        assert!(perms.contains(&json!("experimental:feature")));
+        assert!(perms.contains(&json!("problem:create")));
 
         let revoke_res = app
             .delete_with_token(
-                &routes::role_permission(test_role, "experimental:feature"),
+                &routes::role_permission(test_role, "problem:create"),
                 &admin_token,
             )
             .await;
@@ -404,7 +404,7 @@ mod role_management {
                 .body
                 .as_array()
                 .unwrap()
-                .contains(&json!("experimental:feature"))
+                .contains(&json!("problem:create"))
         );
     }
 

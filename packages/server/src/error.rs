@@ -21,6 +21,12 @@ pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
+    /// A plugin config that breaks its namespace's schema, with each broken
+    /// field.
+    InvalidConfig(Vec<plugin_core::config_schema::FieldError>),
+    /// The plugin is not installed, declares no such config namespace, or
+    /// does not allow it at the requested scope.
+    ConfigNamespaceNotFound(String),
     PayloadTooLarge(String),
     TokenMissing,
     TokenInvalid,
@@ -48,6 +54,8 @@ pub enum AppError {
     /// (its plugin is still loading, or failed to load, here). Retryable: the
     /// load balancer will likely route the retry to a replica that has it.
     ContestTypeUnavailable(String),
+    /// The contest already has a submission, so its contest type is fixed.
+    ContestTypeLocked,
     Overloaded {
         retry_after: u64,
     },
@@ -84,6 +92,21 @@ impl AppError {
 
         match self {
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, simple("VALIDATION_ERROR", msg)),
+            AppError::InvalidConfig(fields) => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    code: "VALIDATION_ERROR".into(),
+                    message: format!(
+                        "Config does not match its schema: {}",
+                        plugin_core::config_schema::describe(&fields)
+                    ),
+                    details: Some(serde_json::json!({ "fields": fields })),
+                },
+            ),
+            AppError::ConfigNamespaceNotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                simple("CONFIG_NAMESPACE_NOT_FOUND", msg),
+            ),
             AppError::PayloadTooLarge(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 simple("PAYLOAD_TOO_LARGE", msg),
@@ -136,6 +159,13 @@ impl AppError {
                 simple(
                     "RATE_LIMITED",
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
+                ),
+            ),
+            AppError::ContestTypeLocked => (
+                StatusCode::CONFLICT,
+                simple(
+                    "CONTEST_TYPE_LOCKED",
+                    "The contest type cannot change once the contest has a submission".into(),
                 ),
             ),
             AppError::ContestTypeUnavailable(contest_type) => (

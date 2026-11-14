@@ -1167,6 +1167,7 @@ broccoli_plugin_admission_queued_total_created 123
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": ["batch"],
                 "checker_formats": ["exact"],
+                "default_checker_format": "lines",
                 "contest_types": ["icpc"],
                 "languages": [],
                 "evaluators": [],

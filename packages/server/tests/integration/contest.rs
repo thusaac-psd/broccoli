@@ -666,6 +666,88 @@ mod contest_update {
         assert_eq!(res.body["title"], "Updated");
     }
 
+    /// Every submission of a contest is judged and ranked under one contest
+    /// type: it can change until the first submission, never after.
+    #[tokio::test]
+    async fn contest_type_is_fixed_once_the_contest_has_a_submission() {
+        let app = TestApp::spawn().await;
+        app.state
+            .registries
+            .contest_type_registry
+            .write()
+            .await
+            .insert(
+                "other".into(),
+                server::registry::ContestTypeHandlers {
+                    plugin_id: "__test__".into(),
+                    submission_fn: "noop".into(),
+                    code_run_fn: "noop".into(),
+                    submission_admission: false,
+                },
+            );
+        let admin = app
+            .create_user_with_role("ct_admin", "pass1234", "admin")
+            .await;
+        let id = app.create_contest(&admin, "Typed", true, true).await;
+        let problem_id = app.create_problem(&admin, "P").await;
+        app.add_problem_to_contest(id, problem_id, &admin).await;
+
+        let res = app
+            .patch_with_token(
+                &routes::contest(id),
+                &json!({"contest_type": "other"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "no submission yet: {}", res.text);
+        assert_eq!(res.body["contest_type"], "other");
+
+        let user_id = {
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            use server::entity::user;
+            user::Entity::find()
+                .filter(user::Column::Username.eq("ct_admin"))
+                .one(&app.db)
+                .await
+                .unwrap()
+                .unwrap()
+                .id
+        };
+        app.insert_submission(server::entity::submission::ActiveModel {
+            files: sea_orm::Set(json!([])),
+            language: sea_orm::Set("cpp".into()),
+            user_id: sea_orm::Set(user_id),
+            problem_id: sea_orm::Set(problem_id),
+            contest_id: sea_orm::Set(Some(id)),
+            contest_type: sea_orm::Set("other".into()),
+            ..Default::default()
+        })
+        .await;
+
+        let res = app
+            .patch_with_token(
+                &routes::contest(id),
+                &json!({"contest_type": "standard"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 409, "{}", res.text);
+        assert_eq!(res.body["code"], "CONTEST_TYPE_LOCKED");
+        let res = app.get_with_token(&routes::contest(id), &admin).await;
+        assert_eq!(res.body["contest_type"], "other");
+
+        // Restating the current type, alone or beside other edits, is no change.
+        let res = app
+            .patch_with_token(
+                &routes::contest(id),
+                &json!({"contest_type": "other", "title": "Renamed"}),
+                &admin,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["title"], "Renamed");
+    }
+
     #[tokio::test]
     async fn empty_patch_returns_current_contest() {
         let app = TestApp::spawn().await;

@@ -79,3 +79,21 @@ default = 1048576
 min = 0
 step = 1024
 unit = "KB"
+
+[config.checker]
+description = "Tolerances of the tokens-float checker format: a token matches when it differs from the answer by at most max(abs_tol, rel_tol * max(|answer|, |output|))."
+scopes = ["problem"]
+
+[config.checker.properties.abs_tol]
+type = "number"
+title = "Absolute Tolerance"
+description = "Largest absolute difference accepted between a number in the output and the answer."
+default = 1e-9
+min = 0.0
+
+[config.checker.properties.rel_tol]
+type = "number"
+title = "Relative Tolerance"
+description = "Largest difference accepted relative to the larger of the two numbers."
+default = 1e-6
+min = 0.0

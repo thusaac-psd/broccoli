@@ -148,6 +148,7 @@ default = []
 
 [config.print.properties.stations.items]
 type = "object"
+required = ["name", "token"]
 
 [config.print.properties.stations.items.properties.name]
 type = "string"

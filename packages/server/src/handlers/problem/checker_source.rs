@@ -50,7 +50,7 @@ pub async fn upload_checker_source(
     // The checker source is owned by the checker plugin's problem-scoped config,
     // not the core problem model. standard-checkers reads it at judge time via
     // `host.config.get_problem(id, "checker_source")`.
-    let _ = crate::services::plugin_config::upsert_config(
+    let _ = crate::services::plugin_config::store_config(
         &state.db,
         &crate::services::plugin_config::ConfigTarget::problem(id),
         CHECKER_SOURCE_PLUGIN_ID,

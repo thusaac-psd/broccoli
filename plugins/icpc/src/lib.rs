@@ -1133,7 +1133,13 @@ fn decide_visibility_decisions(
                     fields: mask_fields.clone(),
                 };
             };
-            let config = configs.get(&contest_id).cloned().unwrap_or_default();
+            let Some(config) = configs.get(&contest_id) else {
+                // Every ICPC contest of the batch has its config loaded above;
+                // a contest without one is a mismatch: fail hidden.
+                return WireDecision::Redact {
+                    fields: mask_fields.clone(),
+                };
+            };
             let duration_ms = row.duration_ms.unwrap_or(0.0) as i64;
             let window = FreezeWindow::current(
                 config.freeze_minutes,

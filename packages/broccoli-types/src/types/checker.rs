@@ -32,13 +32,11 @@ pub struct ResolveCheckerInput {
     pub answer: JudgeFile,
     pub test_input: JudgeFile,
     /// Problem the checker is being resolved for. Checker plugins read their own
-    /// per-problem config (e.g. the testlib checker source) via
-    /// `host.config.get_problem(problem_id, ...)` instead of receiving it inlined
-    /// by the host. Optional for callers that resolve format-only builtins.
+    /// per-problem config (the testlib checker source, the `tokens-float`
+    /// tolerances) via `host.config.get_problem(problem_id, ...)` instead of
+    /// receiving it inlined by the host.
     #[serde(default)]
     pub problem_id: Option<i32>,
-    #[serde(default)]
-    pub config: Option<serde_json::Value>,
     pub output_binding: OutputMode,
 }
 
@@ -140,7 +138,6 @@ mod tests {
             answer: JudgeFile::inline("answer\n"),
             test_input: JudgeFile::inline("input\n"),
             problem_id: Some(42),
-            config: Some(serde_json::json!({"strict": true})),
             output_binding: OutputMode::File {
                 name: "result.json".to_string(),
             },
@@ -154,7 +151,6 @@ mod tests {
         assert_eq!(back.answer.inline_text(), "answer\n");
         assert_eq!(back.test_input.inline_text(), "input\n");
         assert_eq!(back.problem_id, Some(42));
-        assert_eq!(back.config, Some(serde_json::json!({"strict": true})));
         match back.output_binding {
             OutputMode::File { name } => assert_eq!(name, "result.json"),
             _ => panic!("expected file variant"),

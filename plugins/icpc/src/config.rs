@@ -1,24 +1,23 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The `contest` config namespace. Its defaults and bounds live in the
+/// namespace's schema in `plugin.toml`; the host fills them in, so every
+/// field is present here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContestConfig {
-    /// Minutes of penalty per wrong submission before AC (default: 20).
-    #[serde(default = "default_penalty_minutes")]
+    /// Minutes of penalty per wrong submission before AC.
     pub penalty_minutes: i32,
 
-    /// Whether compilation errors count as penalty attempts (default: false).
-    #[serde(default)]
+    /// Whether compilation errors count as penalty attempts.
     pub count_compile_error: bool,
 
-    /// Whether contestants see per-test-case verdicts (default: false).
-    #[serde(default)]
+    /// Whether contestants see per-test-case verdicts.
     pub show_test_details: bool,
 
     /// Whether contestants see the FULL live scoreboard during the contest
-    /// (standard public-ICPC behavior). Default false = each contestant sees only
-    /// their own row until the contest ends; organizers (contest:manage) always
-    /// see all rows.
-    #[serde(default)]
+    /// (standard public-ICPC behavior). Off: each contestant sees only their
+    /// own row until the contest ends; organizers (contest:manage) always see
+    /// all rows.
     pub public_standings: bool,
 
     /// Scoreboard freeze window in minutes before the contest end (0 = disabled).
@@ -26,12 +25,7 @@ pub struct ContestConfig {
     /// rank/solved/penalty, and submissions made during the freeze show as PENDING
     /// ("?") instead of AC/WA. Organizers (contest:manage) always see the real
     /// board; the board unfreezes for everyone once the contest ends.
-    #[serde(default)]
     pub freeze_minutes: i32,
-}
-
-fn default_penalty_minutes() -> i32 {
-    20
 }
 
 /// The freeze-gating decision for one viewer, computed purely (no DB/host) so it
@@ -159,10 +153,43 @@ impl ProblemState {
 mod tests {
     use super::*;
 
+    /// A partial stored config reads as the schema fills it in: one stored
+    /// field never resets the others.
     #[test]
-    fn custom_penalty_minutes() {
-        let config: ContestConfig = serde_json::from_str(r#"{"penalty_minutes": 10}"#).unwrap();
-        assert_eq!(config.penalty_minutes, 10);
+    fn a_partial_config_keeps_the_schema_defaults_of_the_other_fields() {
+        let host = broccoli_server_sdk::Host::mock();
+        host.config.seed(
+            "contest",
+            "2",
+            "contest",
+            serde_json::json!({"freeze_minutes": 15, "public_standings": true}),
+        );
+        let config: ContestConfig = host
+            .config
+            .get_contest(2, "contest")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(config.penalty_minutes, 20);
+        assert_eq!(config.freeze_minutes, 15);
+        assert!(config.public_standings);
+    }
+
+    #[test]
+    fn a_config_of_the_wrong_shape_is_an_error() {
+        let host = broccoli_server_sdk::Host::mock();
+        host.config.seed(
+            "contest",
+            "2",
+            "contest",
+            serde_json::json!({"penalty_minutes": "20"}),
+        );
+        let result = host
+            .config
+            .get_contest(2, "contest")
+            .unwrap()
+            .parse::<ContestConfig>();
+        assert!(result.is_err(), "{result:?}");
     }
 
     // duration 300min, freeze 60min -> freeze window opens at 240min elapsed.

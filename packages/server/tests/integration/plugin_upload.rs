@@ -348,6 +348,110 @@ async fn inspecting_an_archive_reports_what_it_would_publish() {
     assert!(res.body["current"].is_null(), "{}", res.text);
 }
 
+/// An upgrade whose config schemas refuse configs already stored lists them,
+/// before publishing (inspect) and after (upload), instead of letting them
+/// fail when the plugin reads them.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upgrade_reports_the_stored_configs_its_schemas_refuse() {
+    use sea_orm::{ActiveModelTrait, Set};
+    use server::entity::plugin_config;
+
+    let a = TestApp::spawn_with_plugins().await;
+    let token = admin(&a).await;
+    for (scope, ref_id, namespace, config) in [
+        ("problem", "7", "server-plugin:limits", json!({"max": 50})),
+        ("problem", "8", "server-plugin:limits", json!({"max": 5})),
+        ("contest", "3", "server-plugin:retired", json!({})),
+        (
+            "plugin",
+            BUNDLED,
+            "limits",
+            json!({"max": 5, "extra": true}),
+        ),
+    ] {
+        plugin_config::ActiveModel {
+            scope: Set(scope.into()),
+            ref_id: Set(ref_id.into()),
+            namespace: Set(namespace.into()),
+            config: Set(config),
+            enabled: Set(None),
+            position: Set(0),
+            updated_at: sea_orm::NotSet,
+        }
+        .insert(&a.db)
+        .await
+        .unwrap();
+    }
+    let manifest = std::fs::read_to_string(fixture(BUNDLED).join("plugin.toml")).unwrap()
+        + r#"
+[config.limits]
+scopes = ["plugin", "problem"]
+
+[config.limits.properties.max]
+type = "integer"
+max = 10
+"#;
+    let wasm = std::fs::read(fixture(BUNDLED).join("server_plugin.wasm")).unwrap();
+    let upgrade = tar_gz(&[
+        (&format!("{BUNDLED}/plugin.toml"), manifest.as_bytes()),
+        (&format!("{BUNDLED}/server_plugin.wasm"), &wasm),
+    ]);
+
+    let res = a
+        .post_plugin_archive(
+            routes::ADMIN_PLUGIN_UPLOAD_INSPECT,
+            upgrade.clone(),
+            &[],
+            &token,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    let reported = |body: &Value| -> Vec<(String, String, String, Vec<String>)> {
+        body["incompatible_configs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no incompatible_configs: {body}"))
+            .iter()
+            .map(|c| {
+                (
+                    c["scope"].as_str().unwrap().to_string(),
+                    c["ref_id"].as_str().unwrap().to_string(),
+                    c["namespace"].as_str().unwrap().to_string(),
+                    c["errors"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|e| e["path"].as_str().unwrap().to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let expected = vec![
+        (
+            "contest".into(),
+            "3".into(),
+            "retired".into(),
+            vec![String::new()],
+        ),
+        (
+            "plugin".into(),
+            BUNDLED.into(),
+            "limits".into(),
+            vec!["extra".into()],
+        ),
+        (
+            "problem".into(),
+            "7".into(),
+            "limits".into(),
+            vec!["max".into()],
+        ),
+    ];
+    assert_eq!(reported(&res.body), expected);
+
+    let uploaded = upload(&a, &token, upgrade).await;
+    assert_eq!(reported(&uploaded), expected);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_corrupt_archive_is_rejected_and_publishes_nothing() {
     let a = TestApp::spawn_with_plugins().await;

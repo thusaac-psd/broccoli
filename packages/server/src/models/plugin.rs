@@ -79,7 +79,7 @@ pub struct ConfigSchemaResponse {
     pub namespace: String,
     #[schema(example = "Testlib checker compiler settings")]
     pub description: Option<String>,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<plugin_core::manifest::ConfigScope>,
     pub json_schema: serde_json::Value,
 }
 
@@ -383,6 +383,10 @@ pub struct PluginArchiveSummary {
     pub size_bytes: u64,
     /// What the fleet runs under this id now; `None` for a new plugin.
     pub current: Option<PublishedPluginResponse>,
+    /// Stored configs of this plugin that the archive's config schemas
+    /// refuse. Publishing it leaves them in place, and the plugin reports an
+    /// error wherever it reads one, so fix or delete them.
+    pub incompatible_configs: Vec<crate::services::plugin_config::IncompatibleConfig>,
 }
 
 /// What the fleet currently publishes for a plugin id.
@@ -406,6 +410,9 @@ pub struct PluginUploadResponse {
     pub version: String,
     pub archive_hash: String,
     pub message: String,
+    /// Stored configs of this plugin that the published version's config
+    /// schemas refuse, as inspecting the archive reports them.
+    pub incompatible_configs: Vec<crate::services::plugin_config::IncompatibleConfig>,
 }
 
 /// Whether this server accepts plugin uploads.

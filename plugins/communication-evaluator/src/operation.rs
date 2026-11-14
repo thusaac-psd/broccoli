@@ -18,12 +18,6 @@ pub fn build_operation(
     if n == 0 {
         return Err("num_processes must be >= 1".to_string());
     }
-    if comm_config.num_processes > comm_config.max_processes {
-        return Err(format!(
-            "num_processes ({}) exceeds max_processes ({})",
-            comm_config.num_processes, comm_config.max_processes
-        ));
-    }
 
     let time_limit_ms = u32::try_from(req.time_limit_ms)
         .map_err(|_| format!("Invalid time_limit_ms: {}", req.time_limit_ms))?;
@@ -31,7 +25,7 @@ pub fn build_operation(
     let memory_limit_kb = u32::try_from(req.memory_limit_kb)
         .map_err(|_| format!("Invalid memory_limit_kb: {}", req.memory_limit_kb))?;
 
-    let buffer_size = comm_config.fifo_buffer_size as usize;
+    let buffer_size = crate::config::FIFO_BUFFER_SIZE;
     let mut channels = Vec::new();
     for i in 0..n {
         // Declare each channel's producer/consumer STEP ids. The manager opens
@@ -335,8 +329,7 @@ mod tests {
             evaluate_batch_id: Some("test-batch".to_string()),
             test_input: JudgeFile::inline("5\n1 2 3 4 5\n"),
             expected_output: JudgeFile::Missing,
-            checker_format: None,
-            checker_config: None,
+            checker_format: "lines".to_string(),
             additional_file_refs: vec![],
             target_worker_id: None,
         }
@@ -393,13 +386,7 @@ mod tests {
         }]
     }
 
-    fn default_comm() -> CommConfig {
-        CommConfig::default()
-    }
-
-    fn default_sandbox() -> SandboxConfig {
-        SandboxConfig::default()
-    }
+    use crate::config::tests::{default_comm, default_sandbox};
 
     fn build(req: &BuildEvalOpsInput, comm: &CommConfig) -> Vec<OperationTask> {
         build_operation(

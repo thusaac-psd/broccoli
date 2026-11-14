@@ -54,10 +54,22 @@ pub fn handle_standings(
          WHERE contest_id = {} ORDER BY position, problem_id",
         p.bind(contest_id)
     );
-    let mut problems: Vec<Problem> = host.db.query_with_args(&sql, &p.into_args())?;
-    for problem in &mut problems {
-        problem.points = ProblemConfig::load(host, contest_id, problem.problem_id)?.points;
+    #[derive(serde::Deserialize)]
+    struct ProblemRow {
+        problem_id: i32,
+        label: Option<String>,
     }
+    let rows: Vec<ProblemRow> = host.db.query_with_args(&sql, &p.into_args())?;
+    let problems = rows
+        .into_iter()
+        .map(|row| {
+            Ok(Problem {
+                points: ProblemConfig::load(host, contest_id, row.problem_id)?.points,
+                problem_id: row.problem_id,
+                label: row.label,
+            })
+        })
+        .collect::<Result<Vec<_>, SdkError>>()?;
 
     let mut p = Params::new();
     let sql = format!(

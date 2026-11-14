@@ -124,7 +124,7 @@ mod tests {
                 "settings".into(),
                 ConfigNamespace {
                     description: Some("External".into()),
-                    scopes: vec!["plugin".into()],
+                    scopes: vec![ConfigScope::Plugin],
                     schema: Some("config/settings.schema.toml".into()),
                     properties: HashMap::new(),
                 },
@@ -166,7 +166,7 @@ mod tests {
                 "evil".into(),
                 ConfigNamespace {
                     description: None,
-                    scopes: vec!["plugin".into()],
+                    scopes: vec![ConfigScope::Plugin],
                     schema: Some("../secret.toml".into()),
                     properties: HashMap::new(),
                 },
@@ -193,7 +193,7 @@ mod tests {
         assert!(server.permissions.contains(&"config:read".to_string()));
 
         let testlib = &manifest.config["testlib"];
-        assert_eq!(testlib.scopes, vec!["plugin"]);
+        assert_eq!(testlib.scopes, vec![ConfigScope::Plugin]);
         assert!(testlib.properties.contains_key("compile_time_limit_s"));
         assert!(testlib.properties.contains_key("cpp"));
 

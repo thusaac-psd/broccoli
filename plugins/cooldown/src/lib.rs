@@ -10,10 +10,12 @@ mod plugin {
 
     use crate::gate::{self, Clocks, CooldownKey};
 
-    #[derive(Debug, Default, Deserialize)]
+    /// The `cooldown` config namespace, with the schema's defaults filled in
+    /// by the host.
+    #[derive(Debug, Deserialize)]
     struct CooldownConfig {
-        #[serde(default)]
-        cooldown_seconds: Option<u32>,
+        /// 0 = no cooldown.
+        cooldown_seconds: u32,
     }
 
     /// Schema bootstrap, invoked by the host on plugin load.
@@ -34,25 +36,21 @@ mod plugin {
     }
 
     /// The configured cooldown, `None` when the gate is off for this resource
-    /// (disabled, zero, or unresolvable config).
-    fn active_cooldown(host: &Host, problem_id: i32, contest_id: Option<i32>) -> Option<u32> {
-        let eff = match host
+    /// (disabled or zero). A config that cannot be read is an error, so the
+    /// submission fails instead of slipping past the cooldown.
+    fn active_cooldown(
+        host: &Host,
+        problem_id: i32,
+        contest_id: Option<i32>,
+    ) -> Result<Option<u32>, SdkError> {
+        let eff = host
             .config
-            .get_effective("cooldown", problem_id, contest_id)
-        {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = host.log.info(&format!(
-                    "[cooldown] Failed to resolve config: {e}, using default (disabled)"
-                ));
-                return None;
-            }
-        };
+            .get_effective("cooldown", problem_id, contest_id)?;
         if !eff.is_enabled {
-            return None;
+            return Ok(None);
         }
-        let config: CooldownConfig = eff.parse_config().unwrap_or_default();
-        config.cooldown_seconds.filter(|&c| c > 0)
+        let config: CooldownConfig = eff.parse_config()?;
+        Ok(Some(config.cooldown_seconds).filter(|&c| c > 0))
     }
 
     fn reject_response(remaining: u64, cooldown: u32) -> FnResult<String> {
@@ -78,7 +76,7 @@ mod plugin {
     pub fn check_cooldown(input: String) -> FnResult<String> {
         let host = Host::new();
         let event: BeforeSubmissionEvent = serde_json::from_str(&input)?;
-        let Some(cooldown) = active_cooldown(&host, event.problem_id, event.contest_id) else {
+        let Some(cooldown) = active_cooldown(&host, event.problem_id, event.contest_id)? else {
             return Ok(serde_json::to_string(&HookResponse::pass())?);
         };
         let key = CooldownKey {
@@ -146,8 +144,8 @@ mod plugin {
             });
         }
 
-        let config: CooldownConfig = eff.parse_config().unwrap_or_default();
-        let cooldown = config.cooldown_seconds.unwrap_or(0);
+        let config: CooldownConfig = eff.parse_config()?;
+        let cooldown = config.cooldown_seconds;
         let clocks = clocks(
             host,
             &CooldownKey {

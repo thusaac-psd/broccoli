@@ -1067,6 +1067,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "problem_types": ["batch", "interactive"],
                 "checker_formats": ["exact", "tokens"],
+                "default_checker_format": "lines",
                 "contest_types": ["icpc", "ioi"],
                 "languages": [],
                 "evaluators": [],

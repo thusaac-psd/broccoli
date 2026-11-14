@@ -218,6 +218,9 @@ pub struct AdminFanOutSubmissionRequest {
     #[schema(example = 1)]
     #[serde(default)]
     pub contest_id: Option<i32>,
+    /// For a practice submission, the contest type that judges it instead of
+    /// the problem's default. A contest submission is judged under its
+    /// contest's type; naming another is a validation error.
     #[schema(example = "ioi")]
     #[serde(default)]
     pub contest_type: Option<String>,

@@ -151,6 +151,7 @@ scopes = ["contest_problem"]
 type = "array"
 title = "Subtask Definitions"
 description = "Define subtask groups with scoring methods. Leave empty for flat scoring."
+default = []
 span = 2
 
 [config.task.properties.subtasks.items]
@@ -183,6 +184,7 @@ unit = "pts"
 type = "array"
 title = "Test Cases"
 description = "Labels of test cases in this subtask"
+default = []
 
 [config.task.properties.subtasks.items.properties.test_cases.items]
 type = "string"

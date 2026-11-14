@@ -334,6 +334,7 @@ pub async fn get_contest_my_info(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = ErrorBody),
+        (status = 409, description = "The contest type cannot change once the contest has a submission (CONTEST_TYPE_LOCKED)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -362,6 +363,12 @@ pub async fn update_contest(
 
     let txn = state.db.begin().await?;
     let existing = find_contest_for_update(&txn, id).await?;
+    if let Some(ref contest_type) = payload.contest_type
+        && existing.contest_type.as_deref() != Some(contest_type.as_str())
+        && crate::utils::contest::contest_has_submissions(&txn, id).await?
+    {
+        return Err(AppError::ContestTypeLocked);
+    }
 
     validate_contest_timeline(
         payload.activate_time.unwrap_or(existing.activate_time),

@@ -67,6 +67,8 @@ impl PluginEntry {
         root_dir: PathBuf,
         manifest: PluginManifest,
     ) -> Result<Self, PluginError> {
+        crate::config_schema::check_manifest(&manifest)
+            .map_err(|e| PluginError::LoadFailed(format!("Plugin '{id}': {e}")))?;
         let mut router = Router::new();
 
         if let Some(server_config) = &manifest.server {

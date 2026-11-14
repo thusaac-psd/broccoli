@@ -203,7 +203,7 @@ broccoli-dev plugin watch my-plugin --server http://localhost:3000
 
 - 宿主能力位于 `host` 之下。使用 `host.db` 配合 `Params` 构造器进行参数化 SQL，使用
   `host.config.get_effective` 获取分层配置，使用 `host.log` 记录日志。
-- 在 `plugin.toml` 中声明 `[config.<plugin>]` 段，即可在管理界面获得一个设置表单，其作用
-  域可以是题目、比赛或比赛题目。
+- 在 `plugin.toml` 中声明 `[config.<namespace>]` 段，即可在管理界面获得一个设置表单，其作用
+  域可以是题目、比赛或比赛题目。参见[配置](./configuration.md)。
 - 使用 web SDK 将前端组件挂载到具名插槽中。参见完整插件清单中的 `[web]` 与
   `[[web.slots]]` 段。
