@@ -1,31 +1,57 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { contestStatus } from './status.ts';
+import { contestStatus, nextPhaseChange, phaseHasStarted } from './status.ts';
 
-const at = (iso: string) => Date.parse(iso);
-const window = {
-  activate_time: '2026-01-01T00:00:00Z',
+const times = {
   start_time: '2026-01-02T00:00:00Z',
   end_time: '2026-01-02T05:00:00Z',
-  deactivate_time: '2026-01-03T00:00:00Z',
 };
 
-test('a contest without an activate time is a draft, whatever its times', () => {
-  const draft = { ...window, activate_time: null };
-  assert.equal(contestStatus(draft, at('2026-01-02T01:00:00Z')), 'draft');
-  assert.equal(contestStatus(draft, at('2027-01-01T00:00:00Z')), 'draft');
+test('an unactivated contest is a draft without an activate time', () => {
+  assert.equal(
+    contestStatus({ phase: 'unactivated', activate_time: null }),
+    'draft',
+  );
+  assert.equal(
+    contestStatus({
+      phase: 'unactivated',
+      activate_time: '2026-01-01T00:00:00Z',
+    }),
+    'scheduled',
+  );
 });
 
-test('contestStatus follows the activation window around the phases', () => {
-  assert.equal(contestStatus(window, at('2025-12-31T00:00:00Z')), 'scheduled');
-  assert.equal(contestStatus(window, at('2026-01-01T12:00:00Z')), 'upcoming');
-  assert.equal(contestStatus(window, at('2026-01-02T01:00:00Z')), 'running');
-  assert.equal(contestStatus(window, at('2026-01-02T06:00:00Z')), 'ended');
-  assert.equal(
-    contestStatus(window, at('2026-01-03T00:00:00Z')),
+test('every other status is the server phase as it is', () => {
+  for (const phase of [
+    'upcoming',
+    'running',
+    'ended',
     'deactivated',
+  ] as const) {
+    assert.equal(
+      contestStatus({ phase, activate_time: '2026-01-01T00:00:00Z' }),
+      phase,
+    );
+  }
+});
+
+test('the phase changes next at the start, then at the end', () => {
+  assert.equal(
+    nextPhaseChange({ phase: 'upcoming', ...times }),
+    Date.parse(times.start_time),
   );
-  const open = { ...window, deactivate_time: null };
-  assert.equal(contestStatus(open, at('2027-01-01T00:00:00Z')), 'ended');
+  assert.equal(
+    nextPhaseChange({ phase: 'running', ...times }),
+    Date.parse(times.end_time),
+  );
+  assert.equal(nextPhaseChange({ phase: 'ended', ...times }), null);
+  assert.equal(nextPhaseChange({ phase: 'unactivated', ...times }), null);
+});
+
+test('a contest has started once it runs', () => {
+  assert.equal(phaseHasStarted('upcoming'), false);
+  assert.equal(phaseHasStarted('unactivated'), false);
+  assert.equal(phaseHasStarted('running'), true);
+  assert.equal(phaseHasStarted('ended'), true);
 });

@@ -1,8 +1,4 @@
-import {
-  serverNow,
-  useApiClient,
-  useServerTimeReached,
-} from '@broccoli/web-sdk/api';
+import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
@@ -11,6 +7,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchContestProblemList } from '@/features/contest/api/fetch-contest-problem-list';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { problemListRefetchInterval } from '@/features/contest/utils/problem-refresh';
+import { phaseHasStarted } from '@/features/contest/utils/status';
 
 /**
  * The problems of `contestId` the viewer may see. Every view of the list
@@ -29,17 +26,15 @@ export function useContestProblems(contestId: number | null | undefined) {
   const presentation = useProblemPresentation(contestId, user?.id);
   const id = contestId ?? NaN;
   const { contest } = useContestInfo(id);
-  const started = useServerTimeReached(
-    contest ? Date.parse(contest.start_time) : null,
-  );
   const canManage = !!user?.permissions.includes(CONTEST_MANAGE);
-  const awaitingStart = !!contest && !started && !canManage;
+  const awaitingStart =
+    !!contest && !phaseHasStarted(contest.phase) && !canManage;
 
   const query = useQuery({
     queryKey: ['contest-problems', contestId, viewerCacheKey(user)],
     enabled: authReady && !!contest && !awaitingStart,
     queryFn: () => fetchContestProblemList(apiClient, id),
-    refetchInterval: () => problemListRefetchInterval(contest, serverNow()),
+    refetchInterval: () => problemListRefetchInterval(contest),
   });
 
   return {

@@ -3,6 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use broccoli_types::types::ContestPhase;
+
 use crate::shared::Pagination;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -74,6 +76,9 @@ pub struct ContestResponse {
     pub created_at: DateTime<Utc>,
     #[schema(example = "2025-09-25T10:30:00Z")]
     pub updated_at: DateTime<Utc>,
+    /// Where the contest is now, on the server's clock. Clients render this
+    /// rather than comparing the timeline with their own clock.
+    pub phase: ContestPhase,
 }
 
 /// One contest in a contest list.
@@ -105,6 +110,8 @@ pub struct ContestListItem {
     pub created_at: DateTime<Utc>,
     #[schema(example = "2025-09-25T10:30:00Z")]
     pub updated_at: DateTime<Utc>,
+    /// Where the contest is now, on the server's clock.
+    pub phase: ContestPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

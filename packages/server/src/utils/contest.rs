@@ -1,6 +1,6 @@
 use broccoli_server_sdk::permissions as perm;
 use chrono::{DateTime, Utc};
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, Select};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Select};
 
 use crate::entity::{contest, contest_problem, contest_user, problem};
 use crate::error::AppError;
@@ -14,13 +14,31 @@ pub use broccoli_server_sdk::types::ContestPhase;
 
 /// The phase of `contest` at `now`.
 pub fn contest_phase(contest: &contest::Model, now: DateTime<Utc>) -> ContestPhase {
-    if contest.activate_time.is_none_or(|at| at > now) {
+    phase_at(
+        contest.activate_time,
+        contest.start_time,
+        contest.end_time,
+        contest.deactivate_time,
+        now,
+    )
+}
+
+/// The phase at `now` of the contest with this timeline: the one definition
+/// of every phase boundary.
+pub fn phase_at(
+    activate_time: Option<DateTime<Utc>>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    deactivate_time: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> ContestPhase {
+    if activate_time.is_none_or(|at| at > now) {
         ContestPhase::Unactivated
-    } else if contest.deactivate_time.is_some_and(|dt| dt <= now) {
+    } else if deactivate_time.is_some_and(|dt| dt <= now) {
         ContestPhase::Deactivated
-    } else if !start_has_passed(contest, now) {
+    } else if now < start_time {
         ContestPhase::Upcoming
-    } else if now < contest.end_time {
+    } else if now < end_time {
         ContestPhase::Running
     } else {
         ContestPhase::Ended
@@ -31,7 +49,14 @@ pub fn contest_phase(contest: &contest::Model, now: DateTime<Utc>) -> ContestPha
 /// activation state: the boundary between [`ContestPhase::Upcoming`] and
 /// [`ContestPhase::Running`]. From then on standings may exist.
 pub fn start_has_passed(contest: &contest::Model, now: DateTime<Utc>) -> bool {
-    now >= contest.start_time
+    phase_at(
+        Some(contest.start_time),
+        contest.start_time,
+        contest.end_time,
+        None,
+        now,
+    )
+    .has_started()
 }
 
 /// Whether a submission's compile output is shown to viewers who neither own
@@ -40,20 +65,6 @@ pub fn start_has_passed(contest: &contest::Model, now: DateTime<Utc>) -> bool {
 /// opts in with `show_compile_output`.
 pub fn compile_output_public(contest: Option<&contest::Model>, now: DateTime<Utc>) -> bool {
     contest.is_none_or(|c| c.show_compile_output || contest_phase(c, now).has_ended())
-}
-
-/// SQL form of [`ContestPhase::is_active`] at `now`, for filters pushed into
-/// a contest query. Keep the two in step: they must agree on every
-/// boundary.
-pub fn contest_active_condition(now: DateTime<Utc>) -> Condition {
-    Condition::all()
-        .add(contest::Column::ActivateTime.is_not_null())
-        .add(contest::Column::ActivateTime.lte(now))
-        .add(
-            Condition::any()
-                .add(contest::Column::DeactivateTime.is_null())
-                .add(contest::Column::DeactivateTime.gt(now)),
-        )
 }
 
 /// Whether any submission was made to the contest. From the first one on,

@@ -1,12 +1,10 @@
-import { useApiClient, useServerNow } from '@broccoli/web-sdk/api';
-import { useAuthReady } from '@broccoli/web-sdk/auth';
+import { useServerNow } from '@broccoli/web-sdk/api';
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
-import { useQuery } from '@tanstack/react-query';
 import { Fragment } from 'react';
 import { useParams } from 'react-router';
 
-import { contestPhase } from '@/features/contest/utils/status';
+import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 
 // -- helpers ------------------------------------------------------------------
 
@@ -39,29 +37,23 @@ const ACCENT = 'hsl(var(--primary))';
 // -- shared data hook ----------------------------------------------------------
 
 function useCountdownData(contestId: number) {
-  const apiClient = useApiClient();
-  const authReady = useAuthReady();
   // The server enforces the window by its clock, so count down by it too.
   const now = useServerNow(1000);
-
-  const { data: contest } = useQuery({
-    queryKey: ['contest', contestId],
-    enabled: authReady && Number.isFinite(contestId) && contestId > 0,
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET('/contests/{id}', {
-        params: { path: { id: contestId } },
-      });
-      if (error) throw error;
-      return data;
-    },
-    staleTime: 60_000,
-  });
+  const { contest } = useContestInfo(
+    Number.isFinite(contestId) && contestId > 0 ? contestId : NaN,
+  );
 
   if (!contest) return null;
 
   const startMs = Date.parse(contest.start_time);
   const endMs = Date.parse(contest.end_time);
-  const phase = contestPhase(startMs, endMs, now);
+  // The server's phase; `useContestInfo` asks again once it is due to change.
+  const phase =
+    contest.phase === 'unactivated' || contest.phase === 'upcoming'
+      ? 'upcoming'
+      : contest.phase === 'running'
+        ? 'running'
+        : 'ended';
 
   const tl = getTimeLeft(phase === 'upcoming' ? startMs : endMs, now);
   const totalDuration = endMs - startMs;

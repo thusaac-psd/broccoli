@@ -25,25 +25,19 @@ use tracing::instrument;
 // `find_contest` (via `find_active_by_id`) runs BEFORE the kernel gate, so a
 // soft-deleted contest is 404 even for a `contest:manage` admin - pinned by
 // `visibility_matrix::soft_delete::contest_soft_deleted_is_not_found_even_for_contest_manage_admin`.
-// `list_contests` filters the same window/is_public/participant conditions
-// at the SQL layer (necessary: pagination's COUNT/OFFSET/LIMIT must operate
-// over the filtered set at the DB layer, which a per-row kernel decision
-// cannot do without first fetching the whole table) with a
-// perm::CONTEST_MANAGE bypass for the admin view, pinned by
+// `list_contests` narrows a viewer without perm::CONTEST_MANAGE to public
+// or enrolled contests in SQL and to contests inside their activation window
+// with `utils::contest::contest_phase`, the one definition of the window,
+// before paging (the admin view pages in SQL), pinned by
 // `contestant_sees_only_public_and_enrolled_contests`,
 // `contestant_does_not_see_never_activating_contests`,
 // `contestant_does_not_see_not_yet_activated_contests`, and
 // `contestant_does_not_see_deactivated_contests` - then also runs every
-// fetched page (bounded to `per_page`, max 100) through
+// page (bounded to `per_page`, max 100) through
 // `kernel.decide_batch(Action::Read, ..)` and drops any row the kernel
 // denies, so the same future contest-scoped plugin narrowing applies here
-// too. The SQL predicate is a byte-identical mirror of the same host rule
-// the kernel applies, so it cannot ALLOW a row the kernel would deny; the
-// kernel pass can only shrink a page the SQL filter already selected, never
-// add a row back - the failure direction if the two predicates ever drift
-// is under-inclusion (an availability bug, visible as `data.len()` <
-// `pagination.total` for that page), never over-inclusion (a disclosure
-// bug). No bundled plugin registers for `Resource::Contest`, so with the
+// too. The kernel pass can only shrink a page the window filter selected,
+// never add a row back. No bundled plugin registers for `Resource::Contest`, so with the
 // bundled plugins these kernel gates answer exactly as the host rule does -
 // the same as every other `Resource::Contest` gate in this codebase (see
 // `handlers/clarification.rs`). `list_participants`
@@ -62,7 +56,7 @@ use crate::services::plugin_config::{
     ConfigTarget, ConfigTargetPattern, delete_config_by_target, delete_config_by_target_pattern,
 };
 use crate::state::AppState;
-use crate::utils::contest::{contest_active_condition, find_contest};
+use crate::utils::contest::find_contest;
 use crate::utils::soft_delete::SoftDeletable;
 use crate::visibility::{Action, Resource, Subject, VisibilityKernel};
 
@@ -125,7 +119,7 @@ pub async fn create_contest(
 
     let model = new_contest.insert(&state.db).await?;
 
-    Ok((StatusCode::CREATED, Json(ContestResponse::from(model))))
+    Ok((StatusCode::CREATED, Json(contest_response(model, now))))
 }
 #[utoipa::path(
     get,
@@ -152,10 +146,14 @@ pub async fn list_contests(
     let window = PageWindow::new(query.page, query.per_page)?;
 
     let mut select = contest::Entity::find_active();
-
-    if !auth_user.has_permission(perm::CONTEST_MANAGE) {
-        let now = state.clock.now();
-        select = select.filter(contest_active_condition(now)).filter(
+    let now = state.clock.now();
+    // Everyone but `contest:manage` sees only contests inside their activation
+    // window, which only `contest_phase` decides: those rows are filtered and
+    // paged here, after the query. A deployment holds tens of contests, so
+    // reading all of a viewer's candidates costs one small query.
+    let manager = auth_user.has_permission(perm::CONTEST_MANAGE);
+    if !manager {
+        select = select.filter(
             Condition::any()
                 .add(contest::Column::IsPublic.eq(true))
                 .add(
@@ -200,22 +198,38 @@ pub async fn list_contests(
         }
     };
 
-    let total = select.clone().count(&state.db).await?;
-
     select = select.order_by_with_nulls(sort_column, sort_order, sea_query::NullOrdering::Last);
 
-    let data = select
-        .offset(Some(window.offset()))
-        .limit(Some(window.limit()))
-        .into_partial_model::<ContestListRow>()
-        .all(&state.db)
-        .await?;
+    let (data, total) = if manager {
+        let total = select.clone().count(&state.db).await?;
+        let page = select
+            .offset(Some(window.offset()))
+            .limit(Some(window.limit()))
+            .into_partial_model::<ContestListRow>()
+            .all(&state.db)
+            .await?;
+        (page, total)
+    } else {
+        let active: Vec<ContestListRow> = select
+            .into_partial_model::<ContestListRow>()
+            .all(&state.db)
+            .await?
+            .into_iter()
+            .filter(|row| row.phase(now).is_active())
+            .collect();
+        let total = active.len() as u64;
+        let page = active
+            .into_iter()
+            .skip(usize::try_from(window.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window.limit()).unwrap_or(usize::MAX))
+            .collect();
+        (page, total)
+    };
 
     // Kernel narrowing pass over this page only (bounded by `per_page`,
     // clamped above to at most 100) - see the module-level comment for why
-    // the SQL filter above stays and this cannot disagree with it in the
-    // disclosure direction. The kernel OWNS the subject: one kernel per
-    // request per subject.
+    // it can only shrink the page. The kernel OWNS the subject: one kernel
+    // per request per subject.
     let kernel = VisibilityKernel::new(&state, Subject::from_auth_user(&auth_user));
     let resources: Vec<Resource> = data.iter().map(|c| Resource::Contest(c.id)).collect();
     let decisions = kernel.decide_batch(Action::Read, &resources).await?;
@@ -226,7 +240,7 @@ pub async fn list_contests(
             if decision.is_denied() {
                 None
             } else {
-                Some(ContestListItem::from(item))
+                Some(item.into_item(now))
             }
         })
         .collect();
@@ -270,7 +284,7 @@ pub async fn get_contest(
         return Err(AppError::NotFound("Contest not found".into()));
     }
 
-    Ok(Json(model.into()))
+    Ok(Json(contest_response(model, state.clock.now())))
 }
 #[utoipa::path(
     get,
@@ -359,7 +373,7 @@ pub async fn update_contest(
 
     if payload == UpdateContestRequest::default() {
         let existing = find_contest(&state.db, id).await?;
-        return Ok(Json(existing.into()));
+        return Ok(Json(contest_response(existing, state.clock.now())));
     }
 
     let txn = state.db.begin().await?;
@@ -418,7 +432,7 @@ pub async fn update_contest(
     let model = active.update(&txn).await?;
     txn.commit().await?;
 
-    Ok(Json(model.into()))
+    Ok(Json(contest_response(model, state.clock.now())))
 }
 #[utoipa::path(
     delete,

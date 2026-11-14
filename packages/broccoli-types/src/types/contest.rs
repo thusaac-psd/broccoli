@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// `activate_time <= start_time < end_time <= deactivate_time`, so the phases
 /// follow each other in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ContestPhase {
     /// `activate_time` is unset or in the future. Only `contest:manage` sees

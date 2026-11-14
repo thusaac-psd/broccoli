@@ -1,57 +1,54 @@
-import { serverNow } from '@broccoli/web-sdk/api';
+import type { ContestPhase } from '@broccoli/web-sdk/contest';
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import type { BadgeProps } from '@broccoli/web-sdk/ui';
 
 import type { MessageKey } from '@/lib/i18n/catalog';
 
-export type ContestPhase = 'upcoming' | 'running' | 'ended';
-
 /**
- * Where `now` falls in a contest window. The end instant still counts as
- * running, as on the server.
+ * Where a contest is now, as the server reports it in every contest
+ * response. The server decides it on its own clock; the web never derives it
+ * from the timeline.
  */
-export function contestPhase(
-  startMs: number,
-  endMs: number,
-  now: number,
-): ContestPhase {
-  return now < startMs ? 'upcoming' : now <= endMs ? 'running' : 'ended';
-}
+export type { ContestPhase };
 
 /**
- * A contest's state as an admin sees it: its phase once activated, or why
- * contestants cannot see it. Without `activate_time` the contest is a draft
- * only `contest:manage` sees; before it, it is scheduled; from
- * `deactivate_time` on it is hidden again.
+ * A contest's state as an admin sees it: its phase, with an unactivated
+ * contest told apart by whether it has an activate time at all (a draft only
+ * `contest:manage` sees) or is waiting for it (scheduled).
  */
 export type ContestStatus =
   | 'draft'
   | 'scheduled'
-  | ContestPhase
-  | 'deactivated';
+  | Exclude<ContestPhase, 'unactivated'>;
 
-/** The timestamps of a contest that decide its status. */
-export interface ContestWindow {
+/** The fields of a contest response that decide its status. */
+export interface ContestStatusSource {
+  phase: ContestPhase;
   activate_time?: string | null;
-  start_time: string;
-  end_time: string;
-  deactivate_time?: string | null;
 }
 
-export function contestStatus(
-  window: ContestWindow,
-  now: number,
-): ContestStatus {
-  if (!window.activate_time) return 'draft';
-  if (now < Date.parse(window.activate_time)) return 'scheduled';
-  if (window.deactivate_time && now >= Date.parse(window.deactivate_time)) {
-    return 'deactivated';
-  }
-  return contestPhase(
-    Date.parse(window.start_time),
-    Date.parse(window.end_time),
-    now,
-  );
+export function contestStatus(contest: ContestStatusSource): ContestStatus {
+  if (contest.phase !== 'unactivated') return contest.phase;
+  return contest.activate_time ? 'scheduled' : 'draft';
+}
+
+/** Whether the contest has started: running, ended, or deactivated after. */
+export function phaseHasStarted(phase: ContestPhase): boolean {
+  return phase === 'running' || phase === 'ended' || phase === 'deactivated';
+}
+
+/**
+ * The instant the contest's phase next changes for a contestant, while it is
+ * upcoming or running: when to ask the server for its phase again.
+ */
+export function nextPhaseChange(contest: {
+  phase: ContestPhase;
+  start_time: string;
+  end_time: string;
+}): number | null {
+  if (contest.phase === 'upcoming') return Date.parse(contest.start_time);
+  if (contest.phase === 'running') return Date.parse(contest.end_time);
+  return null;
 }
 
 const STATUS_BADGES: Record<
@@ -67,9 +64,9 @@ const STATUS_BADGES: Record<
 };
 
 export function getContestStatus(
-  window: ContestWindow,
+  contest: ContestStatusSource,
   t: I18nContextValue['t'],
 ): { label: string; variant: NonNullable<BadgeProps['variant']> } {
-  const { key, variant } = STATUS_BADGES[contestStatus(window, serverNow())];
+  const { key, variant } = STATUS_BADGES[contestStatus(contest)];
   return { label: t(key), variant };
 }
