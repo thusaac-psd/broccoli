@@ -325,6 +325,7 @@ impl ServerRuntime {
             worker_slots,
             plugin_lifecycle: Default::default(),
             plugin_sql,
+            last_workers: Default::default(),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
                 Duration::from_secs(app_config.auth.login_failure_window_secs),

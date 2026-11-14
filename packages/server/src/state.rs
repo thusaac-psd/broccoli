@@ -63,4 +63,6 @@ pub struct AppState {
     pub plugin_lifecycle: Arc<crate::plugin_lifecycle::PluginLifecycle>,
     /// The plugins' raw SQL pools, the same the `sql` host functions use.
     pub plugin_sql: crate::plugin_db::PluginSqlPools,
+    /// The worker list the system overview last read.
+    pub last_workers: crate::handlers::system::LastWorkers,
 }
