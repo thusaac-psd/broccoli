@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use broccoli_api_types::plugin::PluginArchiveSummary;
 use plugin_core::registry::PluginStatus;
 use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use serde_json::{Value, json};
@@ -135,18 +136,14 @@ async fn set_blob(app: &TestApp, hash: &str, data: Vec<u8>) {
 }
 
 /// What inspecting `archive` reports it replaces, as the form's
-/// `replaces` value: `new`, `bundle` or the published archive's hash.
+/// `replaces` value.
 async fn replaces(app: &TestApp, token: &str, archive: Vec<u8>) -> String {
     let res = app
         .post_plugin_archive(routes::ADMIN_PLUGIN_UPLOAD_INSPECT, archive, &[], token)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    let current = &res.body["current"];
-    match current["source"].as_str() {
-        None => "new".into(),
-        Some("bundle") => "bundle".into(),
-        Some(_) => current["archive_hash"].as_str().unwrap().into(),
-    }
+    let summary: PluginArchiveSummary = serde_json::from_value(res.body).unwrap();
+    summary.replaces().form_value().to_string()
 }
 
 /// Inspect, then upload, as the admin UI does.
@@ -829,4 +826,43 @@ async fn plugin_ids_from_the_url_must_be_valid() {
             .all(|r| server::plugin_id::PluginId::parse(r.id.as_str()).is_ok()),
         "{rows:?}"
     );
+}
+
+/// What `broccoli-dev plugin watch` does: publish through the CLI client,
+/// which inspects the archive and states what it replaces.
+async fn publish_with_cli(
+    app: &TestApp,
+    token: &str,
+    archive: Vec<u8>,
+) -> broccoli_api_types::plugin::PluginUploadResponse {
+    let client = broccoli_cli_core::client::Client::new(
+        broccoli_cli_core::session::Session::explicit(app.url(""), token.to_string()),
+    );
+    tokio::task::spawn_blocking(move || client.publish_plugin(&archive))
+        .await
+        .unwrap()
+        .unwrap_or_else(|e| panic!("the CLI publishes the archive: {e}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_publishes_a_new_plugin_a_new_version_and_over_a_bundled_copy() {
+    let app = TestApp::spawn_with_plugins().await;
+    let token = admin(&app).await;
+
+    let first = publish_with_cli(&app, &token, archive(UPLOAD_ONLY, "1.0.0")).await;
+    assert_eq!(first.version, "1.0.0");
+    let second = publish_with_cli(&app, &token, archive(UPLOAD_ONLY, "1.1.0")).await;
+    assert_eq!(second.version, "1.1.0");
+    assert_eq!(
+        row(&app, UPLOAD_ONLY)
+            .await
+            .unwrap()
+            .archive_hash
+            .as_deref(),
+        Some(second.archive_hash.as_str())
+    );
+
+    let over_bundle = publish_with_cli(&app, &token, archive(BUNDLED, "0.2.0")).await;
+    assert_eq!(over_bundle.plugin_id, BUNDLED);
+    assert_eq!(registered(&app, BUNDLED).0, "0.2.0");
 }

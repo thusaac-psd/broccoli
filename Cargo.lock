@@ -5779,6 +5779,7 @@ dependencies = [
  "axum_typed_multipart",
  "base64 0.22.1",
  "broccoli-api-types",
+ "broccoli-cli-core",
  "broccoli-server-sdk",
  "chrono",
  "common",

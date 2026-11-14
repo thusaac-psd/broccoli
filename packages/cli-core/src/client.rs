@@ -11,6 +11,7 @@ use broccoli_api_types::contest::{
     ContestListResponse, ContestProblemResponse, ContestResponse, ContestUserContextResponse,
 };
 use broccoli_api_types::error::ErrorBody;
+use broccoli_api_types::plugin::{PluginArchiveSummary, PluginReplaces, PluginUploadResponse};
 use broccoli_api_types::problem::{ProblemResponse, ProblemSamplesResponse};
 use broccoli_api_types::submission::{
     CreateSubmissionRequest, SubmissionFileDto, SubmissionListResponse, SubmissionResponse,
@@ -179,17 +180,43 @@ impl Client {
         Self::check_status(resp).map(drop)
     }
 
-    /// Upload a packaged plugin archive to the admin plugin-upload endpoint as
-    /// `multipart/form-data`, retrying transient failures with exponential
-    /// backoff. A token that expires mid `plugin watch` is refreshed like any
-    /// other request.
-    pub fn upload_plugin(&self, archive: &[u8]) -> ClientResult<()> {
-        const MAX_RETRIES: u32 = 3;
-        const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-        const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Publish a packaged plugin archive the way the admin UI does: inspect
+    /// it to learn what the fleet publishes under its id now, then upload it
+    /// stating that as `replaces`. Transient failures are retried with
+    /// exponential backoff, and a token that expires mid `plugin watch` is
+    /// refreshed like any other request.
+    pub fn publish_plugin(&self, archive: &[u8]) -> ClientResult<PluginUploadResponse> {
+        let summary: PluginArchiveSummary = self.retrying_transient(|| {
+            let resp = self.post_archive("/api/v1/admin/plugins/upload/inspect", archive, None)?;
+            self.parse_response(resp)
+        })?;
+        let replaces = summary.replaces();
+        self.retrying_transient(|| {
+            let resp =
+                self.post_archive("/api/v1/admin/plugins/upload", archive, Some(&replaces))?;
+            self.parse_response(resp)
+        })
+    }
 
+    /// Send `archive` as the `plugin` field of a `multipart/form-data` form,
+    /// with the `replaces` field when given.
+    fn post_archive(
+        &self,
+        path: &str,
+        archive: &[u8],
+        replaces: Option<&PluginReplaces>,
+    ) -> ClientResult<Response> {
         let boundary = "----broccolicli7MA4YWxkTrZu0gWupload";
-        let mut body = Vec::with_capacity(archive.len() + 256);
+        let mut body = Vec::with_capacity(archive.len() + 512);
+        if let Some(replaces) = replaces {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"replaces\"\r\n\r\n{}\r\n",
+                    replaces.form_value()
+                )
+                .as_bytes(),
+            );
+        }
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(
             b"Content-Disposition: form-data; name=\"plugin\"; filename=\"plugin.tar.gz\"\r\n",
@@ -198,19 +225,26 @@ impl Client {
         body.extend_from_slice(archive);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let content_type = format!("multipart/form-data; boundary={boundary}");
-        let url = self.url("/api/v1/admin/plugins/upload");
+        let url = self.url(path);
+        self.authorized(|bearer| {
+            self.agent
+                .post(&url)
+                .header("Authorization", bearer)
+                .header("Content-Type", &content_type)
+                .send(&body[..])
+        })
+    }
+
+    /// Run `request` again while it fails transiently (the network, or a
+    /// 5xx answer), backing off exponentially between attempts.
+    fn retrying_transient<T>(&self, request: impl Fn() -> ClientResult<T>) -> ClientResult<T> {
+        const MAX_RETRIES: u32 = 3;
+        const INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
         let mut attempt = 0;
         loop {
-            let result = self
-                .authorized(|bearer| {
-                    self.agent
-                        .post(&url)
-                        .header("Authorization", bearer)
-                        .header("Content-Type", &content_type)
-                        .send(&body[..])
-                })
-                .and_then(|resp| self.parse_empty(resp));
+            let result = request();
             let transient = match &result {
                 Err(ClientError::Network { .. }) => true,
                 Err(ClientError::Api(e)) => e.status >= 500,
