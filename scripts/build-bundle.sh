@@ -145,6 +145,8 @@ cp "$ROOT/docker-entrypoint-worker.sh" "$WORK/docker-entrypoint-worker.sh"
 copy_tree "$ROOT/release/examples" "$WORK/examples"
 copy_tree "$ROOT/release/docs" "$WORK/docs"
 cp "$ROOT/release/README.md" "$WORK/README.md"
+# The plugin SDKs with their crates.io closure, for plugin authors offline.
+"$ROOT/scripts/stage-sdk.sh" "$WORK"
 
 "$PYTHON_BIN" - "$WORK" "$VERSION" <<'PY'
 from pathlib import Path
