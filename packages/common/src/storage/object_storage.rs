@@ -496,7 +496,7 @@ impl BlobStore for ObjectStorageBlobStore {
     }
 
     /// One bucket check, with no retry, answered from the last check for
-    /// [`PROBE_TTL`] so a health endpoint polled often costs the storage
+    /// a few seconds so a health endpoint polled often costs the storage
     /// server next to nothing.
     async fn probe(&self) -> Result<(), StorageError> {
         if let Some((at, outcome)) = &*self.last_probe.lock().unwrap_or_else(|e| e.into_inner())
