@@ -100,7 +100,6 @@ fn prepare_case(
                 answer: req.expected_output.clone(),
                 test_input: req.test_input.clone(),
                 problem_id: Some(req.problem_id),
-                config: req.checker_config.clone(),
                 output_binding: checker_output_binding(checker_format),
             })
             .map_err(|e| extism_pdk::Error::msg(format!("checker resolve failed: {e}")))?;

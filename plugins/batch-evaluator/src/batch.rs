@@ -371,7 +371,6 @@ mod tests {
             test_input: JudgeFile::inline("hello\n"),
             expected_output: JudgeFile::inline("world\n"),
             checker_format: Some("exact".to_string()),
-            checker_config: None,
             additional_file_refs: vec![],
             target_worker_id: None,
         }

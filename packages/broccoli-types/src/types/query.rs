@@ -30,6 +30,4 @@ pub struct TestCaseData {
 pub struct ProblemCheckerInfo {
     pub id: i32,
     pub checker_format: Option<String>,
-    #[serde(default)]
-    pub checker_config: Option<serde_json::Value>,
 }

@@ -271,7 +271,6 @@ mod timeout_tests {
                 read_token: None,
             }),
             checker_format: Some("exact".to_string()),
-            checker_config: None,
             additional_file_refs: vec![],
             target_worker_id: None,
         };
@@ -342,8 +341,6 @@ pub struct BuildEvalOpsInput {
     pub expected_output: JudgeFile,
     #[serde(default)]
     pub checker_format: Option<String>,
-    #[serde(default)]
-    pub checker_config: Option<serde_json::Value>,
 
     #[serde(default)]
     pub additional_file_refs: Vec<FileRef>,

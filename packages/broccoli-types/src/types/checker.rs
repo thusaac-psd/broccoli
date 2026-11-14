@@ -32,13 +32,11 @@ pub struct ResolveCheckerInput {
     pub answer: JudgeFile,
     pub test_input: JudgeFile,
     /// Problem the checker is being resolved for. Checker plugins read their own
-    /// per-problem config (e.g. the testlib checker source) via
-    /// `host.config.get_problem(problem_id, ...)` instead of receiving it inlined
-    /// by the host. Optional for callers that resolve format-only builtins.
+    /// per-problem config (the testlib checker source, the `tokens-float`
+    /// tolerances) via `host.config.get_problem(problem_id, ...)` instead of
+    /// receiving it inlined by the host.
     #[serde(default)]
     pub problem_id: Option<i32>,
-    #[serde(default)]
-    pub config: Option<serde_json::Value>,
     pub output_binding: OutputMode,
 }
 
