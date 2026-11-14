@@ -1,8 +1,10 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import {
   getStatusLabel,
-  type SubmissionStatus,
+  type ShownStatus,
   type Verdict,
+  type Withheld,
+  withheldLabel,
 } from '@broccoli/web-sdk/submission';
 import type { BadgeProps } from '@broccoli/web-sdk/ui';
 
@@ -54,14 +56,22 @@ function getVerdictVariant(verdict: Verdict): BadgeVariant {
   }
 }
 
+/**
+ * The badge of a submission's outcome. A withheld outcome (`status` `null`)
+ * says why it is withheld (`withheld`), never that it is still running.
+ */
 export function getVerdictBadge(
   verdict: Verdict | null | undefined,
-  status: SubmissionStatus,
+  status: ShownStatus,
   t: I18nContextValue['t'],
+  withheld?: Withheld | null,
 ): {
   label: string;
   variant: BadgeVariant;
 } {
+  if (status == null) {
+    return { label: withheldLabel(withheld, t), variant: 'outline' };
+  }
   if (status === 'Pending' || status === 'Compiling' || status === 'Running') {
     return { label: getStatusLabel(status, t), variant: 'outline' };
   }

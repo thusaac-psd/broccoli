@@ -1,6 +1,6 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
-  type SubmissionStatus,
+  type ShownStatus,
   type TestCaseResult,
   useTestCasePage,
 } from '@broccoli/web-sdk/submission';
@@ -20,7 +20,7 @@ export function SubmissionTestCases({
   submissionId: number;
   judgementId?: number | null;
   live?: boolean;
-  status: SubmissionStatus;
+  status: ShownStatus;
   comparisonJudgementId?: number;
   renderDiff?: (
     testCase: TestCaseResult,

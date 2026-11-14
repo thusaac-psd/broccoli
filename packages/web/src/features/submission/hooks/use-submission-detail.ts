@@ -24,12 +24,12 @@ export function useSubmissionDetail(submissionId: number) {
       if (error) throw error;
       return data;
     },
-    // Polls until the verdict is final, or until a failure asking again
-    // cannot change (the submission is gone or hidden). A blip or a 502 only
-    // delays the next poll.
+    // Polls until the verdict is final for this viewer (a withheld one is),
+    // or until a failure asking again cannot change (the submission is gone
+    // or hidden). A blip or a 502 only delays the next poll.
     refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      if (status && isTerminalStatus(status)) return false;
+      const data = query.state.data;
+      if (data && isTerminalStatus(data.status)) return false;
       const failed = query.state.error as { status?: number } | null;
       if (
         failed &&

@@ -80,6 +80,7 @@ export function SubmissionDetailView({
     result?.verdict ?? null,
     status,
     t,
+    submission.withheld,
   );
   const scoreDisplay = getSubmissionScoreDisplay(status, result?.score, t);
 

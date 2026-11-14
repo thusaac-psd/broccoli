@@ -156,7 +156,7 @@ export interface paths {
     };
     /**
      * List what depends on a plugin right now
-     * @description Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin provides on the serving replica, so an admin can see what disabling it would stop. A plugin that is not loaded on the serving replica provides no contest types here. Requires `plugin:manage` permission.
+     * @description Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin registered when it last loaded, so an admin can see what disabling it would stop. The answer is the same whether the plugin is enabled or disabled. Requires `plugin:manage` permission.
      */
     get: operations['getPluginDependents'];
     put?: never;
@@ -2750,6 +2750,7 @@ export interface components {
       is_public: boolean;
       /** @description Where the contest is now, on the server's clock. */
       phase: components['schemas']['ContestPhase'];
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /** @example true */
       show_compile_output: boolean;
       /** @example true */
@@ -2829,8 +2830,12 @@ export interface components {
        * @example 5
        */
       problem_id: number;
-      /** @example Two Sum */
-      problem_title: string;
+      /**
+       * @description `None` while `withheld` is set.
+       * @example Two Sum
+       */
+      problem_title?: string | null;
+      withheld?: components['schemas']['Withheld'] | null;
     };
     ContestResponse: {
       /**
@@ -2869,6 +2874,7 @@ export interface components {
        *     rather than comparing the timeline with their own clock.
        */
       phase: components['schemas']['ContestPhase'];
+      plugin_outage?: components['schemas']['PluginOutage'] | null;
       /** @example true */
       show_compile_output: boolean;
       /** @example true */
@@ -3769,6 +3775,18 @@ export interface components {
       version: string;
       web?: components['schemas']['WebDetailResponse'] | null;
     };
+    /** @description Why a plugin cannot serve what it provides right now. */
+    PluginOutage:
+      | {
+          /** @example ioi */
+          plugin_id: string;
+          /** @enum {string} */
+          state: 'disabled';
+        }
+      | {
+          /** @enum {string} */
+          state: 'unavailable';
+        };
     /** @description One live replica's view of a plugin. */
     PluginReplicaResponse: {
       /** @description Load or `init()` error, when `status` is `failed`. */
@@ -4257,7 +4275,7 @@ export interface components {
        * @example 100
        */
       score?: number | null;
-      status: components['schemas']['SubmissionStatus'];
+      status: components['schemas']['SubmissionStatus'] | null;
       /**
        * Format: int32
        * @example 1
@@ -4279,6 +4297,7 @@ export interface components {
        * @example 2
        */
       version: number;
+      withheld?: components['schemas']['Withheld'] | null;
     };
     SubmissionListItem: {
       /** Format: int32 */
@@ -4319,7 +4338,7 @@ export interface components {
        * @example 100
        */
       score?: number | null;
-      status: components['schemas']['SubmissionStatus'];
+      status?: components['schemas']['SubmissionStatus'] | null;
       /** @example worker-1 */
       target_worker_id?: string | null;
       /**
@@ -4336,6 +4355,7 @@ export interface components {
       username: string;
       /** @example Accepted */
       verdict?: string | null;
+      withheld?: components['schemas']['Withheld'] | null;
     };
     SubmissionListResponse: {
       data: components['schemas']['SubmissionListItem'][];
@@ -4375,7 +4395,7 @@ export interface components {
       /** @example Two Sum */
       problem_title: string;
       result?: components['schemas']['JudgeResultResponse'] | null;
-      status: components['schemas']['SubmissionStatus'];
+      status?: components['schemas']['SubmissionStatus'] | null;
       /**
        * @description When set, the submission has been pinned to this worker by an admin
        *     and every operation it produces will run there.
@@ -4389,6 +4409,7 @@ export interface components {
       user_id: number;
       /** @example alice */
       username: string;
+      withheld?: components['schemas']['Withheld'] | null;
     };
     /**
      * @description The wire shape `apply_submission_judgement`, `rejudge_submission`, and
@@ -4907,6 +4928,20 @@ export interface components {
     WebVitalsPayload: {
       vitals: components['schemas']['WebVital'][];
     };
+    /**
+     * @description Why the plugin-governed fields of a resource are left out (`null`) of a
+     *     response. Every field the host decides alone is still present.
+     */
+    Withheld:
+      | {
+          /** @enum {string} */
+          reason: 'hidden';
+        }
+      | {
+          outage: components['schemas']['PluginOutage'];
+          /** @enum {string} */
+          reason: 'plugin_outage';
+        };
     WorkerInfo: {
       /**
        * @description CPU architecture (e.g. `x86_64`, `aarch64`).
@@ -6615,15 +6650,6 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
     };
   };
   createContest: {
@@ -6709,15 +6735,6 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -6891,15 +6908,6 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -7436,15 +7444,6 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
     };
   };
   listParticipants: {
@@ -7488,15 +7487,6 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -7821,15 +7811,6 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
     };
   };
   addContestProblem: {
@@ -8078,7 +8059,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8263,7 +8244,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8331,7 +8312,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8423,7 +8404,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8715,7 +8696,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -8778,7 +8759,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin that decides who may read the problem is disabled (PLUGIN_DISABLED, no Retry-After) or cannot answer right now (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9051,15 +9032,6 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND) */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -9610,7 +9582,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9702,7 +9674,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9794,7 +9766,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9886,7 +9858,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -9974,7 +9946,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10062,7 +10034,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10154,7 +10126,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -10242,7 +10214,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
+      /** @description The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -11263,7 +11235,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -11576,7 +11548,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs could not answer in time (PLUGIN_UNAVAILABLE) */
+      /** @description Durable queue depth exceeded (QUEUE_OVERLOADED); or a plugin it needs is disabled (PLUGIN_DISABLED, no Retry-After) or could not answer in time (PLUGIN_UNAVAILABLE) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -12385,15 +12357,6 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
     };
   };
   bulkRejudgeSubmissions: {
@@ -12523,15 +12486,6 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
     };
   };
   listSubmissionJudgements: {
@@ -12566,15 +12520,6 @@ export interface operations {
       };
       /** @description Submission not found (NOT_FOUND) */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -12637,15 +12582,6 @@ export interface operations {
       };
       /** @description Judgement not found */
       404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ErrorBody'];
-        };
-      };
-      /** @description A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After */
-      503: {
         headers: {
           [name: string]: unknown;
         };

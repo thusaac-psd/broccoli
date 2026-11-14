@@ -1,5 +1,5 @@
 import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
-import type { SubmissionStatus } from '@broccoli/web-sdk/submission';
+import type { ShownStatus } from '@broccoli/web-sdk/submission';
 
 type Translate = I18nContextValue['t'];
 
@@ -18,7 +18,7 @@ export function formatScoreValue(value: number): string {
 }
 
 export function getSubmissionScoreDisplay(
-  status: SubmissionStatus,
+  status: ShownStatus,
   score: number | null | undefined,
   t: Translate,
 ): SubmissionScoreDisplay {
