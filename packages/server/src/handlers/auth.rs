@@ -32,7 +32,8 @@ use crate::extractors::json::AppJson;
 use crate::models::auth::{
     CliRefreshRequest, CliTokenResponse, DeviceAuthorizeRequest, DeviceCodeRequest,
     DeviceCodeResponse, DeviceTokenRequest, LoginRequest, LoginResponse, MeResponse,
-    RegisterRequest, RegisterResponse, validate_login_request, validate_register_request,
+    RegisterRequest, RegisterResponse, RegistrationStatus, validate_login_request,
+    validate_register_request,
 };
 use crate::services::auth_tokens::{
     issue_access_token, mint_refresh_token, revoke_presented, rotate_refresh_token,
@@ -43,16 +44,36 @@ use crate::utils::soft_delete::SoftDeletable;
 use crate::utils::{hash, refresh};
 
 #[utoipa::path(
+    get,
+    path = "/registration",
+    tag = "Auth",
+    operation_id = "getRegistrationStatus",
+    summary = "Whether self-registration is open",
+    description = "Public. Whether `POST /auth/register` creates accounts right now; an admin opens or closes it with `PUT /admin/settings/registration`.",
+    responses(
+        (status = 200, description = "Registration status", body = RegistrationStatus),
+    ),
+)]
+pub async fn get_registration_status(
+    State(state): State<AppState>,
+) -> Result<Json<RegistrationStatus>, AppError> {
+    Ok(Json(RegistrationStatus {
+        open: crate::services::registration::is_open(&state.db).await?,
+    }))
+}
+
+#[utoipa::path(
     post,
     path = "/register",
     tag = "Auth",
     operation_id = "registerUser",
     summary = "Register a new user account",
-    description = "Creates a new user account with the provided credentials. No authentication required. Returns 409 USERNAME_TAKEN if the username is already in use.",
+    description = "Creates a new user account with the provided credentials. No authentication required. Returns 403 REGISTRATION_CLOSED unless an admin opened self-registration, and 409 USERNAME_TAKEN if the username is already in use (usernames differing only in case are the same).",
     request_body = RegisterRequest,
     responses(
         (status = 201, description = "User registered", body = RegisterResponse),
         (status = 400, description = "Validation error (VALIDATION_ERROR)", body = ErrorBody),
+        (status = 403, description = "Self-registration is closed (REGISTRATION_CLOSED)", body = ErrorBody),
         (status = 409, description = "Username taken (USERNAME_TAKEN)", body = ErrorBody),
         (status = 429, description = "Too many registrations from this address, 30 a minute (RATE_LIMITED). Includes Retry-After.", body = ErrorBody),
     ),
@@ -64,6 +85,9 @@ pub async fn register(
     AppJson(payload): AppJson<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     ip_quota::REGISTER.admit(&state.mq, client_ip).await?;
+    if !crate::services::registration::is_open(&state.db).await? {
+        return Err(AppError::RegistrationClosed);
+    }
     validate_register_request(&payload)?;
 
     let prepared = crate::services::user_accounts::prepare_accounts(vec![

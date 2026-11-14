@@ -11,6 +11,7 @@ pub mod plugin_config;
 pub mod plugin_config_cache;
 pub mod plugin_storage;
 pub mod privileges;
+pub mod registration;
 pub mod submission_dispatch;
 pub mod submission_feedback;
 pub mod user_accounts;

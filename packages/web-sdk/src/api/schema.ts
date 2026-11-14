@@ -224,6 +224,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/admin/settings/registration': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Open or close self-registration
+     * @description Requires `user:manage`. Opens or closes `POST /auth/register` for every server at once, with no restart. Closed on a fresh install.
+     */
+    put: operations['setRegistrationStatus'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/admin/submissions/fan-out': {
     parameters: {
       query?: never;
@@ -495,9 +515,29 @@ export interface paths {
     put?: never;
     /**
      * Register a new user account
-     * @description Creates a new user account with the provided credentials. No authentication required. Returns 409 USERNAME_TAKEN if the username is already in use.
+     * @description Creates a new user account with the provided credentials. No authentication required. Returns 403 REGISTRATION_CLOSED unless an admin opened self-registration, and 409 USERNAME_TAKEN if the username is already in use (usernames differing only in case are the same).
      */
     post: operations['registerUser'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/registration': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Whether self-registration is open
+     * @description Public. Whether `POST /auth/register` creates accounts right now; an admin opens or closes it with `PUT /admin/settings/registration`.
+     */
+    get: operations['getRegistrationStatus'];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -1259,7 +1299,7 @@ export interface paths {
     };
     /**
      * Server readiness and dependency health
-     * @description Public, unauthenticated. Pings the database and message queue concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
+     * @description Public, unauthenticated. Pings the database, message queue and blob storage concurrently, within a 1.5s total budget. Returns 200 with `status: "ok"` when all probed components are healthy; 503 with `status: "degraded"` otherwise. This is the deep readiness check; load balancers should probe the shallow `GET /livez`, which makes no dependency calls.
      */
     get: operations['getHealth'];
     put?: never;
@@ -3215,8 +3255,7 @@ export interface components {
        */
       git_sha: string;
       /**
-       * @description Message-queue probe result: `"ok"`, `"down"`, or `"disabled"` when
-       *     MQ is not configured.
+       * @description Message-queue (Redis) probe result: `"ok"` or `"down"`.
        * @example ok
        */
       mq: string;
@@ -3238,6 +3277,13 @@ export interface components {
        * @example ok
        */
       status: string;
+      /**
+       * @description Blob storage probe result: `"ok"` or `"down"`. Object storage is
+       *     checked at most every few seconds; a database or filesystem store
+       *     reports `"ok"`.
+       * @example ok
+       */
+      storage: string;
       /**
        * @description Server version, matching the `Cargo.toml` `[package].version`.
        * @example 0.2.0
@@ -3845,6 +3891,10 @@ export interface components {
       id: number;
       /** @example alice_wonder */
       username: string;
+    };
+    /** @description Whether `POST /auth/register` creates accounts. */
+    RegistrationStatus: {
+      open: boolean;
     };
     RegistriesResponse: {
       /**
@@ -5544,6 +5594,57 @@ export interface operations {
       };
     };
   };
+  setRegistrationStatus: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['RegistrationStatus'];
+      };
+    };
+    responses: {
+      /** @description The registration status now */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RegistrationStatus'];
+        };
+      };
+      /** @description Validation error (VALIDATION_ERROR) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   adminFanOutSubmission: {
     parameters: {
       query?: never;
@@ -5862,7 +5963,7 @@ export interface operations {
           'application/json': components['schemas']['DeviceCodeResponse'];
         };
       };
-      /** @description Too many pending device codes (RATE_LIMITED) */
+      /** @description Too many device codes requested from this address (30 a minute) or pending (RATE_LIMITED). Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;
@@ -5946,7 +6047,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Rate limited (RATE_LIMITED). Includes Retry-After header when auth rate limiting is enabled. */
+      /** @description Rate limited (RATE_LIMITED): too many sign-ins from this address (10 a minute, with `server.rate_limit_auth`) or failed ones for this account. Includes Retry-After. */
       429: {
         headers: {
           [name: string]: unknown;
@@ -6073,6 +6174,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Self-registration is closed (REGISTRATION_CLOSED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Username taken (USERNAME_TAKEN) */
       409: {
         headers: {
@@ -6080,6 +6190,35 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Too many registrations from this address, 30 a minute (RATE_LIMITED). Includes Retry-After. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  getRegistrationStatus: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Registration status */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RegistrationStatus'];
         };
       };
     };
@@ -6177,6 +6316,15 @@ export interface operations {
       };
       /** @description Forbidden (PERMISSION_DENIED) */
       403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -8007,6 +8155,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Per-user rate limited (RATE_LIMITED) */
       429: {
         headers: {
@@ -8429,6 +8586,15 @@ export interface operations {
       };
       /** @description Contest or problem not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -10106,6 +10272,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   downloadAdditionalFile: {
@@ -10311,6 +10486,15 @@ export interface operations {
       };
       /** @description Problem not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -10529,6 +10713,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   deleteCheckerSource: {
@@ -10633,6 +10826,15 @@ export interface operations {
       };
       /** @description Problem not found (NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -10935,6 +11137,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
       /** @description Per-user rate limit or plugin rejection (RATE_LIMITED, PLUGIN_REJECTED) */
       429: {
         headers: {
@@ -11068,6 +11279,15 @@ export interface operations {
       };
       /** @description Duplicate label in problem (CONFLICT) */
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -11280,6 +11500,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
     };
   };
   getTestCase: {
@@ -11458,6 +11687,15 @@ export interface operations {
       };
       /** @description Duplicate label in problem (CONFLICT) */
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Request body over the endpoint's limit (PAYLOAD_TOO_LARGE) */
+      413: {
         headers: {
           [name: string]: unknown;
         };
@@ -12229,7 +12467,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Payload too large (VALIDATION_ERROR) */
+      /** @description Payload too large (PAYLOAD_TOO_LARGE) */
       413: {
         headers: {
           [name: string]: unknown;
@@ -12278,7 +12516,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Payload too large (VALIDATION_ERROR) */
+      /** @description Payload too large (PAYLOAD_TOO_LARGE) */
       413: {
         headers: {
           [name: string]: unknown;

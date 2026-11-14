@@ -41,6 +41,7 @@ fn auth_routes() -> OpenApiRouter<AppState> {
     // intermediaries nor the idempotency cache ever persist it.
     OpenApiRouter::new()
         .routes(routes!(handlers::auth::register))
+        .routes(routes!(handlers::auth::get_registration_status))
         .routes(routes!(handlers::auth::login))
         .routes(routes!(handlers::auth::request_device_code))
         .routes(routes!(handlers::auth::refresh))
@@ -94,6 +95,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::admin::reload_all_plugins))
         .routes(routes!(handlers::admin::remove_plugin_upload))
         .routes(routes!(handlers::submission::admin_fan_out_submission))
+        .routes(routes!(handlers::settings::set_registration_status))
         .merge(upload)
         .nest("/plugins/{id}/config", plugin_global_config_routes())
         .nest("/system", system_routes())

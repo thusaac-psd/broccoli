@@ -41,6 +41,7 @@ mod plugin_upload;
 mod privilege_ceiling;
 mod problem;
 mod queue_outage;
+mod registration;
 mod rejudge_visibility;
 mod request_rejections;
 mod scaling;

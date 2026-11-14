@@ -389,6 +389,8 @@ export const en: Record<string, string> = {
   'auth.logout': 'Log out',
   'auth.invalidCredentials': 'Invalid username or password.',
   'auth.usernameTaken': 'Username is already taken.',
+  'auth.registrationClosed':
+    'Registration is closed. Ask the organisers for an account.',
   'auth.passwordMismatch': 'Passwords do not match.',
   'auth.validationError': 'Please check your input and try again.',
   'auth.device.title': 'Authorize CLI',
@@ -454,6 +456,9 @@ export const en: Record<string, string> = {
 
   // Users - User list
   'users.users.username': 'Username',
+  'users.registration.label': 'Self-registration',
+  'users.registration.description':
+    'Let anyone create an account on the sign-up page. Applies to every server at once.',
   'users.users.roles': 'Roles',
   'users.users.searchPlaceholder': 'Search users by name, id, or role...',
   'users.create.title': 'Create users',

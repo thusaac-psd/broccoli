@@ -538,6 +538,9 @@ pub struct SpawnOptions {
     pub mq_unreachable: bool,
     /// Sets `server.rate_limit_auth` (off by default here).
     pub rate_limit_auth: bool,
+    /// Leave self-registration as a fresh install has it, closed. Otherwise
+    /// it is opened, since most tests create their users by registering.
+    pub registration_closed: bool,
 }
 
 impl TestApp {
@@ -596,6 +599,12 @@ impl TestApp {
                 .await
                 .expect("Failed to connect to test database"),
         );
+
+        if !options.registration_closed {
+            server::services::registration::set_open(&db, true)
+                .await
+                .expect("open self-registration");
+        }
 
         let blob_store = create_blob_store(&BlobStoreConfig::default(), db.clone(), None)
             .await

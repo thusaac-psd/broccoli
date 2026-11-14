@@ -9,6 +9,7 @@ pub mod contest_user;
 pub mod dead_letter_message;
 pub mod device_authorization;
 pub mod idempotency_key;
+pub mod platform_setting;
 pub mod plugin;
 pub mod plugin_config;
 pub mod plugin_replica;

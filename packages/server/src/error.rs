@@ -35,6 +35,8 @@ pub enum AppError {
     /// The usernames an active account already holds (case-insensitively).
     /// Empty when the database refused a write without saying which.
     UsernameTaken(Vec<String>),
+    /// `POST /auth/register` while self-registration is closed.
+    RegistrationClosed,
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -121,6 +123,13 @@ impl AppError {
                 ),
             ),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, simple("CONFLICT", msg)),
+            AppError::RegistrationClosed => (
+                StatusCode::FORBIDDEN,
+                simple(
+                    "REGISTRATION_CLOSED",
+                    "Self-registration is closed; ask the organisers for an account".into(),
+                ),
+            ),
             AppError::UsernameTaken(usernames) => {
                 let message = match usernames.as_slice() {
                     [] => "Username is already taken".to_string(),
