@@ -13,6 +13,7 @@ pub mod submissions;
 pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
+use crate::plugin_db::PluginSqlPools;
 use common::db::DatabaseConnection;
 use extism::ValType::I64;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
@@ -202,9 +203,6 @@ pub(crate) fn host_fn_span(host_fn: &'static str, plugin_id: &str) -> Span {
 
 pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     let mut hr = HostFunctionRegistry::new();
-    // `broccoli_plugin` pool: backs the raw `sql` capability. Full read + write
-    // DML on data, but no schema DDL on core and no app-role powers.
-    let db = &deps.system.db;
     // The host function pool: every other host fn that touches the database
     // runs SQL the host builds itself there, under the app role.
     let host_db = &deps.system.host_db;
@@ -220,7 +218,7 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     );
     register_storage_functions(&mut hr, host_db);
     register_timer_functions(&mut hr, host_db);
-    register_sql_functions(&mut hr, db);
+    register_sql_functions(&mut hr, &deps.system.plugin_sql);
     register_submission_functions(&mut hr, host_db);
     register_registry_functions(&mut hr, &deps);
     register_evaluation_functions(&mut hr, &deps);
@@ -342,16 +340,21 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseCon
     );
 }
 
-/// The raw `sql` capability on the restricted pool, including explicit
-/// transactions shared across one plugin's calls through `txn_map`.
-fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection) {
+/// The raw `sql` capability: each plugin's statements run on its own pool, as
+/// its own role (see [`crate::plugin_db`]), including explicit transactions
+/// shared across one plugin's calls through `txn_map`.
+fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &PluginSqlPools) {
     let cap = "sql";
+    let with_pools = || {
+        let pools = pools.clone();
+        move |plugin_id: &str| (plugin_id.to_string(), pools.clone())
+    };
     register_fn(
         hr,
         cap,
         "db_execute",
         (&[I64, I64], &[I64]),
-        with_db(db),
+        with_pools(),
         Waits::Blocks,
         sql::db_execute,
     );
@@ -360,15 +363,15 @@ fn register_sql_functions(hr: &mut HostFunctionRegistry, db: &DatabaseConnection
         cap,
         "db_query",
         (&[I64, I64], &[I64]),
-        with_db(db),
+        with_pools(),
         Waits::Blocks,
         sql::db_query,
     );
 
     let txn_map: sql::TransactionMap = Arc::new(StdMutex::new(HashMap::new()));
     let with_txns = || {
-        let (db, txn_map) = (db.clone(), txn_map.clone());
-        move |plugin_id: &str| (plugin_id.to_string(), db.clone(), txn_map.clone())
+        let (pools, txn_map) = (pools.clone(), txn_map.clone());
+        move |plugin_id: &str| (plugin_id.to_string(), pools.clone(), txn_map.clone())
     };
     register_fn(
         hr,

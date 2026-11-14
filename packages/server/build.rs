@@ -37,7 +37,8 @@ fn main() {
 }
 
 /// Sources that define the database schema: the entities schema sync
-/// creates, the migrations, and the trigger DDL installed at boot. Every
+/// creates, the migrations, the trigger DDL installed at boot, and the DDL
+/// that provisions each plugin's role and schema. Every
 /// change to them that sync cannot apply needs a fresh database, so the stamp
 /// covers all of them and any edit outside comments changes it.
 const SCHEMA_SOURCES: &[&str] = &[
@@ -45,6 +46,7 @@ const SCHEMA_SOURCES: &[&str] = &[
     "src/migration",
     "src/services/judging/notify.rs",
     "src/services/plugin_config_cache.rs",
+    "src/plugin_db/schema.rs",
 ];
 
 /// FNV-1a over the schema sources with comment and blank lines removed, in

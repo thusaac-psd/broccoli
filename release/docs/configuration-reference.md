@@ -70,7 +70,6 @@ Leave these alone unless a measurement says otherwise.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `plugin_url` | provisioned | A DBA-managed login for raw plugin SQL |
 | `statement_timeout_secs` | `60` | Per-statement timeout; `0` turns it off |
 | `tcp_keepalives` | `true` | Behind a PgBouncer that rejects startup options, set this to `false` and `statement_timeout_secs` to `0` |
 

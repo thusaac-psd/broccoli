@@ -92,6 +92,11 @@ const SCHEMA: &[&str] = &[
     r#"CREATE INDEX submission_feedback_match ON submission_feedback (plugin_id, state_key)"#,
     r#"CREATE INDEX submission_feedback_slot
         ON submission_feedback (plugin_id, slot_key, submission_id)"#,
+    // Each plugin role's login password (see `plugin_db::schema::provision`).
+    r#"CREATE TABLE plugin_login_secret (
+        role TEXT PRIMARY KEY,
+        password TEXT NOT NULL
+    )"#,
 ];
 
 /// The `broccoli_plugin` role that raw plugin SQL runs under.
@@ -99,14 +104,13 @@ const SCHEMA: &[&str] = &[
 /// It is a NOLOGIN group role the app role is a member of, with read and
 /// write DML on every table and sequence, now and future: contest admins are
 /// trusted and install plugins deliberately. It owns no core table, so core
-/// schema DDL (`DROP`/`ALTER`) and `TRUNCATE` stay with the app role; a
-/// plugin's own tables, created under this role, are owned by it. The
-/// restricted pool's credential table `plugin_login_secret` is created and
-/// revoked at runtime (see `database::provision_restricted_plugin_login`).
+/// schema DDL (`DROP`/`ALTER`) and `TRUNCATE` stay with the app role. Each
+/// plugin logs in as its own role, a member of this one, and owns its own
+/// schema (see `plugin_db::schema`).
 ///
 /// `CREATE ROLE` needs CREATEROLE, which a managed app role may lack. Then the
 /// whole block is skipped with a warning and boot continues degraded: the
-/// runtime disables raw plugin SQL (`RestrictedPluginAuth::AppRoleDegraded`).
+/// plugin roles cannot be provisioned either, so raw plugin SQL fails.
 const PLUGIN_ROLE: &str = r#"
 DO $$
 BEGIN
@@ -115,7 +119,7 @@ BEGIN
   EXCEPTION
     WHEN duplicate_object THEN NULL;
     WHEN insufficient_privilege THEN
-      RAISE WARNING 'broccoli_plugin role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will be disabled at runtime (fail-closed degrade). Grant the app role CREATEROLE, or set database.plugin_url to a dedicated non-privileged role, to enable it.';
+      RAISE WARNING 'broccoli_plugin role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will fail until the app role is granted CREATEROLE.';
       RETURN;
   END;
 
@@ -152,12 +156,13 @@ impl MigrationTrait for Migration {
         .await?;
         // Last, so the grants cover every relation created above.
         db.execute_unprepared(PLUGIN_ROLE).await?;
-        // Plugins read everything but must not rewrite what boot trusts: the
-        // schema stamp and the record of applied migrations.
+        // Plugins must not rewrite what boot trusts (the schema stamp and the
+        // record of applied migrations) nor read the plugin logins.
         db.execute_unprepared(&format!(
             "DO $$ BEGIN \
                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'broccoli_plugin') THEN \
                  REVOKE INSERT, UPDATE, DELETE ON {table}, seaql_migrations FROM broccoli_plugin; \
+                 REVOKE ALL ON plugin_login_secret FROM broccoli_plugin; \
                END IF; \
              END $$",
             table = super::STAMP_TABLE,

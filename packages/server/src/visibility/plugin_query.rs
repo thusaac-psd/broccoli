@@ -1108,7 +1108,6 @@ mod tests {
                 },
                 database: DatabaseConfig {
                     url: "mock://visibility-plugin-query-test".to_string(),
-                    plugin_url: None,
                     ..Default::default()
                 },
                 auth: AuthConfig {

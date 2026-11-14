@@ -709,7 +709,6 @@ mod tests {
                 },
                 database: DatabaseConfig {
                     url: "mock://visibility-kernel-test".to_string(),
-                    plugin_url: None,
                     ..Default::default()
                 },
                 auth: AuthConfig {

@@ -637,7 +637,6 @@ impl TestApp {
             },
             database: DatabaseConfig {
                 url: db_url.clone(),
-                plugin_url: None,
                 ..Default::default()
             },
             auth: AuthConfig {
@@ -692,11 +691,15 @@ impl TestApp {
         let server_plugins = ServerManager::new(
             app_config.plugin.clone(),
             server::host_funcs::context::HostFunctionSystemDeps {
-                db: db.clone(),
-                // Test harness reuses the single app-role pool for both the
-                // restricted plugin pool and the host function pool; the role
-                // restriction is proven directly against a real DB in
-                // `server::database`'s unit tests.
+                // Plugin SQL runs as each plugin's own role, as in production;
+                // the host function pool shares the app pool.
+                plugin_sql: server::plugin_db::PluginSqlPools::new(
+                    db.clone(),
+                    &db_url,
+                    8,
+                    std::time::Duration::from_secs(30),
+                    &server::database::app_session(&app_config.database),
+                ),
                 host_db: db.clone(),
                 mq: None,
                 operation_batches: operation_batches.clone(),

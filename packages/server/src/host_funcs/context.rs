@@ -14,9 +14,9 @@ use crate::services::operation_batch::OperationTaskPublisher;
 
 #[derive(Clone)]
 pub struct HostFunctionSystemDeps {
-    /// The RESTRICTED plugin pool (runs as `broccoli_plugin`). Backs the raw
-    /// `sql` capability; cannot write/DDL core tables.
-    pub db: DatabaseConnection,
+    /// Every plugin's raw SQL pool, each logged in as that plugin's own role.
+    /// Backs the `sql` capability only.
+    pub plugin_sql: crate::plugin_db::PluginSqlPools,
     /// The host function pool (the app role). Every host fn that touches the
     /// database other than raw `sql` runs SQL the host builds on it, and so do
     /// the host services those fns start. See `database::connect_host_fn_pool`.

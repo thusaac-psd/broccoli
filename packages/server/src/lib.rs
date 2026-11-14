@@ -16,6 +16,7 @@ pub mod middleware;
 pub mod migration;
 pub mod models;
 pub mod plugin_archive;
+pub mod plugin_db;
 pub mod plugin_distribution;
 pub mod plugin_fleet;
 pub mod plugin_id;

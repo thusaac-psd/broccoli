@@ -13,18 +13,6 @@ pub use common::storage::config::BlobStoreConfig;
 pub struct DatabaseConfig {
     #[serde(default = "default_database_url")]
     pub url: String,
-    /// Optional dedicated connection string for the RESTRICTED plugin SQL pool,
-    /// authenticating as a pre-provisioned least-privilege LOGIN role (e.g.
-    /// `broccoli_plugin_login`, a NOINHERIT member of `broccoli_plugin`). Set
-    /// this when a DBA manages that role out of band and the app role must NOT
-    /// hold CREATEROLE. When unset, the server auto-provisions the role using the
-    /// app role's privileges, with a stable per-database password (so every
-    /// replica converges on the same value); if that also fails it falls back to
-    /// app-role auth, still guarded by the SQL text guard. Either
-    /// way the pool ends up authenticating as a role that cannot `RESET ROLE`
-    /// its way back to the privileged app role.
-    #[serde(default)]
-    pub plugin_url: Option<String>,
     /// Server-side `statement_timeout` for every pooled connection, in seconds
     /// (`0` disables it). Boot-time schema sync, migrations and seeding run on a
     /// separate unbounded session. See `common::db`.
@@ -41,7 +29,6 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             url: default_database_url(),
-            plugin_url: None,
             statement_timeout_secs: common::db::default_statement_timeout_secs(),
             tcp_keepalives: common::db::default_tcp_keepalives(),
         }
