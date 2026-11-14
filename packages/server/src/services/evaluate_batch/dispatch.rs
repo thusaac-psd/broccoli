@@ -69,7 +69,7 @@ pub async fn start_evaluate_batch(
     }
 
     let stage = EvaluatorStage {
-        pm: deps.plugin_manager.clone(),
+        pm: deps.plugin_manager.get()?,
         plugin_id: evaluator.plugin_id.clone(),
     };
 

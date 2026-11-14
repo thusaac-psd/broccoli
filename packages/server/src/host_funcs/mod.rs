@@ -563,7 +563,12 @@ fn register_config_functions(
     privileged_db: &DatabaseConnection,
 ) {
     let db = privileged_db.clone();
-    let registry = deps.plugin_manager.get_registry().clone();
+    let registry = deps
+        .plugin_manager
+        .get()
+        .expect("the manager registers its host functions while it is alive")
+        .get_registry()
+        .clone();
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:read", move |plugin_id| {
         config::create_config_get_function(

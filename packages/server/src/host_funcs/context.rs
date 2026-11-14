@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use common::db::DatabaseConnection;
 use common::storage::BlobStore;
@@ -39,15 +39,36 @@ pub struct HostFunctionSystemDeps {
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
 }
 
+/// The plugin manager as the host functions it owns hold it: weakly, so the
+/// manager and its host functions do not keep each other alive. A host
+/// function only runs inside a call into the manager, so the manager is
+/// there whenever one asks; work a host function starts takes a strong
+/// reference ([`ManagerRef::get`]) for as long as it runs.
+#[derive(Clone)]
+pub struct ManagerRef(Weak<dyn PluginManager>);
+
+impl ManagerRef {
+    pub fn new(manager: &Arc<dyn PluginManager>) -> Self {
+        Self(Arc::downgrade(manager))
+    }
+
+    /// The manager, or an error once it is gone (the server is stopping).
+    pub fn get(&self) -> anyhow::Result<Arc<dyn PluginManager>> {
+        self.0
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("the plugin manager has shut down"))
+    }
+}
+
 #[derive(Clone)]
 pub struct HostFunctionDeps {
     pub system: HostFunctionSystemDeps,
-    pub plugin_manager: Arc<dyn PluginManager>,
+    pub plugin_manager: ManagerRef,
 }
 
 #[derive(Clone)]
 pub struct OperationHostDeps {
-    pub plugin_manager: Option<Arc<dyn PluginManager>>,
+    pub plugin_manager: Option<ManagerRef>,
     pub operation_publisher: Option<Arc<dyn OperationTaskPublisher>>,
     pub operation_batches: OperationBatches,
     pub operation_waiters: OperationWaiters,
@@ -66,7 +87,7 @@ pub struct EvaluateHostDeps {
     pub evaluate_batches: EvaluateBatches,
     pub operation_deps: OperationHostDeps,
     pub fanout: crate::dispatcher::fanout::Fanout,
-    pub plugin_manager: Arc<dyn PluginManager>,
+    pub plugin_manager: ManagerRef,
     pub blob_store: Arc<dyn BlobStore>,
     pub hook_registry: SharedHookRegistry,
     /// Resolves which plugin owns a submission's contest type, for
@@ -79,10 +100,10 @@ pub struct EvaluateHostDeps {
 }
 
 impl HostFunctionSystemDeps {
-    pub fn with_plugin_manager(self, plugin_manager: Arc<dyn PluginManager>) -> HostFunctionDeps {
+    pub fn with_plugin_manager(self, plugin_manager: &Arc<dyn PluginManager>) -> HostFunctionDeps {
         HostFunctionDeps {
             system: self,
-            plugin_manager,
+            plugin_manager: ManagerRef::new(plugin_manager),
         }
     }
 

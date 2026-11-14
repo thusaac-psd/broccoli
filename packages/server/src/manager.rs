@@ -33,7 +33,7 @@ impl ServerManager {
         });
 
         let host_functions = host_funcs::init_host_functions(
-            host_deps.with_plugin_manager(manager.clone() as Arc<dyn PluginManager>),
+            host_deps.with_plugin_manager(&(manager.clone() as Arc<dyn PluginManager>)),
         );
 
         manager
