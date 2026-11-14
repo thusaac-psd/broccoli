@@ -47,8 +47,7 @@ pub fn problem_letter(position: i32) -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArbitraryJobRequest {
-    #[serde(default)]
-    pub contest_id: Option<i32>,
+    pub contest_id: i32,
     /// Problem the code was written against, when printed from a problem page.
     /// Combined with `contest_id` to label the printout.
     #[serde(default)]

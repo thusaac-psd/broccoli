@@ -199,9 +199,13 @@ so volunteers do not install anything extra.
 
 ## What contestants see
 
-Once printing is enabled, contestants get a **Print** button on their submission
-results, and a print option near the code editor for pasting or uploading
-arbitrary code. After requesting a print they see its status, queued, printing,
+Once printing is enabled, contestants get a **Print** button on their contest
+submission results. Printing code they paste or upload, from the print option
+near the code editor, is off until you turn on **Allow printing pasted code**
+(`allow_arbitrary`) for the contest, and only the contest's participants can
+use it. Every print a contestant sends in the contest counts toward **Max
+jobs per contestant** (`max_jobs_per_user`, 20 by default, 0 for no limit);
+staff prints do not count. After requesting a print they see its status, queued, printing,
 or printed, so they know whether to walk to the print desk. If approval is
 required, their request shows as awaiting approval until a volunteer releases it.
 

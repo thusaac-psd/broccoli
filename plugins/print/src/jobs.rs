@@ -153,6 +153,45 @@ pub fn insert_jobs(host: &Host, jobs: &[NewJob]) -> Result<u64, SdkError> {
     host.db.execute_with_args(&sql, &p.into_args())
 }
 
+/// Take `jobs` of `user_id`'s quota of `max` jobs in `contest_id`. False when
+/// that would exceed the quota. One statement: concurrent claims serialize on
+/// the quota row and the `WHERE` re-checks the count a concurrent winner
+/// committed, so two prints can never both take the last job.
+pub fn claim_quota(
+    host: &Host,
+    contest_id: i32,
+    user_id: i32,
+    jobs: i32,
+    max: i32,
+) -> Result<bool, SdkError> {
+    let mut p = Params::new();
+    let sql = format!(
+        "INSERT INTO print_quota (contest_id, user_id, jobs) \
+         SELECT {contest}::int, {user}::int, {jobs}::int WHERE {jobs}::int <= {max}::int \
+         ON CONFLICT (contest_id, user_id) DO UPDATE SET jobs = print_quota.jobs + EXCLUDED.jobs \
+         WHERE print_quota.jobs + EXCLUDED.jobs <= {max}::int",
+        contest = p.bind(contest_id),
+        user = p.bind(user_id),
+        jobs = p.bind(jobs),
+        max = p.bind(max),
+    );
+    Ok(host.db.execute_with_args(&sql, &p.into_args())? > 0)
+}
+
+/// Return `jobs` claimed by [`claim_quota`] for prints that were never queued.
+pub fn refund_quota(host: &Host, contest_id: i32, user_id: i32, jobs: i32) -> Result<(), SdkError> {
+    let mut p = Params::new();
+    let sql = format!(
+        "UPDATE print_quota SET jobs = GREATEST(jobs - {}::int, 0) \
+         WHERE contest_id = {} AND user_id = {}",
+        p.bind(jobs),
+        p.bind(contest_id),
+        p.bind(user_id)
+    );
+    host.db.execute_with_args(&sql, &p.into_args())?;
+    Ok(())
+}
+
 pub fn fetch_submission(
     host: &Host,
     submission_id: i32,

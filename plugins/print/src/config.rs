@@ -13,6 +13,10 @@ fn default_max_pages() -> i32 {
     10
 }
 
+fn default_max_jobs_per_user() -> i32 {
+    20
+}
+
 /// One print station's credential. The station is known by `name` to
 /// everything it does with `token`.
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +33,14 @@ pub struct PrintConfig {
     pub require_approval: bool,
     #[serde(default = "default_max_pages")]
     pub max_pages: i32,
+    /// Whether contestants may print code they paste or upload, besides their
+    /// own submissions.
+    #[serde(default)]
+    pub allow_arbitrary: bool,
+    /// Jobs each contestant may send in the contest, 0 for no limit. Staff
+    /// prints do not count.
+    #[serde(default = "default_max_jobs_per_user")]
+    pub max_jobs_per_user: i32,
     #[serde(default)]
     pub banner: String,
     #[serde(default)]
@@ -41,6 +53,8 @@ impl Default for PrintConfig {
             enabled: true,
             require_approval: false,
             max_pages: default_max_pages(),
+            allow_arbitrary: false,
+            max_jobs_per_user: default_max_jobs_per_user(),
             banner: String::new(),
             stations: Vec::new(),
         }
@@ -73,6 +87,8 @@ mod tests {
         assert!(cfg.enabled);
         assert!(!cfg.require_approval);
         assert_eq!(cfg.max_pages, 10);
+        assert!(!cfg.allow_arbitrary, "pasted-code printing is opt-in");
+        assert_eq!(cfg.max_jobs_per_user, 20);
         assert!(cfg.stations.is_empty());
     }
 
