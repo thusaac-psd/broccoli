@@ -15,13 +15,13 @@
 //!   through an open transaction or a lease of its own or of the call it is
 //!   nested in, reuses it for every further statement, so a call never waits
 //!   on a permit it holds. Such a call has one connection per open transaction
-//!   (at most [`crate::host_funcs::sql::MAX_OPEN_TXNS_PER_PLUGIN`] for a
+//!   (at most `MAX_OPEN_TXNS_PER_PLUGIN` for a
 //!   plugin) and one for its current statement;
 //! - a plugin with no idle connection of its own, while the pools already
 //!   hold `budget` connections, first closes an idle connection of another
 //!   plugin, so the pools keep to the budget as load moves between plugins;
 //! - a connection returning to its pool drops the session state its
-//!   statements left behind ([`SESSION_RESET`]);
+//!   statements left behind (`SESSION_RESET`);
 //! - a connection released while the pools hold more than `budget` (first
 //!   uses racing past that check, or a connection still on its way back to
 //!   its pool, which sqlx does from a task of its own) is closed instead of

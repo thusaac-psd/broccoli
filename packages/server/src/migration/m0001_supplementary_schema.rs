@@ -99,7 +99,7 @@ const SCHEMA: &[&str] = &[
 ];
 
 /// Host relations every plugin may read: contest data with no secret in it.
-/// Their content columns ([`broccoli_types::manifest::SQL_READ_SCOPES`]) are
+/// Their content columns ([`plugin_core::manifest::SQL_READ_SCOPES`]) are
 /// left out and granted to a plugin only by its manifest's `[server.sql]
 /// read` (see `plugin_db::schema::provision`). Every other host relation is
 /// unreadable to plugins; the integration test
