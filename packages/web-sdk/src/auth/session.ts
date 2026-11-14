@@ -132,7 +132,7 @@ export function hintsSignedIn(hint: string | null): boolean {
  */
 export interface SessionEffects {
   hint: string | null;
-  queries: 'clear' | 'invalidate' | null;
+  queries: 'clear' | null;
 }
 
 export function sessionEffects(
@@ -144,8 +144,9 @@ export function sessionEffects(
     return { hint: sessionHint(next), queries: 'clear' };
   }
   if (prev.status === 'bootstrapping' && next.status === 'active') {
-    // Queries that ran before the token was restored got a 401.
-    return { hint: sessionHint(next), queries: 'invalidate' };
+    // Nothing ran without the token: requests wait for the bootstrap (see
+    // `Session.settled`).
+    return { hint: sessionHint(next), queries: null };
   }
   return { hint: null, queries: null };
 }
@@ -156,6 +157,14 @@ export interface Session {
   getState: () => SessionState;
   /** Listeners run synchronously on every state change. */
   subscribe: (listener: SessionListener) => () => void;
+  /**
+   * The state once a started bootstrap has settled who is signed in; the
+   * current state when none is under way. Every request waits for it, so
+   * none is sent without the token a restored session is about to have, and
+   * none answers as the wrong viewer. Without an `AuthProvider` (the root
+   * error page) no bootstrap starts and nothing waits.
+   */
+  settled: () => Promise<SessionState>;
   dispatch: (event: SessionEvent) => void;
   /**
    * Exchange the refresh cookie for a new token. Resolves to that token when
@@ -213,9 +222,12 @@ export function createSession(deps: SessionDeps): Session {
     listeners.forEach((listener) => listener(next, prev));
   };
 
+  let bootstrapStarted = false;
+
   const refresh = async () => {
     const { epoch, status } = state;
     if (status === 'signedOut') return null;
+    if (status === 'bootstrapping') bootstrapStarted = true;
     const outcome = await deps.refresh();
     dispatch({ type: 'refresh-settled', epoch, outcome });
     return outcome.status === 'refreshed' &&
@@ -225,14 +237,26 @@ export function createSession(deps: SessionDeps): Session {
       : null;
   };
 
+  const subscribe = (listener: SessionListener) => {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  };
+
   return {
     getState: () => state,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe,
+    settled: () =>
+      state.status !== 'bootstrapping' || !bootstrapStarted
+        ? Promise.resolve(state)
+        : new Promise((resolve) => {
+            const unsubscribe = subscribe((next) => {
+              if (next.status === 'bootstrapping') return;
+              unsubscribe();
+              resolve(next);
+            });
+          }),
     dispatch,
     refresh,
     async tokenForRetry(sent) {

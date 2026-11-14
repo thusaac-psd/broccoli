@@ -160,7 +160,7 @@ test('a sign-in or sign-out clears cached data and sets the hint for every tab',
   });
 });
 
-test('a restored session refetches what ran without a token', () => {
+test('a restored session writes its hint and keeps what was fetched', () => {
   const active = transition(INITIAL_SESSION, {
     type: 'refresh-settled',
     epoch: INITIAL_SESSION.epoch,
@@ -168,8 +168,50 @@ test('a restored session refetches what ran without a token', () => {
   });
   assert.deepEqual(sessionEffects(INITIAL_SESSION, active), {
     hint: '7',
-    queries: 'invalidate',
+    queries: null,
   });
+});
+
+test('requests wait for the bootstrap, then carry the restored token', async () => {
+  const pending = deferred<RefreshOutcome>();
+  const { session } = sessionWith(() => pending.promise);
+  void session.refresh();
+  let sent: string | null | undefined;
+  const request = session.settled().then((state) => {
+    sent = sentAs(state).token;
+  });
+  await Promise.resolve();
+  assert.equal(sent, undefined, 'nothing is sent while bootstrapping');
+  pending.resolve(refreshed('jwt-1'));
+  await request;
+  assert.equal(sent, 'jwt-1');
+});
+
+test('requests go out at once when nobody is signed in', async () => {
+  const { session } = sessionWith(async () => refreshed('unused'));
+  session.dispatch({ type: 'no-session' });
+  assert.equal((await session.settled()).status, 'signedOut');
+});
+
+test('requests go out at once when no bootstrap was started', async () => {
+  const { session } = sessionWith(async () => refreshed('unused'));
+  assert.equal((await session.settled()).status, 'bootstrapping');
+});
+
+test('requests wait out an unreachable server during the bootstrap', async () => {
+  const { session } = sessionWith(async () => ({
+    status: 'unavailable',
+    retryInMs: 1000,
+  }));
+  const refresh = session.refresh();
+  let settled = false;
+  void session.settled().then(() => (settled = true));
+  await refresh;
+  await Promise.resolve();
+  assert.equal(settled, false);
+  session.dispatch({ type: 'no-session' });
+  await Promise.resolve();
+  assert.equal(settled, true);
 });
 
 test('finding no session on load writes no hint', () => {

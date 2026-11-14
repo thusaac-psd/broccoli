@@ -96,8 +96,10 @@ export function ApiClientProvider({
     const inFlight = new Map<string, { sent: SentAs; replay: Request }>();
 
     client.use({
-      onRequest({ id, request }) {
-        const sent = sentAs(session.getState());
+      async onRequest({ id, request }) {
+        // The bootstrap's own refresh goes around this client, so waiting
+        // here never holds it up.
+        const sent = sentAs(await session.settled());
         if (sent.token) {
           request.headers.set('Authorization', `Bearer ${sent.token}`);
         }
@@ -147,7 +149,7 @@ export function ApiClientProvider({
     () => async (input: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       const hasCallerAuth = headers.has('Authorization');
-      const sent = sentAs(session.getState());
+      const sent = sentAs(await session.settled());
       if (sent.token && !hasCallerAuth) {
         headers.set('Authorization', `Bearer ${sent.token}`);
       }
