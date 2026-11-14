@@ -2,7 +2,8 @@ import { AuthProvider, NavigateContext } from '@broccoli/web-sdk/auth';
 import { PluginRegistryProvider } from '@broccoli/web-sdk/plugin';
 import { ProblemPresentationProvider } from '@broccoli/web-sdk/problem';
 import { ThemeProvider, ThemeToaster } from '@broccoli/web-sdk/theme';
-import { Outlet, useNavigate } from 'react-router';
+import { PageContext } from '@broccoli/web-sdk/ui';
+import { Outlet, useLocation, useNavigate } from 'react-router';
 
 import { AppLayout } from '@/components/AppLayout';
 import { BaseProviders } from '@/components/BaseProviders';
@@ -16,34 +17,38 @@ import { SubmissionNavigationProvider } from '@/features/submission/contexts/sub
 
 export default function AppShell() {
   const navigate = useNavigate();
+  // Dialogs and sheets close when the page changes.
+  const { pathname } = useLocation();
   return (
-    <NavigateContext value={navigate}>
-      <BaseProviders>
-        <ThemeProvider defaultTheme="light">
-          <AuthProvider sessionStatusKey={appConfig.api.sessionStatusKey}>
-            <ContestProvider>
-              <SlotPermissionsBridge>
-                <PluginRegistryProvider
-                  backendUrl={appConfig.plugin.backendUrl}
-                >
-                  <ProblemPresentationProvider>
-                    <SubmissionNavigationProvider>
-                      <DocumentTitle />
-                      <AppLayout>
-                        <SessionGate>
-                          <Outlet />
-                        </SessionGate>
-                      </AppLayout>
-                      <SessionExpiredPrompt />
-                    </SubmissionNavigationProvider>
-                  </ProblemPresentationProvider>
-                  <ThemeToaster richColors closeButton />
-                </PluginRegistryProvider>
-              </SlotPermissionsBridge>
-            </ContestProvider>
-          </AuthProvider>
-        </ThemeProvider>
-      </BaseProviders>
-    </NavigateContext>
+    <PageContext value={pathname}>
+      <NavigateContext value={navigate}>
+        <BaseProviders>
+          <ThemeProvider defaultTheme="light">
+            <AuthProvider sessionStatusKey={appConfig.api.sessionStatusKey}>
+              <ContestProvider>
+                <SlotPermissionsBridge>
+                  <PluginRegistryProvider
+                    backendUrl={appConfig.plugin.backendUrl}
+                  >
+                    <ProblemPresentationProvider>
+                      <SubmissionNavigationProvider>
+                        <DocumentTitle />
+                        <AppLayout>
+                          <SessionGate>
+                            <Outlet />
+                          </SessionGate>
+                        </AppLayout>
+                        <SessionExpiredPrompt />
+                      </SubmissionNavigationProvider>
+                    </ProblemPresentationProvider>
+                    <ThemeToaster richColors closeButton />
+                  </PluginRegistryProvider>
+                </SlotPermissionsBridge>
+              </ContestProvider>
+            </AuthProvider>
+          </ThemeProvider>
+        </BaseProviders>
+      </NavigateContext>
+    </PageContext>
   );
 }

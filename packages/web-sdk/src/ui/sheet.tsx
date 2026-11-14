@@ -4,9 +4,13 @@ import { X } from 'lucide-react';
 import * as React from 'react';
 
 import { useTranslation } from '@/i18n';
+import { usePageScopedOpen } from '@/ui/page-scoped';
 import { cn } from '@/utils';
 
-const Sheet = SheetPrimitive.Root;
+/** A sheet root; it closes when the page changes (see `PageContext`). */
+function Sheet(props: React.ComponentProps<typeof SheetPrimitive.Root>) {
+  return <SheetPrimitive.Root {...props} {...usePageScopedOpen(props)} />;
+}
 
 const SheetTrigger = SheetPrimitive.Trigger;
 
