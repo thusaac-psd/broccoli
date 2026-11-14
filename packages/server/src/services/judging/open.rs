@@ -25,10 +25,37 @@ fn allocate_epoch(update: UpdateMany<submission::Entity>) -> UpdateMany<submissi
 /// Inserts a new submission and its first, current judgement in the
 /// caller's transaction. Both start `Queued`; the claim fiber dispatches the
 /// judgement. Any status, epoch or output on `new` is replaced.
+///
+/// A contest submission is judged under the contest type it was made under,
+/// which the contest keeps from its first submission on
+/// (`CONTEST_TYPE_LOCKED`). So the insert first reads the contest row
+/// `FOR KEY SHARE`, the lock the submission's foreign key takes on it anyway,
+/// with the type the submission carries as its predicate. A change of the
+/// type holds the row `FOR UPDATE` and conflicts with it: committed first,
+/// the read finds the new type and the insert is refused with `CONFLICT`;
+/// otherwise the row stays held until this transaction commits, and the
+/// change then finds this submission and is refused.
 pub async fn create_submission(
     txn: &DatabaseTransaction,
     mut new: submission::ActiveModel,
-) -> Result<(submission::Model, submission_judgement::Model), DbErr> {
+) -> Result<(submission::Model, submission_judgement::Model), crate::error::AppError> {
+    if let (sea_orm::ActiveValue::Set(Some(contest_id)), sea_orm::ActiveValue::Set(contest_type)) =
+        (&new.contest_id, &new.contest_type)
+    {
+        let held = txn
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 AS held FROM contest WHERE id = $1 AND contest_type = $2 \
+                 FOR KEY SHARE",
+                [(*contest_id).into(), contest_type.clone().into()],
+            ))
+            .await?;
+        if held.is_none() {
+            return Err(crate::error::AppError::Conflict(
+                "The contest's type changed while the submission was made; submit again".into(),
+            ));
+        }
+    }
     new.status = Set(SubmissionStatus::Queued);
     new.judge_epoch = Set(0);
     new.max_judge_epoch = Set(0);

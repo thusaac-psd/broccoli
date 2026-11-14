@@ -1014,3 +1014,115 @@ async fn a_standing_verdict_resolves_its_submissions_operation_letters() {
         "a letter filed after the verdict is settled at once"
     );
 }
+
+/// A contest of type `contest_type`, as raw SQL: the tests below race its
+/// type against a submission's insert.
+async fn typed_contest(db: &DatabaseConnection, contest_type: &str) -> i32 {
+    db.query_one_raw(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO contest (title, description, start_time, end_time, contest_type, \
+                              created_at, updated_at) \
+         VALUES ('race', 'race', now(), now() + interval '1 hour', $1, now(), now()) \
+         RETURNING id",
+        [contest_type.into()],
+    ))
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "id")
+    .unwrap()
+}
+
+fn contest_submission(user_id: i32, problem_id: i32, contest_id: i32) -> submission::ActiveModel {
+    submission::ActiveModel {
+        files: Set(serde_json::json!([])),
+        language: Set("cpp".into()),
+        user_id: Set(user_id),
+        problem_id: Set(problem_id),
+        contest_id: Set(Some(contest_id)),
+        contest_type: Set("ioi".into()),
+        created_at: Set(Utc::now()),
+        ..Default::default()
+    }
+}
+
+/// A change of the contest's type that holds the contest row when a
+/// submission made under the old type is inserted: the insert waits for it
+/// and is refused once it commits, whichever of the two reaches the row
+/// first, so no submission lands under a type its contest no longer has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_submission_is_refused_once_its_contest_type_changed_under_it() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (user_id, problem_id) = owner_ids(&db).await;
+    let contest_id = typed_contest(&db, "ioi").await;
+
+    // The change: the contest row held FOR UPDATE, as `update_contest` holds
+    // it, with no submission yet and the new type written.
+    let change = db.begin().await.unwrap();
+    change
+        .execute_unprepared(&format!(
+            "SELECT id FROM contest WHERE id = {contest_id} FOR UPDATE; \
+             UPDATE contest SET contest_type = 'icpc' WHERE id = {contest_id}"
+        ))
+        .await
+        .unwrap();
+
+    let insert = tokio::spawn({
+        let db = db.clone();
+        async move {
+            let txn = db.begin().await.unwrap();
+            let created =
+                create_submission(&txn, contest_submission(user_id, problem_id, contest_id)).await;
+            txn.commit().await.unwrap();
+            created.map(|(s, _)| s.id)
+        }
+    });
+    change.commit().await.unwrap();
+    let refused = insert.await.unwrap().unwrap_err();
+    assert!(
+        matches!(refused, crate::error::AppError::Conflict(_)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        submission::Entity::find()
+            .filter(submission::Column::ContestId.eq(contest_id))
+            .count(&db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// A submission inserted, not yet committed, holds its contest row: a change
+/// of the type that locks the row afterwards sees the submission once it has
+/// the row, so the type stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_type_change_after_a_pending_submission_finds_it() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (user_id, problem_id) = owner_ids(&db).await;
+    let contest_id = typed_contest(&db, "ioi").await;
+
+    let insert = db.begin().await.unwrap();
+    create_submission(&insert, contest_submission(user_id, problem_id, contest_id))
+        .await
+        .unwrap();
+
+    let change = tokio::spawn({
+        let db = db.clone();
+        async move {
+            let txn = db.begin().await.unwrap();
+            txn.execute_unprepared(&format!(
+                "SELECT id FROM contest WHERE id = {contest_id} FOR UPDATE"
+            ))
+            .await
+            .unwrap();
+            let locked = crate::utils::contest::contest_has_submissions(&txn, contest_id)
+                .await
+                .unwrap();
+            txn.rollback().await.unwrap();
+            locked
+        }
+    });
+    insert.commit().await.unwrap();
+    assert!(change.await.unwrap(), "the change sees the submission");
+}
