@@ -414,16 +414,17 @@ async fn contest_calls_at_their_cap_waiting_on_child_calls_all_complete() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_queued_call_leaves_the_queue_with_its_request() {
+async fn a_queued_call_leaves_the_queue_when_its_caller_goes_away() {
     let h = Harness::new(2);
     let holders: Vec<_> = (0..2)
         .map(|_| h.spawn("hold", CallOptions::background(later())))
         .collect();
     until(|| h.fixture.read(|c| c.running) == 2).await;
-    let request = h.spawn("mark", CallOptions::interactive(later()));
-    until(|| h.admission().queued(CallClass::Interactive) == 1).await;
-    request.abort();
-    until(|| h.admission().queued(CallClass::Interactive) == 0).await;
+    // A background call: it queues until a token frees, however long.
+    let caller = h.spawn("mark", CallOptions::background(later()));
+    until(|| h.admission().queued(CallClass::Background) == 1).await;
+    caller.abort();
+    until(|| h.admission().queued(CallClass::Background) == 0).await;
     h.fixture.release();
     for call in holders {
         call.await.unwrap().unwrap();

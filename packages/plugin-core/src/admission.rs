@@ -32,11 +32,12 @@
 //! - One lane holds at most [`Capacity::lane_cap`] admitted calls, half the
 //!   tokens: a slow function, however many calls it gets, leaves the other
 //!   half to every other function.
-//! - A call whose lane is full is refused at once when the lane's own queue
-//!   would take longer than [`SHED_WAIT`] to drain, judged from how long that
-//!   lane's calls have been taking: the person gets a quick "busy, retry"
-//!   instead of waiting out the request's deadline, and a cheap function is
-//!   never refused for what a slow one costs.
+//! - A call queues at most [`SHED_WAIT`], then is refused. A call whose lane
+//!   is full is refused at once when the lane's own queue would take longer
+//!   than that to drain, judged from how long that lane's calls have been
+//!   taking. Either way the person gets a quick "busy, retry" instead of
+//!   waiting out the request's deadline, and a cheap function is never
+//!   refused for what a slow one costs.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -129,8 +130,8 @@ impl CallKind {
     }
 
     /// Whether a person waits on calls of this kind: they are admitted per
-    /// plugin function and shed when their function's queue would outlast
-    /// [`SHED_WAIT`].
+    /// plugin function, queue at most [`SHED_WAIT`] and are shed when their
+    /// function's queue would outlast it.
     fn is_request_path(self) -> bool {
         self.class() == Some(CallClass::Interactive)
     }
@@ -168,9 +169,9 @@ pub const DEFAULT_JUDGING_CAP: usize = 256;
 /// Lifecycle calls admitted at once: plugins load a few at a time.
 pub const LIFECYCLE_CAP: usize = 4;
 
-/// The longest a request path call is expected to queue before it is
-/// refused instead: a person waiting on a page is better served by a retry a
-/// moment later than by a minute behind slow calls.
+/// The longest a request path call queues before it is refused: a person
+/// waiting on a page is better served by a retry a moment later than by a
+/// minute behind slow calls.
 pub const SHED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Weight of the newest call's duration in its lane's running average.
@@ -422,8 +423,8 @@ pub struct Admitted {
 }
 
 /// A top-level call that could not be admitted in time: it reached its
-/// deadline while queued, or, for a request path call, its lane's queue was
-/// expected to take longer than [`SHED_WAIT`].
+/// deadline while queued, or, for a request path call, it queued for
+/// [`SHED_WAIT`] or its lane's queue was expected to take longer than that.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Expired;
 
@@ -490,8 +491,9 @@ impl Admission {
 
     /// Admit a top-level call of `kind` to `function` of `plugin` and give it
     /// a token (none for a lifecycle call), queueing until its kind and lane
-    /// have room and a token is free. Gives up at `deadline`. Cancel-safe:
-    /// dropping the future leaves the queue.
+    /// have room and a token is free. Gives up at `deadline`, and a request
+    /// path call after [`SHED_WAIT`] in the queue. Cancel-safe: dropping the
+    /// future leaves the queue.
     pub async fn admit(
         &self,
         kind: CallKind,
@@ -532,6 +534,10 @@ impl Admission {
             }
             (id, rx)
         };
+        let mut give_up = tokio::time::Instant::from_std(deadline);
+        if kind.is_request_path() {
+            give_up = give_up.min(tokio::time::Instant::now() + SHED_WAIT);
+        }
         let mut waiting = Waiting {
             admission: self,
             lane: key,
@@ -539,7 +545,7 @@ impl Admission {
             rx,
             granted: false,
         };
-        match tokio::time::timeout_at(deadline.into(), &mut waiting.rx).await {
+        match tokio::time::timeout_at(give_up, &mut waiting.rx).await {
             Ok(Ok(token)) => {
                 // The grant already counted this call as admitted.
                 waiting.granted = true;
@@ -823,6 +829,37 @@ mod tests {
         assert!(matches!(visibility, Some(Ok((_, Some(_))))));
         let reflect = try_admit(&a, INTERACTIVE, "reflect");
         assert!(matches!(reflect, Some(Ok((_, Some(_))))));
+        // The queued slow call is refused once it waited the shed wait.
+        tokio::time::advance(SHED_WAIT).await;
+        for call in queued {
+            assert_eq!(call.await.unwrap().err(), Some(Expired));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_burst_is_served_or_refused_within_the_shed_wait() {
+        let a = Admission::new(Capacity::new(4));
+        // The lane's calls have been cheap, so a burst of slow ones queues.
+        served(&a, INTERACTIVE, "f", 0.01, 5).await;
+        let _slow = [admit(&a, INTERACTIVE).await, admit(&a, INTERACTIVE).await];
+        let started = tokio::time::Instant::now();
+        let mut burst = Vec::new();
+        for _ in 0..6 {
+            burst.push(queue(&a, INTERACTIVE).await);
+        }
+        let _busy = [admit(&a, BACKGROUND).await, admit(&a, BACKGROUND).await];
+        let background = queue(&a, BACKGROUND).await;
+        // Its calls run past the shed wait: every queued call is refused at
+        // it, none waits for the request's deadline.
+        tokio::time::advance(SHED_WAIT).await;
+        for call in burst {
+            assert_eq!(call.await.unwrap().err(), Some(Expired));
+        }
+        assert_eq!(started.elapsed(), SHED_WAIT);
+        assert_eq!(a.queued(CallClass::Interactive), 0);
+        // Nobody waits on a background call: it keeps its place.
+        assert!(!background.is_finished());
+        assert_eq!(a.queued(CallClass::Background), 1);
     }
 
     #[tokio::test(start_paused = true)]
