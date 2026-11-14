@@ -2,7 +2,7 @@ import '@/lib/monaco-setup';
 
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { useSubmitGating } from '@broccoli/web-sdk/submission';
 import { useTheme } from '@broccoli/web-sdk/theme';
@@ -160,6 +160,7 @@ function CodeEditorContent({
   supportedLanguages,
 }: CodeEditorProps & { supportedLanguages: Language[] }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const { user, isLoading: authLoading } = useAuth();
   // Scope the localStorage draft keys by the signed-in user so a shared contest
@@ -575,7 +576,7 @@ function CodeEditorContent({
                 key={ct}
                 onClick={() => onContestTypeChange(ct)}
               >
-                {ct}
+                {label('contestType', ct)}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>

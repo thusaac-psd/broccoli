@@ -25,3 +25,6 @@
 'icpc.contestInfo.ceNoCount' = '编译错误不计入尝试次数。'
 'icpc.contestInfo.penaltyPerAttempt' = '{penalty_minutes} 分钟/次'
 'icpc.contestInfo.testDetailsVisible' = '测试点详情可见'
+
+# Names the host shows for what this plugin registers
+'identifier.contestType.icpc' = 'ICPC 赛制'

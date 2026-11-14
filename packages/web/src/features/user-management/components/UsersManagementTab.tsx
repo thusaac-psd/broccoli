@@ -1,5 +1,9 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -40,6 +44,7 @@ function useUserColumns({
   onDelete: (user: ManagedUserRow) => void;
 }): DataTableColumn<ManagedUserRow>[] {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const format = useFormat();
 
   return useMemo(
@@ -84,7 +89,7 @@ function useUserColumns({
             <div className="flex flex-wrap gap-1">
               {roles.slice(0, 3).map((role) => (
                 <Badge key={role} variant="outline">
-                  {role}
+                  {label('role', role)}
                 </Badge>
               ))}
               {roles.length > 3 && (
@@ -135,7 +140,7 @@ function useUserColumns({
         ),
       },
     ],
-    [format, onDelete, onEdit, onManageRoles, t],
+    [format, label, onDelete, onEdit, onManageRoles, t],
   );
 }
 

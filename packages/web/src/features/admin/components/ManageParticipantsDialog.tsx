@@ -9,7 +9,11 @@ import {
   queryState,
   useIdempotentRequest,
 } from '@broccoli/web-sdk/hooks';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import {
   Badge,
   Button,
@@ -238,6 +242,7 @@ function AddParticipantsTab({
   participants: ParticipantItem[];
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -375,7 +380,7 @@ function AddParticipantsTab({
                   <td className="px-3 py-2 font-medium">{u.username}</td>
                   <td className="px-3 py-2">{u.display_name}</td>
                   <td className="px-3 py-2 text-muted-foreground">
-                    {u.roles.join(', ')}
+                    {u.roles.map((r) => label('role', r)).join(', ')}
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button
@@ -411,6 +416,7 @@ function PreviewUserTable({
   users: UserPreviewItem[];
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   if (users.length === 0) return null;
   return (
     <div className="rounded-md border overflow-hidden">
@@ -443,7 +449,9 @@ function PreviewUserTable({
               <td className="px-3 py-2">{user.id}</td>
               <td className="px-3 py-2">{user.username}</td>
               <td className="px-3 py-2">{user.display_name}</td>
-              <td className="px-3 py-2">{user.roles.join(', ')}</td>
+              <td className="px-3 py-2">
+                {user.roles.map((r) => label('role', r)).join(', ')}
+              </td>
             </tr>
           ))}
         </tbody>

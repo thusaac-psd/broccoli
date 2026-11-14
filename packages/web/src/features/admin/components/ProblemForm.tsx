@@ -1,6 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useRegistries } from '@broccoli/web-sdk/hooks';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   DropdownMenu,
@@ -48,6 +48,7 @@ export function ProblemForm({
   attachments,
 }: ProblemFormProps) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const apiClient = useApiClient();
   const { data: registries } = useRegistries();
   const languagesQuery = useQuery({
@@ -299,7 +300,7 @@ export function ProblemForm({
             <SelectContent>
               {problemTypes.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('problemType', opt)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -321,7 +322,7 @@ export function ProblemForm({
             <SelectContent>
               {checkerFormats.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('checker', opt)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -343,7 +344,7 @@ export function ProblemForm({
             <SelectContent>
               {contestTypes.map((opt) => (
                 <SelectItem key={opt} value={opt}>
-                  {opt}
+                  {label('contestType', opt)}
                 </SelectItem>
               ))}
             </SelectContent>

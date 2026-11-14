@@ -26,3 +26,6 @@
 'limit.source.problem' = 'from problem'
 'limit.source.contest' = 'from contest'
 'limit.source.contest_problem' = 'override'
+
+# Why a submission was refused, by the rejection's code
+'apiError.SUBMISSION_LIMIT_EXCEEDED' = 'You have used all {max_submissions} submissions for this problem.'

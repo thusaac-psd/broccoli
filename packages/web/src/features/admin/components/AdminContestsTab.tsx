@@ -11,7 +11,11 @@ import {
   useIdempotentRequest,
   useRegistries,
 } from '@broccoli/web-sdk/hooks';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import { Slot } from '@broccoli/web-sdk/slot';
 import {
@@ -294,6 +298,7 @@ function ContestForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
@@ -428,7 +433,7 @@ function ContestForm({
             </option>
             {(registries?.contest_types ?? []).map((opt) => (
               <option key={opt} value={opt}>
-                {opt}
+                {label('contestType', opt)}
               </option>
             ))}
           </select>
@@ -836,6 +841,7 @@ function useContestColumns({
   onConfigure: (contest: ContestSummary) => void;
 }): DataTableColumn<ContestSummary>[] {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
@@ -871,7 +877,9 @@ function useContestColumns({
       size: 120,
       cell: ({ row }) =>
         row.original.contest_type ? (
-          <Badge variant="outline">{row.original.contest_type}</Badge>
+          <Badge variant="outline">
+            {label('contestType', row.original.contest_type)}
+          </Badge>
         ) : (
           <span className="text-destructive">
             {t('admin.field.contestTypeMissing')}

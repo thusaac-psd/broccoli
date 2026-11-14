@@ -1231,6 +1231,12 @@ export const zhCN: Catalog = {
   'fileDrop.label': '上传文件',
   'fileDrop.prompt': '将文件拖到此处，或点击选择',
 
+  // Names of host identifiers (`identifier.<kind>.<id>`); plugins name theirs
+  'identifier.role.admin': '管理员',
+  'identifier.role.problem_setter': '命题人',
+  'identifier.role.contestant': '选手',
+  'identifier.queueState.unread': '排队中',
+  'identifier.queueState.pending': '处理中',
   // API errors: by code (`apiError.<CODE>`), else by kind
   'apiError.withDetail': '{message}（{detail}）',
   'apiError.kind.network':

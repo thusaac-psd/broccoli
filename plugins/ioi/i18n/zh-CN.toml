@@ -220,3 +220,6 @@
 'ioi.scoreboardTiebreaker.sumScoreTime.description' = '按各题达到当前得分所用时间之和打破同分。'
 'ioi.scoreboardTiebreaker.maxScoreTime.label' = '最晚得分时间'
 'ioi.scoreboardTiebreaker.maxScoreTime.description' = '按达到当前总分的时间打破同分。'
+
+# Names the host shows for what this plugin registers
+'identifier.contestType.ioi' = 'IOI 赛制'

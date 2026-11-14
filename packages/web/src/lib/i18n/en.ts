@@ -1313,6 +1313,12 @@ export const en = {
   'fileDrop.label': 'Upload files',
   'fileDrop.prompt': 'Drop files here or click to browse',
 
+  // Names of host identifiers (`identifier.<kind>.<id>`); plugins name theirs
+  'identifier.role.admin': 'Administrator',
+  'identifier.role.problem_setter': 'Problem setter',
+  'identifier.role.contestant': 'Contestant',
+  'identifier.queueState.unread': 'queued',
+  'identifier.queueState.pending': 'in progress',
   // API errors: by code (`apiError.<CODE>`), else by kind
   'apiError.withDetail': '{message} ({detail})',
   'apiError.kind.network':

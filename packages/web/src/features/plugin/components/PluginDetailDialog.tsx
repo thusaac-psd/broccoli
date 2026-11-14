@@ -1,5 +1,10 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  pluginKeys,
+  useFormat,
+  usePluginText,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { PluginFullDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import {
   Badge,
@@ -453,6 +458,7 @@ export function PluginDetailDialog({
   removingUpload?: boolean;
 }) {
   const { t } = useTranslation();
+  const pluginText = usePluginText();
   const apiClient = useApiClient();
 
   const pluginQuery = useQuery({
@@ -473,7 +479,9 @@ export function PluginDetailDialog({
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {plugin ? plugin.name : t('plugins.detail.title')}
+            {plugin
+              ? pluginText(pluginKeys.name(plugin.id), plugin.name)
+              : t('plugins.detail.title')}
           </DialogTitle>
           <DialogDescription asChild>
             <div className="text-sm text-muted-foreground">

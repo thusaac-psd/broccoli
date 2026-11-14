@@ -1,4 +1,5 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { useLanguageName } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   Submission,
@@ -287,6 +288,7 @@ function SubmissionRow({
   rowClassName?: string;
 }) {
   const { t } = useTranslation();
+  const languageName = useLanguageName();
   const format = useFormat();
   const { onSubmissionClick } = useSubmissionNavigation();
   const { label: verdictLabel, variant: verdictVariant } = getVerdictBadge(
@@ -400,7 +402,7 @@ function SubmissionRow({
             : ''
         }`}
       >
-        {submission.language}
+        {languageName(submission.language)}
       </td>
     ),
     time: () => (

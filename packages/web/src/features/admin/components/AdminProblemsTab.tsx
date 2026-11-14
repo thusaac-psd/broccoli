@@ -10,7 +10,11 @@ import {
   useAsyncDialog,
   useIdempotentRequest,
 } from '@broccoli/web-sdk/hooks';
-import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
+import {
+  useFormat,
+  useIdentifierLabel,
+  useTranslation,
+} from '@broccoli/web-sdk/i18n';
 import type { ProblemSummary } from '@broccoli/web-sdk/problem';
 import {
   Badge,
@@ -388,6 +392,7 @@ function useProblemColumns({
   onConfigure: (problem: ProblemSummary) => void;
 }): DataTableColumn<ProblemSummary>[] {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
   const format = useFormat();
   return [
     { accessorKey: 'id', header: '#', size: 60 },
@@ -429,7 +434,9 @@ function useProblemColumns({
       header: t('admin.field.problemType'),
       size: 120,
       cell: ({ row }) => (
-        <Badge variant="outline">{row.original.problem_type}</Badge>
+        <Badge variant="outline">
+          {label('problemType', row.original.problem_type)}
+        </Badge>
       ),
     },
     {
@@ -438,7 +445,7 @@ function useProblemColumns({
       size: 120,
       cell: ({ row }) => (
         <span className="text-muted-foreground">
-          {row.original.checker_format}
+          {label('checker', row.original.checker_format)}
         </span>
       ),
     },

@@ -1,4 +1,4 @@
-import { use, useMemo } from 'react';
+import { use, useCallback, useMemo } from 'react';
 
 import { serverNow } from '@/api/server-clock';
 import {
@@ -12,6 +12,7 @@ import {
   formatTime,
 } from '@/i18n/format';
 import { I18nContext } from '@/i18n/i18n-context';
+import { type IdentifierKind, identifierLabel } from '@/i18n/labels';
 
 export function useTranslation() {
   const context = use(I18nContext);
@@ -45,5 +46,34 @@ export function useFormat(): Formatters {
       relativeSeconds: (offset) => formatRelativeSeconds(offset, locale),
     }),
     [locale],
+  );
+}
+
+/** `identifierLabel` bound to the UI language. */
+export function useIdentifierLabel(): (
+  kind: IdentifierKind,
+  id: string,
+) => string {
+  const { lookup } = useTranslation();
+  return useCallback(
+    (kind: IdentifierKind, id: string) => identifierLabel(lookup, kind, id),
+    [lookup],
+  );
+}
+
+/**
+ * Plugin-supplied text (a manifest description, a config schema title) in
+ * the user's language: the translation of `key` from the plugin's pack, or
+ * `fallback`, the text the plugin wrote.
+ */
+export function usePluginText(): <T extends string | null | undefined>(
+  key: string,
+  fallback: T,
+) => string | T {
+  const { lookup } = useTranslation();
+  return useCallback(
+    <T extends string | null | undefined>(key: string, fallback: T) =>
+      lookup(key) ?? fallback,
+    [lookup],
   );
 }

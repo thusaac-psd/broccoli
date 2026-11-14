@@ -1,4 +1,4 @@
-import { queryState } from '@broccoli/web-sdk/hooks';
+import { queryState, useLanguageName } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
 import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
@@ -32,6 +32,7 @@ export function SubmissionDetailView({
   contestId,
 }: SubmissionDetailViewProps) {
   const { t } = useTranslation();
+  const languageName = useLanguageName();
   const format = useFormat();
   const detail = queryState(useSubmissionDetail(submissionId));
   const submission = detail.status === 'data' ? detail.data : null;
@@ -129,7 +130,7 @@ export function SubmissionDetailView({
             </MetaItem>
             <MetaItem label={t('submissionDetail.language')}>
               <Badge variant="outline" className="max-w-full font-mono">
-                {submission.language}
+                {languageName(submission.language)}
               </Badge>
             </MetaItem>
             <MetaItem label={t('overview.submitted')}>

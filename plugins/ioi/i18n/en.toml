@@ -220,3 +220,6 @@
 'ioi.scoreboardTiebreaker.sumScoreTime.description' = 'Ties are broken by the sum of each problem’s score-reaching time.'
 'ioi.scoreboardTiebreaker.maxScoreTime.label' = 'Latest score time'
 'ioi.scoreboardTiebreaker.maxScoreTime.description' = 'Ties are broken by when the displayed total score was fully reached.'
+
+# Names the host shows for what this plugin registers
+'identifier.contestType.ioi' = 'IOI'

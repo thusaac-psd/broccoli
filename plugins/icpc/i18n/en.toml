@@ -25,3 +25,6 @@
 'icpc.contestInfo.ceNoCount' = 'Compilation errors do not count as attempts.'
 'icpc.contestInfo.penaltyPerAttempt' = '{penalty_minutes} min/attempt'
 'icpc.contestInfo.testDetailsVisible' = 'Test details visible'
+
+# Names the host shows for what this plugin registers
+'identifier.contestType.icpc' = 'ICPC'

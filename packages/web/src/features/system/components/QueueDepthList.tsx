@@ -1,4 +1,4 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 
 import type { QueueInfo } from '@/features/system/types';
 
@@ -16,6 +16,7 @@ const TONE = {
 
 export function QueueDepthList({ queues }: Props) {
   const { t } = useTranslation();
+  const label = useIdentifierLabel();
 
   if (queues.length === 0) {
     return (
@@ -40,7 +41,7 @@ export function QueueDepthList({ queues }: Props) {
                 <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
                   {Object.entries(q.breakdown).map(([state, count]) => (
                     <span key={state} className="tabular-nums">
-                      {state}: {count}
+                      {label('queueState', state)}: {count}
                     </span>
                   ))}
                 </div>
