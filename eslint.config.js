@@ -82,6 +82,47 @@ export default defineConfig([
     },
   },
 
+  // Heavy code loads on the page that shows it. Every route module, and all
+  // it imports statically, loads for every visitor once the app has started
+  // (see `lib/preload-routes.ts`), so Monaco and KaTeX are imported at run
+  // time only by `*.impl` modules and their setup modules, which code reaches
+  // through a dynamic `import()` (see `components/lazy-impl.ts`).
+  {
+    files: ['packages/web/src/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.impl.{ts,tsx}',
+      'packages/web/src/lib/monaco-setup.ts',
+      'packages/web/src/components/markdown-math.ts',
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                'monaco-editor',
+                'monaco-editor/*',
+                '@monaco-editor/react',
+                'monaco-vim',
+                'katex',
+                'katex/*',
+                'rehype-katex',
+                'remark-math',
+                '**/monaco-setup',
+                '**/markdown-math',
+                '**/*.impl',
+              ],
+              allowTypeImports: true,
+              message:
+                'Heavy code loads through a dynamic import (lazyImpl), never with a route: import it statically only from an *.impl module.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Frontend-specific React config
   {
     files: ['packages/web/**/*.{ts,tsx}', 'packages/web-sdk/**/*.tsx'],

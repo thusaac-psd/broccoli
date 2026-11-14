@@ -4,6 +4,12 @@
 // reload the page, onto the browser's own error page. The modules are the
 // ones React Router itself imports (from its manifest), so they are fetched
 // once and shared.
+//
+// What a route module imports statically therefore loads for every visitor,
+// so heavy code (Monaco, KaTeX) stays behind dynamic imports and loads on the
+// page that shows it (an ESLint rule keeps it there). Should the server be
+// gone when such a chunk is first needed, the import retries, and the root
+// error boundary waits until the server answers and reloads.
 
 interface RouteManifest {
   routes: Record<string, { module: string }>;
