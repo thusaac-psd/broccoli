@@ -89,7 +89,7 @@ fn prepare_case(
     // solution output is checked worker-side. `none` schedules NO checker stage
     // (no comparison; the solution output is captured normally for display) and
     // is interpreted inline by the fused interpret path.
-    let checker_format = checker_format_of(req);
+    let checker_format = req.checker_format.as_str();
     let checker_stage = if checker_format == "none" {
         None
     } else {
@@ -125,11 +125,6 @@ fn prepare_case(
     })
 }
 
-#[cfg(target_arch = "wasm32")]
-fn checker_format_of(req: &BuildEvalOpsInput) -> &str {
-    req.checker_format.as_deref().unwrap_or("exact")
-}
-
 /// The proposed output binding for a checker format. Mirrors standard-checkers'
 /// modes: testlib reads the solution output as a FILE; every built-in comparator
 /// reads it on STDIN (Stream). The evaluator wires exec's output side from the
@@ -154,7 +149,7 @@ fn interpret_case_result(
     result: &OperationResult,
 ) -> Result<TestCaseVerdict, extism_pdk::Error> {
     let tc_id = req.test_case_id;
-    let checker_format = checker_format_of(req);
+    let checker_format = req.checker_format.as_str();
 
     // Every format interprets via the fused path. Comparison formats read the
     // worker-side `check` step's small result; `none` schedules no check step and

@@ -270,7 +270,7 @@ mod timeout_tests {
                 blob_hash: "abc123".to_string(),
                 read_token: None,
             }),
-            checker_format: Some("exact".to_string()),
+            checker_format: "lines".to_string(),
             additional_file_refs: vec![],
             target_worker_id: None,
         };
@@ -339,8 +339,9 @@ pub struct BuildEvalOpsInput {
     pub test_input: JudgeFile,
     #[serde(default)]
     pub expected_output: JudgeFile,
-    #[serde(default)]
-    pub checker_format: Option<String>,
+    /// The problem's checker format, or `none` for a case without an
+    /// expected output.
+    pub checker_format: String,
 
     #[serde(default)]
     pub additional_file_refs: Vec<FileRef>,

@@ -52,6 +52,7 @@ pub(crate) async fn seed_user_and_problem(db: &DatabaseConnection) -> (i32, i32)
         content: Set("c".into()),
         time_limit: Set(1000),
         memory_limit: Set(262_144),
+        checker_format: Set(broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT.into()),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()

@@ -15,8 +15,10 @@ pub struct CreateProblemRequest {
     pub memory_limit: i32,
     #[schema(example = "batch")]
     pub problem_type: String,
+    /// How a solution's output is compared with the expected output.
+    /// Defaults to `lines`.
     #[serde(default = "default_checker_format")]
-    #[schema(example = "exact")]
+    #[schema(example = "lines")]
     pub checker_format: String,
     /// Contest type that judges submissions made outside any contest.
     /// Required: the server never picks one, because any "first registered"
@@ -46,7 +48,7 @@ pub struct ProblemResponse {
     pub memory_limit: i32,
     #[schema(example = "batch")]
     pub problem_type: String,
-    #[schema(example = "exact")]
+    #[schema(example = "lines")]
     pub checker_format: String,
     #[schema(example = "ioi")]
     pub default_contest_type: String,
@@ -150,8 +152,13 @@ pub struct TestCaseListItem {
     pub created_at: DateTime<Utc>,
 }
 
+/// The checker format of a problem that names none: line by line, ignoring
+/// trailing whitespace on each line and trailing blank lines, so an answer
+/// typed without a final newline matches `print(3)`. `exact` compares bytes.
+pub const DEFAULT_CHECKER_FORMAT: &str = "lines";
+
 fn default_checker_format() -> String {
-    "exact".into()
+    DEFAULT_CHECKER_FORMAT.into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]

@@ -370,7 +370,7 @@ mod tests {
             evaluate_batch_id: None,
             test_input: JudgeFile::inline("hello\n"),
             expected_output: JudgeFile::inline("world\n"),
-            checker_format: Some("exact".to_string()),
+            checker_format: "lines".to_string(),
             additional_file_refs: vec![],
             target_worker_id: None,
         }

@@ -3850,6 +3850,7 @@ export interface components {
       /**
        * @example [
        *       "exact",
+       *       "lines",
        *       "tokens"
        *     ]
        */
@@ -3862,6 +3863,12 @@ export interface components {
        *     ]
        */
       contest_types: string[];
+      /**
+       * @description The checker format a problem gets when it names none, for a form to
+       *     preselect.
+       * @example lines
+       */
+      default_checker_format: string;
       evaluators: components['schemas']['EvaluatorEntry'][];
       hooks: components['schemas']['HookEntryInfo'][];
       languages: components['schemas']['LanguageRegistryItem'][];

@@ -27,6 +27,7 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'running-contests/plugin-settings',
+        'running-contests/checking-output',
       ],
     },
     {

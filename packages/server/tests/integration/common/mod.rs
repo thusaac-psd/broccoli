@@ -761,7 +761,7 @@ impl TestApp {
             );
             {
                 let mut stage = checker_stage_registry.write().await;
-                for fmt in ["exact", "none"] {
+                for fmt in ["exact", "lines", "none"] {
                     stage.insert(
                         fmt.into(),
                         server::registry::CheckerStageHandlers {

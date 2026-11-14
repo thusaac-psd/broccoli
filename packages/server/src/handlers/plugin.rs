@@ -115,6 +115,7 @@ pub async fn list_registries(
     Ok(Json(RegistriesResponse {
         problem_types,
         checker_formats,
+        default_checker_format: broccoli_api_types::problem::DEFAULT_CHECKER_FORMAT.into(),
         contest_types,
         languages,
         evaluators,

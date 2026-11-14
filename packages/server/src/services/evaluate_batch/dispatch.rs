@@ -456,7 +456,7 @@ async fn resolve_inputs(
         })
         .collect();
 
-    let checker_format = Some(problem_model.checker_format.clone());
+    let checker_format = problem_model.checker_format.clone();
     // The host does not inline the checker source: checker plugins read it
     // from their own per-problem config (e.g. `standard-checkers:checker_source`).
 
@@ -523,7 +523,7 @@ async fn resolve_inputs(
         let tc_checker_format = if expected_output.present {
             checker_format.clone()
         } else {
-            Some("none".to_string())
+            "none".to_string()
         };
 
         resolved.push(BuildEvalOpsInput {

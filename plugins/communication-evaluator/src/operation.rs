@@ -329,7 +329,7 @@ mod tests {
             evaluate_batch_id: Some("test-batch".to_string()),
             test_input: JudgeFile::inline("5\n1 2 3 4 5\n"),
             expected_output: JudgeFile::Missing,
-            checker_format: None,
+            checker_format: "lines".to_string(),
             additional_file_refs: vec![],
             target_worker_id: None,
         }
