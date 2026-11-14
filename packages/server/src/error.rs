@@ -26,6 +26,9 @@ pub enum AppError {
     TokenInvalid,
     InvalidCredentials,
     PermissionDenied,
+    /// The caller may see a public contest but has not registered for it, so
+    /// may not act in it (submit, run code) until they do.
+    ContestNotRegistered,
     NotFound(String),
     MethodNotAllowed,
     Conflict(String),
@@ -103,6 +106,13 @@ impl AppError {
             AppError::PermissionDenied => (
                 StatusCode::FORBIDDEN,
                 simple("PERMISSION_DENIED", "Insufficient permissions".into()),
+            ),
+            AppError::ContestNotRegistered => (
+                StatusCode::FORBIDDEN,
+                simple(
+                    "CONTEST_NOT_REGISTERED",
+                    "Register for this contest first".into(),
+                ),
             ),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, simple("NOT_FOUND", msg)),
             AppError::MethodNotAllowed => (

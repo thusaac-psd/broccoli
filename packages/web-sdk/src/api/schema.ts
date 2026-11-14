@@ -7989,7 +7989,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -8418,7 +8418,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorBody'];
         };
       };
-      /** @description Forbidden (PERMISSION_DENIED) */
+      /** @description Forbidden (PERMISSION_DENIED); or the caller has not registered for this public contest (CONTEST_NOT_REGISTERED) */
       403: {
         headers: {
           [name: string]: unknown;

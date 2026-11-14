@@ -230,7 +230,7 @@ pub async fn require_contest_participant<C: sea_orm::ConnectionTrait>(
         return Ok(());
     }
     if contest.is_public {
-        return Err(AppError::PermissionDenied);
+        return Err(AppError::ContestNotRegistered);
     }
     Err(AppError::NotFound("Contest not found".into()))
 }
