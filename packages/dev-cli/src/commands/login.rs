@@ -10,6 +10,7 @@ use broccoli_cli_core::api::auth::DeviceCodeResponse;
 use broccoli_cli_core::backoff;
 use broccoli_cli_core::client::{Client, PollResponse, persist_session};
 use broccoli_cli_core::config;
+use broccoli_cli_core::credentials::CredentialsFile;
 use broccoli_cli_core::server::ServerUrl;
 
 #[derive(Args)]
@@ -18,10 +19,20 @@ pub struct LoginArgs {
     /// to last, `server` in config.toml, then http://localhost:3000.
     #[arg(long, env = "BROCCOLI_URL")]
     pub server: Option<ServerUrl>,
+
+    /// Save this access token (for example one copied from the web UI)
+    /// instead of signing in through the browser
+    #[arg(long, env = "BROCCOLI_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
 }
 
 pub fn run(args: LoginArgs) -> anyhow::Result<()> {
     let server = config::login_server(args.server.as_ref())?;
+    if let Some(token) = args.token {
+        persist_session(&server, &token)?;
+        print_saved(&server);
+        return Ok(());
+    }
     println!(
         "{}  Requesting device code from {}...",
         style("→").blue().bold(),
@@ -74,11 +85,7 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
 
                 persist_session(&server, &token)?;
 
-                println!("{}  Logged in successfully!", style("✓").green().bold());
-                println!(
-                    "   Credentials saved to {}",
-                    style("~/.config/broccoli/credentials.json").dim()
-                );
+                print_saved(&server);
                 return Ok(());
             }
             Step::Expired => {
@@ -98,6 +105,18 @@ pub fn run(args: LoginArgs) -> anyhow::Result<()> {
 
     println!();
     bail!("Timed out waiting for authorization. Run `broccoli-dev login` again.");
+}
+
+fn print_saved(server: &ServerUrl) {
+    println!(
+        "{}  Logged in to {}",
+        style("✓").green().bold(),
+        style(server).cyan()
+    );
+    println!(
+        "   Credentials saved to {}",
+        style(CredentialsFile::default_location().path().display()).dim()
+    );
 }
 
 /// RFC 8628 3.2: the interval to use when the server gives none.

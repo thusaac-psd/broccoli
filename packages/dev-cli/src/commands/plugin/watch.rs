@@ -23,21 +23,29 @@ use super::wasm::copy_wasm_artifact;
 
 #[derive(Args)]
 pub struct WatchPluginArgs {
+    /// Plugin directory (the one holding plugin.toml)
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
+    /// Server to upload to. Defaults to the server you last logged in to,
+    /// then `server` in config.toml
     #[arg(long, env = "BROCCOLI_URL")]
     pub server: Option<ServerUrl>,
 
-    #[arg(long, env = "BROCCOLI_TOKEN")]
+    /// Access token to use instead of the saved login (never refreshed)
+    #[arg(long, env = "BROCCOLI_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 
+    /// Run the frontend install command (`pnpm install`) even when
+    /// node_modules exists; it runs anyway when node_modules is missing
     #[arg(long)]
     pub install: bool,
 
+    /// Build an optimized WASM module
     #[arg(long)]
     pub release: bool,
 
+    /// Milliseconds to wait for edits to settle before rebuilding
     #[arg(long, default_value = "500")]
     pub debounce: u64,
 }
@@ -127,11 +135,7 @@ pub fn run(args: WatchPluginArgs) -> anyhow::Result<()> {
 
     let manifest_path = plugin_dir.join("plugin.toml");
     if !manifest_path.exists() {
-        bail!(
-            "Not a broccoli plugin directory: no plugin.toml found in '{}'.\n\
-             Run `broccoli plugin new` to create a new plugin.",
-            plugin_dir.display()
-        );
+        return Err(super::not_a_plugin_dir(&plugin_dir));
     }
 
     let creds = config::resolve_credentials(args.server.as_ref(), args.token.as_deref())?;

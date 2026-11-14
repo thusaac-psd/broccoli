@@ -21,9 +21,21 @@ pub struct PluginArgs {
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
+    /// Scaffold a new plugin
     New(NewPluginArgs),
+    /// Build a plugin's backend (WASM) and frontend in place
     Build(BuildPluginArgs),
+    /// Rebuild on every edit and upload the plugin to a server
     Watch(WatchPluginArgs),
+}
+
+/// The error for a directory without a `plugin.toml`.
+fn not_a_plugin_dir(dir: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Not a broccoli plugin directory: no plugin.toml found in '{}'.\n\
+         Run `broccoli-dev plugin new <name>` to create a new plugin.",
+        dir.display()
+    )
 }
 
 fn read_manifest(path: &Path) -> anyhow::Result<PluginManifest> {
