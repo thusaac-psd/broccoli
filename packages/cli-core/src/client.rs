@@ -11,7 +11,10 @@ use broccoli_api_types::contest::{
     ContestListResponse, ContestProblemResponse, ContestResponse, ContestUserContextResponse,
 };
 use broccoli_api_types::error::ErrorBody;
-use broccoli_api_types::plugin::{PluginArchiveSummary, PluginReplaces, PluginUploadResponse};
+use broccoli_api_types::plugin::{
+    LanguageRegistryItem, PluginArchiveSummary, PluginReplaces, PluginUploadResponse,
+    RegistriesResponse,
+};
 use broccoli_api_types::problem::{ProblemResponse, ProblemSamplesResponse};
 use broccoli_api_types::submission::{
     CreateSubmissionRequest, SubmissionFileDto, SubmissionListResponse, SubmissionResponse,
@@ -379,6 +382,14 @@ impl Client {
     pub fn issue_cli_token(&self) -> ClientResult<CliTokenResponse> {
         let resp = self.post("/api/v1/auth/cli-token", &serde_json::json!({}))?;
         self.parse_response(resp)
+    }
+
+    /// The languages the server's plugins registered, with the file
+    /// extensions each one claims.
+    pub fn languages(&self) -> ClientResult<Vec<LanguageRegistryItem>> {
+        let resp = self.get("/api/v1/plugins/registries")?;
+        let registries: RegistriesResponse = self.parse_response(resp)?;
+        Ok(registries.languages)
     }
 
     pub fn list_contests(&self) -> ClientResult<ContestListResponse> {

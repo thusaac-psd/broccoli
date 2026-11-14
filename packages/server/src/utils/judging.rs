@@ -59,12 +59,7 @@ pub fn validate_submission_contract(
 ) -> Result<(), AppError> {
     let language = language.trim();
 
-    if !known_languages.is_empty() && !known_languages.contains(language) {
-        return Err(AppError::Validation(format!(
-            "Unsupported language: {}",
-            language
-        )));
-    }
+    check_known_language(language, known_languages)?;
 
     let Some(submission_format) = submission_format else {
         return Ok(());
@@ -134,14 +129,21 @@ pub fn validate_run_language(
     language: &str,
     known_languages: &HashSet<String>,
 ) -> Result<(), AppError> {
-    let language = language.trim();
-    if !known_languages.is_empty() && !known_languages.contains(language) {
-        return Err(AppError::Validation(format!(
-            "Unsupported language: {}",
-            language
-        )));
+    check_known_language(language.trim(), known_languages)
+}
+
+/// Refuse a language no plugin registered, naming the ones that are, so a
+/// client can show the choice. An empty registry checks nothing.
+fn check_known_language(language: &str, known_languages: &HashSet<String>) -> Result<(), AppError> {
+    if known_languages.is_empty() || known_languages.contains(language) {
+        return Ok(());
     }
-    Ok(())
+    let mut known: Vec<&str> = known_languages.iter().map(String::as_str).collect();
+    known.sort_unstable();
+    Err(AppError::Validation(format!(
+        "Unsupported language: {language}. Supported languages: {}",
+        known.join(", ")
+    )))
 }
 
 #[cfg(test)]
@@ -150,6 +152,17 @@ mod tests {
 
     fn known_languages() -> HashSet<String> {
         HashSet::from(["cpp".to_string(), "c".to_string(), "python3".to_string()])
+    }
+
+    #[test]
+    fn an_unsupported_language_lists_the_supported_ones() {
+        match validate_run_language("ruby", &known_languages()) {
+            Err(AppError::Validation(message)) => assert_eq!(
+                message,
+                "Unsupported language: ruby. Supported languages: c, cpp, python3"
+            ),
+            other => panic!("expected a validation error, got {other:?}"),
+        }
     }
 
     #[test]

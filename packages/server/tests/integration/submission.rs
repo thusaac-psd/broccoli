@@ -543,7 +543,12 @@ mod submission_listing {
 
         assert_eq!(res.status, 400);
         assert_eq!(res.body["code"], "VALIDATION_ERROR");
-        assert_eq!(res.body["message"], "Unsupported language: ruby");
+        let message = res.body["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("Unsupported language: ruby. Supported languages: "),
+            "{message}"
+        );
+        assert!(message.contains("cpp"), "{message}");
     }
 
     #[tokio::test]

@@ -97,3 +97,21 @@ async fn a_rejected_explicit_token_is_the_servers_answer_not_an_expired_session(
         other => panic!("expected the token refusal, got {other}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_reads_the_languages_and_extensions_the_server_registered() {
+    let app = TestApp::spawn().await;
+    let token = app
+        .create_authenticated_user("lang_reader", "pass1234")
+        .await;
+    let client = Client::new(broccoli_cli_core::session::Session::explicit(
+        server(&app.url("")),
+        token,
+    ));
+    let languages = blocking(move || client.languages()).await.unwrap();
+    let cpp = languages
+        .iter()
+        .find(|l| l.id == "cpp")
+        .expect("the test server registers cpp");
+    assert!(!cpp.extensions.is_empty(), "{cpp:?}");
+}

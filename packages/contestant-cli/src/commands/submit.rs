@@ -95,7 +95,10 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         submission_files.push(SubmissionFileDto { filename, content });
     }
 
-    let language = context::resolve_language(&args.files, args.language.as_deref())?;
+    let language = context::resolve_language(&args.files, args.language.as_deref(), || {
+        context::server_languages(&client)
+    })?
+    .id;
 
     println!(
         "{}  Language: {}",

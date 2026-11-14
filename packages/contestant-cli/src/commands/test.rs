@@ -49,7 +49,9 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
     let user_config = load_user_config();
     let ctx = context::discover_context();
 
-    let language = context::resolve_language(&args.files, args.language.as_deref())?;
+    let language = context::resolve_language(&args.files, args.language.as_deref(), || {
+        context::server_languages(&client)
+    })?;
 
     let mut files = Vec::new();
     for path in &args.files {
@@ -178,7 +180,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         .collect();
 
     let created = client
-        .run_contest_code(contest_id, problem_id, files, &language, custom)
+        .run_contest_code(contest_id, problem_id, files, &language.id, custom)
         .context("Failed to start code run")?;
     let result = poll_code_run(&client, created.id)?;
     print_remote_result(&result)?;
@@ -243,7 +245,7 @@ fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse
 
 fn run_samples_locally(
     files: &[SubmissionFileDto],
-    language: &str,
+    language: &context::Language,
     samples: &[broccoli_cli_core::api::problem::SampleCase],
     config: &broccoli_cli_core::config::UserConfig,
 ) -> anyhow::Result<()> {
@@ -360,7 +362,7 @@ impl Drop for ScratchDir {
 
 fn run_local(
     files: &[SubmissionFileDto],
-    language: &str,
+    language: &context::Language,
     input: &str,
     config: &broccoli_cli_core::config::UserConfig,
 ) -> anyhow::Result<String> {
@@ -368,13 +370,13 @@ fn run_local(
     // stdin is piped directly to keep untrusted paths/filenames out of the command string
     let cmd_template = config
         .runtimes
-        .get(language)
+        .get(&language.id)
         .cloned()
-        .unwrap_or_else(|| default_runtime(language));
+        .unwrap_or_else(|| default_runtime(&language.id));
 
     let main_file = files
         .iter()
-        .find(|file| context::detect_language(&file.filename) == Some(language))
+        .find(|file| language.claims(&file.filename))
         .or_else(|| files.first())
         .map(|f| &f.filename)
         .context("No source files provided")?;
