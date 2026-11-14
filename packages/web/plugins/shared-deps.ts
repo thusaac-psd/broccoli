@@ -12,9 +12,10 @@ import type { Plugin, ResolvedConfig, Rollup } from 'vite';
  * It does two things:
  *   1. Exposes a virtual module (`virtual:shared-deps-map`) that returns
  *      a mapping of bare specifiers -> browser-resolvable URLs.
- *   2. Emits thin re-export "shim" modules for each shared dep. In dev via
- *      middleware (re-exporting from Vite's pre-bundled deps), in production via
- *      emitted chunks.
+ *   2. Provides a thin re-export "shim" module for each shared dep: a virtual
+ *      module served through Vite's own pipeline in dev, and an emitted chunk
+ *      in production. Its imports resolve exactly as the host's do, so a
+ *      plugin gets the very module instances the host uses.
  *
  * The consumer (root.tsx) injects the map as a `<script type="importmap">`
  * in `<head>`, which the browser uses to resolve bare imports in any
@@ -111,16 +112,6 @@ const MAP_PLACEHOLDER_RE = new RegExp(`\\b${MAP_PLACEHOLDER}\\b`, 'g');
 
 const MANIFEST_FILENAME = 'shared-deps-map.json';
 
-/**
- * URL prefix for dev-mode shim modules served via middleware.
- * These re-export from Vite's pre-bundled deps so dynamically loaded plugins
- * (which bypass Vite's import rewriting) can resolve bare specifiers.
- */
-const DEV_SHIM_PREFIX = '/@shared-deps/';
-
-/** Reverse lookup from flattened ids back to original dep names. */
-const FLAT_TO_DEP = new Map(SHARED_DEPS.map((dep) => [flattenId(dep), dep]));
-
 const IDENT_RE = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
 const SDK_DIST_ROOT = fileURLToPath(
   new URL('../../web-sdk/dist/', import.meta.url),
@@ -140,13 +131,9 @@ function getNamedExports(dep: string): string[] {
   }
 }
 
-/** Mirrors Vite's dep pre-bundling filename convention: `/` -> `_` */
+/** A dep's specifier as a file name: `/` becomes `_`. */
 function flattenId(dep: string): string {
   return dep.replace(/\//g, '_');
-}
-
-function isSdkDep(dep: string): boolean {
-  return dep === '@broccoli/web-sdk' || dep.startsWith('@broccoli/web-sdk/');
 }
 
 /** Absolute path of a web-sdk entry, falling back to its built `dist` file. */
@@ -163,25 +150,6 @@ export function resolveSdkEntry(dep: string): string {
       dep.slice('@broccoli/web-sdk/'.length),
       'index.js',
     );
-  }
-}
-
-function toFsModuleUrl(absPath: string): string {
-  return `/@fs/${absPath.replace(/\\/g, '/').replace(/^\/+/, '')}`;
-}
-
-/**
- * Read the browserHash from Vite's dep optimizer metadata.
- * This hash must be appended as `?v={hash}` so the browser resolves to the
- * exact same module instance the host app uses (module cache keys on full URL).
- */
-function readBrowserHash(cacheDir: string): string {
-  try {
-    const metaPath = resolve(cacheDir, 'deps', '_metadata.json');
-    const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
-    return meta.browserHash || '';
-  } catch {
-    return '';
   }
 }
 
@@ -269,52 +237,16 @@ function hoistClientIndexImportMap(config: ResolvedConfig): void {
 }
 
 /**
- * Generate a dev-mode ESM shim that re-exports a pre-bundled dependency.
- *
- * Vite pre-bundles CJS deps (React) as `export default module.exports` with
- * no named exports. ESM deps like `@tanstack/react-query` keep their real named
- * exports but have no default. We handle both via namespace import:
- *
- * ```
- *   import * as __ns gives `{ default: cjsExports }` for CJS
- *   and `{ useQuery, ... }` for ESM.
- * ```
- *
- * Then `__ns.default ?? __ns` gives the right object to extract names from.
- *
- * The `?v={browserHash}` query is critical, because without it, the browser would
- * load a separate module instance (URL mismatch leads to duplicate React and broken
- * hooks).
+ * The dev server's import map: every shared dep maps to its virtual shim
+ * module, which Vite serves at `/@id/` and transforms like any host module.
+ * So the shim imports whatever URL the host's own imports of that dep get
+ * (a pre-bundled dep with its current version hash, an aliased SDK entry),
+ * and the URLs here never go stale when Vite re-optimizes.
  */
-function generateDevShim(dep: string, browserHash: string): string {
-  const named = getNamedExports(dep);
-  const hashSuffix = browserHash ? `?v=${browserHash}` : '';
-  const importSource = isSdkDep(dep)
-    ? toFsModuleUrl(resolveSdkEntry(dep))
-    : `/node_modules/.vite/deps/${flattenId(dep)}.js${hashSuffix}`;
-
-  const setupModule = SHIM_SETUP_MODULES[dep as (typeof SHARED_DEPS)[number]];
-  const lines = [
-    // Root-relative URL matches how the host's own imports resolve in dev,
-    // so the browser shares one module instance.
-    ...(setupModule ? [`import '/${setupModule}';`] : []),
-    `import * as __ns from '${importSource}';`,
-  ];
-
-  if (DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
-    lines.push(`const __mod = __ns.default;`);
-    lines.push(`export default __mod;`);
-    for (const name of named) {
-      lines.push(`export const ${name} = __mod.${name};`);
-    }
-  } else {
-    lines.push(`export * from '${importSource}';`);
-    if (ESM_DEFAULT_EXPORT_DEPS.has(dep as (typeof SHARED_DEPS)[number])) {
-      lines.push(`export { default } from '${importSource}';`);
-    }
-  }
-
-  return lines.join('\n');
+export function devImportMap(): Record<string, string> {
+  return Object.fromEntries(
+    SHARED_DEPS.map((dep) => [dep, `/@id/__x00__${SHIM_PREFIX}${dep}`]),
+  );
 }
 
 export function sharedDepsPlugin(): Plugin {
@@ -347,54 +279,12 @@ export function sharedDepsPlugin(): Plugin {
     },
 
     configureServer(server) {
-      // Force full page reload when Vite re-optimizes deps, because the
-      // import map in <head> is immutable once parsed by the browser.
-      // Without this, dynamically loaded plugins would resolve bare
-      // specifiers to stale pre-bundle URLs (old browserHash), loading
-      // duplicate module instances and breaking React context.
-      let lastBrowserHash = '';
-      server.watcher?.on('change', (path) => {
-        if (path.endsWith('_metadata.json') && path.includes('.vite/deps')) {
-          const newHash = readBrowserHash(config.cacheDir);
-          if (lastBrowserHash && newHash && newHash !== lastBrowserHash) {
-            server.ws.send({ type: 'full-reload' });
-          }
-          lastBrowserHash = newHash;
-        }
-      });
-
-      server.middlewares.use((req, res, next) => {
-        if (!req.url?.startsWith(DEV_SHIM_PREFIX)) return next();
-
-        const browserHash = readBrowserHash(config.cacheDir);
-        const reqPath = req.url.split('?', 1)[0];
-
-        const depFlat = reqPath
-          .slice(DEV_SHIM_PREFIX.length)
-          .replace(/\.js$/, '');
-        const dep = FLAT_TO_DEP.get(depFlat);
-
-        if (!dep) {
-          res.statusCode = 404;
-          res.end('Not a shared dep');
-          return;
-        }
-
-        const code = generateDevShim(dep, browserHash);
-        res.setHeader('Content-Type', 'application/javascript');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.end(code);
-      });
+      // React Router's dev server renders the HTML itself, so the import map
+      // goes into its response here, first in <head>: an import map must
+      // precede every module script.
+      const importMapTag = `<script type="importmap">${JSON.stringify({ imports: devImportMap() })}</script>`;
 
       server.middlewares.use((_, res, next) => {
-        const browserHash = readBrowserHash(config.cacheDir);
-        const hashSuffix = browserHash ? `?v=${browserHash}` : '';
-        const imports: Record<string, string> = {};
-        for (const dep of SHARED_DEPS) {
-          imports[dep] = `${DEV_SHIM_PREFIX}${flattenId(dep)}.js${hashSuffix}`;
-        }
-        const importMapTag = `<script type="importmap">${JSON.stringify({ imports })}</script>`;
-
         let injected = false;
         const _end = res.end.bind(res);
         const _write = res.write.bind(res);
@@ -453,11 +343,10 @@ export function sharedDepsPlugin(): Plugin {
     },
 
     resolveId(id) {
-      if (isDev && isSdkDep(id)) {
-        return `${DEV_SHIM_PREFIX}${flattenId(id)}.js`;
-      }
       if (id === VIRTUAL_MAP_ID) return RESOLVED_MAP_ID;
       if (id.startsWith(SHIM_PREFIX)) return '\0' + id;
+      // A dev request for `/@id/__x00__shared-dep:…` arrives already resolved.
+      if (id.startsWith(RESOLVED_SHIM_PREFIX)) return id;
       return null;
     },
 
