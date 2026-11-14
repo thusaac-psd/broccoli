@@ -33,7 +33,8 @@ const CANCEL_RETRY_MAX: Duration = Duration::from_secs(1);
 struct Entry {
     cancel: CancelHandle,
     fired: Arc<AtomicBool>,
-    /// When the call's deadline passes.
+    /// When the call's deadline passes, for [`expire`].
+    #[cfg(test)]
     deadline: Instant,
     /// The gap before the next repeat of the cancel.
     retry: Duration,
@@ -143,6 +144,7 @@ pub(crate) fn watch(cancel: CancelHandle, deadline: Instant) -> DeadlineGuard {
         Entry {
             cancel,
             fired: fired.clone(),
+            #[cfg(test)]
             deadline,
             retry: CANCEL_RETRY,
         },
