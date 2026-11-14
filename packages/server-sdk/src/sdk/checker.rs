@@ -69,7 +69,6 @@ mod tests {
             answer: JudgeFile::inline("ans\n"),
             test_input: JudgeFile::Missing,
             problem_id: None,
-            config: None,
             output_binding: crate::types::OutputMode::Stream {
                 channel: "verdict".to_string(),
             },
