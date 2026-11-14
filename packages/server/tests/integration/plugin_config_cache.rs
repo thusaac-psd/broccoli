@@ -172,6 +172,22 @@ async fn a_statement_that_changes_no_rows_leaves_the_counter_alone() {
     assert_eq!(epoch(&app.db).await, before);
 }
 
+/// `SET LOCAL ROLE` to the test database's plugin group role.
+async fn set_plugin_group(app: &TestApp) -> String {
+    let group: String = app
+        .db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT name FROM plugin_group_role",
+        ))
+        .await
+        .expect("query")
+        .expect("a group role")
+        .try_get("", "name")
+        .expect("name");
+    format!("SET LOCAL ROLE \"{group}\"")
+}
+
 #[tokio::test]
 async fn the_plugin_role_cannot_move_the_counter() {
     use sea_orm::TransactionTrait;
@@ -181,7 +197,7 @@ async fn the_plugin_role_cannot_move_the_counter() {
         "SELECT nextval('plugin_config_epoch')",
     ] {
         let txn = app.db.begin().await.expect("begin");
-        txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+        txn.execute_unprepared(&set_plugin_group(&app).await)
             .await
             .expect("become the plugin role");
         let err = txn
@@ -196,7 +212,7 @@ async fn the_plugin_role_cannot_move_the_counter() {
     }
     // Nor can it write the config the counter tracks: only host functions do.
     let txn = app.db.begin().await.expect("begin");
-    txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+    txn.execute_unprepared(&set_plugin_group(&app).await)
         .await
         .unwrap();
     let err = txn

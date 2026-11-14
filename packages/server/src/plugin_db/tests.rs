@@ -102,7 +102,7 @@ async fn a_plugin_has_full_ddl_and_dml_in_its_own_schema() {
             .unwrap_or_else(|e| panic!("{sql}: {e}"));
     }
     // Unqualified DDL landed in the plugin's schema, owned by its role.
-    let names = PluginDbNames::new("postgres", "print");
+    let names = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "print");
     let owner = text(
         &pools,
         "print",
@@ -148,7 +148,7 @@ async fn a_plugin_cannot_touch_another_plugins_schema() {
         denied(&pools, "intruder", sql).await;
     }
     // Neither can it become the other plugin's role.
-    let other = PluginDbNames::new("postgres", "cooldown").role;
+    let other = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "cooldown").role;
     denied(&pools, "intruder", &format!("SET ROLE \"{other}\"")).await;
 }
 
@@ -158,7 +158,7 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
     // One connection: a role change would persist into the next statement,
     // as it would into the plugin's next call.
     let pools = f.pools(1);
-    let names = PluginDbNames::new("postgres", "print");
+    let names = PluginDbNames::new("postgres", &super::schema::group_role("postgres"), "print");
     exec(&pools, "print", "RESET ROLE").await.expect("reset");
     assert_eq!(
         text(
@@ -172,7 +172,7 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
     denied(&pools, "print", "SET ROLE postgres").await;
     // Its group role holds less than the plugin role, so stepping down
     // gains nothing.
-    exec(&pools, "print", "SET ROLE broccoli_plugin")
+    exec(&pools, "print", &format!("SET ROLE \"{}\"", names.group))
         .await
         .expect("a member may step down to its group role");
     denied(&pools, "print", "CREATE TABLE plugin_print.t (v INT)").await;
@@ -198,7 +198,7 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
         for plugin in ["icpc", "ioi", "print"] {
             let pools = pools.clone();
             calls.push(tokio::spawn(async move {
-                exec(&pools, plugin, "CREATE TABLE IF NOT EXISTS t (v INT)").await
+                exec(&pools, plugin, "SELECT 1").await
             }));
         }
     }
@@ -293,6 +293,7 @@ mod grants {
         "idempotency_key",
         "plugin",
         "plugin_config",
+        "plugin_group_role",
         "plugin_login_secret",
         "plugin_replica",
         "plugin_storage",

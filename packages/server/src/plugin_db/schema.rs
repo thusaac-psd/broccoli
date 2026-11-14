@@ -2,8 +2,9 @@
 //! that role owns, and the DDL that provisions both.
 //!
 //! Every name is derived from the plugin id alone, so the host holds no
-//! per-plugin knowledge. The role is a member of [`PLUGIN_GROUP_ROLE`], which
-//! carries the read grants on host relations (migration m0001), and owns
+//! per-plugin knowledge. The role is a member of the database's plugin group
+//! role ([`PluginDbNames::group`]), which carries the read grants on host
+//! relations (migration m0001), and owns
 //! schema `plugin_<id>`, where it has full DDL and DML. It has no other
 //! privilege: it cannot write host state, read secrets, or reach another
 //! plugin's schema.
@@ -11,11 +12,6 @@
 use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, DbBackend, DbErr, Statement, TransactionTrait};
 use sha2::{Digest, Sha256};
-
-/// The NOLOGIN group role every plugin role belongs to. It holds `USAGE` on
-/// schema `public` and `SELECT` on the plugin-readable host relations, and
-/// nothing else.
-pub const PLUGIN_GROUP_ROLE: &str = "broccoli_plugin";
 
 /// The table holding each plugin role's login password (migration m0001). No
 /// role but the app role can read it.
@@ -49,26 +45,47 @@ fn quote_literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The schema and the login role of one plugin in one database.
+/// The schema and the roles of one plugin in one database.
+///
+/// Roles are shared by every database of a cluster, so role names carry a
+/// digest of the database name: two databases on one cluster never share a
+/// plugin role or a group role, and each database's app role created, and so
+/// administers, its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginDbNames {
     /// `plugin_<id>`: the schema the role owns, first on its `search_path`.
     pub schema: String,
-    /// The login role. Roles are shared by every database of a cluster, so
-    /// the name carries a digest of the database name and two databases on
-    /// one cluster never share a plugin role.
+    /// The login role, `broccoli_<db>_plugin_<id>`.
     pub role: String,
+    /// The database's plugin group role (see [`group_role`]).
+    pub group: String,
 }
 
 impl PluginDbNames {
-    pub fn new(database: &str, plugin_id: &str) -> Self {
-        let database_tag = hex::encode(&Sha256::digest(database.as_bytes())[..4]);
+    /// The names of `plugin_id` in `database`, whose group role is `group`.
+    pub fn new(database: &str, group: &str, plugin_id: &str) -> Self {
         Self {
             schema: bounded_ident("plugin_", plugin_id),
-            role: bounded_ident(&format!("broccoli_{database_tag}_"), plugin_id),
+            role: bounded_ident(&format!("{}_", group_role(database)), plugin_id),
+            group: group.to_string(),
         }
     }
 }
+
+/// The NOLOGIN role, `broccoli_<db>_plugin`, every plugin role of a database
+/// belongs to, named when the database is migrated and recorded in
+/// [`GROUP_TABLE`]. It holds `USAGE` on schema `public` and the read grants on
+/// host relations, and nothing else. A plugin role's name extends it, so no
+/// plugin id names a group.
+pub fn group_role(database: &str) -> String {
+    let database_tag = hex::encode(&Sha256::digest(database.as_bytes())[..4]);
+    format!("broccoli_{database_tag}_plugin")
+}
+
+/// The one-row table naming the database's plugin group role (migration
+/// m0001). A database cloned from a template keeps its template's group and
+/// the grants made to it.
+pub const GROUP_TABLE: &str = "plugin_group_role";
 
 /// What a plugin's SQL pool connects with.
 #[derive(Clone)]
@@ -94,13 +111,21 @@ pub async fn provision(host: &DatabaseConnection, plugin_id: &str) -> Result<Plu
     let row = txn
         .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
-            "SELECT current_database() AS database, current_setting('search_path') AS path",
+            format!(
+                "SELECT current_database()::text AS database, \
+                        current_setting('search_path') AS path, \
+                        (SELECT name FROM {GROUP_TABLE}) AS grp"
+            ),
         ))
         .await?
         .ok_or_else(|| DbErr::Custom("current_database() returned no row".into()))?;
     let database: String = row.try_get("", "database")?;
     let path: String = row.try_get("", "path")?;
-    let names = PluginDbNames::new(&database, plugin_id);
+    let group: Option<String> = row.try_get("", "grp")?;
+    let group = group.ok_or_else(|| {
+        DbErr::Custom("no plugin group role: the app role lacked CREATEROLE at migration".into())
+    })?;
+    let names = PluginDbNames::new(&database, &group, plugin_id);
 
     // 64 hex characters: nothing to escape in SQL or in a connection string.
     let candidate = format!(
@@ -158,7 +183,7 @@ fn provision_ddl(names: &PluginDbNames, password: &str, path: &str) -> Vec<Strin
              NOREPLICATION NOBYPASSRLS PASSWORD {}",
             quote_literal(password)
         ),
-        format!("GRANT {PLUGIN_GROUP_ROLE} TO {role}"),
+        format!("GRANT {} TO {role}", quote_ident(&names.group)),
         // The app role joins the plugin role so it may hand it the schema.
         format!("GRANT {role} TO CURRENT_USER"),
         format!("CREATE SCHEMA IF NOT EXISTS {schema} AUTHORIZATION {role}"),
@@ -172,10 +197,14 @@ mod tests {
 
     #[test]
     fn short_ids_name_their_schema_and_role_directly() {
-        let names = PluginDbNames::new("broccoli", "codelink-bracket");
+        let group = group_role("broccoli");
+        let names = PluginDbNames::new("broccoli", &group, "codelink-bracket");
         assert_eq!(names.schema, "plugin_codelink-bracket");
-        assert!(names.role.starts_with("broccoli_"), "{}", names.role);
-        assert!(names.role.ends_with("_codelink-bracket"), "{}", names.role);
+        assert_eq!(names.role, format!("{group}_codelink-bracket"));
+        assert!(
+            group.starts_with("broccoli_") && group.ends_with("_plugin"),
+            "{group}"
+        );
     }
 
     #[test]
@@ -183,8 +212,8 @@ mod tests {
         let a = format!("{}a", "x".repeat(127));
         let b = format!("{}b", "x".repeat(127));
         let (na, nb) = (
-            PluginDbNames::new("broccoli", &a),
-            PluginDbNames::new("broccoli", &b),
+            PluginDbNames::new("broccoli", "g", &a),
+            PluginDbNames::new("broccoli", "g", &b),
         );
         for name in [&na.schema, &na.role, &nb.schema, &nb.role] {
             assert!(name.len() <= MAX_IDENT_BYTES, "{name}");
@@ -196,16 +225,17 @@ mod tests {
     #[test]
     fn each_database_gets_its_own_role_but_the_same_schema_name() {
         let (one, two) = (
-            PluginDbNames::new("contest_a", "print"),
-            PluginDbNames::new("contest_b", "print"),
+            PluginDbNames::new("contest_a", "g", "print"),
+            PluginDbNames::new("contest_b", "g", "print"),
         );
         assert_ne!(one.role, two.role);
+        assert_ne!(group_role("contest_a"), group_role("contest_b"));
         assert_eq!(one.schema, two.schema);
     }
 
     #[test]
     fn the_search_path_puts_the_plugin_schema_first() {
-        let names = PluginDbNames::new("db", "print");
+        let names = PluginDbNames::new("db", "g", "print");
         let ddl = provision_ddl(&names, "pw", "\"$user\", public");
         assert_eq!(
             ddl.last().unwrap(),

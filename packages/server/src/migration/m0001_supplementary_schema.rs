@@ -3,8 +3,8 @@ use sea_orm_migration::prelude::*;
 /// The schema the entity `sync()` cannot express: partial and named indexes,
 /// CHECK constraints and column defaults, the `plugin_user_public` view, the
 /// `submission_feedback` and `plugin_login_secret` tables, the optional
-/// `pg_stat_statements` extension and the `broccoli_plugin` role with its
-/// grants.
+/// `pg_stat_statements` extension and the database's plugin group role with
+/// its grants.
 pub struct Migration;
 
 impl MigrationName for Migration {
@@ -92,6 +92,8 @@ const SCHEMA: &[&str] = &[
     r#"CREATE INDEX submission_feedback_match ON submission_feedback (plugin_id, state_key)"#,
     r#"CREATE INDEX submission_feedback_slot
         ON submission_feedback (plugin_id, slot_key, submission_id)"#,
+    // The database's plugin group role (see `plugin_db::schema::group_role`).
+    r#"CREATE TABLE plugin_group_role (name TEXT NOT NULL)"#,
     // Each plugin role's login password (see `plugin_db::schema::provision`).
     r#"CREATE TABLE plugin_login_secret (
         role TEXT PRIMARY KEY,
@@ -127,8 +129,9 @@ pub(crate) const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
     &["id", "username", "display_name", "created_at", "deleted_at"],
 )];
 
-/// The `broccoli_plugin` group role every plugin role belongs to
-/// (`plugin_db::schema`), and the only privileges plugins hold outside their
+/// The database's plugin group role, `group`, every plugin role belongs to
+/// (`plugin_db::schema::group_role`), and the only privileges
+/// plugins hold outside their
 /// own schemas: `USAGE` on schema `public` and `SELECT` on
 /// [`PLUGIN_READABLE`] and [`PLUGIN_READABLE_COLUMNS`]. No write, `TRUNCATE`,
 /// sequence or `CREATE` privilege on anything the host owns, so host state
@@ -137,7 +140,10 @@ pub(crate) const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
 /// `CREATE ROLE` needs CREATEROLE, which a managed app role may lack. Then the
 /// block is skipped with a warning and boot continues; plugin roles cannot be
 /// provisioned either, so raw plugin SQL fails.
-fn plugin_role() -> String {
+fn plugin_role(group: &str) -> String {
+    let group_literal = format!("'{group}'");
+    let group_table = crate::plugin_db::schema::GROUP_TABLE;
+    let group = crate::plugin_db::schema::quote_ident(group);
     let tables = PLUGIN_READABLE
         .iter()
         .map(|t| crate::plugin_db::schema::quote_ident(t))
@@ -152,7 +158,7 @@ fn plugin_role() -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "GRANT SELECT ({columns}) ON {} TO broccoli_plugin;\n",
+                "GRANT SELECT ({columns}) ON {} TO {group};\n",
                 crate::plugin_db::schema::quote_ident(table)
             )
         })
@@ -162,22 +168,23 @@ fn plugin_role() -> String {
 DO $$
 BEGIN
   BEGIN
-    CREATE ROLE broccoli_plugin NOLOGIN;
+    CREATE ROLE {group} NOLOGIN;
   EXCEPTION
     WHEN duplicate_object THEN NULL;
     WHEN insufficient_privilege THEN
-      RAISE WARNING 'broccoli_plugin role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will fail until the app role is granted CREATEROLE.';
+      RAISE WARNING 'plugin group role not provisioned: the application role lacks CREATEROLE. Raw plugin SQL (host.db.*) will fail until the app role is granted CREATEROLE.';
       RETURN;
   END;
+  INSERT INTO {group_table} (name) VALUES ({group_literal});
 
   BEGIN
     REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-    GRANT USAGE ON SCHEMA public TO broccoli_plugin;
-    GRANT SELECT ON {tables} TO broccoli_plugin;
+    GRANT USAGE ON SCHEMA public TO {group};
+    GRANT SELECT ON {tables} TO {group};
     {columns}
   EXCEPTION
     WHEN insufficient_privilege THEN
-      RAISE WARNING 'broccoli_plugin grants skipped (insufficient privilege): %', SQLERRM;
+      RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;
   END;
 END $$;
 "#
@@ -199,7 +206,16 @@ impl MigrationTrait for Migration {
             stamp = super::SCHEMA_STAMP,
         ))
         .await?;
-        db.execute_unprepared(&plugin_role()).await?;
+        let database: String = db
+            .query_one_raw(sea_orm_migration::sea_orm::Statement::from_string(
+                manager.get_database_backend(),
+                "SELECT current_database()::text AS database",
+            ))
+            .await?
+            .ok_or_else(|| DbErr::Custom("current_database() returned no row".into()))?
+            .try_get("", "database")?;
+        let group = crate::plugin_db::schema::group_role(&database);
+        db.execute_unprepared(&plugin_role(&group)).await?;
         Ok(())
     }
 
