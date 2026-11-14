@@ -143,18 +143,16 @@ of `(Instant, CancelHandle)` for every running call and cancels a guest whose
 deadline passes. A guest parked in a host function traps when it returns to
 guest code.
 
-extism sends `TimerAction::Start` to its timer thread and only then arms the
-store's epoch deadline (`set_epoch_deadline(1)`). A cancel handled in between
-bumps the epoch too early and also removes the call's timer entry, so the
-guest runs on and every repeat of the cancel is ignored. The deadline thread
-therefore sends a call's first cancel no sooner than `START_GRACE` after the
-call was registered, and repeats it, doubling the gap from `CANCEL_RETRY` up
-to `CANCEL_RETRY_MAX`, until the call returns; a guest still running 5 s past
-its first cancel is logged as a lost cancel. The manifest timeout, the call
-timeout plus `TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread never
-cancelled. A lost cancel has no backstop: it removes the manifest timeout's
-timer entry too. Only an extism fix that arms the epoch deadline before
-registering the call closes it.
+extism registers a call with its timer thread only after it has reset the
+store and instantiated the guest inside `Plugin::call`, and a cancel handled
+before that finds no call to stop. The deadline thread therefore repeats a
+call's cancel, doubling the gap from `CANCEL_RETRY` up to `CANCEL_RETRY_MAX`,
+until the call returns. Any cancel handled once the call is registered traps
+the guest: the workspace patches extism (`third_party/extism`) to arm the
+store's epoch deadline before it registers the call, and
+`packages/plugin-core/tests/extism_cancel.rs` checks a cancel delivered at
+that instant. The manifest timeout, the call timeout plus
+`TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread never cancelled.
 
 The host's long waits end at the call's deadline too:
 `get_next_evaluate_result` and `get_next_operation_result` cut the wait a

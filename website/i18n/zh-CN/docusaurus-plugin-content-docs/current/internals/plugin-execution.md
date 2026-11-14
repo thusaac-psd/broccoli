@@ -70,7 +70,7 @@ Extism 调用在发起它的线程上一直运行到客体返回，宿主函数�
 
 一个进程级线程（`packages/plugin-core/src/deadline.rs`）为每个运行中的调用维护 `(Instant, CancelHandle)` 堆，并在截止时间到达时取消客体。挂起在宿主函数中的客体在返回客体代码时陷入 trap。
 
-extism 先向其计时线程发送 `TimerAction::Start`，然后才设置 store 的 epoch 截止时间（`set_epoch_deadline(1)`）。在两者之间被处理的取消会过早地推进 epoch，并同时删除该调用的计时条目，于是客体继续运行，之后重复的取消也都被忽略。因此截止时间线程在调用注册后至少 `START_GRACE` 才发出第一次取消，并持续重复，间隔从 `CANCEL_RETRY` 起倍增至 `CANCEL_RETRY_MAX`，直到调用返回；在第一次取消后 5 秒仍在运行的客体会被记录为取消丢失。清单超时（调用超时加 `TIMEOUT_BACKSTOP_MARGIN`）会结束截止时间线程从未取消的客体。丢失的取消没有后备：它同时删除了清单超时的计时条目。只有 extism 在注册调用之前设置 epoch 截止时间的修复才能消除这一问题。
+extism 在 `Plugin::call` 中重置 store 并实例化客体之后，才向其计时线程注册调用；在此之前被处理的取消找不到要停止的调用。因此截止时间线程会持续重复调用的取消，间隔从 `CANCEL_RETRY` 起倍增至 `CANCEL_RETRY_MAX`，直到调用返回。调用注册后被处理的任何取消都会使客体陷入 trap：工作区为 extism 打了补丁（`third_party/extism`），使其在注册调用之前设置 store 的 epoch 截止时间，`packages/plugin-core/tests/extism_cancel.rs` 检查恰在该时刻送达的取消。清单超时（调用超时加 `TIMEOUT_BACKSTOP_MARGIN`）会结束截止时间线程从未取消的客体。
 
 宿主的长时间等待同样在调用的截止时间结束：`get_next_evaluate_result` 和 `get_next_operation_result` 把客体请求的等待时间截断到 `executor::current_deadline`。
 

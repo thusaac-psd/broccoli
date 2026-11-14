@@ -16,36 +16,22 @@ use std::time::{Duration, Instant};
 use extism::CancelHandle;
 use parking_lot::{Condvar, Mutex};
 
-/// The first repeat of a cancel past the deadline. A cancel only interrupts a
-/// guest extism has already registered as running, and the call may register
-/// just after the first cancel, so the deadline thread keeps cancelling until
-/// the call returns, doubling the gap up to [`CANCEL_RETRY_MAX`].
+/// The first repeat of a cancel past the deadline. extism registers a call
+/// with its timer thread only after it has reset the store and instantiated
+/// the guest inside `Plugin::call`, and a cancel handled before that finds no
+/// call to stop. Any cancel handled after it traps the guest, so the deadline
+/// thread keeps cancelling until the call returns, doubling the gap up to
+/// [`CANCEL_RETRY_MAX`] so a guest parked in a long host function after its
+/// cancel sees only a few more.
 const CANCEL_RETRY: Duration = Duration::from_millis(10);
 /// The longest gap between repeated cancels.
 const CANCEL_RETRY_MAX: Duration = Duration::from_secs(1);
-/// A guest still running this long after its first cancel was most likely
-/// lost to the ordering below; it is reported once.
-const LOST_CANCEL_REPORT: Duration = Duration::from_secs(5);
-
-/// Least time between registering a call and its first cancel. extism sends
-/// `TimerAction::Start` to its timer thread and only then arms the store's
-/// epoch deadline (`set_epoch_deadline(1)`); a cancel the timer thread
-/// handles between the two bumps the epoch before the deadline is armed and
-/// also removes the call's timer entry, so that cancel, every repeat of it
-/// and the manifest timeout are all lost and the guest runs on. That gap
-/// follows the instantiation extism runs inside the call, which takes
-/// milliseconds on a loaded host, so the first cancel waits past it: a cancel
-/// before `Start` finds no entry and is repeated, and one after the arm
-/// traps the guest. This makes the loss unlikely, not impossible.
-const START_GRACE: Duration = Duration::from_millis(50);
 
 struct Entry {
     cancel: CancelHandle,
     fired: Arc<AtomicBool>,
-    /// When the deadline first fired, and the gap before the next repeat.
-    first_fire: Option<Instant>,
+    /// The gap before the next repeat of the cancel.
     retry: Duration,
-    reported: bool,
 }
 
 #[derive(Default)]
@@ -95,16 +81,6 @@ impl Deadlines {
                 // Fails only once extism's timer thread is gone, and then
                 // there is no running guest left to cancel.
                 let _ = entry.cancel.cancel();
-                let first_fire = *entry.first_fire.get_or_insert(now);
-                if !entry.reported && now.duration_since(first_fire) >= LOST_CANCEL_REPORT {
-                    entry.reported = true;
-                    tracing::error!(
-                        "A plugin guest is still running {:?} past its deadline: its cancel \
-                         was lost to extism's call registration ordering. The manifest \
-                         timeout ends it only if extism still holds its timer entry.",
-                        LOST_CANCEL_REPORT
-                    );
-                }
                 let retry = entry.retry;
                 entry.retry = (retry * 2).min(CANCEL_RETRY_MAX);
                 state.heap.push(Reverse((now + retry, id)));
@@ -135,12 +111,9 @@ pub(crate) fn watch(cancel: CancelHandle, deadline: Instant) -> DeadlineGuard {
         Entry {
             cancel,
             fired: fired.clone(),
-            first_fire: None,
             retry: CANCEL_RETRY,
-            reported: false,
         },
     );
-    let deadline = deadline.max(Instant::now() + START_GRACE);
     let earliest = state
         .heap
         .peek()
