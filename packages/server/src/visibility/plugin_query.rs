@@ -1244,7 +1244,7 @@ mod tests {
         assert_eq!(result, vec![Decision::Allow, Decision::Allow]);
     }
 
-    async fn decide_with_failed_querier(enabled_in_fleet: bool) -> Vec<Decision> {
+    async fn decide_with_failed_querier(enabled_in_fleet: bool) -> Result<Vec<Decision>, AppError> {
         let mut entry = visibility_plugin_entry("declared-but-failed");
         entry.status = PluginStatus::Failed("deliberate test failure".to_string());
         let mut registry_map = HashMap::new();
@@ -1278,7 +1278,6 @@ mod tests {
             &vec![ResourceScope::Unknown; resources.len()],
         )
         .await
-        .expect("plugins answered")
     }
 
     /// A plugin that DECLARES a `topic = "visibility"` query but is disabled
@@ -1290,7 +1289,9 @@ mod tests {
     async fn declared_querier_that_is_disabled_is_excluded_and_still_allows() {
         let _guard = crate::metrics_test_lock();
         assert_eq!(
-            decide_with_failed_querier(false).await,
+            decide_with_failed_querier(false)
+                .await
+                .expect("plugins answered"),
             vec![Decision::Allow, Decision::Allow]
         );
     }
@@ -1298,15 +1299,17 @@ mod tests {
     /// The same plugin while ENABLED fleet-wide but not `Loaded` on this
     /// replica (failed to load here, or not converged yet) must fail closed:
     /// every other replica is enforcing it, so allowing here would let a
-    /// load-balanced request read what the rest of the fleet hides.
+    /// load-balanced request read what the rest of the fleet hides. With no
+    /// recorded contest types it governs everything, so the batch is
+    /// unavailable.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn declared_querier_that_is_enabled_but_not_loaded_denies_whole_batch() {
+    async fn declared_querier_that_is_enabled_but_not_loaded_makes_the_batch_unavailable() {
         let _guard = crate::metrics_test_lock();
-        assert_eq!(
+        assert!(matches!(
             decide_with_failed_querier(true).await,
-            vec![Decision::Deny, Decision::Deny]
-        );
+            Err(AppError::PluginUnavailable)
+        ));
     }
 
     #[allow(clippy::await_holding_lock)]
