@@ -30,7 +30,7 @@ pub mod schema;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
@@ -54,7 +54,29 @@ struct Inner {
     /// How long a call waits for a connection: its own deadline.
     acquire_timeout: Duration,
     leases: Arc<Semaphore>,
-    pools: StdMutex<HashMap<String, Arc<OnceCell<DatabaseConnection>>>>,
+    pools: StdMutex<HashMap<String, Arc<Slot>>>,
+}
+
+/// One plugin's pool, built once its role and schema are provisioned.
+#[derive(Default)]
+struct Slot {
+    pool: OnceCell<DatabaseConnection>,
+    /// When provisioning last failed, while it keeps failing.
+    failed: StdMutex<Option<Instant>>,
+}
+
+/// How long a plugin's SQL stays unavailable after its provisioning failed,
+/// before the next call tries again.
+const PROVISION_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Why a plugin cannot run SQL right now. The host function answers it by
+/// failing the call as unavailable, which callers retry.
+#[derive(Debug, thiserror::Error)]
+pub enum Unavailable {
+    #[error("no plugin SQL connection was free within the call's deadline")]
+    Busy,
+    #[error("the plugin's database role could not be provisioned: {0}")]
+    Unprovisioned(String),
 }
 
 /// The right to run on a plugin's pool: the pool and the call's permit from
@@ -112,7 +134,11 @@ impl PluginSqlPools {
     /// A lease on `plugin_id`'s pool for the call tree `call` (the running
     /// plugin call's [`plugin_core::executor::call_locals`]), provisioning the
     /// plugin's role and schema and building its pool on first use.
-    pub async fn lease(&self, plugin_id: &str, call: Option<&CallLocals>) -> Result<Lease, DbErr> {
+    pub async fn lease(
+        &self,
+        plugin_id: &str,
+        call: Option<&CallLocals>,
+    ) -> Result<Lease, Unavailable> {
         let budget = &self.inner.leases;
         let held = call.and_then(|c| c.with(|held: &mut HeldPermits| held.live(budget)));
         let permit = match held {
@@ -123,8 +149,8 @@ impl PluginSqlPools {
                     budget.clone().acquire_owned(),
                 )
                 .await
-                .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout))?
-                .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed))?;
+                .map_err(|_| Unavailable::Busy)?
+                .map_err(|_| Unavailable::Busy)?;
                 let permit = Arc::new(permit);
                 if let Some(call) = call {
                     call.with(|held: &mut HeldPermits| held.hold(budget, &permit));
@@ -137,8 +163,11 @@ impl PluginSqlPools {
         Ok(Lease { db, permit })
     }
 
-    async fn pool(&self, plugin_id: &str) -> Result<DatabaseConnection, DbErr> {
-        let cell = self
+    /// `plugin_id`'s pool. A failed provisioning is logged once, at error
+    /// level, and not retried for [`PROVISION_BACKOFF`]; calls in between
+    /// fail at once.
+    async fn pool(&self, plugin_id: &str) -> Result<DatabaseConnection, Unavailable> {
+        let slot = self
             .inner
             .pools
             .lock()
@@ -146,7 +175,41 @@ impl PluginSqlPools {
             .entry(plugin_id.to_string())
             .or_default()
             .clone();
-        cell.get_or_try_init(|| self.open(plugin_id)).await.cloned()
+        if let Some(db) = slot.pool.get() {
+            return Ok(db.clone());
+        }
+        let failed = *slot.failed.lock().unwrap_or_else(|p| p.into_inner());
+        if failed.is_some_and(|at| at.elapsed() < PROVISION_BACKOFF) {
+            return Err(Unavailable::Unprovisioned(
+                "provisioning failed recently; retrying shortly".into(),
+            ));
+        }
+        match slot.pool.get_or_try_init(|| self.open(plugin_id)).await {
+            Ok(db) => {
+                *slot.failed.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                Ok(db.clone())
+            }
+            Err(e) => {
+                let first = slot
+                    .failed
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .replace(Instant::now())
+                    .is_none();
+                if first {
+                    tracing::error!(
+                        plugin_id,
+                        error = %e,
+                        "Could not provision the plugin's database role; its SQL is \
+                         unavailable and is retried every {}s",
+                        PROVISION_BACKOFF.as_secs()
+                    );
+                } else {
+                    tracing::debug!(plugin_id, error = %e, "Plugin provisioning failed again");
+                }
+                Err(Unavailable::Unprovisioned(e.to_string()))
+            }
+        }
     }
 
     async fn open(&self, plugin_id: &str) -> Result<DatabaseConnection, DbErr> {
@@ -190,7 +253,7 @@ impl Inner {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .filter_map(|(id, cell)| cell.get().map(|db| (id.clone(), db.clone())))
+            .filter_map(|(id, slot)| slot.pool.get().map(|db| (id.clone(), db.clone())))
             .collect()
     }
 

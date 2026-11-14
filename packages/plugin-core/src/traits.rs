@@ -256,6 +256,7 @@ fn run_guest(
         ),
     };
     let _admitted = admitted;
+    let locals = resolved.locals.clone();
     let _scope = ScopeGuard::enter(NewScope {
         admission: Some(admission),
         class: resolved.class,
@@ -290,8 +291,9 @@ fn run_guest(
     drop(watch);
     let output_len = outcome.as_ref().map_or(0, |out| out.len() as u64);
     plugin.note_call(input_len + output_len);
+    let marked = locals.with(|m: &mut crate::executor::MarkedUnavailable| m.0);
     outcome.map_err(|e| {
-        if cancelled {
+        if cancelled || marked {
             unavailable()
         } else {
             PluginError::ExecutionFailed {

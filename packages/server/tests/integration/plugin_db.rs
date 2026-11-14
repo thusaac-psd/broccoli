@@ -46,7 +46,10 @@ impl Fixture {
 
 /// Run `sql` as `plugin`.
 async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
-    let lease = pools.lease(plugin, None).await?;
+    let lease = pools
+        .lease(plugin, None)
+        .await
+        .map_err(|e| DbErr::Custom(e.to_string()))?;
     lease.db.execute_unprepared(sql).await.map(drop)
 }
 
@@ -508,4 +511,45 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
     waiting
         .await
         .expect("the other call proceeds once the permit is free");
+}
+
+/// A plugin whose role cannot be provisioned is unavailable, and is not
+/// retried on every call: the next call fails at once, even after the cause
+/// is gone, until the back-off passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_provisioning_backs_off() {
+    use server::plugin_db::Unavailable;
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let group = f.names("print").group;
+    f.app
+        .execute_unprepared("DELETE FROM plugin_group_role")
+        .await
+        .expect("hide the group");
+    let first = pools
+        .lease("print", None)
+        .await
+        .err()
+        .expect("unprovisionable");
+    assert!(
+        matches!(&first, Unavailable::Unprovisioned(msg) if msg.contains("no plugin group role")),
+        "{first}"
+    );
+    f.app
+        .execute_unprepared(&format!("INSERT INTO plugin_group_role VALUES ('{group}')"))
+        .await
+        .expect("restore the group");
+    let again = pools
+        .lease("print", None)
+        .await
+        .err()
+        .expect("still backing off");
+    assert!(
+        matches!(&again, Unavailable::Unprovisioned(msg) if msg.contains("failed recently")),
+        "{again}"
+    );
+    // Another server, with no failure behind it, provisions the plugin.
+    exec(&f.pools(1), "print", "SELECT 1")
+        .await
+        .expect("provisioned once the cause is gone");
 }

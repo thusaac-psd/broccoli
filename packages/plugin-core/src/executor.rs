@@ -175,6 +175,20 @@ impl CallLocals {
     }
 }
 
+/// Set on a call tree by [`fail_unavailable`].
+#[derive(Default)]
+pub(crate) struct MarkedUnavailable(pub bool);
+
+/// Mark the call running on this thread as one the host could not serve right
+/// now. A host function calls this before it traps the guest; the call then
+/// fails with [`PluginError::Unavailable`] instead of an execution error, so
+/// callers answer it as "try again".
+pub fn fail_unavailable() {
+    if let Some(locals) = call_locals() {
+        locals.with(|marked: &mut MarkedUnavailable| marked.0 = true);
+    }
+}
+
 /// The state shared by the call running on this thread and the calls nested
 /// in it; `None` outside a plugin call.
 pub fn call_locals() -> Option<Arc<CallLocals>> {

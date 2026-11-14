@@ -144,6 +144,15 @@ fn spawn_txn_reaper_with(
     });
 }
 
+/// Fail the running call as unavailable: the plugin's SQL cannot run right
+/// now (no connection free in time, or its role unprovisioned), which says
+/// nothing about the request, so callers answer it with "try again".
+fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
+    tracing::warn!(error = %e, "Plugin SQL unavailable");
+    plugin_core::executor::fail_unavailable();
+    extism::Error::msg(e.to_string())
+}
+
 /// Look up a transaction by id, enforcing that the caller is the plugin that
 /// opened it. Txn ids are unguessable UUIDs, but capability boundaries must
 /// not rest on unguessability alone: a leaked id (logs, shared guest memory)
@@ -636,8 +645,9 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSqlPools)>; sql: String, a
 
     let call = plugin_core::executor::call_locals();
     let exec_result = tokio::runtime::Handle::current().block_on(async {
-        pools.lease(plugin_id, call.as_deref()).await?.db.execute_raw(stmt).await
-    });
+        let lease = pools.lease(plugin_id, call.as_deref()).await;
+        Ok(lease?.db.execute_raw(stmt).await)
+    }).map_err(unavailable)?;
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
@@ -664,8 +674,9 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSqlPools)>; sql: String, arg
 
     let call = plugin_core::executor::call_locals();
     let query_result = tokio::runtime::Handle::current().block_on(async {
-        pools.lease(plugin_id, call.as_deref()).await?.db.query_one_raw(stmt).await
-    });
+        let lease = pools.lease(plugin_id, call.as_deref()).await;
+        Ok(lease?.db.query_one_raw(stmt).await)
+    }).map_err(unavailable)?;
 
     match query_result {
         Ok(Some(res)) => {
@@ -707,15 +718,16 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; 
     }
 
     let call = plugin_core::executor::call_locals();
-    let (txn, permit) = tokio::runtime::Handle::current()
-        .block_on(async {
-            let lease = pools.lease(plugin_id, call.as_deref()).await?;
-            Ok::<_, sea_orm::DbErr>((lease.db.begin().await?, lease.permit))
-        })
+    let lease = tokio::runtime::Handle::current()
+        .block_on(pools.lease(plugin_id, call.as_deref()))
+        .map_err(unavailable)?;
+    let txn = tokio::runtime::Handle::current()
+        .block_on(lease.db.begin())
         .map_err(|e| {
             error!("DB begin error: {}", e);
             extism::Error::msg(e.to_string())
         })?;
+    let permit = lease.permit;
 
     let txn_id = Uuid::new_v4().to_string();
     txn_map.lock()
