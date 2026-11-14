@@ -319,7 +319,7 @@ EOF
   echo
   echo ">> infra-server up on $host. admin password: $admin_pw"
   echo ">> connection.env written to $CONN_ENV -- copy it to every worker box's bundle dir."
-  echo ">> import problems with:  cd contest && ./import-problems.sh <archive>   (reads $CONN_ENV)"
+  echo ">> import problems with:  cd contest && sudo ./import-problems.sh <archive>"
 }
 
 # ---------------------------------------------------------------------- worker

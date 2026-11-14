@@ -119,7 +119,7 @@ fi
 cp "$HERE"/systemd/* "$WORK/systemd/"
 cp "$HERE"/config/*  "$WORK/config/"
 [ -f "$HERE/README.md" ] && cp "$HERE/README.md" "$WORK/README.md"
-for f in s3copy.py export-problems.sh import-problems.sh README.md; do
+for f in export-problems.sh import-problems.sh README.md; do
   [ -f "$CONTEST_DIR/$f" ] && cp "$CONTEST_DIR/$f" "$WORK/contest/$f"
 done
 chmod +x "$WORK"/contest/*.sh 2>/dev/null || true
