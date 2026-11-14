@@ -301,6 +301,7 @@ export function AdditionalFilesSection({
 
                 {/* Language */}
                 <select
+                  aria-label={t('admin.additionalFiles.language')}
                   value={item.language}
                   onChange={(e) => {
                     updateStagedField(item.id, 'language', e.target.value);

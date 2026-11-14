@@ -278,7 +278,11 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
           )}
           {phase === 'during' && (
             <Label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer font-normal">
-              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+              <Switch
+                checked={autoRefresh}
+                onCheckedChange={setAutoRefresh}
+                aria-label={t('ioi.scoreboard.autoRefresh')}
+              />
               {t('ioi.scoreboard.autoRefresh')}
             </Label>
           )}

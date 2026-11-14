@@ -143,7 +143,44 @@ const imgAlt = {
   },
 };
 
+/**
+ * A `<select>` shows its current option, not what it chooses, so it needs a
+ * name: an `aria-label`, `aria-labelledby`, or an `id` a `<Label htmlFor>`
+ * points at.
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+const selectLabel = {
+  meta: {
+    type: 'problem',
+    docs: { description: 'Require a label on select elements' },
+    messages: {
+      missing:
+        'Name this select: aria-label, aria-labelledby, or an id with a <Label htmlFor>.',
+    },
+    schema: [],
+  },
+  create(context) {
+    return {
+      JSXOpeningElement(node) {
+        if (node.name.type !== 'JSXIdentifier' || node.name.name !== 'select')
+          return;
+        const labelled = node.attributes.some(
+          (attr) =>
+            attr.type === 'JSXSpreadAttribute' ||
+            ['id', ...LABEL_ATTRS].includes(attr.name.name),
+        );
+        if (!labelled) context.report({ node, messageId: 'missing' });
+      },
+    };
+  },
+};
+
 /** Accessibility rules for the web app, the SDK and plugin frontends. */
 export default {
-  rules: { 'icon-button-label': iconButtonLabel, 'img-alt': imgAlt },
+  rules: {
+    'icon-button-label': iconButtonLabel,
+    'img-alt': imgAlt,
+    'select-label': selectLabel,
+  },
 };

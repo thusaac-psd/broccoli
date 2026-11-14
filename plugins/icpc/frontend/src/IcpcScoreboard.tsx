@@ -268,7 +268,11 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
           )}
           {phase === 'during' && (
             <Label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer font-normal">
-              <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+              <Switch
+                checked={autoRefresh}
+                onCheckedChange={setAutoRefresh}
+                aria-label={t('icpc.scoreboard.autoRefresh')}
+              />
               {t('icpc.scoreboard.autoRefresh')}
             </Label>
           )}

@@ -176,6 +176,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
           <>
             {canPinWorker && (
               <select
+                aria-label={t('submissionDetail.workerTarget')}
                 value={targetWorkerId}
                 onChange={(event) => setTargetWorkerId(event.target.value)}
                 className="ml-auto h-8 rounded-md border bg-background px-2 text-xs"

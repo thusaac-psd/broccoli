@@ -1285,4 +1285,6 @@ export const en: Record<string, string> = {
   'users.users.revokeRole': 'Revoke role',
   'app.pageTitle': '{page} · {app}',
   'app.pageInContest': '{page} · {contest}',
+  'a11y.skipToContent': 'Skip to main content',
+  'submissionDetail.workerTarget': 'Worker to rejudge on',
 };

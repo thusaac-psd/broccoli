@@ -313,8 +313,8 @@ const SidebarTrigger = ({
   className,
   onClick,
   ...props
-}: React.ComponentProps<typeof Button> & {
-  ref?: React.RefObject<React.ElementRef<typeof Button> | null>;
+}: Omit<React.ComponentProps<'button'>, 'aria-label'> & {
+  ref?: React.RefObject<HTMLButtonElement | null>;
 }) => {
   const { t } = useTranslation();
   const { sidebarState, setSidebarState } = useSidebarState();
@@ -333,6 +333,7 @@ const SidebarTrigger = ({
       data-sidebar="trigger"
       variant="ghost"
       size="icon"
+      aria-label={t('sidebar.toggle')}
       className={cn('h-7 w-7', className)}
       onClick={(event) => {
         onClick?.(event);
@@ -341,7 +342,6 @@ const SidebarTrigger = ({
       {...props}
     >
       <PanelLeft />
-      <span className="sr-only">{t('sidebar.toggle')}</span>
     </Button>
   );
 };

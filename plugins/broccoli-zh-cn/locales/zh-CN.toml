@@ -1157,3 +1157,5 @@
 'users.users.revokeRole' = '撤销角色'
 'app.pageTitle' = '{page} · {app}'
 'app.pageInContest' = '{page} · {contest}'
+'a11y.skipToContent' = '跳到主要内容'
+'submissionDetail.workerTarget' = '重测使用的评测机'

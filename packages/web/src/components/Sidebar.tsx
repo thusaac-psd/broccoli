@@ -341,7 +341,7 @@ function PlatformGroup() {
             </SidebarMenuItem>
           )}
           <MenuGroupItems items={adminItems} pathname={pathname} t={t} />
-          <Slot name="sidebar.platform.menu" as="div" />
+          <Slot name="sidebar.platform.menu" as={null} />
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>
@@ -367,7 +367,7 @@ export function Sidebar() {
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          <Slot name="sidebar.header" as="div" />
+          <Slot name="sidebar.header" as={null} />
         </SidebarMenu>
       </SidebarHeader>
 

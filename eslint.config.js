@@ -114,7 +114,11 @@ export default defineConfig([
       'plugins/*/frontend/src/**/*.tsx',
     ],
     plugins: { a11y },
-    rules: { 'a11y/icon-button-label': 'error', 'a11y/img-alt': 'error' },
+    rules: {
+      'a11y/icon-button-label': 'error',
+      'a11y/img-alt': 'error',
+      'a11y/select-label': 'error',
+    },
   },
 
   // User-facing text comes from translation keys, never from literals: JSX

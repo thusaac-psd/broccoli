@@ -40,3 +40,16 @@ test('images need alt text', () => {
     invalid: [{ code: '<img src={a} />', errors: [{ messageId: 'missing' }] }],
   });
 });
+
+test('selects need a label', () => {
+  tester.run('select-label', a11y.rules['select-label'], {
+    valid: [
+      '<select id="kind" />',
+      '<select aria-label={t("kind")} />',
+      '<select {...field} />',
+    ],
+    invalid: [
+      { code: '<select value={v} />', errors: [{ messageId: 'missing' }] },
+    ],
+  });
+});
