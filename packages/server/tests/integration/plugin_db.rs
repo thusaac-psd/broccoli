@@ -680,3 +680,44 @@ async fn a_returned_connection_drops_its_session_state() {
         .await
         .expect("the reset search_path names the plugin's schema first");
 }
+
+/// A plugin removed from the fleet can no longer log in. Installing the same
+/// id again is the same plugin: its role logs in again and finds its data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_plugin_cannot_log_in_until_it_is_installed_again() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    exec(
+        &pools,
+        "print",
+        "CREATE TABLE job (v INT); INSERT INTO job VALUES (7)",
+    )
+    .await
+    .expect("the plugin keeps data");
+    let role = f.names("print").role;
+    let can_login = || async {
+        f.app
+            .query_one_raw(Statement::from_string(
+                DbBackend::Postgres,
+                format!("SELECT rolcanlogin FROM pg_roles WHERE rolname = '{role}'"),
+            ))
+            .await
+            .expect("query")
+            .expect("the role stays")
+            .try_get_by_index::<bool>(0)
+            .expect("bool")
+    };
+
+    pools.forget("print");
+    server::plugin_db::schema::retire(&f.app, "print")
+        .await
+        .expect("retire");
+    assert!(!can_login().await, "a removed plugin's role cannot log in");
+
+    assert_eq!(
+        text(&pools, "print", "SELECT v::text FROM job").await,
+        "7",
+        "the reinstalled plugin logs in and finds its data"
+    );
+    assert!(can_login().await);
+}

@@ -1075,7 +1075,7 @@ mod tests {
 
         AppState {
             plugins,
-            db,
+            db: db.clone(),
             clock: crate::clock::PlatformClock::local_for_tests(),
             plugin_config_cache: Default::default(),
             config: AppConfig {
@@ -1147,6 +1147,13 @@ mod tests {
             dispatcher_permits: DispatcherSemaphore::new(true, 1, 0),
             worker_slots: Default::default(),
             plugin_lifecycle: Default::default(),
+            plugin_sql: crate::plugin_db::PluginSqlPools::new(
+                db.clone(),
+                "postgres://unused/plugin-sql",
+                1,
+                std::time::Duration::from_secs(1),
+                &crate::database::app_session(&Default::default()),
+            ),
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 0,
                 std::time::Duration::from_secs(60),

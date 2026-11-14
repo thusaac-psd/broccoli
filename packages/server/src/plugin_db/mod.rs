@@ -307,6 +307,24 @@ impl PluginSqlPools {
 }
 
 impl PluginSqlPools {
+    /// Drop `plugin_id`'s pool when the plugin is unloaded here, so its next
+    /// load provisions its role again.
+    pub fn forget(&self, plugin_id: &str) {
+        let slot = self
+            .inner
+            .pools
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(plugin_id);
+        if let Some(db) = slot.and_then(|slot| slot.pool.get().cloned())
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                let _ = db.close().await;
+            });
+        }
+    }
+
     /// Connections the plugin pools hold together, in use or idle.
     pub fn open_connections(&self) -> u32 {
         self.inner.open()

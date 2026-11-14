@@ -272,7 +272,7 @@ impl ServerRuntime {
         let manager = ServerManager::new(
             app_config.plugin.clone(),
             HostFunctionSystemDeps {
-                plugin_sql,
+                plugin_sql: plugin_sql.clone(),
                 host_db: host_fn_db,
                 mq: mq.clone(),
                 operation_batches: operation_batches.clone(),
@@ -346,6 +346,7 @@ impl ServerRuntime {
             dispatcher_permits,
             worker_slots,
             plugin_lifecycle: Default::default(),
+            plugin_sql,
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
                 Duration::from_secs(app_config.auth.login_failure_window_secs),

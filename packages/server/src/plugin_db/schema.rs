@@ -175,6 +175,40 @@ pub async fn provision(
     Ok(PluginLogin { names, password })
 }
 
+/// Retire the role of `plugin_id`, a plugin removed from the fleet: it can no
+/// longer log in, and its open sessions end. Its schema and data stay: the
+/// plugin id is the plugin's identity, so a later install of the same id is
+/// the same plugin, and provisioning lets its role log in again.
+pub async fn retire(host: &DatabaseConnection, plugin_id: &str) -> Result<(), DbErr> {
+    let row = host
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "SELECT current_database()::text AS database, \
+                        (SELECT name FROM {GROUP_TABLE}) AS grp"
+            ),
+        ))
+        .await?
+        .ok_or_else(|| DbErr::Custom("current_database() returned no row".into()))?;
+    let database: String = row.try_get("", "database")?;
+    let Some(group) = row.try_get::<Option<String>>("", "grp")? else {
+        return Ok(());
+    };
+    let names = PluginDbNames::new(&database, &group, plugin_id);
+    host.execute_unprepared(&format!(
+        "DO $$ BEGIN \
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {name}) THEN \
+             ALTER ROLE {role} NOLOGIN; \
+             PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = {name}; \
+           END IF; \
+         END $$",
+        name = quote_literal(&names.role),
+        role = quote_ident(&names.role),
+    ))
+    .await
+    .map(drop)
+}
+
 /// The statements that bring a plugin's role and schema to their provisioned
 /// state, given its stored `password`, the app's `search_path` and the
 /// content columns its manifest declares: exactly those are granted, and any
