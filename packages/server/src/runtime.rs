@@ -65,66 +65,25 @@ impl ServerRuntime {
         let db =
             crate::database::connect_main_pool(&app_config.database.url, pools.main, &db_session)
                 .await?;
-        // Dedicated pool for plugin host-function DB calls, isolated from the
-        // main pool above (handlers/dispatcher/windowed-eval). See
-        // database.rs::init_plugin_db.
-        // The RESTRICTED plugin pool must NOT reuse the privileged app login role:
-        // a plugin that escapes the after-connect `SET ROLE broccoli_plugin` via
-        // `RESET ROLE` would otherwise climb back to the app role (and on a pooled
-        // connection that persists into the next call). `resolve_restricted_plugin_pool`
-        // points it at a DBA-managed `plugin_url` or an auto-provisioned
-        // `broccoli_plugin_login`, degrading to app-role auth + the SQL text guard
-        // if neither is available.
-        // Provisioning the dedicated plugin login (CREATE ROLE, the shared
-        // secret row) is boot-time DDL too, so it runs on the locked session.
-        let restricted = crate::database::resolve_restricted_plugin_pool(
-            boot.conn(),
-            &app_config.database.url,
-            app_config.database.plugin_url.as_deref(),
-            &crate::database::plugin_pool_spec(pools.plugin, app_config.plugin.call_timeout()),
-            &db_session,
-        )
-        .await?;
         boot.release().await?;
-        let plugin_db = restricted.pool;
-        // Fail CLOSED on the degrade path: when the restricted pool could NOT be
-        // put behind a least-privilege login (no operator `plugin_url`, and the
-        // auto-provisioned `broccoli_plugin_login` could not be created/connected),
-        // it authenticates as the privileged APP role. On that path the SQL text
-        // guard is the SOLE barrier against a role escape — and a text guard on a
-        // hand-rolled lexer is best-effort defense-in-depth, not a sound boundary.
-        // Rather than run raw plugin `host.db.*` SQL as the app role, DISABLE the
-        // raw SQL capability outright (structured `host.submission/storage/config`
-        // fns are unaffected — they intentionally use the privileged pool). Operator
-        // must grant the app role CREATEROLE or set `database.plugin_url` to restore it.
-        if restricted.auth == crate::database::RestrictedPluginAuth::AppRoleDegraded {
-            warn!(
-                "Restricted plugin DB pool degraded to the privileged application role \
-                 (no database.plugin_url, and broccoli_plugin_login could not be \
-                 provisioned). DISABLING raw plugin SQL (host.db.*) to avoid executing \
-                 plugin SQL as the privileged role; the SQL text guard alone is not a \
-                 sound privilege boundary. Grant the application role CREATEROLE or set \
-                 database.plugin_url to a dedicated non-privileged role to re-enable it. \
-                 Structured host functions (submission/storage/config) are unaffected."
-            );
-            crate::host_funcs::sql::disable_raw_plugin_sql();
-        }
-        // Second, PRIVILEGED plugin pool (same URL, no `SET ROLE`), used only by
-        // the gated core-WRITE host fns (`host.submission.*`, `host.storage.*`,
-        // `config:write`). The `plugin_db` above is restricted to the read-only
-        // `broccoli_plugin` role for the raw `sql` capability (phase 2).
-        let privileged_plugin_db = crate::database::init_plugin_db_privileged(
+        // The host function pool: the SQL the host builds for plugins' host
+        // calls runs here, as the app role, apart from the main pool.
+        let host_fn_db = crate::database::connect_host_fn_pool(
             &app_config.database.url,
-            &crate::database::plugin_pool_spec(
-                pools.plugin_privileged,
-                app_config.plugin.call_timeout(),
-            ),
+            &crate::database::plugin_pool_spec(pools.host_fn, app_config.plugin.call_timeout()),
             &db_session,
         )
         .await?;
-        info!(
-            "Initialized isolated plugin host-function DB pools (restricted sql + privileged writes)"
+        // Raw plugin SQL: one pool per plugin, logged in as the plugin's own
+        // role and sharing the plugin SQL connection budget.
+        let plugin_sql = crate::plugin_db::PluginSqlPools::new(
+            host_fn_db.clone(),
+            &app_config.database.url,
+            pools.plugin,
+            app_config.plugin.call_timeout(),
+            &db_session,
         );
+        info!("Initialized the plugin SQL and host function DB pools");
         let blob_store = create_blob_store(&app_config.storage, db.clone(), Some(metrics.clone()))
             .await
             .context("Failed to initialize blob storage")?;
@@ -313,8 +272,8 @@ impl ServerRuntime {
         let manager = ServerManager::new(
             app_config.plugin.clone(),
             HostFunctionSystemDeps {
-                db: plugin_db,
-                privileged_db: privileged_plugin_db,
+                plugin_sql: plugin_sql.clone(),
+                host_db: host_fn_db,
                 mq: mq.clone(),
                 operation_batches: operation_batches.clone(),
                 operation_waiters: operation_waiters.clone(),
@@ -387,6 +346,7 @@ impl ServerRuntime {
             dispatcher_permits,
             worker_slots,
             plugin_lifecycle: Default::default(),
+            plugin_sql,
             login_throttle: Arc::new(crate::utils::login_throttle::LoginThrottle::new(
                 app_config.auth.login_failure_limit,
                 Duration::from_secs(app_config.auth.login_failure_window_secs),

@@ -1,6 +1,42 @@
 use common::db::{DatabaseConnection, DatabaseTransaction};
+use tokio::sync::OwnedSemaphorePermit;
+
+use crate::plugin_db::PluginSqlPools;
+
+/// What the raw `sql` host functions run with: the plugin pools, and the
+/// plugin registry the declared read scopes (`[server.sql] read`) come from.
+#[derive(Clone)]
+pub struct PluginSql {
+    pub pools: PluginSqlPools,
+    pub registry: plugin_core::registry::PluginRegistry,
+}
+
+impl PluginSql {
+    /// The content columns `plugin_id`'s loaded manifest declares.
+    fn read_scopes(&self, plugin_id: &str) -> Vec<plugin_core::manifest::SqlReadScope> {
+        self.registry
+            .read()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .get(plugin_id)
+                    .and_then(|entry| entry.manifest.server.as_ref())
+                    .map(|server| server.sql.read.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn lease(
+        &self,
+        plugin_id: &str,
+        call: Option<&plugin_core::executor::CallLocals>,
+    ) -> Result<crate::plugin_db::Lease, crate::plugin_db::Unavailable> {
+        let read = self.read_scopes(plugin_id);
+        self.pools.lease(plugin_id, &read, call).await
+    }
+}
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex as StdMutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use extism::host_fn;
@@ -19,6 +55,9 @@ use uuid::Uuid;
 pub struct PluginTransaction {
     plugin_id: String,
     state: StdMutex<TxnState>,
+    /// The opening call's permit from the plugin SQL budget, held until the
+    /// transaction ends and this entry is dropped.
+    _permit: Arc<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug)]
@@ -30,13 +69,14 @@ struct TxnState {
 }
 
 impl PluginTransaction {
-    fn new(txn: DatabaseTransaction, plugin_id: String) -> Self {
+    fn new(txn: DatabaseTransaction, plugin_id: String, permit: Arc<OwnedSemaphorePermit>) -> Self {
         Self {
             plugin_id,
             state: StdMutex::new(TxnState {
                 txn: Some(txn),
                 last_used: Instant::now(),
             }),
+            _permit: permit,
         }
     }
 
@@ -72,7 +112,7 @@ const TXN_REAP_INTERVAL: Duration = Duration::from_secs(30);
 /// damage between reaper sweeps: without a cap, one misbehaving plugin that
 /// traps after `db_begin` in a loop can check out the entire plugin DB pool
 /// (20 connections by default) and starve every other plugin's DB access.
-const MAX_OPEN_TXNS_PER_PLUGIN: usize = 8;
+pub(crate) const MAX_OPEN_TXNS_PER_PLUGIN: usize = 8;
 
 /// Watchdog for one plugin transaction: once the transaction has been idle for
 /// [`TXN_IDLE_TTL`] it is removed from the map and rolled back, returning its
@@ -137,47 +177,13 @@ fn spawn_txn_reaper_with(
     });
 }
 
-/// Set once, at startup, when the restricted plugin SQL pool could only degrade
-/// to privileged app-role auth (no dedicated login role, no operator-managed
-/// `database.plugin_url`). In that state the SQL text guard would be the SOLE
-/// barrier against a role escape, and the guard is best-effort lexer defense, not
-/// an engine-level boundary -- so raw plugin SQL (`host.db.*`) is refused outright
-/// (fail CLOSED) rather than run as the privileged application role. The
-/// server-owned STRUCTURED host functions (submission/storage/config) are
-/// unaffected: they run on the separate privileged pool by design, not on
-/// plugin-authored SQL. See [`crate::database::RestrictedPluginAuth`].
-static RAW_PLUGIN_SQL_DISABLED: OnceLock<bool> = OnceLock::new();
-
-/// Fail closed: disable the raw `sql` capability (`host.db.*`) for this process.
-/// Idempotent; call at startup when the restricted pool degraded to app-role auth.
-pub fn disable_raw_plugin_sql() {
-    let _ = RAW_PLUGIN_SQL_DISABLED.set(true);
-}
-
-fn raw_plugin_sql_disabled() -> bool {
-    RAW_PLUGIN_SQL_DISABLED.get().copied().unwrap_or(false)
-}
-
-/// Gate for every raw plugin SQL / transaction entry point. Pure in `disabled`
-/// so it is unit-testable without touching the process-global `OnceLock`.
-fn raw_sql_gate(disabled: bool, plugin_id: &str) -> Result<(), extism::Error> {
-    if disabled {
-        tracing::warn!(
-            plugin_id,
-            "Refused a raw plugin SQL call: the restricted database login could not \
-             be provisioned, so host.db.* is disabled (fail-closed) rather than run \
-             as the privileged application role"
-        );
-        return Err(extism::Error::msg(
-            "raw plugin SQL (host.db.*) is disabled on this server: the restricted, \
-             least-privilege database login could not be provisioned, so plugin SQL \
-             is refused rather than executed as the privileged application role. \
-             Grant the application role CREATEROLE, or set database.plugin_url to a \
-             dedicated non-privileged role, to enable the raw SQL capability. \
-             (Structured host functions are unaffected.)",
-        ));
-    }
-    Ok(())
+/// Fail the running call as unavailable: the plugin's SQL cannot run right
+/// now (no connection free in time, or its role unprovisioned), which says
+/// nothing about the request, so callers answer it with "try again".
+fn unavailable(e: crate::plugin_db::Unavailable) -> extism::Error {
+    tracing::warn!(error = %e, "Plugin SQL unavailable");
+    plugin_core::executor::fail_unavailable();
+    extism::Error::msg(e.to_string())
 }
 
 /// Look up a transaction by id, enforcing that the caller is the plugin that
@@ -344,9 +350,8 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
             // "set role" must collapse to `set_role` (NOT the SET ROLE keyword
             // pair). But it CAN be a function name: `"set_config"('role',..)` is
             // the built-in set_config called via a quoted identifier, a real role
-            // escape. Dropping the body (as a bare space) hid that token and let
-            // the call through; keeping it as one token means the downstream
-            // set_config match still fires.
+            // escape. Keeping it as one token means the downstream set_config
+            // match fires; dropping the body would hide it.
             '"' => {
                 // U&"..." / u&"..." is a Unicode-escape identifier: Postgres
                 // decodes \XXXX / \+XXXXXX into the REAL identifier at parse time,
@@ -476,18 +481,14 @@ fn scrub_sql_for_guard(sql: &str) -> Result<String, ()> {
 /// session bound ([`common::db::ENFORCED_SESSION_SETTINGS`]) for the rest of the
 /// session. A session-level `SET statement_timeout = 0` would otherwise outlive
 /// the call on the pooled connection and unbound every later plugin call that
-/// reuses it; the transaction-scoped `SET LOCAL` form stays allowed. The restricted pool
-/// confines plugins with a session-level `SET ROLE broccoli_plugin`
-/// (`database.rs`), but that is REVERSIBLE: without this guard a plugin could
-/// `RESET ROLE` / `SET ROLE <app-role>` / `SELECT set_config('role', ...)` /
-/// `DISCARD ALL` -- directly, inside a `DO` block, or in a function body it then
-/// calls -- to escape back to the privileged login role and gain full write/DDL
-/// on core tables and SELECT on PII. We fail closed on any occurrence of these
-/// constructs anywhere in the comment-stripped statement. (The fully robust fix
-/// is a dedicated unprivileged LOGIN role for the restricted pool, so there is
-/// no privileged `session_user` to fall back to; this guard closes the escape
-/// on the default single-credential deployment.) Applied ONLY to the raw
-/// plugin-authored entry points, never to the server-owned privileged writes.
+/// reuses it; the transaction-scoped `SET LOCAL` form stays allowed. Role
+/// changes are refused too. The engine already confines them: a plugin's pool
+/// logs in as the plugin's own role (see [`crate::plugin_db`]), so `RESET ROLE`
+/// lands on that role and `SET ROLE` reaches only its group role, which holds
+/// less. The guard keeps a plugin from leaving its connection in a state its
+/// next call does not expect, and fails closed on any occurrence of these
+/// constructs anywhere in the comment-stripped statement. Applied only to the
+/// raw plugin-authored entry points, never to the SQL host functions build.
 fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error> {
     // Scrub comments and string/identifier bodies so keyword and ';' matching
     // sees only real top-level SQL text (see `scrub_sql_for_guard`). A lexically
@@ -509,10 +510,10 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
         tracing::warn!(
             plugin_id,
             sql = %sql.chars().take(120).collect::<String>(),
-            "Rejected a role/session change on the restricted plugin SQL path",
+            "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
         ));
     }
     Ok(())
@@ -554,6 +555,14 @@ fn statement_escapes_session(stmt: &str) -> bool {
     // token after `create` past any `or`/`replace`; a table NAMED `function`
     // (`CREATE TABLE "function"`) keeps `table` as its command word and is not
     // falsely blocked.
+    // `ALTER ROLE` / `ALTER USER`: a plugin role may change its own password
+    // (`ALTER ROLE CURRENT_USER PASSWORD ..`), which would lock its pool out
+    // on the next connect, and its own session defaults.
+    if tokens.first().copied() == Some("alter")
+        && matches!(tokens.get(1).copied(), Some("role") | Some("user"))
+    {
+        return true;
+    }
     if tokens.first().copied() == Some("create") {
         let command = tokens[1..]
             .iter()
@@ -667,16 +676,19 @@ fn plugin_statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
     Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
 
-host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
+host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute")?;
-    let (plugin_id, db) = &*call;
+    let (plugin_id, pools) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
-    let exec_result = tokio::runtime::Handle::current().block_on(db.execute_raw(stmt));
+    let call = plugin_core::executor::call_locals();
+    let exec_result = tokio::runtime::Handle::current().block_on(async {
+        let lease = pools.lease(plugin_id, call.as_deref()).await;
+        Ok(lease?.db.execute_raw(stmt).await)
+    }).map_err(unavailable)?;
 
     match exec_result {
         Ok(res) => HostDbResponse::ok(JsonValue::from(res.rows_affected())).to_json_string(),
@@ -689,11 +701,10 @@ host_fn!(pub db_execute(user_data: Arc<(String, DatabaseConnection)>; sql: Strin
     }
 });
 
-host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String, args: String) -> String {
+host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_query")?;
-    let (plugin_id, db) = &*call;
+    let (plugin_id, pools) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
     let wrapped_sql = format!(
@@ -702,7 +713,11 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
     );
     let stmt = plugin_statement(&wrapped_sql, values);
 
-    let query_result = tokio::runtime::Handle::current().block_on(db.query_one_raw(stmt));
+    let call = plugin_core::executor::call_locals();
+    let query_result = tokio::runtime::Handle::current().block_on(async {
+        let lease = pools.lease(plugin_id, call.as_deref()).await;
+        Ok(lease?.db.query_one_raw(stmt).await)
+    }).map_err(unavailable)?;
 
     match query_result {
         Ok(Some(res)) => {
@@ -718,11 +733,9 @@ host_fn!(pub db_query(user_data: Arc<(String, DatabaseConnection)>; sql: String,
     }
 });
 
-host_fn!(pub db_begin(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; _input: String) -> String {
+host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _input: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_begin")?;
-    let (plugin_id, db, txn_map) = &*call;
-
-    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
+    let (plugin_id, pools, txn_map) = &*call;
 
     // Per-plugin cap on concurrently open transactions, checked BEFORE
     // checking out a pool connection: each open transaction pins one plugin
@@ -745,28 +758,32 @@ host_fn!(pub db_begin(user_data: Arc<(String, DatabaseConnection, TransactionMap
         }
     }
 
+    let call = plugin_core::executor::call_locals();
+    let lease = tokio::runtime::Handle::current()
+        .block_on(pools.lease(plugin_id, call.as_deref()))
+        .map_err(unavailable)?;
     let txn = tokio::runtime::Handle::current()
-        .block_on(db.begin())
+        .block_on(lease.db.begin())
         .map_err(|e| {
             error!("DB begin error: {}", e);
             extism::Error::msg(e.to_string())
         })?;
+    let permit = lease.permit;
 
     let txn_id = Uuid::new_v4().to_string();
     txn_map.lock()
         .map_err(|_| extism::Error::msg("Transaction map lock poisoned"))?
-        .insert(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone())));
+        .insert(txn_id.clone(), Arc::new(PluginTransaction::new(txn, plugin_id.clone(), permit)));
     // Guarantees cleanup if the guest traps before commit/rollback.
     spawn_txn_reaper(txn_map.clone(), txn_id.clone());
 
     HostDbResponse::ok(serde_json::json!({"txn_id": txn_id})).to_json_string()
 });
 
-host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_query_in")?;
     let (plugin_id, _, txn_map) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
     let wrapped_sql = format!(
@@ -793,11 +810,10 @@ host_fn!(pub db_query_in(user_data: Arc<(String, DatabaseConnection, Transaction
     }
 });
 
-host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute_in")?;
     let (plugin_id, _, txn_map) = &*call;
 
-    raw_sql_gate(raw_plugin_sql_disabled(), plugin_id)?;
     reject_session_escape(plugin_id, &sql)?;
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
@@ -815,7 +831,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, DatabaseConnection, Transacti
     }
 });
 
-host_fn!(pub db_commit(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String) -> String {
+host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_commit")?;
     let (plugin_id, _, txn_map) = &*call;
 
@@ -841,7 +857,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, DatabaseConnection, TransactionMa
     }
 });
 
-host_fn!(pub db_rollback(user_data: Arc<(String, DatabaseConnection, TransactionMap)>; txn_id: String) -> String {
+host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_rollback")?;
     let (plugin_id, _, txn_map) = &*call;
 
@@ -881,11 +897,11 @@ host_fn!(pub db_rollback(user_data: Arc<(String, DatabaseConnection, Transaction
     }
 });
 
-/// Run a plugin-authored write on the shared plugin DB pool and return the same
-/// `HostDbResponse` JSON envelope `db_execute` produces (`{"data": <rows>}` or
-/// `{"error": <msg>}`). Shared by the capability-gated `host.submission.*` write
-/// host functions, which build the SQL server-side but must hit the DB through
-/// the same argument parsing and statement typing as raw `db_execute`.
+/// Run a statement a host function built on `db` (the host function pool) and
+/// return the same `HostDbResponse` JSON envelope `db_execute` produces
+/// (`{"data": <rows>}` or `{"error": <msg>}`). Shared by the capability-gated
+/// `host.submission.*` and `host.code_run.*` writes, which bind their values
+/// through the same argument parsing and statement typing as raw `db_execute`.
 pub(super) fn execute_on_pool(
     db: &DatabaseConnection,
     plugin_id: &str,
@@ -908,8 +924,8 @@ pub(super) fn execute_on_pool(
     }
 }
 
-/// Read-side counterpart to [`execute_on_pool`]: run a plugin-authored read on
-/// the shared plugin DB pool, json_agg-wrapped exactly like `db_query`, and
+/// Read-side counterpart to [`execute_on_pool`]: run a read a host function
+/// built on the host function pool, json_agg-wrapped exactly like `db_query`, and
 /// return the same `HostDbResponse` JSON envelope (`{"data": [rows]}`). Used by
 /// `host.submission.query_test_cases`.
 pub(super) fn query_on_pool(
@@ -947,6 +963,14 @@ mod tests {
     use sea_orm::{ConnectOptions, Database};
 
     use super::*;
+
+    fn permit() -> Arc<OwnedSemaphorePermit> {
+        Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .try_acquire_owned()
+                .expect("a free permit"),
+        )
+    }
 
     #[test]
     fn role_escalation_guard_blocks_every_escape_vector() {
@@ -1016,7 +1040,7 @@ mod tests {
             "SELECT /* abc",
             "SELECT \"abc",
             // the built-in set_config called via a QUOTED identifier is a real
-            // role escape -- dropping the quoted body used to hide it
+            // role escape, and the quoted body must stay visible to the guard
             "SELECT \"set_config\"('role','none',false)",
             "SELECT pg_catalog.\"set_config\"('role','none',false)",
             "SELECT \"pg_catalog\".\"set_config\"('role','none',false)",
@@ -1024,7 +1048,7 @@ mod tests {
             "SET \"role\" = 'admin'",
             "SET \"session_authorization\" = 'admin'",
             // a standard string abutting a token that ends in `e` (name'..') is
-            // NOT an E-string; the old heuristic read past its close and swallowed
+            // NOT an E-string, so the lexer ends it at its close and still sees
             // the ';'-smuggled SET ROLE
             "SELECT name'abc\\'; SET ROLE admin; --'",
             // U&"..." Unicode-escape identifiers decode to the real name at parse
@@ -1050,6 +1074,8 @@ mod tests {
             "UPDATE my_plugin_table SET v = $1 WHERE k = $2",
             "CREATE TABLE my_plugin_table (k TEXT PRIMARY KEY, v INT)",
             "ALTER TABLE my_plugin_table SET (fillfactor = 90)",
+            "ALTER TABLE role ADD COLUMN v INT",
+            "ALTER INDEX user_idx RENAME TO user_idx2",
             // a table whose NAME is the reserved word `function` (quoted, so it
             // flattens to a `function` token) is not a routine definition: the
             // command keyword after CREATE is TABLE, so it stays allowed
@@ -1074,7 +1100,7 @@ mod tests {
             "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
             // role keywords or ';' that appear INSIDE a string literal are data,
             // not commands: the lexer neutralizes the literal so they must not
-            // trip the guard (previously false-positive-rejected)
+            // trip the guard
             "INSERT INTO t(v) VALUES ('hello; discard all')",
             "UPDATE t SET note = 'apply; set role reviewer' WHERE id = 1",
             "INSERT INTO audit_log(action) VALUES ('reset all')",
@@ -1091,7 +1117,7 @@ mod tests {
             // dollar-quoted DATA with no role keyword stays allowed
             "INSERT INTO t(doc) VALUES ($$ hello ; world $$)",
             // a standard string after an e-ending token, ending in a backslash,
-            // is valid and must not be mis-read as an E-string (was Err before)
+            // is valid and must not be mis-read as an E-string
             "SELECT name'C:\\'",
             "SELECT p FROM t WHERE p LIKE'abc\\'",
             // a genuine standalone E-string still honors its backslash escapes
@@ -1107,25 +1133,6 @@ mod tests {
                 "should have allowed: {sql}"
             );
         }
-    }
-
-    #[test]
-    fn raw_sql_gate_fails_closed_only_when_disabled() {
-        // Enabled (the normal path: a dedicated login or an operator plugin_url):
-        // raw SQL is allowed through to the per-statement guard.
-        assert!(raw_sql_gate(false, "p").is_ok());
-        // Degraded to app-role auth: raw SQL is refused outright, with a message
-        // that points the operator at the two supported remedies.
-        let err = raw_sql_gate(true, "p").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("host.db.*") && msg.contains("disabled"),
-            "{msg}"
-        );
-        assert!(
-            msg.contains("CREATEROLE") && msg.contains("plugin_url"),
-            "{msg}"
-        );
     }
 
     /// A transaction orphaned by a trapped guest (never committed or rolled
@@ -1161,7 +1168,11 @@ mod tests {
         let txn_id = "orphan-txn".to_string();
         txn_map.lock().unwrap().insert(
             txn_id.clone(),
-            Arc::new(PluginTransaction::new(txn, "trapped-plugin".to_string())),
+            Arc::new(PluginTransaction::new(
+                txn,
+                "trapped-plugin".to_string(),
+                permit(),
+            )),
         );
 
         spawn_txn_reaper_with(
@@ -1208,7 +1219,7 @@ mod tests {
         let mut map: HashMap<String, Arc<PluginTransaction>> = HashMap::new();
         map.insert(
             "txn-1".to_string(),
-            Arc::new(PluginTransaction::new(txn, "owner".to_string())),
+            Arc::new(PluginTransaction::new(txn, "owner".to_string(), permit())),
         );
 
         let foreign = lookup_owned_txn(&map, "txn-1", "intruder", "db_query_in")
@@ -1258,7 +1269,7 @@ mod tests {
             let txn = db.begin().await.expect("begin");
             txn_map.lock().unwrap().insert(
                 id.to_string(),
-                Arc::new(PluginTransaction::new(txn, owner.to_string())),
+                Arc::new(PluginTransaction::new(txn, owner.to_string(), permit())),
             );
         }
 

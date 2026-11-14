@@ -553,6 +553,7 @@ async fn limited_problem(app: &E2eTestApp, tag: &str, max: u32) -> (String, i32,
 
 /// Store one reservation for `attempt_id` that expires `expires_in_secs` from
 /// now (negative: already expired).
+/// The table lives in the plugin's own schema.
 async fn seed_reservation(
     app: &E2eTestApp,
     (uid, problem_id, contest_id): (i32, i32, i32),
@@ -561,7 +562,7 @@ async fn seed_reservation(
 ) {
     app.db
         .execute_unprepared(&format!(
-            "INSERT INTO submission_limit_claim (user_id, problem_id, contest_id, reservations) \
+            "INSERT INTO \"plugin_submission-limit\".submission_limit_claim (user_id, problem_id, contest_id, reservations) \
              VALUES ({uid}, {problem_id}, {contest_id}, \
                jsonb_build_object('{attempt_id}', EXTRACT(EPOCH FROM NOW()) + {expires_in_secs}))"
         ))

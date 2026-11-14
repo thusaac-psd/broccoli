@@ -45,6 +45,7 @@ const sidebars: SidebarsConfig = {
         'internals/message-queue',
         'internals/plugin-distribution',
         'internals/plugin-execution',
+        'internals/plugin-database',
         'internals/performance',
         'internals/sandbox-overhead',
       ],

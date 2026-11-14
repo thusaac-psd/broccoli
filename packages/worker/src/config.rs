@@ -244,7 +244,6 @@ const SERVER_SETTINGS: &[&str] = &[
     "submission",
     "plugin",
     "batch_max_age_secs",
-    "database.plugin_url",
 ];
 
 impl WorkerAppConfig {
@@ -326,8 +325,6 @@ mod tests {
             .set_override("server.port", 3000)
             .unwrap()
             .set_override("plugin.pool_max_instances", 64)
-            .unwrap()
-            .set_override("database.plugin_url", "postgres://plugin@db/broccoli")
             .unwrap()
             .set_override("worker.max_concurency", 4)
             .unwrap()

@@ -37,10 +37,13 @@ A `plugin_config: Option<serde_json::Value>` column on the problem entity.
 
 ### Plugin-Created Tables
 
-Plugins can use `db_execute("CREATE TABLE ...")` to create their own tables with
-proper foreign keys.
+Plugins can use `db_execute("CREATE TABLE ...")` to create their own tables.
+They land in the plugin's own schema, `plugin_<id>`, where the plugin has full
+DDL and DML; host tables are read-only to it, so foreign keys can only point at
+the plugin's own tables.
 
-- **Pro:** Full SQL capabilities, proper FK constraints, indexing.
+- **Pro:** Full SQL capabilities, constraints and indexing within the plugin's
+  schema.
 - **Con:** Migration management complexity, cleanup responsibility.
 
 ## UI for Plugin Data

@@ -107,7 +107,9 @@ cannot leave a stale scope behind.
 Plugin SQL is parked too, so more calls can wait on the database than there are
 tokens. The plugin database pools are sized from the token count and wait for
 a connection as long as the call timeout; `PoolSizes` in
-`packages/server/src/database.rs` states the rule.
+`packages/server/src/database.rs` states the rule. Each plugin's SQL runs on
+a pool of its own, within that shared budget; see
+[Plugin database access](./plugin-database.md).
 
 ## Nested calls
 

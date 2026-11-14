@@ -69,6 +69,8 @@ target/release/broccoli-stress-test perf \
 ```bash
 docker run -d --name bpg -p 127.0.0.1:5433:5432 \
     -e POSTGRES_PASSWORD=broccoli_pg_secret -e POSTGRES_DB=broccoli \
+    -e BROCCOLI_DB_PASSWORD=broccoli_app_secret \
+    -v "$PWD/config/postgres-init/20-broccoli-app-role.sh:/docker-entrypoint-initdb.d/20-broccoli-app-role.sh:ro" \
     postgres:17-alpine -c shared_preload_libraries=pg_stat_statements \
     -c max_connections=300
 docker run -d --name bredis -p 127.0.0.1:6379:6379 redis:7-alpine

@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -43,7 +44,8 @@ JUDGING_PLUGINS = ("icpc", "ioi", "batch-evaluator", "standard-checkers", "stand
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bin-dir", default=str(ROOT / "target/release"))
-    p.add_argument("--db-url", default="postgres://postgres:broccoli_pg_secret@127.0.0.1:5433/broccoli")
+    p.add_argument("--db-url", default="postgres://broccoli:broccoli_app_secret@127.0.0.1:5433/broccoli",
+                   help="the app role's URL: a LOGIN CREATEROLE role, as docker-compose.yaml creates")
     p.add_argument("--db-admin-url", default="postgres://postgres:broccoli_pg_secret@127.0.0.1:5433/postgres",
                    help="used to recreate the database when --fresh-db is set")
     p.add_argument("--redis-url", default="redis://127.0.0.1:6379")
@@ -347,7 +349,10 @@ def main() -> int:
         if a.fresh_db:
             db = a.db_url.rsplit("/", 1)[1]
             psql(a.db_admin_url, f'DROP DATABASE IF EXISTS "{db}" WITH (FORCE)')
-            psql(a.db_admin_url, f'CREATE DATABASE "{db}"')
+            owner = urllib.parse.urlsplit(a.db_url).username
+            psql(a.db_admin_url, f'CREATE DATABASE "{db}" OWNER "{owner}"')
+            # The app role cannot create the statement statistics extension.
+            psql(a.db_admin_url.rsplit("/", 1)[0] + f"/{db}", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
         if a.flush_redis:
             subprocess.run(["redis-cli", "-u", a.redis_url, "FLUSHALL"], check=True, capture_output=True)
         topo = Topology(a, s, w, out / f"logs-{topo_s}")

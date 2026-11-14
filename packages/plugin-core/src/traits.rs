@@ -162,6 +162,7 @@ pub trait PluginInvoker: Send + Sync {
         let in_flight = InFlight::enter(metrics.as_ref(), &plugin_id_owned);
         let runtime = tokio::runtime::Handle::current();
         let (done, result) = tokio::sync::oneshot::channel();
+        let class = resolved.class;
         self.executor().threads().run({
             let plugin_id = plugin_id_owned.clone();
             let func_name = func_name_owned.clone();
@@ -193,7 +194,7 @@ pub trait PluginInvoker: Send + Sync {
             let attrs = [
                 KeyValue::new("plugin.id", plugin_id.to_string()),
                 KeyValue::new("plugin.function", func_name.to_string()),
-                KeyValue::new("plugin.class", class_label(resolved.class)),
+                KeyValue::new("plugin.class", class_label(class)),
                 KeyValue::new("outcome", outcome),
             ];
             metrics
@@ -255,11 +256,13 @@ fn run_guest(
         ),
     };
     let _admitted = admitted;
+    let locals = resolved.locals.clone();
     let _scope = ScopeGuard::enter(NewScope {
         admission: Some(admission),
         class: resolved.class,
         deadline: resolved.deadline,
         depth: resolved.depth,
+        locals: resolved.locals,
         token,
     });
 
@@ -288,8 +291,9 @@ fn run_guest(
     drop(watch);
     let output_len = outcome.as_ref().map_or(0, |out| out.len() as u64);
     plugin.note_call(input_len + output_len);
+    let marked = locals.with(|m: &mut crate::executor::MarkedUnavailable| m.0);
     outcome.map_err(|e| {
-        if cancelled {
+        if cancelled || marked {
             unavailable()
         } else {
             PluginError::ExecutionFailed {

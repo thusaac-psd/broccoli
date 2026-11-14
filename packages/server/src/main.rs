@@ -18,6 +18,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Prints the plugin group role of a database name and exits, so an
+    // installer can admit the plugin roles in pg_hba.conf with the name the
+    // server derives (see `plugin_db::schema::group_role`).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--plugin-group-role") {
+        let database = args
+            .get(i + 1)
+            .context("--plugin-group-role takes a database name")?;
+        println!("{}", server::plugin_db::schema::group_role(database));
+        return Ok(());
+    }
+
     // Prints the OpenAPI document and exits, without connecting to anything.
     // The document does not depend on the configured values, but loading the
     // configuration keeps one startup path.

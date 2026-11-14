@@ -86,6 +86,11 @@ handler = "get_cooldown_status_standalone"
 - `entry` is the WASM filename the build produces.
 - `permissions` gate host access. Without `sql` the database host functions are
   not available, and so on.
+- With `sql`, the plugin's tables land in its own schema, and host tables are
+  read-only to it. Contestant source, test data, program output and message
+  bodies stay unreadable unless `[server.sql] read` names the columns, for
+  example `read = ["submission.files"]`; the admin sees them when installing
+  the plugin. See [Plugin database access](../internals/plugin-database.md).
 - A hook subscribes a function to a platform event, here `before_submission`.
   With `scope = "resource"` (the default) it runs only where the plugin
   applies: in a contest or problem whose settings turn the plugin on, and in

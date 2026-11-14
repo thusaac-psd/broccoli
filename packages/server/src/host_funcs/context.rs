@@ -14,13 +14,13 @@ use crate::services::operation_batch::OperationTaskPublisher;
 
 #[derive(Clone)]
 pub struct HostFunctionSystemDeps {
-    /// The RESTRICTED plugin pool (runs as `broccoli_plugin`). Backs the raw
-    /// `sql` capability and read-only host fns; cannot write/DDL core tables.
-    pub db: DatabaseConnection,
-    /// The PRIVILEGED plugin pool (runs as the app role, no `SET ROLE`). Backs
-    /// the gated core-WRITE host fns: `host.submission.*`, `host.storage.*`,
-    /// and `config:write`. See `database::init_plugin_db_privileged`.
-    pub privileged_db: DatabaseConnection,
+    /// Every plugin's raw SQL pool, each logged in as that plugin's own role.
+    /// Backs the `sql` capability only.
+    pub plugin_sql: crate::plugin_db::PluginSqlPools,
+    /// The host function pool (the app role). Every host fn that touches the
+    /// database other than raw `sql` runs SQL the host builds on it, and so do
+    /// the host services those fns start. See `database::connect_host_fn_pool`.
+    pub host_db: DatabaseConnection,
     pub mq: Option<mq::Mq>,
     pub operation_batches: OperationBatches,
     pub operation_waiters: OperationWaiters,
@@ -127,7 +127,7 @@ impl HostFunctionSystemDeps {
 impl HostFunctionDeps {
     pub fn evaluate_deps(&self, fanout: crate::dispatcher::fanout::Fanout) -> EvaluateHostDeps {
         EvaluateHostDeps {
-            db: self.system.db.clone(),
+            db: self.system.host_db.clone(),
             evaluator_registry: self.system.evaluator_registry.clone(),
             evaluate_batches: self.system.evaluate_batches.clone(),
             operation_deps: {

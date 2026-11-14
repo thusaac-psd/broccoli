@@ -172,6 +172,27 @@ async fn a_statement_that_changes_no_rows_leaves_the_counter_alone() {
     assert_eq!(epoch(&app.db).await, before);
 }
 
+/// `SET LOCAL ROLE` to the test database's plugin group role.
+async fn set_plugin_group(app: &TestApp) -> String {
+    let group: String = app
+        .db
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT name FROM plugin_group_role",
+        ))
+        .await
+        .expect("query")
+        .expect("a group role")
+        .try_get("", "name")
+        .expect("name");
+    // The app role administers the group; it joins it to step into it.
+    app.db
+        .execute_unprepared(&format!("GRANT \"{group}\" TO CURRENT_USER"))
+        .await
+        .expect("join the group");
+    format!("SET LOCAL ROLE \"{group}\"")
+}
+
 #[tokio::test]
 async fn the_plugin_role_cannot_move_the_counter() {
     use sea_orm::TransactionTrait;
@@ -181,7 +202,7 @@ async fn the_plugin_role_cannot_move_the_counter() {
         "SELECT nextval('plugin_config_epoch')",
     ] {
         let txn = app.db.begin().await.expect("begin");
-        txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+        txn.execute_unprepared(&set_plugin_group(&app).await)
             .await
             .expect("become the plugin role");
         let err = txn
@@ -194,18 +215,18 @@ async fn the_plugin_role_cannot_move_the_counter() {
         );
         txn.rollback().await.expect("rollback");
     }
-    // A plugin's own config write still advances it, through the trigger.
-    let before = epoch(&app.db).await;
+    // Nor can it write the config the counter tracks: only host functions do.
     let txn = app.db.begin().await.expect("begin");
-    txn.execute_unprepared("SET LOCAL ROLE broccoli_plugin")
+    txn.execute_unprepared(&set_plugin_group(&app).await)
         .await
         .unwrap();
-    txn.execute_unprepared(
-        "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
-         VALUES ('plugin', 'cache-probe', 'by-plugin', '{}', 0)",
-    )
-    .await
-    .expect("a plugin may write plugin_config");
-    txn.commit().await.expect("commit");
-    assert!(epoch(&app.db).await > before);
+    let err = txn
+        .execute_unprepared(
+            "INSERT INTO plugin_config (scope, ref_id, namespace, config, position) \
+             VALUES ('plugin', 'cache-probe', 'by-plugin', '{}', 0)",
+        )
+        .await
+        .expect_err("the plugin role must not write plugin_config");
+    assert!(err.to_string().contains("permission denied"), "{err}");
+    txn.rollback().await.expect("rollback");
 }
