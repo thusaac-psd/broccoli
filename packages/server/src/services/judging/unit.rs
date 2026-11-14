@@ -628,6 +628,38 @@ pub async fn release_leases(db: &DatabaseConnection, server_id: &str) -> Result<
     Ok(counts)
 }
 
+/// Hands the in-flight unit `id` back to the queue at epoch `judge_epoch`:
+/// `Queued` again at a fresh epoch, with no retry of either kind spent, as
+/// [`release_leases`] does for a whole server. For a dispatch that failed
+/// while the message queue was unreachable: it never reached a worker, so
+/// nothing about the work failed, and the claim fiber leaves it `Queued`
+/// until the queue answers. Fenced like [`fail_dispatch`]: a dispatch that was
+/// since requeued or superseded changes nothing. Returns whether the unit
+/// went back.
+pub(crate) async fn release_dispatch(
+    db: &DatabaseConnection,
+    unit: Unit,
+    id: i32,
+    judge_epoch: i32,
+) -> Result<bool, DbErr> {
+    let txn = db.begin().await?;
+    let mut b = Binds::default();
+    let filter = format!(
+        "u.id = {} AND u.judge_epoch = {} AND u.status IN {}",
+        b.bind(id),
+        b.bind(judge_epoch),
+        StatusPhase::InFlight.sql_list()
+    );
+    let ids: Vec<i32> = pick(&txn, unit, b, filter, None)
+        .await?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let n = requeue(&txn, unit, &ids, Requeue::Released).await?;
+    txn.commit().await?;
+    Ok(n > 0)
+}
+
 /// How a detector decides that an in-flight unit's owner no longer drives
 /// it. Both compare timestamps stamped with the database clock against the
 /// database clock.

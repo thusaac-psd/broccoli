@@ -176,11 +176,35 @@ async fn dispatch_after_judging_hooks(
 
 async fn record_dispatch_failure(
     db: &DatabaseConnection,
+    mq: &mq::Mq,
     metrics: &common::metrics::Metrics,
     judgement: JudgementRef,
     error_code: &'static str,
     error_message: &str,
 ) {
+    // A dispatch that failed while the queue is unreachable most likely
+    // failed for that (its operations could not be published), and nothing
+    // reached a worker: it goes back to the queue with no retry spent instead
+    // of ending as a SystemError.
+    if !mq.check_reachable().await {
+        match judging::release_dispatch(db, Unit::Judgement, judgement.id, judgement.judge_epoch)
+            .await
+        {
+            Ok(_) => warn!(
+                submission_id = judgement.submission_id,
+                judgement_id = judgement.id,
+                error_code,
+                "Dispatch failed while the message queue is unreachable; handed the judgement back"
+            ),
+            Err(e) => error!(
+                submission_id = judgement.submission_id,
+                judgement_id = judgement.id,
+                marking_error = %e,
+                "Failed to hand back a judgement whose dispatch failed while the message queue is unreachable; a detector requeues it"
+            ),
+        }
+        return;
+    }
     let recovered = match judging::fail_dispatch(
         db,
         Unit::Judgement,
@@ -273,6 +297,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             );
             record_dispatch_failure(
                 &state.db,
+                &state.mq,
                 &state.metrics,
                 judgement_ref,
                 "NO_HANDLER_REGISTERED",
@@ -292,6 +317,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(problem_id = submission.problem_id, "Problem not found");
             record_dispatch_failure(
                 &state.db,
+                &state.mq,
                 &state.metrics,
                 judgement_ref,
                 "PROBLEM_NOT_FOUND",
@@ -304,6 +330,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "DB error fetching problem");
             record_dispatch_failure(
                 &state.db,
+                &state.mq,
                 &state.metrics,
                 judgement_ref,
                 "DATABASE_ERROR",
@@ -320,6 +347,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "Failed to parse submission files");
             record_dispatch_failure(
                 &state.db,
+                &state.mq,
                 &state.metrics,
                 judgement_ref,
                 "INVALID_FILES",
@@ -362,6 +390,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                 error!(error = %e, "Failed to query test cases");
                 record_dispatch_failure(
                     &state.db,
+                    &state.mq,
                     &state.metrics,
                     judgement_ref,
                     "DATABASE_ERROR",
@@ -425,6 +454,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(error = %e, "Failed to spill over-budget inline test case input to blob store");
                     record_dispatch_failure(
                         &state.db,
+                        &state.mq,
                         &state.metrics,
                         judgement_ref,
                         "BLOB_STORE_ERROR",
@@ -447,6 +477,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(error = %e, "Failed to spill over-budget inline test case expected_output to blob store");
                     record_dispatch_failure(
                         &state.db,
+                        &state.mq,
                         &state.metrics,
                         judgement_ref,
                         "BLOB_STORE_ERROR",
@@ -495,6 +526,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
             error!(error = %e, "Failed to serialize plugin input");
             record_dispatch_failure(
                 &state.db,
+                &state.mq,
                 &state.metrics,
                 judgement_ref,
                 "SERIALIZATION_ERROR",
@@ -511,6 +543,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
     let hook_registry = state.registries.hook_registry.clone();
     let contest_types = state.registries.contest_type_registry.clone();
     let db = state.db.clone();
+    let mq = state.mq.clone();
     let metrics = state.metrics.clone();
     let submission_id = submission.id;
     let user_id = submission.user_id;
@@ -572,6 +605,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                                 };
                                 record_dispatch_failure(
                                     &db,
+                                    &mq,
                                     &metrics,
                                     judgement_ref,
                                     error_code,
@@ -604,6 +638,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                             error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Failed to parse plugin output");
                             record_dispatch_failure(
                                 &db,
+                                &mq,
                                 &metrics,
                                 judgement_ref,
                                 "PLUGIN_INVALID_OUTPUT",
@@ -625,6 +660,7 @@ pub(crate) async fn dispatch_judgement(state: AppState, claimed: ClaimedJudgemen
                     error!(submission_id, judgement_id, problem_id, contest_id = ?contest_id, error = %e, "Plugin execution failed");
                     record_dispatch_failure(
                         &db,
+                        &mq,
                         &metrics,
                         judgement_ref,
                         "PLUGIN_EXECUTION_ERROR",

@@ -1126,3 +1126,37 @@ async fn a_type_change_after_a_pending_submission_finds_it() {
     insert.commit().await.unwrap();
     assert!(change.await.unwrap(), "the change sees the submission");
 }
+
+/// A dispatch handed back (it failed while the queue was unreachable) is
+/// `Queued` again at a fresh epoch with neither retry budget spent; a
+/// hand-back for an epoch since requeued changes nothing.
+#[tokio::test]
+async fn a_dispatch_handed_back_spends_no_retry_and_is_fenced_on_its_epoch() {
+    let (_pg, db) = crate::test_support::postgres().await;
+    let (s, _) = new_submission(&db).await;
+    let claimed = claim_one(&db, "srv-a").await;
+    let epoch = claimed.judgement.judge_epoch;
+
+    assert!(
+        release_dispatch(&db, Unit::Judgement, claimed.judgement.id, epoch)
+            .await
+            .unwrap()
+    );
+    let j = judgement(&db, claimed.judgement.id).await;
+    assert_eq!(j.status, SubmissionStatus::Queued);
+    assert_eq!(j.owner_server_id, None);
+    assert_eq!(j.dispatch_retries, claimed.judgement.dispatch_retries);
+    assert!(
+        j.judge_epoch > epoch,
+        "a fresh epoch fences the old dispatch"
+    );
+    assert_eq!(sub(&db, s.id).await.system_error_retries, 0);
+
+    assert!(
+        !release_dispatch(&db, Unit::Judgement, j.id, epoch)
+            .await
+            .unwrap(),
+        "a stale epoch hands nothing back"
+    );
+    assert_eq!(claim_one(&db, "srv-b").await.judgement.id, j.id);
+}
