@@ -379,6 +379,7 @@
 'auth.invalidCredentials' = "Invalid username or password."
 'auth.passwordMismatch' = "Passwords do not match."
 'auth.validationError' = "Please check your input and try again."
+'auth.registrationClosedTitle' = "Registration closed"
 'auth.registrationClosed' = "Registration is closed. Ask the organisers for an account."
 'auth.device.title' = "Authorize CLI"
 'auth.device.instructions' = "Enter the code displayed in your terminal to authorize the CLI."

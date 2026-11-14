@@ -14,6 +14,8 @@ import {
 import { type FormEvent, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 
+import { useRegistrationOpen } from '@/features/auth/hooks/use-registration-status';
+
 export default function LoginForm() {
   const { t } = useTranslation();
   const errorMessage = useErrorMessage();
@@ -21,6 +23,7 @@ export default function LoginForm() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const next = safeReturnPath(searchParams.get('next'));
+  const registrationOpen = useRegistrationOpen();
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -74,12 +77,14 @@ export default function LoginForm() {
           <Button type="submit" className="w-full" disabled={isSubmitting}>
             {t('auth.login')}
           </Button>
-          <p className="text-sm text-muted-foreground">
-            {t('auth.noAccount')}{' '}
-            <Link to={registerPath(next)} className="text-primary underline">
-              {t('auth.register')}
-            </Link>
-          </p>
+          {registrationOpen && (
+            <p className="text-sm text-muted-foreground">
+              {t('auth.noAccount')}{' '}
+              <Link to={registerPath(next)} className="text-primary underline">
+                {t('auth.register')}
+              </Link>
+            </p>
+          )}
         </CardFooter>
       </form>
     </Card>

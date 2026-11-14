@@ -380,6 +380,7 @@
 'auth.invalidCredentials' = "用户名或密码错误。"
 'auth.passwordMismatch' = "两次输入的密码不一致。"
 'auth.validationError' = "请检查输入后重试。"
+'auth.registrationClosedTitle' = "注册已关闭"
 'auth.registrationClosed' = "注册已关闭，请联系组织者获取账号。"
 'auth.device.title' = "授权 CLI"
 'auth.device.instructions' = "输入终端中显示的代码以授权 CLI。"

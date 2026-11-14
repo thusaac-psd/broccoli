@@ -193,7 +193,6 @@ const ROUTES: [string, RegExp, Handler][] = [
     (url) => (url.pathname.endsWith('/zh-CN') ? ZH_CN : {}),
   ],
   ['GET', /^\/plugins\/active$/, () => []],
-  ['GET', /^\/auth\/registration$/, () => ({ open: true })],
   ['GET', /^\/plugins\/registries$/, () => registries],
   [
     'GET',
@@ -285,10 +284,15 @@ const ROUTES: [string, RegExp, Handler][] = [
 
 /**
  * Answers the app's API calls for `viewer` (signed in through the session
- * hint and the refresh cookie the mock pretends to hold). Returns the calls
- * nothing answered.
+ * hint and the refresh cookie the mock pretends to hold), on a server whose
+ * self-registration is open unless `registrationOpen` is false. Returns the
+ * calls nothing answered.
  */
-export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
+export async function mockApi(
+  page: Page,
+  viewer: Viewer,
+  { registrationOpen = true }: { registrationOpen?: boolean } = {},
+): Promise<string[]> {
   const unanswered: string[] = [];
   await page.clock.setFixedTime(NOW);
   if (viewer !== 'guest') {
@@ -314,6 +318,9 @@ export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
         headers,
         json: { token: 'e2e', ...USERS[viewer] },
       });
+    }
+    if (request.method() === 'GET' && path === '/auth/registration') {
+      return route.fulfill({ headers, json: { open: registrationOpen } });
     }
     const match = ROUTES.find(
       ([method, pattern]) => method === request.method() && pattern.test(path),

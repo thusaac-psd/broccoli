@@ -133,3 +133,28 @@ test('the user list marks an account without a password', async ({ page }) => {
   const admin = page.getByRole('row').filter({ hasText: 'Admin' });
   await expect(admin.getByText('No password set')).toHaveCount(0);
 });
+
+test('a closed registration offers no sign-up and names its page closed', async ({
+  page,
+}) => {
+  await mockApi(page, 'guest', { registrationOpen: false });
+  await page.goto('/');
+  await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Sign up' })).toHaveCount(0);
+
+  await page.goto('/login');
+  await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Sign Up' })).toHaveCount(0);
+
+  await page.goto('/register');
+  await expect(page).toHaveTitle(`Registration closed · ${APP_NAME}`);
+  await expect(page.getByText('Registration closed')).toBeVisible();
+});
+
+test('an open registration offers signing up', async ({ page }) => {
+  await mockApi(page, 'guest');
+  await page.goto('/login');
+  await expect(page.getByRole('link', { name: 'Sign Up' })).toBeVisible();
+  await page.goto('/register');
+  await expect(page).toHaveTitle(`Create Account · ${APP_NAME}`);
+});
