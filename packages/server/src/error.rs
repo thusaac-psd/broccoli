@@ -118,7 +118,7 @@ impl AppError {
                 ErrorBody {
                     code: "VALIDATION_ERROR".into(),
                     message: format!(
-                        "Config does not match its schema: {}",
+                        "Config refused: {}",
                         plugin_core::config_schema::describe(&fields)
                     ),
                     details: Some(serde_json::json!({ "fields": fields })),

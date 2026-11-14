@@ -222,9 +222,11 @@ pub struct FieldError {
     pub message: String,
 }
 
-/// A stored config that a plugin manifest would no longer accept.
+/// A stored config that its plugin would no longer accept.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct IncompatibleConfig {
+    #[schema(example = "ioi")]
+    pub plugin_id: String,
     pub scope: broccoli_types::manifest::ConfigScope,
     /// What the config belongs to: the problem id, contest id or
     /// `contest_id:problem_id`; the plugin id at the plugin scope.
@@ -232,8 +234,9 @@ pub struct IncompatibleConfig {
     pub ref_id: String,
     #[schema(example = "contest")]
     pub namespace: String,
-    /// Why the manifest refuses it. A namespace the manifest no longer
-    /// declares at this scope has one error with an empty path.
+    /// Why the plugin refuses it: its schema, or its namespace's validate
+    /// function. A namespace the plugin no longer declares at this scope has
+    /// one error with an empty path.
     pub errors: Vec<FieldError>,
 }
 

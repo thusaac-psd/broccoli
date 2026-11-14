@@ -4,20 +4,24 @@ use sea_orm::{
     sea_query::OnConflict,
 };
 
-use plugin_core::config_schema;
+use broccoli_server_sdk::types::{ConfigValidateInput, ConfigValidateOutput};
+use plugin_core::config_schema::{self, FieldError};
 pub(crate) use plugin_core::manifest::ConfigScope;
-use plugin_core::manifest::PluginManifest;
+use plugin_core::manifest::{ConfigNamespace, PluginManifest};
 use plugin_core::registry::PluginRegistry;
+use plugin_core::traits::PluginManager;
 
 use crate::entity::plugin_config;
 use crate::error::AppError;
-use crate::host_funcs::config::{resolve_namespace, strip_namespace_prefix};
+use crate::host_funcs::config::{extract_plugin_id, resolve_namespace, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, config_key};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigTarget {
     scope: ConfigScope,
     ref_id: String,
+    contest_id: Option<i32>,
+    problem_id: Option<i32>,
 }
 
 impl ConfigTarget {
@@ -25,6 +29,8 @@ impl ConfigTarget {
         Self {
             scope: ConfigScope::Plugin,
             ref_id: config_key::plugin(plugin_id),
+            contest_id: None,
+            problem_id: None,
         }
     }
 
@@ -32,6 +38,8 @@ impl ConfigTarget {
         Self {
             scope: ConfigScope::Problem,
             ref_id: config_key::problem(problem_id),
+            contest_id: None,
+            problem_id: Some(problem_id),
         }
     }
 
@@ -39,6 +47,8 @@ impl ConfigTarget {
         Self {
             scope: ConfigScope::ContestProblem,
             ref_id: config_key::contest_problem(contest_id, problem_id),
+            contest_id: Some(contest_id),
+            problem_id: Some(problem_id),
         }
     }
 
@@ -46,6 +56,23 @@ impl ConfigTarget {
         Self {
             scope: ConfigScope::Contest,
             ref_id: config_key::contest(contest_id),
+            contest_id: Some(contest_id),
+            problem_id: None,
+        }
+    }
+
+    /// The target of a stored row, `None` for a scope or reference the host
+    /// never writes.
+    fn of_row(scope: &str, ref_id: &str) -> Option<Self> {
+        let id = |raw: &str| raw.parse::<i32>().ok();
+        match ConfigScope::parse(scope)? {
+            ConfigScope::Plugin => Some(Self::plugin(ref_id)),
+            ConfigScope::Problem => Some(Self::problem(id(ref_id)?)),
+            ConfigScope::Contest => Some(Self::contest(id(ref_id)?)),
+            ConfigScope::ContestProblem => {
+                let (contest, problem) = ref_id.split_once(':')?;
+                Some(Self::contest_problem(id(contest)?, id(problem)?))
+            }
         }
     }
 
@@ -134,16 +161,18 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     }
 }
 
-/// Checks a config before it is stored: `plugin_id` must declare `namespace`
-/// for `scope`, and `config` must satisfy that namespace's schema. Every
-/// config write, from an admin or from a plugin, passes through here.
-pub(crate) fn validate_config(
+/// Checks a config against its schema: `plugin_id` must declare
+/// `namespace` for `scope`, and `config` must satisfy that namespace's
+/// schema. Every config write passes this; a plugin's writes to its own
+/// namespaces pass only this, since the plugin owns those values. Returns
+/// the namespace's declaration.
+pub(crate) fn check_schema(
     registry: &PluginRegistry,
     scope: ConfigScope,
     plugin_id: &str,
     namespace: &str,
     config: &serde_json::Value,
-) -> Result<(), AppError> {
+) -> Result<ConfigNamespace, AppError> {
     let registry = registry
         .read()
         .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
@@ -162,14 +191,87 @@ pub(crate) fn validate_config(
             scope.as_str()
         )));
     }
-    config_schema::validate(ns, config).map_err(AppError::InvalidConfig)
+    config_schema::validate(ns, config).map_err(AppError::InvalidConfig)?;
+    Ok(ns.clone())
 }
 
-/// Validates and stores a config (see [`validate_config`]).
+/// Checks an admin's config before it is stored: its schema
+/// ([`check_schema`]), then the namespace's `validate` function, if it
+/// declares one, for what only the plugin knows about the target. Either
+/// refusal is [`AppError::InvalidConfig`] with the offending fields.
+pub(crate) async fn validate_config(
+    plugins: &dyn PluginManager,
+    target: &ConfigTarget,
+    plugin_id: &str,
+    namespace: &str,
+    config: &serde_json::Value,
+) -> Result<(), AppError> {
+    let ns = check_schema(
+        plugins.get_registry(),
+        target.scope(),
+        plugin_id,
+        namespace,
+        config,
+    )?;
+    let errors = plugin_verdict(plugins, target, plugin_id, namespace, &ns, config).await?;
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::InvalidConfig(errors))
+    }
+}
+
+/// What the namespace's `validate` function says about a config that passed
+/// its schema: nothing when it declares none. A plugin that cannot answer
+/// refuses the write rather than letting an unchecked value through.
+async fn plugin_verdict(
+    plugins: &dyn PluginManager,
+    target: &ConfigTarget,
+    plugin_id: &str,
+    namespace: &str,
+    ns: &ConfigNamespace,
+    config: &serde_json::Value,
+) -> Result<Vec<FieldError>, AppError> {
+    let Some(function) = &ns.validate else {
+        return Ok(Vec::new());
+    };
+    let input = ConfigValidateInput {
+        namespace: namespace.to_string(),
+        scope: target.scope(),
+        contest_id: target.contest_id,
+        problem_id: target.problem_id,
+        config: ns.resolve(Some(config)),
+    };
+    let input = serde_json::to_vec(&input)
+        .map_err(|e| AppError::Internal(format!("config validate input: {e}")))?;
+    let output = plugins
+        .call_raw(plugin_id, function, input, crate::interactive_call())
+        .await
+        .map_err(|e| {
+            tracing::warn!(plugin_id, function, error = %e, "config validate call failed");
+            AppError::from(e)
+        })?;
+    let output: ConfigValidateOutput = serde_json::from_slice(&output).map_err(|e| {
+        tracing::error!(plugin_id, function, error = %e, "config validate answer unreadable");
+        AppError::Internal(format!(
+            "plugin '{plugin_id}' gave an unreadable answer from '{function}'"
+        ))
+    })?;
+    Ok(output
+        .errors
+        .into_iter()
+        .map(|v| FieldError {
+            path: v.path,
+            message: v.message,
+        })
+        .collect())
+}
+
+/// Validates and stores an admin's config (see [`validate_config`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_config<C: ConnectionTrait>(
     db: &C,
-    registry: &PluginRegistry,
+    plugins: &dyn PluginManager,
     target: &ConfigTarget,
     plugin_id: &str,
     namespace: &str,
@@ -177,7 +279,7 @@ pub(crate) async fn upsert_config<C: ConnectionTrait>(
     enabled: Option<bool>,
     position: i32,
 ) -> Result<Json<PluginConfigResponse>, AppError> {
-    validate_config(registry, target.scope(), plugin_id, namespace, &config)?;
+    validate_config(plugins, target, plugin_id, namespace, &config).await?;
     store_config(db, target, plugin_id, namespace, config, enabled, position).await
 }
 
@@ -348,6 +450,7 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
             }],
         };
         incompatible.push(IncompatibleConfig {
+            plugin_id: plugin_id.to_string(),
             scope,
             ref_id: row.ref_id,
             namespace: namespace.to_string(),
@@ -362,4 +465,80 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
         ))
     });
     Ok(incompatible)
+}
+
+/// Every stored config of a problem, at the problem scope and, with
+/// `include_contests`, in each contest that uses it, that its namespace would
+/// refuse if an admin wrote it now: test data a config refers to may have
+/// changed since it was stored. Configs of plugins not installed here are
+/// skipped; nothing reads them.
+pub(crate) async fn problem_config_issues<C: ConnectionTrait>(
+    db: &C,
+    plugins: &dyn PluginManager,
+    problem_id: i32,
+    include_contests: bool,
+) -> Result<Vec<IncompatibleConfig>, AppError> {
+    let mut targets = sea_orm::Condition::any().add(
+        sea_orm::Condition::all()
+            .add(plugin_config::Column::Scope.eq(ConfigScope::Problem.as_str()))
+            .add(plugin_config::Column::RefId.eq(config_key::problem(problem_id))),
+    );
+    if include_contests {
+        targets = targets.add(
+            sea_orm::Condition::all()
+                .add(plugin_config::Column::Scope.eq(ConfigScope::ContestProblem.as_str()))
+                .add(
+                    plugin_config::Column::RefId
+                        .like(config_key::contest_problem_by_problem_like(problem_id)),
+                ),
+        );
+    }
+    let rows = plugin_config::Entity::find()
+        .filter(targets)
+        .all(db)
+        .await?;
+    let mut issues = Vec::new();
+    for row in rows {
+        let Some(target) = ConfigTarget::of_row(&row.scope, &row.ref_id)
+            .filter(|t| t.problem_id == Some(problem_id))
+        else {
+            continue;
+        };
+        let plugin_id = extract_plugin_id(&row.namespace);
+        let namespace = strip_namespace_prefix(&row.namespace);
+        let installed = plugins
+            .get_registry()
+            .read()
+            .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?
+            .contains_key(plugin_id);
+        if !installed {
+            continue;
+        }
+        let errors =
+            match validate_config(plugins, &target, plugin_id, namespace, &row.config).await {
+                Ok(()) => continue,
+                Err(AppError::InvalidConfig(errors)) => errors,
+                Err(AppError::ConfigNamespaceNotFound(why)) => vec![FieldError {
+                    path: String::new(),
+                    message: why,
+                }],
+                Err(other) => return Err(other),
+            };
+        issues.push(IncompatibleConfig {
+            plugin_id: plugin_id.to_string(),
+            scope: target.scope(),
+            ref_id: row.ref_id.clone(),
+            namespace: namespace.to_string(),
+            errors,
+        });
+    }
+    issues.sort_by(|a, b| {
+        (a.scope.as_str(), &a.ref_id, &a.plugin_id, &a.namespace).cmp(&(
+            b.scope.as_str(),
+            &b.ref_id,
+            &b.plugin_id,
+            &b.namespace,
+        ))
+    });
+    Ok(issues)
 }

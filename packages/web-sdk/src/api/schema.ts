@@ -136,7 +136,7 @@ export interface paths {
     get: operations['getPluginGlobalConfig'];
     /**
      * Create or update config for a namespace on a plugin
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
      */
     put: operations['upsertPluginGlobalConfig'];
     post?: never;
@@ -771,7 +771,7 @@ export interface paths {
     get: operations['getContestConfig'];
     /**
      * Create or update config for a namespace on a contest
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
      */
     put: operations['upsertContestConfig'];
     post?: never;
@@ -1080,7 +1080,7 @@ export interface paths {
     get: operations['getContestProblemConfig'];
     /**
      * Create or update config for a namespace on a contest-problem
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
      */
     put: operations['upsertContestProblemConfig'];
     post?: never;
@@ -1680,6 +1680,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/problems/{id}/config/issues': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the stored configs of a problem that their plugins now refuse
+     * @description Checks every stored config of the problem again, as if an admin wrote it now: against its namespace's schema and the plugin's validate function. A config that names test cases the problem no longer has shows up here. Contest-problem configs are included when the caller may manage contests.
+     */
+    get: operations['listProblemConfigIssues'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/problems/{id}/config/{plugin_id}/{namespace}': {
     parameters: {
       query?: never;
@@ -1691,7 +1711,7 @@ export interface paths {
     get: operations['getProblemConfig'];
     /**
      * Create or update config for a namespace on a problem
-     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope.
+     * @description Stores the config after checking it against the schema the plugin declares for this namespace at this scope, then against the namespace's validate function when the plugin declares one.
      */
     put: operations['upsertProblemConfig'];
     post?: never;
@@ -3394,15 +3414,18 @@ export interface components {
        */
       topic: string;
     };
-    /** @description A stored config that a plugin manifest would no longer accept. */
+    /** @description A stored config that its plugin would no longer accept. */
     IncompatibleConfig: {
       /**
-       * @description Why the manifest refuses it. A namespace the manifest no longer
-       *     declares at this scope has one error with an empty path.
+       * @description Why the plugin refuses it: its schema, or its namespace's validate
+       *     function. A namespace the plugin no longer declares at this scope has
+       *     one error with an empty path.
        */
       errors: components['schemas']['FieldError'][];
       /** @example contest */
       namespace: string;
+      /** @example ioi */
+      plugin_id: string;
       /**
        * @description What the config belongs to: the problem id, contest id or
        *     `contest_id:problem_id`; the plugin id at the plugin scope.
@@ -5451,7 +5474,7 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema, or the plugin's validate function refuses it for this target; `details.fields` lists each broken field as `{path, message}` */
       400: {
         headers: {
           [name: string]: unknown;
@@ -5480,6 +5503,15 @@ export interface operations {
       };
       /** @description The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin that checks this namespace cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -7307,7 +7339,7 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema, or the plugin's validate function refuses it for this target; `details.fields` lists each broken field as `{path, message}` */
       400: {
         headers: {
           [name: string]: unknown;
@@ -7336,6 +7368,15 @@ export interface operations {
       };
       /** @description Contest not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin that checks this namespace cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -8573,7 +8614,7 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema, or the plugin's validate function refuses it for this target; `details.fields` lists each broken field as `{path, message}` */
       400: {
         headers: {
           [name: string]: unknown;
@@ -8602,6 +8643,15 @@ export interface operations {
       };
       /** @description Contest problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin that checks this namespace cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };
@@ -11324,6 +11374,65 @@ export interface operations {
       };
     };
   };
+  listProblemConfigIssues: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Problem ID */
+        id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The refused configs; empty when every config is accepted */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['IncompatibleConfig'][];
+        };
+      };
+      /** @description Unauthorized (TOKEN_MISSING, TOKEN_INVALID) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Forbidden (PERMISSION_DENIED) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Problem not found (NOT_FOUND) */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A plugin that checks one of the configs cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
   getProblemConfig: {
     parameters: {
       query?: never;
@@ -11407,7 +11516,7 @@ export interface operations {
           'application/json': components['schemas']['PluginConfigResponse'];
         };
       };
-      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}` */
+      /** @description Validation error (VALIDATION_ERROR): the config breaks the namespace's schema, or the plugin's validate function refuses it for this target; `details.fields` lists each broken field as `{path, message}` */
       400: {
         headers: {
           [name: string]: unknown;
@@ -11436,6 +11545,15 @@ export interface operations {
       };
       /** @description Problem not found (NOT_FOUND), or the plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND) */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The plugin that checks this namespace cannot answer right now (PLUGIN_UNAVAILABLE) */
+      503: {
         headers: {
           [name: string]: unknown;
         };

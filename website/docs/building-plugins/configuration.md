@@ -52,16 +52,81 @@ type, does not load.
 
 A write through the admin API, or through `host.config.set*`, is refused
 unless the plugin declares the namespace for that scope and the value
-satisfies its schema:
+satisfies its schema. An admin's write must also pass the namespace's
+`validate` function, when it declares one (see below):
 
 | Response | Code | When |
 | --- | --- | --- |
 | 404 | `CONFIG_NAMESPACE_NOT_FOUND` | the plugin is not installed, declares no such namespace, or not for this scope |
-| 400 | `VALIDATION_ERROR` | the value breaks the schema; `details.fields` lists each `{path, message}` |
+| 400 | `VALIDATION_ERROR` | the value breaks the schema, or the namespace's `validate` function refuses it; `details.fields` lists each `{path, message}` |
+| 503 | `PLUGIN_UNAVAILABLE` | the namespace has a `validate` function and the plugin cannot answer right now |
 
 A stored value may leave fields out: they read as their defaults. When an
 upgrade changes a schema, inspecting or uploading the archive lists every
 stored config the new schema refuses under `incompatible_configs`.
+
+## Refuse what a schema cannot say
+
+A schema checks types and bounds, not meaning. A subtask list can be
+well-typed and still name a test case the problem does not have, which would
+score every submission 0. Name a function under `validate`, and the host calls
+it on every admin write to the namespace, after the schema check and before it
+stores anything:
+
+```toml
+[config.task]
+scopes = ["contest_problem"]
+validate = "validate_task_config"
+```
+
+The function receives a `ConfigValidateInput`: the namespace, the scope, the
+`contest_id` and `problem_id` the config belongs to, and the proposed value
+with its defaults filled in. Read whatever else you need through your usual
+host functions, and answer with a `ConfigValidateOutput` listing one
+`ConfigViolation` per problem. An empty list accepts the value:
+
+```rust
+#[plugin_fn]
+pub fn validate_task_config(input: String) -> FnResult<String> {
+    let host = Host::new();
+    let req: ConfigValidateInput = serde_json::from_str(&input)?;
+    let task: TaskConfig = req.parse()?;
+    let problem_id = req
+        .problem_id
+        .ok_or_else(|| SdkError::Other("a task config belongs to a problem".into()))?;
+    let labels = host.submission.query_test_cases(problem_id)?;
+    let errors = task
+        .subtasks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, s)| s.test_cases.iter().enumerate().map(move |(j, l)| (i, j, l)))
+        .filter(|(_, _, label)| !labels.iter().any(|tc| tc.label.as_deref() == Some(label)))
+        .map(|(i, j, label)| {
+            ConfigViolation::new(
+                format!("subtasks[{i}].test_cases[{j}]"),
+                format!("this problem has no test case '{label}'"),
+            )
+        })
+        .collect();
+    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+}
+```
+
+The host answers each violation as a field of the `VALIDATION_ERROR`, so the
+settings form shows it next to the field its `path` names and lists it with
+the save error. A function that
+fails or returns something unreadable refuses the write too: the host never
+stores a value its validator did not accept.
+
+Writes your plugin makes with `host.config.set*` are checked against the
+schema only. The plugin owns those values, so the host does not call its
+validator on them.
+
+A config can also become invalid after it is stored, when the test data it
+refers to changes. `GET /api/v1/problems/{id}/config/issues` runs every
+config stored for a problem, at the problem scope and in each contest that
+uses it, through the same checks and lists the ones refused, in the
+`incompatible_configs` shape. The problem's test case dialog shows them.
 
 ## Read it
 
