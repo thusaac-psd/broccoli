@@ -530,3 +530,186 @@ mod sql {
         assert_eq!(res.body["code"], "NOT_FOUND");
     }
 }
+
+/// A plugin route that declares the contest or problem it addresses is
+/// answered by the host exactly as the core route for that resource would
+/// answer, before the plugin runs; the plugin receives the resolved contest.
+mod route_access {
+    use super::*;
+    use sea_orm::ConnectionTrait;
+
+    fn proxy(path: &str) -> String {
+        routes::plugin_proxy("server-plugin", path)
+    }
+
+    async fn exec(app: &TestApp, sql: String) {
+        app.db.execute_unprepared(&sql).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contest_route_answers_like_the_core_contest_route() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("ra_admin", "securepass", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("ra_user", "securepass", "contestant")
+            .await;
+        let public = app.create_contest(&admin, "Public", true, false).await;
+        let private = app.create_contest(&admin, "Private", false, false).await;
+        let draft = app.create_contest(&admin, "Draft", true, false).await;
+        exec(
+            &app,
+            format!("UPDATE contest SET activate_time = NULL WHERE id = {draft}"),
+        )
+        .await;
+
+        for (contest, token) in [
+            (public, Some(&user)),
+            (private, Some(&user)),
+            (draft, Some(&user)),
+            (draft, Some(&admin)),
+            (public, None),
+            (999_999, Some(&user)),
+        ] {
+            let (core, plugin) = match token {
+                Some(token) => (
+                    app.get_with_token(&routes::contest(contest), token).await,
+                    app.get_with_token(&proxy(&format!("contests/{contest}/reflect")), token)
+                        .await,
+                ),
+                None => (
+                    app.get_without_token(&routes::contest(contest)).await,
+                    app.get_without_token(&proxy(&format!("contests/{contest}/reflect")))
+                        .await,
+                ),
+            };
+            assert_eq!(
+                plugin.status, core.status,
+                "contest {contest}: plugin {} vs core {}",
+                plugin.text, core.text
+            );
+            if core.status != 200 {
+                assert_eq!(plugin.body["code"], core.body["code"], "contest {contest}");
+            }
+        }
+
+        let res = app
+            .get_with_token(&proxy(&format!("contests/{public}/reflect")), &user)
+            .await;
+        assert_eq!(res.body["contest"]["id"], public);
+        assert_eq!(res.body["contest"]["phase"], "running");
+        assert_eq!(res.body["contest"]["is_public"], true);
+        assert_eq!(res.body["contest"]["participant"], false);
+        assert_eq!(res.body["contest"]["contest_type"], "standard");
+
+        let res = app
+            .get_with_token(&proxy(&format!("contests/{draft}/reflect")), &admin)
+            .await;
+        assert_eq!(res.body["contest"]["phase"], "unactivated");
+
+        let res = app
+            .get_with_token(&proxy("contests/abc/reflect"), &user)
+            .await;
+        assert_eq!(res.status, 400, "{}", res.text);
+        assert_eq!(res.body["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contest_of_another_type_is_not_found() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("rt_admin", "securepass", "admin")
+            .await;
+        let contest = app.create_contest(&admin, "Typed", true, false).await;
+        let path = proxy(&format!("contests/{contest}/typed"));
+
+        let res = app.get_with_token(&path, &admin).await;
+        assert_eq!(res.status, 404, "{}", res.text);
+        assert_eq!(res.body["code"], "NOT_FOUND");
+
+        exec(
+            &app,
+            format!("UPDATE contest SET contest_type = 'fixture-type' WHERE id = {contest}"),
+        )
+        .await;
+        let res = app.get_with_token(&path, &admin).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["contest"]["contest_type"], "fixture-type");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn participant_route_needs_registration_and_a_problem_of_the_contest() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("rp_admin", "securepass", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("rp_user", "securepass", "contestant")
+            .await;
+        let contest = app.create_contest(&admin, "Open", true, false).await;
+        let problem = app.insert_public_problem("In contest").await;
+        let other = app.insert_public_problem("Elsewhere").await;
+        app.add_problem_to_contest(contest, problem, &admin).await;
+        let mine = |p: i32| proxy(&format!("contests/{contest}/problems/{p}/mine"));
+
+        let res = app.get_with_token(&mine(problem), &user).await;
+        assert_eq!(res.status, 403, "non-participant: {}", res.text);
+        assert_eq!(res.body["code"], "PERMISSION_DENIED");
+
+        app.register_for_contest(contest, &user).await;
+        let res = app.get_with_token(&mine(problem), &user).await;
+        assert_eq!(res.status, 200, "{}", res.text);
+        assert_eq!(res.body["problem_id"], problem);
+        assert_eq!(res.body["contest"]["participant"], true);
+
+        let res = app.get_with_token(&mine(other), &user).await;
+        assert_eq!(res.status, 404, "problem outside the contest: {}", res.text);
+
+        let res = app.get_with_token(&mine(problem), &admin).await;
+        assert_eq!(
+            res.status, 200,
+            "contest:manage needs no registration: {}",
+            res.text
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn standalone_problem_route_answers_like_the_core_problem_route() {
+        let app = TestApp::spawn_with_plugins().await;
+        let admin = app
+            .create_user_with_role("rs_admin", "securepass", "admin")
+            .await;
+        let user = app
+            .create_user_with_role("rs_user", "securepass", "contestant")
+            .await;
+        let contest = app.create_contest(&admin, "Hidden", false, false).await;
+        let hidden = app.insert_public_problem("Hidden problem").await;
+        exec(
+            &app,
+            format!("UPDATE problem SET is_public = FALSE WHERE id = {hidden}"),
+        )
+        .await;
+        app.add_problem_to_contest(contest, hidden, &admin).await;
+
+        for (problem, token) in [(hidden, &user), (hidden, &admin), (999_999, &user)] {
+            let core = app.get_with_token(&routes::problem(problem), token).await;
+            let plugin = app
+                .get_with_token(&proxy(&format!("problems/{problem}/reflect")), token)
+                .await;
+            assert_eq!(
+                plugin.status, core.status,
+                "problem {problem}: plugin {} vs core {}",
+                plugin.text, core.text
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn signed_in_route_refuses_anonymous_callers() {
+        let app = TestApp::spawn_with_plugins().await;
+        let res = app.get_without_token(&proxy("me")).await;
+        assert_eq!(res.status, 401);
+        assert_eq!(res.body["code"], "TOKEN_MISSING");
+    }
+}

@@ -11,6 +11,10 @@ struct PluginHttpRequest {
     pub body: Option<serde_json::Value>,
     #[serde(default)]
     pub auth: Option<PluginHttpAuth>,
+    #[serde(default)]
+    pub contest: Option<serde_json::Value>,
+    #[serde(default)]
+    pub problem_id: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +54,8 @@ pub fn reflect(input: String) -> FnResult<String> {
             "params": req.params,
             "query": req.query,
             "auth_user_id": req.auth.map(|auth| auth.user_id),
+            "contest": req.contest,
+            "problem_id": req.problem_id,
         })),
     })?)
 }

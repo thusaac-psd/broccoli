@@ -1,6 +1,7 @@
 mod checker;
 mod code_run;
 mod config;
+mod contest;
 mod evaluate;
 mod hook;
 pub mod hook_events;
@@ -21,6 +22,7 @@ pub use checker::{
 };
 pub use code_run::{OnCodeRunInput, OnCodeRunOutput};
 pub use config::{CascadeLevel, CascadeLevels, ConfigResult, ConfigSource, EffectiveConfig};
+pub use contest::{ContestPhase, RouteContest};
 pub use evaluate::{
     BuildEvalOpsInput, CompileSpec, DEFAULT_EVALUATION_CHECKER_SLACK_S,
     DEFAULT_EVALUATION_RESULT_TIMEOUT_MAX_MS, DEFAULT_EVALUATION_RESULT_TIMEOUT_MIN_MS,

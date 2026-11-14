@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::contest::RouteContest;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginHttpAuth {
     pub user_id: i32,
@@ -28,6 +30,15 @@ pub struct PluginHttpRequest {
     pub body: Option<serde_json::Value>,
     #[serde(default)]
     pub auth: Option<PluginHttpAuth>,
+    /// The contest the route's `contest` path parameter names, resolved and
+    /// checked by the host. Set exactly when the route declares `contest`.
+    #[serde(default)]
+    pub contest: Option<RouteContest>,
+    /// The problem the route's `problem` path parameter names, checked by the
+    /// host to be readable by the caller (inside [`Self::contest`] when the
+    /// route declares both). Set exactly when the route declares `problem`.
+    #[serde(default)]
+    pub problem_id: Option<i32>,
 }
 
 impl PluginHttpRequest {
@@ -53,6 +64,21 @@ impl PluginHttpRequest {
     pub fn require_user_id(&self) -> Result<i32, crate::error::SdkError> {
         self.user_id()
             .ok_or_else(|| crate::error::SdkError::Other("Authentication required".into()))
+    }
+
+    /// The contest the route addresses. A route that does not declare
+    /// `contest` in its manifest never has one, which is the plugin's bug,
+    /// not the caller's: the error is the internal-error message.
+    pub fn contest(&self) -> Result<&RouteContest, String> {
+        self.contest
+            .as_ref()
+            .ok_or_else(|| format!("route {} declares no contest", self.path))
+    }
+
+    /// The problem the route addresses; see [`Self::contest`].
+    pub fn problem_id(&self) -> Result<i32, String> {
+        self.problem_id
+            .ok_or_else(|| format!("route {} declares no problem", self.path))
     }
 }
 

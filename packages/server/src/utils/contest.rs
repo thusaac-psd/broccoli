@@ -7,39 +7,10 @@ use crate::error::AppError;
 use crate::extractors::auth::AuthUser;
 use crate::utils::soft_delete::SoftDeletable;
 
-/// Where a contest is at a given instant. Every time-based contest rule
-/// derives from [`contest_phase`], so all of them share one set of
-/// boundaries: the activation window is `[activate_time, deactivate_time)`
-/// and the contest runs during `[start_time, end_time)`. Contest timelines
-/// are validated as `activate_time <= start_time < end_time <=
-/// deactivate_time`, so the phases follow each other in declaration order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContestPhase {
-    /// `activate_time` is unset or in the future. Only `contest:manage` sees
-    /// the contest.
-    Unactivated,
-    /// Activated, before `start_time`.
-    Upcoming,
-    /// From `start_time` until just before `end_time`.
-    Running,
-    /// From `end_time` until the contest is deactivated.
-    Ended,
-    /// `deactivate_time` has passed. Only `contest:manage` sees the contest.
-    Deactivated,
-}
-
-impl ContestPhase {
-    /// Whether the contest is inside its activation window, i.e. visible to
-    /// users without `contest:manage`.
-    pub fn is_active(self) -> bool {
-        matches!(self, Self::Upcoming | Self::Running | Self::Ended)
-    }
-
-    /// Whether the contest is active and has started (running or ended).
-    pub fn has_started(self) -> bool {
-        matches!(self, Self::Running | Self::Ended)
-    }
-}
+/// Where a contest is at a given instant: the one phase table of the
+/// platform, shared with plugins. Every time-based contest rule derives from
+/// [`contest_phase`], so all of them share one set of boundaries.
+pub use broccoli_server_sdk::types::ContestPhase;
 
 /// The phase of `contest` at `now`.
 pub fn contest_phase(contest: &contest::Model, now: DateTime<Utc>) -> ContestPhase {
@@ -68,13 +39,7 @@ pub fn start_has_passed(contest: &contest::Model, now: DateTime<Utc>) -> bool {
 /// contest it is once the contest has ended, or throughout when the contest
 /// opts in with `show_compile_output`.
 pub fn compile_output_public(contest: Option<&contest::Model>, now: DateTime<Utc>) -> bool {
-    contest.is_none_or(|c| {
-        c.show_compile_output
-            || matches!(
-                contest_phase(c, now),
-                ContestPhase::Ended | ContestPhase::Deactivated
-            )
-    })
+    contest.is_none_or(|c| c.show_compile_output || contest_phase(c, now).has_ended())
 }
 
 /// SQL form of [`ContestPhase::is_active`] at `now`, for filters pushed into
@@ -226,13 +191,25 @@ pub async fn require_contest_participant<C: sea_orm::ConnectionTrait>(
         return Ok(());
     }
     let is_participant = is_contest_participant(db, contest.id, auth_user.user_id).await?;
-    if is_participant {
-        return Ok(());
+    participant_gate(auth_user, contest, is_participant)
+}
+
+/// The rule of [`require_contest_participant`] once the caller's
+/// registration is known: participants and `contest:manage` pass; anyone
+/// else gets 403 on a public contest and 404 on a private one, which they
+/// may not know exists.
+pub fn participant_gate(
+    auth_user: &AuthUser,
+    contest: &contest::Model,
+    is_participant: bool,
+) -> Result<(), AppError> {
+    if is_participant || auth_user.has_permission(perm::CONTEST_MANAGE) {
+        Ok(())
+    } else if contest.is_public {
+        Err(AppError::PermissionDenied)
+    } else {
+        Err(AppError::NotFound("Contest not found".into()))
     }
-    if contest.is_public {
-        return Err(AppError::PermissionDenied);
-    }
-    Err(AppError::NotFound("Contest not found".into()))
 }
 
 #[cfg(test)]

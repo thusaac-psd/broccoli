@@ -144,6 +144,11 @@ pub struct VisibilityKernel<'a> {
     memo: tokio::sync::Mutex<HashMap<(Action, Resource), Decision>>,
     /// Submission rows the caller already read; see [`Self::know_submission`].
     known_submissions: std::sync::Mutex<HashMap<i32, crate::entity::submission::Model>>,
+    /// Contest rows the caller already read; see [`Self::know_contest`].
+    known_contests: std::sync::Mutex<HashMap<i32, crate::entity::contest::Model>>,
+    /// Whether the subject is registered in each contest a decision so far
+    /// resolved; see [`Self::participates`].
+    participation: std::sync::Mutex<HashMap<i32, bool>>,
 }
 
 impl<'a> VisibilityKernel<'a> {
@@ -155,7 +160,29 @@ impl<'a> VisibilityKernel<'a> {
             subject,
             memo: tokio::sync::Mutex::new(HashMap::new()),
             known_submissions: std::sync::Mutex::new(HashMap::new()),
+            known_contests: std::sync::Mutex::new(HashMap::new()),
+            participation: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Hand the kernel an active contest row this request already read, so
+    /// deciding on anything in that contest does not read it again.
+    pub fn know_contest(&self, contest: crate::entity::contest::Model) {
+        self.known_contests
+            .lock()
+            .expect("known contests lock")
+            .insert(contest.id, contest);
+    }
+
+    /// Whether the subject is registered in `contest_id`, when a decision of
+    /// this kernel already looked it up (`None` otherwise, and always for an
+    /// anonymous subject).
+    pub fn participates(&self, contest_id: i32) -> Option<bool> {
+        self.participation
+            .lock()
+            .expect("participation lock")
+            .get(&contest_id)
+            .copied()
     }
 
     /// Hand the kernel a submission row this request already read, so
@@ -253,6 +280,11 @@ impl<'a> VisibilityKernel<'a> {
                     .lock()
                     .expect("known submissions lock")
                     .clone(),
+                known_contests: self
+                    .known_contests
+                    .lock()
+                    .expect("known contests lock")
+                    .clone(),
                 ..HostScopes::default()
             };
             let host_decisions = host_decide(
@@ -264,6 +296,10 @@ impl<'a> VisibilityKernel<'a> {
                 &mut scopes,
             )
             .await?;
+            self.participation
+                .lock()
+                .expect("participation lock")
+                .extend(scopes.participation.iter().map(|(k, v)| (*k, *v)));
             // Compiled out in release, and that is safe — `host_decide`
             // (`host_rules.rs`) builds its return value as
             // `resources.iter().map(...).collect()`, a `.map()` over its own

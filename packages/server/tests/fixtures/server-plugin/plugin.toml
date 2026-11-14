@@ -12,26 +12,31 @@ function = "on_timer"
 [[server.routes]]
 path = "/reflect/{id}"
 method = "GET"
+access = "public"
 handler = "reflect"
 
 [[server.routes]]
 path = "/burn/{millions}"
 method = "GET"
+access = "public"
 handler = "burn"
 
 [[server.routes]]
 path = "/kv/{key}"
 method = "POST"
+access = "public"
 handler = "kv_write"
 
 [[server.routes]]
 path = "/kv/{key}"
 method = "GET"
+access = "public"
 handler = "kv_read"
 
 [[server.routes]]
 path = "/sql/params"
 method = "POST"
+access = "public"
 handler = "sql_parameterized"
 
 [[server.routes]]
@@ -43,17 +48,52 @@ permission = "submission:view_all"
 [[server.routes]]
 path = "/timer/schedule"
 method = "POST"
+access = "public"
 handler = "timer_schedule_route"
 
 [[server.routes]]
 path = "/timer/cancel"
 method = "POST"
+access = "public"
 handler = "timer_cancel_route"
 
 [[server.routes]]
 path = "/timer/deliveries"
 method = "GET"
+access = "public"
 handler = "timer_deliveries_route"
+
+[[server.routes]]
+path = "/me"
+method = "GET"
+handler = "reflect"
+
+[[server.routes]]
+path = "/contests/{contest_id}/reflect"
+method = "GET"
+handler = "reflect"
+contest = "{contest_id}"
+
+[[server.routes]]
+path = "/contests/{contest_id}/typed"
+method = "GET"
+handler = "reflect"
+contest = "{contest_id}"
+contest_type = "fixture-type"
+
+[[server.routes]]
+path = "/contests/{contest_id}/problems/{problem_id}/mine"
+method = "GET"
+handler = "reflect"
+access = "participant"
+contest = "{contest_id}"
+problem = "{problem_id}"
+
+[[server.routes]]
+path = "/problems/{problem_id}/reflect"
+method = "GET"
+handler = "reflect"
+problem = "{problem_id}"
 
 [[server.queries]]
 topic = "visibility"

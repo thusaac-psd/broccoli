@@ -221,8 +221,12 @@ pub struct ServerTimer {
     pub function: String,
 }
 
+/// A `[[server.routes]]` entry, as written in `plugin.toml`. The host checks
+/// who may call the route and reads the resources it addresses before the
+/// plugin runs.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ServerRouteConfig {
     pub method: String,
 
@@ -230,8 +234,140 @@ pub struct ServerRouteConfig {
 
     pub handler: String,
 
+    /// Who may call the route. Defaults to `user`.
+    #[serde(default)]
+    pub access: RouteAccessLevel,
+
+    /// A permission the caller must hold.
     #[serde(default)]
     pub permission: Option<String>,
+
+    /// The path parameter naming the contest the route acts on, as
+    /// `"{contest_id}"`. The caller must be able to read the contest.
+    #[serde(default)]
+    pub contest: Option<String>,
+
+    /// The path parameter naming the problem the route acts on, as
+    /// `"{problem_id}"`: a problem of the route's `contest` when it declares
+    /// one, else a standalone problem. The caller must be able to read the
+    /// problem there.
+    #[serde(default)]
+    pub problem: Option<String>,
+
+    /// The contest type the route serves. A contest of another type is not
+    /// found.
+    #[serde(default)]
+    pub contest_type: Option<String>,
+}
+
+/// The `access` key of a route.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RouteAccessLevel {
+    /// Anyone, signed in or not. The route addresses no contest or problem
+    /// and needs no permission: core resources are never readable
+    /// anonymously.
+    Public,
+    /// A signed-in caller.
+    #[default]
+    User,
+    /// A signed-in participant of the route's contest, or a caller holding
+    /// `contest:manage`.
+    Participant,
+}
+
+/// Who may call a route and what it addresses, checked by the host before
+/// the plugin runs. Built by [`ServerRouteConfig::access`], which refuses
+/// every combination of keys the host cannot enforce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteAccess {
+    /// Anyone. A bearer token, when sent, must still be valid.
+    Public,
+    /// A signed-in caller with a fresh token.
+    SignedIn {
+        permission: Option<String>,
+        target: RouteTarget,
+    },
+}
+
+/// The resource a signed-in route addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteTarget {
+    /// No core resource.
+    Nothing,
+    /// A standalone problem, named by the path parameter `problem`.
+    Problem { problem: String },
+    /// A contest, and optionally one of its problems.
+    Contest(ContestTarget),
+}
+
+/// A contest a route addresses; see [`RouteTarget::Contest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContestTarget {
+    /// The path parameter naming the contest.
+    pub contest: String,
+    /// The path parameter naming a problem of the contest.
+    pub problem: Option<String>,
+    /// The only contest type the route serves.
+    pub contest_type: Option<String>,
+    /// The caller must be registered in the contest or hold
+    /// `contest:manage`.
+    pub participant: bool,
+}
+
+impl ServerRouteConfig {
+    /// The checked form of this route's access keys, or why they do not make
+    /// a rule the host can enforce.
+    pub fn access(&self) -> Result<RouteAccess, String> {
+        let param = |key: &str, value: &Option<String>| -> Result<Option<String>, String> {
+            let Some(value) = value else { return Ok(None) };
+            let name = value
+                .strip_prefix('{')
+                .and_then(|v| v.strip_suffix('}'))
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| format!("{key} must name a path parameter as \"{{name}}\""))?;
+            if !self.path.split('/').any(|segment| segment == value) {
+                return Err(format!("{key} names {value}, which is not in the path"));
+            }
+            Ok(Some(name.to_string()))
+        };
+        let contest = param("contest", &self.contest)?;
+        let problem = param("problem", &self.problem)?;
+        if self.contest_type.is_some() && contest.is_none() {
+            return Err("contest_type needs contest".into());
+        }
+        match self.access {
+            RouteAccessLevel::Public => {
+                if contest.is_some() || problem.is_some() || self.permission.is_some() {
+                    return Err(
+                        "a public route cannot name a contest, a problem or a permission".into(),
+                    );
+                }
+                Ok(RouteAccess::Public)
+            }
+            RouteAccessLevel::User | RouteAccessLevel::Participant => {
+                let participant = self.access == RouteAccessLevel::Participant;
+                let target = match (contest, problem) {
+                    (Some(contest), problem) => RouteTarget::Contest(ContestTarget {
+                        contest,
+                        problem,
+                        contest_type: self.contest_type.clone(),
+                        participant,
+                    }),
+                    (None, _) if participant => {
+                        return Err("participant access needs contest".into());
+                    }
+                    (None, Some(problem)) => RouteTarget::Problem { problem },
+                    (None, None) => RouteTarget::Nothing,
+                };
+                Ok(RouteAccess::SignedIn {
+                    permission: self.permission.clone(),
+                    target,
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -458,6 +594,70 @@ impl SchemaProperty {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn route(extra: &str) -> Result<RouteAccess, String> {
+        let toml_str = format!(
+            "method = \"GET\"\npath = \"/contests/{{contest_id}}/problems/{{problem_id}}\"\nhandler = \"h\"\n{extra}"
+        );
+        let route: ServerRouteConfig = toml::from_str(&toml_str).map_err(|e| e.to_string())?;
+        route.access()
+    }
+
+    #[test]
+    fn route_without_access_keys_needs_a_signed_in_caller() {
+        assert_eq!(
+            route(""),
+            Ok(RouteAccess::SignedIn {
+                permission: None,
+                target: RouteTarget::Nothing
+            })
+        );
+    }
+
+    #[test]
+    fn route_names_its_contest_and_problem_by_path_parameter() {
+        assert_eq!(
+            route(
+                "access = \"participant\"\ncontest = \"{contest_id}\"\nproblem = \"{problem_id}\"\ncontest_type = \"ioi\""
+            ),
+            Ok(RouteAccess::SignedIn {
+                permission: None,
+                target: RouteTarget::Contest(ContestTarget {
+                    contest: "contest_id".into(),
+                    problem: Some("problem_id".into()),
+                    contest_type: Some("ioi".into()),
+                    participant: true,
+                }),
+            })
+        );
+        assert_eq!(
+            route("problem = \"{problem_id}\""),
+            Ok(RouteAccess::SignedIn {
+                permission: None,
+                target: RouteTarget::Problem {
+                    problem: "problem_id".into()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn route_keys_the_host_cannot_enforce_are_refused() {
+        for extra in [
+            "contest = \"contest_id\"",
+            "contest = \"{cid}\"",
+            "contest_type = \"ioi\"",
+            "access = \"participant\"",
+            "access = \"public\"\ncontest = \"{contest_id}\"",
+            "access = \"public\"\nproblem = \"{problem_id}\"",
+            "access = \"public\"\npermission = \"contest:manage\"",
+            "acess = \"public\"",
+            "access = \"anyone\"",
+        ] {
+            assert!(route(extra).is_err(), "accepted: {extra}");
+        }
+        assert_eq!(route("access = \"public\""), Ok(RouteAccess::Public));
+    }
 
     #[test]
     fn parse_manifest_with_inline_config_schema() {

@@ -18,6 +18,7 @@ use tracing::{info, instrument, warn};
 use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, fresh_user};
 use crate::extractors::path::AppPath;
+use crate::services::plugin_route_access::authorize;
 use crate::state::AppState;
 use crate::utils::jwt;
 
@@ -94,7 +95,7 @@ async fn handle_plugin_request_impl(
     // forwarded `auth.permissions`.
     let auth_user = authenticate(&state, &headers).await?;
 
-    let (handler_name, required_permission, params) = {
+    let (handler_name, access, params) = {
         let registry = state
             .plugins
             .get_registry()
@@ -122,22 +123,16 @@ async fn handle_plugin_request_impl(
 
         (
             route_info.handler.clone(),
-            route_info.permission.clone(),
+            route_info.access.clone(),
             matched_route
                 .params
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
+                .collect::<HashMap<String, String>>(),
         )
     };
 
-    if let Some(ref permission) = required_permission {
-        let user = auth_user.as_ref().ok_or_else(|| {
-            warn!("Unauthorized access attempt to protected plugin route");
-            AppError::TokenMissing
-        })?;
-        user.require_permission(permission)?;
-    }
+    let resolved = authorize(&state, auth_user.as_ref(), &access, &params).await?;
 
     let request = PluginHttpRequest {
         method: method.to_string(),
@@ -156,6 +151,8 @@ async fn handle_plugin_request_impl(
             roles: user.roles,
             permissions: user.permissions,
         }),
+        contest: resolved.contest,
+        problem_id: resolved.problem_id,
     };
 
     info!("Forwarding request to plugin handler: {}", handler_name);
@@ -269,7 +266,7 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
@@ -277,9 +274,10 @@ macro_rules! proxy_handler {
             request_body = $body_type,
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR)", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin or Route not found", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
@@ -305,16 +303,17 @@ macro_rules! proxy_handler {
             tag = "Plugins",
             operation_id = $op_id,
             summary = $summary,
-            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. The request is forwarded to the plugin's Wasm handler, and the response is returned to the client. Authorization is checked based on the permissions defined in the plugin manifest.",
+            description = "Handles HTTP requests for plugin-defined routes. The plugin and route are determined by the path parameters. Before the request is forwarded to the plugin's Wasm handler, the host checks the access the route declares in the plugin manifest (sign-in, permission, contest participation) and resolves the contest and problem it addresses with the same visibility rules as the core routes.",
             params(
                 ("plugin_id" = String, Path, description = "The unique identifier of the plugin"),
                 ("path" = String, Path, description = "The sub-path defined in plugin's manifest")
             ),
             responses(
                 (status = 200, description = "Success", body = serde_json::Value),
+                (status = 400, description = "A path parameter the route declares as an id is not one (VALIDATION_ERROR)", body = ErrorBody),
                 (status = 401, description = "Unauthorized: no token, or an invalid or stale one (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
                 (status = 403, description = "Forbidden", body = ErrorBody),
-                (status = 404, description = "Plugin or Route not found", body = ErrorBody),
+                (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
                 (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
             ),
