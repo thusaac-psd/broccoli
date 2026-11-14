@@ -54,6 +54,8 @@ pub enum AppError {
     /// (its plugin is still loading, or failed to load, here). Retryable: the
     /// load balancer will likely route the retry to a replica that has it.
     ContestTypeUnavailable(String),
+    /// The contest already has a submission, so its contest type is fixed.
+    ContestTypeLocked,
     Overloaded {
         retry_after: u64,
     },
@@ -157,6 +159,13 @@ impl AppError {
                 simple(
                     "RATE_LIMITED",
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
+                ),
+            ),
+            AppError::ContestTypeLocked => (
+                StatusCode::CONFLICT,
+                simple(
+                    "CONTEST_TYPE_LOCKED",
+                    "The contest type cannot change once the contest has a submission".into(),
                 ),
             ),
             AppError::ContestTypeUnavailable(contest_type) => (

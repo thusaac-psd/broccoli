@@ -491,23 +491,34 @@ pub async fn admin_fan_out_submission(
         &known_languages,
     )?;
 
-    if let Some(contest_id) = payload.contest_id {
-        let _contest = find_contest(&txn, contest_id).await?;
-        if !is_problem_in_contest(&txn, contest_id, payload.problem_id).await? {
-            return Err(AppError::NotFound(
-                "Problem not found in this contest".into(),
-            ));
+    // A contest submission is judged under its contest's type, like every
+    // other submission of that contest; only a practice submission may name
+    // another.
+    let contest_type = match payload.contest_id {
+        Some(contest_id) => {
+            let contest_type = required_contest_type(&find_contest(&txn, contest_id).await?)?;
+            if !is_problem_in_contest(&txn, contest_id, payload.problem_id).await? {
+                return Err(AppError::NotFound(
+                    "Problem not found in this contest".into(),
+                ));
+            }
+            if payload
+                .contest_type
+                .as_ref()
+                .is_some_and(|ct| *ct != contest_type)
+            {
+                return Err(AppError::Validation(format!(
+                    "A submission to this contest is judged as '{contest_type}', its contest type"
+                )));
+            }
+            contest_type
         }
-    }
-
-    let contest_type = match payload.contest_type {
-        Some(ref ct) => {
-            validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
-                .await?;
-            ct.clone()
-        }
-        None => match payload.contest_id {
-            Some(contest_id) => required_contest_type(&find_contest(&txn, contest_id).await?)?,
+        None => match payload.contest_type {
+            Some(ref ct) => {
+                validate_contest_type("contest_type", ct, &state.registries.contest_type_registry)
+                    .await?;
+                ct.clone()
+            }
             None => problem.default_contest_type.clone(),
         },
     };

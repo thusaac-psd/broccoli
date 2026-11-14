@@ -543,3 +543,82 @@ async fn admin_fan_out_response_is_denied_like_a_read_would_be() {
     assert_eq!(created.target_worker_id.as_deref(), Some(worker_id));
     assert_eq!(created.problem_id, problem_id);
 }
+
+/// A fan-out to a contest is judged under the contest's type, like every
+/// other submission of the contest: naming another type is refused.
+#[tokio::test]
+async fn admin_fan_out_to_a_contest_cannot_name_another_contest_type() {
+    let redis = common::test_util::redis_image()
+        .start()
+        .await
+        .expect("failed to start Redis container");
+    let port = redis
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("failed to get Redis port");
+    let redis_url = format!("redis://127.0.0.1:{port}");
+    let worker_id = "rjv-fanout-type-worker";
+    seed_live_worker_heartbeat(&redis_url, worker_id).await;
+    let app = TestApp::spawn_with_options(SpawnOptions {
+        redis_url: Some(redis_url),
+        ..Default::default()
+    })
+    .await;
+    app.state
+        .registries
+        .contest_type_registry
+        .write()
+        .await
+        .insert(
+            "other".into(),
+            server::registry::ContestTypeHandlers {
+                plugin_id: "__test__".into(),
+                submission_fn: "noop".into(),
+                code_run_fn: "noop".into(),
+                submission_admission: false,
+            },
+        );
+    let admin_token = app
+        .create_user_with_role("rjv_fanout_type_admin", "pass1234", "admin")
+        .await;
+    let problem_id = insert_public_problem(&app, "Fan-out Type Problem").await;
+    let contest_id = app.create_contest(&admin_token, "C", true, true).await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin_token)
+        .await;
+
+    let fan_out = |contest_type: Option<&str>| {
+        serde_json::json!({
+            "problem_id": problem_id,
+            "contest_id": contest_id,
+            "contest_type": contest_type,
+            "language": "cpp",
+            "files": [{ "filename": "main.cpp", "content": "int main() { return 0; }" }],
+            "target_worker_ids": [worker_id],
+        })
+    };
+    let res = app
+        .post_with_token(
+            routes::ADMIN_FAN_OUT_SUBMISSION,
+            &fan_out(Some("other")),
+            &admin_token,
+        )
+        .await;
+    assert_eq!(res.status, 400, "{}", res.text);
+    assert_eq!(res.body["code"], "VALIDATION_ERROR");
+
+    let res = app
+        .post_with_token(
+            routes::ADMIN_FAN_OUT_SUBMISSION,
+            &fan_out(None),
+            &admin_token,
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.text);
+    let submission_id = res.body["submissions"][0]["id"].as_i64().unwrap() as i32;
+    let stored = submission::Entity::find_by_id(submission_id)
+        .one(&app.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.contest_type, "standard");
+}

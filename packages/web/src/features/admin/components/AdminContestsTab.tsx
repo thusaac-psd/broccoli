@@ -64,6 +64,7 @@ import { SwitchField } from '@/features/admin/components/SwitchField';
 import { ContestSlotProvider } from '@/features/contest/components/ContestSlotProvider';
 import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import { getContestStatus } from '@/features/contest/utils/status';
+import { fetchContestSubmissions } from '@/features/submission/api/fetch-contest-submissions';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { changedFields } from '@/lib/changed-fields';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
@@ -295,6 +296,22 @@ function ContestForm({
   const { data: registries } = useRegistries();
   const [values, setValues] = useState(initial);
   const isEdit = contestId !== undefined;
+  // The server fixes a contest's type at its first submission
+  // (CONTEST_TYPE_LOCKED), so the form shows it read-only from then on.
+  const { data: contestTypeLocked = false } = useQuery({
+    queryKey: ['contest-has-submissions', contestId],
+    queryFn: async () =>
+      (
+        await fetchContestSubmissions(apiClient, {
+          contestId: contestId!,
+          cursor: null,
+          per_page: 1,
+          sort_by: 'created_at',
+          sort_order: 'desc',
+        })
+      ).data.length > 0,
+    enabled: isEdit,
+  });
 
   const set =
     <K extends keyof ContestFormValues>(field: K) =>
@@ -415,6 +432,10 @@ function ContestForm({
             id="contest-type"
             value={values.contestType}
             onChange={(e) => set('contestType')(e.target.value)}
+            disabled={contestTypeLocked}
+            aria-describedby={
+              contestTypeLocked ? 'contest-type-locked' : undefined
+            }
             className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
           >
             <option value="" disabled>
@@ -426,6 +447,14 @@ function ContestForm({
               </option>
             ))}
           </select>
+          {contestTypeLocked && (
+            <p
+              id="contest-type-locked"
+              className="text-xs text-muted-foreground"
+            >
+              {t('admin.contest.contestTypeLocked')}
+            </p>
+          )}
         </div>
 
         <Separator />

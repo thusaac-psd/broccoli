@@ -604,6 +604,7 @@
 'admin.problemFallbackLabel' = '题目 {id}'
 'admin.contest.titlePlaceholder' = '周赛 #42'
 'admin.contest.descriptionPlaceholder' = '比赛描述（支持 Markdown）'
+'admin.contest.contestTypeLocked' = '已固定：比赛已有提交，所有提交都按同一种比赛类型评测。'
 
 # Additional Files (admin)
 'admin.additionalFiles.title' = '附加文件'

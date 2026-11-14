@@ -665,6 +665,8 @@ export const en: Record<string, string> = {
   'admin.contest.titlePlaceholder': 'Weekly Contest #42',
   'admin.contest.descriptionPlaceholder':
     'Contest description (Markdown supported)',
+  'admin.contest.contestTypeLocked':
+    'Fixed: the contest has submissions, and all of them are judged under one contest type.',
 
   // Additional Files (admin)
   'admin.additionalFiles.title': 'Additional Files',
