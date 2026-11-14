@@ -61,9 +61,15 @@ impl CallOptions {
         }
     }
 
-    /// A request path call: visibility, request hooks, plugin routes.
+    /// A call the host makes on the request path: a visibility query or a
+    /// request hook.
     pub fn interactive(deadline: Instant) -> Self {
         Self::new(CallKind::Request, deadline)
+    }
+
+    /// A plugin HTTP route.
+    pub fn route(deadline: Instant) -> Self {
+        Self::new(CallKind::Route, deadline)
     }
 
     /// A contest call that waits in host functions for its judgement.

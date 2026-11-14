@@ -38,6 +38,9 @@
 //!   taking. Either way the person gets a quick "busy, retry" instead of
 //!   waiting out the request's deadline, and a cheap function is never
 //!   refused for what a slow one costs.
+//! - The host's own request path calls ([`CallKind::Request`]: visibility
+//!   queries, request hooks), which the core API depends on, take a freed
+//!   token ahead of plugin routes ([`CallKind::Route`]).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -80,8 +83,14 @@ impl CallClass {
 /// token class. Every top-level call site names one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallKind {
-    /// A request path call: visibility, request hooks, plugin routes.
+    /// A call the host makes on the request path: visibility queries and
+    /// request hooks. The core API waits on these, so they take a freed
+    /// token ahead of [`Route`] calls.
+    ///
+    /// [`Route`]: CallKind::Route
     Request,
+    /// A plugin HTTP route.
+    Route,
     /// A contest call that waits for its judgement (`on_submission`,
     /// `on_code_run`): parked most of its life on the calls of [`Work`].
     ///
@@ -98,12 +107,13 @@ pub enum CallKind {
 }
 
 /// How many [`CallKind`]s there are.
-const KINDS: usize = 5;
+const KINDS: usize = 6;
 
 impl CallKind {
     #[cfg(test)]
     const ALL: [CallKind; KINDS] = [
         CallKind::Request,
+        CallKind::Route,
         CallKind::Judging,
         CallKind::Work,
         CallKind::Hook,
@@ -113,17 +123,18 @@ impl CallKind {
     fn index(self) -> usize {
         match self {
             CallKind::Request => 0,
-            CallKind::Judging => 1,
-            CallKind::Work => 2,
-            CallKind::Hook => 3,
-            CallKind::Lifecycle => 4,
+            CallKind::Route => 1,
+            CallKind::Judging => 2,
+            CallKind::Work => 3,
+            CallKind::Hook => 4,
+            CallKind::Lifecycle => 5,
         }
     }
 
     /// The token class, or `None` for a call that runs without a token.
     pub fn class(self) -> Option<CallClass> {
         match self {
-            CallKind::Request => Some(CallClass::Interactive),
+            CallKind::Request | CallKind::Route => Some(CallClass::Interactive),
             CallKind::Judging | CallKind::Work | CallKind::Hook => Some(CallClass::Background),
             CallKind::Lifecycle => None,
         }
@@ -136,9 +147,23 @@ impl CallKind {
         self.class() == Some(CallClass::Interactive)
     }
 
+    /// Order within the class: a freed token goes to the waiting kind of the
+    /// lowest rank, and within a rank to the oldest waiter.
+    fn rank(self) -> u8 {
+        match self {
+            CallKind::Route => 1,
+            CallKind::Request
+            | CallKind::Judging
+            | CallKind::Work
+            | CallKind::Hook
+            | CallKind::Lifecycle => 0,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             CallKind::Request => "request",
+            CallKind::Route => "route",
             CallKind::Judging => "judging",
             CallKind::Work => "work",
             CallKind::Hook => "hook",
@@ -158,10 +183,10 @@ pub const MIN_TOKENS: usize = 2;
 /// those stalls while bounding the run queue to two guests per core.
 pub const TOKENS_PER_CORE: usize = 2;
 
-/// Admitted request calls (running or parked) per CPU token: room for
-/// request calls parked on a slow database without letting them hold
-/// threads without bound.
-pub const REQUESTS_PER_TOKEN: usize = 8;
+/// Admitted calls of each request path kind (running or parked) per CPU
+/// token: room for request calls parked on a slow database without letting
+/// them hold threads without bound.
+pub const REQUESTS_PER_TOKEN: usize = 4;
 
 /// Admitted contest calls before the server knows its in-flight cap.
 pub const DEFAULT_JUDGING_CAP: usize = 256;
@@ -222,6 +247,7 @@ impl Capacity {
         let interactive = tokens.div_ceil(2);
         let mut caps = [0; KINDS];
         caps[CallKind::Request.index()] = tokens * REQUESTS_PER_TOKEN;
+        caps[CallKind::Route.index()] = tokens * REQUESTS_PER_TOKEN;
         caps[CallKind::Judging.index()] = DEFAULT_JUDGING_CAP;
         caps[CallKind::Work.index()] = 2 * tokens;
         caps[CallKind::Hook.index()] = tokens;
@@ -354,15 +380,15 @@ impl State {
             && lane.admitted < key.cap(&self.capacity)
     }
 
-    /// The lane of `class` whose queued call goes next: the one with room
-    /// whose oldest call queued first.
+    /// The lane of `class` whose queued call goes next: among lanes with
+    /// room, the lowest kind rank, then the oldest call.
     fn next_lane(&self, class: CallClass) -> Option<LaneKey> {
         self.lanes
             .iter()
             .filter(|(key, lane)| key.kind.class() == Some(class) && self.has_room(key, lane))
             .filter_map(|(key, lane)| {
                 let oldest = *lane.queued.first_key_value()?.0;
-                Some((oldest, key))
+                Some(((key.kind.rank(), oldest), key))
             })
             .min_by_key(|(order, _)| *order)
             .map(|(_, key)| key.clone())
@@ -807,17 +833,17 @@ mod tests {
     async fn cheap_calls_are_served_while_a_slow_route_floods_its_lane() {
         let a = Admission::new(Capacity::new(8));
         // A route that takes 5 s a call, called twice in turn.
-        served(&a, INTERACTIVE, "burn", 5.0, 2).await;
+        served(&a, CallKind::Route, "burn", 5.0, 2).await;
         // Then twelve of its calls at once: it gets half the tokens, queues
         // what its own calls drain within the shed wait, sheds the rest.
         let mut burning = Vec::new();
         let mut queued = Vec::new();
         let mut shed = 0;
         for _ in 0..12 {
-            match try_admit(&a, INTERACTIVE, "burn") {
+            match try_admit(&a, CallKind::Route, "burn") {
                 Some(Ok(call)) => burning.push(call),
                 Some(Err(Expired)) => shed += 1,
-                None => queued.push(queue_to(&a, INTERACTIVE, "burn").await),
+                None => queued.push(queue_to(&a, CallKind::Route, "burn").await),
             }
         }
         assert_eq!(
@@ -827,7 +853,7 @@ mod tests {
         // A visibility query, another route of the same plugin: both run now.
         let visibility = try_admit(&a, CallKind::Request, "query");
         assert!(matches!(visibility, Some(Ok((_, Some(_))))));
-        let reflect = try_admit(&a, INTERACTIVE, "reflect");
+        let reflect = try_admit(&a, CallKind::Route, "reflect");
         assert!(matches!(reflect, Some(Ok((_, Some(_))))));
         // The queued slow call is refused once it waited the shed wait.
         tokio::time::advance(SHED_WAIT).await;
@@ -878,6 +904,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn host_request_calls_take_a_freed_token_ahead_of_plugin_routes() {
+        let a = Admission::new(roomy(2));
+        let mut held = vec![admit(&a, BACKGROUND).await, admit(&a, BACKGROUND).await];
+        let route = queue_to(&a, CallKind::Route, "page").await;
+        let request = queue_to(&a, CallKind::Request, "query").await;
+        held.pop();
+        let _granted = request.await.unwrap().unwrap();
+        assert!(!route.is_finished());
+        held.pop();
+        let _granted = route.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_call_to_a_full_lane_is_refused_at_once_when_its_queue_would_outlast_the_shed_wait() {
         let a = Admission::new(roomy(4));
         // Calls of 0.5 s on two admitted calls: one queued ahead is ~0.5 s.
@@ -914,6 +953,8 @@ mod tests {
         served(&a, INTERACTIVE, "g", 0.001, 1).await;
         assert!((lane_secs(&a, INTERACTIVE, "f").unwrap() - 1.2).abs() < 1e-9);
         assert!((lane_secs(&a, INTERACTIVE, "g").unwrap() - 0.001).abs() < 1e-9);
+        // The same function as another kind is another lane.
+        assert_eq!(lane_secs(&a, CallKind::Route, "f"), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1093,7 +1134,7 @@ mod tests {
         let caps = Capacity::new(8).caps;
         assert_eq!(
             caps.total(),
-            64 + DEFAULT_JUDGING_CAP + 16 + 8 + LIFECYCLE_CAP
+            2 * 32 + DEFAULT_JUDGING_CAP + 16 + 8 + LIFECYCLE_CAP
         );
         assert_eq!(caps.threads(), 2 * caps.total());
     }

@@ -162,12 +162,7 @@ async fn handle_plugin_request_impl(
         .map_err(|e| AppError::Internal(format!("Failed to serialize plugin request: {e}")))?;
     let response = state
         .plugins
-        .call_raw(
-            &plugin_id,
-            &handler_name,
-            request,
-            crate::interactive_call(),
-        )
+        .call_raw(&plugin_id, &handler_name, request, crate::route_call())
         .await?;
     let response: PluginHttpResponse =
         serde_json::from_slice(&response).map_err(plugin_core::error::PluginError::from)?;

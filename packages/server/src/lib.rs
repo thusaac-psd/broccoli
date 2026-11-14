@@ -367,9 +367,15 @@ pub(crate) fn request_deadline() -> std::time::Instant {
         .unwrap_or_else(|_| std::time::Instant::now() + PLUGIN_DEADLINE)
 }
 
-/// Options for an interactive plugin call made by the current request.
+/// Options for a host plugin call (a visibility query) made by the current
+/// request.
 pub(crate) fn interactive_call() -> plugin_core::executor::CallOptions {
     plugin_core::executor::CallOptions::interactive(request_deadline())
+}
+
+/// Options for the plugin route call the current request proxies to.
+pub(crate) fn route_call() -> plugin_core::executor::CallOptions {
+    plugin_core::executor::CallOptions::route(request_deadline())
 }
 
 /// Records the request's deadline for [`request_deadline`].
