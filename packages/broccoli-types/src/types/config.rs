@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::SdkError;
@@ -108,19 +110,29 @@ impl ConfigValidateInput {
 
 /// A `validate` function's answer: the config is accepted when `errors` is
 /// empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigValidateOutput {
     #[serde(default)]
     pub errors: Vec<ConfigViolation>,
 }
 
-/// One reason a `validate` function refuses a config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One reason a `validate` function refuses a config: where, the plugin's
+/// English words (`message`, for logs and for a UI that finds no
+/// translation), and optionally a key of the plugin's own language pack with
+/// its parameters, which a client shows in the user's language.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigViolation {
     /// Where the offending value is, as `field.nested[2].leaf`; empty for the
     /// config as a whole.
     pub path: String,
     pub message: String,
+    /// A key of the plugin's pack, under the plugin's id (`ioi.config.…`).
+    /// The host drops a key outside it, so the message shows instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The values the key's message names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 impl ConfigViolation {
@@ -128,6 +140,20 @@ impl ConfigViolation {
         Self {
             path: path.into(),
             message: message.into(),
+            key: None,
+            params: BTreeMap::new(),
         }
+    }
+
+    /// The same, said in the user's language by `key` of the plugin's pack.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// A value the key's message names.
+    pub fn param(mut self, name: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        self.params.insert(name.into(), value.into());
+        self
     }
 }

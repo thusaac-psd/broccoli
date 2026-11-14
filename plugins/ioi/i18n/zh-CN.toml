@@ -227,3 +227,11 @@
 'plugin.ioi.name' = 'IOI 赛制'
 'plugin.ioi.description' = 'IOI 赛制：子任务计分、多种提交模式与令牌。'
 'ioi.scoreboard.table' = '排行榜'
+
+# Task config refusals (validate)
+'ioi.config.task.nameTaken' = '已有名为“{name}”的子任务。'
+'ioi.config.task.noTestCases' = '子任务至少需要一个测试点。'
+'ioi.config.task.unknownTestCase' = '本题没有测试点“{testCase}”。'
+'ioi.config.task.duplicateTestCase' = '测试点“{testCase}”已在此子任务中。'
+'ioi.config.task.ambiguousTestCase' = '“{testCase}”对应 {count} 个测试点，请用编号指定其中一个。'
+'ioi.config.task.zeroWeight' = '此求和子任务的所有测试点分值都为 0，永远无法得分。'

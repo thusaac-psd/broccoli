@@ -225,6 +225,19 @@ const TYPE_KEYS: Record<string, MessageKey> = {
   object: 'config.validation.object',
 };
 
+/** The string and number values of a plugin's message parameters. */
+function messageParams(
+  params: Record<string, unknown> | undefined,
+): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  for (const [name, value] of Object.entries(params ?? {})) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      out[name] = value;
+    }
+  }
+  return out;
+}
+
 /** What a server field error says, in the UI language when its kind is known. */
 function serverProblem(field: ServerFieldError): FieldProblem {
   switch (field.kind) {
@@ -253,6 +266,12 @@ function serverProblem(field: ServerFieldError): FieldProblem {
       return { key: 'config.validation.unknownField' };
     case 'missing':
       return { key: 'config.validation.required' };
+    case 'plugin':
+      return {
+        pluginKey: field.key ?? null,
+        params: messageParams(field.params),
+        message: field.message,
+      };
   }
   // A kind this build does not know yet: the server's own words.
   return {

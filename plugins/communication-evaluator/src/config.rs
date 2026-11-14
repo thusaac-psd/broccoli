@@ -49,6 +49,8 @@ impl CommConfig {
                         source.filename
                     ),
                 )
+                .key("communication-evaluator.config.managerFilenameTaken")
+                .param("filename", source.filename.as_str())
             })
             .collect()
     }

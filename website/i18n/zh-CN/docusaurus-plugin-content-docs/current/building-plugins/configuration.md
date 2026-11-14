@@ -49,7 +49,7 @@ schema，写入才会被接受。管理员的写入若命名空间声明了 `val
 | 响应 | 错误码 | 情形 |
 | --- | --- | --- |
 | 404 | `CONFIG_NAMESPACE_NOT_FOUND` | 插件未安装、没有这个命名空间，或者没有为该级别声明它 |
-| 400 | `VALIDATION_ERROR` | 值不符合 schema，或命名空间的 `validate` 函数拒绝了它；`details.fields` 列出每个 `{path, message}` |
+| 400 | `VALIDATION_ERROR` | 值不符合 schema，或命名空间的 `validate` 函数拒绝了它；`details.fields` 列出每个 `{path, message, kind}`（`validate` 的拒绝为 `kind: "plugin"`，可带 `key` 与 `params`） |
 | 503 | `PLUGIN_UNAVAILABLE` | 命名空间声明了 `validate` 函数，而插件此刻无法应答 |
 
 存储的值可以省略字段，读取时这些字段取默认值。升级插件改变了 schema 时，检查或上传压缩包的
@@ -92,6 +92,8 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
                 format!("subtasks[{i}].test_cases[{j}]"),
                 format!("this problem has no test case '{label}'"),
             )
+            .key("my-plugin.config.task.unknownTestCase")
+            .param("testCase", label.as_str())
         })
         .collect();
     Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
@@ -99,7 +101,9 @@ pub fn validate_task_config(input: String) -> FnResult<String> {
 ```
 
 宿主把每条违规作为 `VALIDATION_ERROR` 的一个字段返回，设置表单会把它显示在 `path` 指向的字段旁，
-并在保存失败的提示中一并列出。函数出错或返回无法解析的内容时，写入同样被拒绝：宿主绝不存储
+并在保存失败的提示中一并列出。带 `key` 的违规以用户的语言显示：表单在插件的翻译包里查找这个键并
+填入 `params`，翻译包里没有时显示 `message`。键必须以插件 id 开头（`my-plugin.`）；其他键会被宿主
+丢弃，因此插件无法冒用宿主或其他插件的文字。函数出错或返回无法解析的内容时，写入同样被拒绝：宿主绝不存储
 未经校验函数接受的值。
 
 插件自己用 `host.config.set*` 写入的值只按 schema 检查。这些值归插件所有，宿主不会再交给它的

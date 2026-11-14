@@ -92,3 +92,7 @@
 'print.stations.version' = 'v{version}'
 'plugin.print.name' = '打印'
 'plugin.print.description' = '比赛中按需打印代码：打印队列与打印站。'
+
+# Print config refusals (validate)
+'print.config.stationNameTaken' = '已有名为“{name}”的打印站。'
+'print.config.stationTokenTaken' = '已有其他打印站使用此令牌。'

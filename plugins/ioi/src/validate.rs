@@ -34,16 +34,23 @@ pub fn task_violations(
     let mut names = HashSet::new();
     for (i, subtask) in subtasks.iter().enumerate() {
         if !names.insert(subtask.name.as_str()) {
-            violations.push(ConfigViolation::new(
-                format!("subtasks[{i}].name"),
-                format!("another subtask is already named '{}'", subtask.name),
-            ));
+            violations.push(
+                ConfigViolation::new(
+                    format!("subtasks[{i}].name"),
+                    format!("another subtask is already named '{}'", subtask.name),
+                )
+                .key("ioi.config.task.nameTaken")
+                .param("name", subtask.name.as_str()),
+            );
         }
         if subtask.test_cases.is_empty() {
-            violations.push(ConfigViolation::new(
-                format!("subtasks[{i}].test_cases"),
-                "a subtask needs at least one test case",
-            ));
+            violations.push(
+                ConfigViolation::new(
+                    format!("subtasks[{i}].test_cases"),
+                    "a subtask needs at least one test case",
+                )
+                .key("ioi.config.task.noTestCases"),
+            );
             continue;
         }
 
@@ -55,30 +62,43 @@ pub fn task_violations(
             match cases_by_key.get(key).map(Vec::as_slice) {
                 None | Some([]) => {
                     all_resolved = false;
-                    violations.push(ConfigViolation::new(
-                        path,
-                        format!("this problem has no test case '{key}'"),
-                    ));
+                    violations.push(
+                        ConfigViolation::new(
+                            path,
+                            format!("this problem has no test case '{key}'"),
+                        )
+                        .key("ioi.config.task.unknownTestCase")
+                        .param("testCase", key.as_str()),
+                    );
                 }
                 Some([tc]) => {
                     if members.insert(tc.id) {
                         total_weight += tc.score.max(0.0);
                     } else {
-                        violations.push(ConfigViolation::new(
-                            path,
-                            format!("test case '{key}' is already in this subtask"),
-                        ));
+                        violations.push(
+                            ConfigViolation::new(
+                                path,
+                                format!("test case '{key}' is already in this subtask"),
+                            )
+                            .key("ioi.config.task.duplicateTestCase")
+                            .param("testCase", key.as_str()),
+                        );
                     }
                 }
                 Some(several) => {
                     all_resolved = false;
-                    violations.push(ConfigViolation::new(
-                        path,
-                        format!(
-                            "'{key}' names {} test cases; refer to one by its id",
-                            several.len()
-                        ),
-                    ));
+                    violations.push(
+                        ConfigViolation::new(
+                            path,
+                            format!(
+                                "'{key}' names {} test cases; refer to one by its id",
+                                several.len()
+                            ),
+                        )
+                        .key("ioi.config.task.ambiguousTestCase")
+                        .param("testCase", key.as_str())
+                        .param("count", several.len()),
+                    );
                 }
             }
         }
@@ -86,10 +106,13 @@ pub fn task_violations(
             && all_resolved
             && total_weight <= 0.0
         {
-            violations.push(ConfigViolation::new(
-                format!("subtasks[{i}].test_cases"),
-                "every test case of this sum subtask has score 0, so it can never score",
-            ));
+            violations.push(
+                ConfigViolation::new(
+                    format!("subtasks[{i}].test_cases"),
+                    "every test case of this sum subtask has score 0, so it can never score",
+                )
+                .key("ioi.config.task.zeroWeight"),
+            );
         }
     }
     violations

@@ -51,16 +51,23 @@ pub fn violations(config: &PrintConfig) -> Vec<ConfigViolation> {
     let mut tokens = HashSet::new();
     for (i, station) in config.stations.iter().enumerate() {
         if !names.insert(station.name.as_str()) {
-            violations.push(ConfigViolation::new(
-                format!("stations[{i}].name"),
-                format!("another station is already named '{}'", station.name),
-            ));
+            violations.push(
+                ConfigViolation::new(
+                    format!("stations[{i}].name"),
+                    format!("another station is already named '{}'", station.name),
+                )
+                .key("print.config.stationNameTaken")
+                .param("name", station.name.as_str()),
+            );
         }
         if !tokens.insert(station.token.as_str()) {
-            violations.push(ConfigViolation::new(
-                format!("stations[{i}].token"),
-                "another station already uses this token",
-            ));
+            violations.push(
+                ConfigViolation::new(
+                    format!("stations[{i}].token"),
+                    "another station already uses this token",
+                )
+                .key("print.config.stationTokenTaken"),
+            );
         }
     }
     violations
