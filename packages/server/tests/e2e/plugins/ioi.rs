@@ -131,6 +131,41 @@ async fn ioi_scoreboard_reflects_judged_submission() {
     );
 }
 
+/// A problem with no subtask config is scored by the default All Tests
+/// subtask, which leaves out samples, so its scoreboard maximum is the sum
+/// of the non-sample test points and a perfect solution reads as full marks.
+#[tokio::test(flavor = "multi_thread")]
+async fn ioi_scoreboard_max_score_leaves_out_samples_like_scoring_does() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_max_admin", "password", "admin")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Max Problem").await;
+    app.create_test_case_with(problem_id, "1", "1", 10, true, &admin)
+        .await;
+    app.create_test_case_with(problem_id, "2", "2", 90, false, &admin)
+        .await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Max Contest", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+
+    let res = app
+        .get_with_token(
+            &format!("/api/v1/p/ioi/api/plugins/ioi/contests/{contest_id}/scoreboard"),
+            &admin,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.text);
+    assert_eq!(
+        res.body["max_scores"][problem_id.to_string()].as_f64(),
+        Some(90.0),
+        "{}",
+        res.text
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ioi_feedback_filter_redacts_judgement_history() {
     let app = E2eTestApp::spawn().await;
