@@ -35,9 +35,11 @@ export function ProblemViewHeader({
   const memoryLimit = problem ? formatKibibytes(problem.memory_limit) : '—';
 
   return (
-    <div className="shrink-0 px-6 pt-6 pb-4">
-      <div className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
+    <div className="shrink-0 px-4 pt-4 pb-4 md:px-6 md:pt-6">
+      {/* On a phone the countdown wraps below the title rather than being
+          hidden: a contestant needs the time left on every screen. */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1 basis-64">
           <ProblemHeader
             id={hideLabels ? undefined : headerId}
             title={problem?.title ?? t('problem.title')}
@@ -47,13 +49,7 @@ export function ProblemViewHeader({
             memoryLimit={memoryLimit}
           />
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {contestId && (
-            <div className="hidden lg:flex items-center">
-              <ContestCountdownMini />
-            </div>
-          )}
-        </div>
+        {contestId && <ContestCountdownMini />}
       </div>
       <Slot name="problem-detail.header" as="div" className="relative mt-3" />
     </div>

@@ -114,6 +114,13 @@
   * {
     @apply border-border;
   }
+  /* A grid item defaults to `min-width: auto`, so one long unbreakable
+     child (a table, a stream name) widens its whole track past the screen.
+     Items shrink to their track instead; content that cannot wrap truncates
+     or scrolls in its own container. A utility (`min-w-*`) still wins. */
+  .grid > * {
+    min-width: 0;
+  }
   body {
     @apply bg-background text-foreground;
     margin: 0;

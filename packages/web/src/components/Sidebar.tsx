@@ -34,6 +34,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -53,6 +54,7 @@ import {
   User,
   Users,
 } from 'lucide-react';
+import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router';
 
 import { useContest } from '@/features/contest/contexts/contest-context';
@@ -351,6 +353,14 @@ function PlatformGroup() {
 export function Sidebar() {
   const { t } = useTranslation();
   const { user, logout } = useAuth();
+  const { pathname } = useLocation();
+  const { setOpenMobile } = useSidebar();
+
+  // On a phone the sidebar is a sheet over the page: a link followed from it
+  // closes it, or it would cover the page it opened.
+  useEffect(() => {
+    setOpenMobile(false);
+  }, [pathname, setOpenMobile]);
 
   return (
     <SidebarUI collapsible="icon">

@@ -28,13 +28,16 @@ export function AppLayout({ children }: AppLayoutProps) {
       <SidebarProvider>
         <Sidebar />
         <SidebarInset id={MAIN_ID} tabIndex={-1} className="outline-hidden">
-          <div className="fixed left-0 top-1/2 z-50 -translate-y-1/2 md:hidden">
-            <SidebarTrigger className="relative h-11 w-5 rounded-r-md rounded-l-none border border-l-0 border-border bg-muted/20 shadow-xs hover:bg-accent [&>svg]:hidden after:absolute after:inset-y-1.5 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:rounded-full after:bg-foreground/70" />
+          {/* Phones have no room for the sidebar: a bar above the page
+              opens it. It scrolls with the page, so it never covers the
+              page's content or its sticky header. */}
+          <div className="flex h-11 shrink-0 items-center border-b bg-background px-2 md:hidden">
+            <SidebarTrigger className="h-9 w-9" />
           </div>
           <div className="fixed bottom-8 right-8 z-50">
             <Slot name="app.NotificationButton" as="div" />
           </div>
-          <div className="flex flex-1 flex-col">{children}</div>
+          <div className="flex min-w-0 flex-1 flex-col">{children}</div>
         </SidebarInset>
       </SidebarProvider>
       <Slot name="app.overlay" as="div" />

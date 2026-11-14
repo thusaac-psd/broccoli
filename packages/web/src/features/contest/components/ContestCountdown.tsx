@@ -210,8 +210,7 @@ export function ContestCountdownMini() {
     phase === 'upcoming' ? t('countdown.startsIn') : t('countdown.endsIn');
 
   return (
-    // hidden on narrow viewports; placed inline in header on large screens
-    <div className="hidden lg:flex items-center">
+    <div className="flex items-center">
       <div className="inline-flex items-center gap-2.5 px-2">
         {/* dot */}
         <span
