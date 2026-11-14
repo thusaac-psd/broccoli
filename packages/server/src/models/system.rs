@@ -41,6 +41,10 @@ pub struct WorkerInfo {
     /// Worker process ID on its host machine.
     #[schema(example = 4242)]
     pub pid: Option<u32>,
+    /// Platform tools the worker found missing at boot: every job that needs
+    /// one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+    #[schema(example = json!([]))]
+    pub missing_platform_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]

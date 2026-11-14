@@ -533,6 +533,7 @@ pub(crate) async fn read_workers(state: &AppState) -> Vec<WorkerInfo> {
             arch: p.arch,
             cpu_count: p.cpu_count,
             pid: p.pid,
+            missing_platform_tools: p.missing_platform_tools,
         })
         .collect()
 }

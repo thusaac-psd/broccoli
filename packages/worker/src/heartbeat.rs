@@ -48,6 +48,8 @@ pub struct HeartbeatConfig {
     pub max_concurrency: Option<u32>,
     pub fairness_mode: String,
     pub system_info: SystemInfo,
+    /// The platform tools missing from this worker's tools directory.
+    pub missing_platform_tools: Vec<String>,
     /// Stamps `last_seen`, which the server and admin UI compare with their
     /// own platform time.
     pub clock: common::clock::PlatformClock,
@@ -84,6 +86,7 @@ impl HeartbeatConfig {
             arch: Some(self.system_info.arch.clone()),
             cpu_count: Some(self.system_info.cpu_count),
             pid: Some(self.system_info.pid),
+            missing_platform_tools: self.missing_platform_tools.clone(),
         };
         serde_json::to_value(payload).unwrap_or_default()
     }
@@ -135,6 +138,7 @@ mod tests {
             arch: Some("x86_64".into()),
             cpu_count: Some(8),
             pid: Some(4242),
+            missing_platform_tools: Vec::new(),
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("\"id\":\"worker-test\""));

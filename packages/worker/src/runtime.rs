@@ -160,6 +160,9 @@ impl WorkerRuntime {
             max_concurrency: Some(capacity.max_concurrency as u32),
             fairness_mode: capacity.fairness_mode.as_str().into(),
             system_info,
+            missing_platform_tools: crate::models::operation::executor::missing_platform_tools(
+                crate::models::operation::executor::tools_dir_from_config(&config).as_deref(),
+            ),
             clock: clock.clone(),
         };
         let claim = NodeClaim::claim_at_boot(

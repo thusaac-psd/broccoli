@@ -4945,6 +4945,12 @@ export interface components {
       /** Format: int32 */
       max_concurrency?: number | null;
       /**
+       * @description Platform tools the worker found missing at boot: every job that needs
+       *     one fails on it with `PLATFORM_TOOL_MISSING`. Empty on a healthy worker.
+       * @example []
+       */
+      missing_platform_tools: string[];
+      /**
        * @description Operating system family (e.g. `linux`, `macos`).
        * @example linux
        */

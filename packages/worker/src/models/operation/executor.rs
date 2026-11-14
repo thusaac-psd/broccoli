@@ -78,6 +78,18 @@ pub fn derived_tools_dir(binary: &std::path::Path) -> Option<PathBuf> {
     .find(|dir| dir.join(COMPARE_TOOL).is_file())
 }
 
+/// The platform tools directory: `[worker.tools] dir`, else the one
+/// [`derived_tools_dir`] finds beside the running binary.
+pub fn tools_dir_from_config(config: &WorkerAppConfig) -> Option<PathBuf> {
+    config
+        .worker
+        .tools
+        .dir
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| derived_tools_dir(&std::env::current_exe().ok()?))
+}
+
 impl OperationTaskExecutor {
     pub async fn from_app_config(
         config: &WorkerAppConfig,
@@ -99,13 +111,7 @@ impl OperationTaskExecutor {
         let follower_poll = Duration::from_millis(config.worker.cache_follower_poll_interval_ms);
         let follower_max_wait = Duration::from_secs(config.worker.cache_follower_max_wait_secs);
 
-        let tools_dir = config
-            .worker
-            .tools
-            .dir
-            .clone()
-            .map(PathBuf::from)
-            .or_else(|| derived_tools_dir(&std::env::current_exe().ok()?));
+        let tools_dir = tools_dir_from_config(config);
         report_tools_dir(tools_dir.as_deref());
 
         Ok(Self {

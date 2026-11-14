@@ -6,6 +6,7 @@ import {
 } from '@broccoli/web-sdk/i18n';
 import { Badge } from '@broccoli/web-sdk/ui';
 import {
+  AlertTriangle,
   CircleDot,
   Cpu,
   MonitorSmartphone,
@@ -84,6 +85,17 @@ export function WorkerCard({ worker }: Props) {
           {format.relativeSeconds(-worker.seconds_since_last_seen)}
         </span>
       </div>
+
+      {worker.missing_platform_tools.length > 0 && (
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            {t('system.worker.missingTools', {
+              tools: worker.missing_platform_tools.join(', '),
+            })}
+          </span>
+        </div>
+      )}
 
       <div className="mt-4">
         <div className="flex items-center justify-between text-xs">

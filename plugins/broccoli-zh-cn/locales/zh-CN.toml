@@ -1090,6 +1090,7 @@
 'system.worker.system' = "系统"
 'system.worker.cpus' = "{count} 个 CPU"
 'system.worker.pid' = "进程号 {pid}"
+'system.worker.missingTools' = "缺少平台工具：{tools}。在 [worker.tools] dir 提供这些工具之前，此评测机接到的每个提交都会失败。"
 
 # Dead Letter Queue
 'sidebar.dlq' = "死信队列"

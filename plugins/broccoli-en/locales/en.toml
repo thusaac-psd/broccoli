@@ -1089,6 +1089,7 @@
 'system.worker.system' = "System"
 'system.worker.cpus' = "{count, plural, one {# CPU} other {# CPUs}}"
 'system.worker.pid' = "pid {pid}"
+'system.worker.missingTools' = "Missing platform tools: {tools}. Every submission this worker takes fails until [worker.tools] dir holds them."
 
 # Dead Letter Queue
 'sidebar.dlq' = "Dead Letter Queue"

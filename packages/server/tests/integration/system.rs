@@ -115,6 +115,7 @@ mod worker_liveness {
             arch: None,
             cpu_count: None,
             pid: None,
+            missing_platform_tools: Vec::new(),
         };
         let _: () = conn
             .set_ex(
