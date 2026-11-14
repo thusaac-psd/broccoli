@@ -338,9 +338,19 @@ mod user_modification {
             .await;
         assert_eq!(unassign_res.status, 204);
 
+        // A role change ends the user's sessions, so the old token learns
+        // from `/me` that it must sign in again; a new sign-in lacks the role.
         let me_res_after = app.get_with_token(routes::ME, &user_token).await;
+        assert_eq!(me_res_after.status, 401, "{}", me_res_after.text);
+        let login_res = app
+            .post_without_token(
+                routes::LOGIN,
+                &json!({"username": "role_victim", "password": "securepass"}),
+            )
+            .await;
+        assert_eq!(login_res.status, 200);
         assert!(
-            !me_res_after.body["roles"]
+            !login_res.body["roles"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("problem_setter"))

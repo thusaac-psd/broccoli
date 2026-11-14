@@ -343,6 +343,7 @@ mod grants {
     /// Host relations no plugin may read at all: credentials, accounts and
     /// roles, other plugins' host-held state, and host machinery.
     const HIDDEN: &[&str] = &[
+        "auth_session",
         "blob_data",
         "dead_letter_message",
         "device_authorization",
