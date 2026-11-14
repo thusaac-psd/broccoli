@@ -32,10 +32,12 @@ const LOST_CANCEL_REPORT: Duration = Duration::from_secs(5);
 /// epoch deadline (`set_epoch_deadline(1)`); a cancel the timer thread
 /// handles between the two bumps the epoch before the deadline is armed and
 /// also removes the call's timer entry, so that cancel, every repeat of it
-/// and the manifest timeout are all lost and the guest runs on. The gap is a
-/// few statements, but a thread preempted inside it widens it; waiting this
-/// long after the call was registered makes that unlikely, not impossible.
-const START_GRACE: Duration = Duration::from_millis(5);
+/// and the manifest timeout are all lost and the guest runs on. That gap
+/// follows the instantiation extism runs inside the call, which takes
+/// milliseconds on a loaded host, so the first cancel waits past it: a cancel
+/// before `Start` finds no entry and is repeated, and one after the arm
+/// traps the guest. This makes the loss unlikely, not impossible.
+const START_GRACE: Duration = Duration::from_millis(50);
 
 struct Entry {
     cancel: CancelHandle,
