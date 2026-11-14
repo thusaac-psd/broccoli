@@ -80,6 +80,7 @@ handler = "get_cooldown_status_standalone"
 - 有 `sql` 时，插件的表落在它自己的模式中，宿主表对它只读。选手源代码、测试数据、程序输出和消息正文默认不可读，除非 `[server.sql] read` 列出这些列，例如 `read = ["submission.files"]`；管理员在安装插件时会看到它们。参见[插件数据库访问](../internals/plugin-database.md)。
 - 钩子将一个函数订阅到平台事件，此处为 `before_submission`。
   `scope = "resource"`（默认值）表示钩子只在插件适用的范围内运行，即设置中启用了该插件的比赛或题目，以及该插件自身注册的比赛类型下的所有比赛。`scope = "global"` 表示对服务器上的所有提交运行。
+- 若 `before_submission` 钩子为一次提交尝试预留了资源（例如配额中的一个名额），应在 `submission_attempt_abandoned` 事件中释放它。当某次尝试因后续钩子拒绝或写入失败而没有产生提交时，主机会在响应请求之前发送该事件。
 - 路由将一个 HTTP 方法与路径映射到导出的函数。`{problem_id}` 这类路径参数在处理函数内
   读取。
 - 可选的 `[bundle]` 段落指定发布包如何提供该插件。`mode = "default"`（默认值）表示随发布包提供并默认加载；`mode = "optional"` 表示放在 `plugins-available/` 中，由运维人员通过 `enable-plugin.sh` 启用，适用于仅部分赛事需要的插件；`mode = "none"` 表示不随发布包提供，用于测试插件。

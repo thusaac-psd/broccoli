@@ -96,6 +96,10 @@ handler = "get_cooldown_status_standalone"
   applies: in a contest or problem whose settings turn the plugin on, and in
   every contest of a type the plugin itself registered. With
   `scope = "global"` it runs for every submission on the server.
+- A `before_submission` hook that reserves something for an attempt, such as
+  a slot in a quota, releases it on `submission_attempt_abandoned`. The host
+  sends that event, before it answers the request, for an attempt that ends
+  without a submission because a later hook rejected it or its insert failed.
 - A route maps an HTTP method and path to an exported function. Path parameters
   like `{problem_id}` are read inside the handler.
 - An optional `[bundle]` section says how release bundles ship the plugin.

@@ -87,13 +87,35 @@ mod plugin {
             contest_id: event.contest_id,
         };
         let mut p = Params::new();
-        let sql = gate::claim_sql(&mut p, &key, cooldown, event.attempt_timeout_ms);
+        let sql = gate::claim_sql(
+            &mut p,
+            &key,
+            &event.attempt_id,
+            cooldown,
+            event.attempt_timeout_ms,
+        );
         if host.db.execute_with_args(&sql, &p.into_args())? > 0 {
             return Ok(serde_json::to_string(&HookResponse::pass())?);
         }
         // The clocks moved on since the claim lost; never report 0 for a rejection.
         let wait = clocks(&host, &key)?.wait_secs(cooldown).max(1);
         reject_response(wait, cooldown)
+    }
+
+    /// Release the claim of an attempt that ended without a submission.
+    #[plugin_fn]
+    pub fn release_claim(input: String) -> FnResult<String> {
+        let host = Host::new();
+        let event: SubmissionAttemptAbandonedEvent = serde_json::from_str(&input)?;
+        let key = CooldownKey {
+            user_id: event.user_id,
+            problem_id: event.problem_id,
+            contest_id: event.contest_id,
+        };
+        let mut p = Params::new();
+        let sql = gate::release_sql(&mut p, &key, &event.attempt_id);
+        host.db.execute_with_args(&sql, &p.into_args())?;
+        Ok(serde_json::to_string(&HookResponse::pass())?)
     }
 
     #[derive(Serialize)]

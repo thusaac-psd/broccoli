@@ -108,6 +108,22 @@ mod plugin {
         Ok(serde_json::to_string(&resp)?)
     }
 
+    /// Release the reservation of an attempt that ended without a submission.
+    #[plugin_fn]
+    pub fn release_reservation(input: String) -> FnResult<String> {
+        let host = Host::new();
+        let event: SubmissionAttemptAbandonedEvent = serde_json::from_str(&input)?;
+        let key = LimitKey {
+            user_id: event.user_id,
+            problem_id: event.problem_id,
+            contest_id: event.contest_id,
+        };
+        let mut p = Params::new();
+        let sql = reservation::release_sql(&mut p, &key, &event.attempt_id);
+        host.db.execute_with_args(&sql, &p.into_args())?;
+        Ok(serde_json::to_string(&HookResponse::pass())?)
+    }
+
     // API: GET /api/plugins/submission-limit/contests/{contest_id}/problems/{problem_id}/status
     // API: GET /api/plugins/submission-limit/problems/{problem_id}/status
 

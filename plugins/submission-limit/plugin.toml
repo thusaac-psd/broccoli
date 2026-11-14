@@ -15,6 +15,11 @@ topic = "before_submission"
 function = "check_limit"
 scope = "resource"
 
+[[server.hooks]]
+topic = "submission_attempt_abandoned"
+function = "release_reservation"
+scope = "resource"
+
 [[server.routes]]
 method = "GET"
 path = "/api/plugins/submission-limit/contests/{contest_id}/problems/{problem_id}/status"
