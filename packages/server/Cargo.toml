@@ -88,6 +88,7 @@ bundled-stress-test = []
 test-hooks = ["common/test-hooks"]
 
 [dev-dependencies]
+broccoli-cli-core = { path = "../cli-core" }
 common = { workspace = true, features = ["test-util", "test-hooks"] }
 reqwest = { version = "0.12", features = ["cookies", "json", "multipart"] }
 sea-orm = { workspace = true, features = ["mock"] }

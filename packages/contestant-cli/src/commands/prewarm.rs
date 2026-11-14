@@ -40,18 +40,9 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Server URL from saved credentials, then $BROCCOLI_URL, then config, else default.
+/// The server [`config::login_server`] picks.
 fn resolve_server() -> String {
-    if let Ok(creds) = config::resolve_credentials(None, None) {
-        return creds.server().to_string();
-    }
-    if let Ok(url) = std::env::var("BROCCOLI_URL")
-        && !url.trim().is_empty()
-    {
-        return url;
-    }
-    if let Some(server) = config::load_user_config().server {
-        return server;
-    }
-    "http://localhost:3000".to_string()
+    config::login_server(None)
+        .map(|server| server.join("/"))
+        .unwrap_or_else(|_| "http://localhost:3000/".into())
 }

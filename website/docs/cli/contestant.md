@@ -64,9 +64,12 @@ broccoli login --server https://judge.example.com
 ```
 
 This opens your browser to authorize, then keeps you signed in for later
-commands. Your login is saved on this machine, so you do it once per server.
-Without `--server`, Broccoli talks to a local server at `http://localhost:3000`,
-so pass your contest's address. Confirm who you are at any time.
+commands. Your login is saved on this machine, so you do it once per server, and
+the server you logged in to last is the one every later command talks to. Write
+the address with `http://` or `https://`; a trailing slash makes no difference.
+Without `--server`, Broccoli uses the server you logged in to last, then the
+`server` your configuration sets, then a local server at
+`http://localhost:3000`. Confirm who you are, and on which server, at any time.
 
 ```bash
 broccoli whoami
@@ -85,6 +88,17 @@ flow, pass them and Broccoli skips the browser.
 
 ```bash
 broccoli login --server https://judge.example.com -u alice -p secret
+```
+
+When a login fails, the message says why: nothing answered at the address, the
+address answers but is not a Broccoli server, or the username or password is
+wrong.
+
+On a shared machine, log out when you are done. This removes the saved login for
+the current server, or for the one you name with `--server`.
+
+```bash
+broccoli logout
 ```
 
 ## Find your contest
@@ -119,8 +133,12 @@ List the problems in a contest.
 broccoli contest problems "Spring Round"
 ```
 
-Each problem has a label such as `A`, a number, and a title, and any of them
-names the problem. Download one to save its statement and sample cases as files
+Each problem has a label such as `A`, a position in the contest such as `1`, and
+a title such as `"Two Sum"`, and any of them names the problem: `-p A`, `-p 1`
+and `-p "Two Sum"` all pick the first problem. To use a problem's id instead,
+write it with `#`, as in `-p #42`. Broccoli prints the label and title it picked
+before it tests or submits, and refuses a reference that could mean two
+problems. Download one to save its statement and sample cases as files
 in the current folder, ready to read offline and test against.
 
 ```bash
@@ -137,7 +155,9 @@ broccoli test sol.cpp -c "Spring Round" -p A
 ```
 
 Broccoli reads the language from the file extension, fetches the samples, runs
-each one, and shows you which passed, with a diff for any that did not. Add
+each one, and shows you which passed, with a diff for any that did not. The
+command exits with status 3 when a sample fails, so a script can tell a wrong
+answer from an error. Add
 `--local` to run on your own machine instead of the server, which is faster and
 works offline once you have downloaded the problem.
 
@@ -162,7 +182,8 @@ broccoli submit sol.cpp -c "Spring Round" -p A
 
 Broccoli detects the language, submits, and prints a submission number. Override
 the language with `-l` when you need to. Add `-w` to wait for the verdict right
-there instead of checking it later.
+there instead of checking it later. With `-w` the command exits with status 3
+when the verdict is anything but Accepted.
 
 ```bash
 broccoli submit sol.cpp -c "Spring Round" -p A -w
@@ -234,7 +255,7 @@ Ask the organizers a question about a contest. Leave the question off to type it
 interactively.
 
 ```bash
-broccoli clarifications ask "Spring Round" "Is the input always sorted?"
+broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
 
 Read the answers, and any announcements, with the list.
@@ -259,8 +280,12 @@ language = "cpp"
 ```
 
 A saved default applies everywhere. Set the contest once and drop `-c` from then
-on. The keys you can set are `contest`, `language`, and `server`, and you remove
-one with `broccoli config unset`.
+on; `contest info`, `contest problems`, `watch` and `clarifications` use it too
+when you leave the contest off. The keys you can set are `contest`, `language`,
+`server` and `tls`, and you remove one with `broccoli config unset`. These
+commands change only your own configuration file. If the lab machine's file
+(`/etc/broccoli/config.toml`) also sets a key, its value applies again after you
+unset yours, and Broccoli tells you so.
 
 ```bash
 broccoli config set contest "Spring Round"
@@ -273,9 +298,9 @@ command.
 broccoli config
 ```
 
-Two environment variables override the saved values for a single run, which helps
-in scripts. `BROCCOLI_URL` sets the server and `BROCCOLI_TOKEN` sets the login
-token. Your login and your settings live in your account's configuration folder,
+Every command takes `--server` and `--token` to override the saved values for a
+single run, which helps in scripts. The environment variables `BROCCOLI_URL` and
+`BROCCOLI_TOKEN` do the same. Your login and your settings live in your account's configuration folder,
 next to a cache of the problems you download. Run `broccoli config` to see the
 exact path.
 
@@ -288,6 +313,15 @@ server does not accept the one you named, the message lists what the server
 supports. `test --local` remembers the list from the last time it reached the
 server, so it keeps working offline.
 
+## Exit status
+
+| Status | Meaning                                                            |
+| ------ | ------------------------------------------------------------------ |
+| `0`    | The command succeeded                                              |
+| `1`    | Something went wrong, such as no connection or no login            |
+| `2`    | The command line was not understood                                |
+| `3`    | `test` had a sample fail, or `submit -w` got a verdict other than Accepted |
+
 ## Every command
 
 Run `broccoli --help`, or add `--help` to any command, to see every option. Each
@@ -297,6 +331,7 @@ command also has a short alias.
 | ----------------------------- | --------- | ------------------------------------- |
 | `broccoli login`              | `li`      | Log in to a contest server            |
 | `broccoli whoami`             | `me`      | Show who you are logged in as         |
+| `broccoli logout`             |           | Forget the saved login                |
 | `broccoli contest list`       | `c ls`    | List contests                         |
 | `broccoli contest info`       | `c i`     | Contest details and your status       |
 | `broccoli contest register`   | `c reg`   | Register for a contest                |

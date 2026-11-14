@@ -53,6 +53,15 @@ Use `--backend`, `--frontend`, or `--full` to pick what gets generated. Without
 one of those flags the command asks. The scaffold lands in `./my-plugin`, or
 pass `-o <DIR>` to write it elsewhere.
 
+The scaffold depends on the Broccoli SDKs. Created inside a Broccoli checkout,
+it uses the checkout's `packages/` directory, so it builds against the code
+next to it. Elsewhere, pass `--sdk <DIR>` with the `packages/` directory of a
+checkout to get the same local dependencies, which build without fetching the
+SDKs from anywhere. Without `--sdk`, a backend depends on the published
+`broccoli-server-sdk` crate at the version the CLI was built with; a frontend
+outside a checkout needs `--sdk`, with `packages/web-sdk` built
+(`pnpm --filter @broccoli/web-sdk build`).
+
 ## Anatomy
 
 Three files define a backend plugin.
@@ -196,14 +205,17 @@ pub fn check_cooldown(input: String) -> FnResult<String> {
 ## Build and install
 
 ```bash
-broccoli-dev plugin build my-plugin --install
+broccoli-dev plugin build my-plugin
 ```
 
 Because the manifest has a `[server]` section, the CLI runs
-`cargo build --target wasm32-wasip1` and copies the artifact to the `entry` path.
-`--install` places the build where a local server loads it. Add `--release` for
-an optimized module. If the manifest has a `[web]` section, the CLI also runs the
-frontend build.
+`cargo build --target wasm32-wasip1` and copies the artifact to the `entry` path
+inside the plugin directory. Add `--release` for an optimized module. If the
+manifest has a `[web]` section, the CLI also runs the frontend build, first
+installing the frontend's dependencies when `node_modules` is missing;
+`--install` runs the install command even when it exists. A server loads the
+plugin from its plugins directory, or from an upload, which `plugin watch` does
+for you.
 
 ## Build without internet access
 
@@ -227,17 +239,22 @@ registry or a LAN mirror is reachable.
 
 ## Iterate against a running server
 
-Sign in once, then watch the directory. The CLI rebuilds on every change and
-uploads the new bundle:
+Sign in once, then watch the directory. The CLI rebuilds on every edit and
+uploads the new bundle, replacing what the server publishes under the plugin's
+id. A failed build or upload waits for your next edit instead of retrying:
 
 ```bash
 broccoli-dev login --server http://localhost:3000
 broccoli-dev plugin watch my-plugin --server http://localhost:3000
 ```
 
-`broccoli-dev login` stores credentials in `~/.config/broccoli/credentials.json`. You
-can override them with `BROCCOLI_URL` and `BROCCOLI_TOKEN`, or with `--server`
-and `--token`.
+`broccoli-dev login` stores credentials in `credentials.json` in the `broccoli`
+folder of your platform's config directory (`~/.config/broccoli` on Linux) and
+prints the exact path. On a machine without a browser, save a token copied from
+the web UI with `broccoli-dev login --server <URL> --token <TOKEN>`. You can
+override the saved login with `BROCCOLI_URL` and `BROCCOLI_TOKEN`, or with
+`--server` and `--token` on `plugin watch`. Uploading needs the `plugin:manage`
+permission and a server with plugin uploads switched on.
 
 ## Where to go next
 

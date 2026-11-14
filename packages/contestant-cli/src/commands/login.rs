@@ -6,20 +6,17 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use console::style;
 
-use broccoli_cli_core::client::{Client, persist_session};
-use broccoli_cli_core::config::load_user_config;
+use broccoli_cli_core::client::{Client, ClientError, persist_session};
+use broccoli_cli_core::config;
+use broccoli_cli_core::server::ServerUrl;
 use broccoli_cli_core::session::Session;
+use broccoli_cli_core::tui::progress::Progress;
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Args)]
 pub struct LoginArgs {
-    /// Broccoli contest server URL. Falls back to $BROCCOLI_URL, then the saved
-    /// config (`broccoli config set server`), then http://localhost:3000.
-    #[arg(short, long, env = "BROCCOLI_URL")]
-    pub server: Option<String>,
-
     /// Username for direct login.
     #[arg(short, long)]
     pub username: Option<String>,
@@ -34,13 +31,9 @@ pub struct LoginArgs {
 }
 
 pub fn run(args: LoginArgs) -> Result<()> {
-    // Precedence: --server flag or $BROCCOLI_URL (both via clap), then the saved
-    // user config, then the local default. Without the config step, `broccoli
-    // config set server X` was silently ignored and login always hit localhost.
-    let server = args
-        .server
-        .or_else(|| load_user_config().server)
-        .unwrap_or_else(|| "http://localhost:3000".to_string());
+    // `--server` (global), else $BROCCOLI_URL, the server signed in to last,
+    // `server` in config.toml, then http://localhost:3000.
+    let server = config::login_server(super::server_option())?;
 
     if let (Some(username), Some(password)) = (&args.username, &args.password) {
         return login_direct(&server, username, password);
@@ -61,18 +54,16 @@ pub fn run(args: LoginArgs) -> Result<()> {
     login_via_paste(&server)
 }
 
-fn login_direct(server: &str, username: &str, password: &str) -> Result<()> {
+fn login_direct(server: &ServerUrl, username: &str, password: &str) -> Result<()> {
     let client = Client::anonymous(server);
-    let resp = client
-        .login(username, password)
-        .context("Login failed — check your username and password")?;
+    let resp = client.login(username, password).context("Login failed")?;
 
     persist_session(server, &resp.token)?;
     print_logged_in(&resp.username, server);
     Ok(())
 }
 
-fn login_via_callback(server: &str) -> Result<()> {
+fn login_via_callback(server: &ServerUrl) -> Result<()> {
     let listener =
         TcpListener::bind("127.0.0.1:0").context("Failed to bind local address for callback")?;
     let local_port = listener.local_addr()?.port();
@@ -83,8 +74,8 @@ fn login_via_callback(server: &str) -> Result<()> {
     let state = generate_state();
 
     let auth_url = format!(
-        "{}/auth/cli?redirect_uri={}&state={}",
-        server.trim_end_matches('/'),
+        "{}?redirect_uri={}&state={}",
+        server.join("/auth/cli"),
         callback_url,
         state,
     );
@@ -106,17 +97,14 @@ fn login_via_callback(server: &str) -> Result<()> {
         .context("Failed to set non-blocking mode")?;
 
     let start = std::time::Instant::now();
-    let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
+    let mut progress = Progress::stdout();
     let mut token: Option<String> = None;
 
     while start.elapsed() < CALLBACK_TIMEOUT {
-        // \x1b[K clears stale trailing chars
-        print!(
-            "\r\x1b[K{}  Waiting for browser authentication... ({}s)",
-            style(spinner.next()).cyan(),
+        progress.tick(format_args!(
+            "Waiting for browser authentication... ({}s)",
             start.elapsed().as_secs()
-        );
-        std::io::stdout().flush().ok();
+        ));
 
         match listener.accept() {
             Ok((stream, _)) => {
@@ -134,8 +122,7 @@ fn login_via_callback(server: &str) -> Result<()> {
         }
     }
 
-    print!("\r\x1b[K");
-    std::io::stdout().flush().ok();
+    progress.clear();
 
     let token = match token {
         Some(t) => t,
@@ -256,8 +243,8 @@ fn handle_callback_connection(mut stream: TcpStream, expected_state: &str) -> Op
     token
 }
 
-fn login_via_paste(server: &str) -> Result<()> {
-    let auth_url = format!("{}/auth/cli", server.trim_end_matches('/'));
+fn login_via_paste(server: &ServerUrl) -> Result<()> {
+    let auth_url = server.join("/auth/cli");
 
     println!(
         "{} Open this URL in your browser to authenticate:",
@@ -282,19 +269,22 @@ fn login_via_paste(server: &str) -> Result<()> {
     finalize_login(server, &token)
 }
 
-fn finalize_login(server: &str, token: &str) -> Result<()> {
-    let client = Client::new(Session::explicit(server.to_string(), token.to_string()));
+fn finalize_login(server: &ServerUrl, token: &str) -> Result<()> {
+    let client = Client::new(Session::explicit(server.clone(), token.to_string()));
 
-    let me = client.me().context(
-        "Failed to validate token with server. Make sure the token is correct and the server is reachable.",
-    )?;
+    let me = client.me().map_err(|e| match e {
+        ClientError::Api(api) if api.rejects_token() => anyhow::anyhow!(
+            "{server} did not accept that token. Copy the whole token from the browser page and try again."
+        ),
+        other => anyhow::Error::new(other).context("Could not check the token with the server"),
+    })?;
 
     persist_session(server, token).context("Failed to save credentials")?;
     print_logged_in(&me.username, server);
     Ok(())
 }
 
-fn print_logged_in(username: &str, server: &str) {
+fn print_logged_in(username: &str, server: &ServerUrl) {
     println!(
         "{} Logged in as {} (server: {})",
         style("✓").green(),

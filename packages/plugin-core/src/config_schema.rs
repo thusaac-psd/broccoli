@@ -7,19 +7,11 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::manifest::{ConfigNamespace, PluginManifest, SchemaProperty};
 
-/// One way a config value breaks its schema.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-pub struct FieldError {
-    /// Where the value is, as `field.nested[2].leaf`; empty for the config
-    /// object itself.
-    pub path: String,
-    pub message: String,
-}
+pub use broccoli_api_types::plugin::FieldError;
 
 /// The value types a schema property can declare.
 const TYPES: &[&str] = &["string", "integer", "number", "boolean", "array", "object"];

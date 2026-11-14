@@ -128,9 +128,13 @@ fn default_install_cmd(dir: &Path) -> Vec<String> {
 /// Whether the nearest `pnpm-workspace.yaml` at or above `dir` exists and its
 /// `packages` patterns leave `dir` out.
 fn outside_enclosing_workspace(dir: &Path) -> bool {
-    let Ok(dir) = dir.canonicalize() else {
-        return false;
-    };
+    dir.canonicalize()
+        .is_ok_and(|dir| outside_enclosing_workspace_of(&dir))
+}
+
+/// [`outside_enclosing_workspace`] for an absolute, symlink-free `dir`, which
+/// need not exist yet.
+pub(crate) fn outside_enclosing_workspace_of(dir: &Path) -> bool {
     for root in dir.ancestors() {
         let manifest = root.join("pnpm-workspace.yaml");
         let Ok(text) = std::fs::read_to_string(&manifest) else {

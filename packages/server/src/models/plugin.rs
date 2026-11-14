@@ -1,7 +1,7 @@
-use crate::plugin_distribution::PluginSourceKind;
 use crate::plugin_fleet::{FleetView, PluginFleetResponse, PluginSourceResponse};
 pub use broccoli_api_types::plugin::{
-    ContestTypeEntry, EvaluatorEntry, HookEntryInfo, LanguageRegistryItem, RegistriesResponse,
+    ContestTypeEntry, EvaluatorEntry, HookEntryInfo, LanguageRegistryItem, PluginArchiveSummary,
+    PluginSourceKind, PluginUploadResponse, PublishedPluginResponse, RegistriesResponse,
 };
 use plugin_core::manifest::{ComponentMap, ServerRouteConfig, WebRouteConfig, WebSlotConfig};
 use plugin_core::registry::{PluginInfo, PluginStatus};
@@ -378,62 +378,6 @@ pub struct PluginArchiveForm {
     /// and the upload is refused with `409 CONFLICT`.
     #[schema(example = "bundle")]
     pub replaces: Option<String>,
-}
-
-/// What a plugin archive would publish, for the admin to confirm.
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct PluginArchiveSummary {
-    #[schema(example = "my-plugin")]
-    pub id: String,
-    #[schema(example = "My Plugin")]
-    pub name: String,
-    #[schema(example = "1.2.0")]
-    pub version: String,
-    pub description: Option<String>,
-    /// Host permissions the plugin's server component requests.
-    #[schema(example = json!(["storage", "sql"]))]
-    pub permissions: Vec<String>,
-    /// Content columns, as `table.column`, the plugin's SQL would read
-    /// (`[server.sql] read`).
-    #[schema(example = json!(["submission.files"]))]
-    pub sql_read: Vec<String>,
-    pub has_server: bool,
-    pub has_web: bool,
-    /// Content hash of the archive: its key in the blob store.
-    pub archive_hash: String,
-    pub size_bytes: u64,
-    /// What the fleet runs under this id now; `None` for a new plugin.
-    pub current: Option<PublishedPluginResponse>,
-    /// Stored configs of this plugin that the archive's config schemas
-    /// refuse. Publishing it leaves them in place, and the plugin reports an
-    /// error wherever it reads one, so fix or delete them.
-    pub incompatible_configs: Vec<crate::services::plugin_config::IncompatibleConfig>,
-}
-
-/// What the fleet currently publishes for a plugin id.
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct PublishedPluginResponse {
-    pub source: PluginSourceKind,
-    /// Hash of the uploaded archive, when `source` is `upload`. An upload
-    /// that replaces this plugin sends it (or `bundle`) as `replaces`.
-    pub archive_hash: Option<String>,
-    /// Published manifest version, once one has been published.
-    #[schema(example = "1.1.0")]
-    pub version: Option<String>,
-    pub enabled: bool,
-}
-
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct PluginUploadResponse {
-    #[schema(example = "my-plugin")]
-    pub plugin_id: String,
-    #[schema(example = "1.2.0")]
-    pub version: String,
-    pub archive_hash: String,
-    pub message: String,
-    /// Stored configs of this plugin that the published version's config
-    /// schemas refuse, as inspecting the archive reports them.
-    pub incompatible_configs: Vec<crate::services::plugin_config::IncompatibleConfig>,
 }
 
 /// Whether this server accepts plugin uploads.

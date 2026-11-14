@@ -156,10 +156,15 @@ over the LAN:
 ```bash
 scp broccoli-native-v1/cli/broccoli contestant-box:/usr/local/bin/broccoli
 # on a contestant box:
-broccoli login                       # point at http://<box1-LAN-IP>/
-broccoli submit sol.cpp -p A -c <id> # submit
-broccoli test sol.cpp -p A -c <id>   # run samples locally/remote
+broccoli login -s http://<box1-LAN-IP> # later commands use this server
+broccoli submit sol.cpp -p A -c <id>   # submit
+broccoli test sol.cpp -p A -c <id>     # run samples locally/remote
+broccoli logout                        # at the end of a session on a shared box
 ```
+
+To preseed the server on every contestant machine instead, write
+`server = "http://<box1-LAN-IP>"` to `/etc/broccoli/config.toml`; a plain
+`broccoli login` then signs in there.
 
 ### Print stations (optional, for code printing)
 

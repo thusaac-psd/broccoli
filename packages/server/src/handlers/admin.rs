@@ -3,6 +3,7 @@ use axum::{
     Json,
     extract::{Multipart, State},
 };
+use broccoli_api_types::plugin::PluginReplaces;
 use broccoli_server_sdk::permissions as perm;
 use sea_orm::EntityTrait;
 use tracing::instrument;
@@ -367,9 +368,8 @@ async fn read_archive(
     Ok(ArchiveForm { archive, replaces })
 }
 
-/// The `replaces` field: `new` for a plugin that does not exist yet,
-/// `bundle`, or the hash of the uploaded archive being replaced, exactly as
-/// inspecting the archive reported the current source.
+/// The `replaces` field, as inspecting the archive reported the current
+/// source (see [`PluginReplaces`]).
 fn parse_replaces(value: Option<&str>) -> Result<Option<PluginSource>, AppError> {
     let missing = || {
         AppError::Validation(
@@ -378,11 +378,11 @@ fn parse_replaces(value: Option<&str>) -> Result<Option<PluginSource>, AppError>
                 .into(),
         )
     };
-    match value.ok_or_else(missing)?.trim() {
-        "new" => Ok(None),
-        "bundle" => Ok(Some(PluginSource::Bundle)),
-        hash => {
-            let hash = common::storage::ContentHash::from_hex(hash).map_err(|_| missing())?;
+    match PluginReplaces::parse(value.ok_or_else(missing)?) {
+        PluginReplaces::New => Ok(None),
+        PluginReplaces::Bundle => Ok(Some(PluginSource::Bundle)),
+        PluginReplaces::Upload(hash) => {
+            let hash = common::storage::ContentHash::from_hex(&hash).map_err(|_| missing())?;
             Ok(Some(PluginSource::Upload(hash.to_hex())))
         }
     }

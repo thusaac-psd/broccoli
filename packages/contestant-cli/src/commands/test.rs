@@ -13,8 +13,9 @@ use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
 use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
+use broccoli_cli_core::tui::progress::Progress;
 
-use super::context;
+use super::{Rejected, context};
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -22,7 +23,7 @@ pub struct TestArgs {
     #[arg(required = true)]
     pub files: Vec<String>,
 
-    /// Problem ID, label, index, or title (e.g. A, 1, or "Two Sum")
+    /// Problem label, position, title or #ID (e.g. A, 1, "Two Sum" or #42)
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 
@@ -44,12 +45,14 @@ pub struct TestArgs {
 }
 
 pub fn run(args: TestArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
     let user_config = load_user_config();
     let ctx = context::discover_context();
 
-    let language = context::resolve_language(&args.files, args.language.as_deref())?;
+    let language = context::resolve_language(&args.files, args.language.as_deref(), || {
+        context::server_languages(&client)
+    })?;
 
     let mut files = Vec::new();
     for path in &args.files {
@@ -72,29 +75,39 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let contest_ref = args
-        .contest
-        .as_deref()
-        .or(ctx.as_ref().and_then(|c| c.contest.as_deref()))
-        .or(user_config.contest.as_deref())
-        .context("No contest specified. Use -c <id|name>.")?;
+    let contest_ref = context::contest_ref(args.contest.as_deref())?;
+    let contest_ref = contest_ref.as_str();
     let problem_ref = args
         .problem
         .as_deref()
         .or(ctx.as_ref().and_then(|c| c.problem.as_deref()))
         .context("No problem specified. Use -p <id|label> (e.g. -p A).")?;
 
-    // --local: fall back to raw refs when name resolution can't reach the server
-    let (contest_id, problem_id) = if args.local {
-        let c =
-            resolve::contest_id(&client, contest_ref).unwrap_or_else(|_| contest_ref.to_string());
-        let p = resolve::problem_id(&client, &c, problem_ref)
-            .unwrap_or_else(|_| problem_ref.to_string());
-        (c, p)
-    } else {
-        let c = resolve::contest_id(&client, contest_ref)?;
-        let p = resolve::problem_id(&client, &c, problem_ref)?;
-        (c, p)
+    // --local works offline from the cached samples: a contest id and a
+    // `#ID` problem reference need no server to resolve.
+    let resolved = resolve::contest_id(&client, contest_ref).and_then(|c| {
+        let p = resolve::problem(&client, &c, problem_ref)?;
+        println!("{}  Problem {}", style("→").blue().bold(), style(&p).cyan());
+        Ok((c, p.id.to_string()))
+    });
+    let (contest_id, problem_id) = match resolved {
+        Ok(ids) => ids,
+        Err(e) if args.local => {
+            let offline = contest_ref
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .zip(resolve::explicit_problem_id(problem_ref));
+            match offline {
+                Some((c, p)) => (c.to_string(), p.to_string()),
+                None => {
+                    return Err(e.context(
+                        "Offline, --local needs a numeric contest id and a #ID problem reference",
+                    ));
+                }
+            }
+        }
+        Err(e) => return Err(e),
     };
     let contest_id = contest_id.as_str();
     let problem_id = problem_id.as_str();
@@ -164,7 +177,7 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         .collect();
 
     let created = client
-        .run_contest_code(contest_id, problem_id, files, &language, custom)
+        .run_contest_code(contest_id, problem_id, files, &language.id, custom)
         .context("Failed to start code run")?;
     let result = poll_code_run(&client, created.id)?;
     print_remote_result(&result)?;
@@ -198,38 +211,32 @@ fn load_cached_samples(
 }
 
 fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
-    use std::io::Write;
     use std::time::{Duration, Instant};
-    let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
+    let mut progress = Progress::stderr();
     let start = Instant::now();
 
     loop {
         let cr = client.get_code_run(run_id)?;
         let status = cr.status;
         if !status.is_in_progress() {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
             return Ok(cr);
         }
         if start.elapsed() > Duration::from_secs(120) {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
+            progress.clear();
             bail!("Timed out waiting for the code run to finish.");
         }
-        eprint!(
-            "\r\x1b[K  {} Running... {} ({:.0}s)",
-            spinner.next(),
+        progress.tick(format_args!(
+            "Running... {} ({:.0}s)",
             status.human(),
             start.elapsed().as_secs_f64()
-        );
-        std::io::stderr().flush().ok();
+        ));
         std::thread::sleep(Duration::from_millis(300));
     }
 }
 
 fn run_samples_locally(
     files: &[SubmissionFileDto],
-    language: &str,
+    language: &context::Language,
     samples: &[broccoli_cli_core::api::problem::SampleCase],
     config: &broccoli_cli_core::config::UserConfig,
 ) -> anyhow::Result<()> {
@@ -253,7 +260,16 @@ fn run_samples_locally(
         }
     }
     println!("  {}/{} samples passed.", passed, samples.len());
-    Ok(())
+    samples_verdict(passed, samples.len())
+}
+
+/// Every sample passing is success; anything less is [`Rejected`].
+fn samples_verdict(passed: usize, total: usize) -> anyhow::Result<()> {
+    if passed == total {
+        Ok(())
+    } else {
+        Err(Rejected(format!("{passed}/{total} samples passed")).into())
+    }
 }
 
 fn print_diff(expected: &str, got: &str) {
@@ -346,7 +362,7 @@ impl Drop for ScratchDir {
 
 fn run_local(
     files: &[SubmissionFileDto],
-    language: &str,
+    language: &context::Language,
     input: &str,
     config: &broccoli_cli_core::config::UserConfig,
 ) -> anyhow::Result<String> {
@@ -354,13 +370,13 @@ fn run_local(
     // stdin is piped directly to keep untrusted paths/filenames out of the command string
     let cmd_template = config
         .runtimes
-        .get(language)
+        .get(&language.id)
         .cloned()
-        .unwrap_or_else(|| default_runtime(language));
+        .unwrap_or_else(|| default_runtime(&language.id));
 
     let main_file = files
         .iter()
-        .find(|file| context::detect_language(&file.filename) == Some(language))
+        .find(|file| language.claims(&file.filename))
         .or_else(|| files.first())
         .map(|f| &f.filename)
         .context("No source files provided")?;
@@ -485,5 +501,20 @@ fn print_remote_result(run: &CodeRunResponse) -> anyhow::Result<()> {
     }
     println!("  {}/{} passed.", passed, cases.len());
 
-    Ok(())
+    samples_verdict(passed, cases.len())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_sample_is_a_rejection_not_an_error() {
+        assert!(samples_verdict(2, 2).is_ok());
+        let err = samples_verdict(1, 2).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Rejected>().unwrap().0,
+            "1/2 samples passed"
+        );
+    }
 }
