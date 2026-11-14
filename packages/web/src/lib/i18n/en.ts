@@ -1323,7 +1323,7 @@ export const en = {
   // API errors: by code (`apiError.<CODE>`), else by kind
   'apiError.withDetail': '{message} ({detail})',
   'apiError.kind.network':
-    'Cannot reach the server. Check your connection; it retries when the connection is back.',
+    'Cannot reach the server. Check your connection and try again.',
   'apiError.kind.temporary':
     'The server is busy right now. Try again in a moment.',
   'apiError.kind.unauthenticated': 'Your session has ended. Sign in again.',

@@ -1240,8 +1240,7 @@ export const zhCN: Catalog = {
   'identifier.queueState.pending': '处理中',
   // API errors: by code (`apiError.<CODE>`), else by kind
   'apiError.withDetail': '{message}（{detail}）',
-  'apiError.kind.network':
-    '无法连接服务器。请检查网络连接，连接恢复后会自动重试。',
+  'apiError.kind.network': '无法连接服务器，请检查网络连接后重试。',
   'apiError.kind.temporary': '服务器正忙，请稍后重试。',
   'apiError.kind.unauthenticated': '登录已失效，请重新登录。',
   'apiError.kind.forbidden': '您没有执行此操作的权限。',
