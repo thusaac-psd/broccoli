@@ -161,6 +161,7 @@ pub fn contest_json(id: i32, contest_type: Option<&str>) -> Value {
         "contest_type": contest_type,
         "created_at": "2026-05-01T00:00:00Z",
         "updated_at": "2026-05-01T00:00:00Z",
+        "phase": "unactivated",
     })
 }
 
@@ -199,6 +200,8 @@ pub fn test_case_json(id: i32, problem_id: i32, expected_output: &str) -> Value 
         "output_size": expected_output.len(),
         "input_preview": "1\n",
         "output_preview": expected_output,
+        "input_is_binary": false,
+        "expected_output_is_binary": false,
         "score": 100,
         "description": null,
         "label": "01",
