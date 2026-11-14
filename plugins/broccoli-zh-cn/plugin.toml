@@ -1,0 +1,5 @@
+name = 'zh-cn-language'
+version = '0.1.0'
+
+[translations]
+zh-CN = "locales/zh-CN.toml"

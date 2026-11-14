@@ -46,6 +46,29 @@ relative times come from `useFormat()`, which formats for the user's language;
 measure server timestamps against `useFormat().relative`, which uses the
 server's clock.
 
+## Add a language
+
+The host's own messages are language packs too: a plugin whose manifest
+declares only `[translations]`. `plugins/broccoli-en` holds the English
+messages, which are the keys every other language translates, and
+`plugins/broccoli-zh-cn` holds Simplified Chinese. To add a language, ship a
+pack in the same shape:
+
+```toml
+# plugin.toml
+name = 'ja-language'
+version = '0.1.0'
+
+[translations]
+ja = "locales/ja.toml"
+```
+
+Install it like any plugin and the language appears in the language menu,
+without rebuilding the web app. The web build embeds the packs in the
+repository, so the UI speaks them before the server answers and while it is
+unreachable; what the server serves overrides them. A key a pack lacks shows
+in English.
+
 ## Name what you register
 
 The host shows contest types, problem types and checker formats by name. Add

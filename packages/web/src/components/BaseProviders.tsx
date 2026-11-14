@@ -4,7 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
 import { appConfig } from '@/config';
-import { CORE_CATALOGS } from '@/lib/i18n/catalogs';
+import { embeddedCatalogs } from '@/lib/i18n/packs.gen';
 import { queryClient } from '@/lib/query-client';
 
 /**
@@ -16,7 +16,7 @@ export function BaseProviders({ children }: { children: ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <ApiClientProvider baseUrl={appConfig.api.baseUrl}>
-        <I18nProvider defaultLocale="en" coreI18n={CORE_CATALOGS}>
+        <I18nProvider defaultLocale="en" embeddedCatalogs={embeddedCatalogs}>
           {children}
         </I18nProvider>
       </ApiClientProvider>

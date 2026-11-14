@@ -35,6 +35,21 @@ zh-CN = "i18n/zh-CN.toml"
 
 前端通过 `@broccoli/web-sdk/i18n` 中 `useTranslation()` 返回的 `t()` 读取词条。`{name}` 插入参数。`{count, plural, one {...} other {...}}` 按该语言的复数规则为 `count` 选择形式，分支中的 `#` 表示该数字。日期和相对时间由 `useFormat()` 按用户语言格式化；服务器时间戳请用 `useFormat().relative` 计算，它以服务器时钟为准。
 
+## 添加语言
+
+宿主自身的消息同样是语言包：清单中只声明 `[translations]` 的插件。`plugins/broccoli-en` 存放英文消息，其键即其他语言需要翻译的全部键；`plugins/broccoli-zh-cn` 存放简体中文。要添加一种语言，按相同结构提供一个语言包：
+
+```toml
+# plugin.toml
+name = 'ja-language'
+version = '0.1.0'
+
+[translations]
+ja = "locales/ja.toml"
+```
+
+像安装其他插件一样安装它，该语言即出现在语言菜单中，无需重新构建 Web 应用。Web 构建会内嵌仓库中的语言包，因此在服务器响应之前以及无法连接时界面也能使用这些语言；服务器提供的语言包会覆盖内嵌版本。语言包缺少的键以英文显示。
+
 ## 为注册的内容命名
 
 宿主按名称显示比赛类型、题目类型和校验格式。在 `identifier.<kind>.<id>` 下给出名称；没有名称时直接显示 id。

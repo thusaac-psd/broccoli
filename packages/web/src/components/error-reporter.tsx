@@ -4,8 +4,7 @@ import { RotateCcw, ServerCrash, Undo2 } from 'lucide-react';
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
 import type { MessageKey } from '@/lib/i18n/catalog';
-import { CORE_CATALOGS } from '@/lib/i18n/catalogs';
-import { en } from '@/lib/i18n/en';
+import { embeddedCatalogs, sourceCatalog } from '@/lib/i18n/packs.gen';
 import { reportError } from '@/lib/telemetry';
 
 interface Props {
@@ -22,18 +21,21 @@ interface State {
  * The root error boundary wraps its translated page (and the providers that
  * page needs) in this boundary, and the crash being reported may have
  * originated inside one of those providers. It therefore deliberately uses no
- * app context: its strings come from the saved locale's translations when
- * they are already cached (else English), and navigation uses raw window
+ * app context: its strings come from the embedded language packs, in the
+ * saved locale (else English), and navigation uses raw window
  * APIs, so the fallback can never crash itself. It visually mirrors
  * AppErrorPage.
  */
-/** Translate `key` without the i18n context, from the bundled catalogs. */
+/** Translate `key` without the i18n context, from the embedded packs. */
 function t(key: MessageKey): string {
   try {
     const locale = localStorage.getItem(LOCALE_STORAGE_KEY);
-    return (locale ? CORE_CATALOGS[locale]?.[key] : undefined) ?? en[key];
+    return (
+      (locale ? embeddedCatalogs[locale]?.[key] : undefined) ??
+      sourceCatalog[key]
+    );
   } catch {
-    return en[key];
+    return sourceCatalog[key];
   }
 }
 

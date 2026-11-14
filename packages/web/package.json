@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "react-router dev",
     "build": "react-router build",
-    "typecheck": "react-router typegen && tsc -b",
+    "typecheck": "pnpm gen:language-packs && react-router typegen && tsc -b",
+    "gen:language-packs": "node --experimental-strip-types scripts/language-packs.ts",
     "check:asset-hashes": "node --experimental-strip-types scripts/check-asset-hashes.ts",
     "preview": "vite preview"
   },

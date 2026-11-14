@@ -20,15 +20,20 @@ export const LOCALE_STORAGE_KEY = 'broccoli-locale';
 interface I18nProviderProps {
   children: ReactNode;
   localeKey?: string;
+  /** The locale every other one falls back to. */
   defaultLocale?: string;
-  coreI18n?: Record<string, TranslationMap>;
+  /**
+   * Catalogs the app ships with, by locale: what the UI speaks before (and
+   * without) the server. The translations the server serves override them.
+   */
+  embeddedCatalogs?: Record<string, TranslationMap>;
 }
 
 export function I18nProvider({
   children,
   localeKey = LOCALE_STORAGE_KEY,
   defaultLocale = 'en',
-  coreI18n = {},
+  embeddedCatalogs = {},
 }: I18nProviderProps) {
   const apiClient = useApiClient();
 
@@ -65,7 +70,7 @@ export function I18nProvider({
     queryKey: ['i18n', 'locales'],
     queryFn: async () => {
       const { data: pluginLocales = [] } = await apiClient.GET('/i18n/locales');
-      const coreLocales = Object.keys(coreI18n);
+      const coreLocales = Object.keys(embeddedCatalogs);
       return Array.from(new Set([...coreLocales, ...pluginLocales]));
     },
   });
@@ -107,9 +112,9 @@ export function I18nProvider({
     (key: string, params?: MessageParams) => {
       const value =
         pluginTranslations[key] ??
-        coreI18n[locale]?.[key] ??
+        embeddedCatalogs[locale]?.[key] ??
         fallbackPluginTranslations[key] ??
-        coreI18n[defaultLocale]?.[key];
+        embeddedCatalogs[defaultLocale]?.[key];
       return value === undefined
         ? undefined
         : formatMessage(value, locale, params);
@@ -119,7 +124,7 @@ export function I18nProvider({
       defaultLocale,
       pluginTranslations,
       fallbackPluginTranslations,
-      coreI18n,
+      embeddedCatalogs,
     ],
   );
 
@@ -133,12 +138,20 @@ export function I18nProvider({
     () => ({
       locale,
       setLocale,
-      availableLocales: availableLocales ?? Object.keys(coreI18n),
+      availableLocales: availableLocales ?? Object.keys(embeddedCatalogs),
       t,
       lookup,
       isLoading,
     }),
-    [locale, setLocale, availableLocales, coreI18n, t, lookup, isLoading],
+    [
+      locale,
+      setLocale,
+      availableLocales,
+      embeddedCatalogs,
+      t,
+      lookup,
+      isLoading,
+    ],
   );
 
   return <I18nContext value={value}>{children}</I18nContext>;
