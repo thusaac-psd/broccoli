@@ -4,29 +4,14 @@ use sea_orm::{
     sea_query::OnConflict,
 };
 
+use plugin_core::config_schema;
+pub(crate) use plugin_core::manifest::ConfigScope;
+use plugin_core::registry::PluginRegistry;
+
 use crate::entity::plugin_config;
 use crate::error::AppError;
 use crate::host_funcs::config::{resolve_namespace, strip_namespace_prefix};
 use crate::models::plugin_config::{PluginConfigResponse, config_key};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfigScope {
-    Plugin,
-    Problem,
-    ContestProblem,
-    Contest,
-}
-
-impl ConfigScope {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Plugin => "plugin",
-            Self::Problem => "problem",
-            Self::ContestProblem => "contest_problem",
-            Self::Contest => "contest",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigTarget {
@@ -148,7 +133,57 @@ pub(crate) async fn get_config<C: ConnectionTrait>(
     }
 }
 
+/// Checks a config before it is stored: `plugin_id` must declare `namespace`
+/// for `scope`, and `config` must satisfy that namespace's schema. Every
+/// config write, from an admin or from a plugin, passes through here.
+pub(crate) fn validate_config(
+    registry: &PluginRegistry,
+    scope: ConfigScope,
+    plugin_id: &str,
+    namespace: &str,
+    config: &serde_json::Value,
+) -> Result<(), AppError> {
+    let registry = registry
+        .read()
+        .map_err(|_| AppError::Internal("plugin registry lock poisoned".into()))?;
+    let not_found = |why: String| AppError::ConfigNamespaceNotFound(why);
+    let entry = registry
+        .get(plugin_id)
+        .ok_or_else(|| not_found(format!("Plugin '{plugin_id}' is not installed")))?;
+    let ns = entry.manifest.config.get(namespace).ok_or_else(|| {
+        not_found(format!(
+            "Plugin '{plugin_id}' declares no config namespace '{namespace}'"
+        ))
+    })?;
+    if !ns.scopes.contains(&scope) {
+        return Err(not_found(format!(
+            "Config namespace '{plugin_id}/{namespace}' cannot be set at the {} scope",
+            scope.as_str()
+        )));
+    }
+    config_schema::validate(ns, config).map_err(AppError::InvalidConfig)
+}
+
+/// Validates and stores a config (see [`validate_config`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upsert_config<C: ConnectionTrait>(
+    db: &C,
+    registry: &PluginRegistry,
+    target: &ConfigTarget,
+    plugin_id: &str,
+    namespace: &str,
+    config: serde_json::Value,
+    enabled: Option<bool>,
+    position: i32,
+) -> Result<Json<PluginConfigResponse>, AppError> {
+    validate_config(registry, target.scope(), plugin_id, namespace, &config)?;
+    store_config(db, target, plugin_id, namespace, config, enabled, position).await
+}
+
+/// Stores a config row as given. Only for records the host itself owns and
+/// shapes; anything an admin or a plugin writes goes through
+/// [`upsert_config`].
+pub(crate) async fn store_config<C: ConnectionTrait>(
     db: &C,
     target: &ConfigTarget,
     plugin_id: &str,

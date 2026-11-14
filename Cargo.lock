@@ -4467,6 +4467,7 @@ dependencies = [
  "matchit 0.9.2",
  "opentelemetry",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

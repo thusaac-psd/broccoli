@@ -79,7 +79,7 @@ pub struct ConfigSchemaResponse {
     pub namespace: String,
     #[schema(example = "Testlib checker compiler settings")]
     pub description: Option<String>,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<plugin_core::manifest::ConfigScope>,
     pub json_schema: serde_json::Value,
 }
 

@@ -73,7 +73,7 @@ fn collect_schemas_for_scope(
             continue;
         }
         for (ns_name, ns_config) in &plugin.manifest.config {
-            if ns_config.scopes.contains(&scope_name.to_string()) {
+            if ns_config.scopes.contains(&scope) {
                 schemas.push(AvailableSchema {
                     plugin_id: plugin.id.clone(),
                     namespace: ns_name.clone(),
@@ -220,6 +220,7 @@ pub async fn get_plugin_global_config(
     tag = "Plugin Config",
     operation_id = "upsertPluginGlobalConfig",
     summary = "Create or update config for a namespace on a plugin",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope.",
     params(
         ("id" = String, Path, description = "Plugin ID"),
         ("namespace" = String, Path, description = "Config namespace"),
@@ -227,9 +228,10 @@ pub async fn get_plugin_global_config(
     request_body = UpsertPluginConfigRequest,
     responses(
         (status = 200, description = "Config upserted", body = PluginConfigResponse),
-        (status = 400, description = "Validation error (VALIDATION_ERROR)", body = crate::error::ErrorBody),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
+        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -246,6 +248,7 @@ pub async fn upsert_plugin_global_config(
     let target = ConfigTarget::plugin(&plugin_id);
     upsert_config(
         &state.db,
+        state.plugins.get_registry(),
         &target,
         &plugin_id,
         &namespace,
@@ -356,6 +359,7 @@ pub async fn get_problem_config(
     tag = "Plugin Config",
     operation_id = "upsertProblemConfig",
     summary = "Create or update config for a namespace on a problem",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope.",
     params(
         ("id" = i32, Path, description = "Problem ID"),
         ("plugin_id" = String, Path, description = "Plugin ID"),
@@ -367,6 +371,8 @@ pub async fn get_problem_config(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
         (status = 404, description = "Problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
+        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -388,6 +394,7 @@ pub async fn upsert_problem_config(
     let target = ConfigTarget::problem(problem_id);
     let result = upsert_config(
         &txn,
+        state.plugins.get_registry(),
         &target,
         &plugin_id,
         &namespace,
@@ -511,6 +518,7 @@ pub async fn get_contest_problem_config(
     tag = "Plugin Config",
     operation_id = "upsertContestProblemConfig",
     summary = "Create or update config for a namespace on a contest-problem",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("problem_id" = i32, Path, description = "Problem ID"),
@@ -523,6 +531,8 @@ pub async fn get_contest_problem_config(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
         (status = 404, description = "Contest problem not found (NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
+        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -544,6 +554,7 @@ pub async fn upsert_contest_problem_config(
     let target = ConfigTarget::contest_problem(contest_id, problem_id);
     let result = upsert_config(
         &txn,
+        state.plugins.get_registry(),
         &target,
         &plugin_id,
         &namespace,
@@ -664,6 +675,7 @@ pub async fn get_contest_config(
     tag = "Plugin Config",
     operation_id = "upsertContestConfig",
     summary = "Create or update config for a namespace on a contest",
+    description = "Stores the config after checking it against the schema the plugin declares for this namespace at this scope.",
     params(
         ("id" = i32, Path, description = "Contest ID"),
         ("plugin_id" = String, Path, description = "Plugin ID"),
@@ -675,6 +687,8 @@ pub async fn get_contest_config(
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = crate::error::ErrorBody),
         (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = crate::error::ErrorBody),
         (status = 404, description = "Contest not found (NOT_FOUND)", body = crate::error::ErrorBody),
+        (status = 400, description = "Validation error (VALIDATION_ERROR): the config breaks the namespace's schema; `details.fields` lists each broken field as `{path, message}`", body = crate::error::ErrorBody),
+        (status = 404, description = "The plugin is not installed, declares no such namespace, or does not allow it at this scope (CONFIG_NAMESPACE_NOT_FOUND)", body = crate::error::ErrorBody),
     ),
     security(("jwt" = [])),
 )]
@@ -696,6 +710,7 @@ pub async fn upsert_contest_config(
     let target = ConfigTarget::contest(contest_id);
     let result = upsert_config(
         &txn,
+        state.plugins.get_registry(),
         &target,
         &plugin_id,
         &namespace,

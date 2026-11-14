@@ -1,0 +1,69 @@
+name = "test-plugin"
+version = "0.1.0"
+description = "Config schema fixture: namespaces at the resource scopes"
+
+[web]
+root = "app"
+entry = "index.js"
+
+[config.checker]
+scopes = ["problem"]
+
+[config.checker.properties.tolerance]
+type = "number"
+min = 0
+
+[config.checker.properties.v]
+type = "integer"
+
+[config.checker.properties.k]
+type = "string"
+
+[config.checker.properties.a]
+type = "integer"
+
+[config.scoring]
+scopes = ["problem", "contest"]
+
+[config.scoring.properties.b]
+type = "integer"
+
+[config.scoring.properties.k]
+type = "string"
+
+[config.contest-type]
+scopes = ["contest"]
+
+[config.contest-type.properties.type]
+type = "string"
+
+[config.limits]
+scopes = ["contest", "contest_problem"]
+
+[config.limits.properties.time_limit]
+type = "integer"
+min = 1
+
+[config.limits.properties.k]
+type = "string"
+
+[config.limits.properties.t]
+type = "integer"
+
+# Declares no properties, so it accepts any object.
+[config.my-checker_v2]
+scopes = ["problem"]
+
+[config.penalty]
+scopes = ["problem", "contest", "contest_problem"]
+
+[config.penalty.properties.penalty_minutes]
+type = "integer"
+default = 20
+min = 0
+max = 600
+
+[config.penalty.properties.mode]
+type = "string"
+enum = ["strict", "lenient"]
+default = "strict"

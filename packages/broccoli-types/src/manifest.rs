@@ -314,25 +314,70 @@ pub struct WebRouteConfig {
     pub meta: Option<HashMap<String, String>>,
 }
 
+/// What a stored plugin config belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigScope {
+    /// The plugin as a whole (its global settings).
+    Plugin,
+    Problem,
+    Contest,
+    /// One problem inside one contest.
+    ContestProblem,
+}
+
+impl ConfigScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plugin => "plugin",
+            Self::Problem => "problem",
+            Self::Contest => "contest",
+            Self::ContestProblem => "contest_problem",
+        }
+    }
+
+    pub fn parse(scope: &str) -> Option<Self> {
+        [
+            Self::Plugin,
+            Self::Problem,
+            Self::Contest,
+            Self::ContestProblem,
+        ]
+        .into_iter()
+        .find(|s| s.as_str() == scope)
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConfigNamespace {
     pub description: Option<String>,
+    /// Where this namespace can be configured. The host refuses a config for
+    /// it anywhere else.
     #[serde(default)]
-    pub scopes: Vec<String>,
+    pub scopes: Vec<ConfigScope>,
     pub schema: Option<String>,
     #[serde(default)]
     pub properties: HashMap<String, SchemaProperty>,
 }
 
 impl ConfigNamespace {
+    /// The config with nothing stored: every default the schema declares.
     pub fn defaults(&self) -> serde_json::Value {
-        let mut obj = serde_json::Map::new();
-        for (key, prop) in &self.properties {
-            if let Some(val) = prop.default_value() {
-                obj.insert(key.clone(), val);
-            }
-        }
-        serde_json::Value::Object(obj)
+        self.resolve(None)
+    }
+
+    /// The config a plugin reads: `stored` with every default the schema
+    /// declares filled in where `stored` leaves the field out, inside nested
+    /// objects and array items too.
+    pub fn resolve(&self, stored: Option<&serde_json::Value>) -> serde_json::Value {
+        let mut fields = match stored {
+            Some(serde_json::Value::Object(fields)) => fields.clone(),
+            Some(other) => return other.clone(),
+            None => serde_json::Map::new(),
+        };
+        fill_defaults(&self.properties, &mut fields);
+        serde_json::Value::Object(fields)
     }
 
     pub fn to_json_schema(&self) -> serde_json::Value {
@@ -347,8 +392,40 @@ impl ConfigNamespace {
                 props.insert(name.clone(), prop.to_json_schema());
             }
             schema.insert("properties".into(), props.into());
+            schema.insert("additionalProperties".into(), false.into());
         }
         schema.into()
+    }
+}
+
+fn fill_defaults(
+    properties: &HashMap<String, SchemaProperty>,
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    for (name, prop) in properties {
+        match fields.get_mut(name) {
+            Some(value) => fill_value(prop, value),
+            None => {
+                if let Some(mut default) = prop.default_value() {
+                    fill_value(prop, &mut default);
+                    fields.insert(name.clone(), default);
+                }
+            }
+        }
+    }
+}
+
+fn fill_value(prop: &SchemaProperty, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => fill_defaults(&prop.properties, fields),
+        serde_json::Value::Array(items) => {
+            if let Some(item) = &prop.items {
+                for v in items {
+                    fill_value(item, v);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -444,8 +521,16 @@ impl SchemaProperty {
         if let Some(ref v) = self.required {
             schema.insert("required".into(), v.clone().into());
         }
-        if let Some(v) = self.additional_properties {
-            schema.insert("additionalProperties".into(), v.into());
+        // The host rejects undeclared fields of an object that declares its
+        // fields, unless it opts into additional ones.
+        match self.additional_properties {
+            Some(v) => {
+                schema.insert("additionalProperties".into(), v.into());
+            }
+            None if !self.properties.is_empty() => {
+                schema.insert("additionalProperties".into(), false.into());
+            }
+            None => {}
         }
         if let Some(v) = self.step {
             schema.insert("multipleOf".into(), v.into());
@@ -492,7 +577,7 @@ mod tests {
 
         let ns = &manifest.config["my-ns"];
         assert_eq!(ns.description.as_deref(), Some("Test config"));
-        assert_eq!(ns.scopes, vec!["plugin", "problem"]);
+        assert_eq!(ns.scopes, vec![ConfigScope::Plugin, ConfigScope::Problem]);
         assert_eq!(ns.properties.len(), 1);
 
         let prop = &ns.properties["timeout"];

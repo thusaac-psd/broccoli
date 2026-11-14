@@ -585,9 +585,20 @@ fn register_config_functions(
     });
 
     let db = host_db.clone();
+    let registry = deps
+        .plugin_manager
+        .get()
+        .expect("the manager registers its host functions while it is alive")
+        .get_registry()
+        .clone();
     let cache = deps.system.plugin_config_cache.clone();
     hr.register("config:write", move |plugin_id| {
-        config::create_config_set_function(plugin_id.to_string(), db.clone(), cache.clone())
+        config::create_config_set_function(
+            plugin_id.to_string(),
+            db.clone(),
+            registry.clone(),
+            cache.clone(),
+        )
     });
 }
 

@@ -559,6 +559,25 @@ impl TestApp {
         Self::spawn_internal(true, options).await
     }
 
+    /// A plugin-less app that knows the manifests under
+    /// `tests/fixtures_config`, so plugin config writes have schemas to be
+    /// checked against: `test-plugin` declares namespaces at the resource
+    /// scopes, `my-plugin` at the plugin scope. They are web-only, so
+    /// nothing needs to be built or run.
+    pub async fn spawn_with_config_schemas() -> Self {
+        let app = Self::spawn().await;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures_config");
+        let mut registry = app.state.plugins.get_registry().write().unwrap();
+        for id in ["test-plugin", "my-plugin"] {
+            let mut entry = plugin_core::registry::PluginEntry::from_dir(&dir.join(id))
+                .expect("config fixture manifest loads");
+            entry.status = plugin_core::registry::PluginStatus::Loaded;
+            registry.insert(id.to_string(), entry);
+        }
+        drop(registry);
+        app
+    }
+
     /// Another server replica of `self`: same database, its own plugin
     /// registry, dispatcher state and HTTP listener.
     pub async fn spawn_replica(&self, mut options: SpawnOptions) -> Self {

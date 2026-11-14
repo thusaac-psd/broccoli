@@ -6,7 +6,10 @@ use sea_orm::{EntityTrait, Set, sea_query::OnConflict};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::error::AppError;
+use crate::services::plugin_config::{ConfigScope, validate_config};
 use crate::services::plugin_config_cache::PluginConfigCache;
+use plugin_core::config_schema;
 
 type ConfigGetUserData = (
     String,
@@ -14,7 +17,12 @@ type ConfigGetUserData = (
     PluginRegistry,
     PluginConfigCache,
 );
-type ConfigSetUserData = (String, DatabaseConnection, PluginConfigCache);
+type ConfigSetUserData = (
+    String,
+    DatabaseConnection,
+    PluginRegistry,
+    PluginConfigCache,
+);
 
 const VALID_SCOPES: &[&str] = &["problem", "contest_problem", "contest", "plugin"];
 
@@ -114,13 +122,14 @@ pub fn create_config_get_function(
 pub fn create_config_set_function(
     plugin_id: String,
     db: DatabaseConnection,
+    registry: PluginRegistry,
     cache: PluginConfigCache,
 ) -> Function {
     super::host_function(
         "config_set",
         [ValType::I64],
         [],
-        super::host_data((plugin_id, db, cache)),
+        super::host_data((plugin_id, db, registry, cache)),
         super::Waits::Blocks,
         config_set_fn,
     )
@@ -152,24 +161,24 @@ fn config_get_fn(
         .block_on(async { cache.get(db, &input.scope, &ref_id, &namespace).await })
         .map_err(|e| extism::Error::msg(format!("DB error in config_get: {}", e)))?;
 
-    let output_value = match result {
-        Some(row) => {
-            serde_json::json!({ "config": &row.config, "is_default": false, "enabled": row.enabled })
-        }
-        None => {
-            let defaults = registry
-                .read()
-                .ok()
-                .and_then(|reg| {
-                    reg.get(plugin_id)
-                        .and_then(|entry| entry.manifest.config.get(&raw_namespace))
-                        .map(|ns| ns.defaults())
-                })
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-
-            serde_json::json!({ "config": defaults, "is_default": true, "enabled": null })
-        }
-    };
+    // The plugin reads its config with every default its schema declares
+    // filled in, so it never needs defaults of its own.
+    let stored = result.as_ref().map(|row| &row.config);
+    let config = registry
+        .read()
+        .ok()
+        .and_then(|reg| {
+            reg.get(plugin_id)
+                .and_then(|entry| entry.manifest.config.get(&raw_namespace))
+                .map(|ns| ns.resolve(stored))
+        })
+        .or_else(|| stored.cloned())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let output_value = serde_json::json!({
+        "config": config,
+        "is_default": result.is_none(),
+        "enabled": result.as_ref().and_then(|row| row.enabled),
+    });
 
     super::write_json(plugin, outputs, &output_value, "config_get output")
 }
@@ -182,7 +191,7 @@ fn config_set_fn(
 ) -> Result<(), extism::Error> {
     let input: ConfigSetInput = super::read_json(plugin, inputs, "config_set input")?;
     let call = super::HostCall::enter(&user_data, "config_set")?;
-    let (plugin_id, db, cache) = &*call;
+    let (plugin_id, db, registry, cache) = &*call;
 
     let ref_id = if input.scope == "plugin" {
         plugin_id.clone()
@@ -193,6 +202,16 @@ fn config_set_fn(
     validate_raw_namespace(&input.namespace)?;
     let namespace = resolve_namespace(&input.scope, plugin_id, &input.namespace);
     validate_config_input(&input.scope, &ref_id, &namespace)?;
+    let scope = ConfigScope::parse(&input.scope)
+        .ok_or_else(|| extism::Error::msg(format!("Invalid scope '{}'", input.scope)))?;
+    validate_config(registry, scope, plugin_id, &input.namespace, &input.config).map_err(|e| {
+        let why = match e {
+            AppError::InvalidConfig(fields) => config_schema::describe(&fields),
+            AppError::ConfigNamespaceNotFound(why) => why,
+            other => format!("{other:?}"),
+        };
+        extism::Error::msg(format!("config_set refused: {why}"))
+    })?;
 
     let key = (input.scope.clone(), ref_id.clone(), namespace.clone());
     tokio::runtime::Handle::current()
