@@ -22,13 +22,21 @@ pub struct Model {
     pub revoked_at: Option<DateTimeUtc>,
 
     /// Selector of the row this one replaced, when it was issued by a
-    /// rotation. It caps the reuse grace at one sibling per rotated row and
-    /// lets logout retire the predecessor along with the presented row.
+    /// rotation. It caps the reuse grace at one sibling per rotated row.
     #[sea_orm(nullable, indexed)]
     pub rotated_from: Option<String>,
 
+    /// The sign-in this token belongs to. Deleting the session deletes its
+    /// tokens. A row without one is not a credential: presenting it is
+    /// `TOKEN_INVALID`.
+    #[sea_orm(nullable, indexed)]
+    pub session_id: Option<i64>,
+
     #[sea_orm(belongs_to, from = "user_id", to = "id")]
     pub user: HasOne<super::user::Entity>,
+
+    #[sea_orm(belongs_to, from = "session_id", to = "id", on_delete = "Cascade")]
+    pub session: HasOne<super::auth_session::Entity>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
@@ -41,9 +49,17 @@ impl ActiveModelBehavior for ActiveModel {}
 /// block inserts into tables that reference the user.
 pub const LOCK_OWNER_SQL: &str = r#"SELECT 1 FROM "user" WHERE id = $1 FOR NO KEY UPDATE"#;
 
+/// Delete a user's sessions (their refresh tokens cascade) and any refresh
+/// token of the user outside a session.
+const END_USER_SESSIONS_SQL: &str = r#"
+WITH sessions AS (DELETE FROM auth_session WHERE user_id = $1)
+DELETE FROM refresh_tokens WHERE user_id = $1 AND session_id IS NULL
+"#;
+
 impl Entity {
-    /// Delete every refresh token of `user_id`, after taking the owner lock
-    /// (see [`LOCK_OWNER_SQL`]).
+    /// End every session of `user_id`, with all its refresh tokens, after
+    /// taking the owner lock (see [`LOCK_OWNER_SQL`]). The user's access
+    /// tokens fail the freshness check from then on.
     pub async fn revoke_all_for_user<C>(db: &C, user_id: i32) -> Result<(), sea_orm::DbErr>
     where
         C: ConnectionTrait,
@@ -54,10 +70,12 @@ impl Entity {
             [user_id.into()],
         ))
         .await?;
-        Self::delete_many()
-            .filter(Column::UserId.eq(user_id))
-            .exec(db)
-            .await?;
+        db.execute_raw(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            END_USER_SESSIONS_SQL,
+            [user_id.into()],
+        ))
+        .await?;
         Ok(())
     }
 }

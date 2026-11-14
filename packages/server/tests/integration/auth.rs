@@ -696,6 +696,140 @@ mod logout {
 
         assert_eq!(res.status, 204);
     }
+
+    /// One sign-in: the access token and refresh cookie a login hands out.
+    struct SignIn {
+        token: String,
+        cookie: String,
+    }
+
+    /// A client without a cookie store, so each request carries exactly the
+    /// credentials the test gives it.
+    fn bare_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .cookie_store(false)
+            .build()
+            .unwrap()
+    }
+
+    async fn sign_in(app: &TestApp, username: &str) -> SignIn {
+        let res = bare_client()
+            .post(app.url(routes::LOGIN))
+            .json(&json!({"username": username, "password": "securepass"}))
+            .send()
+            .await
+            .unwrap();
+        let cookie = res
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok()?.strip_prefix("broccoli_refresh="))
+            .map(|rest| rest.split(';').next().unwrap_or_default().to_owned())
+            .find(|value| !value.is_empty())
+            .expect("a refresh cookie");
+        let res = TestResponse::from_response(res).await;
+        assert_eq!(res.status, 200, "login: {}", res.text);
+        SignIn {
+            token: res.body["token"].as_str().unwrap().to_owned(),
+            cookie,
+        }
+    }
+
+    async fn post_with_cookie(app: &TestApp, path: &str, cookie: &str) -> TestResponse {
+        let res = bare_client()
+            .post(app.url(path))
+            .header("cookie", format!("broccoli_refresh={cookie}"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        TestResponse::from_response(res).await
+    }
+
+    /// A logout ends its own sign-in on the server: the refresh token is
+    /// refused, and the access token can no longer change anything or read
+    /// `/auth/me`, while plain reads keep the documented expiry bound. The
+    /// same user's other sign-in stays signed in.
+    #[tokio::test]
+    async fn logout_ends_its_session_and_no_other() {
+        let app = TestApp::spawn().await;
+        app.post_without_token(
+            routes::REGISTER,
+            &json!({"username": "lena", "password": "securepass"}),
+        )
+        .await;
+        let laptop = sign_in(&app, "lena").await;
+        let phone = sign_in(&app, "lena").await;
+
+        let out = post_with_cookie(&app, routes::LOGOUT, &laptop.cookie).await;
+        assert_eq!(out.status, 204, "{}", out.text);
+
+        let refresh = post_with_cookie(&app, routes::REFRESH, &laptop.cookie).await;
+        assert_eq!(refresh.status, 401, "{}", refresh.text);
+        let mutate = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &laptop.token)
+            .await;
+        assert_eq!(
+            mutate.status, 401,
+            "logged-out token mutated: {}",
+            mutate.text
+        );
+        assert_eq!(mutate.body["code"], "TOKEN_INVALID");
+        let me = app.get_with_token(routes::ME, &laptop.token).await;
+        assert_eq!(me.status, 401, "logged-out token read /me: {}", me.text);
+        let read = app.get_with_token(routes::CONTESTS, &laptop.token).await;
+        assert_eq!(
+            read.status, 200,
+            "a read keeps the expiry bound: {}",
+            read.text
+        );
+
+        let me = app.get_with_token(routes::ME, &phone.token).await;
+        assert_eq!(me.status, 200, "the other sign-in was ended: {}", me.text);
+        let refresh = post_with_cookie(&app, routes::REFRESH, &phone.cookie).await;
+        assert_eq!(refresh.status, 200, "{}", refresh.text);
+    }
+
+    /// A client without a cookie, like the CLI, logs out with its access
+    /// token, which ends the refresh token it holds in the same session.
+    #[tokio::test]
+    async fn logout_with_an_access_token_ends_its_session() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_authenticated_user("cli_user", "securepass")
+            .await;
+        let cli = app
+            .post_with_token(routes::CLI_TOKEN, &json!({}), &token)
+            .await;
+        assert_eq!(cli.status, 200, "{}", cli.text);
+        let cli_token = cli.body["token"].as_str().unwrap();
+
+        let out = app
+            .post_with_token(routes::LOGOUT, &json!({}), cli_token)
+            .await;
+        assert_eq!(out.status, 204, "{}", out.text);
+
+        let refresh = app
+            .post_without_token(
+                routes::CLI_REFRESH,
+                &json!({ "refresh_token": cli.body["refresh_token"] }),
+            )
+            .await;
+        assert_eq!(refresh.status, 401, "{}", refresh.text);
+        assert_eq!(app.get_with_token(routes::ME, cli_token).await.status, 401);
+        // The login the CLI exchanged was the same sign-in.
+        assert_eq!(app.get_with_token(routes::ME, &token).await.status, 401);
+    }
+
+    /// A logout with a refresh cookie that names no session still succeeds
+    /// and clears the cookie.
+    #[tokio::test]
+    async fn logout_with_an_unknown_cookie_succeeds() {
+        let app = TestApp::spawn().await;
+        let res = post_with_cookie(&app, routes::LOGOUT, "nope:nope").await;
+        assert_eq!(res.status, 204, "{}", res.text);
+    }
 }
 
 mod request_validation {
@@ -915,6 +1049,45 @@ mod token_freshness {
 
         let me = app.get_with_token(routes::ME, &token).await;
         assert_eq!(me.status, 401, "stale token read /auth/me: {}", me.text);
+    }
+
+    /// An admin's password reset ends the user's sign-ins at once: the old
+    /// access token can no longer submit, whatever second the reset lands in.
+    #[tokio::test]
+    async fn a_password_reset_ends_the_old_token_for_submissions() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("reset_admin", "securepass", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin, "Reset").await;
+        let token = app
+            .create_authenticated_user("reset_bob", "securepass")
+            .await;
+        let bob = app.get_with_token(routes::ME, &token).await.body["id"]
+            .as_i64()
+            .unwrap() as i32;
+
+        let reset = app
+            .patch_with_token(
+                &routes::user(bob),
+                &json!({ "password": "brandnewpass" }),
+                &admin,
+            )
+            .await;
+        assert_eq!(reset.status, 200, "{}", reset.text);
+
+        let submit = app
+            .post_with_token(
+                &routes::problem_submissions(problem_id),
+                &json!({
+                    "files": [{"filename": "main.cpp", "content": "int main(){}"}],
+                    "language": "cpp",
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(submit.status, 401, "old token submitted: {}", submit.text);
+        assert_eq!(submit.body["code"], "TOKEN_INVALID");
     }
 
     /// Every operation the API documents as authenticated and whose method

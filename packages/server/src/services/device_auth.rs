@@ -7,7 +7,7 @@ use common::db::DatabaseConnection;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 
 use crate::error::AppError;
-use crate::services::auth_tokens::issue_access_token;
+use crate::services::auth_tokens::{issue_access_token, open_session};
 use crate::utils::hash;
 
 /// Most pending codes held fleet-wide; past it, new requests get 429.
@@ -161,7 +161,13 @@ pub async fn poll(
         }
         (false, Some(user_id)) => {
             delete(&txn, &code_hash).await?;
-            match issue_access_token(&txn, jwt_secret, user_id).await {
+            // The approval is a sign-in of its own, which the CLI's logout
+            // ends.
+            let grant = match open_session(&txn, user_id).await {
+                Ok(session_id) => issue_access_token(&txn, jwt_secret, user_id, session_id).await,
+                Err(e) => Err(e),
+            };
+            match grant {
                 Ok(grant) => PollOutcome::Token(grant.token),
                 Err(AppError::TokenInvalid) => PollOutcome::Denied,
                 Err(e) => return Err(e),

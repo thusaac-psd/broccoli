@@ -12,6 +12,8 @@ use crate::utils::jwt;
 
 pub struct AuthUser {
     pub user_id: i32,
+    /// The sign-in session the caller's token belongs to.
+    pub session_id: i64,
     pub username: String,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
@@ -58,6 +60,7 @@ impl From<jwt::Claims> for AuthUser {
     fn from(claims: jwt::Claims) -> Self {
         AuthUser {
             user_id: claims.uid,
+            session_id: claims.sid,
             username: claims.sub,
             roles: claims.roles,
             permissions: claims.permissions,
@@ -93,6 +96,28 @@ where
     }
 }
 
+/// The session a request's bearer access token names, if the token's
+/// signature and expiry verify, fresh or not: for ending that session. No
+/// token, or one that does not verify, is `None`.
+pub struct BearerSession(pub Option<i64>);
+
+impl<S> FromRequestParts<S> for BearerSession
+where
+    S: Send + Sync,
+    AppState: axum::extract::FromRef<S>,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        Ok(Self(
+            bearer_claims(parts, &app_state)
+                .ok()
+                .map(|claims| claims.sid),
+        ))
+    }
+}
+
 /// The caller of a request whatever its method, checked by [`fresh_user`]:
 /// for reads that answer from the caller's current account, such as
 /// `/auth/me`. Deref-es to the inner [`AuthUser`].
@@ -122,17 +147,17 @@ where
     }
 }
 
-/// The active account a token's user has now, and the change stamp its
-/// freshness is judged against.
+/// The active account a token's user has now and the change stamp its
+/// freshness is judged against, if the token's session is still open.
 const FRESH_USER_SQL: &str = r#"
-SELECT username, display_name, credentials_changed_at
-FROM "user"
-WHERE id = $1 AND deleted_at IS NULL
+SELECT u.username, u.display_name, u.credentials_changed_at
+FROM "user" u JOIN auth_session s ON s.user_id = u.id
+WHERE u.id = $1 AND s.id = $2 AND u.deleted_at IS NULL
 "#;
 
 /// The caller of a verified access token, if the token is still fresh: its
-/// user is active and it was minted no earlier than the user's last
-/// credential change. A stale token is `TokenInvalid`, a 401, so the client
+/// session is open (no logout ended it), its user is active and it was minted
+/// no earlier than the user's last credential change. A stale token is `TokenInvalid`, a 401, so the client
 /// refreshes and gets a token carrying the user's current roles. The one
 /// freshness check of the platform: [`AuthUser`] on mutating requests,
 /// [`FreshAuthUser`] and the plugin proxy all apply it. One indexed read.
@@ -145,11 +170,11 @@ pub(crate) async fn fresh_user(
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             FRESH_USER_SQL,
-            [claims.uid.into()],
+            [claims.uid.into(), claims.sid.into()],
         ))
         .await
         .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
-        // No row: the user was deleted or deactivated.
+        // No row: the session ended, or the user was deleted or deactivated.
         .ok_or(AppError::TokenInvalid)?;
     let username: String = row.try_get("", "username")?;
     let display_name: String = row.try_get("", "display_name")?;

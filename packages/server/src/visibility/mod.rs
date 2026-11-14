@@ -567,6 +567,7 @@ mod tests {
     fn subject(user_id: i32) -> Subject {
         Subject::from_auth_user(&AuthUser {
             user_id,
+            session_id: 0,
             username: "viewer".into(),
             roles: vec![],
             permissions: vec![],

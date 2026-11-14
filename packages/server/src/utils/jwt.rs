@@ -10,6 +10,8 @@ pub struct Claims {
     pub jti: String,
     pub sub: String,
     pub uid: i32,
+    /// The sign-in session (`entity::auth_session`) the token belongs to.
+    pub sid: i64,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
     pub exp: u64,
@@ -20,7 +22,7 @@ pub struct Claims {
 
 /// How long an access token is valid. A read checks the token without a
 /// database lookup, so a token that a credential change (password, roles,
-/// deactivation) has ended still reads for at most this long. Every mutating
+/// deactivation) or a logout has ended still reads for at most this long. Every mutating
 /// request checks it against the database (`extractors::auth::AuthUser`) and
 /// refuses it at once.
 pub const ACCESS_TOKEN_TTL: Duration = Duration::minutes(5);
@@ -33,6 +35,7 @@ pub const ACCESS_TOKEN_TTL: Duration = Duration::minutes(5);
 /// `iat` with.
 pub fn sign_access_token(
     user_id: i32,
+    session_id: i64,
     username: &str,
     roles: Vec<String>,
     permissions: Vec<String>,
@@ -45,6 +48,7 @@ pub fn sign_access_token(
         jti: generate_random_string(),
         sub: username.to_owned(),
         uid: user_id,
+        sid: session_id,
         roles,
         permissions,
         exp: expiration.max(0) as u64,
@@ -103,7 +107,7 @@ mod tests {
     fn expiry_is_judged_against_the_given_platform_time_not_this_host_clock() {
         // Issued in 2001, far from this host's clock in either direction.
         let issued = at(1_000_000_000);
-        let token = sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token = sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         let claims = verify(&token, "secret", issued + Duration::minutes(4)).unwrap();
         assert_eq!(claims.iat, issued.timestamp() as u64);
         assert!(verify(&token, "secret", issued + ACCESS_TOKEN_TTL).is_err());
@@ -112,14 +116,15 @@ mod tests {
     #[test]
     fn a_token_signed_with_another_secret_is_rejected() {
         let issued = at(1_000_000_000);
-        let token = sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token = sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         assert!(verify(&token, "other", issued).is_err());
     }
 
     #[test]
     fn a_token_issued_in_the_future_is_rejected() {
         let now = at(1_000_000_000);
-        let token = |issued| sign_access_token(1, "u", vec![], vec![], issued, "secret").unwrap();
+        let token =
+            |issued| sign_access_token(1, 1, "u", vec![], vec![], issued, "secret").unwrap();
         let near = token(now + Duration::seconds(IAT_LEEWAY_SECS));
         assert!(verify(&near, "secret", now).is_ok());
         let ahead = token(now + Duration::seconds(IAT_LEEWAY_SECS + 1));
