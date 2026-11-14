@@ -5,8 +5,9 @@
 #   broccoli-dev plugin new my-plugin --sdk <bundle>/sdk
 #   cd my-plugin && cargo build --offline --config <bundle>/sdk/.cargo/config.toml ...
 #
-# The layout is what `broccoli-dev plugin new --sdk` reads (a checkout's
-# `packages/`, see packages/dev-cli/src/template/sdk.rs):
+# `broccoli-dev` finds DEST/sdk without `--sdk` when it runs from inside DEST
+# (the air-gap bundle ships it as cli/broccoli-dev). The layout is what
+# packages/dev-cli/src/template/sdk.rs reads as a staged SDK:
 #
 #   server-sdk/        broccoli-server-sdk, depending on ../broccoli-types
 #   broccoli-types/    with its manifest normalized by `cargo package`, so it
@@ -15,7 +16,9 @@
 #   vendor/            the crates.io closure of a scaffolded plugin crate
 #   .cargo/config.toml the source replacement that points cargo at vendor/
 #
-# Runs on the connected build box (cargo vendor fetches crates.io once). It
+# Runs on the connected build box (cargo vendor fetches crates.io once, at
+# the versions the workspace's Cargo.lock pins), or offline with
+# CARGO_NET_OFFLINE=true once `cargo fetch` has filled the cargo cache. It
 # then checks, with an empty CARGO_HOME and --offline, that a crate rendered
 # from the scaffold's own Cargo.toml template resolves from vendor/ alone.
 #
@@ -51,12 +54,13 @@ tar -xzf "$TMP"/web/broccoli-web-sdk-*.tgz -C "$TMP/web"
 cp -R "$TMP"/web/package/. "$SDK/web-sdk/"
 
 # probe NAME DIR: a plugin crate rendered from the scaffold's template,
-# depending on the staged server SDK.
+# depending on the staged server SDK, locked to the workspace's versions.
 probe() {
   mkdir -p "$2/src"
   sed -e "s|{{plugin_name}}|$1|g" \
       -e "s|{{server_sdk_dep}}|path = \"$SDK/server-sdk\"|" \
       "$ROOT/packages/dev-cli/templates/backend/Cargo.toml.tmpl" > "$2/Cargo.toml"
+  cp "$ROOT/Cargo.lock" "$2/Cargo.lock"
   : > "$2/src/lib.rs"
 }
 

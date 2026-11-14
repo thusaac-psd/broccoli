@@ -107,7 +107,11 @@ everything an install needs:
   server replica). `./enable-plugin.sh` with no arguments lists them. An enabled
   plugin stays covered by the integrity check: it must match its copy here byte
   for byte.
-- `cli/` — the musl-static `broccoli` contestant CLI binary.
+- `cli/` — the musl-static binaries of the `broccoli` contestant CLI and the
+  `broccoli-dev` plugin tool, which scaffolds plugins against `sdk/`.
+- `sdk/` — the plugin SDKs and the crates.io crates a plugin backend needs, so
+  plugins build on the LAN with no internet (see the plugin getting-started
+  guide, "Build without internet access").
 - `ca/` — `root.crt` (public, ships everywhere) and `issue-leaf.sh`; NO private
   key lives here. The CA/leaf private keys live only in the
   `broccoli-airgap-<V>.server-secret/` sidecar.

@@ -840,7 +840,6 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "broccoli-cli-core",
- "broccoli-server-sdk",
  "broccoli-types",
  "clap",
  "console",

@@ -163,5 +163,5 @@ upstream is on its own machine.
 - `contest/`: offline contest helpers: problem export/import and worker bring-up
   (see `contest/README.md`).
 - `sdk/`: the plugin SDKs and the crates.io crates a plugin backend needs, for
-  `broccoli-dev plugin new --sdk sdk` with no internet (see the plugin
+  `broccoli-dev plugin new --sdk <bundle>/sdk` with no internet (see the plugin
   getting-started guide, "Build without internet access").

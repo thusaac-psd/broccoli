@@ -66,15 +66,18 @@ Use `--backend`, `--frontend`, or `--full` to make the command non-interactive.
 Useful flags:
 
 - `-o, --output <DIR>` writes the scaffold somewhere other than `./<name>`.
-- `--sdk <DIR>` takes the SDKs from a local directory laid out like a Broccoli
-  checkout's `packages/` (`server-sdk/`, `broccoli-types/`, `web-sdk/`).
+- `--sdk <DIR>` takes the SDKs from a local directory: the `packages/` of a
+  Broccoli checkout or the `sdk/` of a release bundle.
 
-Inside a Broccoli checkout the scaffold depends on the checkout's SDK packages
-by path, found automatically. Elsewhere, `--sdk` gives the same local
-dependencies; without it, a backend depends on the published
-`broccoli-server-sdk` at the version this CLI was built with, and a frontend
-needs `--sdk` (with `web-sdk` built). Every scaffold is its own Cargo workspace
-root, so it builds the same inside and outside a checkout.
+Without `--sdk`, the scaffold takes the SDKs from the first such directory above
+the plugin directory, then above the `broccoli-dev` executable: the checkout the
+plugin is created in, the checkout the CLI was built in, or the release bundle
+it ships in. It never uses a registry for them, and stops when it finds none. A
+frontend outside the checkout's pnpm workspace depends on the web SDK as
+published: the bundle's staged `web-sdk/`, or a `pnpm pack` tarball of a
+checkout's built `web-sdk` written into the frontend directory. Every scaffold
+is its own Cargo workspace root, so it builds the same inside and outside a
+checkout.
 
 ### `broccoli-dev plugin build`
 
