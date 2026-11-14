@@ -573,41 +573,34 @@ mod tests {
         assert_eq!(err.into_response().status, 400);
     }
 
-    /// Queues the reads `contest::check_access` makes for a public, active
-    /// contest.
-    fn queue_public_contest(host: &Host) {
-        host.db.queue_query_result(json!([{
-            "contest_type": "icpc", "is_public": true, "is_active": true, "phase": "during"
-        }]));
-    }
-
-    fn arbitrary_request(user_id: i32, body: serde_json::Value) -> PluginHttpRequest {
+    /// A pasted-code print on contest 5's route, by a registered contestant
+    /// or not.
+    fn arbitrary_request(
+        user_id: i32,
+        participant: bool,
+        body: serde_json::Value,
+    ) -> PluginHttpRequest {
         let mut req = with_user(request(), user_id);
+        req.contest = Some(broccoli_server_sdk::types::RouteContest {
+            id: 5,
+            contest_type: Some("icpc".into()),
+            is_public: true,
+            phase: broccoli_server_sdk::types::ContestPhase::Running,
+            participant,
+        });
         req.body = Some(body);
         req
     }
 
     fn scratch() -> serde_json::Value {
-        json!({ "contest_id": 5, "filename": "scratch.py", "language": "python3", "source": "print(1)\n" })
-    }
-
-    #[test]
-    fn arbitrary_print_needs_a_contest() {
-        let host = Host::mock();
-        let req = arbitrary_request(
-            10,
-            json!({ "filename": "scratch.py", "source": "print(1)\n" }),
-        );
-        let err = handle_print_arbitrary(&host, &req).unwrap_err();
-        assert_eq!(err.into_response().status, 400);
-        assert!(host.db.executions().is_empty());
+        json!({ "filename": "scratch.py", "language": "python3", "source": "print(1)\n" })
     }
 
     #[test]
     fn arbitrary_print_is_off_unless_the_contest_allows_it() {
         let host = Host::mock();
-        queue_public_contest(&host);
-        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        let err =
+            handle_print_arbitrary(&host, &arbitrary_request(10, true, scratch())).unwrap_err();
         assert_eq!(err.into_response().status, 403);
         assert!(host.db.executions().is_empty());
     }
@@ -621,9 +614,8 @@ mod tests {
             config::NAMESPACE,
             json!({ "allow_arbitrary": true }),
         );
-        queue_public_contest(&host);
-        host.db.queue_query_result(json!([{ "exists": false }]));
-        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        let err =
+            handle_print_arbitrary(&host, &arbitrary_request(10, false, scratch())).unwrap_err();
         assert_eq!(err.into_response().status, 403);
         assert!(host.db.executions().is_empty());
     }
@@ -637,11 +629,9 @@ mod tests {
             config::NAMESPACE,
             json!({ "allow_arbitrary": true, "max_jobs_per_user": 3 }),
         );
-        queue_public_contest(&host);
-        host.db.queue_query_result(json!([{ "exists": true }]));
         host.db.queue_execute_result(1); // quota claimed
         host.db.queue_execute_result(1); // job inserted
-        let resp = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap();
+        let resp = handle_print_arbitrary(&host, &arbitrary_request(10, true, scratch())).unwrap();
         assert_eq!(resp.status, 201);
         let execs = host.db.executions();
         assert!(
@@ -665,10 +655,9 @@ mod tests {
             config::NAMESPACE,
             json!({ "allow_arbitrary": true }),
         );
-        queue_public_contest(&host);
-        host.db.queue_query_result(json!([{ "exists": true }]));
         host.db.queue_execute_result(0); // quota exhausted
-        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        let err =
+            handle_print_arbitrary(&host, &arbitrary_request(10, true, scratch())).unwrap_err();
         assert_eq!(err.into_response().status, 429);
         assert_eq!(host.db.executions().len(), 1);
     }
