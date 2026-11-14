@@ -1,11 +1,11 @@
-//! The one place that mints credentials.
+//! The one place that mints credentials and opens and ends sign-in sessions.
 //!
 //! Every endpoint that hands out an access token (`login`, `refresh`,
 //! `cli-refresh`, `cli-token`, the device flow) goes through
 //! [`issue_access_token`], which reads the user's CURRENT roles and
 //! permissions from the database. Nothing copies grants out of a presented
 //! JWT: re-signing old claims with a fresh `iat` would launder a token that
-//! `FreshAuthUser` rejects (revoked role, reset password, deleted account)
+//! freshness check rejects (revoked role, reset password, deleted account)
 //! into one it accepts.
 
 use common::db::DatabaseConnection;
@@ -13,9 +13,59 @@ use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, TransactionTrait,
 };
 
-use crate::entity::refresh_token;
+use crate::entity::{auth_session, refresh_token};
 use crate::error::AppError;
 use crate::utils::{hash, jwt, refresh};
+
+/// An access token is valid this long; a session that has no unexpired
+/// refresh token and is older than this can mint nothing more.
+const ACCESS_TOKEN_TTL_SECS: i32 = jwt::ACCESS_TOKEN_TTL.num_seconds() as i32;
+
+/// Open a session for the active user `$1`, purging the user's sessions that
+/// can mint nothing more on the way (older than an access token and without an
+/// unexpired refresh token). No row comes back for a missing or deleted user.
+const OPEN_SESSION_SQL: &str = r#"
+WITH purged AS (
+    DELETE FROM auth_session s
+    WHERE s.user_id = $1
+      AND s.created_at < now() - make_interval(secs => $2::int)
+      AND NOT EXISTS (
+          SELECT 1 FROM refresh_tokens r WHERE r.session_id = s.id AND r.expires_at > now()
+      )
+)
+INSERT INTO auth_session (user_id, created_at)
+SELECT id, now() FROM "user" WHERE id = $1 AND deleted_at IS NULL
+RETURNING id
+"#;
+
+/// Open a sign-in session for `user_id` (a login or a device approval).
+///
+/// Returns `TokenInvalid` when the user is missing or soft-deleted.
+pub async fn open_session<C: ConnectionTrait>(db: &C, user_id: i32) -> Result<i64, AppError> {
+    let row = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            OPEN_SESSION_SQL,
+            [user_id.into(), ACCESS_TOKEN_TTL_SECS.into()],
+        ))
+        .await?
+        .ok_or(AppError::TokenInvalid)?;
+    Ok(row.try_get("", "id")?)
+}
+
+/// End the sessions `ids` names: their refresh tokens go with them and their
+/// access tokens fail the freshness check from now on. Ending an
+/// already-ended session is a no-op.
+pub async fn end_sessions<C: ConnectionTrait>(db: &C, ids: &[i64]) -> Result<(), AppError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    auth_session::Entity::delete_many()
+        .filter(auth_session::Column::Id.is_in(ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(())
+}
 
 /// A freshly signed access token and the identity baked into it.
 pub struct AccessGrant {
@@ -53,7 +103,8 @@ FROM "user" u
 WHERE u.id = $1 AND u.deleted_at IS NULL
 "#;
 
-/// Sign an access token for `user_id` from the user's current database state.
+/// Sign an access token for `user_id` in session `session_id` from the user's
+/// current database state.
 ///
 /// Returns `TokenInvalid` when the user is missing or soft-deleted, so a caller
 /// that authenticated with an old credential cannot mint a token for an
@@ -62,6 +113,7 @@ pub async fn issue_access_token<C: ConnectionTrait>(
     db: &C,
     jwt_secret: &str,
     user_id: i32,
+    session_id: i64,
 ) -> Result<AccessGrant, AppError> {
     let row = db
         .query_one_raw(Statement::from_sql_and_values(
@@ -80,6 +132,7 @@ pub async fn issue_access_token<C: ConnectionTrait>(
 
     let token = jwt::sign_access_token(
         user_id,
+        session_id,
         &username,
         roles.clone(),
         permissions.clone(),
@@ -142,13 +195,14 @@ purged AS (
     DELETE FROM refresh_tokens WHERE user_id = $3 AND expires_at < now()
 )
 INSERT INTO refresh_tokens
-    (selector, validator, user_id, expires_at, created_at, revoked_at, rotated_from)
-VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL, $1)
+    (selector, validator, user_id, expires_at, created_at, revoked_at, rotated_from, session_id)
+VALUES ($2, $4, $3, now() + make_interval(days => $5::int), now(), NULL, $1, $6)
 "#;
 
 async fn issue_refresh_token<C: ConnectionTrait>(
     db: &C,
     user_id: i32,
+    session_id: i64,
     retire: Option<&str>,
 ) -> Result<String, AppError> {
     let selector = hash::generate_random_string();
@@ -162,19 +216,21 @@ async fn issue_refresh_token<C: ConnectionTrait>(
             user_id.into(),
             hash_validator(&validator).into(),
             (refresh::REFRESH_TOKEN_EXPIRY_DAYS as i32).into(),
+            session_id.into(),
         ],
     ))
     .await?;
     Ok(refresh::construct_refresh_token(&selector, &validator))
 }
 
-/// Create a refresh-token row for `user_id` and return the opaque token
-/// (`selector:validator`) the client stores.
+/// Create a refresh-token row for `user_id` in session `session_id` and return
+/// the opaque token (`selector:validator`) the client stores.
 pub async fn mint_refresh_token<C: ConnectionTrait>(
     db: &C,
     user_id: i32,
+    session_id: i64,
 ) -> Result<String, AppError> {
-    issue_refresh_token(db, user_id, None).await
+    issue_refresh_token(db, user_id, session_id, None).await
 }
 
 /// A presented refresh token whose validator matched its row, classified with
@@ -182,7 +238,7 @@ pub async fn mint_refresh_token<C: ConnectionTrait>(
 struct PresentedToken {
     selector: String,
     user_id: i32,
-    rotated_from: Option<String>,
+    session_id: Option<i64>,
     state: TokenState,
 }
 
@@ -216,7 +272,7 @@ SELECT selector, validator, user_id,
        (SELECT count(*) FROM refresh_tokens c WHERE c.rotated_from = r.selector) AS children,
        (SELECT count(*) FROM refresh_tokens c
         WHERE c.rotated_from = r.selector AND c.revoked_at IS NULL) AS live_children,
-       rotated_from
+       session_id
 FROM refresh_tokens r
 WHERE selector = $1
 "#;
@@ -271,34 +327,37 @@ async fn find_presented<C: ConnectionTrait>(
     Ok(Some(PresentedToken {
         selector: row.try_get("", "selector")?,
         user_id: row.try_get("", "user_id")?,
-        rotated_from: row.try_get("", "rotated_from")?,
+        session_id: row.try_get("", "session_id")?,
         state,
     }))
 }
 
-/// Delete the refresh-token row a presented token names (logout), together
-/// with the row it was rotated from, which would otherwise stay replayable
-/// for the rest of the grace window. Returns `TokenInvalid` when it names
-/// none.
-pub async fn revoke_presented(db: &DatabaseConnection, presented: &str) -> Result<(), AppError> {
-    let token = find_presented(db, presented, false)
-        .await?
-        .ok_or(AppError::TokenInvalid)?;
-    refresh_token::Entity::delete_many()
-        .filter(
-            refresh_token::Column::Selector
-                .is_in(std::iter::once(token.selector).chain(token.rotated_from)),
-        )
-        .exec(db)
-        .await?;
-    Ok(())
+/// The session a presented refresh token belongs to, if the token is genuine
+/// (its validator matches), whatever its state. A token outside any session
+/// is deleted on the way, since it can never be used.
+pub async fn session_of_presented(
+    db: &DatabaseConnection,
+    presented: &str,
+) -> Result<Option<i64>, AppError> {
+    let Some(token) = find_presented(db, presented, false).await? else {
+        return Ok(None);
+    };
+    if token.session_id.is_none() {
+        refresh_token::Entity::delete_by_id(token.selector)
+            .exec(db)
+            .await?;
+    }
+    Ok(token.session_id)
 }
 
-/// [`refresh_token::LOCK_OWNER_SQL`], addressed by the presented selector.
+/// [`refresh_token::LOCK_OWNER_SQL`], addressed by the presented selector,
+/// and a key-share lock on the token's session. A logout ending the session
+/// waits for the rotation, or the rotation finds the session gone, never the
+/// two waiting on each other's rows.
 const LOCK_OWNER_BY_SELECTOR_SQL: &str = r#"
-SELECT 1 FROM "user"
-WHERE id = (SELECT user_id FROM refresh_tokens WHERE selector = $1)
-FOR NO KEY UPDATE
+SELECT 1 FROM "user" u JOIN auth_session s ON s.user_id = u.id
+WHERE s.id = (SELECT session_id FROM refresh_tokens WHERE selector = $1)
+FOR NO KEY UPDATE OF u FOR KEY SHARE OF s
 "#;
 
 /// Exchange a presented refresh token for a new access token and a new
@@ -314,8 +373,8 @@ pub async fn rotate_refresh_token(
 ) -> Result<(AccessGrant, String), AppError> {
     let txn = db.begin().await?;
 
-    // Take the owner lock before the token row lock, the same order as
-    // `revoke_all_for_user` (see `refresh_token::LOCK_OWNER_SQL`).
+    // Take the owner and session locks before the token row lock, the same
+    // order as `revoke_all_for_user` (see `refresh_token::LOCK_OWNER_SQL`).
     if let Ok((selector, _)) = refresh::parse_refresh_token(presented) {
         txn.execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -328,6 +387,13 @@ pub async fn rotate_refresh_token(
     let token = find_presented(&txn, presented, true)
         .await?
         .ok_or(AppError::TokenInvalid)?;
+    let Some(session_id) = token.session_id else {
+        refresh_token::Entity::delete_by_id(token.selector)
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
+        return Err(AppError::TokenInvalid);
+    };
 
     match token.state {
         TokenState::Live => {}
@@ -343,15 +409,17 @@ pub async fn rotate_refresh_token(
             return Err(AppError::TokenInvalid);
         }
         // The validator matched, so this is the token's real holder or a
-        // thief: kill the whole family so a stolen chain cannot outlive
-        // detection. A mismatched validator never reaches here, so nobody can
-        // trip a victim's family kill by guessing a revoked selector.
+        // thief: end the whole family, the token's session, so a stolen chain
+        // cannot outlive detection; its access tokens die with it. A
+        // mismatched validator never reaches here, so nobody can trip a
+        // victim's family kill by guessing a revoked selector.
         TokenState::Rotated(Replay::Reuse) => {
             tracing::warn!(
                 user_id = token.user_id,
-                "Refresh token reuse detected; revoking all refresh tokens for the user"
+                session_id,
+                "Refresh token reuse detected; ending its session"
             );
-            refresh_token::Entity::revoke_all_for_user(&txn, token.user_id).await?;
+            end_sessions(&txn, &[session_id]).await?;
             txn.commit().await?;
             return Err(AppError::TokenInvalid);
         }
@@ -364,7 +432,7 @@ pub async fn rotate_refresh_token(
         }
     }
 
-    let grant = match issue_access_token(&txn, jwt_secret, token.user_id).await {
+    let grant = match issue_access_token(&txn, jwt_secret, token.user_id, session_id).await {
         Ok(grant) => grant,
         Err(AppError::TokenInvalid) => {
             // The user was soft-deleted after this token was issued.
@@ -379,7 +447,8 @@ pub async fn rotate_refresh_token(
 
     // The rotated row is retained (marked revoked) instead of deleted, so a
     // later replay is detectable as reuse rather than an unknown selector.
-    let new_refresh_token = issue_refresh_token(&txn, token.user_id, Some(&token.selector)).await?;
+    let new_refresh_token =
+        issue_refresh_token(&txn, token.user_id, session_id, Some(&token.selector)).await?;
     txn.commit().await?;
     Ok((grant, new_refresh_token))
 }

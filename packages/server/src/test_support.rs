@@ -40,7 +40,7 @@ pub(crate) async fn seed_user_and_problem(db: &DatabaseConnection) -> (i32, i32)
     let u = user::ActiveModel {
         username: Set("test-user".into()),
         display_name: Set("test-user".into()),
-        password: Set("x".into()),
+        password: Set(Some("x".into())),
         created_at: Set(now),
         ..Default::default()
     }

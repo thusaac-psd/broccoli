@@ -18,7 +18,7 @@ use uuid::Uuid;
 // `tests/integration/visibility_matrix.rs::problem_attachment_list` suite.
 use crate::entity::{problem, problem_attachment};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
+use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::path::AppPath;
 use crate::handlers::problem::require_problem_part_reachable;
 use crate::models::attachment::{AttachmentListResponse, AttachmentResponse};
@@ -437,7 +437,7 @@ async fn download_attachment_in(
 )]
 #[instrument(skip(state, auth_user), fields(problem_id, ref_id))]
 pub async fn delete_attachment(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((problem_id, ref_id)): AppPath<(i32, String)>,
 ) -> Result<impl IntoResponse, AppError> {

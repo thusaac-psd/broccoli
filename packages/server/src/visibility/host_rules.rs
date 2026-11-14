@@ -714,6 +714,7 @@ mod tests {
     fn subject(user_id: i32, permissions: &[&str]) -> Subject {
         Subject::from_auth_user(&AuthUser {
             user_id,
+            session_id: 0,
             username: "viewer".into(),
             roles: vec![],
             permissions: permissions.iter().map(|p| p.to_string()).collect(),

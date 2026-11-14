@@ -6,7 +6,7 @@ use broccoli_server_sdk::permissions as perm;
 use tracing::{info, instrument};
 
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::FreshAuthUser;
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::models::auth::RegistrationStatus;
 use crate::state::AppState;
@@ -29,7 +29,7 @@ use crate::state::AppState;
 )]
 #[instrument(skip(state, auth_user, payload), fields(user_id = auth_user.user_id, open = payload.open))]
 pub async fn set_registration_status(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<RegistrationStatus>,
 ) -> Result<Json<RegistrationStatus>, AppError> {

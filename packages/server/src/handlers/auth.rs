@@ -27,7 +27,7 @@ use crate::services::ip_quota;
 // could route through.
 use crate::entity::user;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::{AuthUser, BearerSession, FreshAuthUser};
 use crate::extractors::json::AppJson;
 use crate::models::auth::{
     CliRefreshRequest, CliTokenResponse, DeviceAuthorizeRequest, DeviceCodeRequest,
@@ -36,7 +36,8 @@ use crate::models::auth::{
     validate_register_request,
 };
 use crate::services::auth_tokens::{
-    issue_access_token, mint_refresh_token, revoke_presented, rotate_refresh_token,
+    end_sessions, issue_access_token, mint_refresh_token, open_session, rotate_refresh_token,
+    session_of_presented,
 };
 use crate::services::device_auth::{self, PollOutcome};
 use crate::state::AppState;
@@ -156,11 +157,11 @@ pub async fn login(
         .one(&state.db)
         .await?;
 
-    // An unknown username is checked against a dummy hash so both cases cost
-    // the same.
+    // An unknown username and an account without a password are checked
+    // against a dummy hash, so every refusal costs the same and reads the same.
     let is_valid = hash::verify_password_off_thread(
         payload.password.clone(),
-        maybe_user.as_ref().map(|u| u.password.clone()),
+        maybe_user.as_ref().and_then(|u| u.password.clone()),
     )
     .await
     .map_err(|e| AppError::Internal(format!("Password verify error: {e}")))?;
@@ -180,9 +181,12 @@ pub async fn login(
         state.login_throttle.clear(&throttle_key, ip);
     }
 
-    let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
-
-    let refresh_token = mint_refresh_token(&state.db, user.id).await?;
+    let txn = state.db.begin().await?;
+    let session_id = open_session(&txn, user.id).await?;
+    let grant =
+        issue_access_token(&txn, &state.config.auth.jwt_secret, user.id, session_id).await?;
+    let refresh_token = mint_refresh_token(&txn, user.id, session_id).await?;
+    txn.commit().await?;
     let cookie = refresh::build_refresh_cookie(&refresh_token, https.0);
 
     Ok((jar.add(cookie), Json(LoginResponse::from(grant))))
@@ -225,20 +229,24 @@ pub async fn refresh(
     tag = "Auth",
     operation_id = "logoutUser",
     summary = "Log out user",
-    description = "Revokes the refresh token and clears the cookie.",
+    description = "Ends the sign-in session the refresh cookie belongs to, and the one the bearer access token names, if either is sent, then clears the cookie. Ending a session deletes all of its refresh tokens, and its access tokens are refused from then on on every state-changing request (401 TOKEN_INVALID); a read accepts them until they expire, at most 5 minutes. The user's other sessions (other browsers, the CLI) stay signed in. A CLI logs out by sending its access token. Always 204: an unknown, expired or already ended session needs no ending.",
     responses(
         (status = 204, description = "Logged out successfully"),
     ),
 )]
-#[instrument(skip(state, jar))]
+#[instrument(skip(state, jar, bearer))]
 pub async fn logout(
     State(state): State<AppState>,
     https: ReachedOverHttps,
+    BearerSession(bearer): BearerSession,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(cookie) = jar.get(refresh::REFRESH_COOKIE_NAME) {
-        revoke_presented(&state.db, cookie.value()).await?;
-    }
+    let cookie = match jar.get(refresh::REFRESH_COOKIE_NAME) {
+        Some(cookie) => session_of_presented(&state.db, cookie.value()).await?,
+        None => None,
+    };
+    let sessions: Vec<i64> = bearer.into_iter().chain(cookie).collect();
+    end_sessions(&state.db, &sessions).await?;
 
     let removal_cookie = refresh::build_removal_cookie(https.0);
 
@@ -251,29 +259,23 @@ pub async fn logout(
     tag = "Auth",
     operation_id = "getCurrentUser",
     summary = "Get current authenticated user profile",
-    description = "Returns the authenticated user's profile, including the roles and permissions embedded in their JWT.",
+    description = "Returns the authenticated user's profile, including the roles and permissions embedded in their JWT. A token that a credential change, a logout or a deactivation has ended is 401 TOKEN_INVALID here, so a client learns at once that it must refresh.",
     responses(
         (status = 200, description = "Current user info", body = MeResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
-pub async fn me(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<MeResponse>, AppError> {
-    let user = user::Entity::find_active_by_id(auth_user.user_id)
-        .one(&state.db)
-        .await?
-        .ok_or(AppError::TokenInvalid)?;
-    Ok(Json(MeResponse {
-        id: auth_user.user_id,
+#[instrument(skip(auth_user), fields(user_id = auth_user.user_id))]
+pub async fn me(auth_user: FreshAuthUser) -> Json<MeResponse> {
+    let FreshAuthUser { user, display_name } = auth_user;
+    Json(MeResponse {
+        id: user.user_id,
         username: user.username,
-        display_name: user.display_name,
-        roles: auth_user.roles,
-        permissions: auth_user.permissions,
-    }))
+        display_name,
+        roles: user.roles,
+        permissions: user.permissions,
+    })
 }
 
 const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -462,11 +464,11 @@ pub async fn request_device_code(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn authorize_device(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<DeviceAuthorizeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // `FreshAuthUser` refused a stale or deleted caller. Only the approving
+    // `AuthUser` refused a stale or deleted caller. Only the approving
     // user is recorded; the CLI's token is minted from that user's current
     // grants when it collects it.
     device_auth::authorize(
@@ -534,7 +536,7 @@ pub async fn poll_device_token(
     tag = "Auth",
     operation_id = "issueCliToken",
     summary = "Issue a long-lived refresh token for the CLI",
-    description = "Exchanges the caller's current access token for a fresh access token plus a long-lived refresh token. The CLI stores the refresh token and uses POST /auth/cli-refresh to obtain new access tokens without re-prompting.",
+    description = "Exchanges the caller's current access token for a fresh access token plus a long-lived refresh token, both in the caller's sign-in session. The CLI stores the refresh token and uses POST /auth/cli-refresh to obtain new access tokens without re-prompting.",
     responses(
         (status = 200, description = "CLI token issued", body = CliTokenResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
@@ -543,15 +545,21 @@ pub async fn poll_device_token(
 )]
 #[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
 pub async fn issue_cli_token(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<CliTokenResponse>, AppError> {
-    // `FreshAuthUser` refused a stale or deleted caller; the access token is
+    // `AuthUser` refused a stale or deleted caller; the access token is
     // built from current grants before any refresh row exists for it.
-    let token = issue_access_token(&state.db, &state.config.auth.jwt_secret, auth_user.user_id)
-        .await?
-        .token;
-    let refresh_token = mint_refresh_token(&state.db, auth_user.user_id).await?;
+    let token = issue_access_token(
+        &state.db,
+        &state.config.auth.jwt_secret,
+        auth_user.user_id,
+        auth_user.session_id,
+    )
+    .await?
+    .token;
+    let refresh_token =
+        mint_refresh_token(&state.db, auth_user.user_id, auth_user.session_id).await?;
 
     Ok(Json(CliTokenResponse {
         token,

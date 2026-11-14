@@ -55,8 +55,8 @@ pub enum Selection {
 #[derive(Debug, Clone)]
 pub struct ExportOptions {
     pub selection: Selection,
-    /// Carry the accounts' password hashes. Without it every password is
-    /// blank, so the archive holds no credentials.
+    /// Carry the accounts' password hashes. Without it no account has a
+    /// password, so the archive holds no credentials.
     pub with_secrets: bool,
 }
 
@@ -380,7 +380,7 @@ pub async fn export(
         let select: Vec<String> = columns
             .iter()
             .map(|c| match (table.name, c.as_str(), options.with_secrets) {
-                ("user", "password", false) => "''::text".to_string(),
+                ("user", "password", false) => "NULL::text".to_string(),
                 _ => ident(c),
             })
             .collect();

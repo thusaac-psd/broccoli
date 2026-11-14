@@ -26,6 +26,8 @@ mod m0002_checker_format_no_default;
 mod m0003_username_case_insensitive;
 mod m0004_platform_setting;
 mod m0005_no_plugin_column_defaults;
+mod m0006_auth_session;
+mod m0007_user_password_optional;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -162,6 +164,8 @@ impl MigratorTrait for Migrator {
             Box::new(m0003_username_case_insensitive::Migration),
             Box::new(m0004_platform_setting::Migration),
             Box::new(m0005_no_plugin_column_defaults::Migration),
+            Box::new(m0006_auth_session::Migration),
+            Box::new(m0007_user_password_optional::Migration),
         ]
     }
 }

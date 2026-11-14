@@ -190,16 +190,25 @@ export function errorKindKey(kind: ErrorKind): string {
   return `apiError.kind.${kind}`;
 }
 
-/** `details` as message parameters: its top-level strings and numbers. */
+/**
+ * `details` as message parameters: its top-level strings and numbers, and its
+ * lists of them (such as the `usernames` a conflict names) joined by commas.
+ */
 function detailParams(details: unknown): Record<string, string | number> {
   const params: Record<string, string | number> = {};
   if (typeof details !== 'object' || details === null) return params;
   for (const [key, value] of Object.entries(details)) {
     if (typeof value === 'string' || typeof value === 'number') {
       params[key] = value;
+    } else if (Array.isArray(value) && value.every(isScalar)) {
+      params[key] = value.join(', ');
     }
   }
   return params;
+}
+
+function isScalar(value: unknown): value is string | number {
+  return typeof value === 'string' || typeof value === 'number';
 }
 
 /** What to tell the user about a failure, in their language. */

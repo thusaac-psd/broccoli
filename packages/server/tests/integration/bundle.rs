@@ -9,7 +9,7 @@ use common::storage::BlobStore;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use server::bundle::{ExportOptions, ImportOptions, Selection};
 
-use crate::common::TestApp;
+use crate::common::{TestApp, routes};
 
 async fn text(app: &TestApp, sql: &str) -> String {
     app.db
@@ -198,10 +198,11 @@ async fn a_contest_bundle_restores_every_row_and_blob_onto_another_server() {
     assert_eq!(
         text(
             &target,
-            "SELECT display_name || '|' || password AS v FROM \"user\" WHERE username = 'dave'"
+            "SELECT display_name || '|' || (password IS NULL)::text AS v FROM \"user\" \
+             WHERE username = 'dave'"
         )
         .await,
-        "dave|"
+        "dave|true"
     );
     // A role the target lacked comes with its permissions; a role it had
     // gains none.
@@ -307,4 +308,80 @@ async fn an_export_with_a_missing_blob_writes_nothing() {
         "a failed export wrote {} bytes",
         archive.len()
     );
+}
+
+/// An account a bundle brings without its password has none: signing in to
+/// it is refused like a wrong password, admins see that it has none, and it
+/// signs in once an admin sets one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_imported_without_its_password_signs_in_once_one_is_set() {
+    let source = TestApp::spawn().await;
+    let (contest, _) = seed_contest(&source).await;
+    let archive = export(
+        &source,
+        ExportOptions {
+            selection: Selection::Contest(contest),
+            with_secrets: false,
+        },
+    )
+    .await
+    .expect("export");
+    let target = TestApp::spawn().await;
+    let admin = target
+        .create_user_with_role("target_admin", "pass1234", "admin")
+        .await;
+    import(&target, &archive, ImportOptions::default())
+        .await
+        .expect("import");
+
+    for password in ["source-password", ""] {
+        let login = target
+            .post_without_token(
+                routes::LOGIN,
+                &serde_json::json!({ "username": "dave", "password": password }),
+            )
+            .await;
+        if password.is_empty() {
+            assert_eq!(login.status, 400, "{}", login.text);
+        } else {
+            assert_eq!(login.status, 401, "{}", login.text);
+            assert_eq!(login.body["code"], "INVALID_CREDENTIALS");
+        }
+    }
+
+    let users = target.get_with_token(routes::USERS, &admin).await;
+    assert_eq!(users.status, 200, "{}", users.text);
+    let dave = users
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "dave");
+    let dave = dave.expect("dave is listed").clone();
+    assert_eq!(dave["has_password"], false, "{dave}");
+    let admin_row = users
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "target_admin");
+    assert_eq!(admin_row.expect("admin is listed")["has_password"], true);
+
+    let id = dave["id"].as_i64().unwrap() as i32;
+    let set = target
+        .patch_with_token(
+            &routes::user(id),
+            &serde_json::json!({ "password": "a-new-password" }),
+            &admin,
+        )
+        .await;
+    assert_eq!(set.status, 200, "{}", set.text);
+    assert_eq!(set.body["has_password"], true);
+    let login = target
+        .post_without_token(
+            routes::LOGIN,
+            &serde_json::json!({ "username": "dave", "password": "a-new-password" }),
+        )
+        .await;
+    assert_eq!(login.status, 200, "{}", login.text);
 }
