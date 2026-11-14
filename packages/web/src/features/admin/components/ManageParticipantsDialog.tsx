@@ -205,6 +205,7 @@ function EnrolledTab({
                   </td>
                   <td className="px-3 py-2 text-right">
                     <Button
+                      aria-label={t('admin.participants.remove')}
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-destructive hover:text-destructive"

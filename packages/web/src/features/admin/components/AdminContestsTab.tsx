@@ -647,6 +647,7 @@ export function ContestProblemsDialog({
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <Button
+                          aria-label={t('markdown.preview')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
@@ -655,6 +656,7 @@ export function ContestProblemsDialog({
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
                         <Button
+                          aria-label={t('admin.configure')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
@@ -666,6 +668,7 @@ export function ContestProblemsDialog({
                           <Settings className="h-3.5 w-3.5" />
                         </Button>
                         <Button
+                          aria-label={t('common.remove')}
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7 text-destructive hover:text-destructive"
@@ -896,7 +899,12 @@ function useContestColumns({
       cell: ({ row }) => (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-7 w-7">
+            <Button
+              aria-label={t('admin.actions')}
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+            >
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>

@@ -436,6 +436,7 @@ export function ProblemForm({
                     >
                       <span>{filename}</span>
                       <button
+                        aria-label={t('common.remove')}
                         type="button"
                         onClick={() => removeFilename(lang, filename)}
                         className="text-muted-foreground hover:text-destructive"

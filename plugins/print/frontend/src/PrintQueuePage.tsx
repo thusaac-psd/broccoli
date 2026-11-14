@@ -303,6 +303,7 @@ export function PrintQueuePage() {
           return (
             <div className="flex items-center justify-end gap-1">
               <Button
+                aria-label={t('print.queue.action.viewCode')}
                 variant="ghost"
                 size="sm"
                 className="h-7 gap-1 text-muted-foreground hover:text-foreground"
@@ -313,6 +314,7 @@ export function PrintQueuePage() {
               </Button>
               {job.status === 'pending_approval' && (
                 <Button
+                  aria-label={t('print.queue.action.approve')}
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-emerald-600 hover:text-emerald-700 dark:text-emerald-400"
@@ -324,6 +326,7 @@ export function PrintQueuePage() {
               )}
               {['done', 'failed', 'canceled'].includes(job.status) && (
                 <Button
+                  aria-label={t('print.queue.action.reprint')}
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-muted-foreground hover:text-foreground"
@@ -345,6 +348,7 @@ export function PrintQueuePage() {
               )}
               {!['done', 'canceled'].includes(job.status) && (
                 <Button
+                  aria-label={t('print.queue.action.cancel')}
                   variant="ghost"
                   size="sm"
                   className="h-7 gap-1 text-muted-foreground hover:text-red-600 dark:hover:text-red-400"

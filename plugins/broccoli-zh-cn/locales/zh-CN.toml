@@ -722,7 +722,7 @@
 'admin.testCases.bulkUpload.outputFormatRequired' = '请输入输出格式。'
 'admin.testCases.labelPlaceholder' = 'sample_01'
 'admin.testCases.outputPlaceholder' = '0 1'
-'admin.testCases.inputPlaceholder' = "4\n2 7 11 15\n9"
+'admin.testCases.inputPlaceholder' = '4\n2 7 11 15\n9'
 
 # Toast notifications
 'toast.contest.created' = '比赛创建成功。'
@@ -1144,3 +1144,14 @@
 'dateTime.clear' = '清除'
 'fileDrop.label' = '上传文件'
 'fileDrop.prompt' = '将文件拖到此处，或点击选择'
+'common.remove' = '移除'
+'common.download' = '下载'
+'common.increase' = '增加'
+'common.decrease' = '减少'
+'table.firstPage' = '第一页'
+'table.previousPage' = '上一页'
+'table.nextPage' = '下一页'
+'table.lastPage' = '最后一页'
+'editor.addTestCase' = '添加测试用例'
+'users.roles.revokePermission' = '撤销权限'
+'users.users.revokeRole' = '撤销角色'

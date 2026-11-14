@@ -178,6 +178,7 @@ export function ManageRolePermissionsDialog({
                       {permission}
                     </Badge>
                     <Button
+                      aria-label={t('users.roles.revokePermission')}
                       type="button"
                       variant="ghost"
                       size="sm"

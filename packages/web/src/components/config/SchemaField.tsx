@@ -371,6 +371,7 @@ export function SchemaField({
                   />
                 </div>
                 <Button
+                  aria-label={t('common.remove')}
                   type="button"
                   variant="ghost"
                   size="icon"

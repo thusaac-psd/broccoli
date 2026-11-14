@@ -127,6 +127,7 @@ export function BlobRefField({
             </Button>
           </FileDropZone>
           <Button
+            aria-label={t('common.remove')}
             type="button"
             variant="ghost"
             size="icon"

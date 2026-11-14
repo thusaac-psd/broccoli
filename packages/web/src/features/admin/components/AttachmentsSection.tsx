@@ -314,6 +314,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
                 {/* Upload single */}
                 <Button
+                  aria-label={t('admin.attachments.upload')}
                   type="button"
                   variant="ghost"
                   size="icon"
@@ -327,6 +328,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
                 {/* Remove from staging */}
                 <Button
+                  aria-label={t('common.remove')}
                   type="button"
                   variant="ghost"
                   size="icon"
@@ -378,6 +380,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
               {/* Copy Markdown */}
               <Button
+                aria-label={t('admin.attachments.copyMarkdown')}
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -393,6 +396,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
               </Button>
 
               <Button
+                aria-label={t('common.download')}
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -402,6 +406,7 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
                 <Download className="h-3.5 w-3.5" />
               </Button>
               <Button
+                aria-label={t('admin.delete')}
                 type="button"
                 variant="ghost"
                 size="icon"

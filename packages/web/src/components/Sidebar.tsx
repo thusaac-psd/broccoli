@@ -361,13 +361,9 @@ export function Sidebar() {
               <Link to="/">
                 <img
                   src={logo}
+                  alt={t('app.name')}
                   className="flex items-center justify-center w-full"
                 />
-                {/* <div className="flex flex-col gap-0.5 leading-none">
-                  <span className="font-semibold">{t('app.name')}</span>
-                  <span className="text-xs">{t('app.tagline')}</span>
-                </div>
-                */}
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

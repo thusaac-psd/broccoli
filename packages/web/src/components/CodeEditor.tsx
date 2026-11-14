@@ -581,6 +581,9 @@ function CodeEditorContent({
         </DropdownMenu>
       )}
       <Button
+        aria-label={t(
+          isFormatLocked ? 'editor.uploadIntoTab' : 'editor.upload',
+        )}
         variant="ghost"
         size="sm"
         className="h-7 w-7 p-0 text-muted-foreground"
@@ -679,6 +682,7 @@ function CodeEditorContent({
       ))}
       {!isFormatLocked && (
         <button
+          aria-label={t('editor.addFile')}
           type="button"
           onClick={addFile}
           title={t('editor.addFile')}
@@ -799,6 +803,7 @@ function CodeEditorContent({
             ))}
             {customTestCases.length < 10 && (
               <button
+                aria-label={t('editor.addTestCase')}
                 type="button"
                 onClick={addTestCase}
                 className="px-1.5 py-1 text-muted-foreground hover:text-foreground transition-colors"
