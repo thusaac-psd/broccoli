@@ -23,7 +23,7 @@ current judgement from the moment it exists.
 | claim | `Queued` | `Pending`, owned, lease stamped | claim fiber |
 | progress | in flight | `Compiling`, `Running` | plugin (`host.submission.update`, `host.code_run.update`) |
 | finish | in flight | `Judged`, `CompilationError` (finalized) | plugin |
-| fail | in flight | `SystemError` (finalized) | dispatch (`fail_dispatch`) |
+| fail | in flight | `SystemError` (finalized) | dispatch, an ended judging session (`fail_dispatch`) |
 | requeue | in flight | `Queued`, new epoch, no owner | `release_leases`, `reclaim_abandoned` |
 | exhaust | in flight | `SystemError` (finalized), dead-lettered | `reclaim_abandoned` |
 | system-error retry | finalized `SystemError`, current | `Queued`, new epoch | `retry_system_errors` |
@@ -71,6 +71,30 @@ replica wakes on the same notification; `SKIP LOCKED` in the claim splits the
 work. A one-second fallback tick covers notifications lost while the
 listening connection was down; every reconnect also wakes the
 fiber.
+
+## Judging sessions end in a verdict
+
+A contest plugin judges a submission in a detached session: the host runs its
+test cases and calls the plugin back with each result (see
+`services/windowed_session.rs`). The plugin records the verdict from a
+callback. The session loop returns how it ended, a `SessionEnd`, on every
+exit, and the evaluate driver acts on it once:
+
+- `Decided`: the plugin ended the session (finish, cancel, or its answer to
+  the last result). A judgement it left open is finalized as `SystemError`
+  with `PLUGIN_NO_VERDICT`.
+- `Aborted`: a callback failed, or the plugin is gone (disabled, unloaded).
+  The judgement is finalized as `SystemError` with `PLUGIN_SESSION_ABORTED`.
+- `Interrupted`: this server is shutting down. Nothing is recorded; the
+  shutdown releases the judgement and a peer judges it again.
+
+Both finalizations go through `fail_dispatch`, fenced on the judgement's
+epoch and on it being open, so a verdict the plugin already wrote stands. The
+after-judging hooks fire after either. While the plugin providing a contest
+type is disabled, a submission to its contests is refused with
+`503 CONTEST_TYPE_DISABLED` and no `Retry-After`; `CONTEST_TYPE_UNAVAILABLE`
+(with `Retry-After`) means only that the serving replica has not loaded the
+plugin yet.
 
 ## The submission row is a cache
 

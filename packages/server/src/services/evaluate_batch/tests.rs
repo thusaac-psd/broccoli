@@ -52,53 +52,6 @@ fn giveup_drain_is_none_when_channel_genuinely_empty() {
 }
 
 #[test]
-fn detached_evaluate_completion_hooks_only_follow_terminal_callback_actions() {
-    let input = StartDetachedWindowedEvaluateInput {
-        batch: StartEvaluateBatchInput {
-            problem_type: "icpc".into(),
-            test_cases: Vec::new(),
-        },
-        concurrency: 1,
-        result_timeout_ms: 1000,
-        callback_fn: "on_result".into(),
-        state: serde_json::json!({}),
-        submission_completion: Some(broccoli_server_sdk::types::DetachedSubmissionCompletion {
-            submission_id: 42,
-            judgement_id: 7,
-            judge_epoch: 9,
-            fire_after_judging: true,
-        }),
-    };
-    let completion = input.submission_completion.as_ref();
-
-    assert_eq!(
-        detached_evaluate_completion(completion, DetachedEvaluateCallbackAction::Finish)
-            .map(|completion| completion.submission_id),
-        Some(42)
-    );
-    assert_eq!(
-        detached_evaluate_completion(completion, DetachedEvaluateCallbackAction::Cancel)
-            .map(|completion| completion.judgement_id),
-        Some(7)
-    );
-    assert_eq!(
-        detached_evaluate_completion(completion, DetachedEvaluateCallbackAction::Continue),
-        None
-    );
-
-    let muted = broccoli_server_sdk::types::DetachedSubmissionCompletion {
-        submission_id: 42,
-        judgement_id: 7,
-        judge_epoch: 9,
-        fire_after_judging: false,
-    };
-    assert_eq!(
-        detached_evaluate_completion(Some(&muted), DetachedEvaluateCallbackAction::Finish),
-        None
-    );
-}
-
-#[test]
 fn delivered_verdict_completes_its_case_and_drains_the_batch() {
     let batches = EvaluateBatches::default();
     let tx = open_batch(&batches, "eval-1", &[10, 11]);

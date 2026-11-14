@@ -21,7 +21,8 @@ use crate::registry::{EvaluateCaseRef, OperationBatches, OperationWaiter, Operat
 use crate::services::batch_table::{BatchSender, Removal};
 use crate::services::batch_wait::{BatchWait, WaitCtx, WaitPolicy};
 use crate::services::windowed_session::{
-    SessionAction, SessionDecision, SlotEvent, SlotOutcome, WindowedSession, run_windowed_session,
+    SessionAction, SessionDecision, SessionEnd, SlotEvent, SlotOutcome, WindowedSession,
+    run_windowed_session,
 };
 
 const INLINE_FILE_BLOB_THRESHOLD_BYTES: usize = 1_048_576;
@@ -300,8 +301,8 @@ pub fn start_detached_windowed_operation(
 
 /// [`WindowedSession`] driver for detached operation batches. Operation is the
 /// plain shape: a `usize` slot index, an MQ round-trip per slot, a raw
-/// `TaskResult` decoded into an `OperationResult`, no server-side retry, and no
-/// terminal hooks.
+/// `TaskResult` decoded into an `OperationResult`, no server-side retry, and
+/// nothing to record when it ends.
 struct OperationDriver {
     plugin_id: String,
     session_id: String,
@@ -418,6 +419,10 @@ impl WindowedSession for OperationDriver {
     async fn cancel_selected(&self, active: &mut Vec<(usize, String)>, ids: &HashSet<usize>) {
         cancel_operation_indices(&self.plugin_id, &self.deps, active, ids);
     }
+
+    /// An operation session judges no unit of its own: whatever its plugin
+    /// judges with it is finalized by that plugin's own judging session.
+    async fn on_end(&self, _end: SessionEnd) {}
 }
 
 async fn run_detached_windowed_operation(

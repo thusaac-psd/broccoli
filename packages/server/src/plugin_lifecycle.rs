@@ -215,6 +215,21 @@ impl PluginLifecycle {
         self.governs.read().ok()?.get(plugin_id).cloned()
     }
 
+    /// Whether `contest_type` is provided only by plugins the fleet has
+    /// disabled: some disabled plugin last registered it and no enabled one
+    /// did. A type no plugin ever registered is not disabled, just unknown.
+    pub fn is_contest_type_disabled(&self, contest_type: &str) -> bool {
+        let Ok(governs) = self.governs.read() else {
+            return false;
+        };
+        let mut providers = governs
+            .iter()
+            .filter(|(_, g)| g.contest_types.iter().any(|t| t == contest_type))
+            .map(|(id, _)| self.is_desired_enabled(id))
+            .peekable();
+        providers.peek().is_some() && providers.all(|enabled| !enabled)
+    }
+
     pub(crate) fn set_desired(&self, plugin_id: &str, enabled: bool) {
         if let Ok(mut d) = self.desired.write() {
             d.insert(plugin_id.to_string(), enabled);

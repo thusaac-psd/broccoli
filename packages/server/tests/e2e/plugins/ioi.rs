@@ -954,3 +954,89 @@ async fn ioi_scoreboard_uses_time_taken_as_score_tiebreaker() {
         "{second}"
     );
 }
+
+/// Disabling the contest-type plugin while one of its submissions is being
+/// judged ends that judgement as `SystemError` as soon as the next result
+/// arrives for the plugin's (now gone) callback, instead of leaving it
+/// `Running` behind a live lease. A new submission to its contests is refused
+/// with `CONTEST_TYPE_DISABLED`, which is not a retry-later answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
+    let app = E2eTestApp::spawn().await;
+    let admin = app
+        .create_user_with_role("ioi_disable_admin", "password", "admin")
+        .await;
+    let contestant = app
+        .create_authenticated_user("ioi_disable_user", "password")
+        .await;
+    let problem_id = app.create_problem(&admin, "IOI Disable").await;
+    app.create_test_case(problem_id, &admin).await;
+    let contest_id = app
+        .create_typed_contest(&admin, "IOI Disable Contest", "ioi", true, true)
+        .await;
+    app.add_problem_to_contest(contest_id, problem_id, &admin)
+        .await;
+    app.register_for_contest(contest_id, &contestant).await;
+
+    // Hold every operation in the queue, so the judging session is started
+    // and waiting for its first result when the plugin goes away.
+    app.pause_worker();
+    let sub_id = app
+        .create_contest_submission(contest_id, problem_id, &contestant, "cpp", CPP_SUM)
+        .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let judgement = submission_judgement::Entity::find()
+            .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+            .one(&app.db)
+            .await
+            .expect("query judgement")
+            .expect("the submission has a judgement");
+        if judgement.status == SubmissionStatus::Compiling {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "judging never started: {:?}",
+            judgement.status
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let res = app
+        .post_with_token("/api/v1/admin/plugins/ioi/disable", &json!({}), &admin)
+        .await;
+    assert!(res.status < 300, "disable failed: {}", res.text);
+    app.resume_worker();
+
+    let res = app.wait_for_submission_terminal(sub_id, &admin, 60).await;
+    assert_eq!(res.body["status"], "SystemError", "{}", res.text);
+    let judgement = submission_judgement::Entity::find()
+        .filter(submission_judgement::Column::SubmissionId.eq(sub_id))
+        .one(&app.db)
+        .await
+        .expect("query judgement")
+        .expect("the submission has a judgement");
+    assert!(judgement.is_finalized);
+    assert_eq!(
+        judgement.error_code.as_deref(),
+        Some("PLUGIN_SESSION_ABORTED")
+    );
+
+    let res = app
+        .post_with_token(
+            &format!("/api/v1/contests/{contest_id}/problems/{problem_id}/submissions"),
+            &json!({
+                "files": [{"filename": "main.cpp", "content": CPP_SUM}],
+                "language": "cpp",
+            }),
+            &contestant,
+        )
+        .await;
+    assert_eq!(res.status, 503, "{}", res.text);
+    assert_eq!(res.body["code"], "CONTEST_TYPE_DISABLED", "{}", res.text);
+    assert!(
+        !res.headers.contains_key("retry-after"),
+        "a disabled contest type is not a retry-later answer"
+    );
+}

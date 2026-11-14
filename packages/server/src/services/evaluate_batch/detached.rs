@@ -33,7 +33,8 @@ struct EvaluateDriver {
     callback_fn: String,
     deps: EvaluateHostDeps,
     problem_type: String,
-    submission_completion: Option<broccoli_server_sdk::types::DetachedSubmissionCompletion>,
+    /// The judgement this session judges, when it judges one.
+    submission_completion: Option<DetachedSubmissionCompletion>,
     /// Clones of cheap-bodied test cases, so a timed-out op can be re-dispatched.
     retry_pool: HashMap<i32, StartEvaluateCaseInput>,
     /// Per-test-case retry attempts consumed so far.
@@ -193,17 +194,22 @@ impl WindowedSession for EvaluateDriver {
         );
     }
 
-    async fn on_terminal(&self, action: SessionAction) {
-        let cb_action = match action {
-            SessionAction::Continue => DetachedEvaluateCallbackAction::Continue,
-            SessionAction::Finish => DetachedEvaluateCallbackAction::Finish,
-            SessionAction::Cancel => DetachedEvaluateCallbackAction::Cancel,
+    async fn on_end(&self, end: SessionEnd) {
+        let Some(completion) = self.submission_completion.as_ref() else {
+            return;
         };
-        fire_detached_evaluate_completion_hooks(
-            &self.deps,
-            detached_evaluate_completion(self.submission_completion.as_ref(), cb_action),
-        )
-        .await;
+        let (error_code, error_message) = match end {
+            SessionEnd::Interrupted => return,
+            SessionEnd::Aborted(error) => (
+                SESSION_ABORTED,
+                format!("The contest plugin's judging callback failed: {error}"),
+            ),
+            SessionEnd::Decided(_) => (
+                SESSION_ENDED_WITHOUT_VERDICT,
+                "The contest plugin ended judging without recording a verdict".to_string(),
+            ),
+        };
+        finish_judgement(&self.deps, completion, error_code, &error_message).await;
     }
 }
 
@@ -255,18 +261,52 @@ async fn run_detached_windowed_evaluate(
     .await;
 }
 
-async fn fire_detached_evaluate_completion_hooks(
+/// `error_code` of a judgement whose judging session aborted before the
+/// plugin recorded a verdict.
+pub const SESSION_ABORTED: &str = "PLUGIN_SESSION_ABORTED";
+/// `error_code` of a judgement whose plugin ended its judging session without
+/// recording a verdict.
+pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
+
+/// Leave the judgement a session judged terminal: finalize it as
+/// `SystemError` if the plugin did not (a no-op when it did, or when the
+/// judgement was since requeued or superseded), then fire its after-judging
+/// hooks.
+async fn finish_judgement(
     deps: &EvaluateHostDeps,
-    completion: Option<broccoli_server_sdk::types::DetachedSubmissionCompletion>,
+    completion: &DetachedSubmissionCompletion,
+    error_code: &str,
+    error_message: &str,
 ) {
-    let Some(completion) = completion else {
-        return;
-    };
+    match crate::services::judging::fail_dispatch(
+        &deps.db,
+        crate::services::judging::Unit::Judgement,
+        completion.judgement_id,
+        completion.judge_epoch,
+        error_code,
+        error_message,
+    )
+    .await
+    {
+        Ok(true) => tracing::warn!(
+            submission_id = completion.submission_id,
+            judgement_id = completion.judgement_id,
+            error_code,
+            "Judging session ended without a verdict; finalized as SystemError"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::error!(
+            submission_id = completion.submission_id,
+            judgement_id = completion.judgement_id,
+            error = %e,
+            "Failed to finalize the judgement of an ended judging session; the stuck-job detector requeues it"
+        ),
+    }
     fire_after_judging_hooks_for_detached_completion(
         &deps.db,
         deps.hook_registry.clone(),
         &deps.contest_type_registry,
-        &completion,
+        completion,
     )
     .await;
 }

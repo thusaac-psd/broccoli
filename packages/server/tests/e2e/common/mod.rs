@@ -117,6 +117,9 @@ pub struct E2eTestApp {
     claim_cancel: Option<watch::Sender<bool>>,
     claim_handle: Option<JoinHandle<()>>,
     worker_handle: Option<JoinHandle<()>>,
+    /// Holds the in-process worker before its next read while `true` (see
+    /// [`E2eTestApp::pause_worker`]). `None` against an external server.
+    worker_paused: Option<watch::Sender<bool>>,
     result_consumer_handle: Option<JoinHandle<()>>,
     /// The in-process server's liveness key; dropping it releases the key
     /// and the reply stream. `None` against an external server.
@@ -238,6 +241,7 @@ impl E2eTestApp {
             claim_cancel: None,
             claim_handle: None,
             worker_handle: None,
+            worker_paused: None,
             result_consumer_handle: None,
             _node_heartbeat: None,
             _plugin_cache: None,
@@ -441,6 +445,7 @@ impl E2eTestApp {
         let mut claim_cancel_opt = None;
         let mut claim_handle_opt = None;
         let mut worker_handle_opt = None;
+        let (worker_paused, mut worker_paused_rx) = watch::channel(false);
 
         if load_plugins {
             let failures = sync_plugins(&state).await.expect("Failed to sync plugins");
@@ -497,6 +502,10 @@ impl E2eTestApp {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         continue;
                     };
+                    // A batch read while paused runs only once resumed.
+                    if worker_paused_rx.wait_for(|paused| !*paused).await.is_err() {
+                        return;
+                    }
                     for delivery in batch {
                         let Ok(task) = delivery.payload else {
                             let _ = tasks.ack(&delivery.entry).await;
@@ -586,12 +595,29 @@ impl E2eTestApp {
             claim_cancel: claim_cancel_opt,
             claim_handle: claim_handle_opt,
             worker_handle: worker_handle_opt,
+            worker_paused: Some(worker_paused),
             result_consumer_handle: result_consumer_handle_opt,
             _node_heartbeat: Some(node_heartbeat),
             _plugin_cache: Some(plugin_cache),
             _database: Some(database),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
+    }
+
+    /// Stop the in-process worker from running tasks until
+    /// [`Self::resume_worker`]: every task it reads meanwhile waits unrun.
+    pub fn pause_worker(&self) {
+        self.worker_paused
+            .as_ref()
+            .expect("pausing needs the in-process worker")
+            .send_replace(true);
+    }
+
+    pub fn resume_worker(&self) {
+        self.worker_paused
+            .as_ref()
+            .expect("resuming needs the in-process worker")
+            .send_replace(false);
     }
 
     fn url(&self, path: &str) -> String {

@@ -17,7 +17,7 @@ sidebar_position: 2
 | claim | `Queued` | `Pending`，有属主，租约已盖戳 | 认领纤程 |
 | progress | 进行中 | `Compiling`、`Running` | 插件（`host.submission.update`、`host.code_run.update`） |
 | finish | 进行中 | `Judged`、`CompilationError`（已定稿） | 插件 |
-| fail | 进行中 | `SystemError`（已定稿） | 分发（`fail_dispatch`） |
+| fail | 进行中 | `SystemError`（已定稿） | 分发、已结束的评测会话（`fail_dispatch`） |
 | requeue | 进行中 | `Queued`，新纪元，无属主 | `release_leases`、`reclaim_abandoned` |
 | exhaust | 进行中 | `SystemError`（已定稿），写入死信队列 | `reclaim_abandoned` |
 | system-error retry | 已定稿的 `SystemError`，当前评测记录 | `Queued`，新纪元 | `retry_system_errors` |
@@ -40,6 +40,16 @@ sidebar_position: 2
 - 某服务器拥有的单元离开进行中状态时发送 `freed:<server id>`。只有上一轮被进行中上限或分发准入限制的纤程才会响应它。
 
 被唤醒的纤程认领一批，只要每一轮都填满批次且仍有余量就继续下一轮。认领期间到达的唤醒合并为再一轮，且距上一轮至少 10 ms，因此突发的提交会成批认领。所有副本都会被同一条通知唤醒，认领中的 `SKIP LOCKED` 在它们之间分配工作。一秒一次的后备轮询覆盖监听连接断开期间丢失的通知；每次重新连接也会唤醒纤程。
+
+## 评测会话以判定结束
+
+竞赛插件在一个分离会话中评测提交：宿主运行其测试点，并对每个结果回调插件（见 `services/windowed_session.rs`）。插件在某次回调中记录判定。会话循环在每一个出口都返回其结束方式 `SessionEnd`，评测驱动对其处理一次：
+
+- `Decided`：插件结束了会话（完成、取消，或对最后一个结果的回答）。插件留下的未定稿评测记录以 `SystemError` 和 `PLUGIN_NO_VERDICT` 定稿。
+- `Aborted`：某次回调失败，或插件已不存在（被禁用、被卸载）。评测记录以 `SystemError` 和 `PLUGIN_SESSION_ABORTED` 定稿。
+- `Interrupted`：本服务器正在关闭。不记录任何内容；关闭流程会释放该评测记录，由其他服务器重新评测。
+
+两种定稿都经由 `fail_dispatch`，以评测记录的纪元及其尚未定稿为栅栏，因此插件已写入的判定保持不变。两者之后都会触发评测后钩子。当提供某竞赛类型的插件被禁用时，提交到其竞赛的请求以 `503 CONTEST_TYPE_DISABLED` 拒绝，且不带 `Retry-After`；`CONTEST_TYPE_UNAVAILABLE`（带 `Retry-After`）只表示当前副本尚未加载该插件。
 
 ## 提交行是缓存
 
