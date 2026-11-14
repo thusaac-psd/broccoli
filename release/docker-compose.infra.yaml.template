@@ -25,6 +25,8 @@ services:
           -v app="$$BROCCOLI_DB_USER" -v pw="$$BROCCOLI_DB_PASSWORD" -v db="$$POSTGRES_DB" <<'SQL'
         CREATE ROLE :"app" LOGIN CREATEROLE PASSWORD :'pw';
         ALTER DATABASE :"db" OWNER TO :"app";
+        -- The statement statistics need the superuser to create the extension.
+        CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
         SQL
         INIT
         exec docker-entrypoint.sh "$$@"

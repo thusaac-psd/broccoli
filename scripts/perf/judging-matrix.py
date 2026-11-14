@@ -351,6 +351,8 @@ def main() -> int:
             psql(a.db_admin_url, f'DROP DATABASE IF EXISTS "{db}" WITH (FORCE)')
             owner = urllib.parse.urlsplit(a.db_url).username
             psql(a.db_admin_url, f'CREATE DATABASE "{db}" OWNER "{owner}"')
+            # The app role cannot create the statement statistics extension.
+            psql(a.db_admin_url.rsplit("/", 1)[0] + f"/{db}", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
         if a.flush_redis:
             subprocess.run(["redis-cli", "-u", a.redis_url, "FLUSHALL"], check=True, capture_output=True)
         topo = Topology(a, s, w, out / f"logs-{topo_s}")
