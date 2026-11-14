@@ -468,12 +468,12 @@ mod tests {
         let registries = empty_registries();
         {
             let mut reg = registries.checker_stage_registry.write().await;
-            reg.insert("exact".to_string(), handlers("standard-checkers"));
-            reg.insert("none".to_string(), handlers("standard-checkers"));
+            reg.insert("exact".to_string(), handlers("checker-plugin"));
+            reg.insert("none".to_string(), handlers("checker-plugin"));
             reg.insert("custom".to_string(), handlers("other-plugin"));
         }
 
-        purge_plugin_registrations(&registries, "standard-checkers").await;
+        purge_plugin_registrations(&registries, "checker-plugin").await;
 
         let reg = registries.checker_stage_registry.read().await;
         assert!(!reg.contains_key("exact"), "purged plugin's format removed");

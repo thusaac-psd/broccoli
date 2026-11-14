@@ -72,6 +72,26 @@ let config: ContestConfig = host.config.get_contest(contest_id, "contest")?.pars
 `EffectiveConfig::parse_config` 对级联读取 `host.config.get_effective` 的结果做同样的事。这样，
 与 schema 不再一致的类型会在读取处明确报错。
 
+## 保存题目的检查器源代码
+
+若检查器插件的格式要编译题目自带的检查器（例如 testlib），插件应声明一个题目作用域、带
+`checker_source = true` 的命名空间。对于检查器格式由该插件提供的每道题目，宿主的检查器源代码接口
+会把管理员上传的文件以 `{ "files": [{ "filename", "content" }] }` 的形式存入该命名空间，题目编辑器的
+检查器源代码页面也从这里显示。该命名空间不会在其他地方作为设置项出现。
+
+```toml
+[config.checker_source]
+scopes = ["problem"]
+checker_source = true
+
+[config.checker_source.properties.files]
+type = "array"
+default = []
+```
+
+插件像读取其他题目配置一样读取它：`host.config.get_problem(problem_id, "checker_source")`。一个
+清单最多只能标记一个命名空间，且其 `scopes` 只能是 `["problem"]`。
+
 ## 测试
 
 `Host::mock()` 会读取被测 crate 的 `plugin.toml`，因此原生测试看到的配置与服务器填入默认值后的

@@ -429,10 +429,10 @@ fn format_tol(tol: f64) -> String {
 // validates the returned CheckerStage / CheckerVerdict shapes.
 // ---------------------------------------------------------------------------
 
-/// Load the testlib checker source for a problem from this plugin's own
-/// per-problem config (`standard-checkers:checker_source`), set by the problem
-/// editor. The checker source is owned by the checker plugin, not the core
-/// problem model nor the evaluator; the host does not inline it.
+/// Load the testlib checker source for a problem from this plugin's
+/// `checker_source` namespace, which the manifest declares as the checker
+/// source of the problems this plugin judges; the host stores the problem
+/// editor's files there and does not inline them.
 #[cfg(target_arch = "wasm32")]
 fn load_checker_source(host: &Host, problem_id: Option<i32>) -> Result<Vec<SourceFile>, String> {
     let problem_id = problem_id
@@ -444,7 +444,11 @@ fn load_checker_source(host: &Host, problem_id: Option<i32>) -> Result<Vec<Sourc
     if result.is_default {
         return Err("Testlib checker requires checker_source".to_string());
     }
-    let files: Vec<SourceFile> = serde_json::from_value(result.config)
+    #[derive(serde::Deserialize)]
+    struct CheckerSource {
+        files: Vec<SourceFile>,
+    }
+    let CheckerSource { files } = serde_json::from_value(result.config)
         .map_err(|e| format!("invalid checker_source config: {e}"))?;
     if files.is_empty() {
         return Err("Testlib checker requires checker_source".to_string());

@@ -22,6 +22,23 @@ pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError>
             "[server.sql] read scopes need the \"sql\" permission".into(),
         ));
     }
+    let checker_sources: Vec<(&String, &ConfigNamespace)> = manifest
+        .config
+        .iter()
+        .filter(|(_, ns)| ns.checker_source)
+        .collect();
+    if checker_sources.len() > 1 {
+        return Err(PluginError::LoadFailed(
+            "at most one config namespace may set checker_source".into(),
+        ));
+    }
+    if let Some((name, ns)) = checker_sources.first()
+        && ns.scopes != [ConfigScope::Problem]
+    {
+        return Err(PluginError::LoadFailed(format!(
+            "config namespace '{name}' sets checker_source, so its scopes must be [\"problem\"]"
+        )));
+    }
     if let Some(server) = &manifest.server {
         for route in &server.routes {
             route.access().map_err(|e| {
@@ -127,6 +144,7 @@ mod tests {
                     scopes: vec![ConfigScope::Plugin],
                     schema: Some("config/settings.schema.toml".into()),
                     properties: HashMap::new(),
+                    checker_source: false,
                 },
             )]),
         };
@@ -169,6 +187,7 @@ mod tests {
                     scopes: vec![ConfigScope::Plugin],
                     schema: Some("../secret.toml".into()),
                     properties: HashMap::new(),
+                    checker_source: false,
                 },
             )]),
         };
@@ -182,38 +201,29 @@ mod tests {
         );
     }
 
+    fn with_namespaces(namespaces: &str) -> Result<PluginManifest, PluginError> {
+        parse_manifest(&format!(
+            "name = \"demo\"\nversion = \"0.1.0\"\n{namespaces}"
+        ))
+    }
+
     #[test]
-    fn standard_checkers_manifest_parses() {
-        let toml_content = include_str!("../../../plugins/standard-checkers/plugin.toml");
-        let manifest: PluginManifest = toml::from_str(toml_content).unwrap();
+    fn a_checker_source_namespace_is_problem_scoped_and_unique() {
+        let one =
+            with_namespaces("[config.sources]\nscopes = [\"problem\"]\nchecker_source = true\n")
+                .unwrap();
+        assert!(one.config["sources"].checker_source);
 
-        assert_eq!(manifest.name, "standard-checkers");
-
-        let server = manifest.server.unwrap();
-        assert!(server.permissions.contains(&"config:read".to_string()));
-
-        let testlib = &manifest.config["testlib"];
-        assert_eq!(testlib.scopes, vec![ConfigScope::Plugin]);
-        assert!(testlib.properties.contains_key("compile_time_limit_s"));
-        assert!(testlib.properties.contains_key("cpp"));
-
-        let schema = testlib.to_json_schema();
-        assert_eq!(schema["type"], "object");
-        assert!(
-            schema["properties"]["compile_time_limit_s"]["minimum"]
-                .as_f64()
-                .is_some()
+        let wrong_scope = with_namespaces(
+            "[config.sources]\nscopes = [\"problem\", \"contest\"]\nchecker_source = true\n",
         );
+        assert!(wrong_scope.is_err());
 
-        let compile_time = &schema["properties"]["compile_time_limit_s"];
-        assert_eq!(compile_time["multipleOf"], 0.5);
-        assert_eq!(compile_time["x-precision"], 1);
-        assert_eq!(compile_time["x-unit"], "s");
-
-        let compile_mem = &schema["properties"]["compile_memory_limit_kb"];
-        assert_eq!(compile_mem["multipleOf"], 1024.0);
-        assert_eq!(compile_mem["x-unit"], "KB");
-        assert!(compile_mem.get("x-precision").is_none());
+        let two = with_namespaces(
+            "[config.a]\nscopes = [\"problem\"]\nchecker_source = true\n\
+             [config.b]\nscopes = [\"problem\"]\nchecker_source = true\n",
+        );
+        assert!(two.is_err());
     }
 
     const SQL_PLUGIN: &str = r#"

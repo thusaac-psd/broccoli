@@ -458,8 +458,8 @@ async fn resolve_inputs(
         .collect();
 
     let checker_format = problem_model.checker_format.clone();
-    // The host does not inline the checker source: checker plugins read it
-    // from their own per-problem config (e.g. `standard-checkers:checker_source`).
+    // The host does not inline the checker source: a checker plugin reads it
+    // from the problem-scoped namespace its manifest declares `checker_source`.
 
     let test_cases = input.test_cases;
     let db_needed_ids: Vec<i32> = test_cases

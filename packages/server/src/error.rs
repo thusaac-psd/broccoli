@@ -64,6 +64,9 @@ pub enum AppError {
     ContestTypeUnavailable(String),
     /// The contest already has a submission, so its contest type is fixed.
     ContestTypeLocked,
+    /// The plugin providing the problem's checker format declares no checker
+    /// source, so the problem `id` has none to set.
+    CheckerSourceUnsupported(i32),
     /// The plugin providing this contest type is disabled fleet-wide. Not
     /// retryable: nothing changes until an admin enables it again.
     ContestTypeDisabled(String),
@@ -214,6 +217,13 @@ impl AppError {
                 simple(
                     "RATE_LIMITED",
                     format!("Rate limit exceeded. Try again in {} seconds", retry_after),
+                ),
+            ),
+            AppError::CheckerSourceUnsupported(id) => (
+                StatusCode::CONFLICT,
+                simple(
+                    "CHECKER_SOURCE_UNSUPPORTED",
+                    format!("Problem {id}'s checker format takes no checker source"),
                 ),
             ),
             AppError::ContestTypeLocked => (
