@@ -1,3 +1,4 @@
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import type {
   SubmissionStatus,
@@ -13,6 +14,7 @@ import type { SubmissionEntry } from '@/features/submission/hooks/use-submission
 import { getSubmissionScoreDisplay } from '../utils/score-display';
 import { getVerdictBadge } from '../utils/verdict';
 import { PinnedSubmissionGroup } from './PinnedSubmissionGroup';
+import { SubmissionRejection } from './SubmissionResult';
 
 const DEFAULT_VISIBLE_COUNT = 5;
 
@@ -48,8 +50,6 @@ function getEntryStatus(entry: SubmissionEntry): SubmissionStatus {
       return 'Pending';
     case 'polling':
       return 'Running';
-    case 'error':
-      return 'SystemError';
     default:
       return 'Pending';
   }
@@ -81,6 +81,7 @@ export function RecentSubmissionOverview({
   linkBuilder,
 }: RecentSubmissionOverviewProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const format = useFormat();
   const { openSubmission } = useSubmissionNavigation();
 
@@ -122,9 +123,33 @@ export function RecentSubmissionOverview({
     });
   }
 
+  // A refused attempt is not a submission: it shows as the reason it was
+  // refused, never as a row being judged. Entries are newest first.
+  const rejection = ungrouped.find((entry) => entry.status === 'rejected');
+  const unfollowable = ungrouped.find(
+    (entry) => entry.status === 'error' && !entry.submission,
+  );
+  const notices = (
+    <>
+      {rejection && (
+        <SubmissionRejection
+          error={rejection.error}
+          failure={t('toast.submission.error')}
+        />
+      )}
+      {unfollowable && (
+        <p role="alert" className="text-sm text-destructive py-2">
+          {errorMessage(unfollowable.error, t('submissions.loadFailed'))}
+        </p>
+      )}
+    </>
+  );
+
   const pendingRows: OverviewRow[] = [];
   for (const entry of ungrouped) {
+    if (entry.status === 'rejected') continue;
     if (!entry.submission) {
+      if (entry.status === 'error') continue;
       pendingRows.push({
         key: `entry-${entry.id}`,
         submissionId: null,
@@ -174,6 +199,7 @@ export function RecentSubmissionOverview({
         <h3 className="text-sm font-semibold">
           {t('result.latestOverviewTitle')}
         </h3>
+        {notices}
         {historyError && !isSubmitting ? (
           <QueryErrorState
             className="py-4"
@@ -201,6 +227,7 @@ export function RecentSubmissionOverview({
       <h3 className="text-sm font-semibold">
         {t('result.latestOverviewTitle')}
       </h3>
+      {notices}
       <div className="mt-3 space-y-2">
         {groupBlocks.map(([key, groupEntries]) => (
           <PinnedSubmissionGroup

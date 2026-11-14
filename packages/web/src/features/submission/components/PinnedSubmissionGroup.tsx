@@ -1,3 +1,4 @@
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   isTerminalStatus,
@@ -41,6 +42,7 @@ function buildRow(entry: SubmissionEntry): Row {
 
 export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { openSubmission } = useSubmissionNavigation();
 
   const rows = entries
@@ -140,9 +142,10 @@ export function PinnedSubmissionGroup({ entries, linkBuilder }: Props) {
                     {label}
                   </Badge>
                 )}
-                {row.entry.status === 'error' && row.entry.error && (
-                  <span className="text-rose-500 text-[10px] font-mono">
-                    {row.entry.error.code}
+                {(row.entry.status === 'error' ||
+                  row.entry.status === 'rejected') && (
+                  <span className="text-rose-500 text-[10px]">
+                    {errorMessage(row.entry.error, t('toast.submission.error'))}
                   </span>
                 )}
               </div>

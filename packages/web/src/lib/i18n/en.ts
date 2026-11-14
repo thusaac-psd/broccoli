@@ -888,7 +888,8 @@ export const en = {
     'At least one worker produced a different verdict from the others.',
   'pinnedGroup.allAccepted': 'All workers accepted',
   'toast.submission.running': 'Running code...',
-  'toast.submission.error': 'Failed to submit code. Please try again.',
+  'toast.submission.error': 'The submission was not accepted.',
+  'toast.submission.runError': 'The code could not be run.',
   'toast.idempotency.outcomeUnknown':
     'An earlier attempt was interrupted and may already have gone through. Check whether it did before trying again.',
   'toast.idempotency.inProgress':

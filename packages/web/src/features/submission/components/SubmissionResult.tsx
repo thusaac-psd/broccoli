@@ -1,6 +1,10 @@
+import { errorKind, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
-import type { Submission, SubmissionError } from '@broccoli/web-sdk/submission';
+import {
+  parseSubmissionError,
+  type Submission,
+} from '@broccoli/web-sdk/submission';
 import { TextPreview } from '@broccoli/web-sdk/ui';
 import { Timer, XCircle } from 'lucide-react';
 
@@ -10,31 +14,20 @@ import { SubmissionTestCases } from './SubmissionTestCases';
 interface SubmissionResultProps {
   submission?: Submission | null;
   isSubmitting?: boolean;
-  error?: SubmissionError | null;
 }
 
 export function SubmissionResult({
   submission,
   isSubmitting,
-  error,
 }: SubmissionResultProps) {
   const { t } = useTranslation();
 
   // No submission yet - prompt
-  if (!submission && !isSubmitting && !error) {
+  if (!submission && !isSubmitting) {
     return (
       <div className="flex items-center justify-center h-32 text-muted-foreground">
         {t('result.submitPrompt')}
       </div>
-    );
-  }
-
-  // Submission error
-  if (error && !submission) {
-    return (
-      <Slot name="submission-result.rejection" slotProps={{ error }}>
-        <RejectionMessage error={error} />
-      </Slot>
     );
   }
 
@@ -126,19 +119,56 @@ export function SubmissionResult({
   );
 }
 
-function RejectionMessage({ error }: { error: SubmissionError }) {
-  if (error.code === 'RATE_LIMITED') {
+/**
+ * Why the server refused a submit or run, in the user's language. Plugins
+ * that refuse submissions (a cooldown, a submission limit) render their own
+ * explanation through the `submission-result.rejection` slot, from the
+ * error's `code` and `details`.
+ */
+export function SubmissionRejection({
+  error,
+  failure,
+}: {
+  error: unknown;
+  failure: string;
+}) {
+  return (
+    <Slot
+      name="submission-result.rejection"
+      slotProps={{ error: parseSubmissionError(error) }}
+    >
+      <RejectionMessage error={error} failure={failure} />
+    </Slot>
+  );
+}
+
+function RejectionMessage({
+  error,
+  failure,
+}: {
+  error: unknown;
+  failure: string;
+}) {
+  const errorMessage = useErrorMessage();
+  const message = errorMessage(error, failure);
+  if (errorKind(error) === 'rateLimited') {
     return (
-      <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400 text-sm py-2">
+      <div
+        role="alert"
+        className="flex items-center gap-2 text-amber-600 dark:text-amber-400 text-sm py-2"
+      >
         <Timer className="h-4 w-4 shrink-0" />
-        <span>{error.message}</span>
+        <span>{message}</span>
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-2 text-destructive text-sm py-2">
+    <div
+      role="alert"
+      className="flex items-center gap-2 text-destructive text-sm py-2"
+    >
       <XCircle className="h-4 w-4 shrink-0" />
-      <span>{error.message}</span>
+      <span>{message}</span>
     </div>
   );
 }

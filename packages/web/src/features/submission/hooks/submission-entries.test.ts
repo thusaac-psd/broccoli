@@ -94,6 +94,49 @@ test('an entry that failed stays failed', () => {
   }
 });
 
+test('a refused submit is a rejection, never a submission being judged', () => {
+  const rejected = entriesReducer([entry(1, 'submitting')], {
+    type: 'rejected',
+    id: 1,
+    error,
+  });
+  assert.equal(rejected[0].status, 'rejected');
+  assert.equal(rejected[0].error, error);
+  assert.equal(pollTarget(rejected[0]), null);
+  // Nothing the server says later turns it into a submission.
+  for (const action of [
+    { type: 'accepted', id: 1, result: result('Pending', false) },
+    { type: 'polled', id: 1, result: result('Judged', true) },
+    { type: 'failed', id: 1, error },
+  ] satisfies EntryAction[]) {
+    assert.equal(entriesReducer(rejected, action), rejected);
+  }
+});
+
+test('only a submit still in flight can be refused', () => {
+  const polling = [entry(1, 'polling')];
+  assert.equal(
+    entriesReducer(polling, { type: 'rejected', id: 1, error }),
+    polling,
+  );
+});
+
+test('the next attempt replaces an earlier rejection', () => {
+  const rejected = entriesReducer([entry(1, 'submitting')], {
+    type: 'rejected',
+    id: 1,
+    error,
+  });
+  const next = entriesReducer(rejected, {
+    type: 'added',
+    entries: [entry(2, 'submitting')],
+  });
+  assert.deepEqual(
+    next.map((e) => e.id),
+    [2],
+  );
+});
+
 test('a submit that settles after the entries were reset changes nothing', () => {
   const entries = entriesReducer([entry(1, 'submitting')], { type: 'reset' });
   assert.deepEqual(
@@ -137,7 +180,6 @@ function poller(responses: PollResponse[], signedOut = false) {
       sleeps.push(ms);
     },
     dispatch: (action) => actions.push(action),
-    toError: () => error,
     isSignedOut: () => signedOut,
   });
   return { run, actions, sleeps, fetches: () => fetches };
@@ -165,7 +207,7 @@ for (const [status, signedOut] of [
   test(`a ${status}${signedOut ? ' when signed out' : ''} fails the entry and stops polling`, async () => {
     const p = poller(
       [
-        { ok: false, status, error: {} },
+        { ok: false, status, error },
         { ok: true, result: result('Judged', true) },
       ],
       signedOut,
@@ -211,7 +253,6 @@ test('an aborted poller sends nothing more', async () => {
     },
     sleep: async () => {},
     dispatch: () => assert.fail('dispatched after abort'),
-    toError: () => error,
     isSignedOut: () => false,
   });
   assert.equal(fetches, 0);

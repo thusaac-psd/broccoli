@@ -827,7 +827,8 @@ export const zhCN: Catalog = {
   'pinnedGroup.divergesHint': '至少有一台评测机给出了与其他评测机不同的结果。',
   'pinnedGroup.allAccepted': '所有评测机均通过',
   'toast.submission.running': '正在运行代码…',
-  'toast.submission.error': '提交代码失败，请重试。',
+  'toast.submission.error': '提交未被接受。',
+  'toast.submission.runError': '无法运行代码。',
   'toast.idempotency.outcomeUnknown':
     '之前的一次尝试被中断，操作可能已经完成。请先确认是否已生效，再决定是否重试。',
   'toast.idempotency.inProgress':

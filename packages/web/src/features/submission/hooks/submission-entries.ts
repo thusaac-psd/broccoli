@@ -1,17 +1,22 @@
-import type {
-  CodeRun,
-  Submission,
-  SubmissionError,
-} from '@broccoli/web-sdk/submission';
+import type { CodeRun, Submission } from '@broccoli/web-sdk/submission';
 import { backoffDelay, type BackoffPolicy } from '@broccoli/web-sdk/utils';
 
 // The submissions and code runs started from one problem page, each moving
-// through `submitting -> polling -> done`, or into `error` from either of the
-// first two. `done` and `error` are final: no late response, retry or poll
-// can move an entry out of them. Actions for entries that no longer exist
-// (the problem changed while a submit was in flight) change nothing.
+// through `submitting -> polling -> done`. From `submitting` the server may
+// refuse the attempt (`rejected`: nothing was created, so there is no
+// submission to show or poll, only the reason); `error` is a submission the
+// page can no longer follow (gone, hidden, or signed out). `done`,
+// `rejected` and `error` are final: no late response, retry or poll can move
+// an entry out of them, and the next attempt replaces a rejection. Actions
+// for entries that no longer exist (the problem changed while a submit was
+// in flight) change nothing.
 
-export type EntryStatus = 'submitting' | 'polling' | 'done' | 'error';
+export type EntryStatus =
+  | 'submitting'
+  | 'polling'
+  | 'done'
+  | 'rejected'
+  | 'error';
 
 export interface SubmissionEntry {
   /** Unique client-side ID for this entry */
@@ -24,7 +29,8 @@ export interface SubmissionEntry {
   submissionId?: number;
   codeRun: CodeRun | null;
   status: EntryStatus;
-  error: SubmissionError | null;
+  /** Why it was refused (`rejected`) or could not be followed (`error`). */
+  error: unknown;
   /** True for "run code" entries */
   isRun?: boolean;
   /**
@@ -53,7 +59,9 @@ export type EntryAction =
   /** The server accepted a submission but returned only its id. */
   | { type: 'accepted'; id: number; submissionId: number; result?: never }
   | { type: 'polled'; id: number; result: EntryResult }
-  | { type: 'failed'; id: number; error: SubmissionError }
+  /** The server refused the submit or run: nothing was created. */
+  | { type: 'rejected'; id: number; error: unknown }
+  | { type: 'failed'; id: number; error: unknown }
   /** The entry has nothing to show here (it is in the submissions list). */
   | { type: 'withdrawn'; id: number }
   | { type: 'reset' };
@@ -64,6 +72,7 @@ const FROM: Record<
   ReadonlySet<EntryStatus>
 > = {
   accepted: new Set(['submitting']),
+  rejected: new Set(['submitting']),
   polled: new Set(['polling']),
   failed: new Set(['submitting', 'polling']),
 };
@@ -87,7 +96,10 @@ export function entriesReducer(
 ): SubmissionEntry[] {
   switch (action.type) {
     case 'added':
-      return [...action.entries, ...entries];
+      return [
+        ...action.entries,
+        ...entries.filter((e) => e.status !== 'rejected'),
+      ];
     case 'withdrawn':
       return entries.some((e) => e.id === action.id)
         ? entries.filter((e) => e.id !== action.id)
@@ -99,15 +111,17 @@ export function entriesReducer(
       const entry = entries[index];
       if (!entry || !FROM[action.type].has(entry.status)) return entries;
       const next =
-        action.type === 'failed'
-          ? { ...entry, status: 'error' as const, error: action.error }
-          : action.result
-            ? withResult(entry, action.result)
-            : {
-                ...entry,
-                submissionId: action.submissionId,
-                status: 'polling' as const,
-              };
+        action.type === 'rejected'
+          ? { ...entry, status: 'rejected' as const, error: action.error }
+          : action.type === 'failed'
+            ? { ...entry, status: 'error' as const, error: action.error }
+            : action.result
+              ? withResult(entry, action.result)
+              : {
+                  ...entry,
+                  submissionId: action.submissionId,
+                  status: 'polling' as const,
+                };
       return entries.map((e, i) => (i === index ? next : e));
     }
   }
@@ -137,7 +151,6 @@ export interface PollDeps {
   fetch: (signal: AbortSignal) => Promise<PollResponse>;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   dispatch: (action: EntryAction) => void;
-  toError: (error: unknown) => SubmissionError;
   /** Whether nobody is signed in (as opposed to a token being renewed). */
   isSignedOut: () => boolean;
 }
@@ -189,7 +202,7 @@ export async function pollEntry(
       deps.dispatch({
         type: 'failed',
         id: entryId,
-        error: deps.toError(response.error),
+        error: response.error,
       });
       return;
     } else {
