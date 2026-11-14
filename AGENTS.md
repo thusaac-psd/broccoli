@@ -185,6 +185,11 @@ binaries warn about every key they do not read.
 - `packages/server` is the axum server: handlers, the visibility kernel, the
   plugin host functions and the judging services.
 - `packages/worker` consumes MQ tasks and operation tasks in a reconnect loop.
+- A plugin's raw SQL (`host.db.*`) runs as that plugin's own database role, in
+  its own schema, on its own pool (`packages/server/src/plugin_db`). Host tables
+  are read-only to plugins, and content columns stay hidden unless the manifest
+  declares a `[server.sql] read` scope. The app role provisions these roles, so
+  it needs `CREATEROLE` but never superuser.
 - `packages/plugin-core` holds the plugin abstractions shared by the host:
   manifest parsing, the registry, instance pools, hooks, admission, config, i18n
   and the plugin HTTP proxy types.
