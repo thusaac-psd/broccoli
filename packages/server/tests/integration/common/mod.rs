@@ -142,6 +142,10 @@ pub mod routes {
         format!("/api/v1/admin/plugins/{id}/disable")
     }
 
+    pub fn admin_plugin_dependents(id: &str) -> String {
+        format!("/api/v1/admin/plugins/{id}/dependents")
+    }
+
     pub fn admin_plugin_reload(id: &str) -> String {
         format!("/api/v1/admin/plugins/{id}/reload")
     }

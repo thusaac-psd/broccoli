@@ -1,6 +1,6 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
 import type { PluginDetail, UploadRemoval } from '@broccoli/web-sdk/plugin';
 import { usePluginRegistry } from '@broccoli/web-sdk/plugin';
@@ -11,6 +11,7 @@ import {
   CardHeader,
   QueryErrorState,
   Skeleton,
+  useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
@@ -61,6 +62,8 @@ export default function PluginsPage() {
   // runs before the early Unauthorized return, so without this an unauthorized
   // viewer would 403 on /admin/plugins.
   const canManagePlugins = !!user?.permissions.includes(PLUGIN_MANAGE);
+  const [confirm, confirmDialog] = useConfirmDialog();
+  const format = useFormat();
 
   const pluginsQuery = useQuery({
     queryKey: ['admin-plugins'],
@@ -93,7 +96,7 @@ export default function PluginsPage() {
     queryClient.invalidateQueries({ queryKey: ['i18n'] });
   }, [queryClient]);
 
-  const handleToggle = useCallback(
+  const applyToggle = useCallback(
     async (plugin: PluginDetail, enable: boolean) => {
       setTogglingIds((prev) => new Set(prev).add(plugin.id));
       try {
@@ -125,6 +128,50 @@ export default function PluginsPage() {
       }
     },
     [errorMessage, apiClient, invalidatePluginQueries, unloadPlugin, t],
+  );
+
+  // Disabling stops the contests in a format the plugin provides from
+  // accepting and judging submissions, so it is confirmed against the
+  // contests running now. When those cannot be read, the dialog says so
+  // rather than implying there are none.
+  const handleToggle = useCallback(
+    async (plugin: PluginDetail, enable: boolean) => {
+      if (enable) return applyToggle(plugin, true);
+      const { data, error } = await apiClient.GET(
+        '/admin/plugins/{id}/dependents',
+        { params: { path: { id: plugin.id } } },
+      );
+      const running = data?.running_contests ?? [];
+      confirm({
+        title: t('plugins.disableConfirm.title', { name: plugin.name }),
+        description: error ? (
+          errorMessage(error, t('plugins.disableConfirm.unknownContests'))
+        ) : running.length === 0 ? (
+          t('plugins.disableConfirm.noContests')
+        ) : (
+          <>
+            {t('plugins.disableConfirm.runningContests', {
+              count: running.length,
+            })}
+            <ul className="mt-2 list-disc pl-5">
+              {running.map((contest) => (
+                <li key={contest.id}>
+                  {contest.title}{' '}
+                  <span className="text-muted-foreground">
+                    ({format.dateTime(contest.end_time, { timeZoneName: true })}
+                    )
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ),
+        confirmLabel: t('plugins.disableConfirm.confirm'),
+        destructive: true,
+        onConfirm: () => applyToggle(plugin, false),
+      });
+    },
+    [apiClient, applyToggle, confirm, errorMessage, format, t],
   );
 
   // Reload on every server. Also the retry for a plugin that failed to load:
@@ -333,6 +380,7 @@ export default function PluginsPage() {
         onOpenChange={setUploadOpen}
         onPublished={handlePublished}
       />
+      {confirmDialog}
     </PageLayout>
   );
 }

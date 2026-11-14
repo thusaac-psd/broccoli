@@ -8,7 +8,7 @@ use sea_orm::EntityTrait;
 use tracing::instrument;
 
 // visibility-bypass-audited: every handler in this module (list_all_plugins,
-// get_plugin_details, enable_plugin, disable_plugin, reload_plugin,
+// get_plugin_details, get_plugin_dependents, enable_plugin, disable_plugin, reload_plugin,
 // reload_all_plugins, get_plugin_upload_policy, inspect_plugin_archive,
 // upload_plugin, remove_plugin_upload) requires perm::PLUGIN_MANAGE, pinned by
 // tests/integration/plugin.rs's `contestant_cannot_manage_plugins`. This is
@@ -19,9 +19,9 @@ use crate::error::{AppError, ErrorBody};
 use crate::extractors::auth::{AuthUser, FreshAuthUser};
 use crate::extractors::path::AppPath;
 use crate::models::plugin::{
-    PluginArchiveForm, PluginArchiveSummary, PluginDetailResponse, PluginFullDetailResponse,
-    PluginUploadPolicy, PluginUploadResponse, PublishedPluginResponse, ReloadAllResponse,
-    RemoveUploadQuery, RemoveUploadResponse,
+    PluginArchiveForm, PluginArchiveSummary, PluginDependentsResponse, PluginDetailResponse,
+    PluginFullDetailResponse, PluginUploadPolicy, PluginUploadResponse, PublishedPluginResponse,
+    ReloadAllResponse, RemoveUploadQuery, RemoveUploadResponse, RunningContestRef,
 };
 use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
 use crate::plugin_distribution::{PluginSource, bundled_root};
@@ -154,6 +154,61 @@ pub async fn enable_plugin(
     Ok(Json(serde_json::json!({
         "message": format!("Plugin '{}' enabled successfully", id)
     })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/plugins/{id}/dependents",
+    tag = "Admin",
+    operation_id = "getPluginDependents",
+    summary = "List what depends on a plugin right now",
+    description = "Returns the contests running now (started, not yet ended, not deleted) whose contest type the plugin provides on the serving replica, so an admin can see what disabling it would stop. A plugin that is not loaded on the serving replica provides no contest types here. Requires `plugin:manage` permission.",
+    params(("id" = String, Path, description = "Plugin ID")),
+    responses(
+        (status = 200, description = "What depends on the plugin", body = PluginDependentsResponse),
+        (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
+        (status = 403, description = "Forbidden (PERMISSION_DENIED)", body = ErrorBody),
+    ),
+    security(("jwt" = [])),
+)]
+#[instrument(skip(state, auth_user), fields(id))]
+pub async fn get_plugin_dependents(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    AppPath(id): AppPath<PluginId>,
+) -> Result<Json<PluginDependentsResponse>, AppError> {
+    use sea_orm::{DbBackend, FromQueryResult, Statement};
+
+    auth_user.require_permission(perm::PLUGIN_MANAGE)?;
+
+    let contest_types: Vec<String> = state
+        .registries
+        .contest_type_registry
+        .read()
+        .await
+        .iter()
+        .filter(|(_, handlers)| handlers.plugin_id == id.as_str())
+        .map(|(contest_type, _)| contest_type.clone())
+        .collect();
+    if contest_types.is_empty() {
+        return Ok(Json(PluginDependentsResponse {
+            running_contests: Vec::new(),
+        }));
+    }
+    // "Running" is judged by the database clock, the one every replica shares.
+    let running_contests = RunningContestRef::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"SELECT id, title, contest_type, end_time
+             FROM contest
+            WHERE contest_type = ANY($1)
+              AND deleted_at IS NULL
+              AND start_time <= NOW() AND end_time > NOW()
+            ORDER BY end_time, id"#,
+        [contest_types.into()],
+    ))
+    .all(&state.db)
+    .await?;
+    Ok(Json(PluginDependentsResponse { running_contests }))
 }
 
 #[utoipa::path(

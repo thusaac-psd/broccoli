@@ -949,6 +949,14 @@ export const zhCN: Catalog = {
   'plugins.detail.removeUploadConfirm': '移除',
   'plugins.detail.removeUploadCancel': '取消',
   'plugins.detail.removeUploadError': '移除上传失败',
+  'plugins.disableConfirm.title': '停用 {name}？',
+  'plugins.disableConfirm.runningContests':
+    '停用后，以下 {count} 场正在进行的比赛将无法按其赛制接收和评测提交：',
+  'plugins.disableConfirm.noContests':
+    '当前没有正在进行的比赛使用此插件提供的赛制。',
+  'plugins.disableConfirm.unknownContests':
+    '无法确认哪些正在进行的比赛使用此插件。',
+  'plugins.disableConfirm.confirm': '停用',
   'plugins.detail.uploadRemoved': '已移除上传，插件已从所有服务器移除。',
   'plugins.detail.uploadReplacedByBundle':
     '已移除上传，所有服务器重新运行内置版本。',

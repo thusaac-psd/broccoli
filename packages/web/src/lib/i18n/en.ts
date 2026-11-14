@@ -946,6 +946,14 @@ export const en = {
   'plugins.detail.removeUploadConfirm': 'Remove',
   'plugins.detail.removeUploadCancel': 'Cancel',
   'plugins.detail.removeUploadError': 'Failed to remove the upload',
+  'plugins.disableConfirm.title': 'Disable {name}?',
+  'plugins.disableConfirm.runningContests':
+    '{count, plural, one {Disabling it stops this running contest from accepting and judging submissions in its format:} other {Disabling it stops these # running contests from accepting and judging submissions in their format:}}',
+  'plugins.disableConfirm.noContests':
+    'No contest is running in a format this plugin provides.',
+  'plugins.disableConfirm.unknownContests':
+    'Could not check which running contests use this plugin.',
+  'plugins.disableConfirm.confirm': 'Disable',
   'plugins.detail.uploadRemoved':
     'Removed the upload; the plugin is gone from every server.',
   'plugins.detail.uploadReplacedByBundle':
