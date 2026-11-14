@@ -4,8 +4,8 @@
 //! deadline:
 //!
 //! - A top-level call of a [`CallKind`] waits, holding nothing but a queue
-//!   entry, until its kind has room and a CPU token is free
-//!   ([`crate::admission`]). Only then does it get a guest thread
+//!   entry, until its kind (and, on the request path, its plugin function)
+//!   has room and a CPU token is free ([`crate::admission`]). Only then does it get a guest thread
 //!   ([`crate::threads`]) and look up the plugin's pool, so a call queued
 //!   across a reload runs on the new version.
 //! - A lifecycle call (plugin `init`) needs room under its own small cap but
@@ -84,9 +84,15 @@ impl CallOptions {
         }
     }
 
-    /// A request path call: visibility, request hooks, plugin routes.
+    /// A call the host makes on the request path: a visibility query or a
+    /// request hook.
     pub fn interactive(deadline: Instant) -> Self {
         Self::new(CallKind::Request, deadline)
+    }
+
+    /// A plugin HTTP route.
+    pub fn route(deadline: Instant) -> Self {
+        Self::new(CallKind::Route, deadline)
     }
 
     /// A contest call that waits in host functions for its judgement.
