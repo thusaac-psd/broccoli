@@ -400,13 +400,7 @@ impl<'a> VisibilityKernel<'a> {
             self.submission_feedback(std::slice::from_ref(&resource))
                 .await?
         };
-        Ok(match decision {
-            Decision::Deny => None,
-            d => Some(Visible::new(entity, d).with_feedback(match resource {
-                Resource::Submission(id) => feedback.get(&id).cloned(),
-                _ => None,
-            })),
-        })
+        Ok(wrap_visible(&resource, entity, decision, &feedback))
     }
 
     /// Batched form. Input and output are positionally aligned; denied
@@ -428,13 +422,7 @@ impl<'a> VisibilityKernel<'a> {
         Ok(items
             .into_iter()
             .zip(decisions)
-            .map(|((resource, entity), d)| match d {
-                Decision::Deny => None,
-                d => Some(Visible::new(entity, d).with_feedback(match resource {
-                    Resource::Submission(id) => feedback.get(&id).cloned(),
-                    _ => None,
-                })),
-            })
+            .map(|((resource, entity), d)| wrap_visible(&resource, entity, d, &feedback))
             .collect())
     }
 
@@ -459,6 +447,41 @@ impl<'a> VisibilityKernel<'a> {
             .collect();
         crate::services::submission_feedback::load(self.state, &ids).await
     }
+}
+
+/// Wraps `entity` under `decision`, or `None` when denied.
+///
+/// A submission's status is the root of its outcome: every submission shape
+/// carries one, and a verdict, score or result implies it. A decision that
+/// hides a submission's status ([`SUBMISSION_STATUS_PATH`]) therefore
+/// withholds its whole outcome: the submission is presented exactly as one
+/// whose feedback is withheld, instead of carrying a `null` status no client
+/// can read.
+///
+/// [`SUBMISSION_STATUS_PATH`]: broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH
+fn wrap_visible<T: serde::Serialize>(
+    resource: &Resource,
+    entity: T,
+    decision: Decision,
+    feedback: &HashMap<i32, crate::services::submission_feedback::Feedback>,
+) -> Option<Visible<T>> {
+    use crate::services::submission_feedback::Feedback;
+    use broccoli_server_sdk::visibility::SUBMISSION_STATUS_PATH;
+    let (decision, presented) = match (resource, decision) {
+        (_, Decision::Deny) => return None,
+        // The withheld presentation sets the status the mask would blank.
+        (Resource::Submission(_), Decision::Redact(mask))
+            if mask.covers(SUBMISSION_STATUS_PATH) =>
+        {
+            (
+                Decision::Redact(mask.without(SUBMISSION_STATUS_PATH)),
+                Some(Feedback::Withheld),
+            )
+        }
+        (Resource::Submission(id), d) => (d, feedback.get(id).cloned()),
+        (_, d) => (d, None),
+    };
+    Some(Visible::new(entity, decision).with_feedback(presented))
 }
 
 #[cfg(test)]

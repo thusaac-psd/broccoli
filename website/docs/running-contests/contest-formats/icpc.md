@@ -45,7 +45,10 @@ the board.
 With `freeze_minutes` set, the standings a contestant sees stop updating that
 many minutes before the contest ends. A submission made during that window
 shows as pending rather than its real verdict, until the board is revealed.
-Organizers always see the real board, frozen or not.
+In the submission list another team's frozen submission shows only when it
+was submitted: it reads as running, with no verdict or compile result, and a
+list filtered or sorted by status leaves it out. A team always sees its own
+results, and organizers always see the real board, frozen or not.
 
 Freezing only matters once `public_standings` is on, since a contestant with
 public standings off already sees only their own row, which never freezes.
