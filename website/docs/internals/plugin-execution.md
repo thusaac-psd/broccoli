@@ -140,21 +140,34 @@ lease, judging and operations `plugin.call_timeout_secs`.
 
 One process-wide thread (`packages/plugin-core/src/deadline.rs`) keeps a heap
 of `(Instant, CancelHandle)` for every running call and cancels a guest whose
-deadline passes. A guest parked in a host function traps when it returns to
-guest code.
+deadline passes. The guest traps at its next function entry or loop
+iteration; one parked in a host function traps once it returns to guest code
+and reaches one.
 
-extism sends `TimerAction::Start` to its timer thread and only then arms the
-store's epoch deadline (`set_epoch_deadline(1)`). A cancel handled in between
-bumps the epoch too early and also removes the call's timer entry, so the
-guest runs on and every repeat of the cancel is ignored. The deadline thread
-therefore sends a call's first cancel no sooner than `START_GRACE` after the
-call was registered, and repeats it, doubling the gap from `CANCEL_RETRY` up
-to `CANCEL_RETRY_MAX`, until the call returns; a guest still running 5 s past
-its first cancel is logged as a lost cancel. The manifest timeout, the call
-timeout plus `TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread never
-cancelled. A lost cancel has no backstop: it removes the manifest timeout's
-timer entry too. Only an extism fix that arms the epoch deadline before
-registering the call closes it.
+The workspace patches extism (`third_party/extism`) so that a call's cancel
+and manifest timeout bound every piece of guest code the call runs. extism
+arms the store's epoch deadline and registers the call with its timer thread
+before it instantiates the guest, so the guest's start function and
+`_initialize` run under the same cancel and timeout as the export; building
+an instance does not instantiate the main module; and after an
+instantiation that failed, a cancelled one included, the next call starts
+from a fresh store instead of a half-initialized instance. The same holds
+after any call whose guest did not return normally: a trap (cancel, timeout,
+out of fuel, a guest panic), a failed host function or a WASI exit leaves
+the guest's memory possibly half updated, so extism rebuilds the store before
+the instance's next call, and the instance stays in its pool. An error the
+guest returns through its output keeps the store. A cancelled call
+fails like any other, so the host maps it to `PluginError::Unavailable`.
+`packages/plugin-core/tests/extism_cancel.rs` checks these cases.
+
+A cancel handled before extism registers the call finds no call to stop.
+`deadline::watch` runs just before `Plugin::call`, and extism registers the
+call once it holds the instance and has replaced a store the previous call
+left unusable; no guest code runs in that window. The deadline thread
+therefore repeats a call's cancel, doubling the gap from `CANCEL_RETRY` up to
+`CANCEL_RETRY_MAX`, until the call returns. The manifest timeout, the call
+timeout plus `TIMEOUT_BACKSTOP_MARGIN`, ends a guest the deadline thread
+never cancelled.
 
 The host's long waits end at the call's deadline too:
 `get_next_evaluate_result` and `get_next_operation_result` cut the wait a
