@@ -96,7 +96,10 @@ export function Markdown({ children, className, resolveUrl }: MarkdownProps) {
             </pre>
           ),
           code({ children, className: codeClassName }) {
-            const isBlock = !!codeClassName;
+            // A fenced block has a language class, or (without a language)
+            // ends in the newline before its closing fence; inline code has
+            // neither.
+            const isBlock = !!codeClassName || String(children).endsWith('\n');
             if (isBlock) {
               return <code className="font-mono text-[13px]">{children}</code>;
             }
