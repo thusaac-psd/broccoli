@@ -20,6 +20,7 @@ use sea_orm::{ConnectionTrait, Statement};
 use sea_orm_migration::prelude::*;
 
 mod m0001_baseline;
+mod m0002_checker_format_no_default;
 
 pub use m0001_baseline::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
@@ -94,7 +95,10 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m0001_baseline::Migration)]
+        vec![
+            Box::new(m0001_baseline::Migration),
+            Box::new(m0002_checker_format_no_default::Migration),
+        ]
     }
 }
 
