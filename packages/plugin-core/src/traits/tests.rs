@@ -351,12 +351,13 @@ async fn a_call_parked_in_a_host_wait_holds_no_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn threads_stay_bounded_under_a_slow_plugin_flood() {
-    let h = Harness::new(4);
+    let h =
+        Harness::with_capacity(Capacity::new(4).with_cap(crate::admission::CallKind::Work, 1000));
     let calls: Vec<_> = (0..500)
-        .map(|_| h.spawn("hold", CallOptions::interactive(later())))
+        .map(|_| h.spawn("hold", CallOptions::background(later())))
         .collect();
     until(|| {
-        h.fixture.read(|c| c.running) == 4 && h.admission().queued(CallClass::Interactive) == 496
+        h.fixture.read(|c| c.running) == 4 && h.admission().queued(CallClass::Background) == 496
     })
     .await;
     // One guest thread per running guest; the 496 queued calls hold none.
@@ -365,6 +366,31 @@ async fn threads_stay_bounded_under_a_slow_plugin_flood() {
     for call in calls {
         call.await.unwrap().unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_function_fills_only_its_own_lane() {
+    let h = Harness::new(4);
+    let lane_cap = h.admission().capacity().lane_cap();
+    // Request calls of a function that hold their guest: past its lane's cap
+    // they queue (or are refused), however many tokens are free.
+    let slow: Vec<_> = (0..6)
+        .map(|_| h.spawn("hold", CallOptions::interactive(later())))
+        .collect();
+    until(|| h.fixture.read(|c| c.running) == lane_cap).await;
+    // A call to another function of the same plugin runs at once.
+    h.manager
+        .call_raw(PLUGIN, "mark", vec![], CallOptions::interactive(later()))
+        .await
+        .expect("a call to another function runs beside the full lane");
+    h.fixture.release();
+    for call in slow {
+        match call.await.unwrap() {
+            Ok(_) | Err(PluginError::Unavailable { .. }) => {}
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    assert_eq!(h.fixture.read(|c| c.max_running), lane_cap);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

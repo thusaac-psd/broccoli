@@ -4,8 +4,8 @@
 //! deadline:
 //!
 //! - A top-level call of a [`CallKind`] waits, holding nothing but a queue
-//!   entry, until its kind has room and a CPU token is free
-//!   ([`crate::admission`]). Only then does it get a guest thread
+//!   entry, until its kind (and, on the request path, its plugin function)
+//!   has room and a CPU token is free ([`crate::admission`]). Only then does it get a guest thread
 //!   ([`crate::threads`]) and look up the plugin's pool, so a call queued
 //!   across a reload runs on the new version.
 //! - A lifecycle call (plugin `init`) needs room under its own small cap but
