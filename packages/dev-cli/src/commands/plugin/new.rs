@@ -5,6 +5,7 @@ use clap::Args;
 use console::style;
 use dialoguer::Select;
 
+use crate::template::sdk::SdkSource;
 use crate::template::variables::{
     TemplateVars, to_pascal_case, to_snake_case, validate_plugin_name,
 };
@@ -29,25 +30,30 @@ const STATIC_POSTCSS_CONFIG: &str = include_str!("../../../templates/frontend/po
 
 #[derive(Args)]
 pub struct NewPluginArgs {
+    /// Plugin id: lowercase letters, digits and single hyphens
     pub name: String,
 
+    /// Scaffold a backend (Rust compiled to WASM) only
     #[arg(long, conflicts_with_all = ["frontend", "full"])]
     pub backend: bool,
 
+    /// Scaffold a frontend (React) only
     #[arg(long, conflicts_with_all = ["backend", "full"])]
     pub frontend: bool,
 
+    /// Scaffold a backend and a frontend
     #[arg(long, conflicts_with_all = ["backend", "frontend"])]
     pub full: bool,
 
+    /// Directory to create the plugin in [default: ./<NAME>]
     #[arg(long, short)]
     pub output: Option<PathBuf>,
 
-    #[arg(long, default_value = r#"path = "../../server-sdk""#)]
-    pub server_sdk: String,
-
-    #[arg(long, default_value = "workspace:*")]
-    pub web_sdk: String,
+    /// Directory holding the Broccoli SDKs (the packages/ directory of a
+    /// Broccoli checkout). Found automatically inside a checkout; elsewhere
+    /// the backend uses the published crate and a frontend needs this.
+    #[arg(long, value_name = "DIR")]
+    pub sdk: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +82,25 @@ pub fn run(args: NewPluginArgs) -> Result<()> {
         ScaffoldKind::Backend => String::new(),
     };
 
+    let sdk = SdkSource::locate(args.sdk.as_deref(), &output_dir)?;
+    let has_backend = matches!(kind, ScaffoldKind::Backend | ScaffoldKind::Full);
+    let frontend_dir = match kind {
+        ScaffoldKind::Full => Some(output_dir.join("frontend")),
+        ScaffoldKind::Frontend => Some(output_dir.clone()),
+        ScaffoldKind::Backend => None,
+    };
     let vars = TemplateVars {
         plugin_name: args.name.clone(),
         plugin_name_snake: to_snake_case(&args.name),
         plugin_name_pascal: to_pascal_case(&args.name),
-        server_sdk_dep: args.server_sdk,
-        web_sdk_dep: args.web_sdk,
+        server_sdk_dep: match has_backend {
+            true => sdk.server_sdk_dep(&output_dir)?,
+            false => String::new(),
+        },
+        web_sdk_dep: match &frontend_dir {
+            Some(dir) => sdk.web_sdk_dep(dir)?,
+            None => String::new(),
+        },
         web_root,
     };
 

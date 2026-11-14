@@ -882,6 +882,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "broccoli-cli-core",
+ "broccoli-server-sdk",
  "broccoli-types",
  "clap",
  "console",
@@ -897,6 +898,7 @@ dependencies = [
  "serde_json",
  "shlex 1.3.0",
  "tar",
+ "tempfile",
  "toml 0.9.12+spec-1.1.0",
 ]
 
