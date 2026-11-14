@@ -28,6 +28,21 @@ pub fn discover_context() -> Option<ProjectContext> {
     None
 }
 
+/// The contest a command uses: `arg`, else the `.broccoli` file's, else
+/// `contest` in config.toml.
+pub fn contest_ref(arg: Option<&str>) -> Result<String> {
+    if let Some(contest) = arg {
+        return Ok(contest.to_string());
+    }
+    discover_context()
+        .and_then(|c| c.contest)
+        .or_else(|| broccoli_cli_core::config::load_user_config().contest)
+        .context(
+            "No contest given. Pass one (id or name), run from a directory with a .broccoli \
+             file, or set one with `broccoli config set contest <id>`.",
+        )
+}
+
 /// Write .broccoli file in cwd
 pub fn save_context(ctx: &ProjectContext) -> anyhow::Result<()> {
     let content = toml::to_string_pretty(ctx)?;

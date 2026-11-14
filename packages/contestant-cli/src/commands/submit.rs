@@ -1,11 +1,11 @@
-use super::context;
+use super::{Rejected, context};
 use anyhow::Context;
 use broccoli_cli_core::api::submission::SubmissionFileDto;
 use broccoli_cli_core::client::Client;
-use broccoli_cli_core::config::{self, load_user_config};
 use broccoli_cli_core::fmt;
 use broccoli_cli_core::model::{StatusDisplay, VerdictDisplay};
 use broccoli_cli_core::resolve;
+use broccoli_cli_core::tui::progress::Progress;
 use clap::Args;
 use console::style;
 use std::collections::HashMap;
@@ -41,9 +41,8 @@ pub struct SubmitArgs {
 }
 
 pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
-    let user_config = load_user_config();
     let ctx = context::discover_context();
 
     let problem_ref = args
@@ -55,15 +54,8 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
     let contest_id: Option<String> = if args.no_contest {
         None
     } else {
-        let contest_ref = args
-            .contest
-            .as_deref()
-            .or(ctx.as_ref().and_then(|c| c.contest.as_deref()))
-            .or(user_config.contest.as_deref())
-            .context(
-                "No contest specified. Use -c <id|name>, or --no-contest to submit \
-                 to a standalone problem.",
-            )?;
+        let contest_ref = context::contest_ref(args.contest.as_deref())?;
+        let contest_ref = contest_ref.as_str();
         Some(resolve::contest_id(&client, contest_ref)?)
     };
     let problem_id: String = match contest_id.as_deref() {
@@ -197,16 +189,14 @@ fn single_required_filename<'a>(
 }
 
 fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
-    use std::io::Write;
     let submission_id = submission_id.to_string();
     let submission_id = submission_id.as_str();
-    let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
+    let mut progress = Progress::stderr();
     let start = std::time::Instant::now();
 
     loop {
         if start.elapsed() > Duration::from_secs(300) {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
+            progress.clear();
             anyhow::bail!(
                 "Timed out waiting for the verdict. Check later with `broccoli status {}`.",
                 submission_id
@@ -219,18 +209,14 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
         let elapsed = start.elapsed();
 
         if sub.status.is_in_progress() {
-            // \x1b[K clears stale chars from a previous longer frame
-            eprint!(
-                "\r\x1b[K  {} Judging... {} ({:.1}s)",
-                spinner.next(),
+            progress.tick(format_args!(
+                "Judging... {} ({:.1}s)",
                 sub.status.human(),
                 elapsed.as_secs_f64()
-            );
-            std::io::stderr().flush().ok();
+            ));
             std::thread::sleep(Duration::from_millis(200));
         } else {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
+            progress.clear();
 
             let accepted = sub
                 .result
@@ -293,7 +279,10 @@ fn watch_verdict(client: &Client, submission_id: i32) -> anyhow::Result<()> {
                 }
             }
 
-            return Ok(());
+            return match accepted {
+                true => Ok(()),
+                false => Err(Rejected(label).into()),
+            };
         }
     }
 }

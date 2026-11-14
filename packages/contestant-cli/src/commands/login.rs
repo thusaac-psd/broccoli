@@ -10,17 +10,13 @@ use broccoli_cli_core::client::{Client, ClientError, persist_session};
 use broccoli_cli_core::config;
 use broccoli_cli_core::server::ServerUrl;
 use broccoli_cli_core::session::Session;
+use broccoli_cli_core::tui::progress::Progress;
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 const SPIN_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Args)]
 pub struct LoginArgs {
-    /// Broccoli contest server URL. Falls back to $BROCCOLI_URL, the server
-    /// signed in to last, `server` in config.toml, then http://localhost:3000.
-    #[arg(short, long, env = "BROCCOLI_URL")]
-    pub server: Option<ServerUrl>,
-
     /// Username for direct login.
     #[arg(short, long)]
     pub username: Option<String>,
@@ -35,7 +31,9 @@ pub struct LoginArgs {
 }
 
 pub fn run(args: LoginArgs) -> Result<()> {
-    let server = config::login_server(args.server.as_ref())?;
+    // `--server` (global), else $BROCCOLI_URL, the server signed in to last,
+    // `server` in config.toml, then http://localhost:3000.
+    let server = config::login_server(super::server_option())?;
 
     if let (Some(username), Some(password)) = (&args.username, &args.password) {
         return login_direct(&server, username, password);
@@ -99,17 +97,14 @@ fn login_via_callback(server: &ServerUrl) -> Result<()> {
         .context("Failed to set non-blocking mode")?;
 
     let start = std::time::Instant::now();
-    let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
+    let mut progress = Progress::stdout();
     let mut token: Option<String> = None;
 
     while start.elapsed() < CALLBACK_TIMEOUT {
-        // \x1b[K clears stale trailing chars
-        print!(
-            "\r\x1b[K{}  Waiting for browser authentication... ({}s)",
-            style(spinner.next()).cyan(),
+        progress.tick(format_args!(
+            "Waiting for browser authentication... ({}s)",
             start.elapsed().as_secs()
-        );
-        std::io::stdout().flush().ok();
+        ));
 
         match listener.accept() {
             Ok((stream, _)) => {
@@ -127,8 +122,7 @@ fn login_via_callback(server: &ServerUrl) -> Result<()> {
         }
     }
 
-    print!("\r\x1b[K");
-    std::io::stdout().flush().ok();
+    progress.clear();
 
     let token = match token {
         Some(t) => t,

@@ -4,19 +4,22 @@ use clap::Args;
 use console::style;
 
 use broccoli_cli_core::client::Client;
-use broccoli_cli_core::{config, resolve};
+use broccoli_cli_core::resolve;
 
 #[derive(Args)]
 pub struct InfoArgs {
-    /// Contest ID or name (e.g. 3 or "Spring Round")
-    #[arg(required = true)]
-    pub contest: String,
+    /// Contest ID or name (e.g. 3 or "Spring Round"); defaults to the
+    /// .broccoli file's, then `contest` in config.toml
+    pub contest: Option<String>,
 }
 
 pub fn run(args: InfoArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
-    let cid = resolve::contest_id(&client, &args.contest)?;
+    let cid = resolve::contest_id(
+        &client,
+        &crate::commands::context::contest_ref(args.contest.as_deref())?,
+    )?;
 
     println!("{}  Fetching contest info...", style("→").blue().bold());
 

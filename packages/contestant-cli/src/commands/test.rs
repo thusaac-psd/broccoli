@@ -13,8 +13,9 @@ use broccoli_cli_core::client::Client;
 use broccoli_cli_core::config::{self, load_user_config};
 use broccoli_cli_core::model::{StatusDisplay, SubmissionStatus, VerdictDisplay};
 use broccoli_cli_core::resolve;
+use broccoli_cli_core::tui::progress::Progress;
 
-use super::context;
+use super::{Rejected, context};
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -44,7 +45,7 @@ pub struct TestArgs {
 }
 
 pub fn run(args: TestArgs) -> anyhow::Result<()> {
-    let creds = config::resolve_credentials(None, None)?;
+    let creds = crate::commands::credentials()?;
     let client = Client::new(creds);
     let user_config = load_user_config();
     let ctx = context::discover_context();
@@ -74,12 +75,8 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let contest_ref = args
-        .contest
-        .as_deref()
-        .or(ctx.as_ref().and_then(|c| c.contest.as_deref()))
-        .or(user_config.contest.as_deref())
-        .context("No contest specified. Use -c <id|name>.")?;
+    let contest_ref = context::contest_ref(args.contest.as_deref())?;
+    let contest_ref = contest_ref.as_str();
     let problem_ref = args
         .problem
         .as_deref()
@@ -214,31 +211,25 @@ fn load_cached_samples(
 }
 
 fn poll_code_run(client: &Client, run_id: i32) -> anyhow::Result<CodeRunResponse> {
-    use std::io::Write;
     use std::time::{Duration, Instant};
-    let mut spinner = broccoli_cli_core::tui::spinner::Spinner::new();
+    let mut progress = Progress::stderr();
     let start = Instant::now();
 
     loop {
         let cr = client.get_code_run(run_id)?;
         let status = cr.status;
         if !status.is_in_progress() {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
             return Ok(cr);
         }
         if start.elapsed() > Duration::from_secs(120) {
-            eprint!("\r\x1b[K");
-            std::io::stderr().flush().ok();
+            progress.clear();
             bail!("Timed out waiting for the code run to finish.");
         }
-        eprint!(
-            "\r\x1b[K  {} Running... {} ({:.0}s)",
-            spinner.next(),
+        progress.tick(format_args!(
+            "Running... {} ({:.0}s)",
             status.human(),
             start.elapsed().as_secs_f64()
-        );
-        std::io::stderr().flush().ok();
+        ));
         std::thread::sleep(Duration::from_millis(300));
     }
 }
@@ -269,7 +260,16 @@ fn run_samples_locally(
         }
     }
     println!("  {}/{} samples passed.", passed, samples.len());
-    Ok(())
+    samples_verdict(passed, samples.len())
+}
+
+/// Every sample passing is success; anything less is [`Rejected`].
+fn samples_verdict(passed: usize, total: usize) -> anyhow::Result<()> {
+    if passed == total {
+        Ok(())
+    } else {
+        Err(Rejected(format!("{passed}/{total} samples passed")).into())
+    }
 }
 
 fn print_diff(expected: &str, got: &str) {
@@ -501,5 +501,20 @@ fn print_remote_result(run: &CodeRunResponse) -> anyhow::Result<()> {
     }
     println!("  {}/{} passed.", passed, cases.len());
 
-    Ok(())
+    samples_verdict(passed, cases.len())
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_sample_is_a_rejection_not_an_error() {
+        assert!(samples_verdict(2, 2).is_ok());
+        let err = samples_verdict(1, 2).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<Rejected>().unwrap().0,
+            "1/2 samples passed"
+        );
+    }
 }
