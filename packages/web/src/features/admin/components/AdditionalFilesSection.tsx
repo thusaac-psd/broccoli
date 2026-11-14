@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -37,6 +37,7 @@ export function AdditionalFilesSection({
   problemId,
 }: AdditionalFilesSectionProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -122,18 +123,16 @@ export function AdditionalFilesSection({
         );
 
         if (error) {
-          throw new Error(getErrorMessage(error, 'Upload failed'));
+          throw error;
         }
 
         return true;
       } catch (err) {
-        toast.error(
-          getErrorMessage(err, t('admin.additionalFiles.uploadError')),
-        );
+        toast.error(errorMessage(err, t('admin.additionalFiles.uploadError')));
         return false;
       }
     },
-    [apiClient, problemId, t],
+    [errorMessage, apiClient, problemId, t],
   );
 
   const handleUploadSingle = useCallback(

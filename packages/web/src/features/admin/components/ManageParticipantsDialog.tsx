@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestSummary } from '@broccoli/web-sdk/contest';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
@@ -236,6 +236,7 @@ function AddParticipantsTab({
   participants: ParticipantItem[];
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -291,7 +292,7 @@ function AddParticipantsTab({
       return;
     }
     if (error && !isAlreadyDone(error)) {
-      toast.error(getErrorMessage(error, t('toast.participant.addError')));
+      toast.error(errorMessage(error, t('toast.participant.addError')));
     } else {
       toast.success(t('toast.participant.added'));
       queryClient.invalidateQueries({
@@ -448,6 +449,7 @@ function BulkImportTab({
   participants: ParticipantItem[];
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -620,7 +622,7 @@ function BulkImportTab({
       setResult('already-done');
       toast.success(t('toast.participant.bulkAlreadyDone'));
     } else if (error || !data) {
-      const msg = getErrorMessage(error, t('admin.bulkParticipantsError'));
+      const msg = errorMessage(error, t('admin.bulkParticipantsError'));
       setErrorMsg(msg);
       toast.error(msg);
       return;

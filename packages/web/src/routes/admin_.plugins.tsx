@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { PLUGIN_MANAGE } from '@broccoli/web-sdk/permissions';
@@ -25,6 +25,7 @@ import { PluginUploadDialog } from '@/features/plugin/components/PluginUploadDia
 
 export default function PluginsPage() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -109,9 +110,7 @@ export default function PluginsPage() {
         // Refresh either way: a rejected toggle may mean the page was stale.
         invalidatePluginQueries();
         if (error) {
-          toast.error(
-            getErrorMessage(error, t('validation.pluginToggleError')),
-          );
+          toast.error(errorMessage(error, t('validation.pluginToggleError')));
         } else {
           // Unnecessary to load the plugin immediately, as it will be lazily
           // loaded when the user navigates to a page that uses it.
@@ -127,7 +126,7 @@ export default function PluginsPage() {
         });
       }
     },
-    [apiClient, invalidatePluginQueries, unloadPlugin, t],
+    [errorMessage, apiClient, invalidatePluginQueries, unloadPlugin, t],
   );
 
   // Reload on every server. Also the retry for a plugin that failed to load:
@@ -141,7 +140,7 @@ export default function PluginsPage() {
         });
 
         if (error) {
-          toast.error(getErrorMessage(error, t('plugins.reloadError')));
+          toast.error(errorMessage(error, t('plugins.reloadError')));
         } else {
           await reloadPlugin(pluginId);
         }
@@ -155,7 +154,7 @@ export default function PluginsPage() {
         });
       }
     },
-    [apiClient, invalidatePluginQueries, reloadPlugin, t],
+    [errorMessage, apiClient, invalidatePluginQueries, reloadPlugin, t],
   );
 
   const handleReloadAll = useCallback(async () => {
@@ -164,7 +163,7 @@ export default function PluginsPage() {
       const { error } = await apiClient.POST('/admin/plugins/reload-all', {});
 
       if (error) {
-        toast.error(getErrorMessage(error, t('plugins.reloadError')));
+        toast.error(errorMessage(error, t('plugins.reloadError')));
       } else {
         await reloadAllPlugins();
       }
@@ -172,7 +171,7 @@ export default function PluginsPage() {
     } finally {
       setIsReloadingAll(false);
     }
-  }, [apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
+  }, [errorMessage, apiClient, invalidatePluginQueries, reloadAllPlugins, t]);
 
   const handlePublished = useCallback(
     async (pluginId: string) => {
@@ -193,10 +192,16 @@ export default function PluginsPage() {
         );
         if (error || !data) {
           toast.error(
-            getErrorMessage(error, t('plugins.detail.removeUploadError')),
+            errorMessage(error, t('plugins.detail.removeUploadError')),
           );
         } else {
-          toast.success(data.message);
+          toast.success(
+            t(
+              data.outcome === 'removed'
+                ? 'plugins.detail.uploadRemoved'
+                : 'plugins.detail.uploadReplacedByBundle',
+            ),
+          );
           if (data.outcome === 'removed') {
             unloadPlugin(pluginId);
             setDetailPluginId(null);
@@ -210,6 +215,7 @@ export default function PluginsPage() {
       }
     },
     [
+      errorMessage,
       apiClient,
       invalidatePluginQueries,
       reloadPlugin,

@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -36,6 +36,7 @@ export function ManageUserRolesDialog({
   onOpenChange,
 }: ManageUserRolesDialogProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
 
@@ -112,7 +113,7 @@ export function ManageUserRolesDialog({
     setIsAssigning(false);
 
     if (error) {
-      toast.error(getErrorMessage(error, t('users.users.assignRoleError')));
+      toast.error(errorMessage(error, t('users.users.assignRoleError')));
       return;
     }
 

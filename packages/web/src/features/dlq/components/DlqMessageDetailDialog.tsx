@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -27,6 +27,7 @@ interface Props {
 
 export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const format = useFormat();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -46,7 +47,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
         params: { path: { id: messageId } },
       });
       if (error) {
-        toast.error(getErrorMessage(error, t('dlq.detail.retryError')));
+        toast.error(errorMessage(error, t('dlq.detail.retryError')));
         return;
       }
       toast.success(t('dlq.detail.retrySuccess'));

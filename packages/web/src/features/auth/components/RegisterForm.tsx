@@ -1,4 +1,4 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -18,6 +18,7 @@ import { DisplayNameField } from '@/components/DisplayNameField';
 
 export default function RegisterForm() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { login } = useAuth();
   const navigate = useNavigate();
 
@@ -60,20 +61,14 @@ export default function RegisterForm() {
       });
 
       if (regError) {
-        if (regError.code === 'USERNAME_TAKEN') {
-          setError(t('auth.usernameTaken'));
-        } else {
-          setError(regError.message || t('auth.validationError'));
-        }
+        setError(errorMessage(regError, t('auth.validationError')));
         return;
       }
 
       await login({ username, password });
       navigate('/');
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : t('auth.validationError');
-      setError(message);
+      setError(errorMessage(err, t('auth.validationError')));
     } finally {
       setIsSubmitting(false);
     }

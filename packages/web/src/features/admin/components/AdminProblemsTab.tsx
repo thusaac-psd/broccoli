@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem } from '@broccoli/web-sdk/contest';
 import {
@@ -157,6 +157,7 @@ function ProblemDialogForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
@@ -237,7 +238,7 @@ function ProblemDialogForm({
     }
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
-        getErrorMessage(
+        errorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),
@@ -542,6 +543,7 @@ function useContestProblemColumns({
 
 export function AdminProblemsTab({ contestId }: { contestId?: number }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -649,7 +651,7 @@ export function AdminProblemsTab({ contestId }: { contestId?: number }) {
       params: { path: { id: problemId } },
     });
     if (error || !data) {
-      toast.error(getErrorMessage(error, t('toast.problem.loadError')));
+      toast.error(errorMessage(error, t('toast.problem.loadError')));
       return undefined;
     }
     return data;

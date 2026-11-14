@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -55,6 +55,7 @@ function parseStatus(value: string | null): SubmissionStatusFilterValue {
 
 export function ContestSubmissions({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -223,7 +224,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       });
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissions.bulkRejudge.error')));
+      toast.error(errorMessage(error, t('submissions.bulkRejudge.error')));
     },
   });
 

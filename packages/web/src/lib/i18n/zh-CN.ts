@@ -370,7 +370,6 @@ export const zhCN: Catalog = {
   'auth.haveAccount': '已有账户？',
   'auth.logout': '退出登录',
   'auth.invalidCredentials': '用户名或密码错误。',
-  'auth.usernameTaken': '用户名已被使用。',
   'auth.passwordMismatch': '两次输入的密码不一致。',
   'auth.validationError': '请检查输入后重试。',
   'auth.device.title': '授权 CLI',
@@ -927,6 +926,9 @@ export const zhCN: Catalog = {
   'plugins.detail.removeUploadConfirm': '移除',
   'plugins.detail.removeUploadCancel': '取消',
   'plugins.detail.removeUploadError': '移除上传失败',
+  'plugins.detail.uploadRemoved': '已移除上传，插件已从所有服务器移除。',
+  'plugins.detail.uploadReplacedByBundle':
+    '已移除上传，所有服务器重新运行内置版本。',
 
   // Resource config
   'admin.configure': '配置',
@@ -1193,4 +1195,40 @@ export const zhCN: Catalog = {
   'dateTime.nextMonth': '下个月',
   'fileDrop.label': '上传文件',
   'fileDrop.prompt': '将文件拖到此处，或点击选择',
+
+  // API errors: by code (`apiError.<CODE>`), else by kind
+  'apiError.withDetail': '{message}（{detail}）',
+  'apiError.kind.network':
+    '无法连接服务器。请检查网络连接，连接恢复后会自动重试。',
+  'apiError.kind.temporary': '服务器正忙，请稍后重试。',
+  'apiError.kind.unauthenticated': '登录已失效，请重新登录。',
+  'apiError.kind.forbidden': '您没有执行此操作的权限。',
+  'apiError.kind.notFound': '内容不存在，或您无权查看。',
+  'apiError.kind.rateLimited': '请求过于频繁，请稍候再试。',
+  'apiError.kind.conflict': '内容已被修改，请刷新后重试。',
+  'apiError.kind.invalid': '请求被拒绝。',
+  'apiError.kind.server': '服务器出错，请重试。',
+  'apiError.INVALID_CREDENTIALS': '用户名或密码错误。',
+  'apiError.TOKEN_MISSING': '请登录后继续。',
+  'apiError.TOKEN_INVALID': '登录已失效，请重新登录。',
+  'apiError.PERMISSION_DENIED': '您没有执行此操作的权限。',
+  'apiError.USERNAME_TAKEN': '该用户名已被占用。',
+  'apiError.PAYLOAD_TOO_LARGE': '上传内容过大。',
+  'apiError.METHOD_NOT_ALLOWED': '不支持此操作。',
+  'apiError.PLUGIN_UPLOAD_DISABLED': '此服务器已关闭插件上传。',
+  'apiError.RATE_LIMITED': '请求过于频繁，请稍候再试。',
+  'apiError.QUEUE_OVERLOADED': '评测队列已满，请稍后重试。',
+  'apiError.PLUGIN_UNAVAILABLE': '服务器正忙，请稍后重试。',
+  'apiError.CONTEST_TYPE_UNAVAILABLE':
+    '服务器暂时无法接受此比赛的提交，请稍后重试。',
+  'apiError.IDEMPOTENCY_KEY_IN_PROGRESS': '相同的请求仍在处理中。',
+  'apiError.IDEMPOTENCY_KEY_MISMATCH': '此请求与原请求不一致，请刷新后重试。',
+  'apiError.IDEMPOTENCY_RESPONSE_TOO_LARGE':
+    '之前的请求已成功，请刷新查看结果。',
+  'apiError.IDEMPOTENCY_RESPONSE_NOT_STORED':
+    '之前的请求已成功，请刷新查看结果。',
+  'apiError.IDEMPOTENCY_OUTCOME_UNKNOWN':
+    '之前的尝试可能已生效，请确认后再重试。',
+  'apiError.INTERNAL_ERROR': '服务器出错，请重试。',
+  'apiError.INVALID_RESPONSE': '服务器返回了无法识别的响应。',
 };

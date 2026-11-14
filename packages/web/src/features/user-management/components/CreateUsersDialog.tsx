@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import type { CreatedUser } from '@broccoli/web-sdk/auth';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -39,6 +39,7 @@ export function CreateUsersDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const sendIdempotent = useIdempotentRequest();
@@ -126,7 +127,7 @@ export function CreateUsersDialog({
         unsettledMessage(error, t, {
           refetch: refreshUserLists,
           outcomeUnknownKey: 'users.create.outcomeUnknown',
-        }) ?? getErrorMessage(error, t('users.create.error')),
+        }) ?? errorMessage(error, t('users.create.error')),
       );
     } finally {
       setBusy(false);

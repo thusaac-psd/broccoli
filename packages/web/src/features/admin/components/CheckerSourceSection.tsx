@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, FileDropZone, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -35,6 +35,7 @@ interface CheckerSourceSectionProps {
 
 export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -102,18 +103,27 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
       });
 
       if (error) {
-        throw new Error(getErrorMessage(error, 'Upload failed'));
+        throw error;
       }
 
       setStaged([]);
       toast.success(t('admin.checkerSource.uploaded'));
       queryClient.invalidateQueries({ queryKey });
     } catch (err) {
-      toast.error(getErrorMessage(err, t('admin.checkerSource.uploadError')));
+      toast.error(errorMessage(err, t('admin.checkerSource.uploadError')));
     } finally {
       setUploading(false);
     }
-  }, [staged, files, apiClient, problemId, queryClient, queryKey, t]);
+  }, [
+    errorMessage,
+    staged,
+    files,
+    apiClient,
+    problemId,
+    queryClient,
+    queryKey,
+    t,
+  ]);
 
   const handleDeleteFile = useCallback(
     async (filename: string) => {
@@ -140,10 +150,10 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
         toast.success(t('admin.checkerSource.deleted'));
         queryClient.invalidateQueries({ queryKey });
       } catch (err) {
-        toast.error(getErrorMessage(err, t('admin.checkerSource.deleteError')));
+        toast.error(errorMessage(err, t('admin.checkerSource.deleteError')));
       }
     },
-    [files, apiClient, problemId, queryClient, queryKey, t],
+    [errorMessage, files, apiClient, problemId, queryClient, queryKey, t],
   );
 
   const handleClearAll = useCallback(

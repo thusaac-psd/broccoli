@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -31,6 +31,7 @@ export function ManageRolePermissionsDialog({
   onOpenChange,
 }: ManageRolePermissionsDialogProps) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
 
@@ -83,9 +84,7 @@ export function ManageRolePermissionsDialog({
     setIsGranting(false);
 
     if (error) {
-      toast.error(
-        getErrorMessage(error, t('users.roles.grantPermissionError')),
-      );
+      toast.error(errorMessage(error, t('users.roles.grantPermissionError')));
       return;
     }
 

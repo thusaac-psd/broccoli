@@ -195,6 +195,14 @@ export default defineConfig([
           message: 'Shown error text comes from a translation key: use t().',
         },
         {
+          // A server's `message` is English detail for logs; what the user
+          // reads comes from useErrorMessage(), which translates by code.
+          selector:
+            "CallExpression:matches([callee.object.name='toast'], [callee.name=/^set(Error|Message|Notice)$/]) MemberExpression[property.name='message']",
+          message:
+            'Show a failure through useErrorMessage() from @broccoli/web-sdk/api, never its raw message.',
+        },
+        {
           selector:
             'Property[key.name=/^(label|title|description|placeholder|message|confirmLabel|failureMessage|emptyMessage)$/] > Literal[value=/[A-Za-z]{2}/]:not([value=/[a-z0-9]-[a-z]/]):not([value=/^[\\w-]+(\\.[\\w-]+)+$/])',
           message: 'UI text comes from a translation key: use t().',

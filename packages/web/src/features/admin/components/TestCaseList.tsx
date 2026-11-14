@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Badge, Button, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -19,6 +19,7 @@ import {
  */
 export function TestCaseList({ problemId }: { problemId: number }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
   const [confirm, confirmDialog] = useConfirmDialog();
@@ -91,7 +92,7 @@ export function TestCaseList({ problemId }: { problemId: number }) {
         ) : error ? (
           <div role="alert" className="space-y-3 py-8 text-center">
             <p className="text-sm text-destructive">
-              {getErrorMessage(error, t('common.loadFailed'))}
+              {errorMessage(error, t('common.loadFailed'))}
             </p>
             <Button variant="outline" size="sm" onClick={() => refetch()}>
               {t('common.retry')}

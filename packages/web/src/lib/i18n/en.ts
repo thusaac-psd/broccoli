@@ -385,7 +385,6 @@ export const en = {
   'auth.haveAccount': 'Already have an account?',
   'auth.logout': 'Log out',
   'auth.invalidCredentials': 'Invalid username or password.',
-  'auth.usernameTaken': 'Username is already taken.',
   'auth.passwordMismatch': 'Passwords do not match.',
   'auth.validationError': 'Please check your input and try again.',
   'auth.device.title': 'Authorize CLI',
@@ -923,6 +922,10 @@ export const en = {
   'plugins.detail.removeUploadConfirm': 'Remove',
   'plugins.detail.removeUploadCancel': 'Cancel',
   'plugins.detail.removeUploadError': 'Failed to remove the upload',
+  'plugins.detail.uploadRemoved':
+    'Removed the upload; the plugin is gone from every server.',
+  'plugins.detail.uploadReplacedByBundle':
+    'Removed the upload; every server runs the bundled copy again.',
   'plugins.fleet.failedOn': 'Failed on {failed} of {total} servers',
   'plugins.fleet.pending': 'Applying to all servers…',
   'plugins.fleet.notInstalled': 'Not installed on every server',
@@ -1273,4 +1276,48 @@ export const en = {
   'dateTime.nextMonth': 'Next month',
   'fileDrop.label': 'Upload files',
   'fileDrop.prompt': 'Drop files here or click to browse',
+
+  // API errors: by code (`apiError.<CODE>`), else by kind
+  'apiError.withDetail': '{message} ({detail})',
+  'apiError.kind.network':
+    'Cannot reach the server. Check your connection; it retries when the connection is back.',
+  'apiError.kind.temporary':
+    'The server is busy right now. Try again in a moment.',
+  'apiError.kind.unauthenticated': 'Your session has ended. Sign in again.',
+  'apiError.kind.forbidden': 'You do not have permission to do this.',
+  'apiError.kind.notFound': 'It no longer exists, or you cannot see it.',
+  'apiError.kind.rateLimited':
+    'Too many requests. Wait a moment and try again.',
+  'apiError.kind.conflict': 'It was changed meanwhile. Reload and try again.',
+  'apiError.kind.invalid': 'The request was refused.',
+  'apiError.kind.server': 'Something went wrong on the server. Try again.',
+  'apiError.INVALID_CREDENTIALS': 'Wrong username or password.',
+  'apiError.TOKEN_MISSING': 'Sign in to continue.',
+  'apiError.TOKEN_INVALID': 'Your session has ended. Sign in again.',
+  'apiError.PERMISSION_DENIED': 'You do not have permission to do this.',
+  'apiError.USERNAME_TAKEN': 'That username is already taken.',
+  'apiError.PAYLOAD_TOO_LARGE': 'The upload is too large.',
+  'apiError.METHOD_NOT_ALLOWED': 'This action is not supported.',
+  'apiError.PLUGIN_UPLOAD_DISABLED':
+    'Plugin uploads are turned off on this server.',
+  'apiError.RATE_LIMITED': 'Too many requests. Wait a moment and try again.',
+  'apiError.QUEUE_OVERLOADED':
+    'The judge queue is full right now. Try again in a moment.',
+  'apiError.PLUGIN_UNAVAILABLE':
+    'The server is busy right now. Try again in a moment.',
+  'apiError.CONTEST_TYPE_UNAVAILABLE':
+    'This server cannot accept submissions for this contest right now. Try again in a moment.',
+  'apiError.IDEMPOTENCY_KEY_IN_PROGRESS':
+    'The same request is still being processed.',
+  'apiError.IDEMPOTENCY_KEY_MISMATCH':
+    'This request does not match the one it repeats. Reload and try again.',
+  'apiError.IDEMPOTENCY_RESPONSE_TOO_LARGE':
+    'The earlier request succeeded. Reload to see the result.',
+  'apiError.IDEMPOTENCY_RESPONSE_NOT_STORED':
+    'The earlier request succeeded. Reload to see the result.',
+  'apiError.IDEMPOTENCY_OUTCOME_UNKNOWN':
+    'The earlier attempt may have taken effect. Check before trying again.',
+  'apiError.INTERNAL_ERROR': 'Something went wrong on the server. Try again.',
+  'apiError.INVALID_RESPONSE':
+    'The server sent an answer this page cannot read.',
 } satisfies Record<string, string>;

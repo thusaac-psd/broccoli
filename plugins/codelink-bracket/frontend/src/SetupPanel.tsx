@@ -1,4 +1,4 @@
-import { getErrorMessage } from '@broccoli/web-sdk/api';
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button, Input, Label, Switch } from '@broccoli/web-sdk/ui';
@@ -34,6 +34,7 @@ export function SetupPanel({
   onClose?: () => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = useBracketApi();
   const { user } = useAuth();
   const config = useQuery({
@@ -44,7 +45,7 @@ export function SetupPanel({
   if (config.isError) {
     return (
       <p role="alert">
-        {getErrorMessage(config.error, t('codelink-bracket.setup.loadFailed'))}
+        {errorMessage(config.error, t('codelink-bracket.setup.loadFailed'))}
       </p>
     );
   }
@@ -69,6 +70,7 @@ function SetupForm({
   onClose?: () => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const api = useBracketApi();
   const queryClient = useQueryClient();
   const participants = useParticipants(contestId, true);
@@ -208,7 +210,7 @@ function SetupForm({
         queryKey: ['codelink-bracket-bracket', contestId],
       });
     } catch (err) {
-      setError(getErrorMessage(err, t('codelink-bracket.setup.failed')));
+      setError(errorMessage(err, t('codelink-bracket.setup.failed')));
     } finally {
       setSaving(false);
     }

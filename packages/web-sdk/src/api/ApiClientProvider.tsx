@@ -3,6 +3,7 @@ import { type ReactNode, useMemo } from 'react';
 
 import { ApiClientContext } from '@/api/api-client-context';
 import { refreshSession, withSettledCookie } from '@/api/refresh-session';
+import { withRequestErrors } from '@/api/request-errors';
 import type { paths } from '@/api/schema';
 import { fetchWithServerClock } from '@/api/server-clock';
 import { createSession, type SentAs, sentAs } from '@/auth/session';
@@ -140,7 +141,7 @@ export function ApiClientProvider({
       },
     });
 
-    return client;
+    return withRequestErrors(client);
   }, [resolvedBaseUrl, session]);
 
   const apiFetch = useMemo(

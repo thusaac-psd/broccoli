@@ -1,3 +1,4 @@
+import { useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -26,6 +27,7 @@ function safeNext(next: string | null): string {
 
 export default function LoginForm() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { login } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -45,11 +47,7 @@ export default function LoginForm() {
       await login({ username, password });
       navigate(next);
     } catch (err) {
-      const message =
-        err instanceof Error && err.message
-          ? err.message
-          : t('auth.invalidCredentials');
-      setError(message);
+      setError(errorMessage(err, t('auth.invalidCredentials')));
     } finally {
       setIsSubmitting(false);
     }

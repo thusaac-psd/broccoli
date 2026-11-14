@@ -110,7 +110,7 @@ export function AuthProvider({
         body: data,
       });
 
-      if (error) throw new Error(error.message);
+      if (error) throw error;
       if (!resData) throw new Error('Unexpected login response');
 
       session.dispatch({ type: 'signed-in', session: resData });

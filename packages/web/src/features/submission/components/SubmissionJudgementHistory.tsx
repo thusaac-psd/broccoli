@@ -1,4 +1,4 @@
-import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
+import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
@@ -33,6 +33,7 @@ interface Props {
 
 export function SubmissionJudgementHistory({ submissionId }: Props) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user } = useAuth();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -117,7 +118,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.rejudgeError')));
+      toast.error(errorMessage(error, t('submissionDetail.rejudgeError')));
     },
   });
 
@@ -137,7 +138,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.applyError')));
+      toast.error(errorMessage(error, t('submissionDetail.applyError')));
     },
   });
 
@@ -156,7 +157,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       await invalidate();
     },
     onError: (error) => {
-      toast.error(getErrorMessage(error, t('submissionDetail.discardError')));
+      toast.error(errorMessage(error, t('submissionDetail.discardError')));
     },
   });
 

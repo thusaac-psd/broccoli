@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import type { ContestProblem, ContestSummary } from '@broccoli/web-sdk/contest';
 import {
@@ -290,6 +290,7 @@ function ContestForm({
   dialog: ReturnType<typeof useAsyncDialog>;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const apiClient = useApiClient();
   const sendIdempotent = useIdempotentRequest();
@@ -324,7 +325,7 @@ function ContestForm({
     if (toastUnsettled(result.error, t, { refetch })) throw result.error;
     if (result.error && !isAlreadyDone(result.error)) {
       toast.error(
-        getErrorMessage(
+        errorMessage(
           result.error,
           isEdit ? t('admin.editError') : t('admin.createError'),
         ),
@@ -489,6 +490,7 @@ export function ContestProblemsDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const queryClient = useQueryClient();
   const contestProblemsKey = ['contest-problems', contest.id];
   const apiClient = useApiClient();
@@ -583,7 +585,7 @@ export function ContestProblemsDialog({
       return;
     }
     if (apiError && !isAlreadyDone(apiError)) {
-      toast.error(getErrorMessage(apiError, t('toast.problem.addError')));
+      toast.error(errorMessage(apiError, t('toast.problem.addError')));
     } else {
       toast.success(t('toast.problem.added'));
       queryClient.invalidateQueries({ queryKey: contestProblemsKey });

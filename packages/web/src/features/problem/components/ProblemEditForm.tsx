@@ -1,7 +1,7 @@
 import {
   type ApiClient,
-  getErrorMessage,
   useApiClient,
+  useErrorMessage,
 } from '@broccoli/web-sdk/api';
 import { useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
@@ -66,6 +66,7 @@ function ProblemEditFields({
   initial: ProblemFormData;
 }) {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const navigate = useNavigate();
   const apiClient = useApiClient();
   const queryClient = useQueryClient();
@@ -86,7 +87,7 @@ function ProblemEditFields({
       ),
     });
     if (error) {
-      toast.error(getErrorMessage(error, t('admin.editError')));
+      toast.error(errorMessage(error, t('admin.editError')));
       throw error;
     }
     toast.success(t('toast.problem.updated'));

@@ -1,4 +1,8 @@
-import { getErrorMessage, type IdempotentResult } from '@broccoli/web-sdk/api';
+import {
+  type IdempotentResult,
+  TranslatedError,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { unsettledMessageKey, useAsyncSubmit } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
@@ -47,6 +51,7 @@ const PER_PAGE = 25;
 
 export function PrintQueuePage() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const format = useFormat();
   const { user } = useAuth();
   const api = usePrintApi();
@@ -100,24 +105,28 @@ export function PrintQueuePage() {
       try {
         for (const action of actions) {
           const result = await action().catch((error: unknown) => {
-            throw new Error(getErrorMessage(error, t('print.action.failed')));
+            throw new TranslatedError(
+              errorMessage(error, t('print.action.failed')),
+            );
           });
           if (!result.settled) {
-            throw new Error(t(unsettledMessageKey(result.outcome)));
+            throw new TranslatedError(t(unsettledMessageKey(result.outcome)));
           }
         }
       } finally {
         refresh();
       }
     },
-    [refresh, t],
+    [errorMessage, refresh, t],
   );
 
   // An action outside a confirm dialog reports its failure as a toast.
   const actNow = useCallback(
     (action: () => Promise<IdempotentResult<unknown>>) =>
-      act([action]).catch((error: Error) => toast.error(error.message)),
-    [act],
+      act([action]).catch((error: unknown) =>
+        toast.error(errorMessage(error, t('print.action.failed'))),
+      ),
+    [act, errorMessage, t],
   );
 
   const handleViewCode = useCallback(
@@ -628,10 +637,7 @@ export function PrintQueuePage() {
           )}
           {batchSubmit.state.status === 'failed' && (
             <p role="alert" className="text-sm text-destructive">
-              {getErrorMessage(
-                batchSubmit.state.error,
-                t('print.action.failed'),
-              )}
+              {errorMessage(batchSubmit.state.error, t('print.action.failed'))}
             </p>
           )}
           <DialogFooter>

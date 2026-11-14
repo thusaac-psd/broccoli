@@ -1,4 +1,8 @@
-import { parseApiError, useApiClient } from '@broccoli/web-sdk/api';
+import {
+  parseApiError,
+  useApiClient,
+  useErrorMessage,
+} from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
@@ -122,6 +126,7 @@ const PAGE_KEYFRAMES = `
 
 export function DeviceAuthPage() {
   const { t } = useTranslation();
+  const errorMessage = useErrorMessage();
   const { user, isLoading } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -260,7 +265,7 @@ export function DeviceAuthPage() {
         } else if (errorBody?.code === 'CONFLICT') {
           setError(t('auth.device.codeAlreadyUsed'));
         } else {
-          setError(errorBody?.message || t('auth.device.error'));
+          setError(errorMessage(apiError, t('auth.device.error')));
         }
         // Send the user back to re-check the code they entered.
         setStep('enter');
