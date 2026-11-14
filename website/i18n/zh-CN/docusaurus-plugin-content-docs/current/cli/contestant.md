@@ -73,7 +73,7 @@ broccoli login --server https://judge.example.com -u alice -p secret
 
 登录失败时，提示会说明原因：该地址没有任何服务应答、该地址有应答但不是 Broccoli 服务器，或者用户名或密码错误。
 
-在共用的机器上，用完后请退出登录。这会删除当前服务器（或你用 `--server` 指定的服务器）保存在本机的登录信息。
+在共用的机器上，用完后请退出登录。这会结束你在当前服务器（或你用 `--server` 指定的服务器）上的会话，使保存的登录信息的副本也随之失效，并删除本机保存的登录信息。若无法连接服务器，本机的登录信息仍会被删除，命令会提醒你该会话在服务器上可能一直有效，直到过期。
 
 ```bash
 broccoli logout
@@ -261,7 +261,7 @@ Broccoli 根据你的文件扩展名，按照比赛服务器支持的语言及�
 | ----------------------------- | --------- | -------------------------- |
 | `broccoli login`              | `li`      | 登录到比赛服务器           |
 | `broccoli whoami`             | `me`      | 显示你当前的登录身份       |
-| `broccoli logout`             |           | 删除保存的登录信息         |
+| `broccoli logout`             |           | 结束会话并删除登录信息     |
 | `broccoli contest list`       | `c ls`    | 列出比赛                   |
 | `broccoli contest info`       | `c i`     | 比赛详情与你的状态         |
 | `broccoli contest register`   | `c reg`   | 报名一场比赛               |

@@ -94,8 +94,11 @@ When a login fails, the message says why: nothing answered at the address, the
 address answers but is not a Broccoli server, or the username or password is
 wrong.
 
-On a shared machine, log out when you are done. This removes the saved login for
-the current server, or for the one you name with `--server`.
+On a shared machine, log out when you are done. This ends your session on the
+current server, or on the one you name with `--server`, so a copy of the saved
+login stops working too, and removes the login from this machine. When the
+server cannot be reached the login is still removed here, and the command warns
+that the session may stay valid on the server until it expires.
 
 ```bash
 broccoli logout
@@ -331,7 +334,7 @@ command also has a short alias.
 | ----------------------------- | --------- | ------------------------------------- |
 | `broccoli login`              | `li`      | Log in to a contest server            |
 | `broccoli whoami`             | `me`      | Show who you are logged in as         |
-| `broccoli logout`             |           | Forget the saved login                |
+| `broccoli logout`             |           | End the session and forget the login  |
 | `broccoli contest list`       | `c ls`    | List contests                         |
 | `broccoli contest info`       | `c i`     | Contest details and your status       |
 | `broccoli contest register`   | `c reg`   | Register for a contest                |

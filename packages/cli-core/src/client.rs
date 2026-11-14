@@ -101,6 +101,9 @@ pub type ClientResult<T> = Result<T, ClientError>;
 
 type Response = http::Response<ureq::Body>;
 
+/// The cookie the server reads a refresh token from.
+const REFRESH_COOKIE: &str = "broccoli_refresh";
+
 /// API client over one [`Session`]. On a 401 it refreshes the session once and
 /// resends the request. Clones of the session share its token rotation, so the
 /// client is `Send + Sync` and can be shared across threads.
@@ -346,6 +349,20 @@ impl Client {
         };
         let resp = self.post_anonymous("/api/v1/auth/login", &body)?;
         self.parse_response(resp)
+    }
+
+    /// End the session `refresh_token` belongs to on the server, so no copy
+    /// of the token pair keeps working. `POST /auth/logout` revokes the
+    /// refresh token it finds in the refresh cookie, where the web client
+    /// keeps it.
+    pub fn logout(&self, refresh_token: &str) -> ClientResult<()> {
+        let resp = self
+            .agent
+            .post(&self.url("/api/v1/auth/logout"))
+            .header("Cookie", format!("{REFRESH_COOKIE}={refresh_token}"))
+            .send_empty()
+            .map_err(|e| self.network(e))?;
+        self.parse_empty(resp)
     }
 
     pub fn request_device_code(&self) -> ClientResult<DeviceCodeResponse> {
@@ -736,7 +753,55 @@ pub struct PollResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
     use super::*;
+
+    /// A server that answers one request with `status` and returns the
+    /// request line and headers it received.
+    fn answer_once(status: &str) -> (ServerUrl, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url: ServerUrl = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let status = status.to_string();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end().to_string();
+                if line.is_empty() {
+                    break;
+                }
+                head.push(line);
+            }
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            head
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn logout_presents_the_refresh_token_to_the_server() {
+        let (url, server) = answer_once("204 No Content");
+        Client::anonymous(&url).logout("refresh-abc").unwrap();
+        let head = server.join().unwrap();
+        assert_eq!(head[0], "POST /api/v1/auth/logout HTTP/1.1");
+        assert!(
+            head.iter()
+                .any(|h| h.eq_ignore_ascii_case("cookie: broccoli_refresh=refresh-abc")),
+            "{head:?}"
+        );
+    }
 
     fn error(status: u16, code: &str) -> ApiError {
         ApiError {
