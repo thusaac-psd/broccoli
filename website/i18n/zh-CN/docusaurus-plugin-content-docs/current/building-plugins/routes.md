@@ -54,7 +54,10 @@ contest_type = "ioi"
 | `401` | `TOKEN_MISSING`、`TOKEN_INVALID` | 需要令牌的路由未携带令牌，或令牌无效、已失效。 |
 | `403` | `PERMISSION_DENIED` | 调用者缺少 `permission`，或在 `participant` 路由上不是公开比赛的参赛者。 |
 | `404` | `NOT_FOUND` | 调用者无法读取该比赛或题目、资源不存在、题目不属于该比赛，或比赛属于其他 `contest_type`。 |
-| `503` | `PLUGIN_UNAVAILABLE` | 比赛的可见性依赖于当前未加载的插件。带有 `Retry-After`。 |
+| `503` | `PLUGIN_DISABLED` | 你的插件，或决定谁可以读取该路由题目的插件，已被禁用。不带 `Retry-After`：在管理员重新启用之前不会改变。 |
+| `503` | `PLUGIN_UNAVAILABLE` | 决定谁可以读取该路由题目的插件当前无法答复。带有 `Retry-After`。 |
+
+比赛类型插件被禁用或未加载时，服务器保持其比赛可读，并以 `plugin_outage` 标记。该插件管辖的题目和提交仍会列出，其插件管辖的字段为 `null`，并由 `withheld` 字段说明原因；整个答复都取决于该插件的读取会返回上表中的某个 `503`。可见性查询从不会被问到管理人员（`contest:manage` 或 `submission:view_all`），他们看到的是主机规则所显示的内容。
 
 未激活或已停用的比赛仅对 `contest:manage` 可见。私有比赛对其参赛者和 `contest:manage` 可见。
 
