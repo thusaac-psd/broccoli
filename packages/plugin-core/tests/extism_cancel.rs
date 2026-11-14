@@ -41,12 +41,26 @@ const SPIN_IN_INITIALIZE: &str = r#"(module
     (func (export "ready") (result i32)
         (i32.sub (i32.const 1) (global.get $ready))))"#;
 
+/// A guest whose `dirty_then_park` export marks the instance dirty, calls the
+/// host's `park` and then spins; `clean` succeeds only on a clean instance.
+const DIRTY_THEN_PARK: &str = r#"(module
+    (import "extism:host/user" "park" (func $park))
+    (global $dirty (mut i32) (i32.const 0))
+    (func (export "dirty_then_park") (result i32)
+        (global.set $dirty (i32.const 1))
+        (call $park)
+        (loop (br 0))
+        (i32.const 0))
+    (func (export "clean") (result i32) (global.get $dirty)))"#;
+
 const REGISTERED: &str = "call registered with the timer";
 const CANCEL_HANDLED: &str = "handling cancel event";
 
-/// A call to cancel as soon as it registers.
+/// A plugin whose calls a test cancels.
 struct Target {
     cancel: CancelHandle,
+    /// Whether to cancel each call as soon as it registers.
+    on_register: bool,
     /// Cancel events the timer thread has handled for this plugin.
     handled: Mutex<u32>,
     handled_changed: Condvar,
@@ -80,13 +94,24 @@ struct Probe(Mutex<HashMap<String, Arc<Target>>>);
 impl Probe {
     /// Cancel every call `plugin` makes, as soon as it registers.
     fn cancel_on_register(&self, plugin: &Plugin) {
+        self.track(plugin, true);
+    }
+
+    /// Track `plugin` so a test can cancel its call with
+    /// [`Target::cancel_and_wait`] at a point of its choosing.
+    fn track(&self, plugin: &Plugin, on_register: bool) -> Arc<Target> {
         let cancel = plugin.cancel_handle();
         let target = Arc::new(Target {
             cancel: cancel.clone(),
+            on_register,
             handled: Mutex::new(0),
             handled_changed: Condvar::new(),
         });
-        self.0.lock().unwrap().insert(cancel.id.to_string(), target);
+        self.0
+            .lock()
+            .unwrap()
+            .insert(cancel.id.to_string(), target.clone());
+        target
     }
 
     fn stop_cancelling(&self, plugin: &Plugin) {
@@ -151,7 +176,7 @@ impl Subscriber for ProbeSubscriber {
             return;
         };
         match fields.message.as_str() {
-            REGISTERED => target.cancel_and_wait(),
+            REGISTERED if target.on_register => target.cancel_and_wait(),
             CANCEL_HANDLED => target.cancel_handled(),
             _ => {}
         }
@@ -229,4 +254,28 @@ fn a_call_after_a_cancelled_initialization_initializes_the_guest_again() {
     plugin
         .call::<_, ()>("ready", "")
         .expect("the next call runs `_initialize` to completion first");
+}
+
+#[test]
+fn the_call_after_a_guest_is_cancelled_mid_export_runs_on_a_fresh_instance() {
+    // `park` cancels the call while the guest is inside it, after the guest
+    // has changed its state; the guest traps at its next epoch check, the
+    // loop after `park`.
+    let target: UserData<Option<Arc<Target>>> = UserData::new(None);
+    let park = Function::new("park", [], [], target.clone(), |_, _, _, target| {
+        let target = target.get()?.lock().unwrap().clone();
+        target
+            .expect("the test tracks the plugin")
+            .cancel_and_wait();
+        Ok(())
+    });
+    let mut plugin = plugin(Manifest::new([Wasm::data(DIRTY_THEN_PARK)]), [park]);
+    *target.get().unwrap().lock().unwrap() = Some(PROBE.track(&plugin, false));
+
+    let outcome = plugin.call::<_, ()>("dirty_then_park", "");
+    assert!(outcome.is_err(), "the guest traps after `park` returns");
+
+    plugin
+        .call::<_, ()>("clean", "")
+        .expect("the next call does not see the cancelled call's state");
 }
