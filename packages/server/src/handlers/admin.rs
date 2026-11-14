@@ -27,6 +27,7 @@ use crate::plugin_archive::{MAX_ARCHIVE_BYTES, PluginArchive};
 use crate::plugin_distribution::{PluginSource, bundled_root};
 use crate::plugin_id::PluginId;
 use crate::plugin_lifecycle::UploadRemoval;
+use crate::services::plugin_config::incompatible_configs;
 use crate::state::AppState;
 
 /// Whether this replica's bundle has a copy of the plugin `id`.
@@ -385,7 +386,7 @@ pub async fn get_plugin_upload_policy(
     tag = "Admin",
     operation_id = "inspectPluginArchive",
     summary = "Check a plugin archive without publishing it",
-    description = "Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, and what the fleet runs under that id now. Publishes nothing. Requires `plugin:manage` permission.",
+    description = "Validates a tar.gz plugin archive exactly as an upload would and reports what it would publish: the plugin id, version, the host permissions it requests, what the fleet runs under that id now, and the stored configs of the plugin that the archive's config schemas would refuse. Publishes nothing. Requires `plugin:manage` permission.",
     request_body(content_type = "multipart/form-data", content = PluginArchiveForm),
     responses(
         (status = 200, description = "The archive is valid", body = PluginArchiveSummary),
@@ -418,6 +419,8 @@ pub async fn inspect_plugin_archive(
             enabled: row.is_enabled,
         });
     let manifest = archive.manifest();
+    let incompatible_configs =
+        incompatible_configs(&state.db, archive.id().as_str(), manifest).await?;
     Ok(Json(PluginArchiveSummary {
         id: archive.id().to_string(),
         name: manifest.name.clone(),
@@ -438,6 +441,7 @@ pub async fn inspect_plugin_archive(
         archive_hash: archive.hash().to_hex(),
         size_bytes: archive.bytes().len() as u64,
         current,
+        incompatible_configs,
     }))
 }
 
@@ -475,12 +479,15 @@ pub async fn upload_plugin(
     let plugin_id = archive.id().to_string();
     let version = archive.manifest().version.clone();
     let archive_hash = archive.hash().to_hex();
+    let manifest = archive.manifest().clone();
     crate::plugin_lifecycle::install(&state, archive, replaces).await?;
+    let incompatible_configs = incompatible_configs(&state.db, &plugin_id, &manifest).await?;
     Ok(Json(PluginUploadResponse {
         message: format!("Plugin '{plugin_id}' v{version} uploaded and published"),
         plugin_id,
         version,
         archive_hash,
+        incompatible_configs,
     }))
 }
 

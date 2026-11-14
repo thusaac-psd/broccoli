@@ -6,6 +6,7 @@ use sea_orm::{
 
 use plugin_core::config_schema;
 pub(crate) use plugin_core::manifest::ConfigScope;
+use plugin_core::manifest::PluginManifest;
 use plugin_core::registry::PluginRegistry;
 
 use crate::entity::plugin_config;
@@ -286,4 +287,92 @@ pub(crate) async fn delete_config_by_target_pattern<C: ConnectionTrait>(
         .exec(db)
         .await?;
     Ok(())
+}
+
+/// A stored config that a plugin manifest would no longer accept.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct IncompatibleConfig {
+    pub scope: ConfigScope,
+    /// What the config belongs to: the problem id, contest id or
+    /// `contest_id:problem_id`; the plugin id at the plugin scope.
+    #[schema(example = "12")]
+    pub ref_id: String,
+    #[schema(example = "contest")]
+    pub namespace: String,
+    /// Why the manifest refuses it. A namespace the manifest no longer
+    /// declares at this scope has one error with an empty path.
+    pub errors: Vec<config_schema::FieldError>,
+}
+
+/// Every stored config of `plugin_id` that `manifest` would refuse, so an
+/// admin sees what an upgrade breaks before publishing it.
+pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
+    db: &C,
+    plugin_id: &str,
+    manifest: &PluginManifest,
+) -> Result<Vec<IncompatibleConfig>, AppError> {
+    let prefix = format!("{plugin_id}:");
+    // `_` in a plugin id is a LIKE wildcard, so the prefix is checked again
+    // exactly below.
+    let rows = plugin_config::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    sea_orm::Condition::all()
+                        .add(plugin_config::Column::Scope.eq(ConfigScope::Plugin.as_str()))
+                        .add(plugin_config::Column::RefId.eq(plugin_id)),
+                )
+                .add(
+                    sea_orm::Condition::all()
+                        .add(plugin_config::Column::Scope.ne(ConfigScope::Plugin.as_str()))
+                        .add(plugin_config::Column::Namespace.like(format!("{prefix}%"))),
+                ),
+        )
+        .all(db)
+        .await?;
+    let mut incompatible = Vec::new();
+    for row in rows {
+        let Some(scope) = ConfigScope::parse(&row.scope) else {
+            continue;
+        };
+        let namespace = if scope == ConfigScope::Plugin {
+            row.namespace.as_str()
+        } else {
+            match row.namespace.strip_prefix(&prefix) {
+                Some(raw) => raw,
+                None => continue,
+            }
+        };
+        let errors = match manifest
+            .config
+            .get(namespace)
+            .filter(|ns| ns.scopes.contains(&scope))
+        {
+            Some(ns) => match config_schema::validate(ns, &row.config) {
+                Ok(()) => continue,
+                Err(errors) => errors,
+            },
+            None => vec![config_schema::FieldError {
+                path: String::new(),
+                message: format!(
+                    "the plugin no longer declares this namespace at the {} scope",
+                    scope.as_str()
+                ),
+            }],
+        };
+        incompatible.push(IncompatibleConfig {
+            scope,
+            ref_id: row.ref_id,
+            namespace: namespace.to_string(),
+            errors,
+        });
+    }
+    incompatible.sort_by(|a, b| {
+        (a.scope.as_str(), &a.ref_id, &a.namespace).cmp(&(
+            b.scope.as_str(),
+            &b.ref_id,
+            &b.namespace,
+        ))
+    });
+    Ok(incompatible)
 }
