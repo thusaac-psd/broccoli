@@ -1677,8 +1677,11 @@ async fn assert_feedback_withheld(fx: &Fixture, id: i32, token: &str) {
         routes::SUBMISSIONS.to_string(),
         routes::contest_submissions(fx.contest_id),
     ] {
-        // No status filter matches a hidden status.
+        // No status filter matches a hidden status, and a status sort lists
+        // the row in its own group.
         for (query, present) in [
+            ("sort_by=status", true),
+            ("sort_by=status&sort_order=asc", true),
             ("status=Running&sort_by=status", false),
             ("status=Judged&sort_by=status", false),
         ] {

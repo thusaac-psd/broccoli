@@ -965,12 +965,28 @@ async fn icpc_freeze_hides_a_peer_submission_status_from_lists_filters_and_sorts
     assert_eq!(row["withheld"], json!({"reason": "hidden"}), "{row}");
     assert!(row["verdict"].is_null(), "{row}");
 
+    // A status sort lists the row after every row whose status the peer
+    // sees, whichever the direction.
     for query in [
-        "?status=CompilationError",
-        "?status=Running",
         "?sort_by=status&sort_order=asc",
         "?sort_by=status&sort_order=desc",
     ] {
+        let res = app.get_with_token(&format!("{list}{query}"), &peer).await;
+        assert_eq!(res.status, 200, "{query}: {}", res.text);
+        let listed = rows(&res.body);
+        let at = listed
+            .iter()
+            .position(|r| r["id"] == frozen)
+            .unwrap_or_else(|| panic!("{query} lists the hidden row: {}", res.text));
+        assert!(
+            listed[..at].iter().all(|r| !r["status"].is_null())
+                && listed[at..].iter().all(|r| r["status"].is_null()),
+            "{query} groups hidden rows last: {}",
+            res.text
+        );
+    }
+
+    for query in ["?status=CompilationError", "?status=Running"] {
         let res = app.get_with_token(&format!("{list}{query}"), &peer).await;
         assert_eq!(res.status, 200, "{query}: {}", res.text);
         assert!(
