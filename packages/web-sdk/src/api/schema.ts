@@ -631,7 +631,7 @@ export interface paths {
     put?: never;
     /**
      * Toggle a reply's public visibility
-     * @description Requires `contest:manage` permission. Promotes a private reply to a public announcement or reverts it. Optionally makes the parent question public as well.
+     * @description Requires `contest:manage` permission. Publishes a private reply, which also publishes its question, or makes a public reply private again. A question stays public once published.
      */
     post: operations['toggleReplyPublic'];
     delete?: never;
@@ -651,7 +651,7 @@ export interface paths {
     put?: never;
     /**
      * Reply to a clarification
-     * @description Users with `contest:manage` permission, the question author, or the DM recipient can reply. Multiple replies are allowed. When `is_public` is true, the reply becomes visible to all participants.
+     * @description Users with `contest:manage` permission, the question author, or the DM recipient can reply. Multiple replies are allowed. When an admin sets `is_public`, the reply and its question become visible to every participant; `is_public` from anyone else is ignored.
      */
     post: operations['replyClarification'];
     delete?: never;
@@ -6592,9 +6592,7 @@ export interface operations {
   };
   toggleReplyPublic: {
     parameters: {
-      query?: {
-        include_question?: boolean;
-      };
+      query?: never;
       header?: never;
       path: {
         /** @description Contest ID */

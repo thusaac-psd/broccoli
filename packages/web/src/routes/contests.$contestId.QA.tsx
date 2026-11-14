@@ -135,11 +135,10 @@ export default function ContestQAPage() {
                 resolved,
               })
             }
-            onToggleReplyPublic={(replyId, includeQuestion) =>
+            onToggleReplyPublic={(replyId) =>
               togglePublicMutation.mutate({
                 clarificationId: c.id,
                 replyId,
-                includeQuestion,
               })
             }
           />

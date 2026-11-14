@@ -173,8 +173,12 @@ mod clarification_visibility {
         );
     }
 
+    /// A private reply keeps a private question hidden from other contestants.
+    /// Publishing the reply publishes the thread: a reply is only ever shown
+    /// under its question, so a public reply under a private question would be
+    /// visible to nobody new.
     #[tokio::test]
-    async fn public_reply_alone_does_not_leak_private_question() {
+    async fn publishing_a_reply_publishes_its_question() {
         let app = TestApp::spawn().await;
         let admin = app
             .create_user_with_role("admin1", "pass1234", "admin")
@@ -191,7 +195,7 @@ mod clarification_visibility {
             .post_with_token(
                 &routes::contest_clarifications(cid),
                 &json!({
-                    "content": "Secret cheat code?",
+                    "content": "Is the input sorted?",
                     "clarification_type": "question"
                 }),
                 &u1,
@@ -203,81 +207,57 @@ mod clarification_visibility {
             .post_with_token(
                 &routes::contest_clarification_reply(cid, clar_id),
                 &json!({
-                    "content": "No.",
+                    "content": "Yes.",
                     "is_public": false
                 }),
                 &admin,
             )
             .await;
         assert_eq!(rep_res.status, 200);
-
         let reply_id = rep_res.body["replies"][0]["id"].as_i64().unwrap() as i32;
 
-        let res_u2_before = app
+        let before = app
             .get_with_token(&routes::contest_clarifications(cid), &u2)
             .await;
-        assert_eq!(res_u2_before.body["data"].as_array().unwrap().len(), 0);
-
-        app.post_with_token(
-            &routes::contest_clarification_toggle(cid, clar_id, reply_id),
-            &json!({}),
-            &admin,
-        )
-        .await;
-
-        let res_u2_after = app
-            .get_with_token(&routes::contest_clarifications(cid), &u2)
-            .await;
-        let data = res_u2_after.body["data"].as_array().unwrap();
         assert_eq!(
-            data.len(),
+            before.body["data"].as_array().unwrap().len(),
             0,
-            "Public reply on a private clarification must not leak the parent to other contestants"
+            "a private reply must not reveal a private question"
         );
 
-        // U1 (the author) still sees their own thread with the public reply.
-        let res_u1 = app
-            .get_with_token(&routes::contest_clarifications(cid), &u1)
+        let toggled = app
+            .post_with_token(
+                &routes::contest_clarification_toggle(cid, clar_id, reply_id),
+                &json!({}),
+                &admin,
+            )
             .await;
-        let data_u1 = res_u1.body["data"].as_array().unwrap();
-        assert_eq!(data_u1.len(), 1);
-        assert_eq!(data_u1[0]["content"], "Secret cheat code?");
-        assert_eq!(data_u1[0]["replies"][0]["is_public"], true);
+        assert_eq!(toggled.status, 200);
+        assert_eq!(toggled.body["is_public"], true);
 
-        // Promoting the question explicitly (toggle again with include_question=true,
-        // which flips the reply back to private; instead use a fresh setup-style
-        // assertion via direct toggle of the question via re-toggle path).
-        // To verify the "public question + public reply" path makes the thread
-        // visible, toggle the reply public again with include_question=true.
+        let after = app
+            .get_with_token(&routes::contest_clarifications(cid), &u2)
+            .await;
+        let data = after.body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "the published thread is visible to U2");
+        assert_eq!(data[0]["content"], "Is the input sorted?");
+        assert_eq!(data[0]["is_public"], true);
+        assert_eq!(data[0]["replies"][0]["content"], "Yes.");
+
+        // Making the reply private again hides it from U2 but leaves the
+        // question public: it may carry other public replies.
         app.post_with_token(
             &routes::contest_clarification_toggle(cid, clar_id, reply_id),
             &json!({}),
             &admin,
         )
         .await;
-        // Reply is now private again; flip once more, this time including question.
-        app.post_with_token(
-            &format!(
-                "{}?include_question=true",
-                routes::contest_clarification_toggle(cid, clar_id, reply_id)
-            ),
-            &json!({}),
-            &admin,
-        )
-        .await;
-
-        let res_u2_final = app
+        let reverted = app
             .get_with_token(&routes::contest_clarifications(cid), &u2)
             .await;
-        let data_final = res_u2_final.body["data"].as_array().unwrap();
-        assert_eq!(
-            data_final.len(),
-            1,
-            "Once the question itself is made public, U2 can see the thread"
-        );
-        assert_eq!(data_final[0]["content"], "Secret cheat code?");
-        assert_eq!(data_final[0]["is_public"], true);
-        assert_eq!(data_final[0]["replies"][0]["content"], "No.");
+        let data = reverted.body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["replies"].as_array().unwrap().len(), 0);
     }
 }
 
@@ -508,6 +488,21 @@ mod clarification_reply_publishing {
             rep_res.body["replies"][0]["is_public"], true,
             "admin reply with is_public:true must be public at reply time"
         );
+        assert_eq!(
+            rep_res.body["is_public"], true,
+            "a public reply publishes its question"
+        );
+
+        let u2 = app
+            .create_user_with_role("u2", "pass1234", "contestant")
+            .await;
+        app.register_for_contest(cid, &u2).await;
+        let seen = app
+            .get_with_token(&routes::contest_clarifications(cid), &u2)
+            .await;
+        let data = seen.body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "every participant sees the published thread");
+        assert_eq!(data[0]["replies"][0]["content"], "2 seconds.");
     }
 
     /// A non-admin (here the question's own author) may reply, but their
