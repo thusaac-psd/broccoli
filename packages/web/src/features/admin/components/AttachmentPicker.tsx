@@ -113,7 +113,7 @@ export function AttachmentPicker({
                     onClick={() => handleClick(att)}
                     className="flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md cursor-pointer hover:bg-accent transition-colors group"
                   >
-                    <GripVertical className="h-3 w-3 text-muted-foreground/40 shrink-0 group-hover:text-muted-foreground cursor-grab" />
+                    <GripVertical className="h-3 w-3 text-muted-foreground shrink-0 group-hover:text-muted-foreground cursor-grab" />
                     {isImg ? (
                       <AuthImage
                         src={attachmentUrl(apiBasePath, problemId, att.id)}

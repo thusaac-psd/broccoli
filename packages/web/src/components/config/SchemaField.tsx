@@ -202,7 +202,7 @@ export function SchemaField({
               </Label>
               {badge}
               {inheritedBoolLabel && (
-                <span className="text-[10px] text-muted-foreground/50 italic">
+                <span className="text-[10px] text-muted-foreground italic">
                   {inheritedBoolLabel}
                 </span>
               )}

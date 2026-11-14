@@ -133,7 +133,7 @@ export function SubmissionDetailView({
               <MetaItem label={t('submissionDetail.pinnedWorker')}>
                 <Badge
                   variant="outline"
-                  className="max-w-full font-mono text-primary/80"
+                  className="max-w-full font-mono text-primary"
                   title={t('submissionDetail.pinnedWorkerHint')}
                 >
                   {submission.target_worker_id}
@@ -190,7 +190,7 @@ function MetaItem({
 }) {
   return (
     <div className="min-w-0 space-y-0.5">
-      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/60">
+      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         {label}
       </div>
       <div className="[overflow-wrap:anywhere]">{children}</div>

@@ -114,7 +114,7 @@ export function WorkerCard({ worker }: Props) {
           {worker.hostname && (
             <div className="flex items-center gap-2">
               <Server className="h-3 w-3 shrink-0" />
-              <span className="text-muted-foreground/70 shrink-0">
+              <span className="text-muted-foreground shrink-0">
                 {t('system.worker.hostname')}
               </span>
               <span
@@ -128,7 +128,7 @@ export function WorkerCard({ worker }: Props) {
           {worker.ip_addresses && worker.ip_addresses.length > 0 && (
             <div className="flex items-start gap-2">
               <Network className="mt-0.5 h-3 w-3 shrink-0" />
-              <span className="text-muted-foreground/70 shrink-0">
+              <span className="text-muted-foreground shrink-0">
                 {t('system.worker.ip')}
               </span>
               <div className="flex flex-wrap gap-1 min-w-0">
@@ -146,7 +146,7 @@ export function WorkerCard({ worker }: Props) {
           {(osLabel || worker.cpu_count) && (
             <div className="flex items-center gap-2">
               <MonitorSmartphone className="h-3 w-3 shrink-0" />
-              <span className="text-muted-foreground/70 shrink-0">
+              <span className="text-muted-foreground shrink-0">
                 {t('system.worker.system')}
               </span>
               <span className="text-foreground truncate">
@@ -159,7 +159,7 @@ export function WorkerCard({ worker }: Props) {
             </div>
           )}
           {worker.pid != null && (
-            <div className="text-[10px] text-muted-foreground/60 font-mono">
+            <div className="text-[10px] text-muted-foreground font-mono">
               {t('system.worker.pid', { pid: worker.pid })}
             </div>
           )}

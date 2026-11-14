@@ -314,14 +314,14 @@ function SubmissionRow({
               onClick={(event) =>
                 onSubmissionClick(event, linkBuilder(submission))
               }
-              className="inline-flex items-center gap-0.5 text-xs font-mono text-primary/60 hover:text-primary transition-colors group"
+              className="inline-flex items-center gap-0.5 text-xs font-mono text-primary hover:text-primary transition-colors group"
               title={t('submissions.viewDetails')}
             >
               #{submission.id}
               <ExternalLink className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
             </Link>
           ) : (
-            <span className="text-[10px] font-mono text-muted-foreground/40">
+            <span className="text-[10px] font-mono text-muted-foreground">
               #{submission.id}
             </span>
           )}
@@ -332,10 +332,10 @@ function SubmissionRow({
       <td key="user" className={`${px} ${py}`}>
         <div className="flex flex-col gap-0.5 min-w-0">
           <span className="font-medium truncate">{submission.username}</span>
-          <span className="text-[10px] font-mono text-muted-foreground/60">
+          <span className="text-[10px] font-mono text-muted-foreground">
             #{submission.user_id}
             {submission.contest_id != null && (
-              <span className="ml-1.5 text-muted-foreground/50">
+              <span className="ml-1.5 text-muted-foreground">
                 {t('submissions.inContest', { id: submission.contest_id })}
               </span>
             )}
@@ -358,7 +358,7 @@ function SubmissionRow({
             {customVerdict ?? defaultVerdict}
             {submission.target_worker_id ? (
               <span
-                className="inline-flex items-center gap-0.5 text-[10px] font-mono text-primary/70 bg-primary/10 px-1 py-0.5 rounded"
+                className="inline-flex items-center gap-0.5 text-[10px] font-mono text-primary bg-primary/10 px-1 py-0.5 rounded"
                 title={t('submissions.pinnedTo', {
                   worker: submission.target_worker_id,
                 })}
@@ -376,13 +376,13 @@ function SubmissionRow({
                     onClick={(event) =>
                       onSubmissionClick(event, linkBuilder(submission))
                     }
-                    className="inline-flex items-center gap-0.5 text-[10px] font-mono text-primary/60 hover:text-primary transition-colors group"
+                    className="inline-flex items-center gap-0.5 text-[10px] font-mono text-primary hover:text-primary transition-colors group"
                   >
                     #{submission.id}
                     <ExternalLink className="h-2.5 w-2.5 opacity-0 group-hover:opacity-100 transition-opacity" />
                   </Link>
                 ) : (
-                  <span className="text-[10px] font-mono text-muted-foreground/40">
+                  <span className="text-[10px] font-mono text-muted-foreground">
                     #{submission.id}
                   </span>
                 )}
@@ -395,7 +395,7 @@ function SubmissionRow({
     language: () => (
       <td
         key="language"
-        className={`${px} ${py} font-mono text-muted-foreground/60 whitespace-nowrap ${
+        className={`${px} ${py} font-mono text-muted-foreground whitespace-nowrap ${
           columns.find((c) => c.key === 'language')?.align === 'right'
             ? 'text-right'
             : ''
@@ -407,7 +407,7 @@ function SubmissionRow({
     time: () => (
       <td
         key="time"
-        className={`${px} ${py} font-mono text-muted-foreground/60 text-right whitespace-nowrap tabular-nums`}
+        className={`${px} ${py} font-mono text-muted-foreground text-right whitespace-nowrap tabular-nums`}
       >
         {submission.time_used != null
           ? t('result.timeValue', { value: submission.time_used })
@@ -417,7 +417,7 @@ function SubmissionRow({
     memory: () => (
       <td
         key="memory"
-        className={`${px} ${py} font-mono text-muted-foreground/60 text-right whitespace-nowrap tabular-nums`}
+        className={`${px} ${py} font-mono text-muted-foreground text-right whitespace-nowrap tabular-nums`}
       >
         {submission.memory_used != null
           ? formatKibibytes(submission.memory_used)
@@ -427,7 +427,7 @@ function SubmissionRow({
     submitted: () => (
       <td
         key="submitted"
-        className={`${px} ${py} text-muted-foreground/50 text-right whitespace-nowrap ${compact ? 'pr-3' : ''}`}
+        className={`${px} ${py} text-muted-foreground text-right whitespace-nowrap ${compact ? 'pr-3' : ''}`}
       >
         {formatRelativeDatetime(submission.created_at, t)}
       </td>
@@ -456,7 +456,7 @@ function SubmissionRow({
           </td>
         )}
         {expandable && (
-          <td className={`${px} ${py} text-muted-foreground/50`}>
+          <td className={`${px} ${py} text-muted-foreground`}>
             {isExpanded ? (
               <ChevronDown className={compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
             ) : (

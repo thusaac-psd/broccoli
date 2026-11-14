@@ -142,7 +142,7 @@ export function NumericInput({
           placeholder={inheritedPlaceholder ?? (integer ? '0' : '0.0')}
         />
         {(rangeHint || unit) && (
-          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground/60 pointer-events-none select-none tabular-nums">
+          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground pointer-events-none select-none tabular-nums">
             {unit && rangeHint
               ? `${rangeHint} ${unit}`
               : unit

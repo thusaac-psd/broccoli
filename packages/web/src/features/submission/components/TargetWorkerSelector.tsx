@@ -51,9 +51,7 @@ export function TargetWorkerSelector({ selected, onChange, disabled }: Props) {
       </span>
 
       {selected.length === 0 && (
-        <span className="text-muted-foreground/70">
-          {t('submit.pinToHint')}
-        </span>
+        <span className="text-muted-foreground">{t('submit.pinToHint')}</span>
       )}
 
       {selected.map((id) => (

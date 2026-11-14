@@ -485,7 +485,7 @@ export function DeviceAuthPage() {
             <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border/60 bg-card shadow-xs">
               <TerminalIcon className="h-5 w-5 text-primary" />
             </div>
-            <LinkIcon className="h-4 w-4 text-muted-foreground/50" />
+            <LinkIcon className="h-4 w-4 text-muted-foreground" />
             <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border/60 bg-card shadow-xs">
               <svg
                 className="h-5 w-5 text-primary"
@@ -561,7 +561,7 @@ export function DeviceAuthPage() {
                   />
                   {i === SEGMENT_SIZE - 1 && (
                     <div className="mx-0.5 flex shrink-0 items-center sm:mx-1">
-                      <span className="text-base font-light text-muted-foreground/40 sm:text-lg">
+                      <span className="text-base font-light text-muted-foreground sm:text-lg">
                         —
                       </span>
                     </div>
@@ -597,8 +597,8 @@ export function DeviceAuthPage() {
           className="mt-5 flex items-center justify-center gap-2 text-center"
           style={{ animation: 'fade-up 0.6s ease-out 0.3s both' }}
         >
-          <div className="flex items-center gap-1.5 rounded-full border border-border/40 bg-card/50 px-3 py-1.5 font-mono text-[11px] text-muted-foreground/70">
-            <span className="text-primary/60">$</span>
+          <div className="flex items-center gap-1.5 rounded-full border border-border/40 bg-card/50 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+            <span className="text-primary">$</span>
             <span>{CLI_LOGIN}</span>
             <span
               className="inline-block h-3 w-0.5 rounded-full bg-muted-foreground/30"

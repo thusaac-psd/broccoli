@@ -176,11 +176,48 @@ const selectLabel = {
   },
 };
 
+const DIMMED_TEXT = /(^|[\s:])text-(muted-foreground|primary|destructive)\/\d/;
+
+/**
+ * The muted, primary and destructive text tokens are tuned to read at 4.5:1
+ * on every surface; an opacity modifier on them (`text-muted-foreground/60`)
+ * drops below that. De-emphasize with size or weight instead.
+ *
+ * @type {import('eslint').Rule.RuleModule}
+ */
+const textTokenOpacity = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description: 'Forbid opacity modifiers on contrast-tuned text tokens',
+    },
+    messages: {
+      dimmed:
+        'An opacity modifier on this text token falls below 4.5:1 contrast: use the token as it is.',
+    },
+    schema: [],
+  },
+  create(context) {
+    const check = (node, text) => {
+      if (DIMMED_TEXT.test(text)) context.report({ node, messageId: 'dimmed' });
+    };
+    return {
+      Literal(node) {
+        if (typeof node.value === 'string') check(node, node.value);
+      },
+      TemplateElement(node) {
+        check(node, node.value.raw);
+      },
+    };
+  },
+};
+
 /** Accessibility rules for the web app, the SDK and plugin frontends. */
 export default {
   rules: {
     'icon-button-label': iconButtonLabel,
     'img-alt': imgAlt,
     'select-label': selectLabel,
+    'text-token-opacity': textTokenOpacity,
   },
 };

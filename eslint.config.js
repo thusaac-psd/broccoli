@@ -118,6 +118,7 @@ export default defineConfig([
       'a11y/icon-button-label': 'error',
       'a11y/img-alt': 'error',
       'a11y/select-label': 'error',
+      'a11y/text-token-opacity': 'error',
     },
   },
 

@@ -827,13 +827,13 @@ function CodeEditorContent({
                   }
                   placeholder={t('editor.inputPlaceholder')}
                   spellCheck={false}
-                  className="w-full resize-y rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring min-h-[4.5rem] max-h-[12rem]"
+                  className="w-full resize-y rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[4.5rem] max-h-[12rem]"
                 />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground">
                   {t('editor.expectedOutput')}
-                  <span className="ml-1 text-muted-foreground/60 font-normal">
+                  <span className="ml-1 text-muted-foreground font-normal">
                     ({t('editor.optional')})
                   </span>
                 </label>
@@ -848,7 +848,7 @@ function CodeEditorContent({
                   }
                   placeholder={t('editor.expectedOutputPlaceholder')}
                   spellCheck={false}
-                  className="w-full resize-y rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring min-h-[4.5rem] max-h-[12rem]"
+                  className="w-full resize-y rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm leading-relaxed placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[4.5rem] max-h-[12rem]"
                 />
               </div>
             </div>

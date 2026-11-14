@@ -35,7 +35,7 @@ export default function ContestSubmissionsPage() {
         icon={<Code2 className="h-6 w-6 text-primary" />}
       >
         <div className="flex flex-col items-center justify-center py-16 text-center">
-          <LogIn className="h-10 w-10 text-muted-foreground/40 mb-4" />
+          <LogIn className="h-10 w-10 text-muted-foreground mb-4" />
           <p className="text-muted-foreground mb-4">
             {t('auth.loginToViewSubmissions')}
           </p>

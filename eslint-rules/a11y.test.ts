@@ -53,3 +53,18 @@ test('selects need a label', () => {
     ],
   });
 });
+
+test('text tokens keep their contrast', () => {
+  tester.run('text-token-opacity', a11y.rules['text-token-opacity'], {
+    valid: [
+      '<p className="text-muted-foreground" />',
+      '<p className="bg-muted-foreground/20" />',
+    ],
+    invalid: [
+      '<p className="text-xs text-muted-foreground/60" />',
+      'cn("hover:text-muted-foreground/80")',
+      '<a className="text-xs text-primary/60" />',
+      '<p className={`a ${b} text-muted-foreground/50`} />',
+    ].map((code) => ({ code, errors: [{ messageId: 'dimmed' }] })),
+  });
+});

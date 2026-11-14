@@ -101,7 +101,7 @@ export function Markdown({ children, className, resolveUrl }: MarkdownProps) {
               return <code className="font-mono text-[13px]">{children}</code>;
             }
             return (
-              <code className="bg-muted/80 text-destructive/80 rounded px-1.5 py-0.5 text-[13px] font-mono">
+              <code className="bg-muted text-foreground rounded px-1.5 py-0.5 text-[13px] font-mono">
                 {children}
               </code>
             );

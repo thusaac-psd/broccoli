@@ -77,7 +77,7 @@ export function ContestProblemsCard({ contestId }: { contestId: number }) {
                     </Link>
                   </td>
                   <td className="px-2 py-3">
-                    <ChevronRight className="h-4 w-4 text-muted-foreground/30 group-hover:text-primary transition-colors" />
+                    <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
                   </td>
                 </tr>
               ))}

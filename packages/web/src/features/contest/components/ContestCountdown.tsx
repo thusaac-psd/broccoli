@@ -33,7 +33,7 @@ function countdownSegments(
 }
 
 // CSS-variable-based color tokens - respond to any theme automatically
-const ACCENT = 'hsl(var(--sidebar-ring))';
+const ACCENT = 'hsl(var(--primary))';
 
 // -- shared data hook ----------------------------------------------------------
 
@@ -166,7 +166,7 @@ export function ContestCountdown() {
                   }}
                 />
               </div>
-              <div className="mt-0.5 text-right text-[9px] tabular-nums text-muted-foreground/50">
+              <div className="mt-0.5 text-right text-[9px] tabular-nums text-muted-foreground">
                 {Math.round(progress)}%
               </div>
             </div>
@@ -175,15 +175,15 @@ export function ContestCountdown() {
       )}
 
       {/* Schedule */}
-      <div className="text-xs text-muted-foreground/70 font-medium tabular-nums space-y-1">
+      <div className="text-xs text-muted-foreground font-medium tabular-nums space-y-1">
         <div>
-          <span className="text-muted-foreground/40 mr-1.5">
+          <span className="text-muted-foreground mr-1.5">
             {t('contest.countdown.start')}
           </span>
           {fmtDate(contest.start_time)}
         </div>
         <div>
-          <span className="text-muted-foreground/40 mr-1.5">
+          <span className="text-muted-foreground mr-1.5">
             {t('contest.countdown.end')}
           </span>
           {fmtDate(contest.end_time)}
@@ -235,7 +235,7 @@ export function ContestCountdownMini() {
                 >
                   {String(seg.value).padStart(2, '0')}
                 </span>
-                <span className="text-[8px] font-medium uppercase tracking-widest text-muted-foreground/60">
+                <span className="text-[8px] font-medium uppercase tracking-widest text-muted-foreground">
                   {seg.label}
                 </span>
               </div>
