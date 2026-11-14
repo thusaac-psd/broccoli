@@ -352,6 +352,35 @@ mod plugin_routing {
         );
     }
 
+    /// A validly signed token minted before the caller's last credential
+    /// change (a role grant or revoke, a password reset, a deactivation) is
+    /// a 401 on every plugin route, so the client refreshes and the plugin
+    /// sees the caller's current roles. Answering such a request as
+    /// anonymous would show an admin whose role just changed the public
+    /// view of a plugin page.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_token_is_a_401_on_every_plugin_route() {
+        use sea_orm::ConnectionTrait;
+        let app = TestApp::spawn_with_plugins().await;
+        let token = app
+            .create_user_with_role("stale_user", "securepass", "admin")
+            .await;
+        app.db
+            .execute_unprepared(
+                r#"UPDATE "user" SET credentials_changed_at = now() + interval '1 hour' WHERE username = 'stale_user'"#,
+            )
+            .await
+            .unwrap();
+
+        for path in ["reflect/123", "protected/123"] {
+            let res = app
+                .get_with_token(&routes::plugin_proxy("server-plugin", path), &token)
+                .await;
+            assert_eq!(res.status, 401, "{path}: {}", res.text);
+            assert_eq!(res.body["code"], "TOKEN_INVALID", "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn nonexistent_route_returns_not_found() {
         let app = TestApp::spawn().await;
