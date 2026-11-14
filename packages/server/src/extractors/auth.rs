@@ -72,7 +72,7 @@ impl From<jwt::Claims> for AuthUser {
 ///
 /// The freshness rule of the platform lives here: a request whose method
 /// changes state (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) gets the
-/// caller only through [`fresh_user`], so every mutating route refuses a token
+/// caller only through `fresh_user`, so every mutating route refuses a token
 /// that a credential change, a logout or a deactivation has ended, whichever
 /// extractor its handler names. A read trusts the signed claims without a
 /// database lookup, so a stale token reads for at most
@@ -118,7 +118,7 @@ where
     }
 }
 
-/// The caller of a request whatever its method, checked by [`fresh_user`]:
+/// The caller of a request whatever its method, checked by `fresh_user`:
 /// for reads that answer from the caller's current account, such as
 /// `/auth/me`. Deref-es to the inner [`AuthUser`].
 pub struct FreshAuthUser {
