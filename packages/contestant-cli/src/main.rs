@@ -19,8 +19,8 @@ EXAMPLES:
   broccoli status                         Pick a recent submission to inspect
   broccoli watch <id|name>                Live contest dashboard
 
-Most commands accept a contest by id or name and a problem by id, label (A), \
-index, or title. Run `broccoli completions <shell>` to enable tab-completion."
+Most commands accept a contest by id or name and a problem by label (A), \
+position (1), title (\"Two Sum\") or id (#42). Run `broccoli completions <shell>` to enable tab-completion."
 )]
 struct Cli {
     #[command(subcommand)]

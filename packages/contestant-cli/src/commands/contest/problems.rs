@@ -11,7 +11,8 @@ pub struct ProblemsArgs {
     #[arg(required = true)]
     pub contest: String,
 
-    /// Problem ID, label, index, or title to download (statement + samples)
+    /// Problem to download (statement + samples): label (A), position (1),
+    /// title ("Two Sum"), or #<id>
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 }
@@ -22,8 +23,13 @@ pub fn run(args: ProblemsArgs) -> anyhow::Result<()> {
     let cid = resolve::contest_id(&client, &args.contest)?;
 
     if let Some(ref problem_ref) = args.problem {
-        let pid = resolve::problem_id(&client, &cid, problem_ref)?;
-        return download_problem(&client, &cid, &pid);
+        let problem = resolve::problem(&client, &cid, problem_ref)?;
+        println!(
+            "{}  Problem {}",
+            style("→").blue().bold(),
+            style(&problem).cyan()
+        );
+        return download_problem(&client, &cid, &problem.id.to_string());
     }
 
     println!(

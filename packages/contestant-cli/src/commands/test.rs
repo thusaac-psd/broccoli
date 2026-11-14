@@ -22,7 +22,7 @@ pub struct TestArgs {
     #[arg(required = true)]
     pub files: Vec<String>,
 
-    /// Problem ID, label, index, or title (e.g. A, 1, or "Two Sum")
+    /// Problem label, position, title or #<id> (e.g. A, 1, "Two Sum" or #42)
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 
@@ -84,17 +84,31 @@ pub fn run(args: TestArgs) -> anyhow::Result<()> {
         .or(ctx.as_ref().and_then(|c| c.problem.as_deref()))
         .context("No problem specified. Use -p <id|label> (e.g. -p A).")?;
 
-    // --local: fall back to raw refs when name resolution can't reach the server
-    let (contest_id, problem_id) = if args.local {
-        let c =
-            resolve::contest_id(&client, contest_ref).unwrap_or_else(|_| contest_ref.to_string());
-        let p = resolve::problem_id(&client, &c, problem_ref)
-            .unwrap_or_else(|_| problem_ref.to_string());
-        (c, p)
-    } else {
-        let c = resolve::contest_id(&client, contest_ref)?;
-        let p = resolve::problem_id(&client, &c, problem_ref)?;
-        (c, p)
+    // --local works offline from the cached samples: a contest id and a
+    // `#<id>` problem reference need no server to resolve.
+    let resolved = resolve::contest_id(&client, contest_ref).and_then(|c| {
+        let p = resolve::problem(&client, &c, problem_ref)?;
+        println!("{}  Problem {}", style("→").blue().bold(), style(&p).cyan());
+        Ok((c, p.id.to_string()))
+    });
+    let (contest_id, problem_id) = match resolved {
+        Ok(ids) => ids,
+        Err(e) if args.local => {
+            let offline = contest_ref
+                .trim()
+                .parse::<i64>()
+                .ok()
+                .zip(resolve::explicit_problem_id(problem_ref));
+            match offline {
+                Some((c, p)) => (c.to_string(), p.to_string()),
+                None => {
+                    return Err(e.context(
+                        "Offline, --local needs a numeric contest id and a #<id> problem reference",
+                    ));
+                }
+            }
+        }
+        Err(e) => return Err(e),
     };
     let contest_id = contest_id.as_str();
     let problem_id = problem_id.as_str();

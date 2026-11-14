@@ -22,7 +22,8 @@ pub struct SubmitArgs {
     #[arg(short = 'c', long, conflicts_with = "no_contest")]
     pub contest: Option<String>,
 
-    /// Problem ID, label, index, or title (e.g. A, 1, or "Two Sum")
+    /// Problem label, position, title or #<id> (e.g. A, 1, "Two Sum" or #42);
+    /// with --no-contest, the problem id
     #[arg(short = 'p', long)]
     pub problem: Option<String>,
 
@@ -66,9 +67,20 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
         Some(resolve::contest_id(&client, contest_ref)?)
     };
     let problem_id: String = match contest_id.as_deref() {
-        Some(cid) => resolve::problem_id(&client, cid, problem_ref)?,
-        // standalone: no contest to resolve labels against, expect a raw id
-        None => problem_ref.to_string(),
+        Some(cid) => {
+            let problem = resolve::problem(&client, cid, problem_ref)?;
+            println!(
+                "{}  Problem {}",
+                style("→").blue().bold(),
+                style(&problem).cyan()
+            );
+            problem.id.to_string()
+        }
+        // standalone: no contest to resolve labels against, expect an id
+        None => resolve::explicit_problem_id(problem_ref)
+            .or_else(|| problem_ref.trim().parse().ok())
+            .with_context(|| format!("'{problem_ref}' is not a problem id"))?
+            .to_string(),
     };
 
     let mut submission_files = Vec::new();
@@ -147,7 +159,7 @@ pub fn run(args: SubmitArgs) -> anyhow::Result<()> {
     if ctx.is_none() {
         let _ = context::save_context(&context::ProjectContext {
             contest: contest_id.clone(),
-            problem: Some(problem_id.clone()),
+            problem: Some(format!("#{problem_id}")),
             language: Some(language),
         });
     }
