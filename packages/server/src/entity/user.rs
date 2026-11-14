@@ -10,10 +10,11 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
 
-    /// Unique among active accounts, enforced by the migration's partial
-    /// unique index `idx_user_username_active`. Declared `indexed` so schema
-    /// sync treats that index as declared and keeps it.
-    #[sea_orm(indexed)]
+    /// As the user typed it, for display. Unique among active accounts by its
+    /// [`username_key`], enforced by the migration's partial unique index
+    /// `idx_user_username_active` on `lower(username)`, so `Admin` cannot
+    /// register next to `admin`. Not declared `indexed`: lookups go through
+    /// that expression index, and schema sync leaves it alone.
     pub username: String,
     pub display_name: String,
     pub password: String,
@@ -40,6 +41,25 @@ pub struct Model {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// The identity of a username: what two usernames must differ in to belong to
+/// different accounts. Usernames are ASCII, so this is SQL `lower(username)`,
+/// the expression the active-username index is unique on.
+pub fn username_key(username: &str) -> String {
+    username.trim().to_ascii_lowercase()
+}
+
+/// Rows whose username has the same [`username_key`] as one of `usernames`.
+/// Served by the active-username index.
+pub fn username_is_any<I, S>(usernames: I) -> sea_orm::sea_query::SimpleExpr
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    use sea_orm::sea_query::{Expr, ExprTrait, Func};
+    Expr::expr(Func::lower(Expr::col(Column::Username)))
+        .is_in(usernames.into_iter().map(|u| username_key(u.as_ref())))
+}
 
 impl SoftDeletable for Entity {
     type DeletedAtColumn = Column;

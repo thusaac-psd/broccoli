@@ -29,7 +29,9 @@ pub enum AppError {
     NotFound(String),
     MethodNotAllowed,
     Conflict(String),
-    UsernameTaken,
+    /// The usernames an active account already holds (case-insensitively).
+    /// Empty when the database refused a write without saying which.
+    UsernameTaken(Vec<String>),
     PluginNotReady(String),
     /// A valid plugin archive whose plugin failed to load or initialize on
     /// the serving replica; nothing was published.
@@ -113,10 +115,23 @@ impl AppError {
                 ),
             ),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, simple("CONFLICT", msg)),
-            AppError::UsernameTaken => (
-                StatusCode::CONFLICT,
-                simple("USERNAME_TAKEN", "Username is already taken".into()),
-            ),
+            AppError::UsernameTaken(usernames) => {
+                let message = match usernames.as_slice() {
+                    [] => "Username is already taken".to_string(),
+                    [one] => format!("Username '{one}' is already taken"),
+                    many => format!("Usernames already taken: {}", many.join(", ")),
+                };
+                let details =
+                    (!usernames.is_empty()).then(|| serde_json::json!({ "usernames": usernames }));
+                (
+                    StatusCode::CONFLICT,
+                    ErrorBody {
+                        code: "USERNAME_TAKEN".into(),
+                        message,
+                        details,
+                    },
+                )
+            }
             AppError::PluginNotReady(msg) => {
                 (StatusCode::BAD_REQUEST, simple("PLUGIN_NOT_READY", msg))
             }

@@ -56,13 +56,15 @@ pub async fn prepare_accounts(
     .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))?
 }
 
-/// Map a write to the `user` table onto the API error contract. The only
-/// unique constraint besides the primary key is the active-username index, so
-/// a unique violation means the username is taken (for example, a race with a
-/// concurrent create or rename).
-pub fn username_conflict(e: DbErr) -> AppError {
-    match e.sql_err() {
-        Some(SqlErr::UniqueConstraintViolation(_)) => AppError::UsernameTaken,
+/// Map a write of `username` to the `user` table onto the API error contract.
+/// The only unique constraint besides the primary key is the active-username
+/// index, so a unique violation means the username is taken (for example, a
+/// race with a concurrent create or rename).
+pub fn username_conflict(username: &str) -> impl FnOnce(DbErr) -> AppError + '_ {
+    move |e| match e.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            AppError::UsernameTaken(vec![username.to_owned()])
+        }
         _ => AppError::from(e),
     }
 }
@@ -80,7 +82,7 @@ pub async fn insert_account<C: ConnectionTrait>(
     }
     .insert(db)
     .await
-    .map_err(username_conflict)?;
+    .map_err(username_conflict(&account.username))?;
     for role_name in role::DEFAULT_ROLES {
         let role = role::Entity::find_by_id(role_name.to_string())
             .one(db)

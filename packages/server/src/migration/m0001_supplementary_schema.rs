@@ -37,9 +37,11 @@ const SCHEMA: &[&str] = &[
     // index on the same columns. Sync creates that plain index with the table;
     // it is replaced here, and later syncs keep the partial one.
     //
-    // One active account per username; a deleted account frees its name.
-    r#"DROP INDEX "idx-user-username""#,
-    r#"CREATE UNIQUE INDEX idx_user_username_active ON "user" (username)
+    // One active account per username, compared case-insensitively
+    // (`entity::user::username_key`); a deleted account frees its name. An
+    // expression index has no column set, so sync keeps it with no declared
+    // index on `username`.
+    r#"CREATE UNIQUE INDEX idx_user_username_active ON "user" (lower(username))
         WHERE deleted_at IS NULL"#,
     r#"DROP INDEX "idx-submission_judgement-submission_id""#,
     r#"CREATE UNIQUE INDEX idx_submission_judgement_one_current

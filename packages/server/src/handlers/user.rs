@@ -164,6 +164,7 @@ pub async fn update_user(
     require_within_ceiling(&txn, &auth_user, CeilingTarget::User(id)).await?;
 
     let mut active: user::ActiveModel = user_model.into();
+    let renamed_to = username.clone();
     if let Some(username) = username {
         active.username = Set(username);
     }
@@ -175,10 +176,13 @@ pub async fn update_user(
         refresh_token::Entity::revoke_all_for_user(&txn, id).await?;
         user::Entity::touch_credentials_changed(&txn, id).await?;
     }
-    let updated_user = active
-        .update(&txn)
-        .await
-        .map_err(crate::services::user_accounts::username_conflict)?;
+    let updated_user =
+        active
+            .update(&txn)
+            .await
+            .map_err(crate::services::user_accounts::username_conflict(
+                renamed_to.as_deref().unwrap_or_default(),
+            ))?;
 
     txn.commit().await?;
 
@@ -481,18 +485,23 @@ async fn create_accounts(
     users: Vec<CreateUserRequest>,
 ) -> Result<Vec<CreatedUserResponse>, AppError> {
     validate_create_users(&users)?;
-    // Reject existing active usernames before doing expensive password hashing.
-    let names: Vec<_> = users
-        .iter()
-        .map(|u| u.username.trim().to_string())
-        .collect();
-    if user::Entity::find_active()
-        .filter(user::Column::Username.is_in(names))
-        .count(&state.db)
+    // Reject existing active usernames before doing expensive password
+    // hashing, naming every requested one an account already holds.
+    let taken: std::collections::HashSet<String> = user::Entity::find_active()
+        .filter(user::username_is_any(users.iter().map(|u| &u.username)))
+        .all(&state.db)
         .await?
-        > 0
-    {
-        return Err(AppError::UsernameTaken);
+        .iter()
+        .map(|u| user::username_key(&u.username))
+        .collect();
+    if !taken.is_empty() {
+        return Err(AppError::UsernameTaken(
+            users
+                .iter()
+                .map(|u| u.username.trim().to_owned())
+                .filter(|name| taken.contains(&user::username_key(name)))
+                .collect(),
+        ));
     }
     let prepared = crate::services::user_accounts::prepare_accounts(users).await?;
     let txn = state.db.begin().await?;

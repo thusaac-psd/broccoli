@@ -107,19 +107,21 @@ pub async fn login(
     validate_login_request(&payload)?;
 
     let username = payload.username.trim();
+    // The throttle counts failures per account, whatever case they are typed in.
+    let throttle_key = user::username_key(username);
 
     // Contest-safe brute-force throttle: only FAILED attempts for this
     // (username, client IP) pair count and a success clears them, so a
     // legitimate sign-in is never blocked even when a whole venue shares one NAT
     // IP. Fails open when the client IP is unknown.
     if let Some(ip) = client_ip
-        && let Some(retry_after) = state.login_throttle.check(username, ip)
+        && let Some(retry_after) = state.login_throttle.check(&throttle_key, ip)
     {
         return Err(AppError::RateLimited { retry_after });
     }
 
     let maybe_user = user::Entity::find_active()
-        .filter(user::Column::Username.eq(username))
+        .filter(user::username_is_any([username]))
         .one(&state.db)
         .await?;
 
@@ -136,7 +138,7 @@ pub async fn login(
         Some(u) if is_valid => u,
         _ => {
             if let Some(ip) = client_ip {
-                state.login_throttle.record_failure(username, ip);
+                state.login_throttle.record_failure(&throttle_key, ip);
             }
             return Err(AppError::InvalidCredentials);
         }
@@ -144,7 +146,7 @@ pub async fn login(
 
     // Successful auth: clear any accumulated failures for this pair.
     if let Some(ip) = client_ip {
-        state.login_throttle.clear(username, ip);
+        state.login_throttle.clear(&throttle_key, ip);
     }
 
     let grant = issue_access_token(&state.db, &state.config.auth.jwt_secret, user.id).await?;
