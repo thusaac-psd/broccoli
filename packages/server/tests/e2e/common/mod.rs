@@ -36,7 +36,7 @@ use server::utils::plugin::sync_plugins;
 static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub use test_support::TestResponse;
-use test_support::{close_database_pool, create_test_database, shared_redis_port};
+use test_support::{TestDatabase, close_database_pool, create_test_database, shared_redis_port};
 
 /// Whether the in-process worker judges with the mock sandbox:
 /// `E2E_SANDBOX_BACKEND=mock`, or no backend named on a non-Linux host. Any
@@ -124,6 +124,9 @@ pub struct E2eTestApp {
     /// The in-process server's plugin cache (`plugin.cache_dir`), so a test
     /// never writes into the source tree. `None` against an external server.
     _plugin_cache: Option<tempfile::TempDir>,
+    /// This server's own test database, dropped with it. `None` against an
+    /// external server.
+    _database: Option<TestDatabase>,
     /// A contest type this server actually registers, for problem creation
     /// (which requires one): `icpc` from the real plugins, or the stub
     /// `standard` a plugin-less server registers instead.
@@ -238,6 +241,7 @@ impl E2eTestApp {
             result_consumer_handle: None,
             _node_heartbeat: None,
             _plugin_cache: None,
+            _database: None,
             // An external server runs with the real plugins.
             contest_type: "icpc",
         }
@@ -248,8 +252,9 @@ impl E2eTestApp {
         let plugin_cache = tempfile::tempdir().expect("plugin cache tempdir");
 
         let db_name = format!("e2e_{test_id}");
-        let (db_url, redis_port) =
+        let (database, redis_port) =
             tokio::join!(create_test_database(&db_name), shared_redis_port());
+        let db_url = database.url().to_string();
         let mut opts = ConnectOptions::new(&db_url);
         opts.max_connections(db_max_connections)
             .min_connections(0)
@@ -579,6 +584,7 @@ impl E2eTestApp {
             result_consumer_handle: result_consumer_handle_opt,
             _node_heartbeat: Some(node_heartbeat),
             _plugin_cache: Some(plugin_cache),
+            _database: Some(database),
             contest_type: if load_plugins { "icpc" } else { "standard" },
         }
     }
