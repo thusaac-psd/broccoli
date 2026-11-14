@@ -375,8 +375,8 @@ async fn with_request_deadline(
 /// The server's OpenAPI document as pretty-printed JSON: what
 /// `/api-docs/openapi.json` serves, and what `packages/web-sdk`'s `schema.ts`
 /// is generated from.
-pub fn openapi_json(config: &config::AppConfig) -> String {
-    let (_, api) = routes::api_routes(config, ApiDoc::openapi());
+pub fn openapi_json() -> String {
+    let (_, api) = routes::api_routes(routes::RouteSettings::documented(), ApiDoc::openapi());
     api.to_pretty_json()
         .expect("the OpenAPI document serializes to JSON")
 }
@@ -389,7 +389,8 @@ pub fn build_router(state: AppState) -> anyhow::Result<axum::Router> {
     let clock = state.clock.clone();
     let state_cors = state.config.server.cors.clone();
 
-    let (router, api) = routes::api_routes(&state.config, ApiDoc::openapi());
+    let (router, api) =
+        routes::api_routes(routes::RouteSettings::of(&state.config), ApiDoc::openapi());
     let frontend_dist = state.config.server.frontend_dist.clone();
 
     // The timeout sits INSIDE the idempotency middleware so a timed-out

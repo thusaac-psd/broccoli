@@ -51,6 +51,7 @@ impl ServerRuntime {
             common::observability::init_metrics(&app_config.observability.otlp.service_name);
 
         let db_session = crate::database::app_session(&app_config.database);
+        common::db::wait_until_reachable(&app_config.database.url, &db_session).await?;
         // Boot-time schema work runs on one session holding a cluster-wide
         // advisory lock, so replicas booting together serialize instead of
         // racing each other's DDL and check-then-insert seeding.

@@ -30,12 +30,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Prints the OpenAPI document and exits, without connecting to anything.
-    // The document does not depend on the configured values, but loading the
-    // configuration keeps one startup path.
+    // Prints the OpenAPI document and exits. The document does not depend on
+    // configuration, so none is read.
     if std::env::args().any(|a| a == "--openapi") {
-        let app_config = AppConfig::load().context("Failed to load configuration")?;
-        println!("{}", server::openapi_json(&app_config));
+        println!("{}", server::openapi_json());
         return Ok(());
     }
 
@@ -44,13 +42,6 @@ fn main() -> anyhow::Result<()> {
     let nofile = common::rlimit::raise_nofile_limit();
 
     let app_config = AppConfig::load().context("Failed to load configuration")?;
-
-    if app_config.jwt_secret_is_weak() {
-        tracing::warn!(
-            min_recommended_bytes = server::config::MIN_RECOMMENDED_JWT_SECRET_BYTES,
-            "auth.jwt_secret is shorter than the recommended minimum; a weak HS256 secret makes all access tokens forgeable (full account takeover). Set a long, random secret."
-        );
-    }
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -19,9 +19,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Before anything opens sockets or files; see `common::rlimit`.
     let nofile = common::rlimit::raise_nofile_limit();
-    let config = WorkerAppConfig::load().context("Failed to load config")?;
+    let mut config = WorkerAppConfig::load().context("Failed to load config")?;
     let _telemetry_guard = common::observability::init_tracing(&config.observability);
     common::config::warn_unknown_keys(&config.unknown_keys, "BROCCOLI");
+    config.resolve_worker_id()?;
     nofile.log();
     let runtime = WorkerRuntime::build(config).await?;
     runtime.run().await
@@ -72,7 +73,8 @@ async fn check_own_heartbeat(
 async fn run_healthcheck() -> anyhow::Result<()> {
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-    let config = WorkerAppConfig::load().context("Failed to load config")?;
+    let mut config = WorkerAppConfig::load().context("Failed to load config")?;
+    config.resolve_worker_id()?;
 
     let db = common::db::connect(
         &config.database.url,

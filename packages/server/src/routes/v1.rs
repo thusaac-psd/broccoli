@@ -12,7 +12,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::client_ip::ClientIp;
-use crate::config::AppConfig;
 use crate::handlers;
 use crate::state::AppState;
 
@@ -34,13 +33,13 @@ const REGISTER_RATE_LIMIT_BURST: u32 = 30;
 const DEVICE_CODE_RATE_LIMIT_PERIOD: Duration = Duration::from_secs(60);
 const DEVICE_CODE_RATE_LIMIT_BURST: u32 = 30;
 
-pub fn routes(config: &AppConfig) -> OpenApiRouter<AppState> {
-    let submission_max_size = config.submission.max_size;
+pub fn routes(settings: super::RouteSettings) -> OpenApiRouter<AppState> {
+    let submission_max_size = settings.submission_max_size;
 
     OpenApiRouter::new()
         .routes(routes!(handlers::meta::get_version))
         .routes(routes!(handlers::health::get_health))
-        .nest("/auth", auth_routes(config.server.rate_limit_auth))
+        .nest("/auth", auth_routes(settings.rate_limit_auth))
         .nest("/users", user_routes())
         .nest("/roles", role_routes())
         .nest("/admin", admin_routes())

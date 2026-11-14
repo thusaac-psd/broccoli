@@ -27,6 +27,13 @@ one config file can serve both.
 | `storage.backend`                                                          | yes            | yes            | `object_storage`, `database` or `filesystem` |
 | `storage.object_storage.endpoint`, `.access_key`, `.secret_key`, `.bucket` | object storage | object storage | The S3 store                                 |
 
+A required setting has no default: when one is missing, or `auth.jwt_secret` is
+shorter than 32 bytes, the binary exits at once with the name of the setting and
+its environment variable. At boot a node waits for Postgres and Redis, logging
+each attempt with the URL (password redacted) and the cause, and exits instead
+when the answer is one no retry fixes, such as a rejected password or a missing
+database.
+
 ### The database role
 
 `database.url` logs in as the app role: a role with `LOGIN` and `CREATEROLE` and
