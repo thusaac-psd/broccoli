@@ -29,3 +29,6 @@ tmp/
 # Embedded stress-test binaries (fetched at build time, not committed)
 packages/server/embedded/stress-test/*
 !packages/server/embedded/stress-test/.gitkeep
+
+# Python bytecode from running the scripts
+__pycache__/
