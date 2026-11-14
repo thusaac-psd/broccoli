@@ -42,7 +42,7 @@ export function SystemHealthSummary({
       icon: Inbox,
       tone: dlqUnresolved > 0 ? ('alert' as const) : ('default' as const),
     },
-  ];
+  ] as const;
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

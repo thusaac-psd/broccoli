@@ -1,3 +1,5 @@
+import type { MessageKey } from '@/lib/i18n/catalog';
+
 export interface JsonSchemaProperty {
   type?: string;
   title?: string;
@@ -37,6 +39,6 @@ export type {
 
 /** A field's validation problem: an i18n key and its parameters. */
 export interface FieldProblem {
-  key: string;
+  key: MessageKey;
   params?: Record<string, string | number>;
 }

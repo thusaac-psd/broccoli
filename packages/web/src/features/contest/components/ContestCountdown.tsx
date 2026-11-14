@@ -1,5 +1,6 @@
 import { useApiClient, useServerNow } from '@broccoli/web-sdk/api';
 import { useAuthReady } from '@broccoli/web-sdk/auth';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment } from 'react';
@@ -22,7 +23,7 @@ function getTimeLeft(targetMs: number, now: number) {
 /** The digit groups to show: days only when at least a day is left. */
 function countdownSegments(
   tl: ReturnType<typeof getTimeLeft>,
-  t: (key: string) => string,
+  t: I18nContextValue['t'],
 ) {
   return [
     ...(tl.days > 0 ? [{ value: tl.days, label: t('countdown.days') }] : []),

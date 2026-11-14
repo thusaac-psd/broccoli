@@ -3,8 +3,9 @@ import { Button } from '@broccoli/web-sdk/ui';
 import { RotateCcw, ServerCrash, Undo2 } from 'lucide-react';
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 
+import type { MessageKey } from '@/lib/i18n/catalog';
+import { CORE_CATALOGS } from '@/lib/i18n/catalogs';
 import { en } from '@/lib/i18n/en';
-import { queryClient } from '@/lib/query-client';
 import { reportError } from '@/lib/telemetry';
 
 interface Props {
@@ -26,18 +27,11 @@ interface State {
  * APIs, so the fallback can never crash itself. It visually mirrors
  * AppErrorPage.
  */
-/** Translate `key` without the i18n context. */
-function t(key: string): string {
+/** Translate `key` without the i18n context, from the bundled catalogs. */
+function t(key: MessageKey): string {
   try {
     const locale = localStorage.getItem(LOCALE_STORAGE_KEY);
-    const pack = locale
-      ? queryClient.getQueryData<Record<string, string>>([
-          'i18n',
-          'translations',
-          locale,
-        ])
-      : undefined;
-    return pack?.[key] ?? en[key];
+    return (locale ? CORE_CATALOGS[locale]?.[key] : undefined) ?? en[key];
   } catch {
     return en[key];
   }

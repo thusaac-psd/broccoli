@@ -1,4 +1,4 @@
-export const en: Record<string, string> = {
+export const en = {
   'result.expandOutput': 'Expand',
   'result.outputDialogHint':
     'Scroll to inspect the output. Very large output is limited to a 64 KiB preview.',
@@ -82,6 +82,7 @@ export const en: Record<string, string> = {
   'error.action.retry': 'Try again',
   'error.action.back': 'Go back',
   'error.action.goBack': 'Go back',
+  'error.backToHome': 'Back to home',
 
   // Overview
   'overview.title': 'Overview',
@@ -1272,4 +1273,4 @@ export const en: Record<string, string> = {
   'dateTime.nextMonth': 'Next month',
   'fileDrop.label': 'Upload files',
   'fileDrop.prompt': 'Drop files here or click to browse',
-};
+} satisfies Record<string, string>;

@@ -107,7 +107,7 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
                 {meta && (
                   <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-0.5 text-xs">
                     <meta.icon className="h-3 w-3 text-muted-foreground" />
-                    {t(meta.labelKey)}
+                    {meta.labelKey ? t(meta.labelKey) : data.message_type}
                   </span>
                 )}
               </Field>

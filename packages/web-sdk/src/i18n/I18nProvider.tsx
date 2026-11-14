@@ -9,7 +9,7 @@ import {
 
 import { useApiClient } from '@/api';
 import { I18nContext } from '@/i18n/i18n-context';
-import { formatMessage } from '@/i18n/message';
+import { formatMessage, type MessageParams } from '@/i18n/message';
 import type { TranslationMap } from '@/i18n/types';
 
 /** localStorage key where the active locale is persisted. */
@@ -58,7 +58,8 @@ export function I18nProvider({
     [localeKey],
   );
 
-  const { data: availableLocales = [] } = useQuery({
+  // The bundled locales are offered before (and without) the server's list.
+  const { data: availableLocales } = useQuery({
     queryKey: ['i18n', 'locales'],
     queryFn: async () => {
       const { data: pluginLocales = [] } = await apiClient.GET('/i18n/locales');
@@ -95,15 +96,16 @@ export function I18nProvider({
     placeholderData: (prev) => prev,
   });
 
-  const t = useCallback(
-    (key: string, params?: Record<string, string | number>) => {
+  const lookup = useCallback(
+    (key: string, params?: MessageParams) => {
       const value =
         pluginTranslations[key] ??
         coreI18n[locale]?.[key] ??
         fallbackPluginTranslations[key] ??
-        coreI18n[defaultLocale]?.[key] ??
-        key;
-      return formatMessage(value, locale, params);
+        coreI18n[defaultLocale]?.[key];
+      return value === undefined
+        ? undefined
+        : formatMessage(value, locale, params);
     },
     [
       locale,
@@ -114,15 +116,22 @@ export function I18nProvider({
     ],
   );
 
+  // A key no catalog has renders as itself, so a gap is visible.
+  const t = useCallback(
+    (key: string, params?: MessageParams) => lookup(key, params) ?? key,
+    [lookup],
+  );
+
   const value = useMemo(
     () => ({
       locale,
       setLocale,
-      availableLocales,
+      availableLocales: availableLocales ?? Object.keys(coreI18n),
       t,
+      lookup,
       isLoading,
     }),
-    [locale, setLocale, availableLocales, t, isLoading],
+    [locale, setLocale, availableLocales, coreI18n, t, lookup, isLoading],
   );
 
   return <I18nContext value={value}>{children}</I18nContext>;

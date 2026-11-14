@@ -6,8 +6,11 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 
+import type { MessageKey } from '@/lib/i18n/catalog';
+
 export interface MessageTypeMeta {
-  labelKey: string;
+  /** The label's key, or null for a type this build does not know. */
+  labelKey: MessageKey | null;
   icon: LucideIcon;
   retryable: boolean;
 }
@@ -41,5 +44,5 @@ export function messageTypeMeta(type: string): MessageTypeMeta {
       retryable: false,
     };
   }
-  return { labelKey: type, icon: Cog, retryable: false };
+  return { labelKey: null, icon: Cog, retryable: false };
 }

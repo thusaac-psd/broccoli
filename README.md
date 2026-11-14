@@ -52,8 +52,7 @@ broccoli/
 │   ├── cooldown/                # Minimum delay between submissions
 │   ├── submission-limit/        # Maximum submissions per problem
 │   ├── print/                   # On-demand code printing for contests
-│   ├── config-ui-test/          # Kitchen-sink config schema for the config UI
-│   └── broccoli-zh-cn/          # Chinese translation pack
+│   └── config-ui-test/          # Kitchen-sink config schema for the config UI
 ├── website/              # Documentation site (Docusaurus, English and zh-CN)
 ├── release/              # Release bundles, installers and operator docs
 ├── docs/                 # Build, release and authoring notes

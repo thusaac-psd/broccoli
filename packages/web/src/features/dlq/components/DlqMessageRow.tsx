@@ -35,7 +35,7 @@ export function DlqMessageRow({ message, onClick }: Props) {
       <td className="p-3 align-top">
         <span className="inline-flex items-center gap-1 rounded-md border bg-muted/30 px-1.5 py-0.5 text-[10px]">
           <Icon className="h-3 w-3 text-muted-foreground" />
-          {t(meta.labelKey)}
+          {meta.labelKey ? t(meta.labelKey) : message.message_type}
         </span>
       </td>
       <td className="p-3 align-top">

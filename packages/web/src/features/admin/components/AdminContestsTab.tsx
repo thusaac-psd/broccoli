@@ -66,6 +66,7 @@ import { nextProblemLabel } from '@/features/contest/utils/problem-label';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { changedFields } from '@/lib/changed-fields';
+import type { MessageKey } from '@/lib/i18n/catalog';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
 
 // -- Data fetcher --
@@ -216,7 +217,7 @@ function contestRequestBody(values: ContestFormValues) {
 }
 
 /** The i18n key of the first problem with `values`, or null when valid. */
-function contestFormProblem(values: ContestFormValues): string | null {
+function contestFormProblem(values: ContestFormValues): MessageKey | null {
   const { title, startTime, endTime, activateTime, deactivateTime } = values;
   if (!title.trim()) return 'validation.titleRequired';
   if (!startTime || !endTime) return 'validation.startEndTimeRequired';

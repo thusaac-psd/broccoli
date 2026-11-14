@@ -24,6 +24,7 @@ import {
   useSubmissionNavigation,
 } from '@/features/submission/hooks/use-submission-navigation';
 import { getVerdictBadge } from '@/features/submission/utils/verdict';
+import type { MessageKey } from '@/lib/i18n/catalog';
 
 import { SubmissionResult } from './SubmissionResult';
 
@@ -66,7 +67,7 @@ const ADMIN_COLUMNS: SubmissionsTableColumn[] = [
   { key: 'submitted', align: 'right' },
 ];
 
-const COLUMN_HEADERS: Record<SubmissionsTableColumn['key'], string> = {
+const COLUMN_HEADERS: Record<SubmissionsTableColumn['key'], MessageKey> = {
   problem: 'overview.problem',
   user: 'overview.user',
   verdict: 'overview.verdict',

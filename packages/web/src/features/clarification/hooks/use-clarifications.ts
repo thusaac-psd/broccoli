@@ -1,6 +1,7 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import type { CreateClarificationBody } from '@broccoli/web-sdk/clarification';
 import { isAlreadyDone, useIdempotentRequest } from '@broccoli/web-sdk/hooks';
+import type { I18nContextValue } from '@broccoli/web-sdk/i18n';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -25,10 +26,7 @@ function treatAlreadyDoneAsPosted(error: unknown): null {
  * An earlier send may have posted it, or is still posting it. No refetch is
  * needed here: `onSettled` refetches the list, which shows whether it was.
  */
-function reportedUnsettled(
-  error: unknown,
-  t: (key: string) => string,
-): boolean {
+function reportedUnsettled(error: unknown, t: I18nContextValue['t']): boolean {
   return toastUnsettled(error, t, {
     outcomeUnknownKey: 'clarification.outcomeUnknown',
   });

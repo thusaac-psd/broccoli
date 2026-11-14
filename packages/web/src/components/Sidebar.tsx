@@ -4,7 +4,7 @@ import {
   useAuthReady,
   USER_PERMISSIONS,
 } from '@broccoli/web-sdk/auth';
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { type I18nContextValue, useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   CONTEST_MANAGE,
   DLQ_MANAGE,
@@ -57,13 +57,14 @@ import { Link, useLocation } from 'react-router';
 
 import { useContest } from '@/features/contest/contexts/contest-context';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
+import type { MessageKey } from '@/lib/i18n/catalog';
 
 import logo from '../../resources/Logo.png';
 import { LocaleSelector } from './LocaleSelector';
 import { ThemeToggle } from './ThemeSwitcher';
 
 interface MenuItem {
-  key: string;
+  key: MessageKey;
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
   url: string;
   exact: boolean;
@@ -151,7 +152,7 @@ function MenuGroupItems({
 }: {
   items: MenuItem[];
   pathname: string;
-  t: (k: string) => string;
+  t: I18nContextValue['t'];
 }) {
   return (
     <>

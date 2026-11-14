@@ -25,6 +25,8 @@ import { toast } from 'sonner';
 
 import { DisplayNameField } from '@/components/DisplayNameField';
 import {
+  BulkUsersError,
+  bulkUsersProblem,
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
@@ -61,18 +63,12 @@ export function CreateUsersDialog({
 
   function parseUsers(input: unknown) {
     if (Array.isArray(input) && input.length > 100)
-      throw new Error('users.create.tooMany');
+      throw new BulkUsersError('users.create.tooMany');
     return normalizeBulkUsers(input);
   }
 
   function showValidation(error: unknown) {
-    const message = error instanceof Error ? error.message : '';
-    const key =
-      message.startsWith('admin.bulkParticipants') ||
-      message === 'users.create.tooMany'
-        ? message
-        : 'admin.bulkParticipantsInvalidJson';
-    setErrorMsg(t(key));
+    setErrorMsg(t(bulkUsersProblem(error)));
   }
 
   function refreshUserLists() {

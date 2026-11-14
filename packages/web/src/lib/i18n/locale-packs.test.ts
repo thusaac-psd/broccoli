@@ -1,6 +1,7 @@
-// Every translation pack must translate exactly the keys its source catalog
-// defines: the host catalog (`en.ts`) for a language pack, or a plugin's own
-// `en` catalog for that plugin's other locales. A missing key shows up as
+// Every translation must translate exactly the keys its source catalog
+// defines: the host catalog (`en.ts`) for the bundled host catalogs and for a
+// plugin language pack, or a plugin's own `en` catalog for that plugin's
+// other locales. A missing key shows up as
 // English in the translated UI; an extra key is dead text nobody can see.
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'smol-toml';
 
 import { messageParameters } from '../../../../web-sdk/src/i18n/message.ts';
+import { CORE_CATALOGS } from './catalogs.ts';
 import { en } from './en.ts';
 
 const PLUGINS_DIR = join(
@@ -35,6 +37,13 @@ function compare(source: Catalog, pack: Catalog, label: string) {
       messageParameters(pack[key]).join(),
   );
   assert.deepEqual(mismatched, [], `${label} changes placeholders`);
+}
+
+for (const [locale, catalog] of Object.entries(CORE_CATALOGS)) {
+  if (locale === 'en') continue;
+  test(`the bundled ${locale} catalog translates exactly the host keys`, () => {
+    compare(en, catalog, `lib/i18n ${locale}`);
+  });
 }
 
 const plugins = readdirSync(PLUGINS_DIR).filter((name) =>

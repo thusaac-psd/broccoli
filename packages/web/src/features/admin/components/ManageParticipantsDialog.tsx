@@ -37,6 +37,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 
 import {
+  BulkUsersError,
+  bulkUsersProblem,
   normalizeBulkUsers,
   type ParsedBulkUser,
 } from '@/features/user-management/lib/bulk-users';
@@ -492,7 +494,7 @@ function BulkImportTab({
       const { data: users, error: usersError } = await apiClient.GET('/users');
 
       if (usersError || !users) {
-        throw new Error('admin.bulkParticipantsError');
+        throw new BulkUsersError('admin.bulkParticipantsError');
       }
 
       const allUsersMap = new Map<string, UserPreviewItem>();
@@ -551,36 +553,7 @@ function BulkImportTab({
         setErrorMsg(t('admin.bulkParticipantsExistingWithPassword'));
       }
     } catch (error) {
-      if (error instanceof Error) {
-        switch (error.message) {
-          case 'admin.bulkParticipantsError':
-            setErrorMsg(t('admin.bulkParticipantsError'));
-            break;
-          case 'admin.bulkParticipantsInvalidJson':
-            setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-            break;
-          case 'admin.bulkParticipantsInvalidUsername':
-            setErrorMsg(t('admin.bulkParticipantsInvalidUsername'));
-            break;
-          case 'admin.bulkParticipantsDuplicate':
-            setErrorMsg(t('admin.bulkParticipantsDuplicate'));
-            break;
-          case 'admin.bulkParticipantsEmpty':
-            setErrorMsg(t('admin.bulkParticipantsEmpty'));
-            break;
-          case 'admin.bulkParticipantsInvalidPassword':
-            setErrorMsg(t('admin.bulkParticipantsInvalidPassword'));
-            break;
-          case 'admin.bulkParticipantsInvalidDisplayName':
-            setErrorMsg(t('admin.bulkParticipantsInvalidDisplayName'));
-            break;
-          default:
-            setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-            break;
-        }
-      } else {
-        setErrorMsg(t('admin.bulkParticipantsInvalidJson'));
-      }
+      setErrorMsg(t(bulkUsersProblem(error)));
       setPreview(null);
     } finally {
       setLoadingPreview(false);

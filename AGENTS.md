@@ -91,8 +91,9 @@ lockfile.
 
 - Every plugin lives at `plugins/<plugin>/` with a `plugin.toml`, an optional
   Rust crate (`Cargo.toml`, `src/`) for the backend WASM module, an optional
-  `frontend/` and optional `i18n/`. `broccoli-zh-cn` is manifest and locales
-  only.
+  `frontend/` and optional `i18n/`.
+- The host UI's own catalogs (`en`, `zh-CN`) ship in the web bundle under
+  `packages/web/src/lib/i18n`; a plugin translates only its own keys.
 - The server's test fixture plugins live under `packages/server/tests/fixtures`
   and `packages/server/tests/fixtures_timer_negative`; `just build-plugins`
   builds them with the real plugins.
