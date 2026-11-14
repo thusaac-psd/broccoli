@@ -25,7 +25,7 @@ import { useServerTable } from '@/hooks/use-server-table';
 import { useTranslation } from '@/i18n';
 import { Button } from '@/ui/button';
 import { Input } from '@/ui/input';
-import { QueryErrorState } from '@/ui/query-view';
+import { QueryErrorState, RefreshFailedNotice } from '@/ui/query-view';
 import { Skeleton } from '@/ui/skeleton';
 
 // Re-export ColumnDef for consumers
@@ -55,6 +55,8 @@ export interface DataTableProps<TData> {
   defaultSortOrder?: 'asc' | 'desc';
   emptyMessage?: string;
   toolbar?: React.ReactNode;
+  /** Fetch the page again this often (backing off while it fails). */
+  pollEveryMs?: number;
   state?: ControlledServerTableState;
   onPageChange?: (page: number) => void;
   onSearchChange?: (search: string) => void;
@@ -165,6 +167,7 @@ export function DataTable<TData>({
   defaultSortOrder = 'desc',
   emptyMessage,
   toolbar,
+  pollEveryMs,
   state,
   onPageChange,
   onSearchChange,
@@ -189,6 +192,7 @@ export function DataTable<TData>({
     defaultPerPage,
     defaultSortBy,
     defaultSortOrder,
+    pollEveryMs,
     state,
     onPageChange,
     onSearchChange,
@@ -227,6 +231,10 @@ export function DataTable<TData>({
         </div>
       )}
 
+      {(view.status === 'data' || view.status === 'empty') &&
+        view.refreshError != null && (
+          <RefreshFailedNotice retry={view.retry} className="m-3" />
+        )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>

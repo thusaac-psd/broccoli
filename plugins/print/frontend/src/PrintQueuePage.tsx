@@ -33,7 +33,7 @@ import {
   toast,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   Ban,
@@ -43,7 +43,7 @@ import {
   Printer,
   RotateCcw,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 import { StationsPanel } from './components/StationsPanel';
 import { StatusPill } from './components/StatusPill';
@@ -63,7 +63,6 @@ export function PrintQueuePage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [stationFilter, setStationFilter] = useState('');
   const [printerFilter, setPrinterFilter] = useState('');
-  const [nonce, setNonce] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirm, confirmDialog] = useConfirmDialog();
   const batchSubmit = useAsyncSubmit();
@@ -90,16 +89,11 @@ export function PrintQueuePage() {
     ),
   ];
 
-  // Poll the jobs table every 10 seconds.
-  useEffect(() => {
-    const id = setInterval(() => setNonce((n) => n + 1), 10_000);
-    return () => clearInterval(id);
-  }, []);
-
+  const queryClient = useQueryClient();
   const refresh = useCallback(() => {
-    setNonce((n) => n + 1);
+    void queryClient.invalidateQueries({ queryKey: ['print', 'jobs'] });
     setSelected(new Set());
-  }, []);
+  }, [queryClient]);
 
   // Runs job actions in order and refreshes the queue. Rejects with the
   // message to show when one fails or its outcome is unknown (it may have
@@ -565,8 +559,8 @@ export function PrintQueuePage() {
               statusFilter || 'all',
               stationFilter,
               printerFilter,
-              String(nonce),
             ]}
+            pollEveryMs={10_000}
             fetchFn={fetchJobs}
             searchable
             searchPlaceholder={t('print.queue.search')}

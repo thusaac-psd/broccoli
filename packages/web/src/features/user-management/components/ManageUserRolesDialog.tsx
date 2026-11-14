@@ -48,6 +48,8 @@ export function ManageUserRolesDialog({
   const [isAssigning, setIsAssigning] = useState(false);
   const [confirm, confirmDialog] = useConfirmDialog();
 
+  // A failed fetch falls back to the roles the users list already shows.
+  // eslint-disable-next-line no-restricted-syntax
   const { data: userDetail, isLoading: isLoadingUser } = useQuery({
     queryKey: ['admin-user-detail', userId],
     enabled: open && !!userId,

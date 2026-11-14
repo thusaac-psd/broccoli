@@ -5,7 +5,7 @@ import type {
   Submission,
   SubmissionSummary,
 } from '@broccoli/web-sdk/submission';
-import { Badge, Button } from '@broccoli/web-sdk/ui';
+import { Badge, Button, QueryView } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -535,7 +535,7 @@ function SelectionCheckbox({
 function ExpandedDetail({ submissionId }: { submissionId: number }) {
   const apiClient = useApiClient();
 
-  const { data: submission, isLoading } = useQuery<Submission>({
+  const query = useQuery<Submission>({
     queryKey: ['submission', submissionId],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/submissions/{id}', {
@@ -547,13 +547,16 @@ function ExpandedDetail({ submissionId }: { submissionId: number }) {
     staleTime: 60_000,
   });
 
-  if (isLoading || !submission) {
-    return (
-      <div className="flex items-center justify-center py-4">
-        <span className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-      </div>
-    );
-  }
-
-  return <SubmissionResult submission={submission} />;
+  return (
+    <QueryView
+      query={query}
+      loading={
+        <div className="flex items-center justify-center py-4">
+          <span className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+        </div>
+      }
+    >
+      {(submission) => <SubmissionResult submission={submission} />}
+    </QueryView>
+  );
 }

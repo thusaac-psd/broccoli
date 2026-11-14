@@ -9,6 +9,9 @@ import { useIcpcApi } from './useIcpcApi';
 export function useIsIcpcContest(contestId?: number) {
   const api = useIcpcApi();
 
+  // Answers whether the contest is this plugin's: a failure means it is not,
+  // and the slot shows the host's own view.
+  // eslint-disable-next-line no-restricted-syntax
   const { data, isLoading } = useQuery({
     queryKey: ['icpc-contest-info', contestId],
     enabled: !!contestId,

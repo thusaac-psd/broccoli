@@ -19,9 +19,58 @@ const at = (offsetMinutes: number) =>
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-const ZH_CN = parse(
-  readFileSync(join(REPO, 'plugins/broccoli-zh-cn/locales/zh-CN.toml'), 'utf8'),
-) as Record<string, string>;
+const readToml = (path: string) =>
+  parse(readFileSync(join(REPO, path), 'utf8')) as Record<string, unknown>;
+
+const ZH_CN = readToml('plugins/broccoli-zh-cn/locales/zh-CN.toml') as Record<
+  string,
+  string
+>;
+
+interface PluginWeb {
+  root: string;
+  entry: string;
+  css?: string[];
+  components?: Record<string, string>;
+  slots?: unknown[];
+  routes?: unknown[];
+}
+
+/**
+ * A plugin of this repository as the server serves it: its manifest's web
+ * part in `/plugins/active`, its translations merged into the locale's, and
+ * its built frontend (`pnpm build`) under `/assets/<id>/`.
+ */
+function repoPlugin(id: string) {
+  const manifest = readToml(`plugins/${id}/plugin.toml`) as {
+    name: string;
+    web: PluginWeb;
+    translations?: Record<string, string>;
+  };
+  const { web } = manifest;
+  const translations = Object.fromEntries(
+    Object.entries(manifest.translations ?? {}).map(([locale, file]) => [
+      locale,
+      readToml(`plugins/${id}/${file}`) as Record<string, string>,
+    ]),
+  );
+  return {
+    id,
+    root: join(REPO, 'plugins', id, web.root),
+    translations,
+    active: {
+      id,
+      name: manifest.name,
+      entry: `/assets/${id}/${web.entry}`,
+      components: web.components ?? {},
+      slots: web.slots ?? [],
+      routes: web.routes ?? [],
+      css: (web.css ?? []).map((file) => `/assets/${id}/${file}`),
+    },
+  };
+}
+
+type RepoPlugin = ReturnType<typeof repoPlugin>;
 
 export type Viewer = 'guest' | 'admin' | 'contestant';
 
@@ -182,7 +231,7 @@ const SUBMISSION_DETAIL = {
   },
 };
 
-type Handler = (url: URL, viewer: Viewer) => unknown;
+type Handler = (url: URL, viewer: Viewer, plugins: RepoPlugin[]) => unknown;
 
 /** `METHOD path-pattern` to the body answered. */
 const ROUTES: [string, RegExp, Handler][] = [
@@ -190,9 +239,19 @@ const ROUTES: [string, RegExp, Handler][] = [
   [
     'GET',
     /^\/i18n\/translations\/([\w-]+)$/,
-    (url) => (url.pathname.endsWith('/zh-CN') ? ZH_CN : {}),
+    (url, _, plugins) => {
+      const locale = url.pathname.split('/').at(-1) ?? 'en';
+      return Object.assign(
+        locale === 'zh-CN' ? { ...ZH_CN } : {},
+        ...plugins.map((plugin) => plugin.translations[locale] ?? {}),
+      );
+    },
   ],
-  ['GET', /^\/plugins\/active$/, () => []],
+  [
+    'GET',
+    /^\/plugins\/active$/,
+    (_, __, plugins) => plugins.map((plugin) => plugin.active),
+  ],
   ['GET', /^\/auth\/registration$/, () => ({ open: true })],
   ['GET', /^\/plugins\/registries$/, () => registries],
   [
@@ -281,13 +340,34 @@ const ROUTES: [string, RegExp, Handler][] = [
   ['GET', /^\/dlq$/, () => numberedPage([])],
 ];
 
+export interface MockOptions {
+  /** Plugins of this repository to serve, with their built frontends. */
+  plugins?: string[];
+  /** Answers for the plugins' own API calls, `METHOD path` to the body. */
+  pluginRoutes?: [string, RegExp, Handler][];
+}
+
 /**
  * Answers the app's API calls for `viewer` (signed in through the session
  * hint and the refresh cookie the mock pretends to hold). Returns the calls
  * nothing answered.
  */
-export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
+export async function mockApi(
+  page: Page,
+  viewer: Viewer,
+  { plugins: ids = [], pluginRoutes = [] }: MockOptions = {},
+): Promise<string[]> {
   const unanswered: string[] = [];
+  const plugins = ids.map(repoPlugin);
+  for (const plugin of plugins) {
+    await page.route(`**/assets/${plugin.id}/**`, (route) => {
+      const file = new URL(route.request().url()).pathname.slice(
+        `/assets/${plugin.id}/`.length,
+      );
+      return route.fulfill({ path: join(plugin.root, file) });
+    });
+  }
+  const routes = [...pluginRoutes, ...ROUTES];
   await page.clock.setFixedTime(NOW);
   if (viewer !== 'guest') {
     await page.addInitScript(
@@ -313,7 +393,7 @@ export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
         json: { token: 'e2e', ...USERS[viewer] },
       });
     }
-    const match = ROUTES.find(
+    const match = routes.find(
       ([method, pattern]) => method === request.method() && pattern.test(path),
     );
     if (!match) {
@@ -324,7 +404,7 @@ export async function mockApi(page: Page, viewer: Viewer): Promise<string[]> {
         json: { code: 'NOT_FOUND', message: path },
       });
     }
-    return route.fulfill({ headers, json: match[2](url, viewer) });
+    return route.fulfill({ headers, json: match[2](url, viewer, plugins) });
   });
   return unanswered;
 }

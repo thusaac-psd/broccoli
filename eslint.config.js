@@ -265,6 +265,14 @@ export default defineConfig([
             'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
         },
         {
+          // `const { data, isLoading } = useQuery(...)` has no failed state:
+          // a list that could not load reads as empty once loading ends.
+          selector:
+            'VariableDeclarator[init.type="CallExpression"][init.callee.name="useQuery"] > ObjectPattern:has(> Property[key.name="data"]):has(> Property[key.name=/^is(Loading|Pending)$/]):not(:has(> Property[key.name=/^(error|isError|status)$/]))',
+          message:
+            'A query read without its failure shows a failed fetch as empty: render it through QueryView or queryState().',
+        },
+        {
           // A fixed `refetchInterval` asks a failing server as often as a
           // healthy one, from every seat at once, and flickers a page that
           // has nothing to show between loading and failed.

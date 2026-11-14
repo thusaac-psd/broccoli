@@ -10,6 +10,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  QueryView,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Activity, ArrowRight, Clock, Code2, Home, Trophy } from 'lucide-react';
@@ -28,7 +29,7 @@ export default function OverviewPage() {
   const { user } = useAuth();
   const apiClient = useApiClient();
 
-  const { data: contests, isLoading: isContestsLoading } = useQuery({
+  const contestsQuery = useQuery({
     queryKey: ['overview-contests'],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/contests', {
@@ -45,7 +46,7 @@ export default function OverviewPage() {
     },
   });
 
-  const { data: problems, isLoading: isProblemsLoading } = useQuery({
+  const problemsQuery = useQuery({
     queryKey: ['overview-problems'],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/problems', {
@@ -62,7 +63,7 @@ export default function OverviewPage() {
     },
   });
 
-  const { data: submissions, isLoading: isSubmissionsLoading } = useQuery({
+  const submissionsQuery = useQuery({
     queryKey: ['overview-submissions', user?.id],
     enabled: !!user,
     queryFn: async () => {
@@ -103,35 +104,40 @@ export default function OverviewPage() {
             </div>
           </CardHeader>
           <CardContent>
-            {isContestsLoading ? (
-              <ListSkeleton />
-            ) : !contests?.length ? (
-              <p className="text-sm text-muted-foreground">
-                {t('overview.noContests')}
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {contests.map((contest) => {
-                  const status = getContestStatus(contest, t);
-                  return (
-                    <div
-                      key={contest.id}
-                      className="flex items-center justify-between gap-2"
-                    >
-                      <Link
-                        to={`/contests/${contest.id}`}
-                        className="text-sm font-medium hover:text-primary hover:underline truncate"
+            <QueryView
+              query={contestsQuery}
+              loading={<ListSkeleton />}
+              isEmpty={(list) => list.length === 0}
+              empty={
+                <p className="text-sm text-muted-foreground">
+                  {t('overview.noContests')}
+                </p>
+              }
+            >
+              {(contests) => (
+                <div className="space-y-3">
+                  {contests.map((contest) => {
+                    const status = getContestStatus(contest, t);
+                    return (
+                      <div
+                        key={contest.id}
+                        className="flex items-center justify-between gap-2"
                       >
-                        {contest.title}
-                      </Link>
-                      <Badge variant={status.variant} className="shrink-0">
-                        {status.label}
-                      </Badge>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                        <Link
+                          to={`/contests/${contest.id}`}
+                          className="text-sm font-medium hover:text-primary hover:underline truncate"
+                        >
+                          {contest.title}
+                        </Link>
+                        <Badge variant={status.variant} className="shrink-0">
+                          {status.label}
+                        </Badge>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </QueryView>
           </CardContent>
         </Card>
 
@@ -152,38 +158,43 @@ export default function OverviewPage() {
             </div>
           </CardHeader>
           <CardContent>
-            {isProblemsLoading ? (
-              <ListSkeleton />
-            ) : !problems?.length ? (
-              <p className="text-sm text-muted-foreground">
-                {t('overview.noProblems')}
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {problems.map((problem) => (
-                  <div
-                    key={problem.id}
-                    className="flex items-center justify-between gap-2"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        #{problem.id}
-                      </span>
-                      <Link
-                        to={`/problems/${problem.id}`}
-                        className="text-sm font-medium hover:text-primary hover:underline truncate"
-                      >
-                        {problem.title}
-                      </Link>
+            <QueryView
+              query={problemsQuery}
+              loading={<ListSkeleton />}
+              isEmpty={(list) => list.length === 0}
+              empty={
+                <p className="text-sm text-muted-foreground">
+                  {t('overview.noProblems')}
+                </p>
+              }
+            >
+              {(problems) => (
+                <div className="space-y-3">
+                  {problems.map((problem) => (
+                    <div
+                      key={problem.id}
+                      className="flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          #{problem.id}
+                        </span>
+                        <Link
+                          to={`/problems/${problem.id}`}
+                          className="text-sm font-medium hover:text-primary hover:underline truncate"
+                        >
+                          {problem.title}
+                        </Link>
+                      </div>
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                        <Clock className="h-3 w-3" />
+                        {t('result.timeValue', { value: problem.time_limit })}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-                      <Clock className="h-3 w-3" />
-                      {t('result.timeValue', { value: problem.time_limit })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
+            </QueryView>
           </CardContent>
         </Card>
 
@@ -213,26 +224,31 @@ export default function OverviewPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                {isSubmissionsLoading ? (
-                  <ListSkeleton />
-                ) : !submissions?.length ? (
-                  <p className="text-sm text-muted-foreground">
-                    {t('overview.noSubmissions')}
-                  </p>
-                ) : (
-                  <div className="rounded-md border overflow-hidden">
-                    <SubmissionsTable
-                      submissions={submissions}
-                      columns={SubmissionsTable.fullColumns}
-                      expandable={false}
-                      linkBuilder={(sub) =>
-                        sub.contest_id
-                          ? `/contests/${sub.contest_id}/submissions/${sub.id}`
-                          : `/submissions/${sub.id}`
-                      }
-                    />
-                  </div>
-                )}
+                <QueryView
+                  query={submissionsQuery}
+                  loading={<ListSkeleton />}
+                  isEmpty={(list) => list.length === 0}
+                  empty={
+                    <p className="text-sm text-muted-foreground">
+                      {t('overview.noSubmissions')}
+                    </p>
+                  }
+                >
+                  {(submissions) => (
+                    <div className="rounded-md border overflow-hidden">
+                      <SubmissionsTable
+                        submissions={submissions}
+                        columns={SubmissionsTable.fullColumns}
+                        expandable={false}
+                        linkBuilder={(sub) =>
+                          sub.contest_id
+                            ? `/contests/${sub.contest_id}/submissions/${sub.id}`
+                            : `/submissions/${sub.id}`
+                        }
+                      />
+                    </div>
+                  )}
+                </QueryView>
               </CardContent>
             </Card>
           </div>

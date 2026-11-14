@@ -2,6 +2,7 @@ import '@/lib/monaco-setup';
 
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useIdentifierLabel, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Slot } from '@broccoli/web-sdk/slot';
 import { useSubmitGating } from '@broccoli/web-sdk/submission';
@@ -12,6 +13,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  QueryErrorState,
 } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 import type { Monaco } from '@monaco-editor/react';
@@ -118,11 +120,13 @@ function getMonacoLanguage(filename: string): string {
 
 export function CodeEditor(props: CodeEditorProps) {
   const apiClient = useApiClient();
-  const { data: supportedLanguages, isPending } = useQuery({
-    queryKey: ['supported-languages'],
-    queryFn: () => fetchSupportedLanguages(apiClient),
-    staleTime: 5 * 60 * 1000,
-  });
+  const languages = queryState(
+    useQuery({
+      queryKey: ['supported-languages'],
+      queryFn: () => fetchSupportedLanguages(apiClient),
+      staleTime: 5 * 60 * 1000,
+    }),
+  );
 
   // Editor state (saved language + draft file) must never initialize against
   // the fallback language list: the saved language id would not be found, the
@@ -130,7 +134,19 @@ export function CodeEditor(props: CodeEditorProps) {
   // immediately overwrite the contestant's persisted draft with the template.
   // Gate mounting the stateful editor on the supported-languages query so the
   // initializers always see the real language list.
-  if (isPending) {
+  // A failed fetch is said for what it is, with a retry: the fallback list
+  // would cost the contestant their draft just the same.
+  if (languages.status === 'error') {
+    return (
+      <QueryErrorState
+        className="h-full"
+        error={languages.error}
+        retry={languages.retry}
+        retrying={languages.retrying}
+      />
+    );
+  }
+  if (languages.status !== 'data') {
     return (
       <div className="h-full flex flex-col p-3">
         <div className="flex-1 min-h-0 rounded-lg border bg-muted/30 animate-pulse" />
@@ -139,10 +155,7 @@ export function CodeEditor(props: CodeEditorProps) {
   }
 
   return (
-    <CodeEditorContent
-      {...props}
-      supportedLanguages={supportedLanguages ?? []}
-    />
+    <CodeEditorContent {...props} supportedLanguages={languages.data ?? []} />
   );
 }
 
