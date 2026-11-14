@@ -267,6 +267,9 @@ interactively.
 broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
 
+A question that is only the name or number of a contest you can see is not
+sent, since it most likely names the contest. Pass the contest with `-c`.
+
 Read the answers, and any announcements, with the list.
 
 ```bash

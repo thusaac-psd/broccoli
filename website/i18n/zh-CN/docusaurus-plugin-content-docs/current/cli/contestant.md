@@ -210,6 +210,8 @@ broccoli watch "Spring Round"
 broccoli clarifications ask "Is the input always sorted?" -c "Spring Round"
 ```
 
+如果问题内容恰好只是你能看到的某场比赛的名称或编号，它不会被发送，因为这多半是在指定比赛。请用 `-c` 指定比赛。
+
 用列表查看回答以及任何公告。
 
 ```bash

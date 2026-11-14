@@ -1,5 +1,6 @@
 //! Resolve human-friendly contest/problem references to the ids the API expects.
 
+use crate::api::contest::ContestListItem;
 use crate::client::Client;
 use anyhow::{Context, bail};
 
@@ -19,10 +20,7 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
         .data;
     let lower = q.to_lowercase();
 
-    let exact: Vec<_> = contests
-        .iter()
-        .filter(|c| c.title.to_lowercase() == lower)
-        .collect();
+    let exact = contests_named(&contests, q);
     if exact.len() == 1 {
         return Ok(exact[0].id.to_string());
     }
@@ -57,6 +55,19 @@ pub fn contest_id(client: &Client, input: &str) -> anyhow::Result<String> {
                 .join(", ")
         ),
     }
+}
+
+/// The contests `input` names exactly: by id, or by title ignoring case, the
+/// way a contest reference does before it falls back to part of a title.
+pub fn contests_named<'a>(
+    contests: &'a [ContestListItem],
+    input: &str,
+) -> Vec<&'a ContestListItem> {
+    let q = input.trim().to_lowercase();
+    contests
+        .iter()
+        .filter(|c| c.id.to_string() == q || c.title.to_lowercase() == q)
+        .collect()
 }
 
 /// A contest problem a reference resolved to.
@@ -196,8 +207,39 @@ fn available(problems: &[crate::api::contest::ContestProblemResponse]) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::match_problem;
-    use crate::api::contest::ContestProblemResponse;
+    use super::{contests_named, match_problem};
+    use crate::api::contest::{ContestListItem, ContestPhase, ContestProblemResponse};
+
+    fn contest(id: i32, title: &str) -> ContestListItem {
+        let at = "2030-01-01T00:00:00Z".parse().unwrap();
+        ContestListItem {
+            id,
+            title: title.into(),
+            activate_time: None,
+            start_time: at,
+            end_time: at,
+            deactivate_time: None,
+            is_public: true,
+            submissions_visible: false,
+            show_compile_output: true,
+            show_participants_list: true,
+            contest_type: None,
+            created_at: at,
+            updated_at: at,
+            phase: ContestPhase::Running,
+        }
+    }
+
+    #[test]
+    fn a_contest_is_named_by_its_id_or_its_whole_title() {
+        let contests = [contest(3, "Spring Round"), contest(4, "Spring Round 2")];
+        let ids =
+            |q: &str| -> Vec<i32> { contests_named(&contests, q).iter().map(|c| c.id).collect() };
+        assert_eq!(ids("spring round "), [3]);
+        assert_eq!(ids("4"), [4]);
+        assert!(ids("Spring").is_empty());
+        assert!(ids("Is Spring Round open to all?").is_empty());
+    }
 
     fn p(problem_id: i32, label: &str, position: i32, title: &str) -> ContestProblemResponse {
         ContestProblemResponse {
