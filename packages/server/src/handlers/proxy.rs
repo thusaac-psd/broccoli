@@ -122,6 +122,13 @@ async fn handle_plugin_request_impl(
                 AppError::MethodNotAllowed
             })?;
 
+        // A plugin that is installed but not loaded here (disabled, or
+        // between loads) still names its routes; they answer why it cannot
+        // serve them rather than a 404 that reads as "no such route".
+        if entry.status != plugin_core::registry::PluginStatus::Loaded {
+            return Err(state.plugin_lifecycle.outage(&plugin_id).into());
+        }
+
         (
             route_info.handler.clone(),
             route_info.access.clone(),
@@ -291,7 +298,7 @@ macro_rules! proxy_handler {
                 (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]
@@ -328,7 +335,7 @@ macro_rules! proxy_handler {
                 (status = 404, description = "Plugin, route, or the contest or problem the route addresses not found (NOT_FOUND)", body = ErrorBody),
                 (status = 405, description = "Method Not Allowed", body = ErrorBody),
                 (status = 500, description = "The plugin failed (INTERNAL_ERROR); the detail is logged, never returned", body = ErrorBody),
-                (status = 503, description = "A plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE); carries Retry-After", body = ErrorBody),
+                (status = 503, description = "The plugin is disabled (PLUGIN_DISABLED, no Retry-After), or it or a plugin this request needs could not answer in time (PLUGIN_UNAVAILABLE, carries Retry-After)", body = ErrorBody),
             ),
             security(("jwt" = []))
         )]

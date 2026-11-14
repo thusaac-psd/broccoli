@@ -1223,6 +1223,7 @@
 'apiError.RATE_LIMITED' = "Too many requests. Wait a moment and try again."
 'apiError.QUEUE_OVERLOADED' = "The judge queue is full right now. Try again in a moment."
 'apiError.PLUGIN_UNAVAILABLE' = "The server is busy right now. Try again in a moment."
+'apiError.PLUGIN_DISABLED' = "The plugin this needs is turned off. Ask an administrator to enable it."
 'apiError.CONTEST_TYPE_UNAVAILABLE' = "This server cannot accept submissions for this contest right now. Try again in a moment."
 'apiError.IDEMPOTENCY_KEY_IN_PROGRESS' = "The same request is still being processed."
 'apiError.IDEMPOTENCY_KEY_MISMATCH' = "This request does not match the one it repeats. Reload and try again."

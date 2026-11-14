@@ -44,6 +44,7 @@ use crate::utils::problem::find_problem;
 use crate::utils::query::validate_sorting_params;
 use crate::utils::rate_limit::check_rate_limit;
 use crate::visibility::{Action, Resource, ResourceScope, Subject, VisibilityKernel};
+use broccoli_api_types::visibility::PluginOutage;
 
 mod dispatch;
 mod filter;
@@ -748,7 +749,8 @@ pub async fn create_contest_submission(
         && let Some(contest_type) = contest_model.contest_type.as_deref()
         && state
             .plugin_lifecycle
-            .is_contest_type_disabled(contest_type)
+            .disabled_provider(contest_type)
+            .is_some()
     {
         return Err(AppError::ContestTypeDisabled(contest_type.to_string()));
     }
@@ -797,13 +799,12 @@ pub async fn create_contest_submission(
     // accept the submission unchecked. Reject before any hook runs; a type
     // whose plugin the fleet disabled is closed, not briefly unavailable.
     let Some(handler) = handler else {
-        if state
-            .plugin_lifecycle
-            .is_contest_type_disabled(&contest_type)
-        {
-            return Err(AppError::ContestTypeDisabled(contest_type));
-        }
-        return Err(AppError::ContestTypeUnavailable(contest_type));
+        return Err(
+            match crate::plugin_lifecycle::contest_type_outage(&state, &contest_type).await {
+                Some(PluginOutage::Disabled { .. }) => AppError::ContestTypeDisabled(contest_type),
+                _ => AppError::ContestTypeUnavailable(contest_type),
+            },
+        );
     };
     let admission_owner = handler
         .submission_admission

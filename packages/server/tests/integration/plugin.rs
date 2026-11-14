@@ -609,7 +609,7 @@ mod sql {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn calling_disabled_plugin_returns_not_found() {
+    async fn a_disabled_plugins_route_answers_that_it_is_disabled() {
         let app = TestApp::spawn_with_plugins().await;
         let token = app
             .create_user_with_role("admin_user", "securepass", "admin")
@@ -627,8 +627,25 @@ mod sql {
         let res = app
             .get_without_token(&routes::plugin_proxy("server-plugin", "reflect/123"))
             .await;
-        assert_eq!(res.status, 404);
-        assert_eq!(res.body["code"], "NOT_FOUND");
+        assert_eq!(res.status, 503, "{}", res.text);
+        assert_eq!(res.body["code"], "PLUGIN_DISABLED");
+        assert!(
+            res.body["message"]
+                .as_str()
+                .unwrap()
+                .contains("'server-plugin'"),
+            "{}",
+            res.text
+        );
+        assert!(
+            !res.headers.contains_key("retry-after"),
+            "a disabled plugin is not a retry-later answer"
+        );
+
+        let res = app
+            .get_without_token(&routes::plugin_proxy("server-plugin", "no/such/route"))
+            .await;
+        assert_eq!(res.status, 404, "{}", res.text);
     }
 }
 

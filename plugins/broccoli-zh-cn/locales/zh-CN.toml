@@ -1224,6 +1224,7 @@
 'apiError.RATE_LIMITED' = "请求过于频繁，请稍候再试。"
 'apiError.QUEUE_OVERLOADED' = "评测队列已满，请稍后重试。"
 'apiError.PLUGIN_UNAVAILABLE' = "服务器正忙，请稍后重试。"
+'apiError.PLUGIN_DISABLED' = "所需的插件已被停用，请联系管理员启用。"
 'apiError.CONTEST_TYPE_UNAVAILABLE' = "服务器暂时无法接受此比赛的提交，请稍后重试。"
 'apiError.IDEMPOTENCY_KEY_IN_PROGRESS' = "相同的请求仍在处理中。"
 'apiError.IDEMPOTENCY_KEY_MISMATCH' = "此请求与原请求不一致，请刷新后重试。"

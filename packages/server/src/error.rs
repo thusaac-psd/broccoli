@@ -81,6 +81,10 @@ pub enum AppError {
     /// deadline: this server is too busy right now. Never a decision about
     /// the request; the client retries after [`PLUGIN_RETRY_AFTER_SECS`].
     PluginUnavailable,
+    /// What the request needs is provided by plugin `id`, which an
+    /// administrator disabled. Not retryable: nothing changes until it is
+    /// enabled again.
+    PluginDisabled(String),
     /// Blob storage did not answer through its retries: an outage, retried
     /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
     StorageUnavailable,
@@ -273,6 +277,16 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::PluginDisabled(plugin_id) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "PLUGIN_DISABLED",
+                    format!(
+                        "The plugin '{plugin_id}' is disabled, so what it provides is \
+                         unavailable until an administrator enables it"
+                    ),
+                ),
+            ),
             AppError::StorageUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 simple(
@@ -425,6 +439,16 @@ impl From<PluginError> for AppError {
     }
 }
 
+impl From<broccoli_api_types::visibility::PluginOutage> for AppError {
+    fn from(outage: broccoli_api_types::visibility::PluginOutage) -> Self {
+        use broccoli_api_types::visibility::PluginOutage;
+        match outage {
+            PluginOutage::Disabled { plugin_id } => AppError::PluginDisabled(plugin_id),
+            PluginOutage::Unavailable => AppError::PluginUnavailable,
+        }
+    }
+}
+
 impl From<AssetError> for AppError {
     fn from(err: AssetError) -> Self {
         match err {
@@ -564,6 +588,30 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["code"], "PLUGIN_UNAVAILABLE");
         }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_plugin_is_a_503_naming_it_without_retry_after() {
+        use broccoli_api_types::visibility::PluginOutage;
+        let response = AppError::from(PluginOutage::Disabled {
+            plugin_id: "ioi".into(),
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get("Retry-After").is_none());
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "PLUGIN_DISABLED");
+        assert!(
+            body["message"].as_str().unwrap().contains("'ioi'"),
+            "{body}"
+        );
+
+        let response = AppError::from(PluginOutage::Unavailable).into_response();
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap(),
+            &PLUGIN_RETRY_AFTER_SECS.to_string()
+        );
     }
 
     /// Sanity check that 429 RateLimited and 503 Overloaded both
