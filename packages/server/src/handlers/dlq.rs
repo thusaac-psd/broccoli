@@ -19,7 +19,7 @@ use crate::dlq::{DlqService, ResolveResult, dlq_service};
 // kernel governs.
 use crate::entity::{dead_letter_message, submission};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::dlq::*;
@@ -279,7 +279,7 @@ fn stuck_retry_skip_to_error(skip: StuckRetrySkip) -> AppError {
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn retry_dlq_message(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<Json<DlqRetryResponse>, AppError> {
@@ -321,7 +321,7 @@ pub async fn retry_dlq_message(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn delete_dlq_message(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -362,7 +362,7 @@ pub async fn delete_dlq_message(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn bulk_retry_dlq(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkRetryDlqRequest>,
 ) -> Result<Json<BulkRetryDlqResponse>, AppError> {
@@ -495,7 +495,7 @@ pub async fn bulk_retry_dlq(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn bulk_delete_dlq(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkDeleteDlqRequest>,
 ) -> Result<Json<BulkDeleteDlqResponse>, AppError> {

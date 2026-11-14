@@ -5,7 +5,7 @@
 //! [`issue_access_token`], which reads the user's CURRENT roles and
 //! permissions from the database. Nothing copies grants out of a presented
 //! JWT: re-signing old claims with a fresh `iat` would launder a token that
-//! `FreshAuthUser` rejects (revoked role, reset password, deleted account)
+//! freshness check rejects (revoked role, reset password, deleted account)
 //! into one it accepts.
 
 use common::db::DatabaseConnection;

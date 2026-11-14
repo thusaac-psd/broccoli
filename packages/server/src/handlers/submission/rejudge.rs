@@ -28,7 +28,7 @@ use crate::dispatcher::queue_depth::enforce_queue_depth_admission;
 // by `tests/integration/rejudge_visibility.rs`.
 use crate::entity::submission;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::FreshAuthUser;
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::validate_contest_type;
@@ -70,7 +70,7 @@ use super::response::{VisibilityContext, build_submission_response};
 )]
 #[instrument(skip(state, auth_user), fields(submission_id = %id, judgement_id = %judgement_id))]
 pub async fn apply_submission_judgement(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -140,7 +140,7 @@ pub async fn apply_submission_judgement(
 )]
 #[instrument(skip(state, auth_user), fields(submission_id = %id, judgement_id = %judgement_id))]
 pub async fn discard_submission_judgement(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((id, judgement_id)): AppPath<(i32, i32)>,
 ) -> Result<StatusCode, AppError> {
@@ -202,7 +202,7 @@ pub struct RejudgeQuery {
 )]
 #[instrument(skip(state, auth_user, query), fields(submission_id = %id))]
 pub async fn rejudge_submission(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
     AppQuery(query): AppQuery<RejudgeQuery>,
@@ -328,7 +328,7 @@ pub async fn rejudge_submission(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn bulk_rejudge_submissions(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkRejudgeRequest>,
 ) -> Result<Json<BulkRejudgeResponse>, AppError> {
@@ -441,7 +441,7 @@ pub async fn bulk_rejudge_submissions(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn admin_fan_out_submission(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<AdminFanOutSubmissionRequest>,
 ) -> Result<impl IntoResponse, AppError> {

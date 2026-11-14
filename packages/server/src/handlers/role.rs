@@ -12,7 +12,7 @@ use sea_orm::*;
 // Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::{role, role_permission, user};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::user::PermissionGrantRequest;
@@ -128,7 +128,7 @@ fn require_known_permission(state: &AppState, permission: &str) -> Result<(), Ap
     security(("jwt" = [])),
 )]
 pub async fn grant_permission_to_role(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(role_name): AppPath<String>,
     AppJson(req): AppJson<PermissionGrantRequest>,
@@ -208,7 +208,7 @@ pub async fn grant_permission_to_role(
     security(("jwt" = [])),
 )]
 pub async fn revoke_permission_from_role(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((role_name, permission_name)): AppPath<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {

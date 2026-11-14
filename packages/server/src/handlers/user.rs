@@ -17,7 +17,7 @@ use tracing::instrument;
 // registrations - never returned to a response body.
 use crate::entity::{contest, contest_user, refresh_token, role, user, user_role};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::middleware::idempotency::NoStore;
@@ -121,7 +121,7 @@ pub async fn get_user(
     security(("jwt" = [])),
 )]
 pub async fn update_user(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
     AppJson(payload): AppJson<UpdateUserRequest>,
@@ -215,7 +215,7 @@ pub async fn update_user(
 )]
 #[instrument(skip(state, auth_user), fields(id, user_id = auth_user.user_id))]
 pub async fn delete_user(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -321,7 +321,7 @@ pub async fn delete_user(
     security(("jwt" = [])),
 )]
 pub async fn assign_role(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<i32>,
     AppJson(payload): AppJson<RoleAssignmentRequest>,
@@ -379,7 +379,7 @@ pub async fn assign_role(
     security(("jwt" = [])),
 )]
 pub async fn revoke_role(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((id, role_name)): AppPath<(i32, String)>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -442,7 +442,7 @@ pub async fn revoke_role(
 )]
 #[instrument(skip(state, auth_user, payload), fields(user_id = auth_user.user_id))]
 pub async fn create_user(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<CreateUserRequest>,
 ) -> Result<(StatusCode, NoStore<Json<CreatedUserResponse>>), AppError> {
@@ -471,7 +471,7 @@ pub async fn create_user(
 )]
 #[instrument(skip(state, auth_user, payload), fields(user_id = auth_user.user_id))]
 pub async fn bulk_create_users(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<BulkCreateUsersRequest>,
 ) -> Result<impl IntoResponse, AppError> {

@@ -17,7 +17,7 @@ use tracing::instrument;
 // and `contestant_cannot_access_non_sample_test_case_via_active_contest`.
 use crate::entity::{problem, test_case, test_case_result};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, Authorized, FreshAuthUser, ProblemEdit};
+use crate::extractors::auth::{AuthUser, Authorized, ProblemEdit};
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::problem::*;
@@ -414,7 +414,7 @@ pub async fn update_test_case(
 )]
 #[instrument(skip(state, auth_user), fields(problem_id, tc_id))]
 pub async fn delete_test_case(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((problem_id, tc_id)): AppPath<(i32, i32)>,
 ) -> Result<impl IntoResponse, AppError> {

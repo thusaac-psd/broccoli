@@ -4,13 +4,11 @@ use std::ops::Deref;
 use axum::extract::{FromRef, FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
 use broccoli_server_sdk::permissions as perm;
-use sea_orm::{ColumnTrait, QueryFilter, QuerySelect};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
-use crate::entity::user;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::utils::jwt;
-use crate::utils::soft_delete::SoftDeletable;
 
 pub struct AuthUser {
     pub user_id: i32,
@@ -42,7 +40,7 @@ impl AuthUser {
 }
 
 /// Decode and verify the `Bearer` access token from the request into its
-/// claims. Shared by [`AuthUser`] (stateless) and [`FreshAuthUser`].
+/// claims.
 fn bearer_claims(parts: &Parts, state: &AppState) -> Result<jwt::Claims, AppError> {
     let auth_header = parts
         .headers
@@ -67,6 +65,16 @@ impl From<jwt::Claims> for AuthUser {
     }
 }
 
+/// The caller of a request, from its bearer access token.
+///
+/// The freshness rule of the platform lives here: a request whose method
+/// changes state (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) gets the
+/// caller only through [`fresh_user`], so every mutating route refuses a token
+/// that a credential change, a logout or a deactivation has ended, whichever
+/// extractor its handler names. A read trusts the signed claims without a
+/// database lookup, so a stale token reads for at most
+/// [`jwt::ACCESS_TOKEN_TTL`]; a read that must see the caller as the database
+/// knows it now takes [`FreshAuthUser`].
 impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
@@ -77,22 +85,26 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         let claims = bearer_claims(parts, &app_state)?;
-        Ok(AuthUser::from(claims))
+        if parts.method.is_safe() {
+            Ok(AuthUser::from(claims))
+        } else {
+            Ok(fresh_user(&app_state, claims).await?.user)
+        }
     }
 }
 
-/// Like [`AuthUser`], but additionally rejects an access token that was minted
-/// before the user's `credentials_changed_at` (password reset, role
-/// grant/revoke, deactivation) or belongs to a now-inactive user. Costs one
-/// indexed lookup, so it guards only high-value mutation handlers -- the
-/// stateless [`AuthUser`] stays free on the hot read path. Deref-es to the
-/// inner `AuthUser` so `require_permission(..)` etc. work unchanged.
-pub struct FreshAuthUser(pub AuthUser);
+/// The caller of a request whatever its method, checked by [`fresh_user`]:
+/// for reads that answer from the caller's current account, such as
+/// `/auth/me`. Deref-es to the inner [`AuthUser`].
+pub struct FreshAuthUser {
+    pub user: AuthUser,
+    pub display_name: String,
+}
 
 impl Deref for FreshAuthUser {
     type Target = AuthUser;
     fn deref(&self) -> &AuthUser {
-        &self.0
+        &self.user
     }
 }
 
@@ -106,31 +118,43 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = AppState::from_ref(state);
         let claims = bearer_claims(parts, &app_state)?;
-        Ok(FreshAuthUser(fresh_user(&app_state, claims).await?))
+        fresh_user(&app_state, claims).await
     }
 }
+
+/// The active account a token's user has now, and the change stamp its
+/// freshness is judged against.
+const FRESH_USER_SQL: &str = r#"
+SELECT username, display_name, credentials_changed_at
+FROM "user"
+WHERE id = $1 AND deleted_at IS NULL
+"#;
 
 /// The caller of a verified access token, if the token is still fresh: its
 /// user is active and it was minted no earlier than the user's last
 /// credential change. A stale token is `TokenInvalid`, a 401, so the client
 /// refreshes and gets a token carrying the user's current roles. The one
-/// freshness rule of the platform: [`FreshAuthUser`] and the plugin proxy
-/// both apply it.
+/// freshness check of the platform: [`AuthUser`] on mutating requests,
+/// [`FreshAuthUser`] and the plugin proxy all apply it. One indexed read.
 pub(crate) async fn fresh_user(
     state: &AppState,
     claims: jwt::Claims,
-) -> Result<AuthUser, AppError> {
-    // One indexed read of the active user's credential-change stamp. A
-    // missing row means the user was soft-deleted/deactivated -> reject.
-    let credentials_changed_at: chrono::DateTime<chrono::Utc> = user::Entity::find_active()
-        .filter(user::Column::Id.eq(claims.uid))
-        .select_only()
-        .column(user::Column::CredentialsChangedAt)
-        .into_tuple()
-        .one(&state.db)
+) -> Result<FreshAuthUser, AppError> {
+    let row = state
+        .db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            FRESH_USER_SQL,
+            [claims.uid.into()],
+        ))
         .await
         .map_err(|e| AppError::Internal(format!("credential freshness lookup failed: {e}")))?
+        // No row: the user was deleted or deactivated.
         .ok_or(AppError::TokenInvalid)?;
+    let username: String = row.try_get("", "username")?;
+    let display_name: String = row.try_get("", "display_name")?;
+    let credentials_changed_at: chrono::DateTime<chrono::Utc> =
+        row.try_get("", "credentials_changed_at")?;
 
     // Both sides of the comparison are DB-clock values (`iat` is stamped from
     // `statement_timestamp()` in `services::auth_tokens`), so it holds even
@@ -146,7 +170,13 @@ pub(crate) async fn fresh_user(
     if (claims.iat as i64) < credentials_changed_at.timestamp() {
         return Err(AppError::TokenInvalid);
     }
-    Ok(AuthUser::from(claims))
+    Ok(FreshAuthUser {
+        user: AuthUser {
+            username,
+            ..AuthUser::from(claims)
+        },
+        display_name,
+    })
 }
 
 /// A permission an [`Authorized`] extractor demands. Implemented by zero-sized
@@ -162,9 +192,10 @@ impl RequiredPermission for ProblemEdit {
     const NAME: &'static str = perm::PROBLEM_EDIT;
 }
 
-/// A [`FreshAuthUser`] that already holds permission `P`.
+/// An [`AuthUser`] that already holds permission `P`, checked for freshness
+/// whatever the request's method.
 ///
-/// Use it instead of `FreshAuthUser` + `require_permission(..)` on any handler
+/// Use it instead of `AuthUser` + `require_permission(..)` on any handler
 /// that takes a request body. Axum runs every `FromRequestParts` extractor
 /// before the single body extractor (`AppJson`, `BaseMultipart`, ...), so
 /// checking the permission HERE rejects an unauthorised caller with 403 before

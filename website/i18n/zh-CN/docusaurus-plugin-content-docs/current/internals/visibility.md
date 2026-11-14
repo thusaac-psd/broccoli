@@ -26,7 +26,7 @@ sidebar_position: 7
 
 代理（`handlers/proxy.rs`）先认证调用者并匹配路由，然后在调用插件之前，以路由经过检查的 `RouteAccess` 调用 `services::plugin_route_access::authorize`：
 
-- 持有者令牌经过 `extractors::auth::fresh_user`，与 `FreshAuthUser` 使用同一条新鲜度规则，因此失效的令牌在这里同样返回 401。
+- 持有者令牌经过 `extractors::auth::fresh_user`，与每个会修改状态的核心请求使用同一项新鲜度检查，因此失效的令牌在这里同样返回 401，读请求也不例外。
 - `permission` 依据令牌中的权限检查。
 - 声明的比赛只读取一次（`find_contest`），对照路由的 `contest_type` 检查，通过 `know_contest` 交给内核，并与声明的题目在同一次 `decide_batch` 中决策。报名情况来自同一批次（`participates`），`participant` 路由应用 `participant_gate`，即 `require_contest_participant` 使用的规则。
 

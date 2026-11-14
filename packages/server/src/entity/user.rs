@@ -33,9 +33,9 @@ pub struct Model {
 
     /// When this user's credentials/authorization last changed (password reset,
     /// role grant/revoke, deactivation). Access tokens minted before this
-    /// instant are rejected by the `FreshAuthUser` extractor, so a downgraded or
-    /// deactivated user cannot keep using a still-unexpired access token on
-    /// high-value mutations.
+    /// instant are refused on every mutating request and by `FreshAuthUser`
+    /// (`extractors::auth::fresh_user`), so a downgraded or deactivated user
+    /// cannot keep changing anything with a still-unexpired access token.
     pub credentials_changed_at: DateTimeUtc,
 }
 
@@ -85,7 +85,7 @@ impl SoftDeletable for Entity {
 
 impl Entity {
     /// Stamp a single user's `credentials_changed_at` to now, invalidating any
-    /// access token minted before this instant on the `FreshAuthUser` path.
+    /// access token minted before this instant (`extractors::auth::fresh_user`).
     /// Call inside the same transaction as the credential/authorization change.
     pub async fn touch_credentials_changed<C>(db: &C, user_id: i32) -> Result<(), sea_orm::DbErr>
     where

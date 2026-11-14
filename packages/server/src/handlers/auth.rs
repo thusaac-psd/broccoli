@@ -251,29 +251,23 @@ pub async fn logout(
     tag = "Auth",
     operation_id = "getCurrentUser",
     summary = "Get current authenticated user profile",
-    description = "Returns the authenticated user's profile, including the roles and permissions embedded in their JWT.",
+    description = "Returns the authenticated user's profile, including the roles and permissions embedded in their JWT. A token that a credential change, a logout or a deactivation has ended is 401 TOKEN_INVALID here, so a client learns at once that it must refresh.",
     responses(
         (status = 200, description = "Current user info", body = MeResponse),
         (status = 401, description = "Unauthorized (TOKEN_MISSING, TOKEN_INVALID)", body = ErrorBody),
     ),
     security(("jwt" = [])),
 )]
-#[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
-pub async fn me(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<MeResponse>, AppError> {
-    let user = user::Entity::find_active_by_id(auth_user.user_id)
-        .one(&state.db)
-        .await?
-        .ok_or(AppError::TokenInvalid)?;
-    Ok(Json(MeResponse {
-        id: auth_user.user_id,
+#[instrument(skip(auth_user), fields(user_id = auth_user.user_id))]
+pub async fn me(auth_user: FreshAuthUser) -> Json<MeResponse> {
+    let FreshAuthUser { user, display_name } = auth_user;
+    Json(MeResponse {
+        id: user.user_id,
         username: user.username,
-        display_name: user.display_name,
-        roles: auth_user.roles,
-        permissions: auth_user.permissions,
-    }))
+        display_name,
+        roles: user.roles,
+        permissions: user.permissions,
+    })
 }
 
 const USER_CODE_CHARSET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -462,11 +456,11 @@ pub async fn request_device_code(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn authorize_device(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppJson(payload): AppJson<DeviceAuthorizeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // `FreshAuthUser` refused a stale or deleted caller. Only the approving
+    // `AuthUser` refused a stale or deleted caller. Only the approving
     // user is recorded; the CLI's token is minted from that user's current
     // grants when it collects it.
     device_auth::authorize(
@@ -543,10 +537,10 @@ pub async fn poll_device_token(
 )]
 #[instrument(skip(state, auth_user), fields(user_id = auth_user.user_id))]
 pub async fn issue_cli_token(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<CliTokenResponse>, AppError> {
-    // `FreshAuthUser` refused a stale or deleted caller; the access token is
+    // `AuthUser` refused a stale or deleted caller; the access token is
     // built from current grants before any refresh row exists for it.
     let token = issue_access_token(&state.db, &state.config.auth.jwt_secret, auth_user.user_id)
         .await?

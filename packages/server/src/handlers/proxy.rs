@@ -44,7 +44,9 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Option<Au
     };
     let claims = jwt::verify(token, &state.config.auth.jwt_secret, state.clock.now())
         .map_err(|_| AppError::TokenInvalid)?;
-    fresh_user(state, claims).await.map(Some)
+    fresh_user(state, claims)
+        .await
+        .map(|fresh| Some(fresh.user))
 }
 
 /// Whether a caller request header may be forwarded to a plugin handler.

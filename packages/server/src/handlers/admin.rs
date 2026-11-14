@@ -17,7 +17,7 @@ use tracing::instrument;
 // Contest/Problem/Submission/Clarification view the kernel governs.
 use crate::entity::plugin as plugin_entity;
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::path::AppPath;
 use crate::models::plugin::{
     PluginArchiveForm, PluginArchiveSummary, PluginDependentsResponse, PluginDetailResponse,
@@ -145,7 +145,7 @@ pub async fn get_plugin_details(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn enable_plugin(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -232,7 +232,7 @@ pub async fn get_plugin_dependents(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn disable_plugin(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -264,7 +264,7 @@ pub async fn disable_plugin(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn reload_plugin(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -293,7 +293,7 @@ pub async fn reload_plugin(
 )]
 #[instrument(skip(state, auth_user))]
 pub async fn reload_all_plugins(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<ReloadAllResponse>, AppError> {
     auth_user.require_permission(perm::PLUGIN_MANAGE)?;
@@ -521,7 +521,7 @@ pub async fn inspect_plugin_archive(
 )]
 #[instrument(skip(state, auth_user, headers, multipart))]
 pub async fn upload_plugin(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     multipart: Multipart,
@@ -565,7 +565,7 @@ pub async fn upload_plugin(
 )]
 #[instrument(skip(state, auth_user), fields(id))]
 pub async fn remove_plugin_upload(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath(id): AppPath<PluginId>,
     AppQuery(query): AppQuery<RemoveUploadQuery>,

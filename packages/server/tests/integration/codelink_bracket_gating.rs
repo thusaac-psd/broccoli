@@ -643,15 +643,14 @@ async fn registered_but_not_in_bracket_user_cannot_submit() {
 // everything; this section covers the permission being revoked mid-contest.
 // =====================================================================
 
-/// `AuthUser` (`packages/server/src/extractors/auth.rs`) is stateless: its
-/// `permissions` come from the JWT's claims, fixed at login or registration
-/// time, and read/submit paths never re-check them against the database
-/// (only `FreshAuthUser`, reserved for high-value mutation handlers,
-/// re-checks `credentials_changed_at`). Revoking a role's permission
-/// mid-contest therefore does not narrow an already-issued access token's
-/// visibility; only a freshly minted token (re-login) picks up the change.
-/// This is the codebase-wide tradeoff (stateless reads and submits stay
-/// fast; only mutations pay for freshness), not a bracket-specific rule.
+/// On a read, `AuthUser` (`packages/server/src/extractors/auth.rs`) is
+/// stateless: its `permissions` come from the JWT's claims, fixed when the
+/// token was minted, and a read never re-checks them against the database
+/// (every mutating request does, through `fresh_user`). Revoking a role's
+/// permission mid-contest therefore does not narrow an already-issued access
+/// token's visibility; only a freshly minted token picks up the change.
+/// This is the codebase-wide tradeoff (stateless reads stay fast; only
+/// requests that change state pay for freshness), not a bracket-specific rule.
 /// This test pins where the line falls for this permission in this plugin:
 /// the stale token keeps the spectator's view, and a fresh token (re-login)
 /// loses it.

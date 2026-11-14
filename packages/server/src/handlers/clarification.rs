@@ -31,7 +31,7 @@ use tracing::instrument;
 // and `tests/integration/clarification.rs::clarification_actions`.
 use crate::entity::{clarification, clarification_reply, contest, user};
 use crate::error::{AppError, ErrorBody};
-use crate::extractors::auth::{AuthUser, FreshAuthUser};
+use crate::extractors::auth::AuthUser;
 use crate::extractors::json::AppJson;
 use crate::extractors::path::AppPath;
 use crate::models::clarification::*;
@@ -372,7 +372,7 @@ pub async fn create_clarification(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn reply_clarification(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ReplyClarificationRequest>,
@@ -534,7 +534,7 @@ pub async fn reply_clarification(
 )]
 #[instrument(skip(state, auth_user))]
 pub async fn toggle_reply_public(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id, reply_id)): AppPath<(i32, i32, i32)>,
 ) -> Result<Json<ClarificationReplyResponse>, AppError> {
@@ -611,7 +611,7 @@ pub async fn toggle_reply_public(
 )]
 #[instrument(skip(state, auth_user, payload))]
 pub async fn resolve_clarification(
-    auth_user: FreshAuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     AppPath((contest_id, clarification_id)): AppPath<(i32, i32)>,
     AppJson(payload): AppJson<ResolveClarificationRequest>,

@@ -792,9 +792,9 @@ mod token_freshness {
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Statement};
     use server::entity::user;
 
-    /// A `FreshAuthUser`-guarded mutation must reject an access token minted
-    /// before the caller's `credentials_changed_at`, while the stateless read
-    /// path keeps accepting the same token (so the hot path stays DB-free).
+    /// A mutation must reject an access token minted before the caller's
+    /// `credentials_changed_at`, while the stateless read path keeps accepting
+    /// the same token (so the hot path stays DB-free).
     #[tokio::test]
     async fn stale_access_token_rejected_on_mutation_but_accepted_on_reads() {
         let app = TestApp::spawn().await;
@@ -845,6 +845,150 @@ mod token_freshness {
             read.text
         );
     }
+
+    /// Makes every token minted so far for the user named `username` stale.
+    /// Setting `credentials_changed_at` an hour ahead keeps the check clear of
+    /// same-second timing.
+    async fn make_tokens_stale(app: &TestApp, username: &str) -> i32 {
+        let uid = user::Entity::find()
+            .filter(user::Column::Username.eq(username))
+            .one(&app.db)
+            .await
+            .expect("db query failed")
+            .expect("user should exist")
+            .id;
+        app.db
+            .execute_raw(Statement::from_string(
+                app.db.get_database_backend(),
+                format!(
+                    "UPDATE \"user\" SET credentials_changed_at = now() + interval '1 hour' WHERE id = {uid}"
+                ),
+            ))
+            .await
+            .expect("bump credentials_changed_at");
+        uid
+    }
+
+    /// Submitting and running code spend the caller's quota and change state,
+    /// so a stale token can do neither, and `/auth/me` tells the client to
+    /// refresh instead of echoing the token's old grants.
+    #[tokio::test]
+    async fn a_stale_token_cannot_submit_or_run_code() {
+        let app = TestApp::spawn().await;
+        let admin = app
+            .create_user_with_role("fresh_admin", "securepass", "admin")
+            .await;
+        let problem_id = app.create_problem(&admin, "Fresh").await;
+        let token = app
+            .create_authenticated_user("fresh_bob", "securepass")
+            .await;
+        app.create_submission(problem_id, &token, "cpp", "int main(){}")
+            .await;
+        make_tokens_stale(&app, "fresh_bob").await;
+
+        let submit = app
+            .post_with_token(
+                &routes::problem_submissions(problem_id),
+                &json!({
+                    "files": [{"filename": "main.cpp", "content": "int main(){}"}],
+                    "language": "cpp",
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(submit.status, 401, "stale token submitted: {}", submit.text);
+        assert_eq!(submit.body["code"], "TOKEN_INVALID");
+
+        let run = app
+            .post_with_token(
+                &routes::problem_code_runs(problem_id),
+                &json!({
+                    "files": [{"filename": "main.cpp", "content": "int main(){}"}],
+                    "language": "cpp",
+                    "custom_test_cases": [{"input": "1"}],
+                }),
+                &token,
+            )
+            .await;
+        assert_eq!(run.status, 401, "stale token ran code: {}", run.text);
+        assert_eq!(run.body["code"], "TOKEN_INVALID");
+
+        let me = app.get_with_token(routes::ME, &token).await;
+        assert_eq!(me.status, 401, "stale token read /auth/me: {}", me.text);
+    }
+
+    /// Every operation the API documents as authenticated and whose method
+    /// changes state answers a stale token with 401 before its handler runs,
+    /// whatever the handler extracts. Path parameters are placeholders: the
+    /// identity is checked before any resource is looked up.
+    #[tokio::test]
+    async fn every_state_changing_route_refuses_a_stale_token() {
+        let app = TestApp::spawn().await;
+        let token = app
+            .create_user_with_role("fresh_walker", "securepass", "admin")
+            .await;
+        make_tokens_stale(&app, "fresh_walker").await;
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&server::openapi_json()).expect("OpenAPI document");
+        let mut checked = Vec::new();
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            for (method, operation) in item.as_object().expect("path item") {
+                let method = match method.as_str() {
+                    "post" => reqwest::Method::POST,
+                    "put" => reqwest::Method::PUT,
+                    "patch" => reqwest::Method::PATCH,
+                    "delete" => reqwest::Method::DELETE,
+                    _ => continue,
+                };
+                let authenticated = operation["security"]
+                    .as_array()
+                    .is_some_and(|schemes| schemes.iter().any(|s| s.get("jwt").is_some()));
+                if !authenticated {
+                    continue;
+                }
+                let url = app.url(&format!("/api/v1{}", with_placeholders(path)));
+                let res = app
+                    .client
+                    .request(method.clone(), &url)
+                    .bearer_auth(&token)
+                    .json(&json!({}))
+                    .send()
+                    .await
+                    .expect("send");
+                let res = TestResponse::from_response(res).await;
+                assert_eq!(
+                    (res.status, res.body["code"].as_str()),
+                    (401, Some("TOKEN_INVALID")),
+                    "{method} {path} accepted a stale token: {}",
+                    res.text
+                );
+                checked.push(format!("{method} {path}"));
+            }
+        }
+        assert!(
+            checked.len() > 50,
+            "the walk found too few operations: {checked:?}"
+        );
+    }
+
+    /// `path` with each `{param}` replaced by `1`.
+    fn with_placeholders(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut in_param = false;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    in_param = true;
+                    out.push('1');
+                }
+                '}' => in_param = false,
+                _ if in_param => {}
+                _ => out.push(c),
+            }
+        }
+        out
+    }
 }
 
 mod token_reissue {
@@ -887,7 +1031,7 @@ mod token_reissue {
     /// Replaces a user's roles directly in the database without bumping
     /// `credentials_changed_at`, so their existing access token still counts as
     /// fresh. This stands in for a role change landing in the same second the token
-    /// was minted, which `FreshAuthUser` tolerates by design.
+    /// was minted, which the freshness check tolerates by design.
     async fn replace_roles_without_bump(app: &TestApp, uid: i32, role: &str) {
         user_role::Entity::delete_many()
             .filter(user_role::Column::UserId.eq(uid))
