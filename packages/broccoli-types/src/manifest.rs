@@ -57,6 +57,16 @@ impl PluginManifest {
         paths
     }
 
+    /// The permissions this plugin's routes require. Together with the host
+    /// catalog ([`crate::permissions::ALL`]) they are every permission a role
+    /// grant can mean something for.
+    pub fn declared_permissions(&self) -> impl Iterator<Item = &str> {
+        self.server
+            .iter()
+            .flat_map(|server| &server.routes)
+            .filter_map(|route| route.permission.as_deref())
+    }
+
     pub fn is_hollow(&self) -> bool {
         !self.has_server() && !self.has_web() && !self.has_translations()
     }
@@ -734,6 +744,35 @@ mod tests {
 
         let prop: SchemaProperty = toml::from_str(toml_str).unwrap();
         assert_eq!(prop.default_value(), Some(json!({"key": "explicit"})));
+    }
+
+    #[test]
+    fn declared_permissions_are_the_permissions_routes_require() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+            name = "print"
+            version = "0.1.0"
+
+            [server]
+            entry = "print.wasm"
+
+            [[server.routes]]
+            method = "GET"
+            path = "/queue"
+            handler = "queue"
+            permission = "print:operate"
+
+            [[server.routes]]
+            method = "GET"
+            path = "/mine"
+            handler = "mine"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.declared_permissions().collect::<Vec<_>>(),
+            ["print:operate"]
+        );
     }
 
     #[test]
