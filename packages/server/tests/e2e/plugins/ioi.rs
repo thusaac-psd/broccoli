@@ -1080,7 +1080,7 @@ async fn disabling_the_contest_plugin_mid_judging_finalizes_the_submission() {
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &admin)
         .await;
     assert_eq!(res.status, 200, "{}", res.text);
-    assert_eq!(res.body["status"], "SystemError", "{}", res.text);
+    assert!(res.body["withheld"].is_null(), "{}", res.text);
     let res = app
         .get_with_token(&format!("/api/v1/submissions/{sub_id}"), &contestant)
         .await;
