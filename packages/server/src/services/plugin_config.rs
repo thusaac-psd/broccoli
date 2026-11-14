@@ -339,13 +339,12 @@ pub(crate) async fn incompatible_configs<C: ConnectionTrait>(
                 Ok(()) => continue,
                 Err(errors) => errors,
             },
-            None => vec![config_schema::FieldError {
-                path: String::new(),
-                message: format!(
-                    "the plugin no longer declares this namespace at the {} scope",
-                    scope.as_str()
-                ),
-            }],
+            None => vec![config_schema::FieldError::new(
+                "",
+                config_schema::FieldErrorKind::NamespaceUndeclared {
+                    scope: scope.as_str().into(),
+                },
+            )],
         };
         incompatible.push(IncompatibleConfig {
             scope,

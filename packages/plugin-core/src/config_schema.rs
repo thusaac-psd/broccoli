@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use crate::manifest::{ConfigNamespace, PluginManifest, SchemaProperty};
 
-pub use broccoli_api_types::plugin::FieldError;
+pub use broccoli_api_types::plugin::{FieldError, FieldErrorKind};
 
 /// The value types a schema property can declare.
 const TYPES: &[&str] = &["string", "integer", "number", "boolean", "array", "object"];
@@ -25,10 +25,13 @@ pub fn validate(ns: &ConfigNamespace, config: &Value) -> Result<(), Vec<FieldErr
             validate_fields(&ns.properties, None, false, fields, "", &mut errors);
         }
         Value::Object(_) => {}
-        other => errors.push(FieldError {
-            path: String::new(),
-            message: format!("expected an object, got {}", kind(other)),
-        }),
+        other => errors.push(FieldError::new(
+            "",
+            FieldErrorKind::Type {
+                expected: "object".into(),
+                got: kind(other).into(),
+            },
+        )),
     }
     if errors.is_empty() {
         Ok(())
@@ -136,29 +139,18 @@ fn validate_fields(
         match properties.get(name) {
             Some(prop) => validate_value(prop, &fields[name], &field_path, errors),
             None if additional => {}
-            None => errors.push(FieldError {
-                path: field_path,
-                message: "unknown field".into(),
-            }),
+            None => errors.push(FieldError::new(field_path, FieldErrorKind::UnknownField)),
         }
     }
     for name in required.into_iter().flatten() {
         if !fields.contains_key(name) {
-            errors.push(FieldError {
-                path: join(path, name),
-                message: "required field is missing".into(),
-            });
+            errors.push(FieldError::new(join(path, name), FieldErrorKind::Missing));
         }
     }
 }
 
 fn validate_value(prop: &SchemaProperty, value: &Value, path: &str, errors: &mut Vec<FieldError>) {
-    let mut fail = |message: String| {
-        errors.push(FieldError {
-            path: path.to_string(),
-            message,
-        })
-    };
+    let mut fail = |kind: FieldErrorKind| errors.push(FieldError::new(path, kind));
     let type_matches = match prop.schema_type.as_str() {
         "string" => value.is_string(),
         "integer" => value.is_i64() || value.is_u64(),
@@ -169,18 +161,18 @@ fn validate_value(prop: &SchemaProperty, value: &Value, path: &str, errors: &mut
         _ => false,
     };
     if !type_matches {
-        fail(format!(
-            "expected {}, got {}",
-            prop.schema_type,
-            kind(value)
-        ));
+        fail(FieldErrorKind::Type {
+            expected: prop.schema_type.clone(),
+            got: kind(value).into(),
+        });
         return;
     }
     if let Some(allowed) = &prop.enum_values
         && !allowed.contains(value)
     {
-        let allowed: Vec<String> = allowed.iter().map(Value::to_string).collect();
-        fail(format!("must be one of {}", allowed.join(", ")));
+        fail(FieldErrorKind::NotAllowed {
+            allowed: allowed.clone(),
+        });
         return;
     }
     match value {
@@ -189,12 +181,12 @@ fn validate_value(prop: &SchemaProperty, value: &Value, path: &str, errors: &mut
             if let Some(min) = prop.min
                 && n < min
             {
-                fail(format!("must be at least {min}"));
+                fail(FieldErrorKind::Min { limit: min });
             }
             if let Some(max) = prop.max
                 && n > max
             {
-                fail(format!("must be at most {max}"));
+                fail(FieldErrorKind::Max { limit: max });
             }
         }
         Value::String(s) => {
@@ -202,17 +194,19 @@ fn validate_value(prop: &SchemaProperty, value: &Value, path: &str, errors: &mut
             if let Some(min) = prop.min_length
                 && len < min as usize
             {
-                fail(format!("must be at least {min} characters"));
+                fail(FieldErrorKind::MinLength { limit: min.into() });
             }
             if let Some(max) = prop.max_length
                 && len > max as usize
             {
-                fail(format!("must be at most {max} characters"));
+                fail(FieldErrorKind::MaxLength { limit: max.into() });
             }
             if let Some(pattern) = &prop.pattern
                 && !regex::Regex::new(pattern).is_ok_and(|re| re.is_match(s))
             {
-                fail(format!("must match the pattern {pattern}"));
+                fail(FieldErrorKind::Pattern {
+                    pattern: pattern.clone(),
+                });
             }
         }
         Value::Array(items) => {
@@ -326,6 +320,20 @@ mod tests {
         let errors = paths(validate(&modes, &json!({"scoring_mode": "bogus"})));
         assert_eq!(errors[0].0, "scoring_mode");
         assert!(validate(&modes, &json!({"scoring_mode": "sum_best_subtask"})).is_ok());
+    }
+
+    #[test]
+    fn a_field_error_names_its_kind_and_the_schema_numbers_beside_the_message() {
+        let errors = validate(&icpc(), &json!({"penalty_minutes": -1})).expect_err("invalid");
+        assert_eq!(
+            serde_json::to_value(&errors).expect("serializes"),
+            json!([{
+                "path": "penalty_minutes",
+                "message": "must be at least 0",
+                "kind": "min",
+                "limit": 0.0,
+            }])
+        );
     }
 
     #[test]
