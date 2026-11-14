@@ -7,11 +7,13 @@
 //! otherwise all see the old last submission. Each admission claims the slot in
 //! `cooldown_claim` until the attempt can no longer become a submission (the
 //! attempt timeout the host publishes on `before_submission`), capped at the
-//! cooldown, which the committed row then enforces. An attempt rejected by a
-//! later hook or a failed insert leaves only the claim, so it blocks for that
-//! long rather than the whole cooldown when the cooldown is longer. Every time
-//! is the database's `NOW()`, and `submission.created_at` is written by the
-//! database too.
+//! cooldown, which the committed row then enforces. The claim records the
+//! attempt that took it, and an attempt that ends without a submission (a
+//! later hook rejected it, or its insert failed) releases its own claim when
+//! the host announces it abandoned, so it blocks nothing afterwards; a claim
+//! whose release never arrives still ends with the attempt timeout. Every
+//! time is the database's `NOW()`, and `submission.created_at` is written by
+//! the database too.
 
 use broccoli_server_sdk::prelude::Params;
 
@@ -20,6 +22,7 @@ pub const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS cooldown_claim (\
      problem_id    INTEGER NOT NULL, \
      contest_id    INTEGER NOT NULL DEFAULT 0, \
      blocked_until TIMESTAMPTZ NOT NULL, \
+     attempt_id    UUID        NOT NULL, \
      PRIMARY KEY (user_id, problem_id, contest_id))";
 
 /// Each clock's state in seconds: since the last committed submission, and
@@ -91,23 +94,38 @@ impl CooldownKey {
 pub fn claim_sql(
     p: &mut Params,
     key: &CooldownKey,
+    attempt_id: &str,
     cooldown: u32,
     attempt_timeout_ms: u64,
 ) -> String {
     let user = p.bind(key.user_id);
     let problem = p.bind(key.problem_id);
     let contest = p.bind(key.contest_id.unwrap_or(0));
+    let attempt = p.bind(attempt_id.to_string());
     let recent = key.recent_submission(p, cooldown);
     let cooldown_ms = p.bind(u64::from(cooldown) * 1000);
     let timeout_ms = p.bind(attempt_timeout_ms);
     format!(
-        "INSERT INTO cooldown_claim (user_id, problem_id, contest_id, blocked_until) \
+        "INSERT INTO cooldown_claim (user_id, problem_id, contest_id, blocked_until, attempt_id) \
          SELECT {user}, {problem}, {contest}, \
-           NOW() + LEAST({cooldown_ms}::bigint, {timeout_ms}::bigint) * INTERVAL '1 millisecond' \
+           NOW() + LEAST({cooldown_ms}::bigint, {timeout_ms}::bigint) * INTERVAL '1 millisecond', \
+           {attempt}::uuid \
          WHERE NOT {recent} \
          ON CONFLICT (user_id, problem_id, contest_id) \
-         DO UPDATE SET blocked_until = EXCLUDED.blocked_until \
+         DO UPDATE SET blocked_until = EXCLUDED.blocked_until, attempt_id = EXCLUDED.attempt_id \
          WHERE cooldown_claim.blocked_until <= NOW() AND NOT {recent}"
+    )
+}
+
+/// End the claim `attempt_id` holds on `key`, if it still holds it. A
+/// committed submission of the attempt keeps blocking through the durable
+/// clock, so releasing is safe however the attempt ended.
+pub fn release_sql(p: &mut Params, key: &CooldownKey, attempt_id: &str) -> String {
+    let claim = key.claim_row(p, "cooldown_claim");
+    format!(
+        "UPDATE cooldown_claim SET blocked_until = LEAST(blocked_until, NOW()) \
+         WHERE {claim} AND attempt_id = {}::uuid",
+        p.bind(attempt_id.to_string())
     )
 }
 
@@ -166,9 +184,26 @@ mod tests {
     }
 
     #[test]
+    fn a_claim_records_its_attempt_and_only_that_attempt_releases_it() {
+        let mut p = Params::new();
+        let claim = claim_sql(&mut p, &KEY, "a1", 60, 60_000);
+        assert!(
+            claim.contains("attempt_id = EXCLUDED.attempt_id"),
+            "{claim}"
+        );
+        assert!(p.into_args().contains(&serde_json::json!("a1")));
+
+        let mut p = Params::new();
+        let release = release_sql(&mut p, &KEY, "a1");
+        assert!(release.contains("AND attempt_id = $4::uuid"), "{release}");
+        assert!(release.contains("LEAST(blocked_until, NOW())"), "{release}");
+        assert_eq!(p.into_args()[3], serde_json::json!("a1"));
+    }
+
+    #[test]
     fn a_claim_lasts_the_shorter_of_the_attempt_timeout_and_the_cooldown() {
         let mut p = Params::new();
-        let sql = claim_sql(&mut p, &KEY, 600, 60_000);
+        let sql = claim_sql(&mut p, &KEY, "a1", 600, 60_000);
         assert!(sql.contains("LEAST("), "{sql}");
         let args = p.into_args();
         assert!(args.contains(&serde_json::json!(600_000)));
@@ -177,7 +212,7 @@ mod tests {
 
     #[test]
     fn the_claim_re_checks_the_durable_clock_on_both_insert_and_update() {
-        let sql = claim_sql(&mut Params::new(), &KEY, 60, 60_000);
+        let sql = claim_sql(&mut Params::new(), &KEY, "a1", 60, 60_000);
         assert_eq!(
             sql.matches("NOT EXISTS (SELECT 1 FROM submission s")
                 .count(),

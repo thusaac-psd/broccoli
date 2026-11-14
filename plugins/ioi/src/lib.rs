@@ -24,7 +24,7 @@ use crate::config::{SubtaskDef, TaskConfig};
 #[cfg(target_arch = "wasm32")]
 use crate::evaluate_batch::{handle_detached_eval_callback, recover_detached_callback_error};
 #[cfg(target_arch = "wasm32")]
-use crate::subtasks::build_default_subtasks;
+use crate::subtasks::effective_subtasks;
 #[cfg(target_arch = "wasm32")]
 use crate::tokens::TokenState;
 
@@ -46,11 +46,7 @@ pub(crate) fn load_effective_subtasks(
     task_config: &TaskConfig,
 ) -> Result<(Vec<TestCaseRow>, Vec<SubtaskDef>), SdkError> {
     let test_cases = host.submission.query_test_cases(problem_id)?;
-    let subtasks = if task_config.subtasks.is_empty() {
-        build_default_subtasks(&test_cases)
-    } else {
-        task_config.subtasks.clone()
-    };
+    let subtasks = effective_subtasks(&task_config.subtasks, &test_cases);
 
     Ok((test_cases, subtasks))
 }

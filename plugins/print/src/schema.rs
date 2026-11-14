@@ -33,6 +33,14 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS print_job_claimable_idx ON print_job (status, contest_id, created_at)",
     "CREATE INDEX IF NOT EXISTS print_job_user_idx ON print_job (user_id, created_at)",
     r#"
+    CREATE TABLE IF NOT EXISTS print_quota (
+        contest_id  INTEGER NOT NULL,
+        user_id     INTEGER NOT NULL,
+        jobs        INTEGER NOT NULL,
+        PRIMARY KEY (contest_id, user_id)
+    )
+    "#,
+    r#"
     CREATE TABLE IF NOT EXISTS print_station (
         name        TEXT PRIMARY KEY,
         location    TEXT,

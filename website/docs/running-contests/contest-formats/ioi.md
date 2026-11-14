@@ -113,7 +113,7 @@ always see it.
 
 | Value                 | Meaning                                                        |
 | ----------------------- | ----------------------------------------------------------------- |
-| `admins_only`           | only contest managers see the full board while the contest runs, everyone else sees only their own row |
+| `admins_only`           | only contest managers see the full board while the contest runs, everyone else sees only their own row, without a rank |
 | `all_contest_viewers`   | every contest viewer sees the full board while the contest runs |
 
 Each problem carries a score time, the elapsed time from contest start

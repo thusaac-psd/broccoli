@@ -34,7 +34,10 @@ pub use evaluate::{
     TestCaseBodyRef, TestCaseVerdict, default_evaluation_result_timeout_ms, seconds_from_ms,
 };
 pub use hook::HookResponse;
-pub use hook_events::{AfterJudgingEvent, AfterSubmissionEvent, BeforeSubmissionEvent, HookEvent};
+pub use hook_events::{
+    AfterJudgingEvent, AfterSubmissionEvent, BeforeSubmissionEvent, HookEvent,
+    SubmissionAttemptAbandonedEvent,
+};
 pub use http::{PluginHttpAuth, PluginHttpRequest, PluginHttpResponse, error_code_for_status};
 pub use lifecycle::{ParseStatusError, StatusPhase, SubmissionLifecycle};
 pub use operation::{

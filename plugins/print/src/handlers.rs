@@ -135,9 +135,7 @@ pub fn handle_print_submission(
 
     // Someone else's submission is not found, exactly like one that does
     // not exist, so the route cannot tell which ids are taken.
-    let is_staff =
-        req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL);
-    if (sub.user_id != user_id && !is_staff) || sub.contest_id != Some(contest_id) {
+    if (sub.user_id != user_id && !is_staff(req)) || sub.contest_id != Some(contest_id) {
         return Err(PluginHttpResponse::error(404, "Submission not found").into());
     }
 
@@ -196,8 +194,7 @@ pub fn handle_print_submission(
             status,
         })
         .collect();
-    // Insert all files atomically so a failure leaves nothing partial.
-    jobs::insert_jobs(host, &new_jobs)?;
+    queue_jobs(host, req, &cfg, contest_id, sub.user_id, &new_jobs)?;
 
     created(serde_json::json!({
         "ok": true,
@@ -221,15 +218,25 @@ pub fn handle_print_arbitrary(
         return Err(PluginHttpResponse::error(413, "Document is too large to print").into());
     }
 
-    // The contest route's contest, checked by the host; prints outside a
-    // contest use the global config.
-    let contest_id = req.contest.as_ref().map(|c| c.id);
-    let cfg = match contest_id {
-        Some(cid) => config::load_contest_config(host, cid)?,
-        None => config::load_global_config(host)?,
-    };
+    // Pasted code prints only inside a contest: the route's contest, checked
+    // by the host, whose config and quota the print draws on.
+    let contest = req.contest()?;
+    let contest_id = contest.id;
+    let cfg = config::load_contest_config(host, contest_id)?;
     if !cfg.enabled {
         return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());
+    }
+    if !cfg.allow_arbitrary {
+        return Err(PluginHttpResponse::error(
+            403,
+            "Printing pasted code is disabled for this contest",
+        )
+        .into());
+    }
+    if !is_staff(req) && !contest.participant {
+        return Err(
+            PluginHttpResponse::error(403, "Only contestants can print in this contest").into(),
+        );
     }
 
     let pages = models::estimate_pages(&body.source);
@@ -244,15 +251,15 @@ pub fn handle_print_arbitrary(
     // Label the printout when the code was printed from a contest problem page.
     // Scoped by (contest_id, problem_id), so an unrelated problem id yields no
     // label rather than leaking one; contest access is already checked above.
-    let problem_label = match (contest_id, body.problem_id) {
-        (Some(cid), Some(pid)) => jobs::fetch_problem_label(host, cid, pid)?.map(|r| {
+    let problem_label = match body.problem_id {
+        Some(pid) => jobs::fetch_problem_label(host, contest_id, pid)?.map(|r| {
             if r.label.trim().is_empty() {
                 models::problem_letter(r.position)
             } else {
                 r.label
             }
         }),
-        _ => None,
+        None => None,
     };
 
     let language = body
@@ -266,10 +273,14 @@ pub fn handle_print_arbitrary(
     let username = caller_username(req);
     let status = JobStatus::initial(cfg.require_approval);
 
-    jobs::insert_job(
+    queue_jobs(
         host,
-        &NewJob {
-            contest_id,
+        req,
+        &cfg,
+        contest_id,
+        user_id,
+        &[NewJob {
+            contest_id: Some(contest_id),
             user_id,
             username: username.clone(),
             display_name: Some(username),
@@ -280,10 +291,46 @@ pub fn handle_print_arbitrary(
             source: body.source,
             pages_est: pages,
             status,
-        },
+        }],
     )?;
 
     created(serde_json::json!({ "ok": true, "jobs": 1, "pages": pages, "status": status.as_str() }))
+}
+
+/// Staff print for others and do not draw on a contestant's quota.
+fn is_staff(req: &PluginHttpRequest) -> bool {
+    req.has_permission(perm::CONTEST_MANAGE) || req.has_permission(perm::SUBMISSION_VIEW_ALL)
+}
+
+/// Queue `new_jobs`, all or none, for `user_id` in `contest_id`, taking them
+/// from the user's quota unless the caller is staff.
+fn queue_jobs(
+    host: &Host,
+    req: &PluginHttpRequest,
+    cfg: &config::PrintConfig,
+    contest_id: i32,
+    user_id: i32,
+    new_jobs: &[NewJob],
+) -> Result<(), ApiError> {
+    let counted = cfg.max_jobs_per_user > 0 && !is_staff(req);
+    let count = new_jobs.len() as i32;
+    if counted && !jobs::claim_quota(host, contest_id, user_id, count, cfg.max_jobs_per_user)? {
+        return Err(PluginHttpResponse::error(
+            429,
+            format!(
+                "Print limit reached ({} jobs per contestant)",
+                cfg.max_jobs_per_user
+            ),
+        )
+        .into());
+    }
+    if let Err(e) = jobs::insert_jobs(host, new_jobs) {
+        if counted {
+            jobs::refund_quota(host, contest_id, user_id, count)?;
+        }
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 pub fn handle_my_jobs(
@@ -526,21 +573,104 @@ mod tests {
         assert_eq!(err.into_response().status, 400);
     }
 
+    /// Queues the reads `contest::check_access` makes for a public, active
+    /// contest.
+    fn queue_public_contest(host: &Host) {
+        host.db.queue_query_result(json!([{
+            "contest_type": "icpc", "is_public": true, "is_active": true, "phase": "during"
+        }]));
+    }
+
+    fn arbitrary_request(user_id: i32, body: serde_json::Value) -> PluginHttpRequest {
+        let mut req = with_user(request(), user_id);
+        req.body = Some(body);
+        req
+    }
+
+    fn scratch() -> serde_json::Value {
+        json!({ "contest_id": 5, "filename": "scratch.py", "language": "python3", "source": "print(1)\n" })
+    }
+
     #[test]
-    fn arbitrary_print_inserts_job() {
+    fn arbitrary_print_needs_a_contest() {
         let host = Host::mock();
-        host.db.queue_execute_result(1);
-        let mut req = with_user(request(), 10);
-        req.body = Some(
-            json!({ "filename": "scratch.py", "language": "python3", "source": "print(1)\n" }),
+        let req = arbitrary_request(
+            10,
+            json!({ "filename": "scratch.py", "source": "print(1)\n" }),
         );
-        let resp = handle_print_arbitrary(&host, &req).unwrap();
+        let err = handle_print_arbitrary(&host, &req).unwrap_err();
+        assert_eq!(err.into_response().status, 400);
+        assert!(host.db.executions().is_empty());
+    }
+
+    #[test]
+    fn arbitrary_print_is_off_unless_the_contest_allows_it() {
+        let host = Host::mock();
+        queue_public_contest(&host);
+        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        assert_eq!(err.into_response().status, 403);
+        assert!(host.db.executions().is_empty());
+    }
+
+    #[test]
+    fn arbitrary_print_is_for_contest_participants_only() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "5",
+            config::NAMESPACE,
+            json!({ "allow_arbitrary": true }),
+        );
+        queue_public_contest(&host);
+        host.db.queue_query_result(json!([{ "exists": false }]));
+        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        assert_eq!(err.into_response().status, 403);
+        assert!(host.db.executions().is_empty());
+    }
+
+    #[test]
+    fn arbitrary_print_takes_a_job_from_the_quota_then_queues_it() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "5",
+            config::NAMESPACE,
+            json!({ "allow_arbitrary": true, "max_jobs_per_user": 3 }),
+        );
+        queue_public_contest(&host);
+        host.db.queue_query_result(json!([{ "exists": true }]));
+        host.db.queue_execute_result(1); // quota claimed
+        host.db.queue_execute_result(1); // job inserted
+        let resp = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap();
         assert_eq!(resp.status, 201);
+        let execs = host.db.executions();
         assert!(
-            host.db.executions()[0]
-                .sql
-                .contains("INSERT INTO print_job")
+            execs[0].sql.starts_with("INSERT INTO print_quota"),
+            "{}",
+            execs[0].sql
         );
+        assert!(
+            execs[1].sql.starts_with("INSERT INTO print_job"),
+            "{}",
+            execs[1].sql
+        );
+    }
+
+    #[test]
+    fn arbitrary_print_past_the_quota_is_refused_and_queues_nothing() {
+        let host = Host::mock();
+        host.config.seed(
+            "contest",
+            "5",
+            config::NAMESPACE,
+            json!({ "allow_arbitrary": true }),
+        );
+        queue_public_contest(&host);
+        host.db.queue_query_result(json!([{ "exists": true }]));
+        host.db.queue_execute_result(0); // quota exhausted
+        let err = handle_print_arbitrary(&host, &arbitrary_request(10, scratch())).unwrap_err();
+        assert_eq!(err.into_response().status, 429);
+        assert_eq!(host.db.executions().len(), 1);
     }
 
     #[test]

@@ -18,6 +18,21 @@ impl FieldMask {
         self.0.iter().map(String::as_str)
     }
 
+    /// Whether blanking this mask blanks `path`: the mask names `path`
+    /// itself or an object enclosing it.
+    pub fn covers(&self, path: &str) -> bool {
+        self.0.iter().any(|masked| {
+            path.strip_prefix(masked.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        })
+    }
+
+    /// This mask without the path `path` itself.
+    pub fn without(mut self, path: &str) -> Self {
+        self.0.remove(path);
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -58,6 +73,15 @@ impl Decision {
     pub fn is_denied(&self) -> bool {
         matches!(self, Decision::Deny)
     }
+
+    /// Whether this decision keeps the value at `path` from the viewer.
+    pub fn hides(&self, path: &str) -> bool {
+        match self {
+            Decision::Allow => false,
+            Decision::Redact(mask) => mask.covers(path),
+            Decision::Deny => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +104,25 @@ mod tests {
         assert!(Decision::Deny.is_denied());
         assert!(!Decision::Allow.is_denied());
         assert!(!Decision::Redact(mask(&["x"])).is_denied());
+    }
+
+    #[test]
+    fn a_mask_covers_its_paths_and_everything_under_them() {
+        let m = mask(&["result", "status"]);
+        assert!(m.covers("status"));
+        assert!(m.covers("result"));
+        assert!(m.covers("result.verdict"));
+        assert!(!m.covers("statuses"));
+        assert!(!m.covers("verdict"));
+        assert!(!mask(&["result.verdict"]).covers("result"));
+    }
+
+    #[test]
+    fn hides_is_false_for_allow_and_true_for_deny() {
+        assert!(!Decision::Allow.hides("status"));
+        assert!(Decision::Deny.hides("status"));
+        assert!(Decision::Redact(mask(&["status"])).hides("status"));
+        assert!(!Decision::Redact(mask(&["verdict"])).hides("status"));
     }
 
     #[test]

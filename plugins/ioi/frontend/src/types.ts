@@ -57,7 +57,8 @@ export interface ScoreboardProblemScore {
 }
 
 export interface ScoreboardEntry extends UserDisplayIdentity {
-  rank: number;
+  /** `null` when the board shows only the viewer's own row. */
+  rank: number | null;
   user_id: number;
   total_score: number;
   total_time_seconds: number;
@@ -71,6 +72,8 @@ export interface ScoreboardResponse {
   scoreboard_visibility: ScoreboardVisibility;
   scoreboard_tiebreaker: ScoreboardTiebreaker;
   max_scores: Record<string, number>;
+  /** False when `rankings` holds only the viewer's own row, or nothing. */
+  full_board: boolean;
   rankings: ScoreboardEntry[];
 }
 

@@ -1,4 +1,4 @@
-import { useTranslation } from '@broccoli/web-sdk/i18n';
+import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -119,7 +119,11 @@ function PhaseBanner({
   );
 }
 
-function MedalBadge({ rank }: { rank: number }) {
+function MedalBadge({ rank }: { rank: number | null }) {
+  // A board restricted to the viewer's own row carries no rank.
+  if (rank === null) {
+    return <span className="text-[13px] text-muted-foreground">—</span>;
+  }
   if (rank > 3) {
     return (
       <span className="font-mono tabular-nums text-[13px] text-muted-foreground">
@@ -165,13 +169,13 @@ function ScoreCell({ score, max }: { score: number; max: number }) {
 export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
   const { isIoi, isLoading: guardLoading } = useIsIoiContest(contestId);
   const api = useIoiApi();
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [phaseBanner, setPhaseBanner] = useState<'started' | 'ended' | null>(
     null,
   );
   const previousPhaseRef = useRef<string | null>(null);
-  // eslint-disable-next-line no-restricted-properties -- see `secondsAgo`
+  // eslint-disable-next-line no-restricted-properties -- see the tick below
   const [now, setNow] = useState(Date.now());
 
   const {
@@ -256,11 +260,17 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
   const maxTotal =
     Object.values(maxPerProblem).reduce((sum, v) => sum + v, 0) || 1;
 
-  const secondsAgo =
-    dataUpdatedAt > 0 ? Math.floor((now - dataUpdatedAt) / 1000) : 0;
+  // `now` ticks behind `dataUpdatedAt` right after a refetch; never read
+  // that as a time in the future.
+  const updated = formatRelativeSeconds(
+    Math.min(0, (dataUpdatedAt - now) / 1000),
+    locale,
+  );
 
+  // The board never widens its container: a narrow screen scrolls the
+  // table inside its border instead of clipping its last columns.
   return (
-    <div>
+    <div className="min-w-0 max-w-full">
       {phaseBanner && (
         <PhaseBanner
           type={phaseBanner}
@@ -273,7 +283,7 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
         <div className="flex items-center gap-3">
           {dataUpdatedAt > 0 && (
             <span className="text-[11px] opacity-50">
-              {t('ioi.scoreboard.lastUpdated', { seconds: secondsAgo })}
+              {t('ioi.scoreboard.lastUpdated', { when: updated })}
             </span>
           )}
           {phase === 'during' && (
@@ -300,11 +310,13 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
 
       {rankings.length === 0 ? (
         <div className="py-12 text-center text-muted-foreground">
-          {phase === 'before'
-            ? t('ioi.scoreboard.empty.before')
-            : phase === 'during'
-              ? t('ioi.scoreboard.empty.during')
-              : t('ioi.scoreboard.empty.after')}
+          {!scoreboard.full_board
+            ? t('ioi.scoreboard.hidden')
+            : phase === 'before'
+              ? t('ioi.scoreboard.empty.before')
+              : phase === 'during'
+                ? t('ioi.scoreboard.empty.during')
+                : t('ioi.scoreboard.empty.after')}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-border">

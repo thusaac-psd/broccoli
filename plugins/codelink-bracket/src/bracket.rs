@@ -282,6 +282,62 @@ mod tests {
     }
 
     #[test]
+    fn an_eight_player_bracket_routes_awards_like_wins_and_only_semifinal_losers_reach_the_bronze()
+    {
+        let host = Host::mock();
+        let mut setup = crate::test_support::setup_two_rounds();
+        setup.seeds = (1..=8).collect();
+        setup.rounds.push(setup.rounds[1].clone());
+        setup.third_place = Some(crate::model::ThirdPlaceConfig::Shared);
+        let play = |round: u8, pos: u8, a: i32, b: i32, winner: i32| {
+            let m = MatchState {
+                round,
+                pos,
+                player_a: a,
+                player_b: b,
+                ..Default::default()
+            };
+            write_next_round_slots(&host, 7, &setup, &m, winner).unwrap();
+        };
+
+        // Round one: the match of 7 and 8 is awarded to 8, as staff do for
+        // a player who does not show up.
+        for (pos, winner) in [(0, 1), (1, 3), (2, 5), (3, 8)] {
+            let a = i32::from(pos) * 2 + 1;
+            play(1, pos, a, a + 1, winner);
+        }
+        assert_eq!(
+            host.storage.data().len(),
+            4,
+            "a first-round loser takes no slot: {:?}",
+            host.storage.data()
+        );
+        for pos in 0..2 {
+            storage::create_match_if_both_slots_filled(&host, 7, &setup, 2, pos).unwrap();
+        }
+        let semi = |pos| {
+            storage::load_match(&host, 7, storage::match_id_for(8, 2, pos))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!((semi(0).player_a, semi(0).player_b), (1, 3));
+        assert_eq!((semi(1).player_a, semi(1).player_b), (5, 8));
+
+        play(2, 0, 1, 3, 3);
+        play(2, 1, 5, 8, 5);
+        for pos in 0..2 {
+            storage::create_match_if_both_slots_filled(&host, 7, &setup, 3, pos).unwrap();
+        }
+        let last = |pos| {
+            storage::load_match(&host, 7, storage::match_id_for(8, 3, pos))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!((last(0).player_a, last(0).player_b), (3, 5), "final");
+        assert_eq!((last(1).player_a, last(1).player_b), (1, 8), "bronze");
+    }
+
+    #[test]
     fn a_final_stage_winner_feeds_no_further_slot() {
         let host = Host::mock();
         let setup = crate::test_support::setup_two_rounds();

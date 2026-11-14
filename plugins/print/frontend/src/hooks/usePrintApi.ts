@@ -26,12 +26,7 @@ export function usePrintApi() {
         ),
 
       printArbitrary: ({ contest_id, ...input }: ArbitraryJobInput) =>
-        api.post<SubmitResult>(
-          contest_id === undefined
-            ? `${ROUTES}/jobs`
-            : `${ROUTES}/contests/${contest_id}/jobs`,
-          input,
-        ),
+        api.post<SubmitResult>(`${ROUTES}/contests/${contest_id}/jobs`, input),
 
       myJobs: (contestId?: number) =>
         api.get<ListResponse<PrintJob>>(
