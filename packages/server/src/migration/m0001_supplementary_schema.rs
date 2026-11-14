@@ -101,9 +101,13 @@ const SCHEMA: &[&str] = &[
     )"#,
 ];
 
-/// Host relations every plugin may read in full: contest data with no secret
-/// in it. Every other host relation is unreadable to plugins; the test
-/// the integration test `plugin_db::every_host_relation_is_classified` requires each one to be classified.
+/// Host relations every plugin may read: contest data with no secret in it.
+/// Their content columns ([`broccoli_types::manifest::SQL_READ_SCOPES`]) are
+/// left out and granted to a plugin only by its manifest's `[server.sql]
+/// read` (see `plugin_db::schema::provision`). Every other host relation is
+/// unreadable to plugins; the integration test
+/// `plugin_db::every_host_relation_is_classified` requires each one to be
+/// classified.
 pub const PLUGIN_READABLE: &[&str] = &[
     "additional_file",
     "clarification",
@@ -133,7 +137,8 @@ pub const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
 /// (`plugin_db::schema::group_role`), and the only privileges
 /// plugins hold outside their
 /// own schemas: `USAGE` on schema `public` and `SELECT` on
-/// [`PLUGIN_READABLE`] and [`PLUGIN_READABLE_COLUMNS`]. No write, `TRUNCATE`,
+/// [`PLUGIN_READABLE`] (but its content columns) and
+/// [`PLUGIN_READABLE_COLUMNS`]. No write, `TRUNCATE`,
 /// sequence or `CREATE` privilege on anything the host owns, so host state
 /// changes only through host functions, with their guards.
 ///
@@ -141,28 +146,45 @@ pub const PLUGIN_READABLE_COLUMNS: &[(&str, &[&str])] = &[(
 /// block is skipped with a warning and boot continues; plugin roles cannot be
 /// provisioned either, so raw plugin SQL fails.
 fn plugin_role(group: &str) -> String {
+    use crate::plugin_db::schema::{content_columns, quote_ident};
     let group_literal = format!("'{group}'");
     let group_table = crate::plugin_db::schema::GROUP_TABLE;
-    let group = crate::plugin_db::schema::quote_ident(group);
-    let tables = PLUGIN_READABLE
-        .iter()
-        .map(|t| crate::plugin_db::schema::quote_ident(t))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let columns: String = PLUGIN_READABLE_COLUMNS
-        .iter()
-        .map(|(table, columns)| {
-            let columns = columns
-                .iter()
-                .map(|c| crate::plugin_db::schema::quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "GRANT SELECT ({columns}) ON {} TO {group};\n",
-                crate::plugin_db::schema::quote_ident(table)
-            )
-        })
-        .collect();
+    let group = quote_ident(group);
+    let mut grants = String::new();
+    for table in PLUGIN_READABLE {
+        let content = content_columns(table);
+        if content.is_empty() {
+            grants.push_str(&format!(
+                "GRANT SELECT ON {} TO {group};\n",
+                quote_ident(table)
+            ));
+            continue;
+        }
+        // Every column but the content ones, read from the catalog.
+        let content = content
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        grants.push_str(&format!(
+            "EXECUTE (SELECT format('GRANT SELECT (%s) ON %I TO %s', \
+               string_agg(quote_ident(attname), ', ' ORDER BY attnum), '{table}', '{group}') \
+             FROM pg_attribute WHERE attrelid = 'public.{t}'::regclass AND attnum > 0 \
+               AND NOT attisdropped AND attname <> ALL (ARRAY[{content}]::name[]));\n",
+            t = quote_ident(table),
+        ));
+    }
+    for (table, columns) in PLUGIN_READABLE_COLUMNS {
+        let columns = columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        grants.push_str(&format!(
+            "GRANT SELECT ({columns}) ON {} TO {group};\n",
+            quote_ident(table)
+        ));
+    }
     format!(
         r#"
 DO $$
@@ -180,8 +202,7 @@ BEGIN
   BEGIN
     REVOKE CREATE ON SCHEMA public FROM PUBLIC;
     GRANT USAGE ON SCHEMA public TO {group};
-    GRANT SELECT ON {tables} TO {group};
-    {columns}
+    {grants}
   EXCEPTION
     WHEN insufficient_privilege THEN
       RAISE WARNING 'plugin group grants skipped (insufficient privilege): %', SQLERRM;

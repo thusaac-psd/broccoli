@@ -305,6 +305,24 @@ function PluginDetailContent({
               </div>
             </div>
           )}
+          {plugin.server.sql_read.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground">
+                {t('plugins.detail.sqlRead')}
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {plugin.server.sql_read.map((scope) => (
+                  <Badge
+                    key={scope}
+                    variant="secondary"
+                    className="font-mono text-xs"
+                  >
+                    {scope}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
           <MiniTable
             headers={[
               t('plugins.detail.method'),

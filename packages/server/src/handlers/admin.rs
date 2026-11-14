@@ -428,6 +428,11 @@ pub async fn inspect_plugin_archive(
             .as_ref()
             .map(|s| s.permissions.clone())
             .unwrap_or_default(),
+        sql_read: manifest
+            .server
+            .as_ref()
+            .map(crate::models::plugin::sql_read)
+            .unwrap_or_default(),
         has_server: manifest.has_server(),
         has_web: manifest.has_web(),
         archive_hash: archive.hash().to_hex(),

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
 use plugin_core::executor::CallLocals;
+use plugin_core::manifest::SqlReadScope;
 use sea_orm::DbErr;
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
@@ -61,6 +62,9 @@ struct Inner {
 #[derive(Default)]
 struct Slot {
     pool: OnceCell<DatabaseConnection>,
+    /// The content columns the role was last granted, and the lock that
+    /// serializes granting new ones.
+    granted: tokio::sync::Mutex<Vec<SqlReadScope>>,
     /// When provisioning last failed, while it keeps failing.
     failed: StdMutex<Option<Instant>>,
 }
@@ -133,10 +137,13 @@ impl PluginSqlPools {
 
     /// A lease on `plugin_id`'s pool for the call tree `call` (the running
     /// plugin call's [`plugin_core::executor::call_locals`]), provisioning the
-    /// plugin's role and schema and building its pool on first use.
+    /// plugin's role and schema and building its pool on first use. `read` is
+    /// the content columns the plugin's manifest declares; a change from what
+    /// the role was granted provisions it again.
     pub async fn lease(
         &self,
         plugin_id: &str,
+        read: &[SqlReadScope],
         call: Option<&CallLocals>,
     ) -> Result<Lease, Unavailable> {
         let budget = &self.inner.leases;
@@ -158,7 +165,7 @@ impl PluginSqlPools {
                 permit
             }
         };
-        let db = self.pool(plugin_id).await?;
+        let db = self.pool(plugin_id, read).await?;
         self.inner.make_room(plugin_id).await;
         Ok(Lease { db, permit })
     }
@@ -166,7 +173,11 @@ impl PluginSqlPools {
     /// `plugin_id`'s pool. A failed provisioning is logged once, at error
     /// level, and not retried for [`PROVISION_BACKOFF`]; calls in between
     /// fail at once.
-    async fn pool(&self, plugin_id: &str) -> Result<DatabaseConnection, Unavailable> {
+    async fn pool(
+        &self,
+        plugin_id: &str,
+        read: &[SqlReadScope],
+    ) -> Result<DatabaseConnection, Unavailable> {
         let slot = self
             .inner
             .pools
@@ -176,7 +187,10 @@ impl PluginSqlPools {
             .or_default()
             .clone();
         if let Some(db) = slot.pool.get() {
-            return Ok(db.clone());
+            return self
+                .regrant(plugin_id, &slot, read)
+                .await
+                .map(|()| db.clone());
         }
         let failed = *slot.failed.lock().unwrap_or_else(|p| p.into_inner());
         if failed.is_some_and(|at| at.elapsed() < PROVISION_BACKOFF) {
@@ -184,10 +198,16 @@ impl PluginSqlPools {
                 "provisioning failed recently; retrying shortly".into(),
             ));
         }
-        match slot.pool.get_or_try_init(|| self.open(plugin_id)).await {
+        match slot
+            .pool
+            .get_or_try_init(|| self.open(plugin_id, &slot, read))
+            .await
+        {
             Ok(db) => {
                 *slot.failed.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                Ok(db.clone())
+                self.regrant(plugin_id, &slot, read)
+                    .await
+                    .map(|()| db.clone())
             }
             Err(e) => {
                 let first = slot
@@ -212,8 +232,38 @@ impl PluginSqlPools {
         }
     }
 
-    async fn open(&self, plugin_id: &str) -> Result<DatabaseConnection, DbErr> {
-        let login = schema::provision(&self.inner.host, plugin_id).await?;
+    /// Provision `plugin_id` again when its manifest now declares other
+    /// content columns than its role was granted.
+    async fn regrant(
+        &self,
+        plugin_id: &str,
+        slot: &Slot,
+        read: &[SqlReadScope],
+    ) -> Result<(), Unavailable> {
+        let mut granted = slot.granted.lock().await;
+        if granted.as_slice() == read {
+            return Ok(());
+        }
+        schema::provision(&self.inner.host, plugin_id, read)
+            .await
+            .map_err(|e| Unavailable::Unprovisioned(e.to_string()))?;
+        *granted = read.to_vec();
+        tracing::info!(
+            plugin_id,
+            ?read,
+            "Granted the plugin's declared content columns"
+        );
+        Ok(())
+    }
+
+    async fn open(
+        &self,
+        plugin_id: &str,
+        slot: &Slot,
+        read: &[SqlReadScope],
+    ) -> Result<DatabaseConnection, DbErr> {
+        let login = schema::provision(&self.inner.host, plugin_id, read).await?;
+        *slot.granted.lock().await = read.to_vec();
         let connect = common::db::pg_connect_options(&self.inner.url, &self.inner.session)?
             .username(&login.names.role)
             .password(&login.password);

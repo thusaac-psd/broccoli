@@ -590,6 +590,7 @@ mod tests {
                     function: "decide_visibility".to_string(),
                 }],
                 timers: vec![],
+                sql: Default::default(),
             }),
             web: None,
             translations: HashMap::new(),

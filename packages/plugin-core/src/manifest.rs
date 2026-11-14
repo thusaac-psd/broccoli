@@ -12,8 +12,17 @@ use crate::error::PluginError;
 /// Parses a `plugin.toml`. Config schema includes are left unresolved (see
 /// [`resolve_schema_includes`]).
 pub fn parse_manifest(toml_content: &str) -> Result<PluginManifest, PluginError> {
-    toml::from_str(toml_content)
-        .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))
+    let manifest: PluginManifest = toml::from_str(toml_content)
+        .map_err(|e| PluginError::LoadFailed(format!("Invalid manifest syntax: {}", e)))?;
+    if let Some(server) = &manifest.server
+        && !server.sql.read.is_empty()
+        && !server.permissions.iter().any(|p| p == "sql")
+    {
+        return Err(PluginError::LoadFailed(
+            "[server.sql] read scopes need the \"sql\" permission".into(),
+        ));
+    }
+    Ok(manifest)
 }
 
 /// Replaces the properties of every config namespace that names an external
@@ -195,5 +204,60 @@ mod tests {
         assert_eq!(compile_mem["multipleOf"], 1024.0);
         assert_eq!(compile_mem["x-unit"], "KB");
         assert!(compile_mem.get("x-precision").is_none());
+    }
+
+    const SQL_PLUGIN: &str = r#"
+name = "p"
+version = "1.0.0"
+[server]
+entry = "p.wasm"
+permissions = ["sql"]
+"#;
+
+    #[test]
+    fn a_declared_sql_read_scope_parses() {
+        let manifest = parse_manifest(&format!(
+            "{SQL_PLUGIN}[server.sql]\nread = [\"submission.files\"]\n"
+        ))
+        .expect("a grantable scope");
+        let read = &manifest.server.unwrap().sql.read;
+        assert_eq!(read.len(), 1);
+        assert_eq!((read[0].table(), read[0].column()), ("submission", "files"));
+    }
+
+    #[test]
+    fn no_sql_section_grants_no_content_columns() {
+        let manifest = parse_manifest(SQL_PLUGIN).expect("manifest");
+        assert!(manifest.server.unwrap().sql.read.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_sql_read_scope_is_rejected() {
+        for scope in [
+            "user.password",
+            "refresh_tokens.token_hash",
+            "submission",
+            "nope.x",
+        ] {
+            let err = parse_manifest(&format!("{SQL_PLUGIN}[server.sql]\nread = [\"{scope}\"]\n"))
+                .expect_err(scope)
+                .to_string();
+            assert!(err.contains("unknown SQL read scope"), "{scope}: {err}");
+        }
+        let err = parse_manifest(&format!("{SQL_PLUGIN}[server.sql]\nwrite = []\n"))
+            .expect_err("unknown key")
+            .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn read_scopes_without_the_sql_permission_are_rejected() {
+        let manifest = SQL_PLUGIN.replace(r#"["sql"]"#, r#"["logger"]"#);
+        let err = parse_manifest(&format!(
+            "{manifest}[server.sql]\nread = [\"submission.files\"]\n"
+        ))
+        .expect_err("scope without the permission")
+        .to_string();
+        assert!(err.contains("\"sql\" permission"), "{err}");
     }
 }

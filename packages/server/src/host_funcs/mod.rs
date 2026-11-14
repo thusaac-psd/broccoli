@@ -13,7 +13,6 @@ pub mod submissions;
 pub mod timer;
 
 use crate::host_funcs::context::HostFunctionDeps;
-use crate::plugin_db::PluginSqlPools;
 use common::db::DatabaseConnection;
 use extism::ValType::I64;
 use extism::{CurrentPlugin, Function, UserData, Val, ValType};
@@ -218,7 +217,18 @@ pub fn init_host_functions(deps: HostFunctionDeps) -> HostFunctionRegistry {
     );
     register_storage_functions(&mut hr, host_db);
     register_timer_functions(&mut hr, host_db);
-    register_sql_functions(&mut hr, &deps.system.plugin_sql);
+    register_sql_functions(
+        &mut hr,
+        &sql::PluginSql {
+            pools: deps.system.plugin_sql.clone(),
+            registry: deps
+                .plugin_manager
+                .get()
+                .expect("the manager registers its host functions while it is alive")
+                .get_registry()
+                .clone(),
+        },
+    );
     register_submission_functions(&mut hr, host_db);
     register_registry_functions(&mut hr, &deps);
     register_evaluation_functions(&mut hr, &deps);
@@ -343,7 +353,7 @@ fn register_timer_functions(hr: &mut HostFunctionRegistry, host_db: &DatabaseCon
 /// The raw `sql` capability: each plugin's statements run on its own pool, as
 /// its own role (see [`crate::plugin_db`]), including explicit transactions
 /// shared across one plugin's calls through `txn_map`.
-fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &PluginSqlPools) {
+fn register_sql_functions(hr: &mut HostFunctionRegistry, pools: &sql::PluginSql) {
     let cap = "sql";
     let with_pools = || {
         let pools = pools.clone();

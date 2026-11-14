@@ -2,6 +2,39 @@ use common::db::{DatabaseConnection, DatabaseTransaction};
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::plugin_db::PluginSqlPools;
+
+/// What the raw `sql` host functions run with: the plugin pools, and the
+/// plugin registry the declared read scopes (`[server.sql] read`) come from.
+#[derive(Clone)]
+pub struct PluginSql {
+    pub pools: PluginSqlPools,
+    pub registry: plugin_core::registry::PluginRegistry,
+}
+
+impl PluginSql {
+    /// The content columns `plugin_id`'s loaded manifest declares.
+    fn read_scopes(&self, plugin_id: &str) -> Vec<plugin_core::manifest::SqlReadScope> {
+        self.registry
+            .read()
+            .ok()
+            .and_then(|registry| {
+                registry
+                    .get(plugin_id)
+                    .and_then(|entry| entry.manifest.server.as_ref())
+                    .map(|server| server.sql.read.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn lease(
+        &self,
+        plugin_id: &str,
+        call: Option<&plugin_core::executor::CallLocals>,
+    ) -> Result<crate::plugin_db::Lease, crate::plugin_db::Unavailable> {
+        let read = self.read_scopes(plugin_id);
+        self.pools.lease(plugin_id, &read, call).await
+    }
+}
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, TryLockError};
 use std::time::{Duration, Instant};
@@ -635,7 +668,7 @@ fn plugin_statement(sql: &str, values: Vec<sea_orm::Value>) -> Statement {
     Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
 
-host_fn!(pub db_execute(user_data: Arc<(String, PluginSqlPools)>; sql: String, args: String) -> String {
+host_fn!(pub db_execute(user_data: Arc<(String, PluginSql)>; sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute")?;
     let (plugin_id, pools) = &*call;
 
@@ -660,7 +693,7 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSqlPools)>; sql: String, a
     }
 });
 
-host_fn!(pub db_query(user_data: Arc<(String, PluginSqlPools)>; sql: String, args: String) -> String {
+host_fn!(pub db_query(user_data: Arc<(String, PluginSql)>; sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_query")?;
     let (plugin_id, pools) = &*call;
 
@@ -692,7 +725,7 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSqlPools)>; sql: String, arg
     }
 });
 
-host_fn!(pub db_begin(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; _input: String) -> String {
+host_fn!(pub db_begin(user_data: Arc<(String, PluginSql, TransactionMap)>; _input: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_begin")?;
     let (plugin_id, pools, txn_map) = &*call;
 
@@ -739,7 +772,7 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; 
     HostDbResponse::ok(serde_json::json!({"txn_id": txn_id})).to_json_string()
 });
 
-host_fn!(pub db_query_in(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+host_fn!(pub db_query_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_query_in")?;
     let (plugin_id, _, txn_map) = &*call;
 
@@ -769,7 +802,7 @@ host_fn!(pub db_query_in(user_data: Arc<(String, PluginSqlPools, TransactionMap)
     }
 });
 
-host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
+host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String, sql: String, args: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_execute_in")?;
     let (plugin_id, _, txn_map) = &*call;
 
@@ -790,7 +823,7 @@ host_fn!(pub db_execute_in(user_data: Arc<(String, PluginSqlPools, TransactionMa
     }
 });
 
-host_fn!(pub db_commit(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; txn_id: String) -> String {
+host_fn!(pub db_commit(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_commit")?;
     let (plugin_id, _, txn_map) = &*call;
 
@@ -816,7 +849,7 @@ host_fn!(pub db_commit(user_data: Arc<(String, PluginSqlPools, TransactionMap)>;
     }
 });
 
-host_fn!(pub db_rollback(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; txn_id: String) -> String {
+host_fn!(pub db_rollback(user_data: Arc<(String, PluginSql, TransactionMap)>; txn_id: String) -> String {
     let call = super::HostCall::enter(&user_data, "db_rollback")?;
     let (plugin_id, _, txn_map) = &*call;
 

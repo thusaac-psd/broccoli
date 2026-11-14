@@ -47,7 +47,7 @@ impl Fixture {
 /// Run `sql` as `plugin`.
 async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
     let lease = pools
-        .lease(plugin, None)
+        .lease(plugin, &[], None)
         .await
         .map_err(|e| DbErr::Custom(e.to_string()))?;
     lease.db.execute_unprepared(sql).await.map(drop)
@@ -55,7 +55,7 @@ async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbE
 
 /// The single text value `sql` returns, run as `plugin`.
 async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> String {
-    let lease = pools.lease(plugin, None).await.expect("lease");
+    let lease = pools.lease(plugin, &[], None).await.expect("lease");
     lease
         .db
         .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
@@ -226,17 +226,17 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
 async fn the_plugin_pools_keep_to_one_budget() {
     let f = Fixture::new().await;
     let pools = f.pools(2);
-    let a = pools.lease("a", None).await.expect("a");
+    let a = pools.lease("a", &[], None).await.expect("a");
     let a_txn = sea_orm::TransactionTrait::begin(&a.db)
         .await
         .expect("a begins");
-    let b = pools.lease("b", None).await.expect("b");
+    let b = pools.lease("b", &[], None).await.expect("b");
     let b_txn = sea_orm::TransactionTrait::begin(&b.db)
         .await
         .expect("b begins");
     assert_eq!(pools.open_connections(), 2);
 
-    let third = pools.lease("c", None);
+    let third = pools.lease("c", &[], None);
     tokio::pin!(third);
     assert!(
         (&mut third).now_or_never().is_none(),
@@ -258,6 +258,42 @@ async fn the_plugin_pools_keep_to_one_budget() {
 /// table added later is covered without a test change.
 mod grants {
     use super::*;
+
+    /// A declared scope grants exactly its columns, to that plugin alone, and
+    /// a manifest that stops declaring it loses it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_declared_scope_grants_exactly_its_columns() {
+        use plugin_core::manifest::SqlReadScope;
+        let f = Fixture::new().await;
+        let pools = f.pools(1);
+        let files = vec![SqlReadScope::parse("submission.files").unwrap()];
+        async fn run(
+            pools: &PluginSqlPools,
+            read: &[SqlReadScope],
+            sql: &str,
+        ) -> Result<(), DbErr> {
+            let lease = pools.lease("print", read, None).await.expect("lease");
+            lease.db.execute_unprepared(sql).await.map(drop)
+        }
+        run(&pools, &files, "SELECT files FROM submission")
+            .await
+            .expect("the declared column is readable");
+        for sql in [
+            "SELECT compile_output FROM submission",
+            "SELECT input FROM test_case",
+            "SELECT stdout FROM test_case_result",
+        ] {
+            let err = run(&pools, &files, sql).await.expect_err(sql).to_string();
+            assert!(err.contains("permission denied"), "{sql}: {err}");
+        }
+        denied(&pools, "icpc", "SELECT files FROM submission").await;
+        // The next version of the manifest drops the scope.
+        let err = run(&pools, &[], "SELECT files FROM submission")
+            .await
+            .expect_err("a dropped scope is revoked")
+            .to_string();
+        assert!(err.contains("permission denied"), "{err}");
+    }
     use server::migration::{PLUGIN_READABLE, PLUGIN_READABLE_COLUMNS};
 
     /// Host relations no plugin may read at all: credentials, accounts and
@@ -426,13 +462,45 @@ mod grants {
         let f = Fixture::new().await;
         let pools = f.pools(1);
         for relation in PLUGIN_READABLE {
+            let content = server::plugin_db::schema::content_columns(relation);
+            let columns = strings(
+                &f.app,
+                &format!(
+                    "SELECT attname::text FROM pg_attribute \
+                     WHERE attrelid = 'public.\"{relation}\"'::regclass AND attnum > 0 \
+                       AND NOT attisdropped ORDER BY attnum"
+                ),
+            )
+            .await;
+            let plain = columns
+                .iter()
+                .filter(|c| !content.contains(&c.as_str()))
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
             exec(
                 &pools,
                 "icpc",
-                &format!("SELECT * FROM public.\"{relation}\" LIMIT 1"),
+                &format!("SELECT {plain} FROM public.\"{relation}\" LIMIT 1"),
             )
             .await
             .unwrap_or_else(|e| panic!("{relation} must be readable: {e}"));
+            for column in &content {
+                denied(
+                    &pools,
+                    "icpc",
+                    &format!("SELECT \"{column}\" FROM public.\"{relation}\""),
+                )
+                .await;
+            }
+            if !content.is_empty() {
+                denied(
+                    &pools,
+                    "icpc",
+                    &format!("SELECT * FROM public.\"{relation}\""),
+                )
+                .await;
+            }
         }
         exec(
             &pools,
@@ -473,7 +541,10 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
     let pools = f.pools(1);
     let call = std::sync::Arc::new(CallLocals::default());
 
-    let lease = pools.lease("icpc", Some(&call)).await.expect("first lease");
+    let lease = pools
+        .lease("icpc", &[], Some(&call))
+        .await
+        .expect("first lease");
     let txn = lease
         .db
         .begin()
@@ -484,7 +555,7 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
 
     // A lease that needed a second permit would wait out the acquire
     // timeout and fail; this one reuses the call's.
-    let statement = pools.lease("icpc", Some(&call)).await.expect("lease");
+    let statement = pools.lease("icpc", &[], Some(&call)).await.expect("lease");
     assert!(std::sync::Arc::ptr_eq(&statement.permit, &held));
     statement
         .db
@@ -493,12 +564,12 @@ async fn a_call_reuses_its_permit_at_a_full_budget() {
         .expect("statement beside the transaction");
     drop(statement);
     // A nested call shares its parent's call locals.
-    let nested = pools.lease("ioi", Some(&call)).await.expect("lease");
+    let nested = pools.lease("ioi", &[], Some(&call)).await.expect("lease");
     assert!(std::sync::Arc::ptr_eq(&nested.permit, &held));
     let nested_txn = nested.db.begin().await.expect("nested transaction");
 
     let other = std::sync::Arc::new(CallLocals::default());
-    let waiting = pools.lease("icpc", Some(&other));
+    let waiting = pools.lease("icpc", &[], Some(&other));
     tokio::pin!(waiting);
     assert!(
         (&mut waiting).now_or_never().is_none(),
@@ -527,7 +598,7 @@ async fn failed_provisioning_backs_off() {
         .await
         .expect("hide the group");
     let first = pools
-        .lease("print", None)
+        .lease("print", &[], None)
         .await
         .err()
         .expect("unprovisionable");
@@ -540,7 +611,7 @@ async fn failed_provisioning_backs_off() {
         .await
         .expect("restore the group");
     let again = pools
-        .lease("print", None)
+        .lease("print", &[], None)
         .await
         .err()
         .expect("still backing off");

@@ -855,7 +855,7 @@ mod tests {
             &session,
         );
         let plugin = plugin_sql
-            .lease("labelled", None)
+            .lease("labelled", &[], None)
             .await
             .expect("plugin pool")
             .db;
