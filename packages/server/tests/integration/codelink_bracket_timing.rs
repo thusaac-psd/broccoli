@@ -1293,7 +1293,7 @@ async fn ranking_rejects_the_wrong_length_via_deserialization() {
 }
 
 #[tokio::test]
-async fn ranking_rejects_a_submitter_not_in_the_match() {
+async fn ranking_from_a_submitter_not_in_the_match_is_forbidden() {
     let fx = setup_fixture().await;
     // Seeded elsewhere in the bracket (round-1 match 2), not a participant
     // of match 0.
@@ -1308,10 +1308,11 @@ async fn ranking_rejects_a_submitter_not_in_the_match() {
         )
         .await;
     assert_eq!(
-        res.status, 400,
-        "a ranking from a non-participant must be rejected: {}",
+        res.status, 403,
+        "a ranking from a non-participant must be forbidden: {}",
         res.text
     );
+    assert_eq!(res.body["code"], "NOT_IN_MATCH", "{}", res.text);
 }
 
 /// A player who never ranks must not stall the bracket: the staff start
