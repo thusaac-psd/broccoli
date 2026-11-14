@@ -5,6 +5,7 @@
 //! instead of hanging, which is how a half-open socket surfaces. A timeout or
 //! I/O error drops the connection so the next command reconnects.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use redis::aio::MultiplexedConnection;
@@ -22,7 +23,15 @@ pub struct Conn {
     client: Client,
     response_timeout: Duration,
     cached: Mutex<Option<MultiplexedConnection>>,
+    /// Whether the last command reached Redis ([`UNKNOWN`] before the first):
+    /// [`DOWN`] after a failure that breaks the connection, [`UP`] after any
+    /// command that gets an answer.
+    reachable: AtomicU8,
 }
+
+const UNKNOWN: u8 = 0;
+const UP: u8 = 1;
+const DOWN: u8 = 2;
 
 impl Conn {
     pub fn new(client: Client, response_timeout: Duration) -> Self {
@@ -30,6 +39,28 @@ impl Conn {
             client,
             response_timeout,
             cached: Mutex::new(None),
+            reachable: AtomicU8::new(UNKNOWN),
+        }
+    }
+
+    /// Whether Redis is reachable: known from the last command while it is
+    /// up, a `PING` otherwise (down, or nothing sent yet), so a caller polling
+    /// this costs no round trip in normal operation.
+    pub async fn check_reachable(&self) -> bool {
+        if self.reachable.load(Ordering::Relaxed) == UP {
+            return true;
+        }
+        self.run(|mut c| async move { redis::cmd("PING").query_async::<()>(&mut c).await })
+            .await
+            .is_ok()
+    }
+
+    fn note(&self, reachable: bool) {
+        let now = if reachable { UP } else { DOWN };
+        match (self.reachable.swap(now, Ordering::Relaxed), now) {
+            (UP, DOWN) => tracing::warn!("Lost the connection to Redis"),
+            (DOWN, UP) => tracing::info!("Reconnected to Redis"),
+            _ => {}
         }
     }
 
@@ -60,11 +91,20 @@ impl Conn {
         F: FnOnce(MultiplexedConnection) -> Fut,
         Fut: Future<Output = Result<T, RedisError>>,
     {
-        let result = op(self.get().await?).await;
-        if let Err(e) = &result
-            && breaks_connection(e)
-        {
-            *self.cached.lock().await = None;
+        let conn = match self.get().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                self.note(false);
+                return Err(e);
+            }
+        };
+        let result = op(conn).await;
+        match &result {
+            Err(e) if breaks_connection(e) => {
+                *self.cached.lock().await = None;
+                self.note(false);
+            }
+            _ => self.note(true),
         }
         result
     }

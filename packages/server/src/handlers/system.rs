@@ -254,8 +254,8 @@ async fn record_submission_lifecycle_metrics(
 fn queue_role(state: &AppState, queue_name: &str) -> &'static str {
     state
         .mq
-        .as_ref()
-        .and_then(|mq| mq.topology().role_of(queue_name))
+        .topology()
+        .role_of(queue_name)
         .map_or("unknown", mq::StreamRole::as_str)
 }
 
@@ -609,9 +609,7 @@ pub(crate) async fn read_worker_payloads(
 /// each worker's private stream (live, or dead and not yet drained) and this
 /// server's reply stream.
 pub(crate) async fn read_queues(state: &AppState) -> Vec<QueueInfo> {
-    let Some(mq) = state.mq.as_ref() else {
-        return Vec::new();
-    };
+    let mq = &state.mq;
     let topology = mq.topology();
     let mut keys = vec![
         topology.shared(),

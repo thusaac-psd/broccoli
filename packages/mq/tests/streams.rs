@@ -663,3 +663,42 @@ async fn a_lost_consumer_group_is_recreated() {
         BTreeSet::from(["after-flush".into()])
     );
 }
+
+/// Reachability follows Redis: unreachable once a command fails because Redis
+/// is gone, reachable again once it is back, with no command needed in
+/// between while it stays up.
+#[tokio::test]
+async fn reachability_follows_redis_going_away_and_coming_back() {
+    let (container, url) = restartable_redis().await;
+    let mq = Mq::connect(&url, BASE).await.unwrap();
+    assert!(mq.check_reachable().await);
+
+    container.stop().await.unwrap();
+    let err = mq.ping().await.unwrap_err();
+    assert!(err.is_unreachable(), "{err}");
+    assert!(!mq.check_reachable().await);
+
+    start_again(&container).await;
+    assert!(mq.check_reachable().await);
+    mq.ping().await.unwrap();
+}
+
+/// Credentials Redis rejects are not an outage: waiting does not fix them.
+#[tokio::test]
+async fn rejected_credentials_are_not_unreachable() {
+    let (_container, url) = redis().await;
+    let mut conn = admin(&url).await;
+    let _: () = redis::cmd("CONFIG")
+        .arg("SET")
+        .arg("requirepass")
+        .arg("right")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let wrong = url.replace("redis://", "redis://:wrong@");
+    let err = match Mq::connect(&wrong, BASE).await {
+        Ok(_) => panic!("connected with a wrong password"),
+        Err(e) => e,
+    };
+    assert!(!err.is_unreachable(), "{err}");
+}

@@ -684,7 +684,6 @@ mod tests {
         assert!(cfg.plugin.enable_wasi);
         assert_eq!(cfg.submission.max_size, 2 * 1_048_576);
         assert_eq!(cfg.submission.rate_limit_per_minute, 600);
-        assert!(cfg.mq.enabled);
         assert_eq!(cfg.observability.log_format, "auto");
         assert_eq!(cfg.observability.log_filter, "info");
         assert!(cfg.bootstrap.admin_username.is_empty());

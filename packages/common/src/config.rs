@@ -68,8 +68,6 @@ impl Default for DlqConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MqAppConfig {
-    #[serde(default = "default_mq_enabled")]
-    pub enabled: bool,
     /// Required: there is no default Redis to connect to. Empty until set;
     /// loading the configuration refuses it empty (see [`require_nonempty`]).
     #[serde(default)]
@@ -83,9 +81,6 @@ pub struct MqAppConfig {
     pub dlq: DlqConfig,
 }
 
-fn default_mq_enabled() -> bool {
-    true
-}
 // `pub` so the worker's config builder uses the same default.
 pub fn default_operation_queue_name() -> String {
     "operation_tasks".into()
@@ -94,7 +89,6 @@ pub fn default_operation_queue_name() -> String {
 impl Default for MqAppConfig {
     fn default() -> Self {
         Self {
-            enabled: default_mq_enabled(),
             url: String::new(),
             operation_queue_name: default_operation_queue_name(),
             dlq: DlqConfig::default(),

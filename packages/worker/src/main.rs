@@ -93,18 +93,16 @@ async fn run_healthcheck() -> anyhow::Result<()> {
     .await
     .context("Database ping failed")?;
 
-    if config.mq.enabled {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            check_own_heartbeat(
-                &config.mq.url,
-                &config.mq.operation_queue_name,
-                &config.worker.id,
-            ),
-        )
-        .await
-        .context("Redis heartbeat check timed out")??;
-    }
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        check_own_heartbeat(
+            &config.mq.url,
+            &config.mq.operation_queue_name,
+            &config.worker.id,
+        ),
+    )
+    .await
+    .context("Redis heartbeat check timed out")??;
 
     if worker::sandbox_preflight::uses_isolate(&config.worker.sandbox_backend) {
         let status = tokio::process::Command::new(&config.worker.isolate_bin)

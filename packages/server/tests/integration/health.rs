@@ -22,12 +22,9 @@ mod healthz {
             "body: {}",
             resp.text
         );
-        // The TestApp spawns with `mq.enabled = false`, so the MQ field
-        // reports `disabled` rather than `ok`. The aggregate `status` is
-        // still `ok` because disabled components are not failures.
         assert_eq!(
             resp.body.get("mq").and_then(|v| v.as_str()),
-            Some("disabled"),
+            Some("ok"),
             "body: {}",
             resp.text
         );
@@ -52,10 +49,7 @@ mod api_health {
         assert_eq!(resp.status, 200, "body: {}", resp.text);
         assert_eq!(resp.body.get("status").and_then(|v| v.as_str()), Some("ok"));
         assert_eq!(resp.body.get("db").and_then(|v| v.as_str()), Some("ok"));
-        assert_eq!(
-            resp.body.get("mq").and_then(|v| v.as_str()),
-            Some("disabled")
-        );
+        assert_eq!(resp.body.get("mq").and_then(|v| v.as_str()), Some("ok"));
         assert!(resp.body.get("version").is_some());
         assert!(resp.body.get("git_sha").is_some());
     }
@@ -102,10 +96,10 @@ mod livez {
                 held.push(sock);
             }
         });
-        let redis = redis::Client::open(format!("redis://{addr}")).unwrap();
+        let mq = mq::Mq::lazy(&format!("redis://{addr}"), "silent").unwrap();
 
         let started = Instant::now();
-        let deps = server::handlers::health::probe_dependencies(&app.db, Some(&redis), true).await;
+        let deps = server::handlers::health::probe_dependencies(&app.db, &mq).await;
         let elapsed = started.elapsed();
 
         assert_eq!(deps.mq(), "down");

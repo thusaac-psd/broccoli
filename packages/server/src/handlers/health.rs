@@ -28,8 +28,7 @@ pub struct HealthResponse {
     /// Database probe result: `"ok"` or `"down"`.
     #[schema(example = "ok")]
     pub db: String,
-    /// Message-queue probe result: `"ok"`, `"down"`, or `"disabled"` when
-    /// MQ is not configured.
+    /// Message-queue (Redis) probe result: `"ok"` or `"down"`.
     #[schema(example = "ok")]
     pub mq: String,
     /// Server version, matching the `Cargo.toml` `[package].version`.
@@ -56,7 +55,6 @@ pub struct HealthResponse {
 enum Probe {
     Ok,
     Down,
-    Disabled,
 }
 
 impl Probe {
@@ -64,15 +62,11 @@ impl Probe {
         match self {
             Probe::Ok => "ok",
             Probe::Down => "down",
-            Probe::Disabled => "disabled",
         }
     }
 
     fn healthy(self) -> bool {
-        match self {
-            Probe::Ok | Probe::Disabled => true,
-            Probe::Down => false,
-        }
+        self == Probe::Ok
     }
 
     /// Run `ping` within `PROBE_BUDGET`, logging why it failed.
@@ -117,22 +111,8 @@ impl DependencyHealth {
 
 /// Probes the database and MQ backends concurrently; the whole probe is
 /// bounded by `PROBE_BUDGET`, not budget-per-dependency.
-pub async fn probe_dependencies(
-    db: &DatabaseConnection,
-    redis_client: Option<&redis::Client>,
-    mq_enabled: bool,
-) -> DependencyHealth {
-    let mq_probe = async {
-        match (mq_enabled, redis_client) {
-            (false, _) => Probe::Disabled,
-            (true, Some(client)) => Probe::run("mq", ping_redis(client)).await,
-            (true, None) => {
-                warn!("Health check: MQ enabled but no Redis client available");
-                Probe::Down
-            }
-        }
-    };
-    let (db, mq) = tokio::join!(Probe::run("db", ping_db(db)), mq_probe);
+pub async fn probe_dependencies(db: &DatabaseConnection, mq: &mq::Mq) -> DependencyHealth {
+    let (db, mq) = tokio::join!(Probe::run("db", ping_db(db)), Probe::run("mq", mq.ping()));
     DependencyHealth { db, mq }
 }
 
@@ -143,8 +123,7 @@ pub async fn probe_dependencies(
 /// a dependency blip would fail this check on every replica at once and leave
 /// the balancer with no upstream at all.
 pub async fn compute_health(state: &AppState) -> HealthResponse {
-    let deps =
-        probe_dependencies(&state.db, state.redis_client.as_deref(), state.mq.is_some()).await;
+    let deps = probe_dependencies(&state.db, &state.mq).await;
     let plugins_ready = crate::plugin_lifecycle::not_ready(state).is_empty();
 
     HealthResponse {
@@ -166,12 +145,6 @@ async fn ping_db(db: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
     ))
     .await
     .map(|_| ())
-}
-
-async fn ping_redis(client: &redis::Client) -> Result<(), redis::RedisError> {
-    let mut conn = client.get_multiplexed_async_connection().await?;
-    let _pong: String = redis::cmd("PING").query_async(&mut conn).await?;
-    Ok(())
 }
 
 fn status_code(body: &HealthResponse) -> StatusCode {

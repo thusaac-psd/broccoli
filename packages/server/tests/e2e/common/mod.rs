@@ -343,7 +343,6 @@ impl E2eTestApp {
             submission: SubmissionConfig::default(),
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
-                enabled: true,
                 url: redis_url.clone(),
                 operation_queue_name: operation_queue.clone(),
                 ..Default::default()
@@ -412,7 +411,7 @@ impl E2eTestApp {
             clock,
             plugin_config_cache,
             config: app_config,
-            mq: Some(mq.clone()),
+            mq: mq.clone(),
             redis_client: None,
             blob_store: blob_store.clone(),
             registries: server::state::RegistryState {

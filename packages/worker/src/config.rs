@@ -266,7 +266,6 @@ impl WorkerAppConfig {
             .set_default("worker.cache_leader_heartbeat_interval_secs", 5_i64)?
             .set_default("worker.cache_follower_poll_interval_ms", 250_i64)?
             .set_default("worker.cache_follower_max_wait_secs", 30_i64)?
-            .set_default("mq.enabled", true)?
             // Reference the shared `common` serde defaults so the worker's
             // builder defaults cannot drift from the server's.
             .set_default(

@@ -205,7 +205,7 @@ impl OperationTaskExecutor {
     }
 
     fn cache_leader_from_config(config: &WorkerAppConfig) -> Arc<dyn CacheLeaderElector> {
-        if !config.worker.cache_leader_election_enabled || !config.mq.enabled {
+        if !config.worker.cache_leader_election_enabled {
             info!("cache-leader-election disabled, using NoopCacheLeaderElector");
             return Arc::new(NoopCacheLeaderElector);
         }

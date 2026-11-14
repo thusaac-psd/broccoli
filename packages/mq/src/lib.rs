@@ -98,11 +98,7 @@ impl Mq {
     /// [`MIN_REDIS_MAJOR`]. `base` is `mq.operation_queue_name`, the prefix of
     /// every key.
     pub async fn connect(url: &str, base: &str) -> Result<Self, MqError> {
-        let client = redis::Client::open(url)?;
-        let mq = Self {
-            conn: Arc::new(Conn::new(client, COMMAND_TIMEOUT)),
-            topology: Topology::new(base),
-        };
+        let mq = Self::lazy(url, base)?;
         let info: String = mq
             .conn
             .run(|mut c| async move { redis::cmd("INFO").arg("server").query_async(&mut c).await })
@@ -122,8 +118,35 @@ impl Mq {
         Ok(mq)
     }
 
+    /// A handle on `url` that connects on first use, with none of
+    /// [`Self::connect`]'s checks. For tests that need a queue handle but
+    /// never reach Redis.
+    pub fn lazy(url: &str, base: &str) -> Result<Self, MqError> {
+        let client = redis::Client::open(url)?;
+        Ok(Self {
+            conn: Arc::new(Conn::new(client, COMMAND_TIMEOUT)),
+            topology: Topology::new(base),
+        })
+    }
+
     pub fn topology(&self) -> &Topology {
         &self.topology
+    }
+
+    /// Whether Redis is reachable now. Costs no round trip while it is up (the
+    /// last command answered) and one `PING` while it is down, so work that
+    /// needs the queue can poll this before it starts (see
+    /// [`common::redis_conn::Conn::check_reachable`]).
+    pub async fn check_reachable(&self) -> bool {
+        self.conn.check_reachable().await
+    }
+
+    /// Send a `PING`, for health checks.
+    pub async fn ping(&self) -> Result<(), MqError> {
+        self.conn
+            .run(|mut c| async move { redis::cmd("PING").query_async::<()>(&mut c).await })
+            .await?;
+        Ok(())
     }
 
     /// Check that each key is missing or of its expected type (`TYPE`), so a

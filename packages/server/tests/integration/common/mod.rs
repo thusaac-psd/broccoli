@@ -533,6 +533,9 @@ pub struct SpawnOptions {
     /// `Some(0)` so the dispatcher's retry reaper never re-judges it behind
     /// the test's back.
     pub max_system_error_retries: Option<u32>,
+    /// Point the server's message queue at an address nothing listens on, as
+    /// if Redis were down.
+    pub mq_unreachable: bool,
 }
 
 impl TestApp {
@@ -595,6 +598,19 @@ impl TestApp {
         let blob_store = create_blob_store(&BlobStoreConfig::default(), db.clone(), None)
             .await
             .expect("Failed to initialize blob store");
+
+        // The queue the server's own MQ handle uses (health, queue depths, the
+        // claim fiber's reachability check); plugin operations get no
+        // publisher, as no worker runs here. Replicas share the namespace.
+        let mq_url = match (&options.redis_url, options.mq_unreachable) {
+            (_, true) => "redis://127.0.0.1:1".to_string(),
+            (Some(url), false) => url.clone(),
+            (None, false) => format!(
+                "redis://127.0.0.1:{}",
+                test_support::shared_redis_port().await
+            ),
+        };
+        let mq = mq::Mq::lazy(&mq_url, database.name()).expect("valid redis url");
 
         let plugin_cache = tempfile::tempdir().expect("plugin cache dir");
         let mut app_config = AppConfig {
@@ -663,7 +679,8 @@ impl TestApp {
             },
             storage: BlobStoreConfig::default(),
             mq: MqAppConfig {
-                enabled: false,
+                url: mq_url.clone(),
+                operation_queue_name: database.name().to_string(),
                 ..Default::default()
             },
             observability: common::config::ObservabilityConfig::default(),
@@ -802,7 +819,7 @@ impl TestApp {
             clock: clock.clone(),
             plugin_config_cache,
             config: app_config,
-            mq: None,
+            mq,
             redis_client,
             blob_store,
             registries: server::state::RegistryState {

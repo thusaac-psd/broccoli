@@ -263,6 +263,15 @@ pub struct ClaimPass {
 }
 
 impl ClaimPass {
+    /// A pass that claimed nothing because the queue is unreachable. Held
+    /// back with no room, so the fiber stops this round and tries again on its
+    /// next wake or tick.
+    pub const QUEUE_DOWN: Self = Self {
+        judgements: (0, 0),
+        code_runs: (0, 0),
+        held_back: true,
+    };
+
     /// Some kind of unit filled all of its room, so more of it may be queued.
     pub fn more_may_wait(&self) -> bool {
         let filled = |(claimed, room): (u32, u32)| room > 0 && claimed == room;
@@ -278,6 +287,7 @@ impl ClaimPass {
 }
 
 /// One claim pass: judgements within the in-flight cap, then code runs.
+/// Nothing is claimed while the message queue is unreachable.
 /// Errors are returned to the caller so the fiber loop can log; whatever is
 /// still `Queued` is claimed by the next pass.
 ///
@@ -295,6 +305,12 @@ pub async fn claim_once(
     batch_size: u32,
     max_in_flight: u32,
 ) -> anyhow::Result<ClaimPass> {
+    // Claimed work is dispatched through the queue: while Redis is down it
+    // would only fail and burn retries, so it stays `Queued` for a server
+    // that can reach the queue, or for this one once it can again.
+    if !state.mq.check_reachable().await {
+        return Ok(ClaimPass::QUEUE_DOWN);
+    }
     let in_flight = if max_in_flight == 0 {
         0
     } else {
