@@ -1,0 +1,2 @@
+'plugin.communication-evaluator.name' = 'Communication evaluator'
+'plugin.communication-evaluator.description' = 'Judges communication problems: a manager and contestant processes talking through pipes, as in CMS.'

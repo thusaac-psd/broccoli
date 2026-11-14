@@ -114,6 +114,7 @@ function RecipientPicker({
               style={{ insetInlineStart: '0.625rem' }}
             />
             <Input
+              aria-label={t('clarification.dm.searchPlaceholder')}
               placeholder={t('clarification.dm.searchPlaceholder')}
               value={search}
               onChange={(e) => setSearch(e.target.value)}

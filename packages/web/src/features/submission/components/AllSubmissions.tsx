@@ -172,6 +172,7 @@ export function AllSubmissions() {
         <div className="relative flex-1 min-w-[260px] max-w-[480px]">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
+            aria-label={t('submissions.filters.searchPlaceholder')}
             type="search"
             placeholder={t('submissions.filters.searchPlaceholder')}
             value={searchInput}
@@ -227,7 +228,7 @@ export function AllSubmissions() {
           {(result) => (
             <SubmissionsTable
               submissions={result.data}
-              columns={SubmissionsTable.adminColumns}
+              columns={SubmissionsTable.peerColumns}
               {...bulk.tableSelection}
               linkBuilder={(sub) =>
                 sub.contest_id

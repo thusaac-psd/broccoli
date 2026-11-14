@@ -34,10 +34,34 @@ const PAGES: Record<Viewer, string[]> = {
   ],
 };
 
+// Pages and slots of the plugins this repository ships, checked like the
+// host's: each page opens with every frontend plugin loaded.
+const FRONTEND_PLUGINS = [
+  'print',
+  'icpc',
+  'ioi',
+  'codelink-bracket',
+  'codelink-qualifier',
+  'cooldown',
+  'standard-languages',
+  'communication-evaluator',
+];
+const PLUGIN_PAGES: Record<Viewer, string[]> = {
+  guest: [],
+  admin: ['/print-queue', '/admin/plugins', '/contests/1/rankings'],
+  contestant: ['/contests/1/rankings', '/contests/1/problems/2'],
+};
+
 const APP_NAME = 'Broccoli OJ';
 
-async function open(page: Page, viewer: Viewer, path: string, theme: string) {
-  const unanswered = await mockApi(page, viewer);
+async function open(
+  page: Page,
+  viewer: Viewer,
+  path: string,
+  theme: string,
+  plugins: string[] = [],
+) {
+  const unanswered = await mockApi(page, viewer, { plugins });
   const failures: string[] = [];
   page.on('response', (response) => {
     if (response.status() >= 400 && response.url().includes('/api/')) {
@@ -54,49 +78,75 @@ async function open(page: Page, viewer: Viewer, path: string, theme: string) {
   return { unanswered, failures };
 }
 
-for (const [viewer, paths] of Object.entries(PAGES) as [Viewer, string[]][]) {
-  for (const path of paths) {
-    for (const theme of ['light', 'dark']) {
-      test(`${viewer} ${path} (${theme})`, async ({ page }, info) => {
-        const { unanswered, failures } = await open(page, viewer, path, theme);
+const CASES = [
+  ...(Object.entries(PAGES) as [Viewer, string[]][]).flatMap(
+    ([viewer, paths]) =>
+      paths.map((path) => ({ viewer, path, plugins: [] as string[] })),
+  ),
+  ...(Object.entries(PLUGIN_PAGES) as [Viewer, string[]][]).flatMap(
+    ([viewer, paths]) =>
+      paths.map((path) => ({ viewer, path, plugins: FRONTEND_PLUGINS })),
+  ),
+];
 
-        const { violations } = await new AxeBuilder({ page })
-          .withTags(['wcag2a', 'wcag2aa'])
-          .analyze();
-        // Soft: a failing page reports every problem, not just the first.
-        expect
-          .soft(
-            violations.map((v) => ({
-              rule: v.id,
-              nodes: v.nodes.map((n) => n.target.join(' ')),
-            })),
-          )
-          .toEqual([]);
+for (const { viewer, path, plugins } of CASES) {
+  for (const theme of ['light', 'dark']) {
+    const name = `${viewer} ${path}${plugins.length ? ' with plugins' : ''}`;
+    test(`${name} (${theme})`, async ({ page }, info) => {
+      const { unanswered, failures } = await open(
+        page,
+        viewer,
+        path,
+        theme,
+        plugins,
+      );
 
-        await expect
-          .soft(page)
-          .toHaveTitle(
-            path === '/' && viewer === 'guest'
-              ? APP_NAME
-              : new RegExp(`. · ${APP_NAME}$`),
-          );
-        await expect.soft(page.locator('html')).toHaveAttribute('lang', 'en');
+      const { violations } = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa'])
+        .analyze();
+      // Soft: a failing page reports every problem, not just the first.
+      expect
+        .soft(
+          violations.map((v) => ({
+            rule: v.id,
+            nodes: v.nodes.map((n) => n.target.join(' ')),
+          })),
+        )
+        .toEqual([]);
 
-        if (info.project.name === 'phone') {
-          const overflow = await page.evaluate(
-            () =>
-              document.documentElement.scrollWidth -
-              document.documentElement.clientWidth,
-          );
-          expect.soft(overflow, 'page scrolls sideways').toBe(0);
-        }
+      await expect
+        .soft(page)
+        .toHaveTitle(
+          path === '/' && viewer === 'guest'
+            ? APP_NAME
+            : new RegExp(`. · ${APP_NAME}$`),
+        );
+      await expect.soft(page.locator('html')).toHaveAttribute('lang', 'en');
 
-        expect
-          .soft(unanswered, 'API calls the mock does not answer')
-          .toEqual([]);
-        expect(failures).toEqual([]);
-      });
-    }
+      // Toggles in a list say which item they toggle.
+      const toggles = (await page.locator('body').ariaSnapshot())
+        .split('\n')
+        .map((line) => /- (?:switch|checkbox) "(.*)"/.exec(line)?.[1])
+        .filter((name) => name !== undefined);
+      expect
+        .soft(
+          toggles.filter((name, i) => toggles.indexOf(name) !== i),
+          'toggles that share a name',
+        )
+        .toEqual([]);
+
+      if (info.project.name === 'phone') {
+        const overflow = await page.evaluate(
+          () =>
+            document.documentElement.scrollWidth -
+            document.documentElement.clientWidth,
+        );
+        expect.soft(overflow, 'page scrolls sideways').toBe(0);
+      }
+
+      expect.soft(unanswered, 'API calls the mock does not answer').toEqual([]);
+      expect(failures).toEqual([]);
+    });
   }
 }
 

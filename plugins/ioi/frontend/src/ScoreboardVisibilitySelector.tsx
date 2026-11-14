@@ -67,7 +67,7 @@ export function ScoreboardVisibilitySelector({
       </p>
 
       <Select value={selectedValue} onValueChange={(v) => onChange(v)}>
-        <SelectTrigger>
+        <SelectTrigger aria-label={t('ioi.scoreboardVisibility.label')}>
           <SelectValue
             placeholder={
               inheritedDisplay ??

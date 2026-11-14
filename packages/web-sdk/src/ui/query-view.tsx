@@ -126,6 +126,34 @@ export function SignInPrompt({
   );
 }
 
+/**
+ * Shown over data that a later fetch failed to renew: what is on screen is
+ * the last good copy.
+ */
+export function RefreshFailedNotice({
+  retry,
+  className,
+}: {
+  retry: () => void;
+  className?: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      role="status"
+      className={cn(
+        'flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground',
+        className,
+      )}
+    >
+      <span>{t('query.refreshFailed')}</span>
+      <Button variant="ghost" size="sm" onClick={retry}>
+        {t('common.retry')}
+      </Button>
+    </div>
+  );
+}
+
 /** The default first-load placeholder. */
 export function QueryLoading({ className }: { className?: string }) {
   const { t } = useTranslation();
@@ -195,7 +223,6 @@ export function QueryView<T>({
   empty,
   children,
 }: QueryViewProps<T>) {
-  const { t } = useTranslation();
   const state = queryState(query, isEmpty);
   switch (state.status) {
     case 'idle':
@@ -213,20 +240,19 @@ export function QueryView<T>({
         />
       );
     case 'empty':
-      return empty;
+      return (
+        <>
+          {state.refreshError != null && (
+            <RefreshFailedNotice retry={state.retry} className="mb-3" />
+          )}
+          {empty}
+        </>
+      );
     case 'data':
       return (
         <>
           {state.refreshError != null && (
-            <div
-              role="status"
-              className="mb-3 flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground"
-            >
-              <span>{t('query.refreshFailed')}</span>
-              <Button variant="ghost" size="sm" onClick={state.retry}>
-                {t('common.retry')}
-              </Button>
-            </div>
+            <RefreshFailedNotice retry={state.retry} className="mb-3" />
           )}
           {children(state.data)}
         </>

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { useApiClient } from '@/api';
+import { pollInterval } from '@/hooks/poll';
 import { fetchTestCasePage } from '@/submission/fetch-test-case-page';
 
 export function useTestCasePage({
@@ -36,7 +37,7 @@ export function useTestCasePage({
       live,
     ],
     enabled: enabled && (!testCaseIds || testCaseIds.length > 0),
-    refetchInterval: live ? 1000 : false,
+    refetchInterval: pollInterval(() => (live ? 1000 : false)),
     queryFn: ({ signal }) =>
       fetchTestCasePage(
         api,

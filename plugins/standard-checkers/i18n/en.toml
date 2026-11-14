@@ -5,3 +5,5 @@
 'identifier.checker.tokens-float' = 'Tokens, with float tolerance'
 'identifier.checker.testlib' = 'Testlib checker'
 'identifier.checker.none' = 'No checker'
+'plugin.standard-checkers.name' = 'Standard checkers'
+'plugin.standard-checkers.description' = 'Standard output checkers: exact, line, token and testlib comparison.'

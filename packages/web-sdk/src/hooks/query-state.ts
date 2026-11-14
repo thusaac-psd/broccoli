@@ -20,7 +20,7 @@ export type QueryState<T> =
       retry: () => void;
       retrying: boolean;
     }
-  | { status: 'empty'; data: T; refreshError: unknown }
+  | { status: 'empty'; data: T; refreshError: unknown; retry: () => void }
   | { status: 'data'; data: T; refreshError: unknown; retry: () => void };
 
 /** The fields of a TanStack Query result that decide its `QueryState`. */
@@ -41,7 +41,7 @@ export function queryState<T>(
   if (query.data !== undefined) {
     const refreshError = query.isError ? query.error : null;
     return isEmpty?.(query.data)
-      ? { status: 'empty', data: query.data, refreshError }
+      ? { status: 'empty', data: query.data, refreshError, retry }
       : { status: 'data', data: query.data, refreshError, retry };
   }
   if (query.isError) {

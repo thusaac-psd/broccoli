@@ -1,4 +1,5 @@
 import { usePluginApi } from '@broccoli/web-sdk/api';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
 
 import type { ContestInfoResponse } from './types';
@@ -18,9 +19,9 @@ export function useCodelinkQuery<T extends ContestInfoResponse>(
       ),
     // Polling starts after the server supplies this contest's interval. Zero
     // disables it. Continuing across phase changes includes queued judgements.
-    refetchInterval: (query) => {
-      const seconds = query.state.data?.scoreboard_refresh_seconds;
+    refetchInterval: pollInterval<T>((data) => {
+      const seconds = data?.scoreboard_refresh_seconds;
       return autoRefresh && seconds ? seconds * 1000 : false;
-    },
+    }),
   });
 }

@@ -1,4 +1,5 @@
 import { useAuth, useAuthReady, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useQuery } from '@tanstack/react-query';
 
 import { useBracketApi } from './useBracketApi';
@@ -6,7 +7,7 @@ import { useBracketApi } from './useBracketApi';
 /** Share the same visibility-scoped snapshot across contest and management views. */
 export function useBracket(
   contestId: number | undefined,
-  { enabled = true, refetchInterval = 5_000 } = {},
+  { enabled = true, pollEveryMs = 5_000 } = {},
 ) {
   const { user } = useAuth();
   const authReady = useAuthReady();
@@ -15,6 +16,6 @@ export function useBracket(
     queryKey: ['codelink-bracket-bracket', contestId, viewerCacheKey(user)],
     enabled: authReady && !!contestId && enabled,
     queryFn: () => api.getBracket(contestId as number),
-    refetchInterval,
+    refetchInterval: pollInterval(pollEveryMs),
   });
 }

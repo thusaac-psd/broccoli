@@ -13,6 +13,7 @@ export * from '@/ui/hover-card';
 export * from '@/ui/input';
 export * from '@/ui/label';
 export * from '@/ui/navigation-menu';
+export { PageContext } from '@/ui/page-scoped';
 export * from '@/ui/paginated-list';
 export * from '@/ui/popover';
 export * from '@/ui/query-view';

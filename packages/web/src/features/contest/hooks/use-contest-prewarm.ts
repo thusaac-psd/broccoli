@@ -1,4 +1,5 @@
-import { useApiClient } from '@broccoli/web-sdk/api';
+import { type ApiSchemas, useApiClient } from '@broccoli/web-sdk/api';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -54,15 +55,14 @@ export function useContestPrewarm(contestId: number, active: boolean) {
       return data;
     },
     // Poll while a warm is starting or any live judge is still in flight.
-    refetchInterval: (query) => {
+    refetchInterval: pollInterval<ApiSchemas['WarmStatusResponse']>((data) => {
       if (startMutation.isPending) return 1200;
-      const data = query.state.data;
       if (!data) return 1500;
       const inFlight = data.workers.some(
         (w) => w.state === 'warming' || w.state === 'pending',
       );
       return inFlight ? 1500 : false;
-    },
+    }),
   });
 
   return {

@@ -48,3 +48,6 @@
 'codelink-qualifier.creditedProblems' = "{count} 道计分题"
 'codelink-qualifier.status.reserve' = "补位晋级"
 'codelink-qualifier.status.not_advanced' = "未晋级"
+'plugin.codelink-qualifier.name' = 'Codelink 资格赛'
+'plugin.codelink-qualifier.description' = 'Codelink 资格赛：可配置计分档位与晋级线。'
+'identifier.contestType.codelink-qualifier' = 'Codelink 资格赛'

@@ -1,3 +1,4 @@
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -46,12 +47,9 @@ function PhaseBar({ phase }: { phase: string }) {
   return (
     <div
       className={cn(
-        'flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium',
-        phase === 'before' && 'bg-blue-500/10 text-blue-500',
-        phase === 'during' && 'bg-emerald-500/10 text-emerald-500',
-        phase !== 'before' &&
-          phase !== 'during' &&
-          'bg-gray-500/10 text-gray-500',
+        // The dot carries the color; the text stays on the contrast-tuned
+        // tokens.
+        'flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium bg-muted text-foreground',
       )}
     >
       <span
@@ -188,8 +186,9 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
     enabled: !!contestId && isIoi,
     queryFn: () => api.getScoreboard(contestId!),
     retry: 2,
-    refetchInterval: (query: { state: { data?: ScoreboardResponse } }) =>
-      autoRefresh && query.state.data?.phase === 'during' ? 30000 : false,
+    refetchInterval: pollInterval<ScoreboardResponse>((scoreboard) =>
+      autoRefresh && scoreboard?.phase === 'during' ? 30000 : false,
+    ),
   });
 
   useEffect(() => {
@@ -224,7 +223,7 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
 
   if (isError && !scoreboard) {
     return (
-      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 text-[13px]">
+      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 dark:text-red-400 text-[13px]">
         {t('ioi.scoreboard.loadError')}
       </div>
     );
@@ -282,7 +281,7 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
         <PhaseBar phase={phase} />
         <div className="flex items-center gap-3">
           {dataUpdatedAt > 0 && (
-            <span className="text-[11px] opacity-50">
+            <span className="text-[11px] text-muted-foreground">
               {t('ioi.scoreboard.lastUpdated', { when: updated })}
             </span>
           )}
@@ -323,7 +322,13 @@ export function IoiScoreboard({ contestId, children }: IoiScoreboardProps) {
                 : t('ioi.scoreboard.empty.after')}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <div
+          className="overflow-x-auto rounded-lg border border-border"
+          // Scrolls sideways on a narrow screen: reachable by keyboard.
+          tabIndex={0}
+          role="region"
+          aria-label={t('ioi.scoreboard.table')}
+        >
           <table className="w-full border-collapse min-w-[500px]">
             <thead>
               <tr>

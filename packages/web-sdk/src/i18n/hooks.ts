@@ -3,7 +3,6 @@ import { use, useCallback, useMemo } from 'react';
 import { serverNow } from '@/api/server-clock';
 import {
   type DateInput,
-  type DateTimeOptions,
   formatDate,
   formatDateTime,
   formatLongDate,
@@ -24,7 +23,7 @@ export function useTranslation() {
 
 /** The date formatters of `@broccoli/web-sdk/i18n`, bound to the UI locale. */
 export interface Formatters {
-  dateTime: (value: DateInput, options?: DateTimeOptions) => string;
+  dateTime: (value: DateInput) => string;
   date: (value: DateInput) => string;
   longDate: (value: DateInput) => string;
   time: (value: DateInput) => string;
@@ -38,7 +37,7 @@ export function useFormat(): Formatters {
   const { locale } = useTranslation();
   return useMemo(
     () => ({
-      dateTime: (value, options) => formatDateTime(value, locale, options),
+      dateTime: (value) => formatDateTime(value, locale),
       date: (value) => formatDate(value, locale),
       longDate: (value) => formatLongDate(value, locale),
       time: (value) => formatTime(value, locale),

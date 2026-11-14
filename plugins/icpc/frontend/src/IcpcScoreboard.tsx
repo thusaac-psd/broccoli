@@ -1,4 +1,4 @@
-import { unsettledMessageKey } from '@broccoli/web-sdk/hooks';
+import { pollInterval, unsettledMessageKey } from '@broccoli/web-sdk/hooks';
 import { formatRelativeSeconds, useTranslation } from '@broccoli/web-sdk/i18n';
 import { Label, Switch, useConfirmDialog } from '@broccoli/web-sdk/ui';
 import { cn, getUserDisplayName } from '@broccoli/web-sdk/utils';
@@ -45,7 +45,7 @@ function PhaseBar({ phase, frozen }: { phase: string; frozen?: boolean }) {
   // "In progress"), since a frozen board is the salient status for the viewer.
   if (frozen) {
     return (
-      <div className="flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium bg-amber-500/10 text-amber-600">
+      <div className="flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium bg-muted text-foreground">
         <LockIcon />
         {t('icpc.scoreboard.frozen')}
       </div>
@@ -54,12 +54,9 @@ function PhaseBar({ phase, frozen }: { phase: string; frozen?: boolean }) {
   return (
     <div
       className={cn(
-        'flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium',
-        phase === 'before' && 'bg-blue-500/10 text-blue-500',
-        phase === 'during' && 'bg-emerald-500/10 text-emerald-500',
-        phase !== 'before' &&
-          phase !== 'during' &&
-          'bg-gray-500/10 text-gray-500',
+        // The dot carries the color; the text stays on the contrast-tuned
+        // tokens.
+        'flex items-center gap-2 py-2 px-4 rounded-md text-[13px] font-medium bg-muted text-foreground',
       )}
     >
       <span
@@ -126,8 +123,8 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
           className={cn(
             'font-mono text-[13px] leading-tight',
             cell.first_solve
-              ? 'font-bold text-emerald-600'
-              : 'font-semibold text-emerald-700',
+              ? 'font-bold text-emerald-600 dark:text-emerald-400'
+              : 'font-semibold text-emerald-700 dark:text-emerald-400',
           )}
         >
           {cell.attempts > 0 ? `+${cell.attempts}` : '+'}
@@ -145,12 +142,14 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
   if (cell.pending && cell.pending > 0) {
     return (
       <td className="py-1.5 px-2 text-center border-b border-border bg-amber-500/10">
-        <div className="font-mono text-[13px] font-bold text-amber-600 leading-tight">
+        <div className="font-mono text-[13px] font-bold text-amber-600 dark:text-amber-400 leading-tight">
           ?
         </div>
         <div className="font-mono text-[10px] text-muted-foreground leading-tight">
           {cell.attempts > 0 && (
-            <span className="text-red-600">-{cell.attempts} </span>
+            <span className="text-red-600 dark:text-red-400">
+              -{cell.attempts}{' '}
+            </span>
           )}
           ({cell.pending})
         </div>
@@ -161,7 +160,7 @@ function ProblemCellView({ cell }: { cell: ProblemCell | undefined }) {
   // Attempted but unsolved
   return (
     <td className="py-1.5 px-2 text-center border-b border-border bg-red-500/8">
-      <div className="font-mono text-[13px] font-semibold text-red-600 leading-tight">
+      <div className="font-mono text-[13px] font-semibold text-red-600 dark:text-red-400 leading-tight">
         -{cell.attempts}
       </div>
     </td>
@@ -188,13 +187,12 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
     enabled: !!contestId && isIcpc,
     queryFn: () => api.getStandings(contestId!),
     retry: 2,
-    refetchInterval: (query: { state: { data?: StandingsResponse } }) => {
-      const d = query.state.data;
+    refetchInterval: pollInterval<StandingsResponse>((d) => {
       // Poll during the contest, and also while a frozen board is awaiting reveal
       // (the 'after' phase) so the reveal reaches viewers who leave the tab open.
       const live = d?.phase === 'during' || (!!d?.frozen && !d?.revealed);
       return autoRefresh && live ? 30000 : false;
-    },
+    }),
   });
 
   // Reveal is final and cannot be undone from the UI, so it is confirmed
@@ -231,7 +229,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
 
   if (isError && !standings) {
     return (
-      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 text-[13px]">
+      <div className="p-6 text-center rounded-md bg-red-500/[0.06] text-red-600 dark:text-red-400 text-[13px]">
         {t('icpc.scoreboard.loadError')}
       </div>
     );
@@ -272,7 +270,7 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
             </button>
           )}
           {dataUpdatedAt > 0 && (
-            <span className="text-[11px] opacity-50">
+            <span className="text-[11px] text-muted-foreground">
               {t('icpc.scoreboard.lastUpdated', { when: updated })}
             </span>
           )}
@@ -300,7 +298,13 @@ export function IcpcScoreboard({ contestId, children }: IcpcScoreboardProps) {
                 : t('icpc.scoreboard.empty.after')}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-border">
+        <div
+          className="overflow-x-auto rounded-lg border border-border"
+          // Scrolls sideways on a narrow screen: reachable by keyboard.
+          tabIndex={0}
+          role="region"
+          aria-label={t('icpc.scoreboard.table')}
+        >
           <table className="w-full border-collapse min-w-[500px]">
             <thead>
               <tr>

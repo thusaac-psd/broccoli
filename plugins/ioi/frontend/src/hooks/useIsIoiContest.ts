@@ -9,6 +9,9 @@ import { useIoiApi } from './useIoiApi';
 export function useIsIoiContest(contestId?: number) {
   const api = useIoiApi();
 
+  // Answers whether the contest is this plugin's: a failure means it is not,
+  // and the slot shows the host's own view.
+  // eslint-disable-next-line no-restricted-syntax
   const { data, isLoading } = useQuery({
     queryKey: ['ioi-contest-info', contestId],
     enabled: !!contestId,

@@ -5,14 +5,6 @@
 /** A timestamp: a `Date`, epoch milliseconds, or an ISO 8601 string. */
 export type DateInput = Date | number | string;
 
-export interface DateTimeOptions {
-  /**
-   * Name the time zone ("GMT+8"). Use it on absolute times people compare
-   * across machines, such as contest start and end times.
-   */
-  timeZoneName?: boolean;
-}
-
 function toDate(value: DateInput): Date {
   return value instanceof Date ? value : new Date(value);
 }
@@ -43,17 +35,16 @@ const TIME: Intl.DateTimeFormatOptions = {
   hourCycle: 'h23',
 };
 
-/** Date and time, e.g. "Nov 14, 2026, 08:09" or "2026年11月14日 08:09". */
-export function formatDateTime(
-  value: DateInput,
-  locale: string,
-  options: DateTimeOptions = {},
-): string {
-  return dateFormat(locale, {
-    ...DATE,
-    ...TIME,
-    ...(options.timeZoneName ? { timeZoneName: 'short' } : {}),
-  }).format(toDate(value));
+/**
+ * Date and time with its zone, e.g. "Nov 14, 2026, 08:09 GMT+8" or
+ * "2026年11月14日 GMT+8 08:09". The zone is always named: people compare
+ * absolute times across machines (a contest's start), and one view naming it
+ * while another does not reads as two different times.
+ */
+export function formatDateTime(value: DateInput, locale: string): string {
+  return dateFormat(locale, { ...DATE, ...TIME, timeZoneName: 'short' }).format(
+    toDate(value),
+  );
 }
 
 /** The calendar date alone, e.g. "Nov 14, 2026". */

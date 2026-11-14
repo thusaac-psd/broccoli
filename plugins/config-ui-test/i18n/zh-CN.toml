@@ -17,3 +17,5 @@
 'configUiTest.modeCard.balanced.description' = '在速度与覆盖面之间取得平衡'
 'configUiTest.modeCard.thorough.description' = '完整校验，较慢但更全面'
 'configUiTest.modeCard.experimental.description' = '前沿功能，可能不稳定'
+'plugin.config-ui-test.name' = '配置界面测试'
+'plugin.config-ui-test.description' = '用于检验各类配置字段的插件。'

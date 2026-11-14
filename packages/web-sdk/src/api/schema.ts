@@ -3335,8 +3335,13 @@ export interface components {
        */
       problem_type: string;
     };
-    /** @description One way a config value breaks its namespace's schema. */
-    FieldError: {
+    /**
+     * @description One way a config value breaks its namespace's schema: where, what (`kind`
+     *     and its parameters, for a client to say in its own language), and the same
+     *     in English (`message`, for logs).
+     */
+    FieldError: components['schemas']['FieldErrorKind'] & {
+      /** @example must be at most 10 */
       message: string;
       /**
        * @description Where the value is, as `field.nested[2].leaf`; empty for the config
@@ -3344,6 +3349,61 @@ export interface components {
        */
       path: string;
     };
+    /** @description What is wrong with a config value, with the schema's numbers. */
+    FieldErrorKind:
+      | {
+          expected: string;
+          got: string;
+          /** @enum {string} */
+          kind: 'type';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'unknown_field';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'missing';
+        }
+      | {
+          allowed: unknown[];
+          /** @enum {string} */
+          kind: 'not_allowed';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'min';
+          /** Format: double */
+          limit: number;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'max';
+          /** Format: double */
+          limit: number;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'min_length';
+          /** Format: int64 */
+          limit: number;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'max_length';
+          /** Format: int64 */
+          limit: number;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'pattern';
+          pattern: string;
+        }
+      | {
+          /** @enum {string} */
+          kind: 'namespace_undeclared';
+          scope: string;
+        };
     /**
      * @description Fleet-wide state of one plugin.
      * @enum {string}
@@ -4337,6 +4397,11 @@ export interface components {
        * @example 2025-10-01T14:30:00Z
        */
       created_at: string;
+      /**
+       * @description The name the submitter shows to others.
+       * @example Alice
+       */
+      display_name: string;
       /**
        * Format: int32
        * @example 1

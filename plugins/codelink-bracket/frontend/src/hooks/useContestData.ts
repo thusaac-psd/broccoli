@@ -1,5 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { useQuery } from '@tanstack/react-query';
 
@@ -82,7 +83,7 @@ export function usePlayerSubmissions(
       viewerCacheKey(user),
     ],
     enabled,
-    refetchInterval: 5_000,
+    refetchInterval: pollInterval(5_000),
     queryFn: async () => {
       const { data, error } = await apiClient.GET(
         '/contests/{id}/submissions',

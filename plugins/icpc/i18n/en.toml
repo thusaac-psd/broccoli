@@ -29,3 +29,6 @@
 
 # Names the host shows for what this plugin registers
 'identifier.contestType.icpc' = 'ICPC'
+'plugin.icpc.name' = 'ICPC'
+'plugin.icpc.description' = 'ICPC-style contests: pass/fail judging with time penalties.'
+'icpc.scoreboard.table' = 'Standings'

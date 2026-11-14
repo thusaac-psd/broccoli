@@ -1,3 +1,4 @@
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { QueryView } from '@broccoli/web-sdk/ui';
 import { cn } from '@broccoli/web-sdk/utils';
@@ -15,7 +16,7 @@ export function StationsPanel() {
   const query = useQuery({
     queryKey: ['print', 'stations'],
     queryFn: () => api.listStations(),
-    refetchInterval: 10_000,
+    refetchInterval: pollInterval(10_000),
   });
 
   return (

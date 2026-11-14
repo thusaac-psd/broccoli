@@ -6,7 +6,7 @@ import { refreshSession, withSettledCookie } from '@/api/refresh-session';
 import { withRequestErrors } from '@/api/request-errors';
 import type { paths } from '@/api/schema';
 import { fetchWithServerClock } from '@/api/server-clock';
-import { createSession, type SentAs, sentAs } from '@/auth/session';
+import { createSession, type SentAs } from '@/auth/session';
 import { SessionContext } from '@/auth/session-context';
 
 interface ApiClientProviderProps {
@@ -76,8 +76,8 @@ export function ApiClientProvider({
   const session = useMemo(
     () =>
       createSession({
-        refresh: () =>
-          refreshSession(refreshUrl, { fetch: fetchWithServerClock }),
+        refresh: (options) =>
+          refreshSession(refreshUrl, { fetch: fetchWithServerClock }, options),
         withSettledCookie: (run) => withSettledCookie(refreshUrl, run),
       }),
     [refreshUrl],
@@ -100,7 +100,7 @@ export function ApiClientProvider({
       async onRequest({ id, request }) {
         // The bootstrap's own refresh goes around this client, so waiting
         // here never holds it up.
-        const sent = sentAs(await session.settled());
+        const sent = await session.sendAs();
         if (sent.token) {
           request.headers.set('Authorization', `Bearer ${sent.token}`);
         }
@@ -150,7 +150,7 @@ export function ApiClientProvider({
     () => async (input: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       const hasCallerAuth = headers.has('Authorization');
-      const sent = sentAs(await session.settled());
+      const sent = await session.sendAs();
       if (sent.token && !hasCallerAuth) {
         headers.set('Authorization', `Bearer ${sent.token}`);
       }

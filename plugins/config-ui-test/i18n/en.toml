@@ -17,3 +17,5 @@
 'configUiTest.modeCard.balanced.description' = 'Good trade-off between speed and coverage'
 'configUiTest.modeCard.thorough.description' = 'Full validation, slower but comprehensive'
 'configUiTest.modeCard.experimental.description' = 'Bleeding-edge features, may be unstable'
+'plugin.config-ui-test.name' = 'Config UI test'
+'plugin.config-ui-test.description' = 'A plugin that exercises every kind of configuration field.'

@@ -1,19 +1,15 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
-import { useSessionView } from '@broccoli/web-sdk/auth';
+import { pollInterval } from '@broccoli/web-sdk/hooks';
 import {
   isTerminalStatus,
   type Submission,
 } from '@broccoli/web-sdk/submission';
 import { useQuery } from '@tanstack/react-query';
 
-import {
-  isPermanentPollFailure,
-  POLL_INTERVAL_MS,
-} from '@/features/submission/hooks/submission-entries';
+import { POLL_INTERVAL_MS } from '@/features/submission/hooks/submission-entries';
 
 export function useSubmissionDetail(submissionId: number) {
   const apiClient = useApiClient();
-  const session = useSessionView();
 
   return useQuery<Submission>({
     queryKey: ['submission', submissionId],
@@ -24,23 +20,13 @@ export function useSubmissionDetail(submissionId: number) {
       if (error) throw error;
       return data;
     },
-    // Polls until the verdict is final for this viewer (a withheld one is),
-    // or until a failure asking again cannot change (the submission is gone
-    // or hidden). A blip or a 502 only delays the next poll.
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (data && isTerminalStatus(data.status)) return false;
-      const failed = query.state.error as { status?: number } | null;
-      if (
-        failed &&
-        isPermanentPollFailure(
-          failed.status ?? null,
-          session.getState().status === 'signedOut',
-        )
-      ) {
-        return false;
-      }
-      return POLL_INTERVAL_MS;
-    },
+    // Polls until the verdict is final for this viewer (a withheld one is,
+    // `isTerminalStatus(null)`), slower while polls fail; a hidden or gone
+    // submission (403, 404) stops it.
+    refetchInterval: pollInterval<Submission>((submission) =>
+      submission && isTerminalStatus(submission.status)
+        ? false
+        : POLL_INTERVAL_MS,
+    ),
   });
 }

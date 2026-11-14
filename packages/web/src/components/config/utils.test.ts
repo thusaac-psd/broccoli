@@ -95,29 +95,53 @@ test('hasOwnDescendantValue ignores empty containers', () => {
   assert.equal(hasOwnDescendantValue({ list: [] }, ['list']), false);
 });
 
-test('serverFieldErrors keys the server field errors like validateAll', () => {
+test('serverFieldErrors says each server field error in the UI language, keyed like validateAll', () => {
   const error = {
     code: 'VALIDATION_ERROR',
     details: {
       fields: [
-        { path: 'penalty_minutes', message: 'expected integer, got string' },
-        { path: 'subtasks[1].max_score', message: 'must be at least 0' },
-        { path: '', message: 'expected an object, got array' },
+        {
+          path: 'penalty_minutes',
+          message: 'expected integer, got string',
+          kind: 'type',
+          expected: 'integer',
+          got: 'string',
+        },
+        {
+          path: 'subtasks[1].max_score',
+          message: 'must be at most 10',
+          kind: 'max',
+          limit: 10,
+        },
+        {
+          path: 'name',
+          message: 'must be at least 2 characters',
+          kind: 'min_length',
+          limit: 2,
+        },
+        {
+          path: 'mode',
+          message: 'must be one of "a"',
+          kind: 'not_allowed',
+          allowed: ['a'],
+        },
+        { path: 'bogus', message: 'unknown field', kind: 'unknown_field' },
+        { path: '', message: 'something new', kind: 'from_a_newer_server' },
       ],
     },
   };
   assert.deepEqual(serverFieldErrors(error), {
-    penalty_minutes: {
-      key: 'plugins.config.serverFieldError',
-      params: { message: 'expected integer, got string' },
-    },
+    penalty_minutes: { key: 'config.validation.integer' },
     'subtasks.1.max_score': {
-      key: 'plugins.config.serverFieldError',
-      params: { message: 'must be at least 0' },
+      key: 'config.validation.max',
+      params: { max: 10 },
     },
+    name: { key: 'config.validation.minLength', params: { min: 2 } },
+    mode: { key: 'config.validation.notAllowed' },
+    bogus: { key: 'config.validation.unknownField' },
     '': {
       key: 'plugins.config.serverFieldError',
-      params: { message: 'expected an object, got array' },
+      params: { message: 'something new' },
     },
   });
   assert.deepEqual(serverFieldErrors({ code: 'NOT_FOUND' }), {});

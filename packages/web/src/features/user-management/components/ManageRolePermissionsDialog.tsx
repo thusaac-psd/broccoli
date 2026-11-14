@@ -142,6 +142,7 @@ export function ManageRolePermissionsDialog({
         <div className="space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <Input
+              aria-label={t('users.roles.permissionPlaceholder')}
               value={newPermission}
               onChange={(e) => setNewPermission(e.target.value)}
               placeholder={t('users.roles.permissionPlaceholder')}

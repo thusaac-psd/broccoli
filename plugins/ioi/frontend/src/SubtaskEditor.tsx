@@ -829,6 +829,7 @@ function UnifiedSearch({
   return (
     <div>
       <Input
+        aria-label={t('ioi.subtask.searchPlaceholder')}
         ref={inputRef}
         type="text"
         role="combobox"
@@ -1636,6 +1637,7 @@ export function SubtaskEditor({
                     {t('ioi.subtask.fieldName')}
                   </div>
                   <Input
+                    aria-label={t('ioi.subtask.fieldName')}
                     type="text"
                     value={subtask.name}
                     onChange={(e) =>
@@ -1663,7 +1665,10 @@ export function SubtaskEditor({
                       updateSubtask(idx, { scoring_method: v })
                     }
                   >
-                    <SelectTrigger className="min-w-[130px]">
+                    <SelectTrigger
+                      aria-label={t('ioi.subtask.fieldMethod')}
+                      className="min-w-[130px]"
+                    >
                       <div className="flex items-center gap-1.5">
                         <span
                           className={cn(
@@ -1694,6 +1699,7 @@ export function SubtaskEditor({
                     {t('ioi.subtask.fieldPoints')}
                   </div>
                   <Input
+                    aria-label={t('ioi.subtask.fieldPoints')}
                     type="number"
                     min={0}
                     max={10000}

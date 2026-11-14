@@ -357,7 +357,9 @@ function PlatformGroup() {
 
 export function Sidebar() {
   const { t } = useTranslation();
-  const { user, logout, isLoading: sessionLoading } = useAuth();
+  const { user, logout, isLoading, unreachable } = useAuth();
+  // Nobody is known while the session is restored, or cannot be.
+  const viewerUnknown = isLoading || unreachable;
   const { pathname, search } = useLocation();
   const { setOpenMobile } = useSidebar();
 
@@ -407,9 +409,8 @@ export function Sidebar() {
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton>
                   <User className="h-4 w-4" />
-                  {/* Nobody is known while the session is restored: neither
-                      the user nor a guest. */}
-                  {sessionLoading ? (
+                  {/* Neither the user nor a guest. */}
+                  {viewerUnknown ? (
                     <Skeleton
                       className="h-4 flex-1"
                       aria-label={t('common.loading')}

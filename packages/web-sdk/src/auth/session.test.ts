@@ -10,6 +10,7 @@ import {
   SESSION_REFRESH_INTERVAL_MS,
   sessionEffects,
   type SessionState,
+  SessionUnreachableError,
   SIGNED_OUT_HINT,
   transition,
 } from './session.ts';
@@ -156,14 +157,32 @@ test('logging in settles the bootstrap', () => {
   assert.equal(nextRefreshInMs(next), SESSION_REFRESH_INTERVAL_MS);
 });
 
-test('the bootstrap keeps retrying while the server is unreachable', () => {
+test('an unreachable server settles the bootstrap as unreachable, retrying', () => {
   const next = transition(INITIAL_SESSION, {
     type: 'refresh-settled',
     epoch: INITIAL_SESSION.epoch,
     outcome: { status: 'unavailable', retryInMs: 2_000 },
   });
-  assert.equal(next.status, 'bootstrapping');
+  assert.equal(next.status, 'unreachable');
   assert.equal(nextRefreshInMs(next), 2_000);
+});
+
+test('a session restored once the server answers again refetches what failed meanwhile', () => {
+  const unreachable = transition(INITIAL_SESSION, {
+    type: 'refresh-settled',
+    epoch: INITIAL_SESSION.epoch,
+    outcome: { status: 'unavailable', retryInMs: 2_000 },
+  });
+  const active = transition(unreachable, {
+    type: 'refresh-settled',
+    epoch: unreachable.epoch,
+    outcome: refreshed('jwt-1'),
+  });
+  assert.equal(active.status, 'active');
+  assert.deepEqual(sessionEffects(unreachable, active), {
+    hint: '7',
+    queries: 'refetch',
+  });
 });
 
 test('sign-out revokes the cookie only after signing out locally', async () => {
@@ -208,8 +227,8 @@ test('requests wait for the bootstrap, then carry the restored token', async () 
   const { session } = sessionWith(() => pending.promise);
   void session.refresh();
   let sent: string | null | undefined;
-  const request = session.settled().then((state) => {
-    sent = sentAs(state).token;
+  const request = session.sendAs().then((as) => {
+    sent = as.token;
   });
   await Promise.resolve();
   assert.equal(sent, undefined, 'nothing is sent while bootstrapping');
@@ -221,28 +240,24 @@ test('requests wait for the bootstrap, then carry the restored token', async () 
 test('requests go out at once when nobody is signed in', async () => {
   const { session } = sessionWith(async () => refreshed('unused'));
   session.dispatch({ type: 'no-session' });
-  assert.equal((await session.settled()).status, 'signedOut');
+  assert.equal((await session.sendAs()).token, null);
 });
 
 test('requests go out at once when no bootstrap was started', async () => {
   const { session } = sessionWith(async () => refreshed('unused'));
-  assert.equal((await session.settled()).status, 'bootstrapping');
+  assert.deepEqual(await session.sendAs(), { epoch: 0, token: null });
 });
 
-test('requests wait out an unreachable server during the bootstrap', async () => {
+test('while the server cannot restore the session, requests fail at once without a token', async () => {
   const { session } = sessionWith(async () => ({
     status: 'unavailable',
     retryInMs: 1000,
   }));
   const refresh = session.refresh();
-  let settled = false;
-  void session.settled().then(() => (settled = true));
+  const request = session.sendAs();
   await refresh;
-  await Promise.resolve();
-  assert.equal(settled, false);
-  session.dispatch({ type: 'no-session' });
-  await Promise.resolve();
-  assert.equal(settled, true);
+  await assert.rejects(request, SessionUnreachableError);
+  await assert.rejects(session.sendAs(), SessionUnreachableError);
 });
 
 test('finding no session on load writes no hint', () => {
