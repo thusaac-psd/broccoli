@@ -528,6 +528,11 @@ pub struct SpawnOptions {
     /// Submissions and code runs per user per minute; `None` keeps the
     /// fixture default (no limit tested).
     pub rate_limit_per_minute: Option<u32>,
+    /// `server.max_system_error_retries`; `None` keeps the fixture default
+    /// (50). A test that owns the fate of a `SystemError` submission sets
+    /// `Some(0)` so the dispatcher's retry reaper never re-judges it behind
+    /// the test's back.
+    pub max_system_error_retries: Option<u32>,
 }
 
 impl TestApp {
@@ -625,7 +630,7 @@ impl TestApp {
                 steal_scan_interval_secs: 15,
                 steal_batch_size: 8,
                 max_dispatch_retries: 5,
-                max_system_error_retries: 50,
+                max_system_error_retries: options.max_system_error_retries.unwrap_or(50),
                 cancel_primitive_enabled: false,
                 // Enable the claim fiber by default so integration
                 // tests that rely on the `Queued`-on-POST flow see the
