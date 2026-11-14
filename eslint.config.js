@@ -195,6 +195,15 @@ export default defineConfig([
           message: 'Shown error text comes from a translation key: use t().',
         },
         {
+          // `const { data = [] } = useQuery(...)` shows a failed or unfinished
+          // fetch as an empty list. Render the query through QueryView or
+          // queryState() from @broccoli/web-sdk, which keep the states apart.
+          selector:
+            'VariableDeclarator[init.type="CallExpression"][init.callee.name=/^use[A-Z]/] > ObjectPattern > Property[key.name="data"] > AssignmentPattern',
+          message:
+            'Do not default a query result: render it through QueryView or queryState() so loading, failure and empty stay distinct.',
+        },
+        {
           // A server's `message` is English detail for logs; what the user
           // reads comes from useErrorMessage(), which translates by code.
           selector:

@@ -12,6 +12,8 @@ import { I18nContext } from '@/i18n/i18n-context';
 import { formatMessage, type MessageParams } from '@/i18n/message';
 import type { TranslationMap } from '@/i18n/types';
 
+const EMPTY_TRANSLATIONS: TranslationMap = {};
+
 /** localStorage key where the active locale is persisted. */
 export const LOCALE_STORAGE_KEY = 'broccoli-locale';
 
@@ -68,7 +70,9 @@ export function I18nProvider({
     },
   });
 
-  const { data: pluginTranslations = {}, isLoading } = useQuery({
+  // Plugin translations add to the bundled catalogs; until they arrive, or if
+  // they cannot be fetched, the bundled text is shown, which is correct.
+  const pluginQuery = useQuery({
     queryKey: ['i18n', 'translations', locale],
     queryFn: async () => {
       const { data } = await apiClient.GET('/i18n/translations/{locale}', {
@@ -79,12 +83,14 @@ export function I18nProvider({
     // Keep previous translations while loading new ones to prevent UI flickering
     placeholderData: (prev) => prev,
   });
+  const pluginTranslations = pluginQuery.data ?? EMPTY_TRANSLATIONS;
+  const isLoading = pluginQuery.isLoading;
 
   // Default-locale plugin translations, used as a fallback so plugin keys
   // missing from the active locale render the default-locale string instead
   // of the raw key. Shares the query key shape above, so the cache is reused
   // when the user switches back to the default locale.
-  const { data: fallbackPluginTranslations = {} } = useQuery({
+  const fallbackQuery = useQuery({
     queryKey: ['i18n', 'translations', defaultLocale],
     queryFn: async () => {
       const { data } = await apiClient.GET('/i18n/translations/{locale}', {
@@ -95,6 +101,7 @@ export function I18nProvider({
     enabled: locale !== defaultLocale,
     placeholderData: (prev) => prev,
   });
+  const fallbackPluginTranslations = fallbackQuery.data ?? EMPTY_TRANSLATIONS;
 
   const lookup = useCallback(
     (key: string, params?: MessageParams) => {

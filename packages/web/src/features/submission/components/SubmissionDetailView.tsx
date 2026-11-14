@@ -1,8 +1,9 @@
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useFormat, useTranslation } from '@broccoli/web-sdk/i18n';
 import { isTerminalStatus } from '@broccoli/web-sdk/submission';
-import { Badge } from '@broccoli/web-sdk/ui';
+import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
-import { AlertCircle, ArrowLeft, Loader2 } from 'lucide-react';
+import { ArrowLeft, Loader2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 
 import { useSubmissionDetail } from '@/features/submission/hooks/use-submission-detail';
@@ -32,11 +33,16 @@ export function SubmissionDetailView({
 }: SubmissionDetailViewProps) {
   const { t } = useTranslation();
   const format = useFormat();
-  const { submission, isLoading, error } = useSubmissionDetail(submissionId);
+  const detail = queryState(useSubmissionDetail(submissionId));
+  const submission = detail.status === 'data' ? detail.data : null;
 
-  const returnTarget = useSubmissionReturn(submission, isLoading, contestId);
+  const returnTarget = useSubmissionReturn(
+    submission,
+    detail.status === 'loading',
+    contestId,
+  );
 
-  if (isLoading) {
+  if (detail.status === 'loading' || detail.status === 'idle') {
     return (
       <div className="space-y-4">
         <BackLink target={returnTarget} />
@@ -47,16 +53,20 @@ export function SubmissionDetailView({
     );
   }
 
-  if (error || !submission) {
+  if (detail.status === 'error' || !submission) {
     return (
       <div className="space-y-4">
         <BackLink target={returnTarget} />
-        <div className="flex flex-col items-center gap-3 py-20">
-          <AlertCircle className="h-8 w-8 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
-            {t('submissionDetail.notFound')}
-          </p>
-        </div>
+        {detail.status === 'error' && (
+          <QueryErrorState
+            className="py-20"
+            error={detail.error}
+            retry={detail.retry}
+            retrying={detail.retrying}
+            notFound={t('submissionDetail.notFound')}
+            failure={t('submissionDetail.loadFailed')}
+          />
+        )}
       </div>
     );
   }

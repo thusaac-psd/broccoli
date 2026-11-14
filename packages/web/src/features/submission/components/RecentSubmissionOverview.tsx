@@ -4,7 +4,7 @@ import type {
   SubmissionSummary,
   Verdict,
 } from '@broccoli/web-sdk/submission';
-import { Badge } from '@broccoli/web-sdk/ui';
+import { Badge, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { formatKibibytes } from '@broccoli/web-sdk/utils';
 
 import { useSubmissionNavigation } from '@/features/submission/hooks/use-submission-navigation';
@@ -19,6 +19,8 @@ const DEFAULT_VISIBLE_COUNT = 5;
 interface RecentSubmissionOverviewProps {
   entries: SubmissionEntry[];
   history: SubmissionSummary[];
+  /** Set when the earlier submissions could not be loaded. */
+  historyError?: { error: unknown; retry: () => void } | null;
   isSubmitting?: boolean;
   visibleCount?: number;
   linkBuilder?: (submissionId: number) => string;
@@ -73,6 +75,7 @@ function getScoreToneClass(variant: string): string {
 export function RecentSubmissionOverview({
   entries,
   history,
+  historyError = null,
   isSubmitting,
   visibleCount = DEFAULT_VISIBLE_COUNT,
   linkBuilder,
@@ -171,9 +174,20 @@ export function RecentSubmissionOverview({
         <h3 className="text-sm font-semibold">
           {t('result.latestOverviewTitle')}
         </h3>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {isSubmitting ? t('result.judging') : t('result.latestOverviewEmpty')}
-        </p>
+        {historyError && !isSubmitting ? (
+          <QueryErrorState
+            className="py-4"
+            error={historyError.error}
+            retry={historyError.retry}
+            failure={t('submissions.loadFailed')}
+          />
+        ) : (
+          <p className="mt-2 text-sm text-muted-foreground">
+            {isSubmitting
+              ? t('result.judging')
+              : t('result.latestOverviewEmpty')}
+          </p>
+        )}
       </section>
     );
   }

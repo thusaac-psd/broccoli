@@ -1,9 +1,11 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   FileDropZone,
   Input,
+  QueryErrorState,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -18,7 +20,10 @@ import {
   fetchAdditionalFiles,
   groupFilesByLanguage,
 } from '@/features/problem/api/additional-files';
-import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import {
+  fetchSupportedLanguages,
+  type SupportedLanguage,
+} from '@/features/problem/api/fetch-supported-languages';
 
 interface StagedFile {
   id: string;
@@ -26,6 +31,9 @@ interface StagedFile {
   language: string;
   path: string;
 }
+
+const NO_FILES: AdditionalFile[] = [];
+const NO_LANGUAGES: SupportedLanguage[] = [];
 
 let nextStagedId = 0;
 
@@ -52,16 +60,19 @@ export function AdditionalFilesSection({
     [problemId],
   );
 
-  const { data: files = [], isLoading: filesLoading } = useQuery({
+  const filesQuery = useQuery({
     queryKey,
     queryFn: () => fetchAdditionalFiles(apiClient, problemId),
   });
+  const filesState = queryState(filesQuery);
+  const files = filesQuery.data ?? NO_FILES;
 
-  const { data: languages = [], isLoading: languagesLoading } = useQuery({
+  const languagesQuery = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 60_000,
   });
+  const languages = languagesQuery.data ?? NO_LANGUAGES;
 
   // --- Staging ---
 
@@ -228,7 +239,7 @@ export function AdditionalFilesSection({
 
   const grouped = groupFilesByLanguage(files);
   const languageKeys = Object.keys(grouped).sort();
-  const noLanguages = !languagesLoading && languages.length === 0;
+  const noLanguages = languagesQuery.isSuccess && languages.length === 0;
 
   return (
     <div className="space-y-4">
@@ -237,7 +248,15 @@ export function AdditionalFilesSection({
       </p>
 
       {/* Drop zone — always available */}
-      {noLanguages ? (
+      {languagesQuery.isError && !languagesQuery.data ? (
+        <QueryErrorState
+          className="py-4"
+          error={languagesQuery.error}
+          retry={() => void languagesQuery.refetch()}
+          retrying={languagesQuery.isFetching}
+          failure={t('admin.additionalFiles.languagesLoadFailed')}
+        />
+      ) : noLanguages ? (
         <p className="text-sm text-muted-foreground">
           {t('admin.additionalFiles.noLanguages')}
         </p>
@@ -365,7 +384,15 @@ export function AdditionalFilesSection({
       )}
 
       {/* Existing file listing */}
-      {filesLoading ? (
+      {filesState.status === 'error' ? (
+        <QueryErrorState
+          className="py-4"
+          error={filesState.error}
+          retry={filesState.retry}
+          retrying={filesState.retrying}
+          failure={t('admin.additionalFiles.loadFailed')}
+        />
+      ) : filesState.status === 'loading' ? (
         <div className="py-4 text-center text-sm text-muted-foreground">
           {t('admin.loading')}
         </div>

@@ -93,6 +93,7 @@ export const en = {
   'overview.recentSubmissionsDescription':
     'Latest submissions across all contests and problems.',
   'overview.noSubmissions': 'No submissions yet.',
+  'submissions.loadFailed': 'Could not load the submissions.',
   'overview.problem': 'Problem',
   'overview.user': 'User',
   'overview.language': 'Language',
@@ -156,6 +157,8 @@ export const en = {
   'problem.notes': 'Notes',
   'problem.toggleFullscreen': 'Toggle fullscreen',
   'problem.notFound': 'Problem not found.',
+  'problem.loadFailed': 'Could not load this problem.',
+  'problem.sampleLoadFailed': 'Could not load this sample.',
   'problem.notAvailableNow': 'This problem is not available right now.',
   'problem.loadError': 'Failed to load problem.',
   'problem.copy': 'Copy',
@@ -249,6 +252,7 @@ export const en = {
   // Submission Detail
   'submissionDetail.sourceCode': 'Source Code',
   'submissionDetail.notFound': 'Submission not found',
+  'submissionDetail.loadFailed': 'Could not load this submission.',
   'submissionDetail.backToList': 'Back to submissions',
   'submissionDetail.backToAllSubmissions': 'Back to all submissions',
   'submissionDetail.backToContestSubmissions': 'Back to contest submissions',
@@ -266,6 +270,7 @@ export const en = {
   'submissionDetail.pinnedWorkerHint':
     'This submission was pinned to a specific worker by an admin. Every operation it produces runs on that worker only.',
   'submissionDetail.versions': 'Versions',
+  'submissionDetail.versionsLoadFailed': 'Could not load the judging history.',
   'submissionDetail.workerPreserveRouting': 'Keep current routing',
   'submissionDetail.workerSharedPool': 'Shared worker pool',
   'submissionDetail.regradeCandidate': 'Regrade Candidate',
@@ -329,6 +334,7 @@ export const en = {
     'Are you sure you want to cancel your registration for this contest? You can re-register later if the contest is still open.',
   'contests.unregisterConfirm': 'Yes, Cancel Registration',
   'contests.notFound': 'Contest not found.',
+  'contests.loadFailed': 'Could not load this contest.',
   'contests.loadError': 'Failed to load contest data.',
   'contests.loadProblemsError': 'Failed to load contest problems.',
   'contests.problemsAvailableAfterStart':
@@ -351,6 +357,7 @@ export const en = {
   'contest.qa.directMessages': 'Direct Messages',
   'contest.qa.messages': 'Messages',
   'contest.qa.empty': 'No questions yet.',
+  'contest.qa.loadFailed': 'Could not load the questions and announcements.',
   'contest.countdown.start': 'Start',
   'contest.countdown.end': 'End',
 
@@ -433,6 +440,8 @@ export const en = {
   'users.roles.searchPlaceholder': 'Search roles or permissions...',
   'users.roles.empty': 'No roles found.',
   'users.roles.noPermissions': 'No permissions granted.',
+  'users.roles.permissionsLoadFailed':
+    "Could not load this role's permissions.",
   'users.roles.managePermissions': 'Manage Permissions',
   'users.roles.managePermissionsFor': 'Manage permissions for role: {role}',
   'users.roles.managePermissionsDescription':
@@ -543,6 +552,7 @@ export const en = {
   'admin.saving': 'Saving...',
   'admin.warmCaches': 'Warm caches',
   'admin.contestProblems': 'Contest Problems',
+  'admin.contestProblemsLoadFailed': 'Could not load the problems.',
   'admin.bulkParticipants': 'Bulk Add Participants',
   'admin.bulkParticipantsAction': 'Manage Participants',
 
@@ -576,6 +586,8 @@ export const en = {
     '{count, plural, one {# participant} other {# participants}}',
   'admin.participants.unenrolledCount': '{count} available',
   'admin.participants.empty': 'No participants enrolled yet.',
+  'admin.participants.loadFailed': 'Could not load the participants.',
+  'admin.participants.usersLoadFailed': 'Could not load the users.',
   'admin.participants.noSearchResults': 'No matching results.',
   'admin.participants.allEnrolled': 'All users are already enrolled.',
   'admin.participants.registeredAt': 'Registered',
@@ -670,6 +682,8 @@ export const en = {
   'admin.additionalFiles.description':
     'Judge-private files (graders, headers) compiled alongside submissions.',
   'admin.additionalFiles.empty': 'No additional files yet.',
+  'admin.additionalFiles.loadFailed': 'Could not load the additional files.',
+  'admin.additionalFiles.languagesLoadFailed': 'Could not load the languages.',
   'admin.additionalFiles.uploadError': 'Failed to upload file.',
   'admin.additionalFiles.uploaded': 'File uploaded successfully.',
   'admin.additionalFiles.deleteError': 'Failed to delete file.',
@@ -699,6 +713,7 @@ export const en = {
   'admin.attachments.description':
     'Public files (images, PDFs) that can be referenced in the problem statement.',
   'admin.attachments.empty': 'No attachments yet.',
+  'admin.attachments.loadFailed': 'Could not load the attachments.',
   'admin.attachments.dropzone': 'Drop files here or click to browse',
   'admin.attachments.uploading': 'Uploading {filename}...',
   'admin.attachments.uploaded': 'File uploaded successfully.',
@@ -733,6 +748,7 @@ export const en = {
   'admin.checkerSource.description':
     'Upload source files for a custom checker (e.g. checker.cpp and testlib.h). These are compiled and run to judge submissions when using the testlib checker format.',
   'admin.checkerSource.empty': 'No checker source files.',
+  'admin.checkerSource.loadFailed': 'Could not load the checker source files.',
   'admin.checkerSource.dropzone':
     'Drop checker source files here (.cpp, .c, .h)',
   'admin.checkerSource.uploading': 'Uploading checker source...',
@@ -753,6 +769,7 @@ export const en = {
   'admin.manageTestCases': 'Manage Test Cases',
   'admin.testCases.title': 'Test Cases',
   'admin.testCases.empty': 'No test cases yet. Create one to get started.',
+  'admin.testCases.loadFailed': 'Could not load the test cases.',
   'admin.testCases.create': 'Create Test Case',
   'admin.testCases.createDesc': 'Add a new test case to this problem.',
   'admin.testCases.edit': 'Edit Test Case',
@@ -1003,6 +1020,7 @@ export const en = {
   'config.title': 'Configuration: {name}',
   'config.description': 'Plugin configuration for this resource.',
   'config.noSchemas': 'No plugin configuration available for this resource.',
+  'config.loadFailed': 'Could not load the settings.',
 
   // Language switcher
   'locale.switch': 'Language',
@@ -1106,6 +1124,8 @@ export const en = {
   'common.loadFailed':
     'Could not load this. Check your connection and try again.',
   'common.retry': 'Retry',
+  'query.signInRequired': 'Sign in to see this.',
+  'query.refreshFailed': 'Could not refresh; showing the last loaded copy.',
   'common.temporarilyUnavailable':
     'The server is busy right now. Retrying shortly.',
   'common.version': 'v{version}',
@@ -1264,9 +1284,10 @@ export const en = {
   'extension.componentError': 'Component Error',
   'extension.componentMissing':
     'A plugin registered this route, but its component {component} is missing.',
-  'table.resultOne': '1 result',
   'table.results': '{count, plural, one {# result} other {# results}}',
   'table.loading': 'loading...',
+  'table.noResults': 'No results found.',
+  'table.search': 'Search...',
   'dateTime.time': 'Time:',
   'dateTime.hours': 'Hours',
   'dateTime.minutes': 'Minutes',

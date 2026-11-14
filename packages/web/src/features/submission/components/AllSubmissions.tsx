@@ -6,7 +6,7 @@ import {
   type SubmissionStatusFilterValue,
   toSubmissionStatus,
 } from '@broccoli/web-sdk/submission';
-import { FilterDropdown, Input } from '@broccoli/web-sdk/ui';
+import { FilterDropdown, Input, QueryView } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Code2, ListFilter, Search } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -94,13 +94,13 @@ export function AllSubmissions() {
     return () => clearTimeout(handle);
   }, [appliedQ, searchInput, updateSearchParams]);
 
-  const { data: supportedLanguages = [] } = useQuery({
+  const { data: supportedLanguages } = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
   });
 
-  const { data: submissionsResult, isLoading } = useQuery({
+  const submissionsQuery = useQuery({
     queryKey: [
       'admin-submissions-table',
       appliedQ,
@@ -120,13 +120,15 @@ export function AllSubmissions() {
       }),
   });
 
-  const submissions = submissionsResult?.data ?? [];
-  const pagination = submissionsResult?.pagination;
+  const pagination = submissionsQuery.data?.pagination;
 
   const languageOptions = useMemo(
     () => [
       { value: 'all', label: t('submissions.filters.allLanguages') },
-      ...supportedLanguages.map((l) => ({ value: l.id, label: l.name })),
+      ...(supportedLanguages ?? []).map((l) => ({
+        value: l.id,
+        label: l.name,
+      })),
     ],
     [supportedLanguages, t],
   );
@@ -181,21 +183,32 @@ export function AllSubmissions() {
       </div>
 
       <div className="border rounded-lg overflow-hidden">
-        {isLoading ? (
-          <div className="flex items-center justify-center py-16">
-            <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-          </div>
-        ) : (
-          <SubmissionsTable
-            submissions={submissions}
-            columns={SubmissionsTable.adminColumns}
-            linkBuilder={(sub) =>
-              sub.contest_id
-                ? `/contests/${sub.contest_id}/submissions/${sub.id}`
-                : `/submissions/${sub.id}`
-            }
-          />
-        )}
+        <QueryView
+          query={submissionsQuery}
+          loading={
+            <div
+              role="status"
+              aria-busy
+              className="flex items-center justify-center py-16"
+            >
+              <span className="sr-only">{t('common.loading')}</span>
+              <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+            </div>
+          }
+          failure={t('submissions.loadFailed')}
+        >
+          {(result) => (
+            <SubmissionsTable
+              submissions={result.data}
+              columns={SubmissionsTable.adminColumns}
+              linkBuilder={(sub) =>
+                sub.contest_id
+                  ? `/contests/${sub.contest_id}/submissions/${sub.id}`
+                  : `/submissions/${sub.id}`
+              }
+            />
+          )}
+        </QueryView>
       </div>
 
       <SubmissionListPager

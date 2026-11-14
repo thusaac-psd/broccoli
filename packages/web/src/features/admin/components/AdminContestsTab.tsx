@@ -33,6 +33,7 @@ import {
   DropdownMenuTrigger,
   Input,
   Label,
+  QueryErrorState,
   Separator,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
@@ -68,6 +69,9 @@ import { useTableSearchParams } from '@/hooks/use-table-search-params';
 import { changedFields } from '@/lib/changed-fields';
 import type { MessageKey } from '@/lib/i18n/catalog';
 import { toastUnsettled } from '@/lib/idempotency-feedback';
+
+const NO_CONTEST_PROBLEMS: ContestProblem[] = [];
+const NO_PROBLEMS: ProblemSummary[] = [];
 
 // -- Data fetcher --
 
@@ -497,20 +501,20 @@ export function ContestProblemsDialog({
   const sendIdempotent = useIdempotentRequest();
   const [confirm, confirmDialog] = useConfirmDialog();
 
-  const { data: contestProblems = [], isLoading: loadingContestProblems } =
-    useQuery({
-      queryKey: contestProblemsKey,
-      queryFn: async () => {
-        const { data, error } = await apiClient.GET('/contests/{id}/problems', {
-          params: { path: { id: contest.id } },
-        });
-        if (error) throw error;
-        return data;
-      },
-      enabled: open,
-    });
+  const contestProblemsQuery = useQuery({
+    queryKey: contestProblemsKey,
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET('/contests/{id}/problems', {
+        params: { path: { id: contest.id } },
+      });
+      if (error) throw error;
+      return data;
+    },
+    enabled: open,
+  });
+  const contestProblems = contestProblemsQuery.data ?? NO_CONTEST_PROBLEMS;
 
-  const { data: allProblems = [], isLoading: loadingAllProblems } = useQuery({
+  const allProblemsQuery = useQuery({
     queryKey: ['all-problems-for-contest', contest.id],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/problems', {
@@ -521,6 +525,7 @@ export function ContestProblemsDialog({
     },
     enabled: open,
   });
+  const allProblems = allProblemsQuery.data ?? NO_PROBLEMS;
 
   const [search, setSearch] = useState('');
   const [addingId, setAddingId] = useState<number | null>(null);
@@ -615,7 +620,12 @@ export function ContestProblemsDialog({
     });
   }
 
-  const isLoading = loadingContestProblems || loadingAllProblems;
+  const isLoading =
+    contestProblemsQuery.isLoading || allProblemsQuery.isLoading;
+  // Either list failing leaves the dialog unable to show what is added.
+  const failedQuery = [contestProblemsQuery, allProblemsQuery].find(
+    (query) => query.isError && query.data === undefined,
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -708,7 +718,14 @@ export function ContestProblemsDialog({
           {errorMsg && <p className="text-sm text-destructive">{errorMsg}</p>}
 
           <div className="overflow-y-auto max-h-64 rounded-md border">
-            {isLoading ? (
+            {failedQuery ? (
+              <QueryErrorState
+                error={failedQuery.error}
+                retry={() => void failedQuery.refetch()}
+                retrying={failedQuery.isFetching}
+                failure={t('admin.contestProblemsLoadFailed')}
+              />
+            ) : isLoading ? (
               <div className="py-8 text-center text-muted-foreground">
                 {t('common.loading')}
               </div>

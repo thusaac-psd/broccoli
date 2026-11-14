@@ -6,7 +6,12 @@ import {
   SYSTEM_ADMIN,
 } from '@broccoli/web-sdk/permissions';
 import type { SubmissionJudgement } from '@broccoli/web-sdk/submission';
-import { Badge, Button, TextPreview } from '@broccoli/web-sdk/ui';
+import {
+  Badge,
+  Button,
+  QueryErrorState,
+  TextPreview,
+} from '@broccoli/web-sdk/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
@@ -24,6 +29,8 @@ import { useSystemOverview } from '@/features/system/hooks/useSystemOverview';
 import { getVerdictBadge } from '../utils/verdict';
 import { SubmissionTestCases } from './SubmissionTestCases';
 import { testCaseDiffStatus } from './testCaseDiff';
+
+const NO_JUDGEMENTS: SubmissionJudgement[] = [];
 
 const PRESERVE_TARGET_WORKER = '__preserve__';
 
@@ -54,7 +61,7 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
   const { data: systemOverview } = useSystemOverview({ enabled: canPinWorker });
   const liveWorkers = systemOverview?.workers ?? [];
 
-  const { data: judgements = [], isLoading } = useQuery({
+  const judgementsQuery = useQuery({
     queryKey: ['submission-judgements', submissionId],
     enabled: canViewHistory,
     queryFn: async () => {
@@ -68,6 +75,8 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
       return data;
     },
   });
+  const isLoading = judgementsQuery.isLoading;
+  const judgements = judgementsQuery.data ?? NO_JUDGEMENTS;
 
   const currentJudgement = useMemo(
     () => judgements.find((judgement) => judgement.is_current) ?? null,
@@ -218,6 +227,15 @@ export function SubmissionJudgementHistory({ submissionId }: Props) {
         )}
       </div>
 
+      {judgementsQuery.isError && !judgementsQuery.data && (
+        <QueryErrorState
+          className="py-6"
+          error={judgementsQuery.error}
+          retry={() => void judgementsQuery.refetch()}
+          retrying={judgementsQuery.isFetching}
+          failure={t('submissionDetail.versionsLoadFailed')}
+        />
+      )}
       <div className="mt-4 divide-y">
         {judgements.map((judgement) => (
           <JudgementRow

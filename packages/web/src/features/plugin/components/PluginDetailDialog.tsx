@@ -9,11 +9,11 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  QueryErrorState,
   Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
-  AlertCircle,
   Globe,
   Loader2,
   Package,
@@ -455,11 +455,7 @@ export function PluginDetailDialog({
   const { t } = useTranslation();
   const apiClient = useApiClient();
 
-  const {
-    data: plugin,
-    isLoading,
-    error,
-  } = useQuery({
+  const pluginQuery = useQuery({
     queryKey: ['admin-plugin-detail', pluginId],
     queryFn: async () => {
       const { data, error } = await apiClient.GET('/admin/plugins/{id}', {
@@ -470,6 +466,7 @@ export function PluginDetailDialog({
     },
     enabled: open && !!pluginId,
   });
+  const { data: plugin, isLoading, error } = pluginQuery;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -521,13 +518,13 @@ export function PluginDetailDialog({
           </div>
         )}
 
-        {error && (
-          <div className="py-6 text-center">
-            <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-            <p className="text-sm text-destructive">
-              {t('plugins.detail.loadError')}
-            </p>
-          </div>
+        {error && !plugin && (
+          <QueryErrorState
+            error={error}
+            retry={() => void pluginQuery.refetch()}
+            retrying={pluginQuery.isFetching}
+            failure={t('plugins.detail.loadError')}
+          />
         )}
 
         {plugin && (

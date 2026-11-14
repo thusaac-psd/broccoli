@@ -25,7 +25,14 @@ import { MarkdownEditorWithAttachments } from '@/features/admin/components/Markd
 import { SwitchField } from '@/features/admin/components/SwitchField';
 import type { ProblemFormData } from '@/features/admin/problem-form-values';
 import type { Attachment } from '@/features/problem/api/attachments';
-import { fetchSupportedLanguages } from '@/features/problem/api/fetch-supported-languages';
+import {
+  fetchSupportedLanguages,
+  type SupportedLanguage,
+} from '@/features/problem/api/fetch-supported-languages';
+
+// Template languages offered by the form; a failed load offers none and the
+// form still saves.
+const NO_LANGUAGES: SupportedLanguage[] = [];
 
 interface ProblemFormProps {
   data: ProblemFormData;
@@ -43,11 +50,12 @@ export function ProblemForm({
   const { t } = useTranslation();
   const apiClient = useApiClient();
   const { data: registries } = useRegistries();
-  const { data: supportedLanguages = [] } = useQuery({
+  const languagesQuery = useQuery({
     queryKey: ['supported-languages'],
     queryFn: () => fetchSupportedLanguages(apiClient),
     staleTime: 5 * 60 * 1000,
   });
+  const supportedLanguages = languagesQuery.data ?? NO_LANGUAGES;
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [newFilenameByLanguage, setNewFilenameByLanguage] = useState<
     Record<string, string>

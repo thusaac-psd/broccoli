@@ -9,10 +9,11 @@ import {
   Card,
   CardContent,
   CardHeader,
+  QueryErrorState,
   Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
+import { Loader2, Puzzle, RefreshCw, Upload } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -61,11 +62,7 @@ export default function PluginsPage() {
   // viewer would 403 on /admin/plugins.
   const canManagePlugins = !!user?.permissions.includes(PLUGIN_MANAGE);
 
-  const {
-    data: plugins,
-    isLoading,
-    error,
-  } = useQuery({
+  const pluginsQuery = useQuery({
     queryKey: ['admin-plugins'],
     enabled: canManagePlugins,
     // Other servers apply a change within a few seconds: keep polling while
@@ -78,6 +75,7 @@ export default function PluginsPage() {
       return data;
     },
   });
+  const { data: plugins, isLoading, error } = pluginsQuery;
 
   const { data: uploadPolicy } = useQuery({
     queryKey: ['admin-plugin-upload-policy'],
@@ -284,13 +282,13 @@ export default function PluginsPage() {
         </div>
       )}
 
-      {error && (
-        <Card className="border-destructive">
-          <CardContent className="pt-6 text-center">
-            <AlertCircle className="mx-auto h-10 w-10 text-destructive mb-2" />
-            <p className="text-destructive">{t('plugins.loadError')}</p>
-          </CardContent>
-        </Card>
+      {error && !plugins && (
+        <QueryErrorState
+          error={error}
+          retry={() => void pluginsQuery.refetch()}
+          retrying={pluginsQuery.isFetching}
+          failure={t('plugins.loadError')}
+        />
       )}
 
       {plugins && plugins.length === 0 && (

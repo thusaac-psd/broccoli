@@ -1,8 +1,11 @@
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { currentPath, signInPath, useAuth } from '@broccoli/web-sdk/auth';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import {
   Button,
+  QueryErrorState,
+  QueryLoading,
   Skeleton,
   Tabs,
   TabsContent,
@@ -36,17 +39,21 @@ function parseQaTab(value: string | null): QaTab {
 
 export default function ContestQAPage() {
   const { t } = useTranslation();
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const { contestId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const id = Number(contestId ?? '0');
 
   const isAdmin = !!user?.permissions?.includes(CONTEST_MANAGE);
 
-  const { data: clarifications = [], isLoading } = useClarifications(
+  const clarificationsQuery = useClarifications(
     id,
     !!user && !!contestId && !Number.isNaN(id),
   );
+  const listState = queryState(clarificationsQuery);
+  const loaded = listState.status === 'data' || listState.status === 'empty';
+  const isLoading = !loaded;
+  const clarifications = loaded ? listState.data : [];
   const createMutation = useCreateClarification(id);
   const replyMutation = useReplyClarification(id);
   const resolveMutation = useResolveClarification(id);
@@ -96,10 +103,26 @@ export default function ContestQAPage() {
     return <div className="text-2xl font-bold">{t('contests.notFound')}</div>;
   }
 
+  // Counts appear once the list has loaded; until then, or after a failed
+  // load, there is nothing to count.
+  const counted = (label: string, items: unknown[]) =>
+    loaded ? `${label} (${items.length})` : label;
+
   const renderList = (items: typeof clarifications, emptyMessage: string) => {
-    if (isLoading) {
+    if (listState.status === 'error') {
       return (
-        <div className="space-y-4">
+        <QueryErrorState
+          error={listState.error}
+          retry={listState.retry}
+          retrying={listState.retrying}
+          failure={t('contest.qa.loadFailed')}
+        />
+      );
+    }
+    if (!loaded) {
+      return (
+        <div role="status" aria-busy className="space-y-4">
+          <span className="sr-only">{t('common.loading')}</span>
           <Skeleton className="h-32 w-full" />
           <Skeleton className="h-32 w-full" />
         </div>
@@ -148,6 +171,18 @@ export default function ContestQAPage() {
     );
   };
 
+  if (authLoading) {
+    return (
+      <PageLayout
+        pageId="contest-qa"
+        title={t('sidebar.qa')}
+        icon={<MessageCircle className="h-6 w-6 text-primary" />}
+      >
+        <QueryLoading />
+      </PageLayout>
+    );
+  }
+
   if (!user) {
     return (
       <PageLayout
@@ -159,7 +194,7 @@ export default function ContestQAPage() {
           <LogIn className="h-10 w-10 text-muted-foreground/40 mb-4" />
           <p className="text-muted-foreground mb-4">{t('auth.loginToAsk')}</p>
           <Button asChild>
-            <Link to="/login">{t('nav.signIn')}</Link>
+            <Link to={signInPath(currentPath())}>{t('nav.signIn')}</Link>
           </Button>
         </div>
       </PageLayout>
@@ -210,20 +245,22 @@ export default function ContestQAPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="all">
-            {t('contest.qa.all')} ({clarifications.length})
+            {counted(t('contest.qa.all'), clarifications)}
           </TabsTrigger>
           <TabsTrigger value="announcements">
-            {t('contest.qa.announcements')} ({announcements.length})
+            {counted(t('contest.qa.announcements'), announcements)}
           </TabsTrigger>
           <TabsTrigger value="questions">
-            {t('contest.qa.questions')} ({questions.length})
+            {counted(t('contest.qa.questions'), questions)}
           </TabsTrigger>
           {(showDmTab || canKeepDmTab) && (
             <TabsTrigger value="dm">
-              {isAdmin
-                ? t('contest.qa.directMessages')
-                : t('contest.qa.messages')}{' '}
-              ({directMessages.length})
+              {counted(
+                isAdmin
+                  ? t('contest.qa.directMessages')
+                  : t('contest.qa.messages'),
+                directMessages,
+              )}
             </TabsTrigger>
           )}
         </TabsList>

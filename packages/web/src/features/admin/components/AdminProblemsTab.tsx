@@ -164,11 +164,14 @@ function ProblemDialogForm({
   const [formData, setFormData] = useState(initial);
   const isEdit = problemId !== undefined;
 
-  const { data: attachments = [] } = useQuery({
-    queryKey: attachmentsQueryKey(problemId ?? 0),
-    queryFn: () => fetchAttachments(apiClient, problemId!),
-    enabled: isEdit,
-  });
+  // Offered to the content editor for embedding; the attachments section
+  // of the form reports its own load failure.
+  const attachments =
+    useQuery({
+      queryKey: attachmentsQueryKey(problemId ?? 0),
+      queryFn: () => fetchAttachments(apiClient, problemId!),
+      enabled: isEdit,
+    }).data ?? [];
 
   // `unsettled`: an earlier attempt to attach it is still running or was cut
   // off, so it may or may not be in the contest yet.

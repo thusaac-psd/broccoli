@@ -1,4 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Badge,
@@ -10,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
   Input,
+  QueryErrorState,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -18,6 +20,8 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { RolePermissionsRow } from '@/features/user-management/types';
+
+const NO_PERMISSIONS: string[] = [];
 
 interface ManageRolePermissionsDialogProps {
   role?: RolePermissionsRow;
@@ -46,11 +50,7 @@ export function ManageRolePermissionsDialog({
     }
   }, [open, roleName]);
 
-  const {
-    data: permissions = [],
-    isLoading,
-    isFetching,
-  } = useQuery({
+  const permissionsQuery = useQuery({
     queryKey: ['admin-role-permissions-detail', roleName],
     enabled: open && !!roleName,
     queryFn: async () => {
@@ -61,6 +61,9 @@ export function ManageRolePermissionsDialog({
       return [...data].sort((a, b) => a.localeCompare(b));
     },
   });
+  const { isFetching } = permissionsQuery;
+  const permissionsState = queryState(permissionsQuery);
+  const permissions = permissionsQuery.data ?? NO_PERMISSIONS;
 
   async function handleGrantPermission() {
     if (!roleName) return;
@@ -158,7 +161,15 @@ export function ManageRolePermissionsDialog({
           </div>
 
           <div className="rounded-md border max-h-80 overflow-y-auto">
-            {isLoading ? (
+            {permissionsState.status === 'error' ? (
+              <QueryErrorState
+                className="py-6"
+                error={permissionsState.error}
+                retry={permissionsState.retry}
+                retrying={permissionsState.retrying}
+                failure={t('users.roles.permissionsLoadFailed')}
+              />
+            ) : permissionsState.status === 'loading' ? (
               <div className="p-4 text-sm text-muted-foreground">
                 {t('admin.loading')}
               </div>

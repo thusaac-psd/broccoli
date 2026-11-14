@@ -204,7 +204,8 @@ function ContestProblemsGroup() {
 
   const resolvedTitle = contestTitle ?? contestData?.title ?? null;
 
-  const { data: problems = [] } = useContestProblems(contestId);
+  // Navigation only: the contest pages themselves report a failed load.
+  const problems = useContestProblems(contestId).data ?? [];
 
   if (!contestId) return <></>;
 

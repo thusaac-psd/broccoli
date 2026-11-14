@@ -9,10 +9,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  QueryErrorState,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Loader2, RotateCw, Trash2 } from 'lucide-react';
+import { Loader2, RotateCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
@@ -33,7 +34,8 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
   const queryClient = useQueryClient();
   const open = messageId !== null;
 
-  const { data, isLoading, error } = useDlqMessage(messageId);
+  const messageQuery = useDlqMessage(messageId);
+  const { data, isLoading, error } = messageQuery;
   const meta = data ? messageTypeMeta(data.message_type) : null;
 
   const [busy, setBusy] = useState(false);
@@ -91,11 +93,13 @@ export function DlqMessageDetailDialog({ messageId, onOpenChange }: Props) {
           </div>
         )}
 
-        {error && (
-          <div className="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
-            <p>{t('dlq.detail.loadError')}</p>
-          </div>
+        {error && !data && (
+          <QueryErrorState
+            error={error}
+            retry={() => void messageQuery.refetch()}
+            retrying={messageQuery.isFetching}
+            failure={t('dlq.detail.loadError')}
+          />
         )}
 
         {data && (

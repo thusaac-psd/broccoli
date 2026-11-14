@@ -1,6 +1,12 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button, FileDropZone, useConfirmDialog } from '@broccoli/web-sdk/ui';
+import {
+  Button,
+  FileDropZone,
+  QueryErrorState,
+  useConfirmDialog,
+} from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileCode, Loader2, Plus, Trash2, Upload } from 'lucide-react';
@@ -45,7 +51,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
 
   const queryKey = checkerSourceQueryKey(problemId);
 
-  const { data: existing, isLoading } = useQuery({
+  const existingQuery = useQuery({
     queryKey,
     queryFn: async (): Promise<CheckerSourceFile[]> => {
       const { data, error } = await apiClient.GET(
@@ -57,6 +63,11 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
     },
   });
 
+  const existing = existingQuery.data;
+  const existingState = queryState(existingQuery);
+  // An upload replaces the whole set, merged with the files already there,
+  // so it waits until those are known.
+  const filesKnown = existingQuery.isSuccess;
   const files = useMemo(() => existing ?? [], [existing]);
 
   const handleFilesSelected = useCallback((fileList: File[]) => {
@@ -83,7 +94,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
   }, []);
 
   const handleUpload = useCallback(async () => {
-    if (staged.length === 0) return;
+    if (staged.length === 0 || !filesKnown) return;
     setUploading(true);
 
     try {
@@ -118,6 +129,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
     errorMessage,
     staged,
     files,
+    filesKnown,
     apiClient,
     problemId,
     queryClient,
@@ -221,7 +233,7 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
                 type="button"
                 size="sm"
                 onClick={handleUpload}
-                disabled={uploading}
+                disabled={uploading || !filesKnown}
               >
                 <Upload className="h-3.5 w-3.5 mr-1" />
                 {t('admin.checkerSource.upload')}
@@ -259,7 +271,15 @@ export function CheckerSourceSection({ problemId }: CheckerSourceSectionProps) {
       )}
 
       {/* Existing files */}
-      {isLoading ? (
+      {existingState.status === 'error' ? (
+        <QueryErrorState
+          className="py-4"
+          error={existingState.error}
+          retry={existingState.retry}
+          retrying={existingState.retrying}
+          failure={t('admin.checkerSource.loadFailed')}
+        />
+      ) : existingState.status === 'loading' ? (
         <div className="py-4 text-center text-sm text-muted-foreground">
           {t('admin.loading')}
         </div>

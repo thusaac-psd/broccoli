@@ -1,9 +1,11 @@
 import { useApiBasePath, useApiClient } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
   FileDropZone,
   Input,
+  QueryErrorState,
   useConfirmDialog,
 } from '@broccoli/web-sdk/ui';
 import { formatBytes } from '@broccoli/web-sdk/utils';
@@ -33,6 +35,8 @@ import {
   isImageType,
 } from '@/features/problem/api/attachments';
 import { useAttachmentUpload } from '@/features/problem/hooks/useAttachmentUpload';
+
+const NO_ATTACHMENTS: Attachment[] = [];
 
 interface StagedFile {
   id: string;
@@ -75,10 +79,12 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
 
   const queryKey = useMemo(() => attachmentsQueryKey(problemId), [problemId]);
 
-  const { data: files = [], isLoading: filesLoading } = useQuery({
+  const filesQuery = useQuery({
     queryKey,
     queryFn: () => fetchAttachments(apiClient, problemId),
   });
+  const filesState = queryState(filesQuery);
+  const files = filesQuery.data ?? NO_ATTACHMENTS;
 
   const handleFilesSelected = useCallback((fileList: File[]) => {
     const newStaged = fileList.map((file) => ({
@@ -343,7 +349,15 @@ export function AttachmentsSection({ problemId }: AttachmentsSectionProps) {
       )}
 
       {/* Existing file listing */}
-      {filesLoading ? (
+      {filesState.status === 'error' ? (
+        <QueryErrorState
+          className="py-4"
+          error={filesState.error}
+          retry={filesState.retry}
+          retrying={filesState.retrying}
+          failure={t('admin.attachments.loadFailed')}
+        />
+      ) : filesState.status === 'loading' ? (
         <div className="py-4 text-center text-sm text-muted-foreground">
           {t('admin.loading')}
         </div>

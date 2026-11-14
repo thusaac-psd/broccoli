@@ -1,6 +1,7 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
+import { queryState } from '@broccoli/web-sdk/hooks';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { Button, Input } from '@broccoli/web-sdk/ui';
+import { Button, Input, QueryErrorState } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import { Check, Mail, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -60,7 +61,7 @@ function RecipientPicker({
   const apiClient = useApiClient();
   const [search, setSearch] = useState('');
 
-  const { data: participants = [] } = useQuery({
+  const participantsQuery = useQuery({
     queryKey: ['contest-participants', contestId],
     queryFn: async () => {
       const { data, error } = await apiClient.GET(
@@ -71,17 +72,18 @@ function RecipientPicker({
       return data;
     },
   });
+  const participantsState = queryState(participantsQuery);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return participants.filter(
+    return (participantsQuery.data ?? []).filter(
       (p) =>
         !p.is_deleted &&
         (!term ||
           p.username.toLowerCase().includes(term) ||
           String(p.user_id).includes(term)),
     );
-  }, [participants, search]);
+  }, [participantsQuery.data, search]);
 
   return (
     <div className="space-y-2">
@@ -119,7 +121,19 @@ function RecipientPicker({
             />
           </div>
           <div className="max-h-36 overflow-y-auto border rounded-md">
-            {filtered.length === 0 ? (
+            {participantsState.status === 'error' ? (
+              <QueryErrorState
+                className="py-4"
+                error={participantsState.error}
+                retry={participantsState.retry}
+                retrying={participantsState.retrying}
+                failure={t('admin.participants.loadFailed')}
+              />
+            ) : participantsState.status === 'loading' ? (
+              <div className="p-3 text-sm text-muted-foreground text-center">
+                {t('common.loading')}
+              </div>
+            ) : filtered.length === 0 ? (
               <div className="p-3 text-sm text-muted-foreground text-center">
                 {t('clarification.dm.noParticipants')}
               </div>

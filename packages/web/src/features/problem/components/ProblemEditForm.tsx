@@ -73,10 +73,12 @@ function ProblemEditFields({
   const saving = useAsyncSubmit();
 
   const [formData, setFormData] = useState(initial);
-  const { data: attachments = [] } = useQuery({
-    queryKey: attachmentsQueryKey(problemIdNum),
-    queryFn: () => fetchAttachments(apiClient, problemIdNum),
-  });
+  // Offered to the content editor for embedding only.
+  const attachments =
+    useQuery({
+      queryKey: attachmentsQueryKey(problemIdNum),
+      queryFn: () => fetchAttachments(apiClient, problemIdNum),
+    }).data ?? [];
 
   async function save() {
     const { error } = await apiClient.PATCH('/problems/{id}', {
