@@ -83,6 +83,7 @@ fn completed(task_id: &str) -> TaskReply {
             task_type: Some("operation".to_string()),
             operation: Some("operation".to_string()),
             worker_id: Some("worker-a".to_string()),
+            fault: None,
         },
     }
 }
@@ -101,8 +102,8 @@ async fn a_reply_reaches_only_the_replica_that_published_the_task() {
     let waiters_b: OperationWaiters = Arc::new(DashMap::new());
     let (tx_a, rx_a) = oneshot::channel();
     let (tx_b, rx_b) = oneshot::channel();
-    waiters_a.insert("task-1".to_string(), OperationWaiter::new(tx_a, None));
-    waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b, None));
+    waiters_a.insert("task-1".to_string(), OperationWaiter::new(tx_a, None, None));
+    waiters_b.insert("task-1".to_string(), OperationWaiter::new(tx_b, None, None));
     let consumer_a = tokio::spawn(consume_operation_results(
         mq.reply_inbox("replica-a"),
         outstanding_check(&mq, "replica-a"),
@@ -186,6 +187,7 @@ async fn operation_result_burst_has_no_missing_waiters() {
         metrics: Some(metrics.clone()),
         evaluate_batches,
         judgement: None,
+        faults: None,
     };
 
     let batch_id = start_operation_batch(
@@ -346,7 +348,7 @@ async fn an_operation_a_stale_redis_snapshot_lost_fails_its_waiter() {
             }
         }
         let (tx, rx) = oneshot::channel();
-        let mut waiter = OperationWaiter::new(tx, None);
+        let mut waiter = OperationWaiter::new(tx, None, None);
         waiter.published = true;
         waiters.insert(id.to_string(), waiter);
         receivers.push(rx);

@@ -237,6 +237,7 @@ mod tests {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: None,
         }
     }
 

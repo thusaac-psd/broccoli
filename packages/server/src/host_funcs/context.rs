@@ -81,6 +81,32 @@ pub struct OperationHostDeps {
     /// The judgement the operations started with these deps run for, if
     /// any; each task carries it (see `common::worker::Task::judgement`).
     pub judgement: Option<common::worker::JudgementRef>,
+    /// The dispatch these operations work for, which records the platform
+    /// faults they meet (see `services::judging::DispatchFaults`); `None`
+    /// outside a dispatch.
+    pub faults: Option<crate::services::judging::DispatchFaults>,
+}
+
+impl OperationHostDeps {
+    /// These deps for the plugin call tree running on this thread: what its
+    /// operations meet is recorded for its dispatch.
+    pub fn for_current_call(&self) -> Self {
+        Self {
+            faults: crate::services::judging::DispatchFaults::of_current_call(),
+            ..self.clone()
+        }
+    }
+
+    /// `options` for a plugin call made for the same dispatch as these deps.
+    pub fn call_options(
+        &self,
+        options: plugin_core::executor::CallOptions,
+    ) -> plugin_core::executor::CallOptions {
+        match &self.faults {
+            Some(faults) => options.with_locals(faults.call_locals()),
+            None => options,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -100,6 +126,17 @@ pub struct EvaluateHostDeps {
     pub redis_client: Option<Arc<redis::Client>>,
     pub plugin_config_cache: crate::services::plugin_config_cache::PluginConfigCache,
     pub cancel_primitive_enabled: bool,
+}
+
+impl EvaluateHostDeps {
+    /// These deps for the plugin call tree running on this thread (see
+    /// [`OperationHostDeps::for_current_call`]).
+    pub fn for_current_call(&self) -> Self {
+        Self {
+            operation_deps: self.operation_deps.for_current_call(),
+            ..self.clone()
+        }
+    }
 }
 
 impl HostFunctionSystemDeps {
@@ -124,6 +161,7 @@ impl HostFunctionSystemDeps {
             metrics: self.metrics.clone(),
             evaluate_batches: self.evaluate_batches.clone(),
             judgement: None,
+            faults: None,
         }
     }
 }

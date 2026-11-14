@@ -209,8 +209,9 @@ impl OperationTaskExecutor {
     /// The failed result of a job this worker cannot run for lack of a
     /// platform tool. Failing it at once, without the execution retries, keeps
     /// one misconfigured worker from holding every such job through its retry
-    /// budget: the server sees a failed operation (a `SystemError` for the
-    /// test case), and the error is logged once per tool.
+    /// budget. The result carries [`OperationFault::PlatformToolMissing`], so
+    /// the server ends the judgement once, with that cause, instead of
+    /// retrying it; the error is logged once per tool.
     fn missing_tool_result(&self, task_id: String, missing: &MissingPlatformTool) -> TaskResult {
         let first = self
             .reported_missing
@@ -229,6 +230,7 @@ impl OperationTaskExecutor {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: Some(OperationFault::PlatformToolMissing),
         }
     }
 
@@ -442,6 +444,7 @@ impl Executor for OperationTaskExecutor {
                 task_type: None,
                 operation: None,
                 worker_id: None,
+                fault: None,
             }),
             // Propagate infra/execution errors (blob fetch, sandbox setup, IO) so
             // the worker can classify transient failures and retry them via the

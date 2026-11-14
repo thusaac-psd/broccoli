@@ -123,6 +123,9 @@ fn fail_waiter(waiters: &OperationWaiters, task_id: &str, reason: &str) -> bool 
     let Some((task_id, waiter)) = waiters.remove(task_id) else {
         return false;
     };
+    if let Some(faults) = &waiter.faults {
+        faults.record(common::worker::OperationFault::OperationLost, reason);
+    }
     let _ = waiter.result_tx.send(TaskResult {
         task_id,
         success: false,
@@ -131,6 +134,7 @@ fn fail_waiter(waiters: &OperationWaiters, task_id: &str, reason: &str) -> bool 
         task_type: None,
         operation: None,
         worker_id: None,
+        fault: Some(common::worker::OperationFault::OperationLost),
     });
     true
 }
@@ -185,6 +189,9 @@ fn handle_reply(
             let task_id = result.task_id.clone();
             let task_success = result.success;
             let outcome = if let Some((_, waiter)) = waiters.remove(&task_id) {
+                if let (Some(fault), Some(faults)) = (result.fault, &waiter.faults) {
+                    faults.record(fault, result.error.clone().unwrap_or_default());
+                }
                 let elapsed = waiter.published_at.elapsed();
                 let outcome = if waiter.result_tx.send(result.clone()).is_err() {
                     error!(%task_id, "Failed to send operation result to waiter (receiver dropped)");
@@ -230,8 +237,8 @@ mod tests {
         let waiters: OperationWaiters = Arc::new(DashMap::new());
         let (tx_a, rx_a) = tokio::sync::oneshot::channel();
         let (tx_b, rx_b) = tokio::sync::oneshot::channel();
-        waiters.insert("a".into(), OperationWaiter::new(tx_a, None));
-        waiters.insert("b".into(), OperationWaiter::new(tx_b, None));
+        waiters.insert("a".into(), OperationWaiter::new(tx_a, None, None));
+        waiters.insert("b".into(), OperationWaiter::new(tx_b, None, None));
 
         assert_eq!(fail_all_waiters(&waiters, "stream lost"), 2);
         assert!(waiters.is_empty());

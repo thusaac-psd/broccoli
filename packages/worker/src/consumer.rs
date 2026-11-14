@@ -367,6 +367,7 @@ impl WorkerConsumer {
             task_type: None,
             operation: None,
             worker_id: None,
+            fault: None,
         };
         error_result.attach_worker_metadata(task, &self.worker_id);
         if publish_result(
@@ -432,6 +433,7 @@ mod tests {
                 task_type: None,
                 operation: None,
                 worker_id: None,
+                fault: None,
             })
         }
     }

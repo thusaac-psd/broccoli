@@ -7,7 +7,29 @@ use broccoli_server_sdk::types::{
 };
 use common::StatusPhase;
 
+use super::fault::Recorded;
 use super::unit::{Unit, cascade};
+
+/// `update` as the dispatch's platform `fault` decides it: an update that
+/// ends the judgement as a system error carries the fault's code and
+/// description, whatever the plugin reported, so the system-error retry
+/// treats it by its cause (see [`super::fault`]). Any other update is
+/// unchanged.
+pub(crate) fn with_dispatch_fault(
+    mut update: SubmissionUpdate,
+    fault: Option<Recorded>,
+) -> SubmissionUpdate {
+    let Some(fault) = fault else {
+        return update;
+    };
+    let ends_in_system_error = update.status.is_some_and(|s| s.is_terminal())
+        && matches!(update.verdict, Some(Some(Verdict::SystemError)));
+    if ends_in_system_error {
+        update.error_code = Some(Some(fault.fault.code().to_string()));
+        update.error_message = Some(Some(fault.message));
+    }
+    update
+}
 
 /// The write fence every plugin write to a judgement goes through: the row
 /// (`alias`) is the judgement the caller names, of the submission it names,
@@ -201,6 +223,52 @@ fn push_double_opt_str<P: SqlBindSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::worker::OperationFault;
+
+    fn update(status: SubmissionStatus, verdict: Option<Verdict>) -> SubmissionUpdate {
+        SubmissionUpdate {
+            submission_id: 1,
+            judgement_id: 1,
+            judge_epoch: 1,
+            status: Some(status),
+            verdict: Some(verdict),
+            error_code: Some(Some("PLUGIN_SAYS".into())),
+            ..Default::default()
+        }
+    }
+
+    fn lost() -> Option<Recorded> {
+        Some(Recorded {
+            fault: OperationFault::OperationLost,
+            message: "lost".into(),
+        })
+    }
+
+    #[test]
+    fn a_system_error_under_a_platform_fault_carries_the_faults_code() {
+        let u = with_dispatch_fault(
+            update(SubmissionStatus::Judged, Some(Verdict::SystemError)),
+            lost(),
+        );
+        assert_eq!(u.error_code, Some(Some("OPERATION_LOST".into())));
+        assert_eq!(u.error_message, Some(Some("lost".into())));
+    }
+
+    #[test]
+    fn other_updates_keep_what_the_plugin_wrote() {
+        for u in [
+            update(SubmissionStatus::Judged, Some(Verdict::Accepted)),
+            update(SubmissionStatus::Running, Some(Verdict::SystemError)),
+        ] {
+            let before = u.error_code.clone();
+            assert_eq!(with_dispatch_fault(u, lost()).error_code, before);
+        }
+        let u = update(SubmissionStatus::Judged, Some(Verdict::SystemError));
+        assert_eq!(
+            with_dispatch_fault(u, None).error_code,
+            Some(Some("PLUGIN_SAYS".into()))
+        );
+    }
 
     /// Records bound values and hands back sequential `$N` placeholders, so a
     /// test can assert exactly what SQL `push_judge_sets` builds.

@@ -49,6 +49,40 @@ pub struct HeartbeatPayload {
     pub arch: Option<String>,
     pub cpu_count: Option<u32>,
     pub pid: Option<u32>,
+    /// The platform tools this worker found missing at boot: every job that
+    /// needs one fails on it.
+    pub missing_platform_tools: Vec<String>,
+}
+
+/// Why an operation failed when the failure is the platform's, not the job's.
+/// The server's system-error retry decides the judgement it ends by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OperationFault {
+    /// The server could not publish the operation: the queue did not answer.
+    QueueUnreachable,
+    /// The queue lost the operation or its reply.
+    OperationLost,
+    /// The worker that took the operation lacks a platform tool it needs.
+    PlatformToolMissing,
+}
+
+impl OperationFault {
+    /// Every fault, beside the definition so a new one is listed with it.
+    pub const ALL: [OperationFault; 3] = [
+        Self::QueueUnreachable,
+        Self::OperationLost,
+        Self::PlatformToolMissing,
+    ];
+
+    /// The error code a judgement this fault ends carries.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::QueueUnreachable => "QUEUE_UNREACHABLE",
+            Self::OperationLost => "OPERATION_LOST",
+            Self::PlatformToolMissing => "PLATFORM_TOOL_MISSING",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +98,9 @@ pub struct TaskResult {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
+    /// Set when the operation failed for the platform, not the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<OperationFault>,
 }
 
 impl TaskResult {
@@ -140,6 +177,7 @@ mod reply_tests {
                 task_type: None,
                 operation: None,
                 worker_id: None,
+                fault: None,
             },
         };
 
@@ -166,6 +204,7 @@ mod reply_tests {
             task_type: Some("operation".to_string()),
             operation: Some("operation".to_string()),
             worker_id: Some("worker-a".to_string()),
+            fault: None,
         };
 
         assert_eq!(

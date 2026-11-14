@@ -133,6 +133,7 @@ impl WindowedSession for EvaluateDriver {
             &self.caller_plugin_id,
             &self.callback_fn,
             input,
+            &self.deps.operation_deps,
         )
         .await?;
         Ok(SessionDecision {
@@ -280,46 +281,23 @@ pub const SESSION_ENDED_WITHOUT_VERDICT: &str = "PLUGIN_NO_VERDICT";
 /// Leave the judgement a session judged terminal: finalize it as
 /// `SystemError` if the plugin did not (a no-op when it did, or when the
 /// judgement was since requeued or superseded), then fire its after-judging
-/// hooks. A session that ended without a verdict while the queue is
-/// unreachable hands its judgement back instead, with no retry spent, as a
-/// failed dispatch does (`submission_dispatch::record_dispatch_failure`).
+/// hooks. A platform fault the session's operations met decides the error
+/// code, as for a failed dispatch (`submission_dispatch::record_dispatch_failure`).
 async fn finish_judgement(
     deps: &EvaluateHostDeps,
     completion: &DetachedSubmissionCompletion,
     error_code: &str,
     error_message: &str,
 ) {
-    let queue_reachable = match &deps.operation_deps.operation_publisher {
-        Some(publisher) => publisher.queue_reachable().await,
-        None => true,
+    let fault = deps
+        .operation_deps
+        .faults
+        .as_ref()
+        .and_then(|faults| faults.get());
+    let (error_code, error_message) = match &fault {
+        Some(fault) => (fault.fault.code(), fault.message.as_str()),
+        None => (error_code, error_message),
     };
-    if !queue_reachable {
-        match crate::services::judging::release_dispatch(
-            &deps.db,
-            crate::services::judging::Unit::Judgement,
-            completion.judgement_id,
-            completion.judge_epoch,
-        )
-        .await
-        {
-            Ok(true) => {
-                tracing::warn!(
-                    submission_id = completion.submission_id,
-                    judgement_id = completion.judgement_id,
-                    error_code,
-                    "Judging session ended without a verdict while the message queue is unreachable; handed the judgement back"
-                );
-                return;
-            }
-            Ok(false) => {}
-            Err(e) => tracing::error!(
-                submission_id = completion.submission_id,
-                judgement_id = completion.judgement_id,
-                error = %e,
-                "Failed to hand back a judgement while the message queue is unreachable"
-            ),
-        }
-    }
     match crate::services::judging::fail_dispatch(
         &deps.db,
         crate::services::judging::Unit::Judgement,
@@ -358,6 +336,7 @@ async fn call_detached_evaluate_callback(
     plugin_id: &str,
     callback_fn: &str,
     input: DetachedEvaluateCallbackInput,
+    deps: &crate::host_funcs::context::OperationHostDeps,
 ) -> anyhow::Result<DetachedEvaluateCallbackOutput> {
     let input_bytes = serde_json::to_vec(&input)
         .with_context(|| "Failed to serialize detached evaluate callback input")?;
@@ -366,7 +345,7 @@ async fn call_detached_evaluate_callback(
             plugin_id,
             callback_fn,
             input_bytes,
-            plugin_manager.get_config().background_call(),
+            deps.call_options(plugin_manager.get_config().background_call()),
         )
         .await
         .with_context(|| "Detached evaluate callback failed")?;

@@ -75,7 +75,12 @@
 //! while fewer than `max` retries were spent. A unit's `dispatch_retries`
 //! counts requeues after it was abandoned (budget `max_dispatch_retries`);
 //! a submission's `system_error_retries` counts system-error retries since
-//! the last rejudge (budget `max_system_error_retries`).
+//! the last rejudge (budget `max_system_error_retries`). Only a failure of
+//! judging the submission spends it: a system error is classed by its error
+//! code (see `fault`), and one the platform caused (the queue was unreachable
+//! or lost an operation) goes back to the queue for free, while a platform
+//! misconfiguration that fails every attempt alike stands at once and is
+//! dead-lettered.
 //!
 //! # Locks
 //!
@@ -85,6 +90,7 @@
 //! each other in a cycle.
 
 mod budget;
+mod fault;
 mod notify;
 mod open;
 mod plugin_writes;
@@ -95,6 +101,8 @@ mod unit;
 mod tests;
 
 pub(crate) use budget::RetryBudget;
+pub use fault::DispatchFaults;
+pub(crate) use fault::SystemErrorClass;
 pub use notify::CLAIM_CHANNEL;
 pub(crate) use notify::ClaimWake;
 #[cfg(test)]
@@ -105,11 +113,12 @@ pub(crate) use open::{
     open_judgement,
 };
 pub(crate) use plugin_writes::{
-    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, write_fence,
+    SqlBindSink, code_run_write, code_run_write_fence, judgement_write, with_dispatch_fault,
+    write_fence,
 };
 pub(crate) use unit::SystemErrorPass;
 pub(crate) use unit::{
     Abandoned, ClaimedCodeRun, ClaimedJudgement, claim_code_runs, claim_judgements, fail_dispatch,
-    reclaim_abandoned, refresh_leases, release_dispatch, resolve_if_settled, retry_system_errors,
+    reclaim_abandoned, refresh_leases, resolve_if_settled, retry_system_errors,
 };
 pub use unit::{Unit, UnitCounts, count_in_flight, release_leases};

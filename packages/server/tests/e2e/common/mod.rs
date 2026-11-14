@@ -171,7 +171,7 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS).await
+            Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS, worker_tools_dir()).await
         }
     }
 
@@ -179,7 +179,7 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(false, Self::DEFAULT_DB_MAX_CONNECTIONS).await
+            Self::spawn_internal(false, Self::DEFAULT_DB_MAX_CONNECTIONS, worker_tools_dir()).await
         }
     }
 
@@ -196,8 +196,19 @@ impl E2eTestApp {
         if let Ok(server_url) = std::env::var("E2E_SERVER_URL") {
             Self::connect(&server_url).await
         } else {
-            Self::spawn_internal(true, db_max_connections).await
+            Self::spawn_internal(true, db_max_connections, worker_tools_dir()).await
         }
+    }
+
+    /// Like [`spawn`], with a worker whose tools directory holds no
+    /// platform tool. In-process only.
+    pub async fn spawn_without_platform_tools() -> Self {
+        let empty = std::env::temp_dir().join(format!(
+            "broccoli-e2e-no-tools-{}",
+            TEST_COUNTER.load(Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&empty).expect("create an empty tools dir");
+        Self::spawn_internal(true, Self::DEFAULT_DB_MAX_CONNECTIONS, Some(empty)).await
     }
 
     async fn connect(server_url: &str) -> Self {
@@ -255,7 +266,11 @@ impl E2eTestApp {
         }
     }
 
-    async fn spawn_internal(load_plugins: bool, db_max_connections: u32) -> Self {
+    async fn spawn_internal(
+        load_plugins: bool,
+        db_max_connections: u32,
+        tools_dir: Option<PathBuf>,
+    ) -> Self {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let plugin_cache = tempfile::tempdir().expect("plugin cache tempdir");
 
@@ -506,7 +521,7 @@ impl E2eTestApp {
                     blob_store.clone(),
                     worker_cache_dir,
                     e2e_metrics.clone(),
-                    worker_tools_dir(),
+                    tools_dir,
                 )
                 .await
                 .expect("Failed to initialize e2e operation executor"),
@@ -544,6 +559,7 @@ impl E2eTestApp {
                                 task_type: Some(task.task_type.clone()),
                                 operation: Some(task.executor_name.clone()),
                                 worker_id: None,
+                                fault: None,
                             },
                         };
                         let reply = TaskReply::Completed { result };
