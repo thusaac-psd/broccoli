@@ -48,14 +48,27 @@ the arm and traps the guest.
   `_initialize` trapped and runs the next call on it without initializing it
   again.
 
+## A call that did not return normally resets the store
+
+`raw_call` marks the store for reset after any export call that returned an
+error from wasmtime: a trap (a cancel, a timeout, running out of fuel, a guest
+panic), a failed host function or a WASI exit. Each stops the guest
+mid-execution and can leave its memory half updated (allocator state, guest
+locks, half-written data); the published crate runs the next call on that
+memory. An error the guest reports through its output returns normally and keeps
+the store. The decision sits in `raw_call` because only there is the outcome
+still typed: the error a caller receives has turned an interrupt into the
+message `timeout` and a memory limit into `oom`.
+
 ## The test hook
 
 The patch emits a trace event, `call registered with the timer`, on the calling
 thread right after `Start` is sent.
 `packages/plugin-core/tests/extism_cancel.rs` delivers a cancel from inside that
 event and checks that the guest traps, in an export, in a start function and in
-`_initialize`, that a zero manifest timeout stops a start function, and that the
-call after a cancelled `_initialize` initializes the guest again. Against the
+`_initialize`, that a zero manifest timeout stops a start function, that the
+call after a cancelled `_initialize` initializes the guest again, and that the
+call after a guest cancelled mid-export runs on a fresh instance. Against the
 published crate each of these tests hangs or fails.
 
 Upstream report: `<link to upstream issue>`.

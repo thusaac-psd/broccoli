@@ -1012,7 +1012,12 @@ impl Plugin {
         }
 
         self.stop_timer();
-        self.store_needs_reset = name == "_start";
+        // A guest that did not return normally, because it trapped (a cancel,
+        // a timeout, running out of fuel, a panic), a host function failed or
+        // it exited, stopped mid-execution and may have left its memory half
+        // updated, so the next call starts from a fresh store. An error the
+        // guest reports through its output returns normally and keeps it.
+        self.store_needs_reset = name == "_start" || res.is_err();
 
         let mut rc = -1;
         if self.store.get_fuel().is_ok_and(|x| x == 0) {
