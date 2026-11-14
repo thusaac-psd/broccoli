@@ -160,32 +160,154 @@ pub struct UserConfig {
     pub runtimes: HashMap<String, String>,
 }
 
+/// A single-valued setting of `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    Contest,
+    Language,
+    Server,
+    Tls,
+}
+
+impl ConfigKey {
+    pub const ALL: [ConfigKey; 4] = [Self::Contest, Self::Language, Self::Server, Self::Tls];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Contest => "contest",
+            Self::Language => "language",
+            Self::Server => "server",
+            Self::Tls => "tls",
+        }
+    }
+}
+
+impl std::str::FromStr for ConfigKey {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|key| key.name() == s)
+            .ok_or_else(|| {
+                let names: Vec<_> = Self::ALL.iter().map(|k| k.name()).collect();
+                anyhow::anyhow!("Unknown config key '{s}'. Valid keys: {}", names.join(", "))
+            })
+    }
+}
+
+impl std::fmt::Display for ConfigKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl UserConfig {
+    pub fn get(&self, key: ConfigKey) -> Option<&str> {
+        self.value(key).as_deref()
+    }
+
+    fn value(&self, key: ConfigKey) -> &Option<String> {
+        match key {
+            ConfigKey::Contest => &self.contest,
+            ConfigKey::Language => &self.language,
+            ConfigKey::Server => &self.server,
+            ConfigKey::Tls => &self.tls,
+        }
+    }
+
+    fn value_mut(&mut self, key: ConfigKey) -> &mut Option<String> {
+        match key {
+            ConfigKey::Contest => &mut self.contest,
+            ConfigKey::Language => &mut self.language,
+            ConfigKey::Server => &mut self.server,
+            ConfigKey::Tls => &mut self.tls,
+        }
+    }
+
+    /// `self` with every value `over` sets taking precedence.
+    fn overlaid_with(mut self, over: UserConfig) -> UserConfig {
+        for key in ConfigKey::ALL {
+            if let Some(value) = over.value(key).clone() {
+                *self.value_mut(key) = Some(value);
+            }
+        }
+        // Per language, so overriding one runtime keeps the others.
+        self.runtimes.extend(over.runtimes);
+        self
+    }
+}
+
+/// The two `config.toml` files: the machine's (`/etc/broccoli`, preseeded by
+/// whoever set up the lab) and the user's, whose values take precedence.
+/// Commands that change the configuration change the user's file only, so a
+/// machine value is never copied into it.
+pub struct ConfigLayers {
+    system_path: PathBuf,
+    user_path: PathBuf,
+    pub system: UserConfig,
+    pub user: UserConfig,
+}
+
+impl ConfigLayers {
+    pub fn load() -> Self {
+        Self::load_from(system_config_path(), config_path())
+    }
+
+    fn load_from(system_path: PathBuf, user_path: PathBuf) -> Self {
+        Self {
+            system: load_toml(&system_path),
+            user: load_toml(&user_path),
+            system_path,
+            user_path,
+        }
+    }
+
+    pub fn user_path(&self) -> &Path {
+        &self.user_path
+    }
+
+    pub fn system_path(&self) -> &Path {
+        &self.system_path
+    }
+
+    /// What commands use: the user's values over the machine's.
+    pub fn merged(&self) -> UserConfig {
+        self.system.clone().overlaid_with(self.user.clone())
+    }
+
+    /// Set `key` in the user's file.
+    pub fn set(&mut self, key: ConfigKey, value: String) -> anyhow::Result<()> {
+        *self.user.value_mut(key) = Some(value);
+        self.save_user()
+    }
+
+    /// Remove `key` from the user's file. Returns the machine's value, which
+    /// applies from now on, if it sets one.
+    pub fn unset(&mut self, key: ConfigKey) -> anyhow::Result<Option<&str>> {
+        *self.user.value_mut(key) = None;
+        self.save_user()?;
+        Ok(self.system.get(key))
+    }
+
+    fn save_user(&self) -> anyhow::Result<()> {
+        if let Some(parent) = self.user_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create config directory")?;
+        }
+        let content = toml::to_string_pretty(&self.user)?;
+        std::fs::write(&self.user_path, content)
+            .with_context(|| format!("Failed to write {}", self.user_path.display()))
+    }
+}
+
 fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-/// Load config, merging `/etc/broccoli/config.toml` with user overrides taking precedence.
+/// The configuration commands use: `/etc/broccoli/config.toml` with the
+/// user's `config.toml` taking precedence.
 pub fn load_user_config() -> UserConfig {
-    let mut cfg = load_toml(&system_config_path());
-
-    let user = load_toml(&config_path());
-    if user.contest.is_some() {
-        cfg.contest = user.contest;
-    }
-    if user.language.is_some() {
-        cfg.language = user.language;
-    }
-    if user.server.is_some() {
-        cfg.server = user.server;
-    }
-    if user.tls.is_some() {
-        cfg.tls = user.tls;
-    }
-    // merge per-key so overriding one language keeps the system's other runtimes
-    for (lang, cmd) in user.runtimes {
-        cfg.runtimes.insert(lang, cmd);
-    }
-    cfg
+    ConfigLayers::load().merged()
 }
 
 fn system_config_path() -> PathBuf {
@@ -209,22 +331,74 @@ fn load_toml(path: &Path) -> UserConfig {
     }
 }
 
-/// Save user configuration to `~/.config/broccoli/config.toml`.
-pub fn save_user_config(config: &UserConfig) -> anyhow::Result<()> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create config directory")?;
-    }
-    let content = toml::to_string_pretty(config)?;
-    std::fs::write(&path, &content).context("Failed to write config file")?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::credentials::StoredTokens;
     use std::fs;
+
+    fn layers(system: &str, user: Option<&str>) -> (tempfile::TempDir, ConfigLayers) {
+        let dir = tempfile::tempdir().unwrap();
+        let system_path = dir.path().join("etc/config.toml");
+        fs::create_dir_all(system_path.parent().unwrap()).unwrap();
+        fs::write(&system_path, system).unwrap();
+        let user_path = dir.path().join("home/config.toml");
+        if let Some(user) = user {
+            fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+            fs::write(&user_path, user).unwrap();
+        }
+        let layers = ConfigLayers::load_from(system_path, user_path);
+        (dir, layers)
+    }
+
+    #[test]
+    fn setting_a_key_never_copies_machine_values_into_the_user_file() {
+        let (_dir, mut layers) = layers("server = \"http://judge.lab\"\ntls = \"system\"\n", None);
+        layers.set(ConfigKey::Language, "cpp".into()).unwrap();
+
+        let saved: UserConfig =
+            toml::from_str(&fs::read_to_string(layers.user_path()).unwrap()).unwrap();
+        assert_eq!(saved.language.as_deref(), Some("cpp"));
+        assert_eq!(saved.server, None);
+        assert_eq!(saved.tls, None);
+        assert_eq!(
+            layers.merged().get(ConfigKey::Server),
+            Some("http://judge.lab")
+        );
+    }
+
+    #[test]
+    fn unsetting_a_key_removes_the_users_value_and_reports_the_machines() {
+        let (_dir, mut layers) = layers(
+            "server = \"http://judge.lab\"\n",
+            Some("server = \"http://mine\"\ncontest = \"3\"\n"),
+        );
+        assert_eq!(layers.merged().get(ConfigKey::Server), Some("http://mine"));
+
+        assert_eq!(
+            layers.unset(ConfigKey::Server).unwrap(),
+            Some("http://judge.lab")
+        );
+        assert_eq!(layers.unset(ConfigKey::Contest).unwrap(), None);
+        let reloaded = ConfigLayers::load_from(
+            layers.system_path().to_path_buf(),
+            layers.user_path().to_path_buf(),
+        );
+        assert_eq!(reloaded.user.server, None);
+        assert_eq!(reloaded.user.contest, None);
+        assert_eq!(
+            reloaded.merged().get(ConfigKey::Server),
+            Some("http://judge.lab")
+        );
+    }
+
+    #[test]
+    fn config_keys_parse_from_their_names() {
+        for key in ConfigKey::ALL {
+            assert_eq!(key.name().parse::<ConfigKey>().unwrap(), key);
+        }
+        assert!("colour".parse::<ConfigKey>().is_err());
+    }
 
     #[test]
     fn test_config_dir() {
