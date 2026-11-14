@@ -10,7 +10,7 @@ grep -q 'reverse_proxy' "$cf" || { echo "FAIL: reverse_proxy block missing"; exi
 
 # air-gap: no ACME, no email, no internal issuer
 grep -qi 'acme'          "$cf" && { echo "FAIL: acme present"; exit 1; }
-grep -q  '@'             "$cf" && { echo "FAIL: email address present"; exit 1; }
+grep -Eq '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[[:alpha:]]+' "$cf" && { echo "FAIL: email address present"; exit 1; }
 grep -q  'tls internal'  "$cf" && { echo "FAIL: tls internal present"; exit 1; }
 # fail-closed offline: auto_https fully OFF. `disable_redirects` alone leaves the
 # ACME/cert-management machinery running — with no internet it churns on failed
