@@ -45,20 +45,36 @@ it with a warning. A token means "running guest code", not "call in progress".
   resuming call first, so neither class starves the other under a flood.
 - A queued waiter is an async future holding no thread. Dropping it, as a
   client that went away does, leaves the queue.
-- A `Request` call is not queued when the wait ahead of it is expected to pass
-  `admission::SHED_WAIT` (2 s): the calls queued ahead of it plus itself,
-  times the running average duration of finished request calls, over the
-  request calls admitted now. It fails at once with
-  `PluginError::Unavailable`, so a person gets a quick 503 to retry instead of
-  waiting out the request's deadline behind slower calls. Background calls
-  are never shed, and nothing is shed before a request call has finished.
+
+Request path calls (`Request` and `Route`, the interactive kinds) are admitted
+per plugin function, its lane: the calls of one function cost alike, while two
+functions of one plugin can cost a thousand times apart. A slow route therefore
+never decides what happens to a cheap visibility query.
+
+- One lane holds at most `Capacity::lane_cap` admitted calls, `max(1, C/2)`.
+  However many calls a slow function gets, the other half of the tokens stays
+  free for every other function, including other routes of the same plugin.
+- A request path call queues at most `admission::SHED_WAIT` (2 s), then fails
+  with `PluginError::Unavailable`, a 503 `PLUGIN_UNAVAILABLE` with
+  `Retry-After`. No call waits out the request's deadline in the queue, even
+  when a burst of slow calls arrives after only cheap ones.
+- A call whose lane is full is refused at once when the lane's own queue is
+  expected to take longer than `SHED_WAIT` to drain: the calls queued in the
+  lane plus itself, times the running average duration of that lane's finished
+  calls, over the lane's admitted calls. A lane with no finished call yet
+  sheds nothing at once.
+- `Request` calls, the host's own visibility queries and request hooks that the
+  core API depends on, take a freed interactive token ahead of `Route` calls
+  (plugin HTTP routes).
+- Background calls are never shed and queue until their deadline.
 
 Every admitted call holds one guest thread until it returns, parked or not,
 so each `CallKind` has its own cap on admitted calls:
 
 | Kind | Calls | Cap |
 |---|---|---|
-| `Request` | interactive calls | `REQUESTS_PER_TOKEN` (8) per token |
+| `Request` | visibility queries, request hooks | `REQUESTS_PER_TOKEN` (4) per token |
+| `Route` | plugin HTTP routes | `REQUESTS_PER_TOKEN` (4) per token |
 | `Judging` | `on_submission`, `on_code_run` | this server's in-flight cap |
 | `Work` | evaluators, detached callbacks, timers | this server's fan-out bound + `C` |
 | `Hook` | background hooks | `C` |
@@ -71,8 +87,8 @@ server keeps the judging and work caps at its current shares
 (`dispatcher::fanout::spawn_admission_sizing`).
 
 The kind is a required argument. `CallOptions` has no default and the trait
-has no convenience `call`; every site picks `interactive`, `judging`,
-`background`, `background_hook`, `lifecycle` or `nested`. Hooks take theirs
+has no convenience `call`; every site picks `interactive`, `route`,
+`judging`, `background`, `background_hook`, `lifecycle` or `nested`. Hooks take theirs
 from the dispatch site (`hooks::dispatch_hooks`), because one `PluginHook`
 serves both the `before_submission` request path and background
 notifications.
