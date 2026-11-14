@@ -301,7 +301,8 @@ pub struct WebRouteConfig {
 
     pub component: String,
 
-    pub meta: Option<HashMap<String, String>>,
+    /// Translation key of the page's name, shown in the browser tab.
+    pub title: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

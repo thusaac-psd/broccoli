@@ -19,6 +19,9 @@ import { ListSkeleton } from '@/components/ListSkeleton';
 import { PageLayout } from '@/components/PageLayout';
 import { getContestStatus } from '@/features/contest/utils/status';
 import { SubmissionsTable } from '@/features/submission/components/SubmissionsTable';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('overview.title');
 
 export default function OverviewPage() {
   const { t } = useTranslation();

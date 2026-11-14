@@ -25,6 +25,7 @@ import {
   useResolveClarification,
   useToggleReplyPublic,
 } from '@/features/clarification/hooks/use-clarifications';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
 
 type QaTab = 'all' | 'announcements' | 'questions' | 'dm';
 
@@ -33,6 +34,8 @@ function parseQaTab(value: string | null): QaTab {
     ? value
     : 'all';
 }
+
+export const handle: RouteHandle = contestPageTitle('sidebar.qa');
 
 export default function ContestQAPage() {
   const { t } = useTranslation();

@@ -7,6 +7,9 @@ import { Link, useParams } from 'react-router';
 import { PageLayout } from '@/components/PageLayout';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { ContestSubmissions } from '@/features/submission/components/ContestSubmissions';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = contestPageTitle('sidebar.submissions');
 
 export default function ContestSubmissionsPage() {
   const { t } = useTranslation();

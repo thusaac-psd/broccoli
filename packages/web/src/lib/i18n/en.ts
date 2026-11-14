@@ -979,7 +979,7 @@ export const en: Record<string, string> = {
   'plugins.detail.noRoutes': 'No routes defined.',
   'plugins.detail.noSlots': 'No slots defined.',
   'plugins.detail.noComponents': 'No components defined.',
-  'plugins.detail.meta': 'Meta',
+  'plugins.detail.routeTitle': 'Title key',
   'plugins.detail.loadError': 'Failed to load plugin details.',
   'plugins.detail.servers': 'Servers',
   'plugins.detail.noServers': 'No server is reporting its plugin state.',
@@ -1283,4 +1283,6 @@ export const en: Record<string, string> = {
   'editor.addTestCase': 'Add test case',
   'users.roles.revokePermission': 'Revoke permission',
   'users.users.revokeRole': 'Revoke role',
+  'app.pageTitle': '{page} · {app}',
+  'app.pageInContest': '{page} · {contest}',
 };

@@ -11,6 +11,9 @@ import { ContestEnrollCard } from '@/features/contest/components/ContestEnrollCa
 import { ContestProblemsCard } from '@/features/contest/components/ContestProblemsCard';
 import { useContestEnroll } from '@/features/contest/hooks/use-contest-enroll';
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = contestPageTitle();
 
 export default function ContestOverviewPage() {
   const { t } = useTranslation();

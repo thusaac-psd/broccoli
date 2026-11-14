@@ -100,7 +100,8 @@ export default defineConfig([
       ...reactDom.configs.recommended.rules,
       'react-refresh/only-export-components': [
         'warn',
-        { allowConstantExport: true },
+        // `handle` is a React Router route module export.
+        { allowConstantExport: true, allowExportNames: ['handle'] },
       ],
     },
   },

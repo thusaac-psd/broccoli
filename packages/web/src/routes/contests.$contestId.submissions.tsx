@@ -3,6 +3,9 @@ import { Code2 } from 'lucide-react';
 import { Outlet } from 'react-router';
 
 import { PageLayout } from '@/components/PageLayout';
+import { contestPageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = contestPageTitle('sidebar.submissions');
 
 export default function ContestSubmission() {
   const { t } = useTranslation();

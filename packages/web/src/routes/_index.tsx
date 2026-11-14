@@ -10,6 +10,10 @@ import { ListSkeleton } from '@/components/ListSkeleton';
 import { GuestWelcome } from '@/features/auth/components/GuestWelcome';
 import { ContestSelector } from '@/features/contest/components/ContestSelector';
 import { useContest } from '@/features/contest/contexts/contest-context';
+import { type RouteHandle } from '@/lib/route-title';
+
+/** The home page is the app itself: the tab shows just its name. */
+export const handle: RouteHandle = { useTitle: () => undefined };
 
 export default function Index() {
   const { t } = useTranslation();

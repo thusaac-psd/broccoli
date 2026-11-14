@@ -6,6 +6,9 @@ import { Activity } from 'lucide-react';
 import { PageLayout } from '@/components/PageLayout';
 import { Unauthorized } from '@/components/Unauthorized';
 import { AllSubmissions } from '@/features/submission/components/AllSubmissions';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('adminSubmissions.title');
 
 export default function AdminSubmissionsPage() {
   const { t } = useTranslation();

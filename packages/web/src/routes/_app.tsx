@@ -10,6 +10,7 @@ import { SlotPermissionsBridge } from '@/components/SlotPermissionsBridge';
 import { appConfig } from '@/config';
 import { ContestProvider } from '@/features/contest/contexts/contest-context';
 import { SubmissionNavigationProvider } from '@/features/submission/contexts/submission-navigation-context';
+import { DocumentTitle } from '@/lib/route-title';
 
 export default function AppShell() {
   return (
@@ -21,6 +22,7 @@ export default function AppShell() {
               <PluginRegistryProvider backendUrl={appConfig.plugin.backendUrl}>
                 <ProblemPresentationProvider>
                   <SubmissionNavigationProvider>
+                    <DocumentTitle />
                     <AppLayout>
                       <Outlet />
                     </AppLayout>

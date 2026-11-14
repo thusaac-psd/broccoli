@@ -397,12 +397,12 @@ function PluginDetailContent({
                 headers={[
                   t('plugins.detail.path'),
                   t('plugins.detail.component'),
-                  t('plugins.detail.meta'),
+                  t('plugins.detail.routeTitle'),
                 ]}
                 rows={plugin.web.routes.map((r) => [
                   r.path,
                   r.component,
-                  r.meta ? JSON.stringify(r.meta) : '—',
+                  r.title,
                 ])}
                 emptyMessage={t('plugins.detail.noRoutes')}
               />

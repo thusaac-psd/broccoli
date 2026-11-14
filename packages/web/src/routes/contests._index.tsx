@@ -6,6 +6,9 @@ import { Trophy } from 'lucide-react';
 import { PageLayout } from '@/components/PageLayout';
 import { Unauthorized } from '@/components/Unauthorized';
 import { AdminContestsTab } from '@/features/admin/components/AdminContestsTab';
+import { pageTitle, type RouteHandle } from '@/lib/route-title';
+
+export const handle: RouteHandle = pageTitle('contests.title');
 
 export default function ContestListPage() {
   const { t } = useTranslation();

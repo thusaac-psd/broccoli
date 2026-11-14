@@ -191,4 +191,4 @@ component = "MyPrintsPanel"
 [[web.routes]]
 path = "/print-queue"
 component = "PrintQueuePage"
-meta = { title = "Print Queue" }
+title = "print.queue.title"
