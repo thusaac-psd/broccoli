@@ -82,7 +82,7 @@ pub struct PluginLogin {
 ///
 /// Idempotent, and safe on replicas provisioning the same plugin at once: the
 /// statements run in one transaction serialized on the plugin's row in
-/// [`SECRET_TABLE`], which no plugin can lock. The first writer's password
+/// `plugin_login_secret`, which no plugin can lock. The first writer's password
 /// wins and every replica reads it back, so all replicas connect with the
 /// same password.
 ///
