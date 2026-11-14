@@ -1,11 +1,7 @@
 import { getErrorMessage, useApiClient } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { useAuth, viewerCacheKey } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import {
-  CONTEST_MANAGE,
-  SUBMISSION_REJUDGE,
-  SUBMISSION_VIEW_ALL,
-} from '@broccoli/web-sdk/permissions';
+import { SUBMISSION_REJUDGE } from '@broccoli/web-sdk/permissions';
 import {
   getStatusLabel,
   SUBMISSION_STATUS_FILTER_OPTIONS,
@@ -66,11 +62,10 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
   const [bulkApplyImmediately, setBulkApplyImmediately] = useState(true);
 
   const canBulkRejudge = !!user?.permissions.includes(SUBMISSION_REJUDGE);
-  const scopedUserId =
-    user?.permissions.includes(SUBMISSION_VIEW_ALL) ||
-    user?.permissions.includes(CONTEST_MANAGE)
-      ? undefined
-      : user?.id;
+  // Which rows a viewer sees (their own, or everyone's when the contest
+  // shows submissions or they are staff) is the server's call; the cache is
+  // per viewer because the rows are.
+  const viewerKey = viewerCacheKey(user);
 
   const pages = useCursorPages();
   const appliedProblemId = parsePositiveInt(searchParams.get('problem'));
@@ -156,6 +151,7 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       String(appliedLanguage ?? 'all'),
       appliedStatus,
       pages.cursor,
+      viewerKey,
     ],
     enabled: !!user,
     queryFn: () =>
@@ -164,7 +160,6 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
         problemId: appliedProblemId,
         language: appliedLanguage,
         status: toSubmissionStatus(appliedStatus),
-        userId: scopedUserId,
         cursor: pages.cursor,
         per_page: PER_PAGE,
         sort_by: 'created_at',
@@ -177,14 +172,10 @@ export function ContestSubmissions({ contestId }: { contestId: number }) {
       queryKey: [
         'contest-submissions-bulk-source',
         String(contestId),
-        String(scopedUserId ?? 'all'),
+        viewerKey,
       ],
       enabled: !!user && canBulkRejudge && isBulkMode,
-      queryFn: () =>
-        fetchAllContestSubmissions(apiClient, {
-          contestId,
-          userId: scopedUserId,
-        }),
+      queryFn: () => fetchAllContestSubmissions(apiClient, { contestId }),
     });
 
   const bulkRejudgeMutation = useMutation({

@@ -16,7 +16,6 @@ export async function fetchContestSubmissions(
     problemId?: number | null;
     language?: string | null;
     status?: SubmissionStatus | null;
-    userId?: number | undefined;
   },
 ): Promise<SubmissionListPage> {
   const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
@@ -27,7 +26,6 @@ export async function fetchContestSubmissions(
         per_page: params.per_page,
         sort_by: params.sort_by,
         sort_order: params.sort_order,
-        user_id: params.userId,
         ...(params.problemId ? { problem_id: params.problemId } : {}),
         ...(params.language ? { language: params.language } : {}),
         ...(params.status ? { status: params.status } : {}),
@@ -47,7 +45,6 @@ export async function fetchAllContestSubmissions(
   apiClient: ApiClient,
   params: {
     contestId: number;
-    userId?: number | undefined;
   },
 ): Promise<SubmissionSummary[]> {
   const all: SubmissionSummary[] = [];
@@ -57,7 +54,6 @@ export async function fetchAllContestSubmissions(
     const page = await fetchContestSubmissionPage(
       apiClient,
       params.contestId,
-      params.userId,
       cursor,
     );
     all.push(...page.data);
@@ -69,7 +65,6 @@ export async function fetchAllContestSubmissions(
 async function fetchContestSubmissionPage(
   apiClient: ApiClient,
   contestId: number,
-  userId: number | undefined,
   cursor: string | null,
 ): Promise<SubmissionListPage> {
   const { data, error } = await apiClient.GET('/contests/{id}/submissions', {
@@ -79,7 +74,6 @@ async function fetchContestSubmissionPage(
         ...(cursor ? { cursor } : {}),
         sort_by: 'created_at',
         sort_order: 'desc',
-        user_id: userId,
       },
     },
   });
