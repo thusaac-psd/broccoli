@@ -29,7 +29,9 @@ Em dashes banned. Colons and hyphens are fine.
 - `packages/server-sdk/` and its `ARCHITECTURE.md` for the backend plugin API.
 - `packages/web-sdk/` for the frontend slot system.
 - `packages/plugin-core/` for the manifest and runtime.
-- `packages/cli/` for scaffold, build, and watch commands.
+- `packages/dev-cli/` (the `broccoli-dev` binary) for scaffold, build, and watch
+  commands.
+- `packages/broccoli-types/` for the types the guest SDK and the host share.
 - Existing plugins under `plugins/` as worked examples.
 
 ## Location and shape
