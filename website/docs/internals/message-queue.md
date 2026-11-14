@@ -152,7 +152,9 @@ task either has its reply at or before that entry, or was lost. The consumer
 keeps reading replies, and once its reads have passed the noted entry, any
 of those waiters still waiting fails at once with "the operation was lost
 from the queue". The plugin sees a failed operation, which its judging
-handles like any other (a `SystemError`, then the system-error retry). A
+handles like any other; the dispatch records the loss, so the `SystemError`
+it ends with carries `OPERATION_LOST` and goes back to the queue without
+spending a retry (see the judging lifecycle). A
 waiter counts as published only once its publish returned, so a task still
 being published is never mistaken for a lost one.
 
@@ -260,7 +262,8 @@ that means:
 
 - A task published in that second is gone, and so is its ledger entry. The
   server's next ledger check, within about 10 seconds, fails its waiter, and
-  the submission is judged again through the system-error retry.
+  the submission goes back to the queue as `OPERATION_LOST`, spending no
+  retry.
 - An acknowledgement lost in that second redelivers a task that already ran.
   Its second result reaches no waiter.
 - A reply lost in that second puts its task back in the ledger with the
