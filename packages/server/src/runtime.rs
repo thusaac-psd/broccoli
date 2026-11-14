@@ -249,6 +249,11 @@ impl ServerRuntime {
         if let Some(mq) = &mq {
             tokio::spawn(consume_operation_results(
                 mq.reply_inbox(&server_id),
+                crate::consumers::operation_result::OutstandingCheck {
+                    mq: mq.clone(),
+                    server_id: server_id.clone(),
+                    interval: crate::consumers::operation_result::OUTSTANDING_CHECK_INTERVAL,
+                },
                 operation_waiters.clone(),
                 evaluate_batches.clone(),
                 metrics.clone(),

@@ -461,6 +461,11 @@ impl E2eTestApp {
 
             result_consumer_handle_opt = Some(tokio::spawn(consume_operation_results(
                 mq.reply_inbox(&server_id),
+                server::consumers::operation_result::OutstandingCheck {
+                    mq: mq.clone(),
+                    server_id: server_id.clone(),
+                    interval: server::consumers::operation_result::OUTSTANDING_CHECK_INTERVAL,
+                },
                 operation_waiters.clone(),
                 evaluate_batches.clone(),
                 e2e_metrics.clone(),
