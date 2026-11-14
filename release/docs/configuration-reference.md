@@ -44,12 +44,15 @@ CREATE DATABASE broccoli OWNER broccoli;
 ```
 
 `pg_hba.conf` must admit the plugin roles on the server's address as well as the
-app role. They are members of
-`broccoli_<first 8 hex digits of the sha256 of the database name>_plugin`, so
-one line covers them, for example
-`host broccoli +broccoli_067d8364_plugin 10.0.0.0/24 scram-sha-256` for a
-database named `broccoli`. Without `CREATEROLE` the server boots, but plugin SQL
-fails with 503.
+app role. They are members of the database's plugin group role, which
+`server --plugin-group-role <database>` prints, so one line covers them:
+
+```bash
+echo "host broccoli +$(server --plugin-group-role broccoli) 10.0.0.0/24 scram-sha-256" \
+  >> /etc/postgresql/17/main/pg_hba.conf
+```
+
+Without `CREATEROLE` the server boots, but plugin SQL fails with 503.
 
 ## Derived
 

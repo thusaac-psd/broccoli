@@ -297,13 +297,6 @@ mod tests {
         );
     }
 
-    /// `release/native/install-native.sh` derives the same name in shell
-    /// (`sha256sum`) to admit the plugin roles in `pg_hba.conf`.
-    #[test]
-    fn the_group_role_name_matches_the_native_installer() {
-        assert_eq!(group_role("broccoli"), "broccoli_067d8364_plugin");
-    }
-
     #[test]
     fn long_ids_fit_the_identifier_limit_and_stay_distinct() {
         let a = format!("{}a", "x".repeat(127));

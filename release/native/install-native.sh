@@ -248,9 +248,9 @@ install_infra_server(){
   sed -i '/# broccoli-lan$/d' "$pghba"
   echo "host $DB_NAME $DB_USER $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
   # The plugin roles the server provisions are members of the database's
-  # plugin group role, broccoli_<first 8 hex of sha256(database name)>_plugin.
+  # plugin group role, named by the server itself.
   local plugin_group
-  plugin_group="broccoli_$(printf '%s' "$DB_NAME" | sha256sum | cut -c1-8)_plugin"
+  plugin_group="$("$BUNDLE/bin/server" --plugin-group-role "$DB_NAME")"
   echo "host $DB_NAME +$plugin_group $subnet scram-sha-256 # broccoli-lan" >> "$pghba"
   systemctl restart postgresql
 
