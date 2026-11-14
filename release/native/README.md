@@ -25,17 +25,18 @@ the server web build under `packages/web/build/client`.
 
 ```bash
 cd release/native
-# for an air-gapped lab, pre-stage the C/C++/Python toolchain and Redis 7 as
-# offline .debs (needs Docker + internet, once):
+# for an air-gapped lab, pre-stage the C/C++/Python toolchain, PostgreSQL and
+# Redis 7 as offline .debs (needs Docker + internet, once):
 ./stage-toolchain.sh               # -> toolchain/{20.04,22.04,24.04}/*.deb
+./stage-postgres.sh                # -> postgres/{20.04,22.04,24.04}/*.deb
 ./stage-redis.sh                   # -> redis/{20.04,22.04,24.04}/*.deb
 ./build-native-bundle.sh v1        # -> broccoli-native-v1.tar.gz (+ .sha256)
 ```
 
 The bundle contains the binaries, the `.wasm` judge plugins, the server web UI,
 `weed` + `isolate`, the systemd unit + config templates, the export/import
-tooling, `stage-toolchain.sh`, `stage-redis.sh`, and any pre-staged `toolchain/`
-and `redis/` `.deb` sets. ~700 MB (binaries carry line-table debug info for
+tooling, the staging scripts, and any pre-staged `toolchain/`, `postgres/` and
+`redis/` `.deb` sets. ~700 MB (binaries carry line-table debug info for
 backtraces).
 
 > **testlib.h / special judges** ride inside each problem's `checker_source` in
@@ -48,12 +49,16 @@ Extract to the same directory on each (`tar xzf broccoli-native-v1.tar.gz`).
 
 ## (C) Deploy — offline, on the LAN
 
-Lab boxes are Ubuntu 22.04. Broccoli needs Redis 7, which 22.04's archive does
-not carry (it ships 6.0), so the bundle ships the Redis 7 `.deb` set staged by
-`./stage-redis.sh` and the installer `dpkg -i`s it with no network. Online, it
-falls back to the packages.redis.io repository, then the system apt (24.04 and
-newer ship Redis 7). Postgres comes from apt: point it at a LAN mirror or
-pre-install `postgresql` on a fully air-gapped box.
+Lab boxes are Ubuntu 22.04. The infra box needs PostgreSQL and Redis 7, and
+neither comes from the network. The bundle ships the `.deb` sets
+`./stage-postgres.sh` and `./stage-redis.sh` staged for the box's Ubuntu
+version, each with its full dependency closure, and the installer `dpkg -i`s
+them offline. PostgreSQL is the major version the Docker deployments run
+(`POSTGRES_IMAGE` in `.env.infra.example`), from the PostgreSQL project's
+repository; a box that already runs a PostgreSQL server keeps it. Redis 7 comes
+from packages.redis.io, since 22.04's archive ships 6.0. Without a staged set,
+the installer falls back to the system apt (a LAN mirror) and, for Redis, to
+packages.redis.io.
 
 ### Box 1 — infra + server (Postgres, Redis, SeaweedFS, API)
 
@@ -143,9 +148,10 @@ sudo ./live-boot-preflight.sh <box1-LAN-IP>   # exit 0 = GO, nonzero = NO-GO
 ### Contestant CLI (optional, for contestants)
 
 The bundle ships `cli/broccoli` — a self-contained x86_64 client binary
-(`login`, `submit`, `test`, `contest`, `status`, `watch`, …). It links only
-glibc + libgcc, so it runs on any Ubuntu 22.04 lab machine with no extra
-packages. Distribute it to contestant machines over the LAN:
+(`login`, `submit`, `test`, `contest`, `status`, `watch`, …). It is linked
+statically against musl and needs no shared library, so it runs on any x86_64
+Linux lab machine with no extra packages. Distribute it to contestant machines
+over the LAN:
 
 ```bash
 scp broccoli-native-v1/cli/broccoli contestant-box:/usr/local/bin/broccoli

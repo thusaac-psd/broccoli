@@ -99,6 +99,8 @@ install -m755 "$HERE/../enable-plugin.sh" "$WORK/enable-plugin.sh"
 mkdir -p "$WORK/lib"; cp "$HERE"/../lib/*.sh "$WORK/lib/"
 install -m755 "$HERE/stage-toolchain.sh" "$WORK/stage-toolchain.sh"
 install -m755 "$HERE/stage-redis.sh" "$WORK/stage-redis.sh"
+install -m755 "$HERE/stage-postgres.sh" "$WORK/stage-postgres.sh"
+install -m644 "$HERE/stage-debs.sh" "$WORK/stage-debs.sh"
 install -m755 "$HERE/live-boot-preflight.sh" "$WORK/live-boot-preflight.sh"
 # pre-staged offline C/C++/Python toolchain .deb sets for live-boot workers, if any.
 # install-native.sh (worker) auto-installs the set matching the box's Ubuntu version.
@@ -108,14 +110,17 @@ if [ -d "$HERE/toolchain" ]; then
 else
   echo "  NOTE: no pre-staged toolchain/ -- live-boot workers install build-essential via apt/LAN mirror, or run stage-toolchain.sh"
 fi
-# pre-staged offline Redis 7 .deb sets for air-gapped infra boxes, if any.
-# install-native.sh (infra) installs the set matching the box's Ubuntu version.
-if [ -d "$HERE/redis" ]; then
-  cp -a "$HERE/redis" "$WORK/redis"
-  echo "  redis sets bundled: $(ls "$WORK/redis" 2>/dev/null | tr '\n' ' ')"
-else
-  echo "  NOTE: no pre-staged redis/ -- air-gapped infra needs Redis 7; run stage-redis.sh before building for an offline lab"
-fi
+# pre-staged offline PostgreSQL and Redis 7 .deb sets for air-gapped infra
+# boxes, if any. install-native.sh (infra) installs the set matching the box's
+# Ubuntu version.
+for set in postgres redis; do
+  if [ -d "$HERE/$set" ]; then
+    cp -a "$HERE/$set" "$WORK/$set"
+    echo "  $set sets bundled: $(ls "$WORK/$set" 2>/dev/null | tr '\n' ' ')"
+  else
+    echo "  NOTE: no pre-staged $set/ -- an air-gapped infra box needs it; run stage-$set.sh before building for an offline lab"
+  fi
+done
 cp "$HERE"/systemd/* "$WORK/systemd/"
 cp "$HERE"/config/*  "$WORK/config/"
 [ -f "$HERE/README.md" ] && cp "$HERE/README.md" "$WORK/README.md"
