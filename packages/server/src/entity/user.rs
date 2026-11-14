@@ -41,30 +41,39 @@ pub struct Model {
 
 impl ActiveModelBehavior for ActiveModel {}
 
-/// The identity of a username: what two usernames must differ in to belong to
-/// different accounts. Usernames are ASCII, so this is SQL `lower(username)`,
-/// the expression the active-username index is unique on.
+// The identity of a username: what two usernames must differ in to belong to
+// different accounts. The rule is ASCII case folding of the name without its
+// surrounding whitespace; usernames are ASCII (see
+// `models::user::normalize_username`), so SQL `lower()` and Rust's ASCII
+// lowercase agree on every name. The rule has two forms, kept side by side:
+// [`username_key`] for names in Rust and [`username_key_sql`] for names in SQL.
+// Every comparison of usernames goes through one of them: login, registration,
+// bulk imports, contest participant imports, the bundle's account merge, and
+// the active-username unique index (`idx_user_username_active`, on
+// `lower(username)`).
+
+/// The identity of `username` (see the rule above).
 pub fn username_key(username: &str) -> String {
     username.trim().to_ascii_lowercase()
 }
 
-/// Rows whose username has the same [`username_key`] as one of `usernames`.
-/// Served by the active-username index.
+/// The identity of the username SQL expression `expr`, a column or a bound
+/// value (see the rule above). Stored usernames are already trimmed.
+pub fn username_key_sql(expr: &str) -> String {
+    format!("lower({expr})")
+}
+
+/// Rows whose username has the same identity as one of `usernames`. Served by
+/// the active-username index, whose expression is
+/// `username_key_sql("username")`.
 pub fn username_is_any<I, S>(usernames: I) -> sea_orm::sea_query::SimpleExpr
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    use sea_orm::sea_query::{Expr, ExprTrait, Func};
-    Expr::expr(Func::lower(Expr::col(Column::Username)))
+    use sea_orm::sea_query::{Expr, ExprTrait};
+    Expr::cust(username_key_sql(r#""user"."username""#))
         .is_in(usernames.into_iter().map(|u| username_key(u.as_ref())))
-}
-
-/// The SQL form of [`username_key`], for `expr` a username column or value:
-/// two usernames belong to the same account when these are equal. Raw SQL
-/// that matches accounts by username compares through this.
-pub fn username_key_sql(expr: &str) -> String {
-    format!("lower({expr})")
 }
 
 impl SoftDeletable for Entity {
