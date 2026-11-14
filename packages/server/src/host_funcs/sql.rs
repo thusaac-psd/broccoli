@@ -513,7 +513,7 @@ fn reject_session_escape(plugin_id: &str, sql: &str) -> Result<(), extism::Error
             "Rejected a role/session change on the plugin SQL path",
         );
         return Err(extism::Error::msg(
-            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
+            "not permitted on the plugin SQL capability: SET/RESET ROLE, SET SESSION AUTHORIZATION, set_config, ALTER ROLE/USER, DISCARD, anonymous code blocks, and session-level SET of host-enforced settings (statement_timeout, tcp_keepalives_*; use SET LOCAL) are forbidden",
         ));
     }
     Ok(())
@@ -555,6 +555,14 @@ fn statement_escapes_session(stmt: &str) -> bool {
     // token after `create` past any `or`/`replace`; a table NAMED `function`
     // (`CREATE TABLE "function"`) keeps `table` as its command word and is not
     // falsely blocked.
+    // `ALTER ROLE` / `ALTER USER`: a plugin role may change its own password
+    // (`ALTER ROLE CURRENT_USER PASSWORD ..`), which would lock its pool out
+    // on the next connect, and its own session defaults.
+    if tokens.first().copied() == Some("alter")
+        && matches!(tokens.get(1).copied(), Some("role") | Some("user"))
+    {
+        return true;
+    }
     if tokens.first().copied() == Some("create") {
         let command = tokens[1..]
             .iter()
@@ -1066,6 +1074,8 @@ mod tests {
             "UPDATE my_plugin_table SET v = $1 WHERE k = $2",
             "CREATE TABLE my_plugin_table (k TEXT PRIMARY KEY, v INT)",
             "ALTER TABLE my_plugin_table SET (fillfactor = 90)",
+            "ALTER TABLE role ADD COLUMN v INT",
+            "ALTER INDEX user_idx RENAME TO user_idx2",
             // a table whose NAME is the reserved word `function` (quoted, so it
             // flattens to a `function` token) is not a routine definition: the
             // command keyword after CREATE is TABLE, so it stays allowed
