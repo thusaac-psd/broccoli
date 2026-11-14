@@ -365,7 +365,7 @@ pub async fn update_contest(
     let existing = find_contest_for_update(&txn, id).await?;
     if let Some(ref contest_type) = payload.contest_type
         && existing.contest_type.as_deref() != Some(contest_type.as_str())
-        && contest_has_submissions(&txn, id).await?
+        && crate::utils::contest::contest_has_submissions(&txn, id).await?
     {
         return Err(AppError::ContestTypeLocked);
     }
@@ -457,17 +457,6 @@ pub async fn delete_contest(
     txn.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-/// Whether any submission was made to the contest. From the first one on,
-/// its contest type is fixed: every submission of a contest is judged and
-/// ranked under the same rules, the ones it was made under.
-async fn contest_has_submissions(txn: &DatabaseTransaction, id: i32) -> Result<bool, AppError> {
-    Ok(crate::entity::submission::Entity::find()
-        .filter(crate::entity::submission::Column::ContestId.eq(id))
-        .one(txn)
-        .await?
-        .is_some())
-}
-
 pub(super) async fn find_contest_for_update(
     txn: &DatabaseTransaction,
     id: i32,

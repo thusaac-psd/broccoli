@@ -91,6 +91,25 @@ pub fn contest_active_condition(now: DateTime<Utc>) -> Condition {
         )
 }
 
+/// Whether any submission was made to the contest. From the first one on,
+/// its contest type is fixed: every submission of a contest is judged and
+/// ranked under the same rules, the ones it was made under.
+pub async fn contest_has_submissions<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    id: i32,
+) -> Result<bool, AppError> {
+    use crate::entity::submission;
+    use sea_orm::QuerySelect;
+    Ok(submission::Entity::find()
+        .select_only()
+        .column(submission::Column::Id)
+        .filter(submission::Column::ContestId.eq(id))
+        .into_tuple::<i32>()
+        .one(db)
+        .await?
+        .is_some())
+}
+
 /// The contest type that judges submissions to `contest`. Contests created
 /// before a type was required may have none; they accept no submissions until
 /// an admin sets one, rather than being judged by whichever registered type
