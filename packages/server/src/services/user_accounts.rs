@@ -11,7 +11,8 @@ pub struct PreparedAccount {
     password_hash: String,
 }
 
-/// Hash outside the async executor and before opening a database transaction.
+/// Hash on the password pool, several at once, before opening a database
+/// transaction.
 pub async fn prepare_accounts(
     entries: Vec<CreateUserRequest>,
 ) -> Result<Vec<PreparedAccount>, AppError> {
@@ -35,25 +36,34 @@ pub async fn prepare_accounts(
             ))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    tokio::task::spawn_blocking(move || {
+    let entries: Vec<_> = entries
+        .into_iter()
+        .map(|(username, display_name, password)| {
+            let password =
+                password.unwrap_or_else(|| crate::utils::password::generate_password(16));
+            (username, display_name, password)
+        })
+        .collect();
+    let hashes = crate::utils::hash::hash_passwords_off_thread(
         entries
-            .into_iter()
-            .map(|(username, display_name, password)| {
-                let password =
-                    password.unwrap_or_else(|| crate::utils::password::generate_password(16));
-                let password_hash = crate::utils::hash::hash_password(&password)
-                    .map_err(|e| AppError::Internal(format!("Password hash error: {e}")))?;
-                Ok(PreparedAccount {
-                    username,
-                    display_name,
-                    password,
-                    password_hash,
-                })
-            })
-            .collect()
-    })
+            .iter()
+            .map(|(_, _, password)| password.clone())
+            .collect(),
+    )
     .await
-    .map_err(|e| AppError::Internal(format!("Password hashing task failed: {e}")))?
+    .map_err(|e| AppError::Internal(format!("Password hash error: {e}")))?;
+    Ok(entries
+        .into_iter()
+        .zip(hashes)
+        .map(
+            |((username, display_name, password), password_hash)| PreparedAccount {
+                username,
+                display_name,
+                password,
+                password_hash,
+            },
+        )
+        .collect())
 }
 
 /// Map a write of `username` to the `user` table onto the API error contract.
