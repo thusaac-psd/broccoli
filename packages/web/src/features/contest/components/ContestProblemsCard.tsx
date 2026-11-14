@@ -1,42 +1,31 @@
-import { useServerTimeReached } from '@broccoli/web-sdk/api';
 import { useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { CONTEST_MANAGE } from '@broccoli/web-sdk/permissions';
 import { useProblemPresentation } from '@broccoli/web-sdk/problem';
 import { Skeleton } from '@broccoli/web-sdk/ui';
 import { ChevronRight } from 'lucide-react';
 import { Link } from 'react-router';
 
-import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 import { useContestProblems } from '@/features/contest/hooks/use-contest-problems';
 
 export function ContestProblemsCard({ contestId }: { contestId: number }) {
   const { t } = useTranslation();
   const { user } = useAuth();
   const { hideLabels } = useProblemPresentation(contestId, user?.id);
-  const { contest } = useContestInfo(contestId);
-
-  const canManageContest = !!user?.permissions.includes(CONTEST_MANAGE);
-  const started = useServerTimeReached(
-    contest ? Date.parse(contest.start_time) : null,
-  );
-  const contestNotStarted = !!contest && !started;
-  const shouldBlockByStartTime = contestNotStarted && !canManageContest;
-
   const {
     data: problems = [],
-    isLoading,
+    isPending,
     error,
-  } = useContestProblems(contestId, { enabled: !shouldBlockByStartTime });
+    awaitingStart,
+  } = useContestProblems(contestId);
 
   return (
     <div>
       <h3 className="text-lg font-semibold mb-3">{t('contests.problems')}</h3>
-      {shouldBlockByStartTime ? (
+      {awaitingStart ? (
         <div className="text-sm text-muted-foreground">
           {t('contests.problemsAvailableAfterStart')}
         </div>
-      ) : isLoading ? (
+      ) : isPending ? (
         <div className="space-y-2">
           <Skeleton className="h-12 w-full" />
           <Skeleton className="h-12 w-full" />
