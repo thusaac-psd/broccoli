@@ -111,3 +111,16 @@ test('the document language and title follow the UI locale', async ({
   await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
   await expect(page).toHaveTitle(/^插件管理 · /);
 });
+
+test('switching the UI locale switches the document language and title', async ({
+  page,
+}, info) => {
+  test.skip(info.project.name === 'phone', 'the sidebar is a sheet there');
+  await mockApi(page, 'admin');
+  await page.goto('/admin/plugins');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await page.getByRole('button', { name: 'English' }).click();
+  await page.getByRole('menuitem', { name: '中文' }).click();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+  await expect(page).toHaveTitle(/^插件管理 · /);
+});
