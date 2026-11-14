@@ -138,7 +138,6 @@ mod tests {
             answer: JudgeFile::inline("answer\n"),
             test_input: JudgeFile::inline("input\n"),
             problem_id: Some(42),
-            config: Some(serde_json::json!({"strict": true})),
             output_binding: OutputMode::File {
                 name: "result.json".to_string(),
             },
@@ -152,7 +151,6 @@ mod tests {
         assert_eq!(back.answer.inline_text(), "answer\n");
         assert_eq!(back.test_input.inline_text(), "input\n");
         assert_eq!(back.problem_id, Some(42));
-        assert_eq!(back.config, Some(serde_json::json!({"strict": true})));
         match back.output_binding {
             OutputMode::File { name } => assert_eq!(name, "result.json"),
             _ => panic!("expected file variant"),
