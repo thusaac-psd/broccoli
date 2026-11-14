@@ -3,7 +3,7 @@ import {
   useApiClient,
   useErrorMessage,
 } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { signInPath, useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import { Button } from '@broccoli/web-sdk/ui';
 import {
@@ -163,7 +163,7 @@ export function DeviceAuthPage() {
     if (!isLoading && !user) {
       const search = searchParams.toString();
       const returnUrl = `/auth/device${search ? `?${search}` : ''}`;
-      navigate(`/login?next=${encodeURIComponent(returnUrl)}`, {
+      navigate(signInPath(returnUrl), {
         replace: true,
       });
     }

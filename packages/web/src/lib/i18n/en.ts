@@ -33,6 +33,10 @@ export const en = {
   'nav.ranking': 'Ranking',
   'nav.signIn': 'Sign in',
   'nav.signUp': 'Sign up',
+  'session.expired.title': 'Your session has ended',
+  'session.expired.description':
+    'You were signed out. Sign in again to continue where you left off; your code drafts are kept.',
+  'session.expired.later': 'Not now',
   'nav.toggleMenu': 'Toggle navigation menu',
 
   // ErrorCatcher

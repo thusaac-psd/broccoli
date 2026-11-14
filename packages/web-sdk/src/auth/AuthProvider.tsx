@@ -136,6 +136,7 @@ export function AuthProvider({
       user: state.status === 'active' ? state.user : null,
       accessToken: state.status === 'active' ? state.token : null,
       isLoading: state.status === 'bootstrapping',
+      sessionExpired: state.status === 'signedOut' && state.expired,
       login,
       logout,
       refresh,

@@ -1,5 +1,6 @@
 import { useApiClient } from '@broccoli/web-sdk/api';
 import {
+  signInPath,
   useAuth,
   useAuthReady,
   USER_PERMISSIONS,
@@ -34,6 +35,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  Skeleton,
 } from '@broccoli/web-sdk/ui';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -352,7 +354,8 @@ function PlatformGroup() {
 
 export function Sidebar() {
   const { t } = useTranslation();
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading: sessionLoading } = useAuth();
+  const { pathname, search } = useLocation();
 
   return (
     <SidebarUI collapsible="icon">
@@ -398,9 +401,18 @@ export function Sidebar() {
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton>
                   <User className="h-4 w-4" />
-                  <span className="flex-1">
-                    {user ? user.display_name : t('sidebar.guest')}
-                  </span>
+                  {/* Nobody is known while the session is restored: neither
+                      the user nor a guest. */}
+                  {sessionLoading ? (
+                    <Skeleton
+                      className="h-4 flex-1"
+                      aria-label={t('common.loading')}
+                    />
+                  ) : (
+                    <span className="flex-1">
+                      {user ? user.display_name : t('sidebar.guest')}
+                    </span>
+                  )}
                   <ChevronUp className="ml-auto h-4 w-4" />
                 </SidebarMenuButton>
               </DropdownMenuTrigger>
@@ -417,7 +429,9 @@ export function Sidebar() {
                   </Link>
                 ) : (
                   <DropdownMenuItem asChild>
-                    <Link to="/login">{t('nav.signIn')}</Link>
+                    <Link to={signInPath(`${pathname}${search}`)}>
+                      {t('nav.signIn')}
+                    </Link>
                   </DropdownMenuItem>
                 )}
               </DropdownMenuContent>

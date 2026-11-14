@@ -1,5 +1,5 @@
 import { useApiClient, useErrorMessage } from '@broccoli/web-sdk/api';
-import { useAuth } from '@broccoli/web-sdk/auth';
+import { safeReturnPath, signInPath, useAuth } from '@broccoli/web-sdk/auth';
 import { useTranslation } from '@broccoli/web-sdk/i18n';
 import {
   Button,
@@ -12,7 +12,7 @@ import {
   Label,
 } from '@broccoli/web-sdk/ui';
 import { type FormEvent, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 
 import { DisplayNameField } from '@/components/DisplayNameField';
 
@@ -21,6 +21,8 @@ export default function RegisterForm() {
   const errorMessage = useErrorMessage();
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const next = safeReturnPath(searchParams.get('next'));
 
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -66,7 +68,7 @@ export default function RegisterForm() {
       }
 
       await login({ username, password });
-      navigate('/');
+      navigate(next);
     } catch (err) {
       setError(errorMessage(err, t('auth.validationError')));
     } finally {
@@ -124,7 +126,7 @@ export default function RegisterForm() {
           </Button>
           <p className="text-sm text-muted-foreground">
             {t('auth.haveAccount')}{' '}
-            <Link to="/login" className="text-primary underline">
+            <Link to={signInPath(next)} className="text-primary underline">
               {t('auth.login')}
             </Link>
           </p>

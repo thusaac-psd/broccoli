@@ -35,6 +35,10 @@ export const zhCN: Catalog = {
   'nav.ranking': '排名',
   'nav.signIn': '登录',
   'nav.signUp': '注册',
+  'session.expired.title': '登录已失效',
+  'session.expired.description':
+    '您已被登出。重新登录后可回到当前页面继续；代码草稿已保留。',
+  'session.expired.later': '稍后',
   'nav.toggleMenu': '切换导航菜单',
 
   // ErrorCatcher
