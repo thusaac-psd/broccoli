@@ -1,3 +1,4 @@
+mod binary_data;
 mod code_run;
 mod lifecycle;
 mod statement_counts;

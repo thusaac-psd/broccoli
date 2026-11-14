@@ -718,6 +718,7 @@
 'admin.testCases.edit' = "Edit Test Case"
 'admin.testCases.uploadFile' = "Upload File"
 'admin.testCases.fileReadError' = "Failed to read the file."
+'admin.testCases.binaryBody' = "Binary data, {size, number} bytes. It is judged byte for byte and cannot be edited here; upload the test cases as a ZIP to replace it."
 'admin.testCases.uploadedHidden' = "File uploaded; its content is hidden. Length: {length} characters. Click to clear."
 'admin.testCases.descriptionPlaceholder' = "Explains this sample (Markdown supported)"
 'admin.testCases.sample' = "Sample"

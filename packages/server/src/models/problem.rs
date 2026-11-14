@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::AppError;
 use crate::utils::filename::validate_flat_filename;
-use crate::utils::test_case_body::{test_case_body_preview, test_case_body_size};
 
 pub use super::shared::{Pagination, escape_like};
 use super::shared::{
@@ -173,30 +172,6 @@ impl From<crate::entity::problem::Model> for ProblemResponse {
             samples: vec![],
             created_at: m.created_at,
             updated_at: m.updated_at,
-        }
-    }
-}
-
-impl From<crate::entity::test_case::Model> for TestCaseResponse {
-    fn from(m: crate::entity::test_case::Model) -> Self {
-        Self {
-            id: m.id,
-            input_size: test_case_body_size(&m.input, m.input_size),
-            output_size: test_case_body_size(&m.expected_output, m.expected_output_size),
-            input_preview: test_case_body_preview(&m.input, m.input_preview.as_deref()),
-            output_preview: test_case_body_preview(
-                &m.expected_output,
-                m.expected_output_preview.as_deref(),
-            ),
-            input: m.input,
-            expected_output: m.expected_output,
-            score: m.score,
-            description: m.description,
-            label: m.label,
-            is_sample: m.is_sample,
-            position: m.position,
-            problem_id: m.problem_id,
-            created_at: m.created_at,
         }
     }
 }

@@ -116,45 +116,69 @@ fn read_some<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> 
 }
 
 // ---------------------------------------------------------------------------
-// Streaming character source
+// Streaming unit source
 // ---------------------------------------------------------------------------
 
-/// Pulls UTF-8 `char`s out of a byte `Read` one at a time, buffering only the
-/// few bytes needed to complete a multi-byte code point. Invalid UTF-8 and
-/// a stream ending mid-code-point are hard errors (surfaced as
-/// [`std::io::ErrorKind::InvalidData`]).
-struct CharStream<R: Read> {
+/// One unit of a stream: a decoded `char`, or a byte that is not part of any
+/// UTF-8 code point. Test data and output may be binary; such bytes are
+/// compared as they are, never decoded or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Char(char),
+    Byte(u8),
+}
+
+impl Unit {
+    fn is_whitespace(self) -> bool {
+        matches!(self, Unit::Char(c) if c.is_whitespace())
+    }
+
+    fn push_to(self, bytes: &mut Vec<u8>) {
+        match self {
+            Unit::Char(c) => {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            Unit::Byte(b) => bytes.push(b),
+        }
+    }
+}
+
+/// Pulls [`Unit`]s out of a byte `Read` one at a time, buffering only the few
+/// bytes needed to complete a multi-byte code point. A byte sequence that is
+/// not UTF-8 (including one cut off at the end of the stream) yields its
+/// bytes as [`Unit::Byte`].
+struct UnitStream<R: Read> {
     reader: R,
-    /// Bytes read but not yet decoded into a full code point.
+    /// Bytes read but not yet decoded.
     pending: Vec<u8>,
-    /// Decoded-but-not-yet-yielded characters.
-    chars: std::collections::VecDeque<char>,
+    /// Decoded-but-not-yet-yielded units.
+    units: std::collections::VecDeque<Unit>,
     eof: bool,
 }
 
-impl<R: Read> CharStream<R> {
+impl<R: Read> UnitStream<R> {
     fn new(reader: R) -> Self {
         Self {
             reader,
             pending: Vec::new(),
-            chars: std::collections::VecDeque::new(),
+            units: std::collections::VecDeque::new(),
             eof: false,
         }
     }
 
-    fn next_char(&mut self) -> std::io::Result<Option<char>> {
+    fn next_unit(&mut self) -> std::io::Result<Option<Unit>> {
         loop {
-            if let Some(ch) = self.chars.pop_front() {
-                return Ok(Some(ch));
+            if let Some(unit) = self.units.pop_front() {
+                return Ok(Some(unit));
             }
             if self.eof {
                 if self.pending.is_empty() {
                     return Ok(None);
                 }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "stream ended with incomplete UTF-8 sequence",
-                ));
+                // A code point cut off by the end of the stream: its bytes.
+                self.units.extend(self.pending.drain(..).map(Unit::Byte));
+                continue;
             }
             self.fill()?;
         }
@@ -169,37 +193,41 @@ impl<R: Read> CharStream<R> {
         } else {
             self.pending.extend_from_slice(&buf[..n]);
         }
-
-        match std::str::from_utf8(&self.pending) {
-            Ok(valid) => {
-                self.chars.extend(valid.chars());
-                self.pending.clear();
-                Ok(())
-            }
-            Err(e) => {
-                if e.error_len().is_some() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("stream is not UTF-8: {e}"),
-                    ));
+        let mut consumed = 0;
+        loop {
+            match std::str::from_utf8(&self.pending[consumed..]) {
+                Ok(valid) => {
+                    self.units.extend(valid.chars().map(Unit::Char));
+                    consumed = self.pending.len();
+                    break;
                 }
-                // Trailing bytes are a valid *prefix* of a multi-byte code
-                // point - keep them pending until more bytes arrive.
-                let valid_up_to = e.valid_up_to();
-                if valid_up_to == 0 {
-                    return Ok(());
+                Err(e) => {
+                    let valid_up_to = consumed + e.valid_up_to();
+                    let valid = std::str::from_utf8(&self.pending[consumed..valid_up_to])
+                        .expect("from_utf8 reported this prefix valid");
+                    self.units.extend(valid.chars().map(Unit::Char));
+                    match e.error_len() {
+                        Some(len) => {
+                            self.units.extend(
+                                self.pending[valid_up_to..valid_up_to + len]
+                                    .iter()
+                                    .copied()
+                                    .map(Unit::Byte),
+                            );
+                            consumed = valid_up_to + len;
+                        }
+                        // The rest may be the start of a code point whose
+                        // bytes have not arrived yet.
+                        None => {
+                            consumed = valid_up_to;
+                            break;
+                        }
+                    }
                 }
-                let valid = std::str::from_utf8(&self.pending[..valid_up_to]).map_err(|err| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("stream is not UTF-8: {err}"),
-                    )
-                })?;
-                self.chars.extend(valid.chars());
-                self.pending.drain(..valid_up_to);
-                Ok(())
             }
         }
+        self.pending.drain(..consumed);
+        Ok(())
     }
 }
 
@@ -210,40 +238,42 @@ impl<R: Read> CharStream<R> {
 /// How two tokens at the same position are considered equal.
 #[derive(Debug, Clone, Copy)]
 pub enum TokenMode {
-    /// Byte-for-byte (well, char-for-char) token equality.
+    /// Byte-for-byte token equality.
     Exact,
-    /// Unicode-case-folded equality (`str::to_lowercase`).
+    /// Unicode-case-folded equality (`str::to_lowercase`) of text tokens;
+    /// a token that is not UTF-8 compares byte for byte.
     CaseInsensitive,
-    /// Numeric tokens compare within tolerance; non-numeric compare exactly.
+    /// Numeric tokens compare within tolerance; anything else compares byte
+    /// for byte.
     Float { abs_tol: f64, rel_tol: f64 },
 }
 
-/// Splits a [`CharStream`] into whitespace-delimited tokens. A "token" is a
-/// maximal run of non-whitespace `char`s; whitespace is anything Rust's
-/// `char::is_whitespace` (Unicode) reports - matching `str::split_whitespace`,
-/// which is what the WASM comparer uses (`util::tokenize`). Leading, trailing,
-/// and repeated whitespace produce no empty tokens.
+/// Splits a [`UnitStream`] into whitespace-delimited tokens, as bytes. A
+/// "token" is a maximal run of units that are not whitespace; whitespace is
+/// anything Rust's `char::is_whitespace` (Unicode) reports, matching
+/// `str::split_whitespace` on text. Leading, trailing, and repeated whitespace
+/// produce no empty tokens.
 struct TokenStream<R: Read> {
-    chars: CharStream<R>,
-    partial: String,
+    units: UnitStream<R>,
+    partial: Vec<u8>,
 }
 
 impl<R: Read> TokenStream<R> {
     fn new(reader: R) -> Self {
         Self {
-            chars: CharStream::new(reader),
-            partial: String::new(),
+            units: UnitStream::new(reader),
+            partial: Vec::new(),
         }
     }
 
-    fn next_token(&mut self) -> std::io::Result<Option<String>> {
-        while let Some(ch) = self.chars.next_char()? {
-            if ch.is_whitespace() {
+    fn next_token(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        while let Some(unit) = self.units.next_unit()? {
+            if unit.is_whitespace() {
                 if !self.partial.is_empty() {
                     return Ok(Some(std::mem::take(&mut self.partial)));
                 }
             } else {
-                self.partial.push(ch);
+                unit.push_to(&mut self.partial);
             }
         }
         if self.partial.is_empty() {
@@ -254,13 +284,24 @@ impl<R: Read> TokenStream<R> {
     }
 }
 
-fn tokens_match(expected: &str, actual: &str, mode: &TokenMode) -> bool {
+fn tokens_match(expected: &[u8], actual: &[u8], mode: &TokenMode) -> bool {
+    let text = || {
+        Some((
+            std::str::from_utf8(expected).ok()?,
+            std::str::from_utf8(actual).ok()?,
+        ))
+    };
     match mode {
         TokenMode::Exact => expected == actual,
-        TokenMode::CaseInsensitive => expected.to_lowercase() == actual.to_lowercase(),
+        TokenMode::CaseInsensitive => match text() {
+            Some((e, a)) => e.to_lowercase() == a.to_lowercase(),
+            None => expected == actual,
+        },
         TokenMode::Float { abs_tol, rel_tol } => {
-            match (expected.parse::<f64>(), actual.parse::<f64>()) {
-                (Ok(exp_f), Ok(act_f)) => {
+            let numbers =
+                text().and_then(|(e, a)| Some((e.parse::<f64>().ok()?, a.parse::<f64>().ok()?)));
+            match numbers {
+                Some((exp_f, act_f)) => {
                     if !exp_f.is_finite() || !act_f.is_finite() {
                         // Both must be the same non-finite value (NaN==NaN, or
                         // equal infinities).
@@ -271,8 +312,8 @@ fn tokens_match(expected: &str, actual: &str, mode: &TokenMode) -> bool {
                         diff <= tolerance
                     }
                 }
-                // At least one token is not numeric - compare as strings.
-                _ => expected == actual,
+                // At least one token is not numeric - compare byte for byte.
+                None => expected == actual,
             }
         }
     }
@@ -293,21 +334,7 @@ pub fn compare_tokens<O: Read, A: Read>(
     let mut ans = TokenStream::new(answer);
 
     loop {
-        // Invalid UTF-8 in the SOLUTION output cannot match a (valid UTF-8)
-        // answer, so it is a WrongAnswer - NOT a comparator IO error. A
-        // comparator error exits 64, which the interpreter maps to a checker
-        // SystemError and would wrongly reject a legal submission (invariant
-        // violation). The ANSWER side keeps `?`: a non-UTF-8 jury answer is a
-        // problem-setup bug and must stay a hard error (-> SystemError).
-        let o = match out.next_token() {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                return Ok(Verdict::WrongAnswer);
-            }
-            Err(e) => return Err(e),
-        };
-        let a = ans.next_token()?;
-        match (o, a) {
+        match (out.next_token()?, ans.next_token()?) {
             (Some(o), Some(a)) => {
                 if !tokens_match(&a, &o, &mode) {
                     return Ok(Verdict::WrongAnswer);
@@ -324,55 +351,73 @@ pub fn compare_tokens<O: Read, A: Read>(
 // Line comparison (lines)
 // ---------------------------------------------------------------------------
 
-/// Yields logical lines from a [`CharStream`] with the same normalization as
-/// `util::split_lines_trimmed`:
+/// `line` without its trailing whitespace: trailing units that are Unicode
+/// whitespace (`str::trim_end` on text); a byte that is not UTF-8 is never
+/// whitespace.
+fn trim_end(mut line: Vec<u8>) -> Vec<u8> {
+    loop {
+        let start = line.len().saturating_sub(4);
+        let last = (start..line.len()).find_map(|i| {
+            let tail = std::str::from_utf8(&line[i..]).ok()?;
+            let mut chars = tail.chars();
+            let c = chars.next()?;
+            chars.next().is_none().then_some((i, c))
+        });
+        match last {
+            Some((i, c)) if c.is_whitespace() => line.truncate(i),
+            _ => return line,
+        }
+    }
+}
+
+/// Yields logical lines, as bytes, from a [`UnitStream`]:
 ///
 /// - lines are split on `\n`; a `\r` immediately before the `\n` is dropped
 ///   (CRLF handling, matching `str::lines`),
-/// - each line has trailing whitespace removed (`str::trim_end`, Unicode),
+/// - each line has trailing whitespace removed (see [`trim_end`]),
 /// - empty lines are only emitted when a later non-empty line follows, which
 ///   has the effect of dropping all *trailing* empty lines while preserving
 ///   internal blank lines.
 struct LineStream<R: Read> {
-    chars: CharStream<R>,
-    current: String,
+    units: UnitStream<R>,
+    current: Vec<u8>,
     /// Count of trimmed-empty lines seen but not yet confirmed internal.
     pending_empty: usize,
     /// Count of confirmed-internal empty lines still to be emitted, one at a time.
-    /// Held as a COUNTER (not materialized String entries) so a contestant cannot
+    /// Held as a COUNTER (not materialized entries) so a contestant cannot
     /// OOM the checker by emitting a huge run of blank lines before a non-empty
     /// one.
     flush_empty: usize,
     /// Lines ready to be handed out.
-    queued: std::collections::VecDeque<String>,
+    queued: std::collections::VecDeque<Vec<u8>>,
 }
 
 impl<R: Read> LineStream<R> {
     fn new(reader: R) -> Self {
         Self {
-            chars: CharStream::new(reader),
-            current: String::new(),
+            units: UnitStream::new(reader),
+            current: Vec::new(),
             pending_empty: 0,
             flush_empty: 0,
             queued: std::collections::VecDeque::new(),
         }
     }
 
-    fn next_line(&mut self) -> std::io::Result<Option<String>> {
+    fn next_line(&mut self) -> std::io::Result<Option<Vec<u8>>> {
         loop {
             // Emit confirmed-internal blank lines one at a time from the counter,
             // BEFORE the buffered non-empty line, without ever materializing all
-            // of them (a run of N blanks costs O(1) memory, not O(N) Strings).
+            // of them (a run of N blanks costs O(1) memory, not O(N) lines).
             if self.flush_empty > 0 {
                 self.flush_empty -= 1;
-                return Ok(Some(String::new()));
+                return Ok(Some(Vec::new()));
             }
             if let Some(line) = self.queued.pop_front() {
                 return Ok(Some(line));
             }
             match self.next_raw_line()? {
                 Some(line) => {
-                    let line = line.trim_end().to_string();
+                    let line = trim_end(line);
                     if line.is_empty() {
                         self.pending_empty += 1;
                         continue;
@@ -392,15 +437,15 @@ impl<R: Read> LineStream<R> {
         }
     }
 
-    fn next_raw_line(&mut self) -> std::io::Result<Option<String>> {
-        while let Some(ch) = self.chars.next_char()? {
-            if ch == '\n' {
-                if self.current.ends_with('\r') {
+    fn next_raw_line(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        while let Some(unit) = self.units.next_unit()? {
+            if unit == Unit::Char('\n') {
+                if self.current.last() == Some(&b'\r') {
                     self.current.pop();
                 }
                 return Ok(Some(std::mem::take(&mut self.current)));
             }
-            self.current.push(ch);
+            unit.push_to(&mut self.current);
         }
         if self.current.is_empty() {
             Ok(None)
@@ -411,26 +456,15 @@ impl<R: Read> LineStream<R> {
 }
 
 /// Compare `output` and `answer` line by line. Trailing per-line whitespace is
-/// ignored, CRLF is
-/// normalized to LF, and trailing empty lines are dropped. Returns AC iff both
-/// have the same number of normalized lines and every pair is byte-equal.
-/// `output` is borrowed so the caller keeps the reader.
+/// ignored, CRLF is normalized to LF, and trailing empty lines are dropped.
+/// Returns AC iff both have the same number of normalized lines and every pair
+/// is byte-equal. `output` is borrowed so the caller keeps the reader.
 pub fn compare_lines<O: Read, A: Read>(output: &mut O, answer: A) -> std::io::Result<Verdict> {
     let mut out = LineStream::new(output);
     let mut ans = LineStream::new(answer);
 
     loop {
-        // Output-side invalid UTF-8 -> WrongAnswer (see `compare_tokens`); the
-        // answer side keeps `?` so a broken jury answer stays a hard error.
-        let o = match out.next_line() {
-            Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                return Ok(Verdict::WrongAnswer);
-            }
-            Err(e) => return Err(e),
-        };
-        let a = ans.next_line()?;
-        match (o, a) {
+        match (out.next_line()?, ans.next_line()?) {
             (Some(o), Some(a)) => {
                 if o != a {
                     return Ok(Verdict::WrongAnswer);
@@ -1063,25 +1097,61 @@ mod tests {
     }
 
     #[test]
-    fn tokens_invalid_utf8_answer_is_error() {
-        // Author-side broken answer stays a hard error (interpreter -> SystemError).
-        let mut out = b"5".as_slice();
-        let r = compare_tokens(&mut out, b"\xff\xfe".as_slice(), TokenMode::Exact);
-        assert!(
-            r.is_err(),
-            "answer-side invalid UTF-8 must remain an error, got {r:?}"
-        );
-        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    fn binary_tokens_compare_byte_for_byte() {
+        // Binary test data: the same bytes are accepted, whatever the mode.
+        for mode in [
+            TokenMode::Exact,
+            TokenMode::CaseInsensitive,
+            TokenMode::Float {
+                abs_tol: ABS,
+                rel_tol: REL,
+            },
+        ] {
+            let mut out = b"\x00\xff \xfe\x80\n".as_slice();
+            assert_eq!(
+                compare_tokens(&mut out, b"\x00\xff\n\xfe\x80".as_slice(), mode).unwrap(),
+                Verdict::Accepted
+            );
+            let mut out = b"\x00\xfe".as_slice();
+            assert_eq!(
+                compare_tokens(&mut out, b"\x00\xff".as_slice(), mode).unwrap(),
+                Verdict::WrongAnswer
+            );
+        }
     }
 
     #[test]
-    fn lines_invalid_utf8_answer_is_error() {
-        let mut out = b"hello\n".as_slice();
-        let r = compare_lines(&mut out, b"\xff\xfe".as_slice());
-        assert!(
-            r.is_err(),
-            "answer-side invalid UTF-8 must remain an error, got {r:?}"
+    fn binary_lines_compare_byte_for_byte() {
+        let mut out = b"a\xff \r\n\xc3\n\n".as_slice();
+        assert_eq!(
+            compare_lines(&mut out, b"a\xff\n\xc3".as_slice()).unwrap(),
+            Verdict::Accepted
         );
-        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        let mut out = b"a\xff\n".as_slice();
+        assert_eq!(
+            compare_lines(&mut out, b"a\xfe\n".as_slice()).unwrap(),
+            Verdict::WrongAnswer
+        );
+    }
+
+    #[test]
+    fn a_code_point_split_across_reads_is_still_one_char() {
+        // "é" arrives one byte per read; it must not decay into two bytes.
+        struct OneByte<'a>(&'a [u8]);
+        impl Read for OneByte<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let Some((&b, rest)) = self.0.split_first() else {
+                    return Ok(0);
+                };
+                buf[0] = b;
+                self.0 = rest;
+                Ok(1)
+            }
+        }
+        let mut out = OneByte("CAFÉ".as_bytes());
+        assert_eq!(
+            compare_tokens(&mut out, "café".as_bytes(), TokenMode::CaseInsensitive).unwrap(),
+            Verdict::Accepted
+        );
     }
 }
