@@ -26,6 +26,16 @@ mod entry {
         Ok("ok".into())
     }
 
+    /// The `print` namespace's validate function (see
+    /// [`crate::config::violations`]).
+    #[plugin_fn]
+    pub fn validate_print_config(input: String) -> FnResult<String> {
+        let req: ConfigValidateInput = serde_json::from_str(&input)?;
+        let config: crate::config::PrintConfig = req.parse()?;
+        let errors = crate::config::violations(&config);
+        Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+    }
+
     macro_rules! http_entry {
         ($name:ident => $handler:path) => {
             #[plugin_fn]

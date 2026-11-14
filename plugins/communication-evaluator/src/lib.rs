@@ -31,6 +31,17 @@ pub fn init() -> FnResult<String> {
     Ok("ok".to_string())
 }
 
+/// The `communication` namespace's validate function (see
+/// [`config::CommConfig::violations`]).
+#[cfg(target_arch = "wasm32")]
+#[plugin_fn]
+pub fn validate_communication_config(input: String) -> FnResult<String> {
+    let req: ConfigValidateInput = serde_json::from_str(&input)?;
+    let config: config::CommConfig = req.parse()?;
+    let errors = config.violations();
+    Ok(serde_json::to_string(&ConfigValidateOutput { errors })?)
+}
+
 #[cfg(target_arch = "wasm32")]
 #[plugin_fn]
 pub fn evaluate_communication(input: String) -> FnResult<String> {

@@ -1,4 +1,8 @@
-use broccoli_server_sdk::types::{EvaluationTimeoutBudget, ResourceLimits, seconds_from_ms};
+use std::collections::HashSet;
+
+use broccoli_server_sdk::types::{
+    ConfigViolation, EvaluationTimeoutBudget, ResourceLimits, seconds_from_ms,
+};
 use serde::Deserialize;
 
 /// Kernel pipe buffer size requested for each contestant FIFO, in bytes.
@@ -27,6 +31,29 @@ pub struct CommConfig {
     pub manager_memory_limit_kb: u32,
 }
 
+impl CommConfig {
+    /// What the `communication` namespace refuses beyond its schema: two
+    /// manager sources with one filename, of which the sandbox would keep
+    /// only one.
+    pub fn violations(&self) -> Vec<ConfigViolation> {
+        let mut seen = HashSet::new();
+        self.manager_sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| !seen.insert(source.filename.as_str()))
+            .map(|(i, source)| {
+                ConfigViolation::new(
+                    format!("manager_sources[{i}].filename"),
+                    format!(
+                        "another manager source is already named '{}'",
+                        source.filename
+                    ),
+                )
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -46,6 +73,28 @@ pub(crate) mod tests {
             .get_problem(1, "communication")
             .and_then(|c| c.parse())
             .unwrap()
+    }
+
+    fn source(filename: &str) -> ManagerSourceEntry {
+        ManagerSourceEntry {
+            filename: filename.into(),
+            hash: "h".into(),
+        }
+    }
+
+    #[test]
+    fn manager_sources_sharing_a_filename_are_refused() {
+        let config = CommConfig {
+            manager_sources: vec![source("manager.cpp"), source("a.h"), source("manager.cpp")],
+            ..default_comm()
+        };
+        let paths: Vec<_> = config.violations().into_iter().map(|v| v.path).collect();
+        assert_eq!(paths, ["manager_sources[2].filename"]);
+        let distinct = CommConfig {
+            manager_sources: vec![source("manager.cpp"), source("a.h")],
+            ..default_comm()
+        };
+        assert_eq!(distinct.violations(), []);
     }
 
     #[test]
