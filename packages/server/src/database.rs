@@ -847,7 +847,11 @@ mod tests {
             Duration::from_secs(10),
             &session,
         );
-        let plugin = plugin_sql.lease("labelled").await.expect("plugin pool").db;
+        let plugin = plugin_sql
+            .lease("labelled", None)
+            .await
+            .expect("plugin pool")
+            .db;
 
         async fn show(db: &DatabaseConnection, setting: &str) -> String {
             db.query_one_raw(sea_orm::Statement::from_string(

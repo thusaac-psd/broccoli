@@ -10,8 +10,13 @@
 //! All plugin pools share one connection budget, the restricted plugin pool
 //! size [`crate::database::PoolSizes::plugin`]:
 //!
-//! - at most `budget` statements or transactions hold a connection at once,
-//!   server-wide (a semaphore permit per [`Lease`]);
+//! - at most `budget` plugin calls run SQL at once, server-wide: a [`Lease`]
+//!   holds one of `budget` semaphore permits. A call that already holds one,
+//!   through an open transaction or a lease of its own or of the call it is
+//!   nested in, reuses it for every further statement, so a call never waits
+//!   on a permit it holds. Such a call has one connection per open transaction
+//!   (at most [`crate::host_funcs::sql::MAX_OPEN_TXNS_PER_PLUGIN`] for a
+//!   plugin) and one for its current statement;
 //! - a plugin with no idle connection of its own, while the pools already
 //!   hold `budget` connections, first closes an idle connection of another
 //!   plugin, so the pools keep to the budget as load moves between plugins;
@@ -28,6 +33,7 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use common::db::{DatabaseConnection, PgPoolSpec, PgSession};
+use plugin_core::executor::CallLocals;
 use sea_orm::DbErr;
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
@@ -51,11 +57,31 @@ struct Inner {
     pools: StdMutex<HashMap<String, Arc<OnceCell<DatabaseConnection>>>>,
 }
 
-/// The right to run on a plugin's pool: the pool and one of the shared
-/// budget's permits. A transaction keeps its lease until it ends.
+/// The right to run on a plugin's pool: the pool and the call's permit from
+/// the shared budget. A transaction keeps the permit until it ends.
 pub struct Lease {
     pub db: DatabaseConnection,
-    pub permit: OwnedSemaphorePermit,
+    pub permit: Arc<OwnedSemaphorePermit>,
+}
+
+/// The permits a call tree holds, kept in its [`CallLocals`] while any of its
+/// leases or transactions holds them, keyed by the budget they belong to.
+#[derive(Default)]
+struct HeldPermits(Vec<(Weak<Semaphore>, Weak<OwnedSemaphorePermit>)>);
+
+impl HeldPermits {
+    fn live(&mut self, budget: &Arc<Semaphore>) -> Option<Arc<OwnedSemaphorePermit>> {
+        self.0.retain(|(_, permit)| permit.strong_count() > 0);
+        self.0
+            .iter()
+            .find(|(sem, _)| sem.as_ptr() == Arc::as_ptr(budget))
+            .and_then(|(_, permit)| permit.upgrade())
+    }
+
+    fn hold(&mut self, budget: &Arc<Semaphore>, permit: &Arc<OwnedSemaphorePermit>) {
+        self.0
+            .push((Arc::downgrade(budget), Arc::downgrade(permit)));
+    }
 }
 
 impl PluginSqlPools {
@@ -83,16 +109,29 @@ impl PluginSqlPools {
         }
     }
 
-    /// A lease on `plugin_id`'s pool, provisioning the plugin's role and
-    /// schema and building its pool on first use.
-    pub async fn lease(&self, plugin_id: &str) -> Result<Lease, DbErr> {
-        let permit = tokio::time::timeout(
-            self.inner.acquire_timeout,
-            self.inner.leases.clone().acquire_owned(),
-        )
-        .await
-        .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout))?
-        .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed))?;
+    /// A lease on `plugin_id`'s pool for the call tree `call` (the running
+    /// plugin call's [`plugin_core::executor::call_locals`]), provisioning the
+    /// plugin's role and schema and building its pool on first use.
+    pub async fn lease(&self, plugin_id: &str, call: Option<&CallLocals>) -> Result<Lease, DbErr> {
+        let budget = &self.inner.leases;
+        let held = call.and_then(|c| c.with(|held: &mut HeldPermits| held.live(budget)));
+        let permit = match held {
+            Some(permit) => permit,
+            None => {
+                let permit = tokio::time::timeout(
+                    self.inner.acquire_timeout,
+                    budget.clone().acquire_owned(),
+                )
+                .await
+                .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout))?
+                .map_err(|_| DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed))?;
+                let permit = Arc::new(permit);
+                if let Some(call) = call {
+                    call.with(|held: &mut HeldPermits| held.hold(budget, &permit));
+                }
+                permit
+            }
+        };
         let db = self.pool(plugin_id).await?;
         self.inner.make_room(plugin_id).await;
         Ok(Lease { db, permit })
@@ -115,9 +154,12 @@ impl PluginSqlPools {
         let connect = common::db::pg_connect_options(&self.inner.url, &self.inner.session)?
             .username(&login.names.role)
             .password(&login.password);
+        // Room for every permit plus the transactions a call may hold open
+        // beside its current statement.
+        let max = self.inner.budget + crate::host_funcs::sql::MAX_OPEN_TXNS_PER_PLUGIN as u32;
         let spec = PgPoolSpec {
             acquire_timeout: self.inner.acquire_timeout,
-            ..PgPoolSpec::new(self.inner.budget, 0)
+            ..PgPoolSpec::new(max, 0)
         };
         let pools = Arc::downgrade(&self.inner);
         let options = spec.pool_options().after_release(move |_, _| {

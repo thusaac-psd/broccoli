@@ -162,6 +162,7 @@ pub trait PluginInvoker: Send + Sync {
         let in_flight = InFlight::enter(metrics.as_ref(), &plugin_id_owned);
         let runtime = tokio::runtime::Handle::current();
         let (done, result) = tokio::sync::oneshot::channel();
+        let class = resolved.class;
         self.executor().threads().run({
             let plugin_id = plugin_id_owned.clone();
             let func_name = func_name_owned.clone();
@@ -193,7 +194,7 @@ pub trait PluginInvoker: Send + Sync {
             let attrs = [
                 KeyValue::new("plugin.id", plugin_id.to_string()),
                 KeyValue::new("plugin.function", func_name.to_string()),
-                KeyValue::new("plugin.class", class_label(resolved.class)),
+                KeyValue::new("plugin.class", class_label(class)),
                 KeyValue::new("outcome", outcome),
             ];
             metrics
@@ -260,6 +261,7 @@ fn run_guest(
         class: resolved.class,
         deadline: resolved.deadline,
         depth: resolved.depth,
+        locals: resolved.locals,
         token,
     });
 

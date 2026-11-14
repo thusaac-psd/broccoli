@@ -46,13 +46,13 @@ impl Fixture {
 
 /// Run `sql` as `plugin`.
 async fn exec(pools: &PluginSqlPools, plugin: &str, sql: &str) -> Result<(), DbErr> {
-    let lease = pools.lease(plugin).await?;
+    let lease = pools.lease(plugin, None).await?;
     lease.db.execute_unprepared(sql).await.map(drop)
 }
 
 /// The single text value `sql` returns, run as `plugin`.
 async fn text(pools: &PluginSqlPools, plugin: &str, sql: &str) -> String {
-    let lease = pools.lease(plugin).await.expect("lease");
+    let lease = pools.lease(plugin, None).await.expect("lease");
     lease
         .db
         .query_one_raw(Statement::from_string(DbBackend::Postgres, sql))
@@ -223,17 +223,17 @@ async fn concurrent_first_uses_on_several_replicas_converge() {
 async fn the_plugin_pools_keep_to_one_budget() {
     let f = Fixture::new().await;
     let pools = f.pools(2);
-    let a = pools.lease("a").await.expect("a");
+    let a = pools.lease("a", None).await.expect("a");
     let a_txn = sea_orm::TransactionTrait::begin(&a.db)
         .await
         .expect("a begins");
-    let b = pools.lease("b").await.expect("b");
+    let b = pools.lease("b", None).await.expect("b");
     let b_txn = sea_orm::TransactionTrait::begin(&b.db)
         .await
         .expect("b begins");
     assert_eq!(pools.open_connections(), 2);
 
-    let third = pools.lease("c");
+    let third = pools.lease("c", None);
     tokio::pin!(third);
     assert!(
         (&mut third).now_or_never().is_none(),
@@ -457,4 +457,55 @@ mod grants {
             }
         }
     }
+}
+
+/// A call that holds a permit reuses it: at a full budget, a transaction's call
+/// runs further statements, and its nested call opens a transaction of its
+/// own, while a different call waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_reuses_its_permit_at_a_full_budget() {
+    use plugin_core::executor::CallLocals;
+    use sea_orm::TransactionTrait;
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    let call = std::sync::Arc::new(CallLocals::default());
+
+    let lease = pools.lease("icpc", Some(&call)).await.expect("first lease");
+    let txn = lease
+        .db
+        .begin()
+        .await
+        .expect("the call opens a transaction");
+    let held = lease.permit.clone();
+    drop(lease);
+
+    // A lease that needed a second permit would wait out the acquire
+    // timeout and fail; this one reuses the call's.
+    let statement = pools.lease("icpc", Some(&call)).await.expect("lease");
+    assert!(std::sync::Arc::ptr_eq(&statement.permit, &held));
+    statement
+        .db
+        .execute_unprepared("SELECT 1")
+        .await
+        .expect("statement beside the transaction");
+    drop(statement);
+    // A nested call shares its parent's call locals.
+    let nested = pools.lease("ioi", Some(&call)).await.expect("lease");
+    assert!(std::sync::Arc::ptr_eq(&nested.permit, &held));
+    let nested_txn = nested.db.begin().await.expect("nested transaction");
+
+    let other = std::sync::Arc::new(CallLocals::default());
+    let waiting = pools.lease("icpc", Some(&other));
+    tokio::pin!(waiting);
+    assert!(
+        (&mut waiting).now_or_never().is_none(),
+        "another call waits while the budget is held"
+    );
+    nested_txn.rollback().await.expect("nested ends");
+    drop(nested);
+    txn.rollback().await.expect("transaction ends");
+    drop(held);
+    waiting
+        .await
+        .expect("the other call proceeds once the permit is free");
 }

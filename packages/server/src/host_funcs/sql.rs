@@ -22,9 +22,9 @@ use uuid::Uuid;
 pub struct PluginTransaction {
     plugin_id: String,
     state: StdMutex<TxnState>,
-    /// The transaction's share of the plugin SQL connection budget, returned
-    /// when the transaction ends and this entry is dropped.
-    _permit: OwnedSemaphorePermit,
+    /// The opening call's permit from the plugin SQL budget, held until the
+    /// transaction ends and this entry is dropped.
+    _permit: Arc<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug)]
@@ -36,7 +36,7 @@ struct TxnState {
 }
 
 impl PluginTransaction {
-    fn new(txn: DatabaseTransaction, plugin_id: String, permit: OwnedSemaphorePermit) -> Self {
+    fn new(txn: DatabaseTransaction, plugin_id: String, permit: Arc<OwnedSemaphorePermit>) -> Self {
         Self {
             plugin_id,
             state: StdMutex::new(TxnState {
@@ -79,7 +79,7 @@ const TXN_REAP_INTERVAL: Duration = Duration::from_secs(30);
 /// damage between reaper sweeps: without a cap, one misbehaving plugin that
 /// traps after `db_begin` in a loop can check out the entire plugin DB pool
 /// (20 connections by default) and starve every other plugin's DB access.
-const MAX_OPEN_TXNS_PER_PLUGIN: usize = 8;
+pub(crate) const MAX_OPEN_TXNS_PER_PLUGIN: usize = 8;
 
 /// Watchdog for one plugin transaction: once the transaction has been idle for
 /// [`TXN_IDLE_TTL`] it is removed from the map and rolled back, returning its
@@ -634,8 +634,9 @@ host_fn!(pub db_execute(user_data: Arc<(String, PluginSqlPools)>; sql: String, a
     let values = parse_args(&args)?;
     let stmt = plugin_statement(&sql, values);
 
+    let call = plugin_core::executor::call_locals();
     let exec_result = tokio::runtime::Handle::current().block_on(async {
-        pools.lease(plugin_id).await?.db.execute_raw(stmt).await
+        pools.lease(plugin_id, call.as_deref()).await?.db.execute_raw(stmt).await
     });
 
     match exec_result {
@@ -661,8 +662,9 @@ host_fn!(pub db_query(user_data: Arc<(String, PluginSqlPools)>; sql: String, arg
     );
     let stmt = plugin_statement(&wrapped_sql, values);
 
+    let call = plugin_core::executor::call_locals();
     let query_result = tokio::runtime::Handle::current().block_on(async {
-        pools.lease(plugin_id).await?.db.query_one_raw(stmt).await
+        pools.lease(plugin_id, call.as_deref()).await?.db.query_one_raw(stmt).await
     });
 
     match query_result {
@@ -704,9 +706,10 @@ host_fn!(pub db_begin(user_data: Arc<(String, PluginSqlPools, TransactionMap)>; 
         }
     }
 
+    let call = plugin_core::executor::call_locals();
     let (txn, permit) = tokio::runtime::Handle::current()
         .block_on(async {
-            let lease = pools.lease(plugin_id).await?;
+            let lease = pools.lease(plugin_id, call.as_deref()).await?;
             Ok::<_, sea_orm::DbErr>((lease.db.begin().await?, lease.permit))
         })
         .map_err(|e| {
@@ -908,10 +911,12 @@ mod tests {
 
     use super::*;
 
-    fn permit() -> OwnedSemaphorePermit {
-        Arc::new(tokio::sync::Semaphore::new(1))
-            .try_acquire_owned()
-            .expect("a free permit")
+    fn permit() -> Arc<OwnedSemaphorePermit> {
+        Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(1))
+                .try_acquire_owned()
+                .expect("a free permit"),
+        )
     }
 
     #[test]
