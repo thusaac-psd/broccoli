@@ -100,8 +100,16 @@ pub async fn create_blob_store(
                 .map(PathBuf::from),
             }, metrics.clone())?;
             // Refuse to start against a missing or inaccessible bucket rather
-            // than failing on the first upload or fetch.
-            store.verify_bucket().await?;
+            // than failing on the first upload or fetch; wait for storage that
+            // is not answering yet, as for the database and Redis.
+            crate::boot::wait_for("object storage", &os.endpoint.clone().unwrap_or_default(), || async {
+                store.verify_bucket().await.map_err(|e| match e {
+                    StorageError::Unavailable(_) => crate::boot::Unreachable::Transient(e),
+                    e => crate::boot::Unreachable::Fatal(e),
+                })
+            })
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
             Arc::new(store)
         }
         #[cfg(not(feature = "object-storage"))]

@@ -105,9 +105,6 @@ utoipa = { version = "6", features = ["chrono"] }
 utoipa-axum = "0.3"
 utoipa-scalar = { version = "0.4", features = ["axum"] }
 utoipa-swagger-ui = { version = "10", features = ["axum"] }
-rust-s3 = { version = "0.38", default-features = false, features = [
-  "tokio-rustls-tls",
-] }
 tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 broccoli-server-sdk = { path = "packages/server-sdk" }

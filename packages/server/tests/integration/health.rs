@@ -99,7 +99,12 @@ mod livez {
         let mq = mq::Mq::lazy(&format!("redis://{addr}"), "silent").unwrap();
 
         let started = Instant::now();
-        let deps = server::handlers::health::probe_dependencies(&app.db, &mq).await;
+        let deps = server::handlers::health::probe_dependencies(
+            &app.db,
+            &mq,
+            app.state.blob_store.as_ref(),
+        )
+        .await;
         let elapsed = started.elapsed();
 
         assert_eq!(deps.mq(), "down");

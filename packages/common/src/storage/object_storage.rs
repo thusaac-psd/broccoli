@@ -1,12 +1,9 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use s3::creds::Credentials;
-use s3::error::S3Error;
-use s3::request::ResponseData;
-use s3::serde_types::HeadObjectResult;
-use s3::utils::PutStreamResponse;
-use s3::{Bucket, Region};
+use reqwest::Method;
+use reqwest::header::{HeaderMap, HeaderValue, RANGE};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,6 +15,9 @@ use crate::metrics::Metrics;
 
 use super::error::StorageError;
 use super::hash::ContentHash;
+use super::s3::{
+    EMPTY_PAYLOAD_SHA256, S3Client, S3Request, S3Response, S3TransportError, is_server_failure,
+};
 use super::traits::{BlobStore, BoxReader};
 
 #[derive(Debug, Clone)]
@@ -33,10 +33,12 @@ pub struct ObjectStorageConfig {
 }
 
 pub struct ObjectStorageBlobStore {
-    bucket: Box<Bucket>,
+    s3: std::sync::Arc<S3Client>,
     max_size: u64,
     temp_dir: PathBuf,
     metrics: Option<Metrics>,
+    /// The last [`BlobStore::probe`] outcome and when it was taken.
+    last_probe: std::sync::Mutex<Option<(Instant, Result<(), String>)>>,
 }
 
 impl ObjectStorageBlobStore {
@@ -44,53 +46,30 @@ impl ObjectStorageBlobStore {
         config: ObjectStorageConfig,
         metrics: Option<Metrics>,
     ) -> Result<Self, StorageError> {
-        let region = match &config.endpoint {
-            Some(endpoint) => Region::Custom {
-                region: config.region.clone(),
-                endpoint: endpoint.clone(),
-            },
-            None => config
-                .region
-                .parse::<Region>()
-                .map_err(|e| StorageError::Backend(format!("invalid region: {e}")))?,
+        let endpoint = config
+            .endpoint
+            .clone()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", config.region));
+        let credentials = match (config.access_key, config.secret_key) {
+            (Some(access), Some(secret)) if !access.is_empty() => Some((access, secret)),
+            _ => None,
         };
-
-        let credentials = Credentials::new(
-            config.access_key.as_deref(),
-            config.secret_key.as_deref(),
-            None,
-            None,
-            None,
+        let s3 = S3Client::new(
+            endpoint,
+            config.bucket,
+            config.region,
+            config.path_style,
+            credentials,
         )
-        .map_err(|e| StorageError::Backend(format!("invalid credentials: {e}")))?;
-
-        // Disable rust-s3's built-in retry! (default 1 retry): it covers only
-        // connection/header establishment with blocking, no-jitter sleeps and -
-        // with fail-on-err off - never sees 5xx. We own all retry/backoff below
-        // with status-aware, jittered logic.
-        s3::set_retries(0);
-
-        let mut bucket = Bucket::new(&config.bucket, region, credentials)
-            .map_err(|e| StorageError::Backend(format!("failed to create bucket: {e}")))?;
-
-        if config.path_style {
-            bucket.set_path_style();
-        }
-
-        // Every request carries this timeout, so a half-open or stalled
-        // SeaweedFS connection fails the op instead of hanging its future
-        // forever, pinning a worker task and a pooled connection.
-        bucket.set_request_timeout(Some(std::time::Duration::from_secs(
-            S3_REQUEST_TIMEOUT_SECS,
-        )));
-
-        let temp_dir = config.temp_dir.unwrap_or_else(std::env::temp_dir);
+        .map_err(|e| StorageError::Backend(format!("failed to build the S3 client: {e}")))?;
 
         Ok(Self {
-            bucket,
+            s3: std::sync::Arc::new(s3),
             max_size: config.max_size,
-            temp_dir,
+            temp_dir: config.temp_dir.unwrap_or_else(std::env::temp_dir),
             metrics,
+            last_probe: std::sync::Mutex::new(None),
         })
     }
 
@@ -104,28 +83,26 @@ impl ObjectStorageBlobStore {
     }
 }
 
-fn is_s3_not_found(err: &S3Error) -> bool {
-    matches!(err, S3Error::HttpFailWithBody(404, _))
-}
+/// The key [`ObjectStorageBlobStore::verify_bucket`] reads: content keys are
+/// `<2 hex>/<62 hex>`, so no blob is ever stored here.
+const BUCKET_CHECK_KEY: &str = "broccoli-bucket-check";
 
 const MAX_S3_RETRIES: u32 = 3;
-const S3_REQUEST_TIMEOUT_SECS: u64 = 120;
+/// Retries start only within this long of an operation's first attempt, so
+/// with the client's connect and read timeouts an unreachable or stalled
+/// storage server fails the operation in well under a request's deadline.
+const RETRY_WINDOW: Duration = Duration::from_secs(10);
 const S3_WINDOW: u64 = 8 * 1024 * 1024;
-
-/// HTTP statuses worth retrying. With fail-on-err off these arrive as
-/// `Ok(ResponseData)` (not `Err`), so callers must inspect status, not just the
-/// `Err` arm. 429 = throttling (SeaweedFS SlowDown), 5xx = server-side transient.
-fn is_retryable_status(code: u16) -> bool {
-    code == 429 || (500..600).contains(&code)
-}
+/// How long a [`BlobStore::probe`] answer is reused.
+const PROBE_TTL: Duration = Duration::from_secs(5);
+/// How long a probe waits for the storage server: inside a health check's
+/// budget, so a slow store is reported (and remembered) as down.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Log + count a retry of a transient S3 call. Centralised so every retry site
 /// (get/head/put/delete) is observable identically: a WARN line (visible in
 /// logs and the trace) plus the `broccoli.blob_store.retries` counter, labelled
-/// by operation, for contest-day dashboards/alerts. Transport errors include
-/// request timeouts (reqwest surfaces them as transport errors), so a stalled
-/// backend shows up here as a retry with a "transport error: ... timed out"
-/// reason rather than silently.
+/// by operation, for contest-day dashboards/alerts.
 fn record_retry(metrics: Option<&Metrics>, op: &str, attempt: u32, reason: &str) {
     warn!(
         operation = op,
@@ -143,132 +120,196 @@ fn record_retry(metrics: Option<&Metrics>, op: &str, attempt: u32, reason: &str)
 async fn retry_backoff(attempt: u32) {
     let cap = (100u64.saturating_mul(1u64 << attempt.min(5))).min(2000);
     let jitter = rand::random::<u64>() % (cap + 1);
-    tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+    tokio::time::sleep(Duration::from_millis(jitter)).await;
 }
 
-/// The HTTP status of a successful-at-transport-level S3 response. With
-/// fail-on-err off, error statuses arrive inside `Ok`, so retry and
-/// classification must look at this, not only at `Err`.
-trait S3Status {
-    fn status(&self) -> u16;
-}
-
-impl S3Status for ResponseData {
-    fn status(&self) -> u16 {
-        self.status_code()
-    }
-}
-
-impl S3Status for PutStreamResponse {
-    fn status(&self) -> u16 {
-        self.status_code()
-    }
-}
-
-impl S3Status for (HeadObjectResult, u16) {
-    fn status(&self) -> u16 {
-        self.1
-    }
-}
-
-/// The one retry policy for every S3 call: up to [`MAX_S3_RETRIES`] retries
-/// with jittered backoff on transport errors (incl. timeouts) and retryable
-/// statuses (5xx/429). Terminal outcomes (2xx, 404, 416, other 4xx) are handed
-/// back for the caller to classify. `call` builds a fresh request each attempt,
-/// so the whole call (connection AND body) is inside the retry, unlike
-/// rust-s3's built-in retry, which only wraps connection setup.
-async fn with_retry<T, F, Fut>(
+/// The one retry policy for every S3 call: up to [`MAX_S3_RETRIES`] retries,
+/// all started within [`RETRY_WINDOW`], with jittered backoff on transport
+/// errors (including timeouts) and server failures (5xx, 429). Every other
+/// response is handed back for the caller to classify; what is still failing
+/// when retries run out is [`StorageError::Unavailable`]. `call` builds a
+/// fresh request each attempt, body included.
+async fn with_retry<F, Fut>(
     op: &'static str,
     metrics: Option<&Metrics>,
     mut call: F,
-) -> Result<T, S3Error>
+) -> Result<S3Response, StorageError>
 where
-    T: S3Status,
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, S3Error>>,
+    Fut: std::future::Future<Output = Result<S3Response, S3TransportError>>,
 {
+    let started = Instant::now();
     let mut attempt = 0u32;
     loop {
-        let reason = match call().await {
-            Ok(resp) if is_retryable_status(resp.status()) && attempt < MAX_S3_RETRIES => {
-                format!("status {}", resp.status())
+        let outcome = call().await;
+        let reason = match &outcome {
+            Ok(resp) if is_server_failure(resp.status) => format!("status {}", resp.status),
+            Ok(_) => return Ok(outcome.expect("matched Ok")),
+            Err(S3TransportError::Body(e)) => {
+                return Err(StorageError::Io(std::io::Error::new(
+                    e.kind(),
+                    e.to_string(),
+                )));
             }
-            Err(e) if !is_s3_not_found(&e) && attempt < MAX_S3_RETRIES => {
-                format!("transport error: {e}")
-            }
-            done => return done,
+            Err(e) => format!("transport error: {}", error_chain(e)),
         };
+        if attempt >= MAX_S3_RETRIES || started.elapsed() >= RETRY_WINDOW {
+            return Err(StorageError::Unavailable(format!(
+                "object storage {op} failed after {} attempts: {reason}",
+                attempt + 1
+            )));
+        }
         attempt += 1;
         record_retry(metrics, op, attempt, &reason);
         retry_backoff(attempt).await;
     }
 }
 
+/// `e` and every error under it, for a log line that names the real cause
+/// ("connection refused", "operation timed out") rather than only the top.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
+fn unexpected(op: &str, resp: &S3Response) -> StorageError {
+    StorageError::Backend(format!(
+        "S3 {op} returned status {}{}",
+        resp.status,
+        resp.error_code()
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default()
+    ))
+}
+
 impl ObjectStorageBlobStore {
-    /// HEAD an object with retry; `Ok(None)` when it does not exist.
-    async fn head(&self, key: &str) -> Result<Option<HeadObjectResult>, StorageError> {
-        match with_retry("head", self.metrics.as_ref(), || {
-            self.bucket.head_object(key)
+    fn request<'a>(&self, method: Method, key: &'a str) -> S3Request<'a> {
+        S3Request {
+            method,
+            key,
+            headers: HeaderMap::new(),
+            payload_sha256: EMPTY_PAYLOAD_SHA256,
+        }
+    }
+
+    /// Send a bodiless request with the retry policy.
+    async fn call(
+        &self,
+        op: &'static str,
+        request: S3Request<'_>,
+    ) -> Result<S3Response, StorageError> {
+        with_retry(op, self.metrics.as_ref(), || {
+            self.s3
+                .send(&request, || async { Ok(reqwest::Body::from(Vec::new())) })
         })
         .await
-        {
-            Ok((_, 404)) => Ok(None),
-            Ok((head, status)) if (200..300).contains(&status) => Ok(Some(head)),
-            Ok((_, status)) => Err(StorageError::Backend(format!(
-                "S3 head returned status {status}"
-            ))),
-            Err(e) if is_s3_not_found(&e) => Ok(None),
-            Err(e) => Err(StorageError::Backend(format!(
-                "head_object failed after retries: {e}"
-            ))),
+    }
+
+    /// The object's length, or `None` when it does not exist.
+    async fn head(&self, key: &str) -> Result<Option<u64>, StorageError> {
+        let resp = self.call("head", self.request(Method::HEAD, key)).await?;
+        match resp.status {
+            404 => Ok(None),
+            200..300 => resp.content_length().map(Some).ok_or_else(|| {
+                StorageError::Backend("HEAD response missing content-length".into())
+            }),
+            _ => Err(unexpected("head", &resp)),
         }
     }
 
     /// The object's length from a HEAD, or `NotFound`.
     async fn content_length(&self, hash: &ContentHash) -> Result<u64, StorageError> {
-        let head = self
-            .head(&Self::object_key(hash))
+        self.head(&Self::object_key(hash))
             .await?
-            .ok_or_else(|| StorageError::NotFound(hash.to_hex()))?;
-        head.content_length
-            .map(|len| len as u64)
-            .ok_or_else(|| StorageError::Backend("HEAD response missing content-length".into()))
+            .ok_or_else(|| StorageError::NotFound(hash.to_hex()))
     }
 
     /// Check at boot that the configured bucket exists and these credentials
-    /// can reach it (S3 HeadBucket, with the usual retry). Without this, a
-    /// missing bucket (e.g. an infra init job that failed quietly) lets servers
-    /// and workers boot "healthy" and fail on the first upload or fetch.
+    /// can reach it (S3 HeadBucket, with the usual retry), naming the cause
+    /// when they cannot. Without this, a missing bucket (e.g. an infra init job
+    /// that failed quietly) lets servers and workers boot "healthy" and fail on
+    /// the first upload or fetch. Clock skew is never the cause: requests are
+    /// signed at the storage server's time.
     ///
     /// The bucket is deliberately not created here: it is shared by every
     /// server and worker, so auto-creating it would turn a typo in one node's
     /// config into a private, empty bucket for that node alone.
     pub async fn verify_bucket(&self) -> Result<(), StorageError> {
-        let bucket = &self.bucket.name;
-        // An empty key addresses the bucket itself: `HEAD /<bucket>/`.
-        match with_retry("head_bucket", self.metrics.as_ref(), || {
-            self.bucket.head_object("")
+        let bucket = self.s3.bucket();
+        let endpoint = self.s3.endpoint();
+        // A HEAD carries no error body to tell a missing bucket from bad
+        // credentials, so the check GETs a key that never exists: `NoSuchKey`
+        // means the bucket is there and these credentials may read it.
+        let resp = match self
+            .call("bucket_check", self.request(Method::GET, BUCKET_CHECK_KEY))
+            .await
+        {
+            Ok(resp) => resp,
+            Err(StorageError::Unavailable(e)) => {
+                return Err(StorageError::Unavailable(format!(
+                    "object storage at {endpoint} is unreachable: {e}"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        match (resp.status, resp.error_code()) {
+            (200..300, _) | (404, Some("NoSuchKey")) => Ok(()),
+            (404, _) => Err(StorageError::Backend(format!(
+                "object storage bucket `{bucket}` does not exist at {endpoint}. Create it (the \
+                 infra init job normally does) or fix storage.object_storage.bucket"
+            ))),
+            (_, Some("InvalidAccessKeyId")) => Err(StorageError::Backend(format!(
+                "object storage at {endpoint} does not know the access key: check \
+                 storage.object_storage.access_key"
+            ))),
+            (_, Some("SignatureDoesNotMatch")) => Err(StorageError::Backend(format!(
+                "object storage at {endpoint} rejected the request signature: check \
+                 storage.object_storage.secret_key"
+            ))),
+            (401 | 403, code) => Err(StorageError::Backend(format!(
+                "object storage refused access to bucket `{bucket}` (HTTP {}{}): grant these \
+                 credentials read and write on it",
+                resp.status,
+                code.map(|c| format!(", {c}")).unwrap_or_default()
+            ))),
+            _ => Err(unexpected("bucket check", &resp)),
+        }
+    }
+
+    /// GET bytes `[start, end]` of `key`.
+    async fn get_range_raw(
+        s3: &S3Client,
+        metrics: Option<&Metrics>,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<S3Response, StorageError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RANGE,
+            HeaderValue::from_str(&format!("bytes={start}-{end}")).expect("ASCII range"),
+        );
+        let request = S3Request {
+            method: Method::GET,
+            key,
+            headers,
+            payload_sha256: EMPTY_PAYLOAD_SHA256,
+        };
+        with_retry("get", metrics, || {
+            s3.send(&request, || async { Ok(reqwest::Body::from(Vec::new())) })
         })
         .await
-        {
-            Ok((_, status)) if (200..300).contains(&status) => Ok(()),
-            Ok((_, 404)) => Err(StorageError::Backend(format!(
-                "object storage bucket `{bucket}` does not exist at {}. Create it (the infra \
-                 init job normally does) or fix storage.object_storage.bucket",
-                self.bucket.url()
-            ))),
-            Ok((_, status @ (401 | 403))) => Err(StorageError::Backend(format!(
-                "object storage refused access to bucket `{bucket}` (HTTP {status}): check \
-                 storage.object_storage.access_key / secret_key"
-            ))),
-            Ok((_, status)) => Err(StorageError::Backend(format!(
-                "object storage bucket check for `{bucket}` returned HTTP {status}"
-            ))),
-            Err(e) => Err(StorageError::Backend(format!(
-                "object storage at {} is unreachable: {e}",
-                self.bucket.url()
-            ))),
-        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn s3(&self) -> &S3Client {
+        &self.s3
     }
 }
 
@@ -320,20 +361,33 @@ impl BlobStore for ObjectStorageBlobStore {
             // would upload 0 bytes under the correct content hash - silent,
             // permanent content-addressed corruption. A fresh handle each
             // attempt always streams from byte 0.
-            let status_code = with_retry("put", self.metrics.as_ref(), || async {
-                let mut upload_file = fs::File::open(&temp_path).await?;
-                self.bucket.put_object_stream(&mut upload_file, &key).await
+            let payload_sha256 = hash.to_hex();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_LENGTH,
+                HeaderValue::from(total_bytes),
+            );
+            let request = S3Request {
+                method: Method::PUT,
+                key: &key,
+                headers,
+                payload_sha256: &payload_sha256,
+            };
+            // Every attempt RE-OPENS the temp file and streams it from byte 0:
+            // a body that is resent from a spent reader would store a short
+            // object under the full content's hash.
+            let upload = &temp_path;
+            let resp = with_retry("put", self.metrics.as_ref(), || {
+                self.s3.send(&request, || async move {
+                    let file = fs::File::open(upload).await?;
+                    Ok(reqwest::Body::wrap_stream(
+                        tokio_util::io::ReaderStream::new(file),
+                    ))
+                })
             })
-            .await
-            .map_err(|e| {
-                StorageError::Backend(format!("put_object_stream failed after retries: {e}"))
-            })?
-            .status();
-
-            if !(200..300).contains(&status_code) {
-                return Err(StorageError::Backend(format!(
-                    "S3 put returned status {status_code}"
-                )));
+            .await?;
+            if !(200..300).contains(&resp.status) {
+                return Err(unexpected("put", &resp));
             }
 
             Ok(hash)
@@ -363,12 +417,12 @@ impl BlobStore for ObjectStorageBlobStore {
         // bounded transient retry.
         let total = self.content_length(hash).await?;
 
-        let bucket = (*self.bucket).clone();
+        let s3 = self.s3.clone();
         let hash_hex = hash.to_hex();
         let metrics = self.metrics.clone();
 
         let stream = futures::stream::try_unfold(0u64, move |offset| {
-            let bucket = bucket.clone();
+            let s3 = s3.clone();
             let key = key.clone();
             let hash_hex = hash_hex.clone();
             let metrics = metrics.clone();
@@ -378,22 +432,16 @@ impl BlobStore for ObjectStorageBlobStore {
                 }
                 let end = (offset + S3_WINDOW).min(total) - 1;
                 let expected = end - offset + 1;
-                let resp = with_retry("get", metrics.as_ref(), || {
-                    bucket.get_object_range(&key, offset, Some(end))
-                })
-                .await
-                .map_err(|e| {
-                    std::io::Error::other(format!("get_object_range failed after retries: {e}"))
-                })?;
-
-                let code = resp.status_code();
-                if !(200..300).contains(&code) {
+                let resp = Self::get_range_raw(&s3, metrics.as_ref(), &key, offset, end)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                if !(200..300).contains(&resp.status) {
                     return Err(std::io::Error::other(format!(
-                        "S3 range get returned status {code} for {hash_hex} at offset {offset}/{total}"
+                        "S3 range get returned status {} for {hash_hex} at offset {offset}/{total}",
+                        resp.status
                     )));
                 }
-
-                let chunk = resp.bytes().clone();
+                let chunk = resp.body;
                 // The authoritative `total` says exactly `expected` bytes remain
                 // in this window. Anything else - empty body, short read, or an
                 // over-read - is truncation/corruption from a misbehaving
@@ -429,45 +477,61 @@ impl BlobStore for ObjectStorageBlobStore {
 
         let key = Self::object_key(hash);
         let end = offset.saturating_add(len as u64).saturating_sub(1);
-        let response = with_retry("get", self.metrics.as_ref(), || {
-            self.bucket.get_object_range(&key, offset, Some(end))
-        })
-        .await
-        .map_err(|e| {
-            StorageError::Backend(format!("get_object_range failed after retries: {e}"))
-        })?;
-
-        if response.status_code() == 404 {
-            return Err(StorageError::NotFound(hash.to_hex()));
+        let response =
+            Self::get_range_raw(&self.s3, self.metrics.as_ref(), &key, offset, end).await?;
+        match response.status {
+            404 => Err(StorageError::NotFound(hash.to_hex())),
+            416 => Ok((Vec::new(), true)),
+            200..300 => {
+                let bytes = response.body.to_vec();
+                let eof = bytes.len() < len;
+                Ok((bytes, eof))
+            }
+            _ => Err(unexpected("range get", &response)),
         }
-        if response.status_code() == 416 {
-            return Ok((Vec::new(), true));
-        }
-        if !(200..300).contains(&response.status_code()) {
-            return Err(StorageError::Backend(format!(
-                "S3 range get returned status {}",
-                response.status_code()
-            )));
-        }
-
-        let bytes = response.to_vec();
-        let eof = bytes.len() < len;
-        Ok((bytes, eof))
     }
 
     async fn exists(&self, hash: &ContentHash) -> Result<bool, StorageError> {
         Ok(self.head(&Self::object_key(hash)).await?.is_some())
     }
 
+    /// One bucket check, with no retry, answered from the last check for
+    /// [`PROBE_TTL`] so a health endpoint polled often costs the storage
+    /// server next to nothing.
+    async fn probe(&self) -> Result<(), StorageError> {
+        if let Some((at, outcome)) = &*self.last_probe.lock().unwrap_or_else(|e| e.into_inner())
+            && at.elapsed() < PROBE_TTL
+        {
+            return outcome.clone().map_err(StorageError::Unavailable);
+        }
+        let request = self.request(Method::GET, BUCKET_CHECK_KEY);
+        let check = self
+            .s3
+            .send(&request, || async { Ok(reqwest::Body::from(Vec::new())) });
+        let outcome = match tokio::time::timeout(PROBE_TIMEOUT, check)
+            .await
+            .unwrap_or_else(|_| Err(S3TransportError::Body(std::io::ErrorKind::TimedOut.into())))
+        {
+            Ok(resp)
+                if (200..300).contains(&resp.status) || resp.error_code() == Some("NoSuchKey") =>
+            {
+                Ok(())
+            }
+            Ok(resp) => Err(format!("bucket check returned status {}", resp.status)),
+            Err(e) => Err(e.to_string()),
+        };
+        *self.last_probe.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now(), outcome.clone()));
+        outcome.map_err(StorageError::Unavailable)
+    }
+
     async fn delete(&self, hash: &ContentHash) -> Result<bool, StorageError> {
         let key = Self::object_key(hash);
 
-        let status = with_retry("delete", self.metrics.as_ref(), || {
-            self.bucket.delete_object(&key)
-        })
-        .await
-        .map_err(|e| StorageError::Backend(format!("delete_object failed after retries: {e}")))?
-        .status();
+        let status = self
+            .call("delete", self.request(Method::DELETE, &key))
+            .await?
+            .status;
 
         // Distinguish the three terminal outcomes instead of collapsing
         // everything-but-204 to `Ok(false)`. SeaweedFS returns 204 (or 200) for a
@@ -493,13 +557,12 @@ impl BlobStore for ObjectStorageBlobStore {
 /// storage. Needs Docker.
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
-    use s3::creds::Credentials;
-    use s3::{Bucket, Region};
     use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
     use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
     use super::{ObjectStorageBlobStore, ObjectStorageConfig};
+    use crate::storage::s3::{EMPTY_PAYLOAD_SHA256, S3Client, S3Request};
 
     const ACCESS_KEY: &str = "ak";
     const SECRET_KEY: &str = "sk";
@@ -529,44 +592,75 @@ pub mod testing {
             }
         }
 
+        pub fn endpoint(&self) -> &str {
+            &self.endpoint
+        }
+
         /// Creates `bucket`. The filer behind the S3 gateway can lag the
         /// gateway's "started" log line, so creation is retried until it
         /// succeeds.
         pub async fn create_bucket(&self, bucket: &str) {
-            let region = Region::Custom {
-                region: REGION.into(),
-                endpoint: self.endpoint.clone(),
+            let s3 = S3Client::new(
+                self.endpoint.clone(),
+                bucket.into(),
+                REGION.into(),
+                true,
+                Some((ACCESS_KEY.into(), SECRET_KEY.into())),
+            )
+            .expect("client");
+            let request = S3Request {
+                method: reqwest::Method::PUT,
+                key: "",
+                headers: Default::default(),
+                payload_sha256: EMPTY_PAYLOAD_SHA256,
             };
-            let creds =
-                Credentials::new(Some(ACCESS_KEY), Some(SECRET_KEY), None, None, None).unwrap();
-            for _ in 0..20 {
-                if let Ok(resp) = Bucket::create_with_path_style(
-                    bucket,
-                    region.clone(),
-                    creds.clone(),
-                    s3::BucketConfiguration::default(),
-                )
-                .await
-                    && resp.success()
-                {
-                    return;
+            // Then a first write, which waits while SeaweedFS grows its first
+            // volume, so tests do not spend their own retries on that. An
+            // empty object needs no volume, so the write carries a byte.
+            let byte_sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"w"));
+            let warmup = S3Request {
+                key: "warmup",
+                payload_sha256: &byte_sha256,
+                ..request.clone()
+            };
+            for (request, body) in [(&request, &b""[..]), (&warmup, &b"w"[..])] {
+                let mut done = false;
+                for _ in 0..60 {
+                    if let Ok(resp) = s3
+                        .send(request, || async { Ok(reqwest::Body::from(body.to_vec())) })
+                        .await
+                        && (200..300).contains(&resp.status)
+                    {
+                        done = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                assert!(done, "could not create and write bucket {bucket}");
             }
-            panic!("could not create bucket {bucket}");
         }
 
         /// A blob store on `bucket`, which need not exist.
         pub fn store(&self, bucket: &str) -> ObjectStorageBlobStore {
+            self.store_with(bucket, ACCESS_KEY, SECRET_KEY)
+        }
+
+        /// A blob store on `bucket` signing with these credentials.
+        pub fn store_with(
+            &self,
+            bucket: &str,
+            access_key: &str,
+            secret_key: &str,
+        ) -> ObjectStorageBlobStore {
             ObjectStorageBlobStore::new(
                 ObjectStorageConfig {
                     bucket: bucket.to_string(),
                     region: REGION.into(),
                     endpoint: Some(self.endpoint.clone()),
-                    access_key: Some(ACCESS_KEY.into()),
-                    secret_key: Some(SECRET_KEY.into()),
+                    access_key: Some(access_key.into()),
+                    secret_key: Some(secret_key.into()),
                     path_style: true,
-                    max_size: 1 << 20,
+                    max_size: 64 << 20,
                     temp_dir: None,
                 },
                 None,
@@ -581,47 +675,112 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    struct Status(u16);
-    impl S3Status for Status {
-        fn status(&self) -> u16 {
-            self.0
+    fn response(status: u16) -> S3Response {
+        S3Response {
+            status,
+            headers: HeaderMap::new(),
+            body: Default::default(),
         }
     }
 
-    /// Feed `with_retry` a scripted sequence of outcomes; returns the final
-    /// outcome's status (or `None` for an error) and how many calls were made.
-    async fn script(outcomes: Vec<Result<u16, S3Error>>) -> (Option<u16>, u32) {
+    fn unreadable_body() -> S3TransportError {
+        S3TransportError::Body(std::io::Error::other("unused"))
+    }
+
+    /// Feed `with_retry` a scripted sequence of outcomes (`None` for a
+    /// transport failure); returns the final status (or `None` when the store
+    /// is unavailable) and how many calls were made.
+    async fn script(outcomes: Vec<Option<u16>>) -> (Option<u16>, u32) {
         let calls = AtomicU32::new(0);
         let outcomes = std::sync::Mutex::new(outcomes.into_iter());
         let out = with_retry("test", None, || {
             calls.fetch_add(1, Ordering::SeqCst);
             let next = outcomes.lock().unwrap().next().expect("scripted outcome");
-            async move { next.map(Status) }
+            async move {
+                match next {
+                    Some(status) => Ok(response(status)),
+                    // A connection that cannot be made, as an HTTP error.
+                    None => Err(S3TransportError::Http(
+                        reqwest::Client::new()
+                            .get("http://127.0.0.1:1/")
+                            .send()
+                            .await
+                            .expect_err("nothing listens on port 1"),
+                    )),
+                }
+            }
         })
         .await;
-        (out.ok().map(|s| s.0), calls.load(Ordering::SeqCst))
+        let status = match out {
+            Ok(resp) => Some(resp.status),
+            Err(StorageError::Unavailable(_)) => None,
+            Err(e) => panic!("{e}"),
+        };
+        (status, calls.load(Ordering::SeqCst))
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retries_transient_failures_until_success() {
-        let (status, calls) = script(vec![Err(S3Error::HttpFail), Ok(503), Ok(200)]).await;
-        assert_eq!((status, calls), (Some(200), 3));
+        assert_eq!(
+            script(vec![None, Some(503), Some(200)]).await,
+            (Some(200), 3)
+        );
     }
 
-    #[tokio::test]
-    async fn gives_up_after_the_retry_budget() {
-        let (status, calls) = script(vec![Ok(500), Ok(502), Ok(503), Ok(504)]).await;
-        assert_eq!((status, calls), (Some(504), MAX_S3_RETRIES + 1));
+    #[tokio::test(start_paused = true)]
+    async fn what_still_fails_after_the_retry_budget_is_unavailable() {
+        let (status, calls) = script(vec![Some(500), Some(502), None, Some(504)]).await;
+        assert_eq!((status, calls), (None, MAX_S3_RETRIES + 1));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn terminal_outcomes_are_not_retried() {
         for terminal in [200, 404, 416, 403] {
-            assert_eq!(script(vec![Ok(terminal)]).await, (Some(terminal), 1));
+            assert_eq!(script(vec![Some(terminal)]).await, (Some(terminal), 1));
         }
-        let (status, calls) =
-            script(vec![Err(S3Error::HttpFailWithBody(404, String::new()))]).await;
-        assert_eq!((status, calls), (None, 1));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_upload_body_is_an_io_error_not_an_outage() {
+        let out = with_retry("put", None, || async { Err(unreadable_body()) }).await;
+        assert!(matches!(out, Err(StorageError::Io(_))));
+    }
+
+    /// Storage that does not answer is an outage, reported as such by reads,
+    /// writes, the boot check and the health probe alike.
+    #[tokio::test(start_paused = true)]
+    async fn unreachable_storage_is_unavailable() {
+        let store = ObjectStorageBlobStore::new(
+            ObjectStorageConfig {
+                bucket: "b".into(),
+                region: "us-east-1".into(),
+                endpoint: Some("http://127.0.0.1:1".into()),
+                access_key: Some("ak".into()),
+                secret_key: Some("sk".into()),
+                path_style: true,
+                max_size: 1 << 20,
+                temp_dir: None,
+            },
+            None,
+        )
+        .unwrap();
+        let hash = ContentHash::from_bytes([1u8; 32]);
+        assert!(matches!(
+            store.put(b"x").await,
+            Err(StorageError::Unavailable(_))
+        ));
+        assert!(matches!(
+            store.exists(&hash).await,
+            Err(StorageError::Unavailable(_))
+        ));
+        assert!(matches!(
+            store.verify_bucket().await,
+            Err(StorageError::Unavailable(_))
+        ));
+        assert!(matches!(
+            store.probe().await,
+            Err(StorageError::Unavailable(_))
+        ));
     }
 
     /// Against a real SeaweedFS: a missing bucket refuses boot with a clear
@@ -638,6 +797,20 @@ mod tests {
         seaweedfs.create_bucket("broccoli-blobs").await;
         let present = seaweedfs.store("broccoli-blobs");
         present.verify_bucket().await.expect("existing bucket");
+        present.probe().await.expect("probe");
+
+        let err = seaweedfs
+            .store_with("broccoli-blobs", "ak", "wrong-secret")
+            .verify_bucket()
+            .await
+            .expect_err("wrong secret");
+        assert!(err.to_string().contains("secret_key"), "{err}");
+        let err = seaweedfs
+            .store_with("broccoli-blobs", "nobody", "sk")
+            .verify_bucket()
+            .await
+            .expect_err("unknown access key");
+        assert!(err.to_string().contains("access_key"), "{err}");
 
         let absent = ContentHash::from_bytes([7u8; 32]);
         assert!(!present.exists(&absent).await.expect("exists"));
@@ -652,5 +825,38 @@ mod tests {
             present.get_range(&hash, 1, 3).await.expect("range").0,
             b"ell".to_vec()
         );
+        let big: Vec<u8> = (0..(S3_WINDOW as usize * 2 + 17))
+            .map(|i| i as u8)
+            .collect();
+        let big_hash = present.put(&big).await.expect("put big");
+        assert_eq!(present.get(&big_hash).await.expect("get big"), big);
+        assert!(present.delete(&big_hash).await.expect("delete"));
+        assert!(!present.exists(&big_hash).await.expect("exists"));
+    }
+
+    /// A node whose clock is hours off the storage server's still reads and
+    /// writes: the server refuses its first signature as skewed, the store
+    /// re-learns the server's time from that refusal and the request goes
+    /// through. Driven by skewing the learned clock, not the host's.
+    #[tokio::test]
+    async fn a_node_with_a_skewed_clock_keeps_its_blob_io() {
+        let seaweedfs = testing::Seaweedfs::start().await;
+        seaweedfs.create_bucket("skewed").await;
+        let store = seaweedfs.store("skewed");
+        store.verify_bucket().await.expect("bucket");
+        let hash = store.put(b"before").await.expect("put");
+
+        for skew in [chrono::Duration::hours(3), chrono::Duration::hours(-5)] {
+            store.s3().clock().skew(skew);
+            assert_eq!(store.get(&hash).await.expect("get while skewed"), b"before");
+            let learned = store.s3().clock().now().unwrap();
+            store.s3().clock().skew(skew);
+            store.put(b"while skewed").await.expect("put while skewed");
+            let relearned = store.s3().clock().now().unwrap();
+            assert!(
+                (relearned - learned).num_minutes().abs() < 15,
+                "re-learned {relearned} vs {learned}"
+            );
+        }
     }
 }

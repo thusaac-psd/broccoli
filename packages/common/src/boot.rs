@@ -43,7 +43,7 @@ where
                 return Ok(value);
             }
             Err(Unreachable::Fatal(e)) => {
-                anyhow::bail!("{what} at {target} refused the connection: {e}")
+                anyhow::bail!("{what} at {target}: {e}")
             }
             Err(Unreachable::Transient(e)) => {
                 tracing::warn!(
@@ -119,8 +119,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(
             err.to_string(),
-            "the database at postgres://u:***@db/b refused the connection: \
-             password authentication failed"
+            "the database at postgres://u:***@db/b: password authentication failed"
         );
     }
 }

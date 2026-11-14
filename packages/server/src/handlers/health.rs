@@ -31,6 +31,11 @@ pub struct HealthResponse {
     /// Message-queue (Redis) probe result: `"ok"` or `"down"`.
     #[schema(example = "ok")]
     pub mq: String,
+    /// Blob storage probe result: `"ok"` or `"down"`. Object storage is
+    /// checked at most every few seconds; a database or filesystem store
+    /// reports `"ok"`.
+    #[schema(example = "ok")]
+    pub storage: String,
     /// Server version, matching the `Cargo.toml` `[package].version`.
     #[schema(example = "0.2.0")]
     pub version: String,
@@ -93,6 +98,7 @@ impl Probe {
 pub struct DependencyHealth {
     db: Probe,
     mq: Probe,
+    storage: Probe,
 }
 
 impl DependencyHealth {
@@ -104,16 +110,28 @@ impl DependencyHealth {
         self.mq.as_str()
     }
 
+    pub fn storage(&self) -> &'static str {
+        self.storage.as_str()
+    }
+
     pub fn healthy(&self) -> bool {
-        self.db.healthy() && self.mq.healthy()
+        self.db.healthy() && self.mq.healthy() && self.storage.healthy()
     }
 }
 
-/// Probes the database and MQ backends concurrently; the whole probe is
+/// Probes the database, MQ and blob storage concurrently; the whole probe is
 /// bounded by `PROBE_BUDGET`, not budget-per-dependency.
-pub async fn probe_dependencies(db: &DatabaseConnection, mq: &mq::Mq) -> DependencyHealth {
-    let (db, mq) = tokio::join!(Probe::run("db", ping_db(db)), Probe::run("mq", mq.ping()));
-    DependencyHealth { db, mq }
+pub async fn probe_dependencies(
+    db: &DatabaseConnection,
+    mq: &mq::Mq,
+    blob_store: &dyn common::storage::BlobStore,
+) -> DependencyHealth {
+    let (db, mq, storage) = tokio::join!(
+        Probe::run("db", ping_db(db)),
+        Probe::run("mq", mq.ping()),
+        Probe::run("storage", blob_store.probe()),
+    );
+    DependencyHealth { db, mq, storage }
 }
 
 /// The deep readiness / monitoring check, shared between the documented
@@ -123,13 +141,14 @@ pub async fn probe_dependencies(db: &DatabaseConnection, mq: &mq::Mq) -> Depende
 /// a dependency blip would fail this check on every replica at once and leave
 /// the balancer with no upstream at all.
 pub async fn compute_health(state: &AppState) -> HealthResponse {
-    let deps = probe_dependencies(&state.db, &state.mq).await;
+    let deps = probe_dependencies(&state.db, &state.mq, state.blob_store.as_ref()).await;
     let plugins_ready = crate::plugin_lifecycle::not_ready(state).is_empty();
 
     HealthResponse {
         status: if deps.healthy() { "ok" } else { "degraded" }.to_string(),
         db: deps.db().to_string(),
         mq: deps.mq().to_string(),
+        storage: deps.storage().to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: option_env!("BROCCOLI_GIT_SHA")
             .unwrap_or("unknown")
@@ -183,7 +202,7 @@ pub async fn livez() -> impl IntoResponse {
     tag = "Meta",
     operation_id = "getHealth",
     summary = "Server readiness and dependency health",
-    description = "Public, unauthenticated. Pings the database and message queue concurrently, \
+    description = "Public, unauthenticated. Pings the database, message queue and blob storage concurrently, \
                    within a 1.5s total budget. Returns 200 with `status: \"ok\"` when all probed \
                    components are healthy; 503 with `status: \"degraded\"` otherwise. This is the \
                    deep readiness check; load balancers should probe the shallow `GET /livez`, \

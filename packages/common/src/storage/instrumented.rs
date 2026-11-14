@@ -153,4 +153,8 @@ impl BlobStore for InstrumentedBlobStore {
         );
         result
     }
+
+    async fn probe(&self) -> Result<(), StorageError> {
+        self.inner.probe().await
+    }
 }

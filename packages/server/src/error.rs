@@ -18,6 +18,9 @@ const CONTEST_TYPE_RETRY_AFTER_SECS: u64 = 5;
 /// couple of seconds usually sees.
 pub const PLUGIN_RETRY_AFTER_SECS: u64 = 2;
 
+/// The `Retry-After` of a `STORAGE_UNAVAILABLE` answer.
+pub const STORAGE_RETRY_AFTER_SECS: u64 = 5;
+
 #[derive(Debug)]
 pub enum AppError {
     Validation(String),
@@ -57,6 +60,9 @@ pub enum AppError {
     /// deadline: this server is too busy right now. Never a decision about
     /// the request; the client retries after [`PLUGIN_RETRY_AFTER_SECS`].
     PluginUnavailable,
+    /// Blob storage did not answer through its retries: an outage, retried
+    /// by the client after [`STORAGE_RETRY_AFTER_SECS`].
+    StorageUnavailable,
     PluginRejection {
         code: String,
         message: String,
@@ -183,6 +189,15 @@ impl AppError {
                     ),
                 ),
             ),
+            AppError::StorageUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                simple(
+                    "STORAGE_UNAVAILABLE",
+                    format!(
+                        "File storage is not answering; retry in {STORAGE_RETRY_AFTER_SECS} seconds"
+                    ),
+                ),
+            ),
             AppError::PluginRejection {
                 code,
                 message,
@@ -263,6 +278,7 @@ impl IntoResponse for AppError {
             }
             AppError::ContestTypeUnavailable(_) => Some(CONTEST_TYPE_RETRY_AFTER_SECS),
             AppError::PluginUnavailable => Some(PLUGIN_RETRY_AFTER_SECS),
+            AppError::StorageUnavailable => Some(STORAGE_RETRY_AFTER_SECS),
             _ => None,
         };
 
@@ -290,6 +306,10 @@ impl From<StorageError> for AppError {
             StorageError::InvalidHash(_) => AppError::Validation(err.to_string()),
             StorageError::Io(_) => AppError::Internal(err.to_string()),
             StorageError::Backend(_) => AppError::Internal(err.to_string()),
+            StorageError::Unavailable(_) => {
+                tracing::warn!("{err}");
+                AppError::StorageUnavailable
+            }
         }
     }
 }
@@ -367,6 +387,20 @@ impl From<TypedMultipartError> for AppError {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn storage_that_does_not_answer_is_a_retryable_503() {
+        let err = AppError::from(StorageError::Unavailable("refused".into()));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers()["Retry-After"],
+            STORAGE_RETRY_AFTER_SECS.to_string()
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "STORAGE_UNAVAILABLE");
+    }
 
     /// Durable-queue backpressure must surface as
     /// `503 Service Unavailable` with code `QUEUE_OVERLOADED` and the
