@@ -416,7 +416,11 @@ fn relink(
         }
     }
 
-    for (name, module) in modules.iter() {
+    // The main module is instantiated through `instance_pre` inside a call,
+    // where the timer bounds it. Linking it here would instantiate it as a
+    // reactor, running its start function and `_initialize` outside any call;
+    // it is linked only if another module imports it.
+    for (name, module) in modules.iter().filter(|(name, _)| *name != MAIN_KEY) {
         add_module(
             store,
             &mut linker,
@@ -873,25 +877,23 @@ impl Plugin {
         Ok(())
     }
 
-    // Implements the build of the `call` function, `raw_call` is also used in the SDK
-    // code
-    pub(crate) fn raw_call<T: 'static + Send + Sync>(
+    // Instantiates the guest and sets up the call to `name`, returning the
+    // function and its number of results. Runs once the call is registered
+    // with the timer, so guest code it runs is bounded like the call itself.
+    fn prepare_call<T: 'static + Send + Sync>(
         &mut self,
         lock: &mut std::sync::MutexGuard<Option<Instance>>,
-        name: impl AsRef<str>,
-        input: impl AsRef<[u8]>,
+        name: &str,
+        input: &[u8],
         host_context: Option<T>,
-    ) -> Result<i32, (Error, i32)> {
-        let name = name.as_ref();
-        let input = input.as_ref();
-
-        // Apply the effective initialization budget before reset, relinking,
-        // instantiation, or guest initialization can execute WebAssembly.
-        Self::apply_fuel_limit(&mut self.store, self.initialization_fuel).map_err(|x| (x, -1))?;
-
-        self.reset_store(lock).map_err(|x| (x, -1))?;
-
-        self.instantiate(lock).map_err(|e| (e, -1))?;
+    ) -> Result<(Func, usize), (Error, i32)> {
+        // A failed instantiation or initialization, a cancelled one included,
+        // can leave a partly initialized instance and store behind, so the
+        // next call starts from a fresh store.
+        self.instantiate(lock).map_err(|e| {
+            self.store_needs_reset = true;
+            (e, -1)
+        })?;
 
         // Initialization has finished. Refill the normal call budget before
         // input marshalling so Extism kernel operations retain their upstream
@@ -935,9 +937,39 @@ impl Plugin {
             ));
         }
 
-        // Arm the epoch deadline before the timer thread can see the call: a
-        // cancel or timeout it handles bumps the engine epoch, and only a
-        // deadline armed before that bump traps the guest.
+        Ok((func, n_results))
+    }
+
+    // Ends the timer's watch over the current call.
+    fn stop_timer(&mut self) {
+        self.store
+            .epoch_deadline_callback(|_| Ok(UpdateDeadline::Continue(1)));
+        let _ = self.timer_tx.send(TimerAction::Stop { id: self.id });
+    }
+
+    // Implements the build of the `call` function, `raw_call` is also used in the SDK
+    // code
+    pub(crate) fn raw_call<T: 'static + Send + Sync>(
+        &mut self,
+        lock: &mut std::sync::MutexGuard<Option<Instance>>,
+        name: impl AsRef<str>,
+        input: impl AsRef<[u8]>,
+        host_context: Option<T>,
+    ) -> Result<i32, (Error, i32)> {
+        let name = name.as_ref();
+        let input = input.as_ref();
+
+        // Apply the effective initialization budget before reset, relinking,
+        // instantiation, or guest initialization can execute WebAssembly.
+        Self::apply_fuel_limit(&mut self.store, self.initialization_fuel).map_err(|x| (x, -1))?;
+
+        self.reset_store(lock).map_err(|x| (x, -1))?;
+
+        // Arm the epoch deadline, then register the call with the timer
+        // thread, before any guest code runs: a cancel or timeout the timer
+        // thread handles bumps the engine epoch, and only a deadline armed
+        // before that bump traps the guest. Guest code first runs when the
+        // instance is instantiated and initialized below.
         self.store.epoch_deadline_trap();
         self.store.set_epoch_deadline(1);
 
@@ -953,8 +985,19 @@ impl Plugin {
                     .map(std::time::Duration::from_millis),
             })
             .expect("Timer should start");
-        trace!(plugin = self.id.to_string(), "call registered with the timer");
+        trace!(
+            plugin = self.id.to_string(),
+            "call registered with the timer"
+        );
         self.current_plugin_mut().start_time = std::time::Instant::now();
+
+        let (func, n_results) = match self.prepare_call(lock, name, input, host_context) {
+            Ok(x) => x,
+            Err(e) => {
+                self.stop_timer();
+                return Err(e);
+            }
+        };
 
         // Call the function
         let mut results = vec![wasmtime::Val::I32(0); n_results];
@@ -968,10 +1011,7 @@ impl Plugin {
             }
         }
 
-        // Stop timer
-        self.store
-            .epoch_deadline_callback(|_| Ok(UpdateDeadline::Continue(1)));
-        let _ = self.timer_tx.send(TimerAction::Stop { id: self.id });
+        self.stop_timer();
         self.store_needs_reset = name == "_start";
 
         let mut rc = -1;
