@@ -299,9 +299,13 @@ Redis every 10 seconds, so an operation lost in that second fails within about
 10 seconds of Redis coming back, and its submission is judged again by the
 system-error retry. The same holds for a Redis restored from an older snapshot.
 While a server cannot reach Redis it claims no new submissions; they stay queued
-for a server that can. A worker that crashes loses nothing: the tasks it held
-are redelivered to another worker 30 to 35 seconds after it stopped refreshing
-them.
+for a server that can. The per-address quotas on sign-in, registration and
+device codes are counted in Redis, so while it is down they admit every request:
+they guard against scripted abuse, and an outage must not lock a venue out of
+signing in. The per-account failed-login throttle (`auth.login_failure_limit`)
+is kept by each server in memory and still applies. A worker that crashes loses
+nothing: the tasks it held are redelivered to another worker 30 to 35 seconds
+after it stopped refreshing them.
 
 Useful checks on the infra node (`operation_tasks` is
 `mq.operation_queue_name`):
