@@ -277,6 +277,36 @@ mod tests {
         boxes.iter().map(|b| b.as_str().parse().unwrap()).collect()
     }
 
+    /// Whether this is the child process that runs test `name` on its own.
+    /// Called first by every test that expects exact ids: in the parent it
+    /// runs the test in a child of this test binary that runs no other test,
+    /// waits for it to pass, and returns `false`. A lock this process frees
+    /// stays held by every child another test forked and has not yet exec'd,
+    /// since the child shares the lock's open file, so in a process running
+    /// other tests a freed id can look taken for a moment.
+    fn in_own_process(name: &str) -> bool {
+        const VAR: &str = "BOX_ID_TEST_PROCESS";
+        if std::env::var(VAR).is_ok_and(|v| v == name) {
+            return true;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("models::operation::handler::box_id::tests::{name}"),
+                "--test-threads=1",
+            ])
+            .env(VAR, name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{name} did not pass in its own process:\n{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        false
+    }
+
     #[tokio::test]
     async fn a_seventy_process_operation_gets_distinct_ids_none_reissued_while_live() {
         let dir = tempfile::tempdir().unwrap();
@@ -329,6 +359,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn exhaustion_waits_then_fails_without_a_fallback_id() {
+        if !in_own_process("exhaustion_waits_then_fails_without_a_fallback_id") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let ids = BoxIds::with_wait(dir.path(), 4, Duration::from_secs(5)).unwrap();
         let held = ids.reserve(3).await.unwrap();
@@ -347,6 +380,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_waiting_operation_takes_the_ids_another_one_frees() {
+        if !in_own_process("a_waiting_operation_takes_the_ids_another_one_frees") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let ids = BoxIds::with_wait(dir.path(), 2, Duration::from_secs(3600)).unwrap();
         let held = ids.reserve(2).await.unwrap();
@@ -363,6 +399,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_worker_reuses_the_ids_it_freed_before_trying_others() {
+        if !in_own_process("a_worker_reuses_the_ids_it_freed_before_trying_others") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let other = BoxIds::open(dir.path(), 100).unwrap();
         let ids = BoxIds::open(dir.path(), 100).unwrap();
@@ -378,6 +417,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_scan_wraps_to_free_ids_below_the_hint() {
+        if !in_own_process("the_scan_wraps_to_free_ids_below_the_hint") {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let ids = BoxIds::open(dir.path(), 5).unwrap();
         let other = BoxIds::open(dir.path(), 5).unwrap();
