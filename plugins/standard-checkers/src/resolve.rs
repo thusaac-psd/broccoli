@@ -751,7 +751,7 @@ mod tests {
             &JudgeFile::inline("3\n"),
             &JudgeFile::inline("3 1 4\n"),
             &resolved_with_compile(),
-            &crate::checkers::testlib::TestlibConfig::default(),
+            &crate::checkers::testlib::TestlibConfig::schema_defaults(),
             &OutputMode::File {
                 name: "output.txt".to_string(),
             },
@@ -847,7 +847,7 @@ mod tests {
             &JudgeFile::inline("3\n"),
             &JudgeFile::inline("3 1 4\n"),
             &resolved_with_compile(),
-            &crate::checkers::testlib::TestlibConfig::default(),
+            &crate::checkers::testlib::TestlibConfig::schema_defaults(),
             &OutputMode::Stream {
                 channel: "sol_out".to_string(),
             },

@@ -164,9 +164,13 @@ impl Config {
     }
 }
 
+/// The host's config store for native tests. Like the host, it hands out
+/// each config with the defaults of the namespace's schema filled in, read
+/// from the `plugin.toml` of the crate under test.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) struct ConfigMock {
     data: std::cell::RefCell<std::collections::HashMap<String, (Value, Option<bool>)>>,
+    schemas: std::collections::HashMap<String, broccoli_types::manifest::ConfigNamespace>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,6 +178,32 @@ impl ConfigMock {
     pub fn new() -> Self {
         Self {
             data: std::cell::RefCell::new(std::collections::HashMap::new()),
+            schemas: Self::crate_schemas(),
+        }
+    }
+
+    /// The config namespaces of the plugin whose tests are running: cargo
+    /// runs a test binary with `CARGO_MANIFEST_DIR` set to its crate.
+    fn crate_schemas()
+    -> std::collections::HashMap<String, broccoli_types::manifest::ConfigNamespace> {
+        let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") else {
+            return Default::default();
+        };
+        let path = std::path::Path::new(&dir).join("plugin.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Default::default();
+        };
+        let manifest: broccoli_types::manifest::PluginManifest = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        manifest.config
+    }
+
+    fn resolve(&self, ns: &str, stored: Option<&Value>) -> Value {
+        match self.schemas.get(ns) {
+            Some(schema) => schema.resolve(stored),
+            None => stored
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
         }
     }
 
@@ -188,12 +218,12 @@ impl Config {
         let key = ConfigMock::key(scope, ref_id, ns);
         match self.inner.data.borrow().get(&key) {
             Some((config, enabled)) => Ok(ConfigResult {
-                config: config.clone(),
+                config: self.inner.resolve(ns, Some(config)),
                 is_default: false,
                 enabled: *enabled,
             }),
             None => Ok(ConfigResult {
-                config: Value::Object(serde_json::Map::new()),
+                config: self.inner.resolve(ns, None),
                 is_default: true,
                 enabled: None,
             }),

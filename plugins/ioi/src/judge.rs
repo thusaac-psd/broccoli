@@ -146,8 +146,8 @@ mod tests {
             crate::subtasks::build_default_subtasks(&test_cases)
         };
         JudgeContext {
-            contest_config: ContestConfig::default(),
-            task_config: TaskConfig::default(),
+            contest_config: ContestConfig::schema_defaults(),
+            task_config: TaskConfig::schema_defaults(),
             submission_id: 1,
             problem_id: 10,
             contest_id: 1,

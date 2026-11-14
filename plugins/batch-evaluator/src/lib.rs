@@ -11,11 +11,8 @@ use extism_pdk::{FnResult, plugin_fn};
 pub mod batch;
 
 #[cfg(target_arch = "wasm32")]
-fn load_sandbox_config(host: &Host) -> batch::SandboxConfig {
-    match host.config.get_global("sandbox") {
-        Ok(r) => serde_json::from_value(r.config).unwrap_or_default(),
-        Err(_) => batch::SandboxConfig::default(),
-    }
+fn load_sandbox_config(host: &Host) -> Result<batch::SandboxConfig, SdkError> {
+    host.config.get_global("sandbox")?.parse()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -63,7 +60,7 @@ fn prepare_case(
     host: &Host,
     req: &BuildEvalOpsInput,
 ) -> Result<PreparedEvaluateCase, extism_pdk::Error> {
-    let sandbox_config = load_sandbox_config(host);
+    let sandbox_config = load_sandbox_config(host)?;
 
     let additional_filenames: std::collections::HashSet<&str> = req
         .additional_file_refs

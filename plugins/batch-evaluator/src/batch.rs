@@ -6,10 +6,11 @@ use broccoli_server_sdk::types::{
 use serde::Deserialize;
 use std::collections::HashSet;
 
-/// Admin-configurable sandbox resource limits.
-/// All fields have sensible defaults so zero-config deployments work unchanged.
+/// Admin-configurable sandbox resource limits: the global `sandbox` config
+/// namespace. Its defaults and bounds live in the namespace's schema in
+/// `plugin.toml`, which the host fills in, so zero-config deployments work
+/// and every field is present here.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
 pub struct SandboxConfig {
     pub compile_time_limit_s: f64,
     pub compile_wall_time_multiplier: f64,
@@ -26,29 +27,6 @@ pub struct SandboxConfig {
     pub exec_file_size_limit_kb: u32,
     pub exec_wall_time_multiplier: f64,
     pub result_timeout_ms: u64,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            compile_time_limit_s: 30.0,
-            compile_wall_time_multiplier: 2.0,
-            compile_extra_time_s: 0.0,
-            compile_memory_limit_kb: 524_288, // 512 MB
-            compile_stack_limit_kb: 0,
-            compile_process_limit: 32,
-            compile_open_files_limit: 256,
-            compile_file_size_limit_kb: 524_288, // 512 MB
-            exec_extra_time_s: 0.0,
-            exec_stack_limit_kb: 0,
-            exec_process_limit: 1,
-            exec_open_files_limit: 64,
-            exec_file_size_limit_kb: 65_536, // 64 MB
-            exec_wall_time_multiplier: 3.0,
-            result_timeout_ms: EvaluationTimeoutBudget::default_for_time_limit_ms(0)
-                .minimum_timeout_ms,
-        }
-    }
 }
 
 impl SandboxConfig {
@@ -432,8 +410,13 @@ mod tests {
         }
     }
 
+    /// The sandbox config with nothing stored: the schema's defaults.
     fn default_config() -> SandboxConfig {
-        SandboxConfig::default()
+        broccoli_server_sdk::Host::mock()
+            .config
+            .get_global("sandbox")
+            .and_then(|c| c.parse())
+            .unwrap()
     }
 
     #[test]
@@ -608,7 +591,7 @@ mod tests {
             exec_process_limit: 4,
             exec_wall_time_multiplier: 5.0,
             compile_time_limit_s: 60.0,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &compiled_lang(), &config, None).unwrap();
 
@@ -645,7 +628,7 @@ mod tests {
         lang.run.min_process_limit = Some(64);
         let config = SandboxConfig {
             exec_process_limit: 128,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &lang, &config, None).unwrap();
 
@@ -657,7 +640,7 @@ mod tests {
     fn compile_limits_use_configured_stack_limit() {
         let config = SandboxConfig {
             compile_stack_limit_kb: 262_144,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &compiled_lang(), &config, None).unwrap();
 
@@ -669,7 +652,7 @@ mod tests {
     fn exec_limits_use_configured_stack_limit() {
         let config = SandboxConfig {
             exec_stack_limit_kb: 262_144,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &compiled_lang(), &config, None).unwrap();
 
@@ -683,7 +666,7 @@ mod tests {
             compile_time_limit_s: 40.0,
             compile_wall_time_multiplier: 3.5,
             compile_extra_time_s: 1.5,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &compiled_lang(), &config, None).unwrap();
 
@@ -697,7 +680,7 @@ mod tests {
     fn exec_limits_use_configured_extra_time() {
         let config = SandboxConfig {
             exec_extra_time_s: 2.5,
-            ..SandboxConfig::default()
+            ..default_config()
         };
         let ops = build_operation(&make_req(), &compiled_lang(), &config, None).unwrap();
 
@@ -709,7 +692,7 @@ mod tests {
     fn result_timeout_uses_configured_value_as_floor() {
         let config = SandboxConfig {
             result_timeout_ms: 1_200_000,
-            ..SandboxConfig::default()
+            ..default_config()
         };
 
         assert_eq!(config.result_timeout_ms_for(1000, 1), 1_200_000);
@@ -979,7 +962,7 @@ mod tests {
             compile_time_limit_s: 120.0,
             compile_wall_time_multiplier: 3.0,
             exec_wall_time_multiplier: 5.0,
-            ..SandboxConfig::default()
+            ..default_config()
         };
 
         assert!(config.result_timeout_ms_for(300_000, 1) > config.result_timeout_ms);

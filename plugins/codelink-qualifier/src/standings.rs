@@ -6,16 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ContestConfig, ProblemConfig};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Problem {
     pub problem_id: i32,
     pub label: Option<String>,
-    #[serde(default = "default_problem_points")]
     pub points: usize,
-}
-
-fn default_problem_points() -> usize {
-    ProblemConfig::default().points
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -126,7 +126,7 @@ pub fn handle_print_submission(
     let user_id = require_login(req)?;
     contest::check_access(host, req, contest_id)?;
 
-    let cfg = config::load_contest_config(host, contest_id);
+    let cfg = config::load_contest_config(host, contest_id)?;
     if !cfg.enabled {
         return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());
     }
@@ -230,8 +230,8 @@ pub fn handle_print_arbitrary(
     }
     // Non-contest prints fall back to the global config.
     let cfg = match body.contest_id {
-        Some(cid) => config::load_contest_config(host, cid),
-        None => config::load_global_config(host),
+        Some(cid) => config::load_contest_config(host, cid)?,
+        None => config::load_global_config(host)?,
     };
     if !cfg.enabled {
         return Err(PluginHttpResponse::error(403, "Printing is disabled for this contest").into());

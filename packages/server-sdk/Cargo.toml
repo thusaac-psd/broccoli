@@ -19,3 +19,7 @@ base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 extism-pdk = { version = "1.0", optional = true }
+
+# The native test host reads the config schemas of the plugin under test.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+toml = "0.9"

@@ -479,12 +479,7 @@ pub(crate) fn handle_scoreboard(
 
     let mut max_scores: HashMap<i32, f64> = HashMap::new();
     for &pid in &problem_ids {
-        let task_config: TaskConfig = serde_json::from_value(
-            host.config
-                .get_contest_problem(contest_id, pid, "task")?
-                .config,
-        )
-        .unwrap_or_default();
+        let task_config: TaskConfig = crate::load_task_config(host, contest_id, pid)?;
 
         let max: f64 = if task_config.subtasks.is_empty() {
             let mut p = Params::new();

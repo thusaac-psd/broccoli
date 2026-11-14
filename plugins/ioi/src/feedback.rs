@@ -302,7 +302,11 @@ pub(crate) fn decide_visibility_decisions(
             let Some(contest_id) = resource.contest_id else {
                 return WireDecision::Allow {};
             };
-            let config = configs.get(&contest_id).cloned().unwrap_or_default();
+            let Some(config) = configs.get(&contest_id) else {
+                // Every IOI contest of the batch has its config loaded above;
+                // a contest without one is a mismatch: fail hidden.
+                return mask_for_level(FeedbackLevel::None);
+            };
 
             if viewer_id == Some(row.user_id) {
                 // Owner. A spent token unlocks full feedback for this ONE
