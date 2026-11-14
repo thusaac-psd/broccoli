@@ -170,11 +170,35 @@ async fn a_role_escape_lands_on_the_plugins_own_role() {
     denied(&pools, "print", "SET ROLE postgres").await;
     // Its group role holds less than the plugin role, so stepping down
     // gains nothing.
-    exec(&pools, "print", &format!("SET ROLE \"{}\"", names.group))
+    let step_down = format!("SET ROLE \"{}\"", names.group);
+    denied(
+        &pools,
+        "print",
+        &format!("{step_down}; CREATE TABLE plugin_print.t (v INT)"),
+    )
+    .await;
+    denied(
+        &pools,
+        "print",
+        &format!("{step_down}; SELECT password FROM plugin_login_secret"),
+    )
+    .await;
+    // A role change ends with the call: the connection returns to the pool
+    // as the plugin's own role.
+    exec(&pools, "print", &step_down).await.expect("step down");
+    let lease = pools.lease("print", &[], None).await.expect("lease");
+    let who = lease
+        .db
+        .query_one_raw(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT current_user::text",
+        ))
         .await
-        .expect("a member may step down to its group role");
-    denied(&pools, "print", "CREATE TABLE plugin_print.t (v INT)").await;
-    denied(&pools, "print", "SELECT password FROM plugin_login_secret").await;
+        .expect("query")
+        .expect("row")
+        .try_get_by_index::<String>(0)
+        .expect("text");
+    assert_eq!(who, names.role);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -623,4 +647,36 @@ async fn failed_provisioning_backs_off() {
     exec(&f.pools(1), "print", "SELECT 1")
         .await
         .expect("provisioned once the cause is gone");
+}
+
+/// Session state a plugin statement leaves does not outlive it on the pooled
+/// connection. The host waits on the plugin's advisory lock, which it gets
+/// only once the connection returning to the pool released it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_returned_connection_drops_its_session_state() {
+    let f = Fixture::new().await;
+    let pools = f.pools(1);
+    exec(
+        &pools,
+        "print",
+        "SELECT pg_advisory_lock(42); LISTEN plugin_channel; SET search_path = public",
+    )
+    .await
+    .expect("session state");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        f.app.execute_unprepared("SELECT pg_advisory_lock(42)"),
+    )
+    .await
+    .expect("the plugin's lock is released when its connection returns")
+    .expect("lock");
+    f.app
+        .execute_unprepared("SELECT pg_advisory_unlock(42)")
+        .await
+        .expect("unlock");
+    // The search_path is the role's again: unqualified DDL lands in the
+    // plugin's schema.
+    exec(&pools, "print", "CREATE TABLE after_reset (v INT)")
+        .await
+        .expect("the reset search_path names the plugin's schema first");
 }

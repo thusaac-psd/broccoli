@@ -20,6 +20,8 @@
 //! - a plugin with no idle connection of its own, while the pools already
 //!   hold `budget` connections, first closes an idle connection of another
 //!   plugin, so the pools keep to the budget as load moves between plugins;
+//! - a connection returning to its pool drops the session state its
+//!   statements left behind ([`SESSION_RESET`]);
 //! - a connection released while the pools hold more than `budget` (first
 //!   uses racing past that check, or a connection still on its way back to
 //!   its pool, which sqlx does from a task of its own) is closed instead of
@@ -68,6 +70,13 @@ struct Slot {
     /// When provisioning last failed, while it keeps failing.
     failed: StdMutex<Option<Instant>>,
 }
+
+/// Run on a plugin connection as it returns to its pool: releases the session
+/// advisory locks it took (a lock on the host's boot key would stall the next
+/// boot), stops its `LISTEN`s, and resets its session settings to what the
+/// connection started with. sqlx's prepared statements and the plugin's
+/// temporary tables, which are its own, stay.
+const SESSION_RESET: &str = "SELECT pg_advisory_unlock_all(); UNLISTEN *; RESET ALL";
 
 /// How long a plugin's SQL stays unavailable after its provisioning failed,
 /// before the next call tries again.
@@ -275,9 +284,17 @@ impl PluginSqlPools {
             ..PgPoolSpec::new(max, 0)
         };
         let pools = Arc::downgrade(&self.inner);
-        let options = spec.pool_options().after_release(move |_, _| {
+        let options = spec.pool_options().after_release(move |conn, _| {
             let keep = Weak::upgrade(&pools).is_none_or(|p| p.open() <= p.budget);
-            Box::pin(async move { Ok(keep) })
+            Box::pin(async move {
+                if !keep {
+                    return Ok(false);
+                }
+                // Session state a statement left behind would outlive its
+                // call on the pooled connection: drop it before the next.
+                sea_orm::sqlx::Executor::execute(&mut *conn, SESSION_RESET).await?;
+                Ok(true)
+            })
         });
         tracing::info!(
             plugin_id,
