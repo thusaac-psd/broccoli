@@ -6,11 +6,11 @@ import { Outlet } from 'react-router';
 
 import { AppLayout } from '@/components/AppLayout';
 import { BaseProviders } from '@/components/BaseProviders';
+import { DocumentTitle } from '@/components/DocumentTitle';
 import { SlotPermissionsBridge } from '@/components/SlotPermissionsBridge';
 import { appConfig } from '@/config';
 import { ContestProvider } from '@/features/contest/contexts/contest-context';
 import { SubmissionNavigationProvider } from '@/features/submission/contexts/submission-navigation-context';
-import { DocumentTitle } from '@/lib/route-title';
 
 export default function AppShell() {
   return (

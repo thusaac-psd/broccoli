@@ -13,7 +13,7 @@ import { useContest } from '@/features/contest/contexts/contest-context';
 import { type RouteHandle } from '@/lib/route-title';
 
 /** The home page is the app itself: the tab shows just its name. */
-export const handle: RouteHandle = { useTitle: () => undefined };
+export const handle: RouteHandle = {};
 
 export default function Index() {
   const { t } = useTranslation();

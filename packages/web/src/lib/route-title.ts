@@ -1,5 +1,5 @@
 import { useTranslation } from '@broccoli/web-sdk/i18n';
-import { useMatches, useParams } from 'react-router';
+import { useParams } from 'react-router';
 
 import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
 
@@ -9,19 +9,12 @@ import { useContestInfo } from '@/features/contest/hooks/use-contest-info';
  */
 export interface RouteHandle {
   /**
-   * The page's name, or undefined while the data it comes from loads. It is
-   * a hook, called on every render of the title, so it may read the route's
+   * The page's name, or undefined while the data it comes from loads; a
+   * route without one (the home page) shows just the app's name. It is a
+   * hook, called on every render of the title, so it may read the route's
    * params and the query cache.
    */
-  useTitle: () => string | undefined;
-}
-
-function isRouteHandle(handle: unknown): handle is RouteHandle {
-  return (
-    typeof handle === 'object' &&
-    handle !== null &&
-    typeof (handle as RouteHandle).useTitle === 'function'
-  );
+  useTitle?: () => string | undefined;
 }
 
 /** A page named by one translation key. */
@@ -55,23 +48,4 @@ export function contestPageTitle(key?: string): RouteHandle {
 export function useContestTitle(): string | undefined {
   const { contestId } = useParams();
   return useContestInfo(Number(contestId)).contest?.title;
-}
-
-function RouteTitle({ useTitle }: RouteHandle) {
-  const { t } = useTranslation();
-  const page = useTitle();
-  const app = t('app.name');
-  return <title>{page ? t('app.pageTitle', { page, app }) : app}</title>;
-}
-
-/** Keeps the document title on the name of the page shown. */
-export function DocumentTitle() {
-  const match = [...useMatches()]
-    .reverse()
-    .find((m) => isRouteHandle(m.handle));
-  if (!match) return <RouteTitle useTitle={() => undefined} />;
-  // Keyed by route, so a different page's `useTitle` is a new component and
-  // the hooks it calls never change between renders.
-  const { useTitle } = match.handle as RouteHandle;
-  return <RouteTitle key={match.id} useTitle={useTitle} />;
 }
